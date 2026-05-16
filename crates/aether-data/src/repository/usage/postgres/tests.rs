@@ -692,6 +692,20 @@ fn usage_sql_writes_usage_settlement_pricing_snapshots() {
 }
 
 #[test]
+fn usage_sql_upsert_recovers_missing_provider_links_after_billing_finalizes() {
+    for assignment in [
+        "provider_id = CASE WHEN \"usage\".billing_status = 'pending' OR (\"usage\".provider_id IS NULL AND (\"usage\".provider_endpoint_id IS NULL OR \"usage\".provider_endpoint_id = EXCLUDED.provider_endpoint_id) AND (\"usage\".provider_api_key_id IS NULL OR \"usage\".provider_api_key_id = EXCLUDED.provider_api_key_id)) THEN COALESCE(EXCLUDED.provider_id, \"usage\".provider_id) ELSE \"usage\".provider_id END",
+        "provider_endpoint_id = CASE WHEN \"usage\".billing_status = 'pending' OR (\"usage\".provider_endpoint_id IS NULL AND (\"usage\".provider_id IS NULL OR \"usage\".provider_id = EXCLUDED.provider_id) AND (\"usage\".provider_api_key_id IS NULL OR \"usage\".provider_api_key_id = EXCLUDED.provider_api_key_id)) THEN COALESCE(EXCLUDED.provider_endpoint_id, \"usage\".provider_endpoint_id) ELSE \"usage\".provider_endpoint_id END",
+        "provider_api_key_id = CASE WHEN \"usage\".billing_status = 'pending' OR (\"usage\".provider_api_key_id IS NULL AND (\"usage\".provider_id IS NULL OR \"usage\".provider_id = EXCLUDED.provider_id) AND (\"usage\".provider_endpoint_id IS NULL OR \"usage\".provider_endpoint_id = EXCLUDED.provider_endpoint_id)) THEN COALESCE(EXCLUDED.provider_api_key_id, \"usage\".provider_api_key_id) ELSE \"usage\".provider_api_key_id END",
+    ] {
+        assert!(
+            super::UPSERT_SQL.contains(assignment),
+            "missing provider link recovery assignment: {assignment}"
+        );
+    }
+}
+
+#[test]
 fn usage_sql_updates_usage_mirror_columns_from_terminal_events_only() {
     for assignment in [
         "input_tokens = CASE WHEN \"usage\".billing_status = 'pending' AND EXCLUDED.status IN ('completed', 'failed', 'cancelled') THEN GREATEST(\"usage\".input_tokens, EXCLUDED.input_tokens) ELSE \"usage\".input_tokens END",
