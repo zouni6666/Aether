@@ -1,15 +1,278 @@
 use async_trait::async_trait;
-use sqlx::{sqlite::SqliteRow, Row};
+use sqlx::{sqlite::SqliteRow, QueryBuilder, Row, Sqlite};
 
 use super::{
-    InMemoryProviderCatalogReadRepository, ProviderCatalogKeyListQuery,
-    ProviderCatalogReadRepository, ProviderCatalogWriteRepository, StoredProviderCatalogEndpoint,
-    StoredProviderCatalogKey, StoredProviderCatalogKeyPage, StoredProviderCatalogKeyStats,
-    StoredProviderCatalogProvider,
+    ProviderCatalogKeyListOrder, ProviderCatalogKeyListQuery, ProviderCatalogReadRepository,
+    ProviderCatalogWriteRepository, StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
+    StoredProviderCatalogKeyPage, StoredProviderCatalogKeyStats, StoredProviderCatalogProvider,
 };
 use crate::driver::sqlite::{sqlite_optional_real, SqlitePool};
 use crate::error::SqlResultExt;
 use crate::DataLayerError;
+
+const LIST_PROVIDERS_BY_IDS_PREFIX: &str = r#"
+SELECT
+  id,
+  name,
+  description,
+  website,
+  provider_type,
+  billing_type,
+  CAST(monthly_quota_usd AS REAL) AS monthly_quota_usd,
+  CAST(monthly_used_usd AS REAL) AS monthly_used_usd,
+  quota_reset_day,
+  quota_last_reset_at AS quota_last_reset_at_unix_secs,
+  quota_expires_at AS quota_expires_at_unix_secs,
+  provider_priority,
+  is_active,
+  keep_priority_on_conversion,
+  enable_format_conversion,
+  concurrent_limit,
+  max_retries,
+  proxy,
+  request_timeout,
+  stream_first_byte_timeout,
+  config,
+  created_at AS created_at_unix_ms,
+  updated_at AS updated_at_unix_secs
+FROM providers
+WHERE id IN (
+"#;
+
+const LIST_ENDPOINTS_BY_IDS_PREFIX: &str = r#"
+SELECT
+  id,
+  provider_id,
+  api_format,
+  api_family,
+  endpoint_kind,
+  is_active,
+  health_score,
+  base_url,
+  header_rules,
+  body_rules,
+  max_retries,
+  custom_path,
+  config,
+  format_acceptance_config,
+  proxy,
+  created_at AS created_at_unix_ms,
+  updated_at AS updated_at_unix_secs
+FROM provider_endpoints
+WHERE id IN (
+"#;
+
+const LIST_ENDPOINTS_BY_PROVIDER_IDS_PREFIX: &str = r#"
+SELECT
+  id,
+  provider_id,
+  api_format,
+  api_family,
+  endpoint_kind,
+  is_active,
+  health_score,
+  base_url,
+  header_rules,
+  body_rules,
+  max_retries,
+  custom_path,
+  config,
+  format_acceptance_config,
+  proxy,
+  created_at AS created_at_unix_ms,
+  updated_at AS updated_at_unix_secs
+FROM provider_endpoints
+WHERE provider_id IN (
+"#;
+
+const LIST_KEYS_BY_IDS_PREFIX: &str = r#"
+SELECT
+  id,
+  provider_id,
+  name,
+  auth_type,
+  capabilities,
+  is_active,
+  api_formats,
+  auth_type_by_format,
+  allow_auth_channel_mismatch_formats,
+  COALESCE(api_key, encrypted_key) AS api_key,
+  auth_config,
+  note,
+  internal_priority,
+  rate_multipliers,
+  global_priority_by_format,
+  allowed_models,
+  expires_at AS expires_at_unix_secs,
+  cache_ttl_minutes,
+  max_probe_interval_minutes,
+  proxy,
+  fingerprint,
+  rpm_limit,
+  concurrent_limit,
+  learned_rpm_limit,
+  concurrent_429_count,
+  rpm_429_count,
+  last_429_at AS last_429_at_unix_secs,
+  last_429_type,
+  adjustment_history,
+  utilization_samples,
+  last_probe_increase_at AS last_probe_increase_at_unix_secs,
+  last_rpm_peak,
+  request_count,
+  total_tokens,
+  CAST(total_cost_usd AS REAL) AS total_cost_usd,
+  success_count,
+  error_count,
+  total_response_time_ms,
+  last_used_at AS last_used_at_unix_secs,
+  auto_fetch_models,
+  last_models_fetch_at AS last_models_fetch_at_unix_secs,
+  last_models_fetch_error,
+  locked_models,
+  model_include_patterns,
+  model_exclude_patterns,
+  upstream_metadata,
+  oauth_invalid_at AS oauth_invalid_at_unix_secs,
+  oauth_invalid_reason,
+  status_snapshot,
+  created_at AS created_at_unix_ms,
+  updated_at AS updated_at_unix_secs,
+  health_by_format,
+  circuit_breaker_by_format
+FROM provider_api_keys
+WHERE id IN (
+"#;
+
+const LIST_KEYS_BY_PROVIDER_IDS_PREFIX: &str = r#"
+SELECT
+  id,
+  provider_id,
+  name,
+  auth_type,
+  capabilities,
+  is_active,
+  api_formats,
+  auth_type_by_format,
+  allow_auth_channel_mismatch_formats,
+  COALESCE(api_key, encrypted_key) AS api_key,
+  auth_config,
+  note,
+  internal_priority,
+  rate_multipliers,
+  global_priority_by_format,
+  allowed_models,
+  expires_at AS expires_at_unix_secs,
+  cache_ttl_minutes,
+  max_probe_interval_minutes,
+  proxy,
+  fingerprint,
+  rpm_limit,
+  concurrent_limit,
+  learned_rpm_limit,
+  concurrent_429_count,
+  rpm_429_count,
+  last_429_at AS last_429_at_unix_secs,
+  last_429_type,
+  adjustment_history,
+  utilization_samples,
+  last_probe_increase_at AS last_probe_increase_at_unix_secs,
+  last_rpm_peak,
+  request_count,
+  total_tokens,
+  CAST(total_cost_usd AS REAL) AS total_cost_usd,
+  success_count,
+  error_count,
+  total_response_time_ms,
+  last_used_at AS last_used_at_unix_secs,
+  auto_fetch_models,
+  last_models_fetch_at AS last_models_fetch_at_unix_secs,
+  last_models_fetch_error,
+  locked_models,
+  model_include_patterns,
+  model_exclude_patterns,
+  upstream_metadata,
+  oauth_invalid_at AS oauth_invalid_at_unix_secs,
+  oauth_invalid_reason,
+  status_snapshot,
+  created_at AS created_at_unix_ms,
+  updated_at AS updated_at_unix_secs,
+  health_by_format,
+  circuit_breaker_by_format
+FROM provider_api_keys
+WHERE provider_id IN (
+"#;
+
+const LIST_KEY_SUMMARIES_BY_PROVIDER_IDS_PREFIX: &str = r#"
+SELECT
+  id,
+  provider_id,
+  COALESCE(NULLIF(name, ''), id) AS name,
+  COALESCE(NULLIF(auth_type, ''), 'summary') AS auth_type,
+  NULL AS capabilities,
+  is_active,
+  api_formats,
+  NULL AS auth_type_by_format,
+  NULL AS allow_auth_channel_mismatch_formats,
+  'summary' AS api_key,
+  CASE
+    WHEN auth_config IS NULL THEN NULL
+    ELSE '{}'
+  END AS auth_config,
+  NULL AS note,
+  NULL AS internal_priority,
+  NULL AS rate_multipliers,
+  NULL AS global_priority_by_format,
+  NULL AS allowed_models,
+  NULL AS expires_at_unix_secs,
+  NULL AS cache_ttl_minutes,
+  NULL AS max_probe_interval_minutes,
+  NULL AS proxy,
+  NULL AS fingerprint,
+  NULL AS rpm_limit,
+  NULL AS concurrent_limit,
+  NULL AS learned_rpm_limit,
+  NULL AS concurrent_429_count,
+  NULL AS rpm_429_count,
+  NULL AS last_429_at_unix_secs,
+  NULL AS last_429_type,
+  NULL AS adjustment_history,
+  NULL AS utilization_samples,
+  NULL AS last_probe_increase_at_unix_secs,
+  NULL AS last_rpm_peak,
+  NULL AS request_count,
+  0 AS total_tokens,
+  0.0 AS total_cost_usd,
+  NULL AS success_count,
+  NULL AS error_count,
+  NULL AS total_response_time_ms,
+  NULL AS last_used_at_unix_secs,
+  FALSE AS auto_fetch_models,
+  NULL AS last_models_fetch_at_unix_secs,
+  NULL AS last_models_fetch_error,
+  NULL AS locked_models,
+  NULL AS model_include_patterns,
+  NULL AS model_exclude_patterns,
+  NULL AS upstream_metadata,
+  NULL AS oauth_invalid_at_unix_secs,
+  NULL AS oauth_invalid_reason,
+  NULL AS status_snapshot,
+  NULL AS created_at_unix_ms,
+  NULL AS updated_at_unix_secs,
+  health_by_format,
+  NULL AS circuit_breaker_by_format
+FROM provider_api_keys
+WHERE provider_id IN (
+"#;
+
+const LIST_KEY_STATS_BY_PROVIDER_IDS_PREFIX: &str = r#"
+SELECT
+  provider_id,
+  COUNT(*) AS total_keys,
+  SUM(CASE WHEN is_active THEN 1 ELSE 0 END) AS active_keys
+FROM provider_api_keys
+WHERE provider_id IN (
+"#;
 
 #[derive(Debug, Clone)]
 pub struct SqliteProviderCatalogReadRepository {
@@ -21,90 +284,338 @@ impl SqliteProviderCatalogReadRepository {
         Self { pool }
     }
 
-    async fn load_memory(&self) -> Result<InMemoryProviderCatalogReadRepository, DataLayerError> {
-        Ok(InMemoryProviderCatalogReadRepository::seed(
-            self.load_providers().await?,
-            self.load_endpoints().await?,
-            self.load_keys().await?,
-        ))
-    }
+    pub async fn list_providers_by_ids(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogProvider>, DataLayerError> {
+        if provider_ids.is_empty() {
+            return Ok(Vec::new());
+        }
 
-    async fn load_providers(&self) -> Result<Vec<StoredProviderCatalogProvider>, DataLayerError> {
-        let rows = sqlx::query(
-            r#"
-SELECT
-  id, name, description, website, provider_type, billing_type,
-  CAST(monthly_quota_usd AS REAL) AS monthly_quota_usd,
-  CAST(monthly_used_usd AS REAL) AS monthly_used_usd,
-  quota_reset_day,
-  quota_last_reset_at AS quota_last_reset_at_unix_secs,
-  quota_expires_at AS quota_expires_at_unix_secs,
-  provider_priority, is_active, keep_priority_on_conversion,
-  enable_format_conversion, concurrent_limit, max_retries, proxy,
-  request_timeout, stream_first_byte_timeout, config,
-  created_at AS created_at_unix_ms,
-  updated_at AS updated_at_unix_secs
-FROM providers
-"#,
+        let rows = build_list_query(
+            LIST_PROVIDERS_BY_IDS_PREFIX,
+            provider_ids,
+            " ORDER BY name ASC",
         )
+        .build()
         .fetch_all(&self.pool)
         .await
         .map_sql_err()?;
         rows.iter().map(map_provider_row).collect()
     }
 
-    async fn load_endpoints(&self) -> Result<Vec<StoredProviderCatalogEndpoint>, DataLayerError> {
+    pub async fn list_providers(
+        &self,
+        active_only: bool,
+    ) -> Result<Vec<StoredProviderCatalogProvider>, DataLayerError> {
         let rows = sqlx::query(
             r#"
 SELECT
-  id, provider_id, api_format, api_family, endpoint_kind, is_active,
-  health_score, base_url, header_rules, body_rules, max_retries,
-  custom_path, config, format_acceptance_config, proxy,
+  id,
+  name,
+  description,
+  website,
+  provider_type,
+  billing_type,
+  CAST(monthly_quota_usd AS REAL) AS monthly_quota_usd,
+  CAST(monthly_used_usd AS REAL) AS monthly_used_usd,
+  quota_reset_day,
+  quota_last_reset_at AS quota_last_reset_at_unix_secs,
+  quota_expires_at AS quota_expires_at_unix_secs,
+  provider_priority,
+  is_active,
+  keep_priority_on_conversion,
+  enable_format_conversion,
+  concurrent_limit,
+  max_retries,
+  proxy,
+  request_timeout,
+  stream_first_byte_timeout,
+  config,
   created_at AS created_at_unix_ms,
   updated_at AS updated_at_unix_secs
-FROM provider_endpoints
-WHERE api_format IS NOT NULL
+FROM providers
+WHERE (? = FALSE OR is_active = TRUE)
+ORDER BY provider_priority ASC, name ASC
 "#,
         )
+        .bind(active_only)
+        .fetch_all(&self.pool)
+        .await
+        .map_sql_err()?;
+        rows.iter().map(map_provider_row).collect()
+    }
+
+    pub async fn list_endpoints_by_ids(
+        &self,
+        endpoint_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogEndpoint>, DataLayerError> {
+        if endpoint_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let rows = build_list_query(
+            LIST_ENDPOINTS_BY_IDS_PREFIX,
+            endpoint_ids,
+            " ORDER BY api_format ASC, id ASC",
+        )
+        .build()
         .fetch_all(&self.pool)
         .await
         .map_sql_err()?;
         rows.iter().map(map_endpoint_row).collect()
     }
 
-    async fn load_keys(&self) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
-        let rows = sqlx::query(
-            r#"
-SELECT
-  id, provider_id, name, auth_type, capabilities, is_active, api_formats,
-  auth_type_by_format, allow_auth_channel_mismatch_formats,
-  COALESCE(api_key, encrypted_key) AS api_key,
-  auth_config, note, internal_priority, rate_multipliers,
-  global_priority_by_format, allowed_models,
-  expires_at AS expires_at_unix_secs,
-  cache_ttl_minutes, max_probe_interval_minutes, proxy, fingerprint,
-  rpm_limit, concurrent_limit, learned_rpm_limit, concurrent_429_count,
-  rpm_429_count, last_429_at AS last_429_at_unix_secs, last_429_type,
-  adjustment_history, utilization_samples,
-  last_probe_increase_at AS last_probe_increase_at_unix_secs,
-  last_rpm_peak, request_count, total_tokens, total_cost_usd,
-  success_count, error_count, total_response_time_ms,
-  last_used_at AS last_used_at_unix_secs, auto_fetch_models,
-  last_models_fetch_at AS last_models_fetch_at_unix_secs,
-  last_models_fetch_error, locked_models, model_include_patterns,
-  model_exclude_patterns, upstream_metadata,
-  oauth_invalid_at AS oauth_invalid_at_unix_secs,
-  oauth_invalid_reason, status_snapshot,
-  created_at AS created_at_unix_ms,
-  updated_at AS updated_at_unix_secs,
-  health_by_format, circuit_breaker_by_format
-FROM provider_api_keys
-"#,
+    pub async fn list_endpoints_by_provider_ids(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogEndpoint>, DataLayerError> {
+        if provider_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let rows = build_list_query(
+            LIST_ENDPOINTS_BY_PROVIDER_IDS_PREFIX,
+            provider_ids,
+            " ORDER BY provider_id ASC, api_format ASC, id ASC",
         )
+        .build()
+        .fetch_all(&self.pool)
+        .await
+        .map_sql_err()?;
+        rows.iter().map(map_endpoint_row).collect()
+    }
+
+    pub async fn list_keys_by_ids(
+        &self,
+        key_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
+        if key_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let rows = build_list_query(
+            LIST_KEYS_BY_IDS_PREFIX,
+            key_ids,
+            " ORDER BY name ASC, id ASC",
+        )
+        .build()
         .fetch_all(&self.pool)
         .await
         .map_sql_err()?;
         rows.iter().map(map_key_row).collect()
+    }
+
+    pub async fn list_keys_by_provider_ids(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
+        if provider_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let rows = build_list_query(
+            LIST_KEYS_BY_PROVIDER_IDS_PREFIX,
+            provider_ids,
+            " ORDER BY provider_id ASC, name ASC, id ASC",
+        )
+        .build()
+        .fetch_all(&self.pool)
+        .await
+        .map_sql_err()?;
+        rows.iter().map(map_key_row).collect()
+    }
+
+    pub async fn list_key_summaries_by_provider_ids(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
+        if provider_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let rows = build_list_query(
+            LIST_KEY_SUMMARIES_BY_PROVIDER_IDS_PREFIX,
+            provider_ids,
+            " ORDER BY provider_id ASC, id ASC",
+        )
+        .build()
+        .fetch_all(&self.pool)
+        .await
+        .map_sql_err()?;
+        rows.iter().map(map_key_row).collect()
+    }
+
+    pub async fn list_keys_page(
+        &self,
+        query: &ProviderCatalogKeyListQuery,
+    ) -> Result<StoredProviderCatalogKeyPage, DataLayerError> {
+        if query.provider_id.trim().is_empty() {
+            return Err(DataLayerError::InvalidInput(
+                "provider catalog provider_id is empty".to_string(),
+            ));
+        }
+
+        let offset = i64::try_from(query.offset).map_err(|_| {
+            DataLayerError::InvalidInput(format!(
+                "invalid provider catalog key offset: {}",
+                query.offset
+            ))
+        })?;
+        let limit = i64::try_from(query.limit).map_err(|_| {
+            DataLayerError::InvalidInput(format!(
+                "invalid provider catalog key limit: {}",
+                query.limit
+            ))
+        })?;
+        let search_pattern = query
+            .search
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| format!("%{}%", value.to_ascii_lowercase()));
+        let order_by = match query.order {
+            ProviderCatalogKeyListOrder::Name => "internal_priority ASC, name ASC, id ASC",
+            ProviderCatalogKeyListOrder::CreatedAt => {
+                "internal_priority ASC, COALESCE(created_at, 0) ASC, id ASC"
+            }
+            ProviderCatalogKeyListOrder::CreatedAtAsc => {
+                "created_at IS NULL ASC, created_at ASC, name ASC, id ASC"
+            }
+            ProviderCatalogKeyListOrder::CreatedAtDesc => {
+                "created_at IS NULL ASC, created_at DESC, name ASC, id ASC"
+            }
+            ProviderCatalogKeyListOrder::LastUsedAtAsc => {
+                "last_used_at IS NULL ASC, last_used_at ASC, name ASC, id ASC"
+            }
+            ProviderCatalogKeyListOrder::LastUsedAtDesc => {
+                "last_used_at IS NULL ASC, last_used_at DESC, name ASC, id ASC"
+            }
+        };
+
+        let count_row = sqlx::query(
+            r#"
+SELECT COUNT(*) AS total
+FROM provider_api_keys
+WHERE provider_id = ?
+  AND (? IS NULL OR LOWER(name) LIKE ? OR LOWER(id) LIKE ?)
+  AND (? IS NULL OR is_active = ?)
+"#,
+        )
+        .bind(&query.provider_id)
+        .bind(search_pattern.as_deref())
+        .bind(search_pattern.as_deref())
+        .bind(search_pattern.as_deref())
+        .bind(query.is_active)
+        .bind(query.is_active)
+        .fetch_one(&self.pool)
+        .await
+        .map_sql_err()?;
+        let total = count_row.try_get::<i64, _>("total").map_sql_err()?.max(0) as usize;
+
+        let sql = format!(
+            r#"
+SELECT
+  id,
+  provider_id,
+  name,
+  auth_type,
+  capabilities,
+  is_active,
+  api_formats,
+  auth_type_by_format,
+  allow_auth_channel_mismatch_formats,
+  COALESCE(api_key, encrypted_key) AS api_key,
+  auth_config,
+  note,
+  internal_priority,
+  rate_multipliers,
+  global_priority_by_format,
+  allowed_models,
+  expires_at AS expires_at_unix_secs,
+  cache_ttl_minutes,
+  max_probe_interval_minutes,
+  proxy,
+  fingerprint,
+  rpm_limit,
+  concurrent_limit,
+  learned_rpm_limit,
+  concurrent_429_count,
+  rpm_429_count,
+  last_429_at AS last_429_at_unix_secs,
+  last_429_type,
+  adjustment_history,
+  utilization_samples,
+  last_probe_increase_at AS last_probe_increase_at_unix_secs,
+  last_rpm_peak,
+  request_count,
+  total_tokens,
+  CAST(total_cost_usd AS REAL) AS total_cost_usd,
+  success_count,
+  error_count,
+  total_response_time_ms,
+  last_used_at AS last_used_at_unix_secs,
+  auto_fetch_models,
+  last_models_fetch_at AS last_models_fetch_at_unix_secs,
+  last_models_fetch_error,
+  locked_models,
+  model_include_patterns,
+  model_exclude_patterns,
+  upstream_metadata,
+  oauth_invalid_at AS oauth_invalid_at_unix_secs,
+  oauth_invalid_reason,
+  status_snapshot,
+  created_at AS created_at_unix_ms,
+  updated_at AS updated_at_unix_secs,
+  health_by_format,
+  circuit_breaker_by_format
+FROM provider_api_keys
+WHERE provider_id = ?
+  AND (? IS NULL OR LOWER(name) LIKE ? OR LOWER(id) LIKE ?)
+  AND (? IS NULL OR is_active = ?)
+ORDER BY {order_by}
+LIMIT ?
+OFFSET ?
+"#,
+        );
+        let rows = sqlx::query(&sql)
+            .bind(&query.provider_id)
+            .bind(search_pattern.as_deref())
+            .bind(search_pattern.as_deref())
+            .bind(search_pattern.as_deref())
+            .bind(query.is_active)
+            .bind(query.is_active)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await
+            .map_sql_err()?;
+        let items = rows
+            .iter()
+            .map(map_key_row)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(StoredProviderCatalogKeyPage { items, total })
+    }
+
+    pub async fn list_key_stats_by_provider_ids(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogKeyStats>, DataLayerError> {
+        if provider_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let rows = build_list_query(
+            LIST_KEY_STATS_BY_PROVIDER_IDS_PREFIX,
+            provider_ids,
+            "\nGROUP BY provider_id\nORDER BY provider_id ASC",
+        )
+        .build()
+        .fetch_all(&self.pool)
+        .await
+        .map_sql_err()?;
+        rows.iter().map(map_key_stats_row).collect()
     }
 
     pub async fn create_provider(
@@ -865,81 +1376,63 @@ impl ProviderCatalogReadRepository for SqliteProviderCatalogReadRepository {
         &self,
         active_only: bool,
     ) -> Result<Vec<StoredProviderCatalogProvider>, DataLayerError> {
-        self.load_memory().await?.list_providers(active_only).await
+        Self::list_providers(self, active_only).await
     }
 
     async fn list_providers_by_ids(
         &self,
         provider_ids: &[String],
     ) -> Result<Vec<StoredProviderCatalogProvider>, DataLayerError> {
-        self.load_memory()
-            .await?
-            .list_providers_by_ids(provider_ids)
-            .await
+        Self::list_providers_by_ids(self, provider_ids).await
     }
 
     async fn list_endpoints_by_ids(
         &self,
         endpoint_ids: &[String],
     ) -> Result<Vec<StoredProviderCatalogEndpoint>, DataLayerError> {
-        self.load_memory()
-            .await?
-            .list_endpoints_by_ids(endpoint_ids)
-            .await
+        Self::list_endpoints_by_ids(self, endpoint_ids).await
     }
 
     async fn list_endpoints_by_provider_ids(
         &self,
         provider_ids: &[String],
     ) -> Result<Vec<StoredProviderCatalogEndpoint>, DataLayerError> {
-        self.load_memory()
-            .await?
-            .list_endpoints_by_provider_ids(provider_ids)
-            .await
+        Self::list_endpoints_by_provider_ids(self, provider_ids).await
     }
 
     async fn list_keys_by_ids(
         &self,
         key_ids: &[String],
     ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
-        self.load_memory().await?.list_keys_by_ids(key_ids).await
+        Self::list_keys_by_ids(self, key_ids).await
     }
 
     async fn list_keys_by_provider_ids(
         &self,
         provider_ids: &[String],
     ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
-        self.load_memory()
-            .await?
-            .list_keys_by_provider_ids(provider_ids)
-            .await
+        Self::list_keys_by_provider_ids(self, provider_ids).await
     }
 
     async fn list_key_summaries_by_provider_ids(
         &self,
         provider_ids: &[String],
     ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
-        self.load_memory()
-            .await?
-            .list_key_summaries_by_provider_ids(provider_ids)
-            .await
+        Self::list_key_summaries_by_provider_ids(self, provider_ids).await
     }
 
     async fn list_keys_page(
         &self,
         query: &ProviderCatalogKeyListQuery,
     ) -> Result<StoredProviderCatalogKeyPage, DataLayerError> {
-        self.load_memory().await?.list_keys_page(query).await
+        Self::list_keys_page(self, query).await
     }
 
     async fn list_key_stats_by_provider_ids(
         &self,
         provider_ids: &[String],
     ) -> Result<Vec<StoredProviderCatalogKeyStats>, DataLayerError> {
-        self.load_memory()
-            .await?
-            .list_key_stats_by_provider_ids(provider_ids)
-            .await
+        Self::list_key_stats_by_provider_ids(self, provider_ids).await
     }
 }
 
@@ -1056,6 +1549,21 @@ impl ProviderCatalogWriteRepository for SqliteProviderCatalogReadRepository {
         )
         .await
     }
+}
+
+fn build_list_query<'a>(
+    prefix: &'static str,
+    ids: &'a [String],
+    suffix: &'static str,
+) -> QueryBuilder<'a, Sqlite> {
+    let mut builder = QueryBuilder::<Sqlite>::new(prefix);
+    let mut separated = builder.separated(", ");
+    for id in ids {
+        separated.push_bind(id);
+    }
+    separated.push_unseparated(")");
+    builder.push(suffix);
+    builder
 }
 
 fn current_unix_secs() -> u64 {
@@ -1343,6 +1851,14 @@ fn map_endpoint_row(row: &SqliteRow) -> Result<StoredProviderCatalogEndpoint, Da
             row.try_get("proxy").map_sql_err()?,
             "provider_endpoints.proxy",
         )?,
+    )
+}
+
+fn map_key_stats_row(row: &SqliteRow) -> Result<StoredProviderCatalogKeyStats, DataLayerError> {
+    StoredProviderCatalogKeyStats::new(
+        row.try_get("provider_id").map_sql_err()?,
+        row.try_get("total_keys").map_sql_err()?,
+        row.try_get("active_keys").map_sql_err()?,
     )
 }
 
