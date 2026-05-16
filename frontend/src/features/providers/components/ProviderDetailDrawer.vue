@@ -1361,7 +1361,14 @@ let providerLoadRequestId = 0
 let endpointsLoadRequestId = 0
 let keysLoadRequestId = 0
 let mappingPreviewLoadRequestId = 0
-const PROVIDER_KEYS_PAGE_SIZE = 20
+const DEFAULT_PROVIDER_KEYS_PAGE_SIZE = 3
+const CUSTOM_PROVIDER_KEYS_PAGE_SIZE = 4
+
+function getProviderKeysPageSize(providerType?: string | null): number {
+  return (providerType || '').trim().toLowerCase() === 'custom'
+    ? CUSTOM_PROVIDER_KEYS_PAGE_SIZE
+    : DEFAULT_PROVIDER_KEYS_PAGE_SIZE
+}
 
 // 系统级格式转换配置
 const systemFormatConversionEnabled = ref(false)
@@ -1521,7 +1528,7 @@ function syncCurrentSelections(
 // ===== 账号列表后端分页 =====
 const providerKeysTotal = ref(0)
 const currentKeyPage = ref(1)
-const keyPageSize = ref(PROVIDER_KEYS_PAGE_SIZE)
+const keyPageSize = ref(DEFAULT_PROVIDER_KEYS_PAGE_SIZE)
 const totalKeyPages = computed(() => Math.max(1, Math.ceil(providerKeysTotal.value / keyPageSize.value)))
 const shouldPaginateKeys = computed(() => totalKeyPages.value > 1)
 const paginatedKeys = computed(() => allKeys.value)
@@ -1548,15 +1555,16 @@ watch(
       const hasInitialProvider = props.initialProvider?.id === newId
       if (hasInitialProvider) {
         provider.value = props.initialProvider
+        keyPageSize.value = getProviderKeysPageSize(provider.value?.provider_type)
         loading.value = false
       }
       void loadSystemFormatConversionConfig()
       // mapping-preview 较慢，不阻塞首屏渲染
       void loadMappingPreview()
-      const endpointsPromise = loadEndpoints()
       if (!hasInitialProvider) {
         await loadProvider()
       }
+      const endpointsPromise = loadEndpoints()
       // 仅在抽屉刚打开时启动倒计时
       if (newOpen && !oldOpen) {
         startCountdownTimer()
@@ -1578,7 +1586,7 @@ watch(
       providerKeys.value = []  // 清空 Provider 级别的 keys
       providerKeysTotal.value = 0
       currentKeyPage.value = 1
-      keyPageSize.value = PROVIDER_KEYS_PAGE_SIZE
+      keyPageSize.value = DEFAULT_PROVIDER_KEYS_PAGE_SIZE
       providerModels.value = []
       providerMappingPreview.value = null
       loadingProviderEndpoints.value = false
@@ -3484,6 +3492,7 @@ async function loadProvider() {
     const providerData = await getProvider(props.providerId)
     if (requestId !== providerLoadRequestId) return
     provider.value = providerData
+    keyPageSize.value = getProviderKeysPageSize(providerData.provider_type)
 
     if (!provider.value) {
       throw new Error('Provider 不存在')
