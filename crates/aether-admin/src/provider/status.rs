@@ -42,6 +42,7 @@ const AUTO_REMOVABLE_ACCOUNT_STATE_CODES: &[&str] = &[
     "account_disabled",
     "workspace_deactivated",
     "account_forbidden",
+    "oauth_token_invalid",
 ];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -600,6 +601,19 @@ mod tests {
         assert_eq!(snapshot.label.as_deref(), Some("Token 失效"));
         assert!(snapshot.blocked);
         assert!(!snapshot.recoverable);
+    }
+
+    #[test]
+    fn oauth_expired_state_is_auto_removed() {
+        let state = resolve_pool_account_state(
+            Some("codex"),
+            None,
+            Some("[OAUTH_EXPIRED] token invalidated"),
+        );
+
+        assert!(state.blocked);
+        assert_eq!(state.code.as_deref(), Some("oauth_token_invalid"));
+        assert!(should_auto_remove_account_state(&state));
     }
 
     #[test]

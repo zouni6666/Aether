@@ -914,8 +914,8 @@ mod tests {
     use super::{
         codex_build_invalid_state, codex_runtime_invalid_reason,
         parse_chatgpt_web_conversation_init_response, parse_codex_wham_usage_response,
-        OAUTH_ACCOUNT_BLOCK_PREFIX, OAUTH_EXPIRED_PREFIX, OAUTH_REFRESH_FAILED_PREFIX,
-        OAUTH_REQUEST_FAILED_PREFIX,
+        should_auto_remove_structured_reason, OAUTH_ACCOUNT_BLOCK_PREFIX, OAUTH_EXPIRED_PREFIX,
+        OAUTH_REFRESH_FAILED_PREFIX, OAUTH_REQUEST_FAILED_PREFIX,
     };
     use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
     use serde_json::json;
@@ -1008,6 +1008,23 @@ mod tests {
                 ))
             )
         );
+    }
+
+    #[test]
+    fn auto_remove_structured_reason_removes_oauth_expired_token_invalid() {
+        assert!(should_auto_remove_structured_reason(Some(
+            "[OAUTH_EXPIRED] token invalidated"
+        )));
+    }
+
+    #[test]
+    fn auto_remove_structured_reason_keeps_request_and_refresh_failures() {
+        assert!(!should_auto_remove_structured_reason(Some(
+            "[REQUEST_FAILED] 账号状态检查失败"
+        )));
+        assert!(!should_auto_remove_structured_reason(Some(
+            "[REFRESH_FAILED] Token 续期失败 (401): refresh_token 已失效"
+        )));
     }
 
     #[test]
