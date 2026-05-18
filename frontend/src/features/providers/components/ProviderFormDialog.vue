@@ -60,6 +60,9 @@
                   <SelectItem value="gemini_cli">
                     Gemini CLI
                   </SelectItem>
+                  <SelectItem value="grok">
+                    Grok
+                  </SelectItem>
                   <SelectItem value="kiro">
                     Kiro
                   </SelectItem>
@@ -86,6 +89,9 @@
                   </SelectItem>
                   <SelectItem value="gemini_cli">
                     Gemini CLI
+                  </SelectItem>
+                  <SelectItem value="grok">
+                    Grok
                   </SelectItem>
                   <SelectItem value="kiro">
                     Kiro
@@ -355,7 +361,7 @@ const defaultPriority = computed(() => {
 // 表单数据
 const form = ref({
   name: '',
-  provider_type: 'custom' as 'custom' | 'vertex_ai' | 'claude_code' | 'codex' | 'chatgpt_web' | 'gemini_cli' | 'antigravity' | 'kiro',
+  provider_type: 'custom' as 'custom' | 'vertex_ai' | 'claude_code' | 'codex' | 'chatgpt_web' | 'gemini_cli' | 'antigravity' | 'kiro' | 'grok',
   description: '',
   website: '',
   // 计费配置

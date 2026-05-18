@@ -346,7 +346,7 @@
                               <Copy class="w-2.5 h-2.5" />
                             </Button>
                             <!-- OAuth 状态（失效/过期/倒计时）和刷新按钮 -->
-                            <template v-if="shouldShowOAuthRefreshControl(key)">
+                            <template v-if="shouldShowOAuthRefreshControl(key, provider.provider_type)">
                               <!-- 账号级别异常：醒目提示 + 清除按钮 -->
                               <template v-if="isAccountLevelBlock(key)">
                                 <Badge
@@ -1293,6 +1293,7 @@ import type {
   AntigravityModelQuota,
   CodexUpstreamMetadata,
   ChatGPTWebUpstreamMetadata,
+  GrokUpstreamMetadata,
   KiroUpstreamMetadata,
   QuotaStatusSnapshot,
   QuotaWindowSnapshot,
@@ -1964,7 +1965,7 @@ function quotaSnapshotHasDisplayData(quota: QuotaStatusSnapshot | null | undefin
 
 function getQuotaSnapshotForProvider(
   key: EndpointAPIKey,
-  providerType: 'codex' | 'kiro' | 'antigravity' | 'chatgpt_web' | 'gemini_cli',
+  providerType: 'codex' | 'kiro' | 'antigravity' | 'chatgpt_web' | 'gemini_cli' | 'grok',
 ): QuotaStatusSnapshot | null {
   const quota = key.status_snapshot?.quota
   if (!quota) return null
@@ -2166,6 +2167,66 @@ function getKiroQuotaDisplay(key: EndpointAPIKey): KiroUpstreamMetadata | null {
 function hasKiroQuotaDisplayData(key: EndpointAPIKey): boolean {
   const kiro = getKiroQuotaDisplay(key)
   return !!kiro && (kiro.usage_percentage !== undefined || kiro.usage_limit !== undefined)
+}
+
+type GrokQuotaDisplay = GrokUpstreamMetadata & {
+  usage_percentage?: number
+  usage_limit?: number
+  current_usage?: number
+  remaining?: number
+  next_reset_at?: number
+}
+
+function getGrokQuotaDisplay(key: EndpointAPIKey): GrokQuotaDisplay | null {
+  const quota = getQuotaSnapshotForProvider(key, 'grok')
+  if (!quota) return null
+
+  const display: GrokQuotaDisplay = {}
+  const updatedAt = getQuotaSnapshotUpdatedAt(quota)
+  if (updatedAt !== undefined) display.updated_at = updatedAt
+  if (quota.plan_type) display.plan_type = quota.plan_type
+  if (quota.pool_tier) display.pool_tier = quota.pool_tier
+
+  const code = String(quota.code || '').trim().toLowerCase()
+  if (code === 'banned' || code === 'forbidden') {
+    display.is_banned = true
+    if (quota.reason) display.ban_reason = quota.reason
+  }
+
+  const usageWindow =
+    getQuotaWindow(quota, 'usage')
+    ?? getQuotaWindowByScope(quota, 'account')[0]
+    ?? getQuotaWindowByScope(quota, 'model')
+      .map(window => ({
+        window,
+        remainingPercent: getQuotaWindowRemainingPercent(window),
+      }))
+      .filter((item): item is { window: QuotaWindowSnapshot, remainingPercent: number } => item.remainingPercent !== undefined)
+      .sort((a, b) => a.remainingPercent - b.remainingPercent)[0]?.window
+    ?? null
+  if (usageWindow) {
+    const usedPercent = getQuotaWindowUsedPercent(usageWindow)
+    if (usedPercent !== undefined) display.usage_percentage = usedPercent
+    if (typeof usageWindow.used_value === 'number') display.current_usage = usageWindow.used_value
+    if (typeof usageWindow.limit_value === 'number') display.usage_limit = usageWindow.limit_value
+    if (typeof usageWindow.remaining_value === 'number') display.remaining = usageWindow.remaining_value
+
+    const nextResetAt =
+      getQuotaWindowResetAt(usageWindow)
+      ?? (() => {
+        const resetSeconds = getQuotaWindowResetSeconds(usageWindow)
+        if (updatedAt === undefined || resetSeconds === undefined) return undefined
+        return updatedAt + resetSeconds
+      })()
+    if (nextResetAt !== undefined) display.next_reset_at = nextResetAt
+  }
+
+  return Object.keys(display).length > 0 ? display : null
+}
+
+function hasGrokQuotaDisplayData(key: EndpointAPIKey): boolean {
+  const grok = getGrokQuotaDisplay(key)
+  return !!grok && (grok.usage_percentage !== undefined || grok.usage_limit !== undefined)
 }
 
 type ChatGPTWebQuotaDisplay = ChatGPTWebUpstreamMetadata & {
@@ -2435,6 +2496,28 @@ function shouldAutoRefreshKiroQuota(): boolean {
   return false
 }
 
+function shouldAutoRefreshGrokQuota(): boolean {
+  if (provider.value?.provider_type !== 'grok') return false
+  const now = Math.floor(Date.now() / 1000)
+
+  for (const { key } of allKeys.value) {
+    if (!key.is_active) continue
+
+    if (isTokenExpiringSoon(key, now)) return true
+
+    if (!hasGrokQuotaDisplayData(key)) {
+      return true
+    }
+
+    const updatedAt = getGrokQuotaDisplay(key)?.updated_at
+    if (typeof updatedAt !== 'number' || (now - updatedAt) > AUTO_QUOTA_REFRESH_STALE_SECONDS) {
+      return true
+    }
+  }
+
+  return false
+}
+
 function shouldAutoRefreshChatGPTWebQuota(): boolean {
   if (provider.value?.provider_type !== 'chatgpt_web') return false
   const now = Math.floor(Date.now() / 1000)
@@ -2541,7 +2624,7 @@ async function autoRefreshQuotaInBackground(options: { ignoreCooldown?: boolean 
   if (refreshingQuota.value) return
 
   const providerType = provider.value?.provider_type
-  if (providerType !== 'codex' && providerType !== 'antigravity' && providerType !== 'kiro' && providerType !== 'chatgpt_web') return
+  if (providerType !== 'codex' && providerType !== 'antigravity' && providerType !== 'kiro' && providerType !== 'chatgpt_web' && providerType !== 'grok') return
 
   // 检查是否需要刷新
   let shouldRefresh = false
@@ -2551,6 +2634,8 @@ async function autoRefreshQuotaInBackground(options: { ignoreCooldown?: boolean 
     shouldRefresh = shouldAutoRefreshAntigravityQuota()
   } else if (providerType === 'kiro') {
     shouldRefresh = shouldAutoRefreshKiroQuota()
+  } else if (providerType === 'grok') {
+    shouldRefresh = shouldAutoRefreshGrokQuota()
   } else if (providerType === 'chatgpt_web') {
     shouldRefresh = shouldAutoRefreshChatGPTWebQuota()
   }
@@ -2564,6 +2649,8 @@ async function autoRefreshQuotaInBackground(options: { ignoreCooldown?: boolean 
     hadCachedQuota = allKeys.value.some(({ key }) => key.is_active && hasAntigravityQuotaDisplayData(key))
   } else if (providerType === 'kiro') {
     hadCachedQuota = allKeys.value.some(({ key }) => key.is_active && hasKiroQuotaDisplayData(key))
+  } else if (providerType === 'grok') {
+    hadCachedQuota = allKeys.value.some(({ key }) => key.is_active && hasGrokQuotaDisplayData(key))
   } else if (providerType === 'chatgpt_web') {
     hadCachedQuota = allKeys.value.some(({ key }) => key.is_active && hasChatGPTWebQuotaDisplayData(key))
   }
@@ -3030,6 +3117,9 @@ function formatOAuthPlanType(planType: string): string {
     team: 'Team',
     enterprise: 'Enterprise',
     ultra: 'Ultra',
+    basic: 'Basic',
+    super: 'Super',
+    heavy: 'Heavy',
   }
   return labels[planType.toLowerCase()] || planType
 }
@@ -3377,6 +3467,9 @@ function getOAuthPlanTypeClass(planType: string): string {
     ultra: 'border-amber-500/50 text-amber-600 dark:text-amber-400',
     'pro+': 'border-purple-500/50 text-purple-600 dark:text-purple-400',
     power: 'border-amber-500/50 text-amber-600 dark:text-amber-400',
+    basic: 'border-primary/50 text-primary',
+    super: 'border-green-500/50 text-green-600 dark:text-green-400',
+    heavy: 'border-amber-500/50 text-amber-600 dark:text-amber-400',
   }
   return classes[planType.toLowerCase()] || ''
 }

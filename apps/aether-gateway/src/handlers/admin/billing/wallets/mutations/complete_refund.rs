@@ -14,6 +14,7 @@ use axum::{
     Json,
 };
 use serde_json::json;
+use tracing::warn;
 
 pub(in super::super) async fn build_admin_wallet_complete_refund_response(
     state: &AdminAppState<'_>,
@@ -86,6 +87,20 @@ pub(in super::super) async fn build_admin_wallet_complete_refund_response(
         .await?
     {
         crate::AdminWalletMutationOutcome::Applied(refund) => {
+            if let Some(order_id) = refund.payment_order_id.as_deref() {
+                if let Err(err) = state
+                    .app()
+                    .reverse_referral_rewards_for_order(order_id, refund.amount_usd)
+                    .await
+                {
+                    warn!(
+                        error = ?err,
+                        order_id = %order_id,
+                        refund_id = %refund.id,
+                        "failed to reverse referral rewards for completed refund"
+                    );
+                }
+            }
             let response = Json(json!({
                 "refund": build_admin_wallet_refund_payload(&wallet, &owner, &refund),
             }))

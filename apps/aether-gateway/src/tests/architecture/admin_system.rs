@@ -1,6 +1,32 @@
 use super::*;
 
 #[test]
+fn admin_system_build_version_contract_uses_explicit_local_build_arg() {
+    let build_rs = read_workspace_file("apps/aether-gateway/build.rs");
+    for pattern in [
+        "cargo:rerun-if-env-changed=AETHER_BUILD_VERSION",
+        "env::var(\"AETHER_BUILD_VERSION\")",
+    ] {
+        assert!(
+            build_rs.contains(pattern),
+            "apps/aether-gateway/build.rs should consume explicit build version pattern {pattern}"
+        );
+    }
+
+    let dockerfile = read_workspace_file("Dockerfile.app.local");
+    for pattern in [
+        "ARG AETHER_BUILD_VERSION",
+        "ENV AETHER_BUILD_VERSION=${AETHER_BUILD_VERSION}",
+        "AETHER_VERSION=${AETHER_BUILD_VERSION}",
+    ] {
+        assert!(
+            dockerfile.contains(pattern),
+            "Dockerfile.app.local should pass explicit build version pattern {pattern}"
+        );
+    }
+}
+
+#[test]
 fn admin_system_and_endpoint_roots_stay_thin() {
     let system_mod = read_workspace_file("apps/aether-gateway/src/handlers/admin/system/mod.rs");
     for pattern in [

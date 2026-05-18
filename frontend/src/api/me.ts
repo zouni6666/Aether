@@ -61,11 +61,17 @@ export interface UsageRecordDetail {
   cost: number  // 官方费率
   actual_cost?: number  // 倍率消耗（仅管理员可见）
   rate_multiplier?: number  // 成本倍率（仅管理员可见）
-  response_time_ms?: number
+  response_time_ms?: number | null
+  first_byte_time_ms?: number | null
   is_stream: boolean
   upstream_is_stream?: boolean
   client_requested_stream?: boolean
   client_is_stream?: boolean
+  client_family?: string | null
+  client_ip?: string | null
+  user_agent?: string | null
+  request_path?: string | null
+  request_path_and_query?: string | null
   created_at: string
   cache_creation_input_tokens?: number
   cache_creation_ephemeral_5m_input_tokens?: number

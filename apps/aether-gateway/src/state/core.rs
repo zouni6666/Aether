@@ -56,6 +56,7 @@ use crate::maintenance::spawn_request_candidate_cleanup_worker;
 use crate::maintenance::spawn_stats_aggregation_worker;
 use crate::maintenance::spawn_stats_hourly_aggregation_worker;
 use crate::maintenance::spawn_usage_cleanup_worker;
+use crate::maintenance::spawn_usage_counter_flush_worker;
 use crate::maintenance::spawn_wallet_daily_usage_aggregation_worker;
 
 const SYSTEM_CONFIG_CACHE_TTL: Duration = Duration::from_secs(3);
@@ -572,6 +573,7 @@ impl AppState {
     }
 
     pub(crate) fn invalidate_provider_routing_caches(&self) {
+        self.data.clear_minimal_candidate_selection_cache();
         self.clear_provider_transport_snapshot_cache();
         self.invalidate_scheduler_affinity_cache();
     }
@@ -1143,6 +1145,10 @@ impl AppState {
         supervise_worker(
             crate::task_runtime::TASK_KEY_USAGE_QUEUE_WORKER,
             self.usage_runtime.spawn_worker(self.data.clone()),
+        );
+        supervise_worker(
+            crate::task_runtime::TASK_KEY_USAGE_COUNTER_FLUSH,
+            spawn_usage_counter_flush_worker(self.data.clone()),
         );
         supervise_worker(
             crate::task_runtime::TASK_KEY_PROVIDER_QUOTA_RESET,

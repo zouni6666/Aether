@@ -17,9 +17,11 @@ pub use provider::{ProviderPoolAdapter, ProviderPoolMemberInput};
 pub use providers::{
     build_antigravity_pool_quota_request, build_chatgpt_web_pool_quota_request,
     build_codex_pool_quota_request, build_kiro_pool_quota_request,
-    enrich_chatgpt_web_quota_metadata, normalize_chatgpt_web_image_quota_limit,
-    AntigravityProviderPoolAdapter, ChatGptWebProviderPoolAdapter, CodexProviderPoolAdapter,
-    DefaultProviderPoolAdapter, KiroPoolQuotaAuthInput, KiroProviderPoolAdapter,
+    enrich_chatgpt_web_quota_metadata, grok_mode_id_for_model, grok_pool_tier_from_quota_bucket,
+    grok_quota_window_key_for_model, grok_supported_quota_windows_for_tier,
+    normalize_chatgpt_web_image_quota_limit, AntigravityProviderPoolAdapter,
+    ChatGptWebProviderPoolAdapter, CodexProviderPoolAdapter, DefaultProviderPoolAdapter,
+    GrokProviderPoolAdapter, KiroPoolQuotaAuthInput, KiroProviderPoolAdapter,
     UnsupportedQuotaProviderPoolAdapter, ANTIGRAVITY_FETCH_AVAILABLE_MODELS_PATH,
     CHATGPT_WEB_CONVERSATION_INIT_PATH, CHATGPT_WEB_DEFAULT_BASE_URL, CODEX_WHAM_USAGE_URL,
     KIRO_USAGE_LIMITS_PATH, KIRO_USAGE_SDK_VERSION,
@@ -65,6 +67,7 @@ mod tests {
                 "claude_code",
                 "codex",
                 "gemini_cli",
+                "grok",
                 "kiro",
                 "vertex_ai"
             ]
@@ -82,10 +85,11 @@ mod tests {
 
         assert_eq!(
             service.provider_types_for_capability(ProviderPoolCapability::QuotaRefresh),
-            ["antigravity", "chatgpt_web", "codex", "kiro"]
+            ["antigravity", "chatgpt_web", "codex", "grok", "kiro"]
         );
         assert!(service.supports_quota_refresh("codex"));
         assert!(service.supports_quota_refresh("antigravity"));
+        assert!(service.supports_quota_refresh("grok"));
         assert!(!service.supports_quota_refresh("gemini_cli"));
         assert_eq!(
             service.quota_refresh_unsupported_message("claude_code"),
@@ -247,8 +251,11 @@ mod tests {
             .find(|item| item["name"] == "recent_refresh")
             .expect("recent_refresh should exist");
 
-        assert_eq!(free_first["providers"], json!(["codex", "kiro"]));
-        assert_eq!(recent_refresh["providers"], json!(["codex", "kiro"]));
+        assert_eq!(free_first["providers"], json!(["codex", "grok", "kiro"]));
+        assert_eq!(
+            recent_refresh["providers"],
+            json!(["codex", "grok", "kiro"])
+        );
     }
 
     #[test]
@@ -331,6 +338,37 @@ mod tests {
             }))),
             "chatgpt_web",
         ));
+        assert!(provider_pool_key_account_quota_exhausted(
+            &sample_key(Some(json!({
+                "grok": {
+                    "quota_by_model": {
+                        "quota_fast": {
+                            "is_exhausted": true,
+                            "remaining": 0.0
+                        }
+                    }
+                }
+            }))),
+            "grok",
+        ));
+        assert!(!provider_pool_key_account_quota_exhausted(
+            &sample_key(Some(json!({
+                "grok": {
+                    "pool_tier": "basic",
+                    "quota_by_model": {
+                        "quota_fast": {
+                            "is_exhausted": false,
+                            "remaining": 1.0
+                        },
+                        "quota_heavy": {
+                            "is_exhausted": true,
+                            "remaining": 0.0
+                        }
+                    }
+                }
+            }))),
+            "grok",
+        ));
         assert!(!provider_pool_key_account_quota_exhausted(
             &sample_key(Some(json!({
                 "codex": {
@@ -340,6 +378,68 @@ mod tests {
             }))),
             "codex",
         ));
+    }
+
+    #[test]
+    fn grok_quota_tier_boundaries_match_pool_modes() {
+        assert_eq!(
+            grok_supported_quota_windows_for_tier(Some("basic")),
+            [("quota_fast", "fast")]
+        );
+        assert_eq!(
+            grok_supported_quota_windows_for_tier(Some("super")),
+            [
+                ("quota_auto", "auto"),
+                ("quota_fast", "fast"),
+                ("quota_expert", "expert"),
+                ("quota_grok_4_3", "grok-420-computer-use-sa")
+            ]
+        );
+        assert_eq!(
+            grok_supported_quota_windows_for_tier(Some("heavy")),
+            [
+                ("quota_auto", "auto"),
+                ("quota_fast", "fast"),
+                ("quota_expert", "expert"),
+                ("quota_heavy", "heavy"),
+                ("quota_grok_4_3", "grok-420-computer-use-sa")
+            ]
+        );
+    }
+
+    #[test]
+    fn grok_pool_tier_infers_from_live_quota_totals() {
+        let bucket = json!({
+            "quota_by_model": {
+                "quota_fast": {
+                    "remaining": 20.0,
+                    "total": 30.0
+                },
+                "quota_auto": {
+                    "remaining": 7.0,
+                    "total": 7.0
+                }
+            }
+        });
+        let bucket = bucket.as_object().expect("bucket should be object");
+
+        assert_eq!(grok_pool_tier_from_quota_bucket(bucket), Some("basic"));
+    }
+
+    #[test]
+    fn grok_model_name_maps_to_quota_window() {
+        assert_eq!(
+            grok_quota_window_key_for_model(Some("grok-4.20-fast")),
+            Some("quota_fast")
+        );
+        assert_eq!(
+            grok_quota_window_key_for_model(Some("grok-4.20-multi-agent-0309")),
+            Some("quota_heavy")
+        );
+        assert_eq!(
+            grok_quota_window_key_for_model(Some("grok-4.3-beta")),
+            Some("quota_grok_4_3")
+        );
     }
 
     #[test]

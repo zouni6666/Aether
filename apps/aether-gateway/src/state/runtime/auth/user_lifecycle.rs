@@ -81,6 +81,14 @@ impl AppState {
 
     pub(crate) async fn add_all_users_to_group(&self, group_id: &str) -> Result<(), GatewayError> {
         for user in self.list_non_admin_export_users().await? {
+            let has_other_group = self
+                .list_user_groups_for_user(&user.id)
+                .await?
+                .into_iter()
+                .any(|group| group.id != group_id);
+            if has_other_group {
+                continue;
+            }
             self.add_user_to_group(group_id, &user.id).await?;
         }
         Ok(())

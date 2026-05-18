@@ -1,4 +1,5 @@
 import apiClient from './client'
+import type { ModelTestCapabilities } from './endpoints/types'
 import axios from 'axios'
 import { cachedRequest, buildCacheKey } from '@/utils/cache'
 import type { BillingSummary } from './auth'
@@ -420,6 +421,8 @@ export interface ProviderModelsQueryResponse {
       owned_by?: string
       display_name?: string
       api_format?: string
+      api_formats?: string[]
+      model_test_capabilities?: ModelTestCapabilities | null
     }>
     error?: string
     from_cache?: boolean

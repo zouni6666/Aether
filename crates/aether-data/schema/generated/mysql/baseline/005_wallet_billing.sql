@@ -189,7 +189,8 @@ CREATE TABLE IF NOT EXISTS entitlement_usage_ledgers (
     `created_at` BIGINT NOT NULL,
     PRIMARY KEY (`id`),
     UNIQUE KEY uq_entitlement_usage_request (`user_entitlement_id`, `request_id`),
-    KEY idx_entitlement_usage_user_date (`user_id`, `usage_date`)
+    KEY idx_entitlement_usage_user_date (`user_id`, `usage_date`),
+    KEY idx_entitlement_usage_entitlement_date (`user_entitlement_id`, `usage_date`)
 );
 
 CREATE TABLE IF NOT EXISTS refund_requests (

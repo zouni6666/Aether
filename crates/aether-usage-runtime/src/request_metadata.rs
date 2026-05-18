@@ -72,8 +72,10 @@ fn copy_allowed_metadata_fields(source: &Map<String, Value>, target: &mut Map<St
     copy_non_empty_string(source, target, "trace_id");
     copy_non_empty_string(source, target, "client_ip");
     copy_non_empty_string(source, target, "user_agent");
+    copy_non_empty_string(source, target, "client_family");
     copy_bool(source, target, "client_requested_stream");
     copy_bool(source, target, "upstream_is_stream");
+    copy_non_null_value(source, target, "client_session_affinity");
     copy_bool(source, target, "api_key_is_standalone");
     copy_non_empty_string(source, target, "request_path");
     copy_non_empty_string(source, target, "request_query_string");
@@ -110,8 +112,10 @@ fn move_allowed_metadata_fields(mut source: Map<String, Value>, target: &mut Map
     remove_non_empty_string(&mut source, target, "trace_id");
     remove_non_empty_string(&mut source, target, "client_ip");
     remove_non_empty_string(&mut source, target, "user_agent");
+    remove_non_empty_string(&mut source, target, "client_family");
     remove_bool(&mut source, target, "client_requested_stream");
     remove_bool(&mut source, target, "upstream_is_stream");
+    remove_non_null_value(&mut source, target, "client_session_affinity");
     remove_bool(&mut source, target, "api_key_is_standalone");
     remove_non_empty_string(&mut source, target, "request_path");
     remove_non_empty_string(&mut source, target, "request_query_string");

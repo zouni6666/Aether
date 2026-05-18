@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use axum::{body::Body, http, response::Response};
 use md5::{Digest, Md5};
 use serde_json::json;
+use tracing::warn;
 
 use super::{payment_shared::payment_callback_payload_hash, AppState, GatewayPublicRequestContext};
 
@@ -373,9 +374,20 @@ pub(super) async fn handle_epay_notify(
 
     match outcome {
         Ok(Some(aether_data::repository::wallet::ProcessPaymentCallbackOutcome::Applied {
+            order,
+            order_id,
             ..
-        }))
-        | Ok(Some(
+        })) => {
+            if let Err(err) = state.apply_referral_rewards_for_paid_order(&order).await {
+                warn!(
+                    error = ?err,
+                    order_id = %order_id,
+                    "failed to apply referral rewards for epay callback"
+                );
+            }
+            epay_plain(http::StatusCode::OK, "success")
+        }
+        Ok(Some(
             aether_data::repository::wallet::ProcessPaymentCallbackOutcome::AlreadyCredited {
                 ..
             },

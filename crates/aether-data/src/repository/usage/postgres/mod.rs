@@ -1,5 +1,6 @@
 use aether_data_contracts::repository::usage::{
-    parse_usage_body_ref, usage_body_ref, StoredUsageAuditAggregation, StoredUsageAuditSummary,
+    parse_usage_body_ref, usage_body_ref, ApiKeyLastUsedDelta, ManagementTokenCounterDelta,
+    ProxyNodeCounterDelta, StoredUsageAuditAggregation, StoredUsageAuditSummary,
     StoredUsageBreakdownSummaryRow, StoredUsageCacheAffinityHitSummary,
     StoredUsageCacheAffinityIntervalRow, StoredUsageCacheHitSummary, StoredUsageCostSavingsSummary,
     StoredUsageDashboardDailyBreakdownRow, StoredUsageDashboardProviderCount,
@@ -42,8 +43,8 @@ use super::{
     PendingUsageCleanupSummary, ProviderApiKeyUsageDelta, ProviderApiKeyWindowUsageRequest,
     StoredProviderApiKeyUsageSummary, StoredProviderApiKeyWindowUsageSummary,
     StoredProviderUsageSummary, StoredRequestUsageAudit, StoredUsageDailySummary,
-    UpsertUsageRecord, UsageAuditListQuery, UsageDailyHeatmapQuery, UsageReadRepository,
-    UsageWriteRepository,
+    UpsertUsageRecord, UsageAuditListQuery, UsageCounterFlushSummary, UsageCounterHealthSnapshot,
+    UsageDailyHeatmapQuery, UsageReadRepository, UsageWriteRepository,
 };
 use crate::driver::postgres::PostgresTransactionRunner;
 use crate::{
@@ -1334,8 +1335,148 @@ const REBUILD_API_KEY_USAGE_STATS_SQL: &str =
 const APPLY_PROVIDER_API_KEY_USAGE_DELTA_SQL: &str =
     include_str!("queries/apply_provider_api_key_usage_delta_sql.sql");
 
-const APPLY_PROVIDER_API_KEY_CODEX_WINDOW_USAGE_DELTA_SQL: &str =
-    include_str!("queries/apply_provider_api_key_codex_window_usage_delta_sql.sql");
+const INSERT_USAGE_COUNTER_DELTA_SQL: &str = r#"
+INSERT INTO usage_counter_deltas (
+  id,
+  request_id,
+  kind,
+  target_id,
+  request_count_delta,
+  total_requests_delta,
+  success_count_delta,
+  error_count_delta,
+  dns_failures_delta,
+  stream_errors_delta,
+  total_tokens_delta,
+  total_cost_usd_delta,
+  total_response_time_ms_delta,
+  last_used_at_unix_secs,
+  last_used_ip,
+  candidate_last_used_at_unix_secs,
+  removed_last_used_at_unix_secs,
+  usage_created_at_unix_secs
+) VALUES (
+  $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
+)
+"#;
+
+const CLAIM_USAGE_COUNTER_DELTAS_SQL: &str = r#"
+WITH claimed AS (
+  SELECT id
+  FROM usage_counter_deltas
+  WHERE processed_at IS NULL
+  ORDER BY created_at ASC, id ASC
+  LIMIT $1
+  FOR UPDATE SKIP LOCKED
+)
+SELECT
+  delta.id,
+  delta.kind,
+  delta.target_id,
+  delta.request_count_delta,
+  delta.total_requests_delta,
+  delta.success_count_delta,
+  delta.error_count_delta,
+  delta.dns_failures_delta,
+  delta.stream_errors_delta,
+  delta.total_tokens_delta,
+  delta.total_cost_usd_delta,
+  delta.total_response_time_ms_delta,
+  delta.last_used_at_unix_secs,
+  delta.last_used_ip,
+  delta.candidate_last_used_at_unix_secs,
+  delta.removed_last_used_at_unix_secs,
+  delta.usage_created_at_unix_secs
+FROM usage_counter_deltas AS delta
+JOIN claimed ON claimed.id = delta.id
+ORDER BY delta.created_at ASC, delta.id ASC
+"#;
+
+const READ_USAGE_COUNTER_HEALTH_SQL: &str = r#"
+SELECT
+  COUNT(*) FILTER (WHERE processed_at IS NULL)::BIGINT AS pending_rows,
+  COUNT(*) FILTER (WHERE processed_at IS NOT NULL)::BIGINT AS processed_rows,
+  CAST(EXTRACT(EPOCH FROM MIN(created_at) FILTER (WHERE processed_at IS NULL)) AS BIGINT)
+    AS oldest_pending_created_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM MAX(processed_at)) AS BIGINT)
+    AS latest_processed_at_unix_secs
+FROM usage_counter_deltas
+"#;
+
+const READ_PENDING_USAGE_COUNTER_DELTAS_BY_KIND_SQL: &str = r#"
+SELECT kind, COUNT(*)::BIGINT AS pending_rows
+FROM usage_counter_deltas
+WHERE processed_at IS NULL
+GROUP BY kind
+ORDER BY kind ASC
+"#;
+
+const MARK_USAGE_COUNTER_DELTAS_PROCESSED_SQL: &str = r#"
+UPDATE usage_counter_deltas
+SET processed_at = NOW()
+WHERE id = ANY($1::TEXT[])
+"#;
+const DELETE_PROCESSED_USAGE_COUNTER_DELTAS_SQL: &str = r#"
+WITH doomed AS (
+  SELECT id
+  FROM usage_counter_deltas
+  WHERE processed_at IS NOT NULL
+    AND processed_at < TO_TIMESTAMP($1::double precision)
+  ORDER BY processed_at ASC, created_at ASC, id ASC
+  LIMIT $2
+)
+DELETE FROM usage_counter_deltas AS delta
+USING doomed
+WHERE delta.id = doomed.id
+"#;
+const TRY_LOCK_USAGE_COUNTER_FLUSH_SQL: &str =
+    "SELECT pg_try_advisory_xact_lock(hashtext('usage_counter_flush')::BIGINT) AS locked";
+
+const USAGE_COUNTER_KIND_API_KEY: &str = "api_key";
+const USAGE_COUNTER_KIND_PROVIDER_API_KEY: &str = "provider_api_key";
+const USAGE_COUNTER_KIND_MODEL: &str = "model";
+const USAGE_COUNTER_KIND_PROVIDER_MONTHLY: &str = "provider_monthly";
+const USAGE_COUNTER_KIND_PROXY_NODE: &str = "proxy_node";
+const USAGE_COUNTER_KIND_MANAGEMENT_TOKEN: &str = "management_token";
+const USAGE_COUNTER_KIND_API_KEY_LAST_USED: &str = "api_key_last_used";
+
+const APPLY_PROVIDER_MONTHLY_USAGE_DELTA_SQL: &str = r#"
+UPDATE providers
+SET
+  monthly_used_usd = COALESCE(monthly_used_usd, 0) + $2,
+  updated_at = NOW()
+WHERE id = $1
+"#;
+
+const APPLY_PROXY_NODE_COUNTER_DELTA_SQL: &str = r#"
+UPDATE proxy_nodes
+SET
+  total_requests = total_requests + GREATEST($2::bigint, 0),
+  failed_requests = failed_requests + GREATEST($3::bigint, 0),
+  dns_failures = dns_failures + GREATEST($4::bigint, 0),
+  stream_errors = stream_errors + GREATEST($5::bigint, 0),
+  updated_at = NOW()
+WHERE id = $1
+"#;
+
+const APPLY_MANAGEMENT_TOKEN_COUNTER_DELTA_SQL: &str = r#"
+UPDATE management_tokens
+SET
+  usage_count = COALESCE(usage_count, 0) + GREATEST($2::bigint, 0),
+  last_used_at = CASE
+    WHEN $3::double precision IS NULL THEN last_used_at
+    ELSE GREATEST(COALESCE(last_used_at, TO_TIMESTAMP(0)), TO_TIMESTAMP($3::double precision))
+  END,
+  last_used_ip = COALESCE($4, last_used_ip),
+  updated_at = NOW()
+WHERE id = $1
+"#;
+
+const APPLY_API_KEY_LAST_USED_DELTA_SQL: &str = r#"
+UPDATE api_keys
+SET last_used_at = GREATEST(COALESCE(last_used_at, TO_TIMESTAMP(0)), TO_TIMESTAMP($2::double precision))
+WHERE id = $1
+"#;
 
 const RESET_PROVIDER_API_KEY_USAGE_STATS_SQL: &str =
     include_str!("queries/reset_provider_api_key_usage_stats_sql.sql");
@@ -1348,8 +1489,41 @@ const REBUILD_PROVIDER_API_KEY_CODEX_WINDOW_USAGE_STATS_SQL: &str =
 
 const LIST_USAGE_AUDITS_PREFIX: &str = include_str!("queries/list_usage_audits_prefix.sql");
 const USAGE_RESERVED_PROVIDER_LABELS_FILTER_SQL: &str = " AND BTRIM(COALESCE(\"usage\".provider_name, '')) <> '' AND lower(BTRIM(COALESCE(\"usage\".provider_name, ''))) NOT IN ('unknown', 'unknow', 'pending')";
+const USAGE_PROVIDER_IDENTITY_FILTER_SQL: &str = " AND BTRIM(COALESCE(\"usage\".provider_id, '')) <> '' AND lower(BTRIM(COALESCE(\"usage\".provider_id, ''))) NOT IN ('unknown', 'unknow', 'pending')";
+const USAGE_RAW_PROVIDER_GROUP_KEY_SQL: &str = r#"CASE
+      WHEN BTRIM(COALESCE("usage".provider_id, '')) = ''
+        OR lower(BTRIM(COALESCE("usage".provider_id, ''))) IN ('unknown', 'unknow', 'pending')
+      THEN BTRIM("usage".provider_name)
+      ELSE BTRIM("usage".provider_id)
+    END"#;
+const USAGE_RAW_PROVIDER_DISPLAY_NAME_SQL: &str = r#"CASE
+      WHEN BTRIM(COALESCE("usage".provider_name, '')) = ''
+        OR lower(BTRIM(COALESCE("usage".provider_name, ''))) IN ('unknown', 'unknow', 'pending')
+      THEN NULL
+      ELSE BTRIM("usage".provider_name)
+    END"#;
+const USAGE_PROVIDER_IDENTITY_JOIN_SQL: &str = r#"  LEFT JOIN providers AS provider_by_id
+    ON BTRIM(COALESCE("usage".provider_id, '')) <> ''
+   AND lower(BTRIM(COALESCE("usage".provider_id, ''))) NOT IN ('unknown', 'unknow', 'pending')
+   AND provider_by_id.id = BTRIM("usage".provider_id)"#;
+const USAGE_RESOLVED_PROVIDER_GROUP_KEY_SQL: &str = r#"COALESCE(
+      provider_by_id.id,
+      BTRIM("usage".provider_id)
+    )"#;
+const USAGE_RESOLVED_PROVIDER_DISPLAY_NAME_SQL: &str = r#"COALESCE(
+      provider_by_id.name,
+      CASE
+        WHEN BTRIM(COALESCE("usage".provider_name, '')) = ''
+          OR lower(BTRIM(COALESCE("usage".provider_name, ''))) IN ('unknown', 'unknow', 'pending')
+        THEN NULL
+        ELSE BTRIM("usage".provider_name)
+      END
+    )"#;
 
 struct UsageAuditAggregationSqlFragments {
+    provider_identity_join: &'static str,
+    provider_group_key_expr: &'static str,
+    provider_display_name_expr: &'static str,
     filtered_extra_where: &'static str,
     group_key_expr: &'static str,
     display_name_expr: &'static str,
@@ -1365,6 +1539,9 @@ fn usage_audit_aggregation_sql_fragments(
 ) -> UsageAuditAggregationSqlFragments {
     match group_by {
         UsageAuditAggregationGroupBy::Model => UsageAuditAggregationSqlFragments {
+            provider_identity_join: "",
+            provider_group_key_expr: USAGE_RAW_PROVIDER_GROUP_KEY_SQL,
+            provider_display_name_expr: USAGE_RAW_PROVIDER_DISPLAY_NAME_SQL,
             filtered_extra_where: "",
             group_key_expr: "model",
             display_name_expr: "NULL::varchar",
@@ -1375,6 +1552,9 @@ fn usage_audit_aggregation_sql_fragments(
             success_count_expr: "NULL::BIGINT",
         },
         UsageAuditAggregationGroupBy::Provider => UsageAuditAggregationSqlFragments {
+            provider_identity_join: USAGE_PROVIDER_IDENTITY_JOIN_SQL,
+            provider_group_key_expr: USAGE_RESOLVED_PROVIDER_GROUP_KEY_SQL,
+            provider_display_name_expr: USAGE_RESOLVED_PROVIDER_DISPLAY_NAME_SQL,
             filtered_extra_where: "",
             group_key_expr: "provider_group_key",
             display_name_expr: "provider_display_name",
@@ -1385,6 +1565,9 @@ fn usage_audit_aggregation_sql_fragments(
             success_count_expr: "COALESCE(SUM(success_flag), 0)::BIGINT",
         },
         UsageAuditAggregationGroupBy::ApiFormat => UsageAuditAggregationSqlFragments {
+            provider_identity_join: "",
+            provider_group_key_expr: USAGE_RAW_PROVIDER_GROUP_KEY_SQL,
+            provider_display_name_expr: USAGE_RAW_PROVIDER_DISPLAY_NAME_SQL,
             filtered_extra_where: "",
             group_key_expr: "api_format_group_key",
             display_name_expr: "NULL::varchar",
@@ -1395,6 +1578,9 @@ fn usage_audit_aggregation_sql_fragments(
             success_count_expr: "NULL::BIGINT",
         },
         UsageAuditAggregationGroupBy::User => UsageAuditAggregationSqlFragments {
+            provider_identity_join: "",
+            provider_group_key_expr: USAGE_RAW_PROVIDER_GROUP_KEY_SQL,
+            provider_display_name_expr: USAGE_RAW_PROVIDER_DISPLAY_NAME_SQL,
             filtered_extra_where: " AND \"usage\".user_id IS NOT NULL",
             group_key_expr: "user_id",
             display_name_expr: "NULL::varchar",
@@ -6409,6 +6595,7 @@ WHERE stats_daily_api_key.date >=
             display_name_expr,
             avg_response_time_expr,
             success_count_expr,
+            join_clause,
         ) = match group_by {
             UsageAuditAggregationGroupBy::Model => (
                 "stats_user_daily_model",
@@ -6416,13 +6603,15 @@ WHERE stats_daily_api_key.date >=
                 "NULL::varchar",
                 "NULL::DOUBLE PRECISION",
                 "NULL::BIGINT",
+                "",
             ),
             UsageAuditAggregationGroupBy::Provider => (
                 "stats_user_daily_provider",
                 "provider_name",
-                "provider_name",
+                "MAX(provider_name)",
                 "CASE WHEN COALESCE(SUM(response_time_samples), 0) > 0 THEN COALESCE(SUM(response_time_sum_ms), 0) / COALESCE(SUM(response_time_samples), 0) ELSE NULL END",
                 "COALESCE(SUM(success_requests), 0)::BIGINT",
+                "",
             ),
             UsageAuditAggregationGroupBy::ApiFormat => (
                 "stats_user_daily_api_format",
@@ -6430,6 +6619,7 @@ WHERE stats_daily_api_key.date >=
                 "NULL::varchar",
                 "CASE WHEN COALESCE(SUM(response_time_samples), 0) > 0 THEN COALESCE(SUM(response_time_sum_ms), 0) / COALESCE(SUM(response_time_samples), 0) ELSE NULL END",
                 "NULL::BIGINT",
+                "",
             ),
             UsageAuditAggregationGroupBy::User => {
                 return Ok(Vec::new());
@@ -6464,6 +6654,7 @@ SELECT
   {avg_response_time_expr} AS avg_response_time_ms,
   {success_count_expr} AS success_count
 FROM {table_name}
+{join_clause}
 WHERE date >= $1
   AND date < $2
   {provider_extra_where}
@@ -6475,6 +6666,7 @@ ORDER BY request_count DESC, group_key ASC
             avg_response_time_expr = avg_response_time_expr,
             success_count_expr = success_count_expr,
             table_name = table_name,
+            join_clause = join_clause,
             provider_extra_where = provider_extra_where,
         );
 
@@ -6495,9 +6687,9 @@ ORDER BY request_count DESC, group_key ASC
     ) -> Result<Vec<StoredUsageAuditAggregation>, DataLayerError> {
         let fragments = usage_audit_aggregation_sql_fragments(query.group_by);
         let provider_extra_where =
-            if matches!(query.group_by, UsageAuditAggregationGroupBy::Provider)
-                || query.exclude_reserved_provider_labels
-            {
+            if matches!(query.group_by, UsageAuditAggregationGroupBy::Provider) {
+                USAGE_PROVIDER_IDENTITY_FILTER_SQL
+            } else if query.exclude_reserved_provider_labels {
                 USAGE_RESERVED_PROVIDER_LABELS_FILTER_SQL
             } else {
                 ""
@@ -6508,18 +6700,8 @@ WITH filtered_usage AS (
   SELECT
     "usage".model AS model,
     "usage".user_id AS user_id,
-    CASE
-      WHEN BTRIM(COALESCE("usage".provider_id, '')) = ''
-        OR lower(BTRIM(COALESCE("usage".provider_id, ''))) IN ('unknown', 'unknow', 'pending')
-      THEN BTRIM("usage".provider_name)
-      ELSE BTRIM("usage".provider_id)
-    END AS provider_group_key,
-    CASE
-      WHEN BTRIM(COALESCE("usage".provider_name, '')) = ''
-        OR lower(BTRIM(COALESCE("usage".provider_name, ''))) IN ('unknown', 'unknow', 'pending')
-      THEN NULL
-      ELSE BTRIM("usage".provider_name)
-    END AS provider_display_name,
+    {provider_group_key_expr} AS provider_group_key,
+    {provider_display_name_expr} AS provider_display_name,
     COALESCE("usage".api_format, 'unknown') AS api_format_group_key,
     GREATEST(COALESCE("usage".input_tokens, 0), 0) AS input_tokens,
     GREATEST(COALESCE("usage".output_tokens, 0), 0) AS output_tokens,
@@ -6550,6 +6732,7 @@ WITH filtered_usage AS (
       ELSE 0
     END AS success_flag
   FROM usage_billing_facts AS "usage"
+{provider_identity_join}
   WHERE "usage".created_at >= TO_TIMESTAMP($1::double precision)
     AND "usage".created_at < TO_TIMESTAMP($2::double precision)
     AND "usage".status NOT IN ('pending', 'streaming')
@@ -6649,6 +6832,9 @@ LIMIT $3
 "#,
             provider_extra_where = provider_extra_where,
             filtered_extra_where = fragments.filtered_extra_where,
+            provider_identity_join = fragments.provider_identity_join,
+            provider_group_key_expr = fragments.provider_group_key_expr,
+            provider_display_name_expr = fragments.provider_display_name_expr,
             group_key_expr = fragments.group_key_expr,
             display_name_expr = fragments.display_name_expr,
             secondary_name_expr = fragments.secondary_name_expr,
@@ -6681,6 +6867,9 @@ LIMIT $3
         query: &UsageAuditAggregationQuery,
     ) -> Result<Vec<StoredUsageAuditAggregation>, DataLayerError> {
         if matches!(query.group_by, UsageAuditAggregationGroupBy::User) {
+            return self.aggregate_usage_audits_raw(query).await;
+        }
+        if matches!(query.group_by, UsageAuditAggregationGroupBy::Provider) {
             return self.aggregate_usage_audits_raw(query).await;
         }
         if query.exclude_reserved_provider_labels
@@ -7675,14 +7864,20 @@ ORDER BY "usage".user_id ASC
                     ) {
                         (Some(before), Some(after)) if before.api_key_id == after.api_key_id => {
                             let delta = ApiKeyUsageDelta::between(before, after);
-                            apply_api_key_usage_delta_in_tx(tx, before.api_key_id.as_str(), &delta)
-                                .await?;
+                            enqueue_api_key_usage_delta_in_tx(
+                                tx,
+                                &usage.request_id,
+                                before.api_key_id.as_str(),
+                                &delta,
+                            )
+                            .await?;
                         }
                         _ => {
                             if let Some(before) = before_api_key_contribution.as_ref() {
                                 let delta = ApiKeyUsageDelta::removal(before);
-                                apply_api_key_usage_delta_in_tx(
+                                enqueue_api_key_usage_delta_in_tx(
                                     tx,
+                                    &usage.request_id,
                                     before.api_key_id.as_str(),
                                     &delta,
                                 )
@@ -7690,8 +7885,9 @@ ORDER BY "usage".user_id ASC
                             }
                             if let Some(after) = after_api_key_contribution.as_ref() {
                                 let delta = ApiKeyUsageDelta::addition(after);
-                                apply_api_key_usage_delta_in_tx(
+                                enqueue_api_key_usage_delta_in_tx(
                                     tx,
+                                    &usage.request_id,
                                     after.api_key_id.as_str(),
                                     &delta,
                                 )
@@ -7709,14 +7905,20 @@ ORDER BY "usage".user_id ASC
                     ) {
                         (Some(before), Some(after)) if before.model == after.model => {
                             let delta = ModelUsageDelta::between(before, after);
-                            apply_global_model_usage_delta_in_tx(tx, before.model.as_str(), &delta)
-                                .await?;
+                            enqueue_model_usage_delta_in_tx(
+                                tx,
+                                &usage.request_id,
+                                before.model.as_str(),
+                                &delta,
+                            )
+                            .await?;
                         }
                         _ => {
                             if let Some(before) = before_model_contribution.as_ref() {
                                 let delta = ModelUsageDelta::removal(before);
-                                apply_global_model_usage_delta_in_tx(
+                                enqueue_model_usage_delta_in_tx(
                                     tx,
+                                    &usage.request_id,
                                     before.model.as_str(),
                                     &delta,
                                 )
@@ -7724,8 +7926,9 @@ ORDER BY "usage".user_id ASC
                             }
                             if let Some(after) = after_model_contribution.as_ref() {
                                 let delta = ModelUsageDelta::addition(after);
-                                apply_global_model_usage_delta_in_tx(
+                                enqueue_model_usage_delta_in_tx(
                                     tx,
+                                    &usage.request_id,
                                     after.model.as_str(),
                                     &delta,
                                 )
@@ -7744,8 +7947,9 @@ ORDER BY "usage".user_id ASC
                     ) {
                         (Some(before), Some(after)) if before.key_id == after.key_id => {
                             let delta = ProviderApiKeyUsageDelta::between(before, after);
-                            apply_provider_api_key_usage_delta_in_tx(
+                            enqueue_provider_api_key_usage_delta_in_tx(
                                 tx,
+                                &usage.request_id,
                                 before.key_id.as_str(),
                                 &delta,
                             )
@@ -7754,8 +7958,9 @@ ORDER BY "usage".user_id ASC
                         _ => {
                             if let Some(before) = before_provider_contribution.as_ref() {
                                 let delta = ProviderApiKeyUsageDelta::removal(before);
-                                apply_provider_api_key_usage_delta_in_tx(
+                                enqueue_provider_api_key_usage_delta_in_tx(
                                     tx,
+                                    &usage.request_id,
                                     before.key_id.as_str(),
                                     &delta,
                                 )
@@ -7763,8 +7968,9 @@ ORDER BY "usage".user_id ASC
                             }
                             if let Some(after) = after_provider_contribution.as_ref() {
                                 let delta = ProviderApiKeyUsageDelta::addition(after);
-                                apply_provider_api_key_usage_delta_in_tx(
+                                enqueue_provider_api_key_usage_delta_in_tx(
                                     tx,
+                                    &usage.request_id,
                                     after.key_id.as_str(),
                                     &delta,
                                 )
@@ -7775,6 +7981,218 @@ ORDER BY "usage".user_id ASC
                     Ok(stored)
                 }) as BoxFuture<'_, Result<StoredRequestUsageAudit, DataLayerError>>
             })
+            .await
+    }
+
+    pub async fn flush_usage_counter_deltas(
+        &self,
+        batch_size: usize,
+    ) -> Result<UsageCounterFlushSummary, DataLayerError> {
+        if batch_size == 0 {
+            return Ok(UsageCounterFlushSummary::default());
+        }
+        let batch_size_i64 = i64::try_from(batch_size).map_err(|_| {
+            DataLayerError::InvalidInput(format!(
+                "usage counter flush batch size is out of range: {batch_size}"
+            ))
+        })?;
+
+        self.tx_runner
+            .run_read_write(|tx| {
+                Box::pin(async move {
+                    if !try_lock_usage_counter_flush_in_tx(tx).await? {
+                        return Ok(UsageCounterFlushSummary::default());
+                    }
+
+                    let rows = claim_usage_counter_deltas_in_tx(tx, batch_size_i64).await?;
+                    if rows.is_empty() {
+                        return Ok(UsageCounterFlushSummary::default());
+                    }
+
+                    let row_ids = rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>();
+                    let aggregates = UsageCounterDeltaAggregates::from_rows(&rows)?;
+
+                    for (api_key_id, delta) in &aggregates.api_keys {
+                        apply_api_key_usage_delta_in_tx(tx, api_key_id.as_str(), delta).await?;
+                    }
+                    for (model, delta) in &aggregates.models {
+                        apply_global_model_usage_delta_in_tx(tx, model.as_str(), delta).await?;
+                    }
+                    for (key_id, delta) in &aggregates.provider_api_keys {
+                        apply_provider_api_key_main_usage_delta_in_tx(tx, key_id.as_str(), delta)
+                            .await?;
+                    }
+                    for (provider_id, delta) in &aggregates.provider_monthly {
+                        apply_provider_monthly_usage_delta_in_tx(tx, provider_id.as_str(), *delta)
+                            .await?;
+                    }
+                    for (node_id, delta) in &aggregates.proxy_nodes {
+                        apply_proxy_node_counter_delta_in_tx(tx, node_id.as_str(), delta).await?;
+                    }
+                    for (token_id, delta) in &aggregates.management_tokens {
+                        apply_management_token_counter_delta_in_tx(tx, token_id.as_str(), delta)
+                            .await?;
+                    }
+                    for (api_key_id, delta) in &aggregates.api_key_last_used {
+                        apply_api_key_last_used_delta_in_tx(tx, api_key_id.as_str(), delta).await?;
+                    }
+
+                    mark_usage_counter_deltas_processed_in_tx(tx, &row_ids).await?;
+
+                    Ok(UsageCounterFlushSummary {
+                        rows_claimed: rows.len(),
+                        api_key_targets: aggregates.api_keys.len(),
+                        provider_api_key_targets: aggregates.provider_api_keys.len(),
+                        model_targets: aggregates.models.len(),
+                        provider_monthly_targets: aggregates.provider_monthly.len(),
+                        proxy_node_targets: aggregates.proxy_nodes.len(),
+                        management_token_targets: aggregates.management_tokens.len(),
+                        api_key_last_used_targets: aggregates.api_key_last_used.len(),
+                    })
+                })
+                    as BoxFuture<'_, Result<UsageCounterFlushSummary, DataLayerError>>
+            })
+            .await
+    }
+
+    pub async fn enqueue_proxy_node_counter_delta(
+        &self,
+        delta: ProxyNodeCounterDelta,
+    ) -> Result<bool, DataLayerError> {
+        if delta.is_noop() {
+            return Ok(false);
+        }
+        let node_id = delta.node_id.trim().to_string();
+        let request_id = format!("proxy_node:{node_id}:{}", Uuid::new_v4());
+        self.tx_runner
+            .run_read_write(|tx| {
+                Box::pin(async move {
+                    insert_usage_counter_delta_in_tx(
+                        tx,
+                        UsageCounterDeltaInsert {
+                            request_id: &request_id,
+                            kind: USAGE_COUNTER_KIND_PROXY_NODE,
+                            target_id: &node_id,
+                            request_count_delta: 0,
+                            total_requests_delta: delta.total_requests_delta,
+                            success_count_delta: 0,
+                            error_count_delta: delta.failed_requests_delta,
+                            dns_failures_delta: delta.dns_failures_delta,
+                            stream_errors_delta: delta.stream_errors_delta,
+                            total_tokens_delta: 0,
+                            total_cost_usd_delta: 0.0,
+                            total_response_time_ms_delta: 0,
+                            last_used_at_unix_secs: None,
+                            last_used_ip: None,
+                            candidate_last_used_at_unix_secs: None,
+                            removed_last_used_at_unix_secs: None,
+                            usage_created_at_unix_secs: None,
+                        },
+                    )
+                    .await?;
+                    Ok(true)
+                }) as BoxFuture<'_, Result<bool, DataLayerError>>
+            })
+            .await
+    }
+
+    pub async fn enqueue_management_token_counter_delta(
+        &self,
+        delta: ManagementTokenCounterDelta,
+    ) -> Result<bool, DataLayerError> {
+        if delta.is_noop() {
+            return Ok(false);
+        }
+        let token_id = delta.token_id.trim().to_string();
+        let last_used_ip = delta
+            .last_used_ip
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+        let last_used_at = delta
+            .last_used_at_unix_secs
+            .unwrap_or_else(|| chrono::Utc::now().timestamp().max(0) as u64);
+        let request_id = format!("management_token:{token_id}:{}", Uuid::new_v4());
+        self.tx_runner
+            .run_read_write(|tx| {
+                Box::pin(async move {
+                    insert_usage_counter_delta_in_tx(
+                        tx,
+                        UsageCounterDeltaInsert {
+                            request_id: &request_id,
+                            kind: USAGE_COUNTER_KIND_MANAGEMENT_TOKEN,
+                            target_id: &token_id,
+                            request_count_delta: delta.usage_count_delta,
+                            total_requests_delta: 0,
+                            success_count_delta: 0,
+                            error_count_delta: 0,
+                            dns_failures_delta: 0,
+                            stream_errors_delta: 0,
+                            total_tokens_delta: 0,
+                            total_cost_usd_delta: 0.0,
+                            total_response_time_ms_delta: 0,
+                            last_used_at_unix_secs: Some(last_used_at),
+                            last_used_ip: last_used_ip.as_deref(),
+                            candidate_last_used_at_unix_secs: None,
+                            removed_last_used_at_unix_secs: None,
+                            usage_created_at_unix_secs: None,
+                        },
+                    )
+                    .await?;
+                    Ok(true)
+                }) as BoxFuture<'_, Result<bool, DataLayerError>>
+            })
+            .await
+    }
+
+    pub async fn enqueue_api_key_last_used_delta(
+        &self,
+        delta: ApiKeyLastUsedDelta,
+    ) -> Result<bool, DataLayerError> {
+        if delta.is_noop() {
+            return Ok(false);
+        }
+        let api_key_id = delta.api_key_id.trim().to_string();
+        let request_id = format!("api_key_last_used:{api_key_id}:{}", Uuid::new_v4());
+        self.tx_runner
+            .run_read_write(|tx| {
+                Box::pin(async move {
+                    insert_usage_counter_delta_in_tx(
+                        tx,
+                        UsageCounterDeltaInsert {
+                            request_id: &request_id,
+                            kind: USAGE_COUNTER_KIND_API_KEY_LAST_USED,
+                            target_id: &api_key_id,
+                            request_count_delta: 0,
+                            total_requests_delta: 0,
+                            success_count_delta: 0,
+                            error_count_delta: 0,
+                            dns_failures_delta: 0,
+                            stream_errors_delta: 0,
+                            total_tokens_delta: 0,
+                            total_cost_usd_delta: 0.0,
+                            total_response_time_ms_delta: 0,
+                            last_used_at_unix_secs: Some(delta.last_used_at_unix_secs),
+                            last_used_ip: None,
+                            candidate_last_used_at_unix_secs: None,
+                            removed_last_used_at_unix_secs: None,
+                            usage_created_at_unix_secs: None,
+                        },
+                    )
+                    .await?;
+                    Ok(true)
+                }) as BoxFuture<'_, Result<bool, DataLayerError>>
+            })
+            .await
+    }
+
+    pub async fn cleanup_processed_usage_counter_deltas(
+        &self,
+        cutoff_unix_secs: u64,
+        batch_size: usize,
+    ) -> Result<usize, DataLayerError> {
+        cleanup_processed_usage_counter_deltas_with_pool(&self.pool, cutoff_unix_secs, batch_size)
             .await
     }
 
@@ -7904,6 +8322,48 @@ ORDER BY "usage".user_id ASC
         }
 
         Ok(summary)
+    }
+
+    pub async fn read_usage_counter_health(
+        &self,
+    ) -> Result<UsageCounterHealthSnapshot, DataLayerError> {
+        let row = sqlx::query(READ_USAGE_COUNTER_HEALTH_SQL)
+            .fetch_one(&self.pool)
+            .await
+            .map_postgres_err()?;
+        let mut snapshot = UsageCounterHealthSnapshot {
+            pending_rows: row
+                .try_get::<i64, _>("pending_rows")
+                .map_postgres_err()?
+                .max(0) as u64,
+            processed_rows: row
+                .try_get::<i64, _>("processed_rows")
+                .map_postgres_err()?
+                .max(0) as u64,
+            oldest_pending_created_at_unix_secs: row
+                .try_get::<Option<i64>, _>("oldest_pending_created_at_unix_secs")
+                .map_postgres_err()?
+                .map(|value| value.max(0) as u64),
+            latest_processed_at_unix_secs: row
+                .try_get::<Option<i64>, _>("latest_processed_at_unix_secs")
+                .map_postgres_err()?
+                .map(|value| value.max(0) as u64),
+            pending_by_kind: BTreeMap::new(),
+        };
+
+        let pending_by_kind_rows = sqlx::query(READ_PENDING_USAGE_COUNTER_DELTAS_BY_KIND_SQL)
+            .fetch_all(&self.pool)
+            .await
+            .map_postgres_err()?;
+        for row in pending_by_kind_rows {
+            let kind = row.try_get::<String, _>("kind").map_postgres_err()?;
+            let pending_rows = row
+                .try_get::<i64, _>("pending_rows")
+                .map_postgres_err()?
+                .max(0) as u64;
+            snapshot.pending_by_kind.insert(kind, pending_rows);
+        }
+        Ok(snapshot)
     }
 
     pub async fn rebuild_api_key_usage_stats(&self) -> Result<u64, DataLayerError> {
@@ -8178,6 +8638,12 @@ impl UsageReadRepository for SqlxUsageReadRepository {
     ) -> Result<Vec<StoredUsageDailySummary>, DataLayerError> {
         Self::summarize_usage_daily_heatmap(self, query).await
     }
+
+    async fn read_usage_counter_health(
+        &self,
+    ) -> Result<UsageCounterHealthSnapshot, DataLayerError> {
+        Self::read_usage_counter_health(self).await
+    }
 }
 
 #[async_trait]
@@ -8212,6 +8678,42 @@ impl UsageWriteRepository for SqlxUsageReadRepository {
             batch_size,
         )
         .await
+    }
+
+    async fn flush_usage_counter_deltas(
+        &self,
+        batch_size: usize,
+    ) -> Result<UsageCounterFlushSummary, DataLayerError> {
+        Self::flush_usage_counter_deltas(self, batch_size).await
+    }
+
+    async fn enqueue_proxy_node_counter_delta(
+        &self,
+        delta: ProxyNodeCounterDelta,
+    ) -> Result<bool, DataLayerError> {
+        Self::enqueue_proxy_node_counter_delta(self, delta).await
+    }
+
+    async fn enqueue_management_token_counter_delta(
+        &self,
+        delta: ManagementTokenCounterDelta,
+    ) -> Result<bool, DataLayerError> {
+        Self::enqueue_management_token_counter_delta(self, delta).await
+    }
+
+    async fn enqueue_api_key_last_used_delta(
+        &self,
+        delta: ApiKeyLastUsedDelta,
+    ) -> Result<bool, DataLayerError> {
+        Self::enqueue_api_key_last_used_delta(self, delta).await
+    }
+
+    async fn cleanup_processed_usage_counter_deltas(
+        &self,
+        cutoff_unix_secs: u64,
+        batch_size: usize,
+    ) -> Result<usize, DataLayerError> {
+        Self::cleanup_processed_usage_counter_deltas(self, cutoff_unix_secs, batch_size).await
     }
 
     async fn cleanup_usage(
@@ -8282,6 +8784,526 @@ async fn lock_usage_request_id_in_tx(
     Ok(())
 }
 
+struct UsageCounterDeltaRow {
+    id: String,
+    kind: String,
+    target_id: String,
+    request_count_delta: i64,
+    total_requests_delta: i64,
+    success_count_delta: i64,
+    error_count_delta: i64,
+    dns_failures_delta: i64,
+    stream_errors_delta: i64,
+    total_tokens_delta: i64,
+    total_cost_usd_delta: f64,
+    total_response_time_ms_delta: i64,
+    last_used_at_unix_secs: Option<u64>,
+    last_used_ip: Option<String>,
+    candidate_last_used_at_unix_secs: Option<u64>,
+    removed_last_used_at_unix_secs: Option<u64>,
+    usage_created_at_unix_secs: Option<u64>,
+}
+
+#[derive(Default)]
+struct UsageCounterDeltaAggregates {
+    api_keys: BTreeMap<String, ApiKeyUsageDelta>,
+    provider_api_keys: BTreeMap<String, ProviderApiKeyUsageDelta>,
+    models: BTreeMap<String, ModelUsageDelta>,
+    provider_monthly: BTreeMap<String, f64>,
+    proxy_nodes: BTreeMap<String, ProxyNodeCounterDelta>,
+    management_tokens: BTreeMap<String, ManagementTokenCounterDelta>,
+    api_key_last_used: BTreeMap<String, ApiKeyLastUsedDelta>,
+}
+
+impl UsageCounterDeltaAggregates {
+    fn from_rows(rows: &[UsageCounterDeltaRow]) -> Result<Self, DataLayerError> {
+        let mut aggregates = Self::default();
+        for row in rows {
+            if !row.total_cost_usd_delta.is_finite() {
+                return Err(DataLayerError::UnexpectedValue(format!(
+                    "usage_counter_deltas.total_cost_usd_delta is not finite for {}",
+                    row.id
+                )));
+            }
+            match row.kind.as_str() {
+                USAGE_COUNTER_KIND_API_KEY => {
+                    let entry = aggregates
+                        .api_keys
+                        .entry(row.target_id.clone())
+                        .or_default();
+                    entry.total_requests += row.total_requests_delta;
+                    entry.total_tokens += row.total_tokens_delta;
+                    entry.total_cost_usd += row.total_cost_usd_delta;
+                    merge_optional_max(
+                        &mut entry.candidate_last_used_at_unix_secs,
+                        row.candidate_last_used_at_unix_secs,
+                    );
+                    merge_optional_max(
+                        &mut entry.removed_last_used_at_unix_secs,
+                        row.removed_last_used_at_unix_secs,
+                    );
+                }
+                USAGE_COUNTER_KIND_PROVIDER_API_KEY => {
+                    let entry = aggregates
+                        .provider_api_keys
+                        .entry(row.target_id.clone())
+                        .or_default();
+                    entry.request_count += row.request_count_delta;
+                    entry.success_count += row.success_count_delta;
+                    entry.error_count += row.error_count_delta;
+                    entry.total_tokens += row.total_tokens_delta;
+                    entry.total_cost_usd += row.total_cost_usd_delta;
+                    entry.total_response_time_ms += row.total_response_time_ms_delta;
+                    merge_optional_max(
+                        &mut entry.candidate_last_used_at_unix_secs,
+                        row.candidate_last_used_at_unix_secs,
+                    );
+                    merge_optional_max(
+                        &mut entry.removed_last_used_at_unix_secs,
+                        row.removed_last_used_at_unix_secs,
+                    );
+                    merge_optional_max(
+                        &mut entry.usage_created_at_unix_secs,
+                        row.usage_created_at_unix_secs,
+                    );
+                }
+                USAGE_COUNTER_KIND_MODEL => {
+                    let entry = aggregates.models.entry(row.target_id.clone()).or_default();
+                    entry.request_count += row.request_count_delta;
+                }
+                USAGE_COUNTER_KIND_PROVIDER_MONTHLY => {
+                    let entry = aggregates
+                        .provider_monthly
+                        .entry(row.target_id.clone())
+                        .or_default();
+                    *entry += row.total_cost_usd_delta;
+                }
+                USAGE_COUNTER_KIND_PROXY_NODE => {
+                    let entry = aggregates
+                        .proxy_nodes
+                        .entry(row.target_id.clone())
+                        .or_insert(ProxyNodeCounterDelta {
+                            node_id: row.target_id.clone(),
+                            total_requests_delta: 0,
+                            failed_requests_delta: 0,
+                            dns_failures_delta: 0,
+                            stream_errors_delta: 0,
+                        });
+                    entry.total_requests_delta += row.total_requests_delta;
+                    entry.failed_requests_delta += row.error_count_delta;
+                    entry.dns_failures_delta += row.dns_failures_delta;
+                    entry.stream_errors_delta += row.stream_errors_delta;
+                }
+                USAGE_COUNTER_KIND_MANAGEMENT_TOKEN => {
+                    let entry = aggregates
+                        .management_tokens
+                        .entry(row.target_id.clone())
+                        .or_insert(ManagementTokenCounterDelta {
+                            token_id: row.target_id.clone(),
+                            usage_count_delta: 0,
+                            last_used_at_unix_secs: None,
+                            last_used_ip: None,
+                        });
+                    entry.usage_count_delta += row.request_count_delta;
+                    merge_latest_optional_timestamp_with_value(
+                        &mut entry.last_used_at_unix_secs,
+                        &mut entry.last_used_ip,
+                        row.last_used_at_unix_secs,
+                        row.last_used_ip.clone(),
+                    );
+                }
+                USAGE_COUNTER_KIND_API_KEY_LAST_USED => {
+                    let Some(last_used_at_unix_secs) = row.last_used_at_unix_secs else {
+                        continue;
+                    };
+                    let entry = aggregates
+                        .api_key_last_used
+                        .entry(row.target_id.clone())
+                        .or_insert(ApiKeyLastUsedDelta {
+                            api_key_id: row.target_id.clone(),
+                            last_used_at_unix_secs,
+                        });
+                    if last_used_at_unix_secs > entry.last_used_at_unix_secs {
+                        entry.last_used_at_unix_secs = last_used_at_unix_secs;
+                    }
+                }
+                other => {
+                    return Err(DataLayerError::UnexpectedValue(format!(
+                        "unknown usage counter delta kind: {other}"
+                    )));
+                }
+            }
+        }
+        Ok(aggregates)
+    }
+}
+
+fn merge_optional_max(target: &mut Option<u64>, value: Option<u64>) {
+    if let Some(value) = value {
+        if target.is_none_or(|current| value > current) {
+            *target = Some(value);
+        }
+    }
+}
+
+fn merge_latest_optional_timestamp_with_value(
+    target_timestamp: &mut Option<u64>,
+    target_value: &mut Option<String>,
+    timestamp: Option<u64>,
+    value: Option<String>,
+) {
+    let Some(timestamp) = timestamp else {
+        return;
+    };
+    if target_timestamp.is_none_or(|current| timestamp >= current) {
+        *target_timestamp = Some(timestamp);
+        if value
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|v| !v.is_empty())
+        {
+            *target_value = value;
+        }
+    }
+}
+
+fn optional_unix_secs_to_i64(
+    field_name: &str,
+    value: Option<u64>,
+) -> Result<Option<i64>, DataLayerError> {
+    value
+        .map(|value| {
+            i64::try_from(value).map_err(|_| {
+                DataLayerError::UnexpectedValue(format!("{field_name} exceeds i64: {value}"))
+            })
+        })
+        .transpose()
+}
+
+fn optional_i64_to_unix_secs(
+    field_name: &str,
+    value: Option<i64>,
+) -> Result<Option<u64>, DataLayerError> {
+    value
+        .map(|value| {
+            u64::try_from(value).map_err(|_| {
+                DataLayerError::UnexpectedValue(format!("{field_name} is negative: {value}"))
+            })
+        })
+        .transpose()
+}
+
+async fn enqueue_api_key_usage_delta_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    request_id: &str,
+    api_key_id: &str,
+    delta: &ApiKeyUsageDelta,
+) -> Result<(), DataLayerError> {
+    if api_key_id.trim().is_empty() || delta.is_noop() {
+        return Ok(());
+    }
+    let total_cost_usd_delta = if delta.total_cost_usd.is_finite() {
+        delta.total_cost_usd
+    } else {
+        0.0
+    };
+    insert_usage_counter_delta_in_tx(
+        tx,
+        UsageCounterDeltaInsert {
+            request_id,
+            kind: USAGE_COUNTER_KIND_API_KEY,
+            target_id: api_key_id,
+            request_count_delta: 0,
+            total_requests_delta: delta.total_requests,
+            success_count_delta: 0,
+            error_count_delta: 0,
+            dns_failures_delta: 0,
+            stream_errors_delta: 0,
+            total_tokens_delta: delta.total_tokens,
+            total_cost_usd_delta,
+            total_response_time_ms_delta: 0,
+            last_used_at_unix_secs: None,
+            last_used_ip: None,
+            candidate_last_used_at_unix_secs: delta.candidate_last_used_at_unix_secs,
+            removed_last_used_at_unix_secs: delta.removed_last_used_at_unix_secs,
+            usage_created_at_unix_secs: None,
+        },
+    )
+    .await
+}
+
+async fn enqueue_model_usage_delta_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    request_id: &str,
+    model: &str,
+    delta: &ModelUsageDelta,
+) -> Result<(), DataLayerError> {
+    if model.trim().is_empty() || delta.is_noop() {
+        return Ok(());
+    }
+    insert_usage_counter_delta_in_tx(
+        tx,
+        UsageCounterDeltaInsert {
+            request_id,
+            kind: USAGE_COUNTER_KIND_MODEL,
+            target_id: model,
+            request_count_delta: delta.request_count,
+            total_requests_delta: 0,
+            success_count_delta: 0,
+            error_count_delta: 0,
+            dns_failures_delta: 0,
+            stream_errors_delta: 0,
+            total_tokens_delta: 0,
+            total_cost_usd_delta: 0.0,
+            total_response_time_ms_delta: 0,
+            last_used_at_unix_secs: None,
+            last_used_ip: None,
+            candidate_last_used_at_unix_secs: None,
+            removed_last_used_at_unix_secs: None,
+            usage_created_at_unix_secs: None,
+        },
+    )
+    .await
+}
+
+async fn enqueue_provider_api_key_usage_delta_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    request_id: &str,
+    key_id: &str,
+    delta: &ProviderApiKeyUsageDelta,
+) -> Result<(), DataLayerError> {
+    if key_id.trim().is_empty() || delta.is_noop() {
+        return Ok(());
+    }
+    let total_cost_usd_delta = if delta.total_cost_usd.is_finite() {
+        delta.total_cost_usd
+    } else {
+        0.0
+    };
+    insert_usage_counter_delta_in_tx(
+        tx,
+        UsageCounterDeltaInsert {
+            request_id,
+            kind: USAGE_COUNTER_KIND_PROVIDER_API_KEY,
+            target_id: key_id,
+            request_count_delta: delta.request_count,
+            total_requests_delta: 0,
+            success_count_delta: delta.success_count,
+            error_count_delta: delta.error_count,
+            dns_failures_delta: 0,
+            stream_errors_delta: 0,
+            total_tokens_delta: delta.total_tokens,
+            total_cost_usd_delta,
+            total_response_time_ms_delta: delta.total_response_time_ms,
+            last_used_at_unix_secs: None,
+            last_used_ip: None,
+            candidate_last_used_at_unix_secs: delta.candidate_last_used_at_unix_secs,
+            removed_last_used_at_unix_secs: delta.removed_last_used_at_unix_secs,
+            usage_created_at_unix_secs: delta.usage_created_at_unix_secs,
+        },
+    )
+    .await
+}
+
+struct UsageCounterDeltaInsert<'a> {
+    request_id: &'a str,
+    kind: &'a str,
+    target_id: &'a str,
+    request_count_delta: i64,
+    total_requests_delta: i64,
+    success_count_delta: i64,
+    error_count_delta: i64,
+    dns_failures_delta: i64,
+    stream_errors_delta: i64,
+    total_tokens_delta: i64,
+    total_cost_usd_delta: f64,
+    total_response_time_ms_delta: i64,
+    last_used_at_unix_secs: Option<u64>,
+    last_used_ip: Option<&'a str>,
+    candidate_last_used_at_unix_secs: Option<u64>,
+    removed_last_used_at_unix_secs: Option<u64>,
+    usage_created_at_unix_secs: Option<u64>,
+}
+
+async fn insert_usage_counter_delta_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    input: UsageCounterDeltaInsert<'_>,
+) -> Result<(), DataLayerError> {
+    let request_id = input.request_id.trim();
+    let target_id = input.target_id.trim();
+    if request_id.is_empty() || target_id.is_empty() {
+        return Ok(());
+    }
+    let candidate_last_used_at_unix_secs = optional_unix_secs_to_i64(
+        "usage counter candidate_last_used_at_unix_secs",
+        input.candidate_last_used_at_unix_secs,
+    )?;
+    let removed_last_used_at_unix_secs = optional_unix_secs_to_i64(
+        "usage counter removed_last_used_at_unix_secs",
+        input.removed_last_used_at_unix_secs,
+    )?;
+    let usage_created_at_unix_secs = optional_unix_secs_to_i64(
+        "usage counter usage_created_at_unix_secs",
+        input.usage_created_at_unix_secs,
+    )?;
+    let last_used_at_unix_secs = optional_unix_secs_to_i64(
+        "usage counter last_used_at_unix_secs",
+        input.last_used_at_unix_secs,
+    )?;
+
+    sqlx::query(INSERT_USAGE_COUNTER_DELTA_SQL)
+        .bind(Uuid::new_v4().to_string())
+        .bind(request_id)
+        .bind(input.kind)
+        .bind(target_id)
+        .bind(input.request_count_delta)
+        .bind(input.total_requests_delta)
+        .bind(input.success_count_delta)
+        .bind(input.error_count_delta)
+        .bind(input.dns_failures_delta)
+        .bind(input.stream_errors_delta)
+        .bind(input.total_tokens_delta)
+        .bind(input.total_cost_usd_delta)
+        .bind(input.total_response_time_ms_delta)
+        .bind(last_used_at_unix_secs)
+        .bind(
+            input
+                .last_used_ip
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        )
+        .bind(candidate_last_used_at_unix_secs)
+        .bind(removed_last_used_at_unix_secs)
+        .bind(usage_created_at_unix_secs)
+        .execute(&mut **tx)
+        .await
+        .map_postgres_err()?;
+    Ok(())
+}
+
+async fn claim_usage_counter_deltas_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    batch_size: i64,
+) -> Result<Vec<UsageCounterDeltaRow>, DataLayerError> {
+    let rows = sqlx::query(CLAIM_USAGE_COUNTER_DELTAS_SQL)
+        .bind(batch_size)
+        .fetch_all(&mut **tx)
+        .await
+        .map_postgres_err()?;
+    rows.iter().map(map_usage_counter_delta_row).collect()
+}
+
+async fn try_lock_usage_counter_flush_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+) -> Result<bool, DataLayerError> {
+    sqlx::query_scalar::<_, bool>(TRY_LOCK_USAGE_COUNTER_FLUSH_SQL)
+        .fetch_one(&mut **tx)
+        .await
+        .map_postgres_err()
+}
+
+fn map_usage_counter_delta_row(row: &PgRow) -> Result<UsageCounterDeltaRow, DataLayerError> {
+    Ok(UsageCounterDeltaRow {
+        id: row.try_get::<String, _>("id").map_postgres_err()?,
+        kind: row.try_get::<String, _>("kind").map_postgres_err()?,
+        target_id: row.try_get::<String, _>("target_id").map_postgres_err()?,
+        request_count_delta: row
+            .try_get::<i64, _>("request_count_delta")
+            .map_postgres_err()?,
+        total_requests_delta: row
+            .try_get::<i64, _>("total_requests_delta")
+            .map_postgres_err()?,
+        success_count_delta: row
+            .try_get::<i64, _>("success_count_delta")
+            .map_postgres_err()?,
+        error_count_delta: row
+            .try_get::<i64, _>("error_count_delta")
+            .map_postgres_err()?,
+        dns_failures_delta: row
+            .try_get::<i64, _>("dns_failures_delta")
+            .map_postgres_err()?,
+        stream_errors_delta: row
+            .try_get::<i64, _>("stream_errors_delta")
+            .map_postgres_err()?,
+        total_tokens_delta: row
+            .try_get::<i64, _>("total_tokens_delta")
+            .map_postgres_err()?,
+        total_cost_usd_delta: row
+            .try_get::<f64, _>("total_cost_usd_delta")
+            .map_postgres_err()?,
+        total_response_time_ms_delta: row
+            .try_get::<i64, _>("total_response_time_ms_delta")
+            .map_postgres_err()?,
+        last_used_at_unix_secs: optional_i64_to_unix_secs(
+            "usage_counter_deltas.last_used_at_unix_secs",
+            row.try_get::<Option<i64>, _>("last_used_at_unix_secs")
+                .map_postgres_err()?,
+        )?,
+        last_used_ip: row
+            .try_get::<Option<String>, _>("last_used_ip")
+            .map_postgres_err()?,
+        candidate_last_used_at_unix_secs: optional_i64_to_unix_secs(
+            "usage_counter_deltas.candidate_last_used_at_unix_secs",
+            row.try_get::<Option<i64>, _>("candidate_last_used_at_unix_secs")
+                .map_postgres_err()?,
+        )?,
+        removed_last_used_at_unix_secs: optional_i64_to_unix_secs(
+            "usage_counter_deltas.removed_last_used_at_unix_secs",
+            row.try_get::<Option<i64>, _>("removed_last_used_at_unix_secs")
+                .map_postgres_err()?,
+        )?,
+        usage_created_at_unix_secs: optional_i64_to_unix_secs(
+            "usage_counter_deltas.usage_created_at_unix_secs",
+            row.try_get::<Option<i64>, _>("usage_created_at_unix_secs")
+                .map_postgres_err()?,
+        )?,
+    })
+}
+
+async fn mark_usage_counter_deltas_processed_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    row_ids: &[String],
+) -> Result<(), DataLayerError> {
+    if row_ids.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(MARK_USAGE_COUNTER_DELTAS_PROCESSED_SQL)
+        .bind(row_ids)
+        .execute(&mut **tx)
+        .await
+        .map_postgres_err()?;
+    Ok(())
+}
+
+async fn cleanup_processed_usage_counter_deltas_with_pool(
+    pool: &PgPool,
+    cutoff_unix_secs: u64,
+    batch_size: usize,
+) -> Result<usize, DataLayerError> {
+    if batch_size == 0 {
+        return Ok(0);
+    }
+    let cutoff = i64::try_from(cutoff_unix_secs).map_err(|_| {
+        DataLayerError::InvalidInput(format!(
+            "usage counter cleanup cutoff exceeds i64: {cutoff_unix_secs}"
+        ))
+    })?;
+    let limit = i64::try_from(batch_size).map_err(|_| {
+        DataLayerError::InvalidInput(format!(
+            "usage counter cleanup batch size is out of range: {batch_size}"
+        ))
+    })?;
+
+    let deleted = sqlx::query(DELETE_PROCESSED_USAGE_COUNTER_DELTAS_SQL)
+        .bind(cutoff)
+        .bind(limit)
+        .execute(pool)
+        .await
+        .map_postgres_err()?
+        .rows_affected();
+    Ok(usize::try_from(deleted).unwrap_or(usize::MAX))
+}
+
 async fn apply_api_key_usage_delta_in_tx(
     tx: &mut sqlx::Transaction<'_, Postgres>,
     api_key_id: &str,
@@ -8302,12 +9324,7 @@ async fn apply_api_key_usage_delta_in_tx(
 
     sqlx::query(APPLY_API_KEY_USAGE_DELTA_SQL)
         .bind(api_key_id)
-        .bind(i32::try_from(delta.total_requests).map_err(|_| {
-            DataLayerError::UnexpectedValue(format!(
-                "api_keys.total_requests delta exceeds i32: {}",
-                delta.total_requests
-            ))
-        })?)
+        .bind(delta.total_requests)
         .bind(delta.total_tokens)
         .bind(total_cost_usd_delta)
         .bind(
@@ -8340,19 +9357,14 @@ async fn apply_global_model_usage_delta_in_tx(
 
     sqlx::query(APPLY_GLOBAL_MODEL_USAGE_DELTA_SQL)
         .bind(model)
-        .bind(i32::try_from(delta.request_count).map_err(|_| {
-            DataLayerError::UnexpectedValue(format!(
-                "global_models.usage_count delta exceeds i32: {}",
-                delta.request_count
-            ))
-        })?)
+        .bind(delta.request_count)
         .execute(&mut **tx)
         .await
         .map_postgres_err()?;
     Ok(())
 }
 
-async fn apply_provider_api_key_usage_delta_in_tx(
+async fn apply_provider_api_key_main_usage_delta_in_tx(
     tx: &mut sqlx::Transaction<'_, Postgres>,
     key_id: &str,
     delta: &ProviderApiKeyUsageDelta,
@@ -8372,32 +9384,12 @@ async fn apply_provider_api_key_usage_delta_in_tx(
 
     sqlx::query(APPLY_PROVIDER_API_KEY_USAGE_DELTA_SQL)
         .bind(key_id)
-        .bind(i32::try_from(delta.request_count).map_err(|_| {
-            DataLayerError::UnexpectedValue(format!(
-                "provider_api_keys.request_count delta exceeds i32: {}",
-                delta.request_count
-            ))
-        })?)
-        .bind(i32::try_from(delta.success_count).map_err(|_| {
-            DataLayerError::UnexpectedValue(format!(
-                "provider_api_keys.success_count delta exceeds i32: {}",
-                delta.success_count
-            ))
-        })?)
-        .bind(i32::try_from(delta.error_count).map_err(|_| {
-            DataLayerError::UnexpectedValue(format!(
-                "provider_api_keys.error_count delta exceeds i32: {}",
-                delta.error_count
-            ))
-        })?)
+        .bind(delta.request_count)
+        .bind(delta.success_count)
+        .bind(delta.error_count)
         .bind(delta.total_tokens)
         .bind(total_cost_usd_delta)
-        .bind(i32::try_from(delta.total_response_time_ms).map_err(|_| {
-            DataLayerError::UnexpectedValue(format!(
-                "provider_api_keys.total_response_time_ms delta exceeds i32: {}",
-                delta.total_response_time_ms
-            ))
-        })?)
+        .bind(delta.total_response_time_ms)
         .bind(
             delta
                 .candidate_last_used_at_unix_secs
@@ -8411,37 +9403,86 @@ async fn apply_provider_api_key_usage_delta_in_tx(
         .execute(&mut **tx)
         .await
         .map_postgres_err()?;
-    apply_provider_api_key_codex_window_usage_delta_in_tx(tx, key_id, delta).await?;
     Ok(())
 }
 
-async fn apply_provider_api_key_codex_window_usage_delta_in_tx(
+async fn apply_provider_monthly_usage_delta_in_tx(
     tx: &mut sqlx::Transaction<'_, Postgres>,
-    key_id: &str,
-    delta: &ProviderApiKeyUsageDelta,
+    provider_id: &str,
+    total_cost_usd_delta: f64,
 ) -> Result<(), DataLayerError> {
-    let Some(usage_created_at_unix_secs) = delta.usage_created_at_unix_secs else {
-        return Ok(());
-    };
-    if delta.request_count == 0 && delta.total_tokens == 0 && delta.total_cost_usd == 0.0 {
+    if provider_id.trim().is_empty() || total_cost_usd_delta == 0.0 {
         return Ok(());
     }
-    let total_cost_usd_delta = if delta.total_cost_usd.is_finite() {
-        delta.total_cost_usd
-    } else {
-        0.0
-    };
+    if !total_cost_usd_delta.is_finite() {
+        return Err(DataLayerError::UnexpectedValue(format!(
+            "providers.monthly_used_usd delta is not finite for {provider_id}"
+        )));
+    }
 
-    sqlx::query(APPLY_PROVIDER_API_KEY_CODEX_WINDOW_USAGE_DELTA_SQL)
-        .bind(key_id)
-        .bind(i64::try_from(usage_created_at_unix_secs).map_err(|_| {
-            DataLayerError::UnexpectedValue(format!(
-                "provider api key window usage timestamp exceeds i64: {usage_created_at_unix_secs}"
-            ))
-        })?)
-        .bind(delta.request_count)
-        .bind(delta.total_tokens)
+    sqlx::query(APPLY_PROVIDER_MONTHLY_USAGE_DELTA_SQL)
+        .bind(provider_id)
         .bind(total_cost_usd_delta)
+        .execute(&mut **tx)
+        .await
+        .map_postgres_err()?;
+    Ok(())
+}
+
+async fn apply_proxy_node_counter_delta_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    node_id: &str,
+    delta: &ProxyNodeCounterDelta,
+) -> Result<(), DataLayerError> {
+    if delta.is_noop() || node_id.trim().is_empty() {
+        return Ok(());
+    }
+
+    sqlx::query(APPLY_PROXY_NODE_COUNTER_DELTA_SQL)
+        .bind(node_id)
+        .bind(delta.total_requests_delta)
+        .bind(delta.failed_requests_delta)
+        .bind(delta.dns_failures_delta)
+        .bind(delta.stream_errors_delta)
+        .execute(&mut **tx)
+        .await
+        .map_postgres_err()?;
+    Ok(())
+}
+
+async fn apply_management_token_counter_delta_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    token_id: &str,
+    delta: &ManagementTokenCounterDelta,
+) -> Result<(), DataLayerError> {
+    if delta.is_noop() || token_id.trim().is_empty() {
+        return Ok(());
+    }
+    let last_used_at = delta.last_used_at_unix_secs.map(|value| value as f64);
+
+    sqlx::query(APPLY_MANAGEMENT_TOKEN_COUNTER_DELTA_SQL)
+        .bind(token_id)
+        .bind(delta.usage_count_delta)
+        .bind(last_used_at)
+        .bind(delta.last_used_ip.as_deref())
+        .execute(&mut **tx)
+        .await
+        .map_postgres_err()?;
+    Ok(())
+}
+
+async fn apply_api_key_last_used_delta_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    api_key_id: &str,
+    delta: &ApiKeyLastUsedDelta,
+) -> Result<(), DataLayerError> {
+    if delta.is_noop() || api_key_id.trim().is_empty() {
+        return Ok(());
+    }
+
+    sqlx::query(APPLY_API_KEY_LAST_USED_DELTA_SQL)
+        .bind(api_key_id)
+        .bind(delta.last_used_at_unix_secs as f64)
         .execute(&mut **tx)
         .await
         .map_postgres_err()?;
@@ -8543,6 +9584,9 @@ fn map_usage_row(
         .try_get::<f64, _>("cache_read_cost_usd")
         .map_postgres_err()?;
     usage.output_price_per_1m = row.try_get("output_price_per_1m").map_postgres_err()?;
+    usage.client_family = row
+        .try_get::<Option<String>, _>("client_family")
+        .map_postgres_err()?;
     usage.request_headers = row.try_get("request_headers").map_postgres_err()?;
     let request_body = usage_json_column(
         row,

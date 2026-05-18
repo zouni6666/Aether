@@ -1,7 +1,7 @@
 WITH aggregated AS (
   SELECT
     provider_api_key_id,
-    COUNT(*)::INTEGER AS request_count,
+    COUNT(*)::BIGINT AS request_count,
     COALESCE(SUM(
       CASE
         WHEN status IN ('completed', 'success', 'ok', 'billed', 'settled')
@@ -10,7 +10,7 @@ WITH aggregated AS (
         THEN 1
         ELSE 0
       END
-    ), 0)::INTEGER AS success_count,
+    ), 0)::BIGINT AS success_count,
     COALESCE(SUM(
       CASE
         WHEN status NOT IN ('pending', 'streaming')
@@ -22,7 +22,7 @@ WITH aggregated AS (
         THEN 1
         ELSE 0
       END
-    ), 0)::INTEGER AS error_count,
+    ), 0)::BIGINT AS error_count,
     COALESCE(SUM(
       GREATEST(
         COALESCE(
@@ -42,11 +42,12 @@ WITH aggregated AS (
         THEN GREATEST(response_time_ms, 0)
         ELSE 0
       END
-    ), 0)::INTEGER AS total_response_time_ms,
+    ), 0)::BIGINT AS total_response_time_ms,
     MAX(created_at) AS last_used_at
   FROM usage_billing_facts AS "usage"
   WHERE provider_api_key_id IS NOT NULL
     AND BTRIM(provider_api_key_id) <> ''
+    AND status NOT IN ('pending', 'streaming')
   GROUP BY provider_api_key_id
 )
 UPDATE provider_api_keys

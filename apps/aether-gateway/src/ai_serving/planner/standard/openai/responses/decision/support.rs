@@ -19,6 +19,7 @@ use crate::ai_serving::planner::candidate_source::{
 };
 use crate::ai_serving::planner::common::extract_standard_requested_model;
 use crate::ai_serving::planner::decision_input::{
+    attach_routing_policy_to_local_requested_model_input,
     build_local_requested_model_decision_input, resolve_local_authenticated_decision_input,
 };
 use crate::ai_serving::planner::materialization_policy::{
@@ -48,7 +49,7 @@ pub(crate) async fn resolve_local_openai_responses_decision_input(
     decision: &GatewayControlDecision,
     body_json: &serde_json::Value,
     plan_kind: &str,
-) -> Option<LocalOpenAiResponsesDecisionInput> {
+) -> Result<Option<LocalOpenAiResponsesDecisionInput>, GatewayError> {
     let Some(auth_context) = resolve_local_decision_execution_runtime_auth_context(decision) else {
         warn!(
             trace_id = %trace_id,
@@ -65,7 +66,7 @@ pub(crate) async fn resolve_local_openai_responses_decision_input(
             extract_standard_requested_model(body_json).as_deref(),
             "missing_auth_context",
         );
-        return None;
+        return Ok(None);
     };
 
     let Some(requested_model) = extract_standard_requested_model(body_json) else {
@@ -81,7 +82,7 @@ pub(crate) async fn resolve_local_openai_responses_decision_input(
             None,
             "missing_requested_model",
         );
-        return None;
+        return Ok(None);
     };
 
     let resolved_input = match resolve_local_authenticated_decision_input(
@@ -108,7 +109,7 @@ pub(crate) async fn resolve_local_openai_responses_decision_input(
                 Some(requested_model.as_str()),
                 "auth_snapshot_missing",
             );
-            return None;
+            return Ok(None);
         }
         Err(err) => {
             warn!(
@@ -124,14 +125,30 @@ pub(crate) async fn resolve_local_openai_responses_decision_input(
                 Some(requested_model.as_str()),
                 "auth_snapshot_read_failed",
             );
-            return None;
+            return Err(err);
         }
     };
 
     let mut input = build_local_requested_model_decision_input(resolved_input, requested_model);
     input.request_auth_channel = decision.request_auth_channel.clone();
     input.client_session_affinity = client_session_affinity_from_parts(parts, Some(body_json));
-    Some(input)
+    if let Err(err) = attach_routing_policy_to_local_requested_model_input(
+        state,
+        parts,
+        &mut input,
+        body_json,
+        "openai:responses",
+    )
+    .await
+    {
+        warn!(
+            trace_id = %trace_id,
+            error = ?err,
+            "gateway local openai responses decision routing profile resolution failed"
+        );
+        return Err(err);
+    }
+    Ok(Some(input))
 }
 
 pub(crate) async fn materialize_local_openai_responses_candidate_attempts(
@@ -157,6 +174,7 @@ pub(crate) async fn materialize_local_openai_responses_candidate_attempts(
         spec_metadata.require_streaming,
         input.required_capabilities.as_ref(),
         &input.auth_snapshot,
+        input.routing_policy.as_ref(),
         input.client_session_affinity.as_ref(),
         true,
         LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModelAndApiFormat,
@@ -170,6 +188,7 @@ pub(crate) async fn materialize_local_openai_responses_candidate_attempts(
         Some(&input.auth_snapshot),
         input.client_session_affinity.as_ref(),
         input.required_capabilities.as_ref(),
+        input.routing_policy.as_ref(),
         sticky_session_token.as_deref(),
         input.request_auth_channel.as_deref(),
         persistence_policy,
@@ -256,6 +275,7 @@ pub(crate) async fn build_local_openai_responses_candidate_attempt_source<'a>(
             &input.auth_snapshot,
             input.client_session_affinity.as_ref(),
             input.required_capabilities.as_ref(),
+            input.routing_policy.as_ref(),
             sticky_session_token.as_deref(),
             input.request_auth_channel.as_deref(),
             persistence_policy,

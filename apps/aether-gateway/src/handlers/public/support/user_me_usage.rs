@@ -321,6 +321,75 @@ fn users_me_usage_upstream_is_stream(item: &StoredRequestUsageAudit) -> bool {
         .unwrap_or(item.is_stream)
 }
 
+fn users_me_usage_metadata_string<'a>(
+    item: &'a StoredRequestUsageAudit,
+    key: &str,
+) -> Option<&'a str> {
+    item.request_metadata
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .and_then(|metadata| metadata.get(key))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn infer_client_family_from_user_agent(user_agent: &str) -> Option<&'static str> {
+    let normalized = user_agent.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    if normalized.starts_with("codex_vscode") {
+        return Some("codex_vscode");
+    }
+    if normalized.starts_with("codex") {
+        return Some("codex");
+    }
+    if normalized.contains("claude-code") || normalized.contains("claude_code") {
+        return Some("claude_code");
+    }
+    if normalized.contains("opencode") {
+        return Some("opencode");
+    }
+    if normalized.contains("geminicli") || normalized.contains("gemini-cli") {
+        return Some("gemini_cli");
+    }
+    if normalized.starts_with("openai/js") {
+        return Some("openai_js_sdk");
+    }
+    None
+}
+
+fn users_me_usage_client_family(item: &StoredRequestUsageAudit) -> Option<&str> {
+    item.client_family
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            item.request_metadata
+                .as_ref()
+                .and_then(serde_json::Value::as_object)
+                .and_then(|metadata| {
+                    metadata
+                        .get("client_session_affinity")
+                        .and_then(serde_json::Value::as_object)
+                        .and_then(|affinity| affinity.get("client_family"))
+                        .and_then(serde_json::Value::as_str)
+                        .or_else(|| {
+                            metadata
+                                .get("client_family")
+                                .and_then(serde_json::Value::as_str)
+                        })
+                })
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .or_else(|| {
+            users_me_usage_metadata_string(item, "user_agent")
+                .and_then(infer_client_family_from_user_agent)
+        })
+}
+
 fn build_users_me_usage_record_payload(
     item: &StoredRequestUsageAudit,
     include_actual_cost: bool,
@@ -353,6 +422,11 @@ fn build_users_me_usage_record_payload(
         "upstream_is_stream": upstream_is_stream,
         "client_requested_stream": client_is_stream,
         "client_is_stream": client_is_stream,
+        "client_family": users_me_usage_client_family(item),
+        "client_ip": users_me_usage_metadata_string(item, "client_ip"),
+        "user_agent": users_me_usage_metadata_string(item, "user_agent"),
+        "request_path": users_me_usage_metadata_string(item, "request_path"),
+        "request_path_and_query": users_me_usage_metadata_string(item, "request_path_and_query"),
         "status": item.status,
         "has_fallback": item.has_fallback(),
         "created_at": unix_secs_to_rfc3339(item.created_at_unix_ms),
@@ -411,6 +485,9 @@ fn build_users_me_usage_active_payload(item: &StoredRequestUsageAudit) -> serde_
         "client_requested_stream": client_is_stream,
         "client_is_stream": client_is_stream,
         "has_format_conversion": item.has_format_conversion,
+        "client_family": users_me_usage_client_family(item),
+        "client_ip": users_me_usage_metadata_string(item, "client_ip"),
+        "user_agent": users_me_usage_metadata_string(item, "user_agent"),
         "target_model": item.target_model,
         "has_fallback": item.has_fallback(),
     });
@@ -1366,6 +1443,41 @@ mod tests {
         assert_eq!(active_payload["upstream_is_stream"], true);
         assert_eq!(active_payload["client_requested_stream"], false);
         assert_eq!(active_payload["client_is_stream"], false);
+    }
+
+    #[test]
+    fn user_usage_payload_infers_client_family_from_user_agent() {
+        let item = StoredRequestUsageAudit {
+            request_metadata: Some(json!({
+                "client_ip": "192.168.0.28",
+                "user_agent": "codex_vscode/0.131.0-alpha.9 (Windows 10.0.26200; x86_64)"
+            })),
+            ..sample_usage("completed")
+        };
+
+        let record_payload =
+            build_users_me_usage_record_payload(&item, false, &BTreeMap::new(), false);
+        let active_payload = build_users_me_usage_active_payload(&item);
+
+        assert_eq!(record_payload["client_family"], "codex_vscode");
+        assert_eq!(record_payload["client_ip"], "192.168.0.28");
+        assert_eq!(active_payload["client_family"], "codex_vscode");
+        assert_eq!(active_payload["client_ip"], "192.168.0.28");
+    }
+
+    #[test]
+    fn user_usage_payload_labels_openai_js_user_agent_as_sdk() {
+        let item = StoredRequestUsageAudit {
+            request_metadata: Some(json!({
+                "user_agent": "OpenAI/JS 6.34.0"
+            })),
+            ..sample_usage("completed")
+        };
+
+        let record_payload =
+            build_users_me_usage_record_payload(&item, false, &BTreeMap::new(), false);
+
+        assert_eq!(record_payload["client_family"], "openai_js_sdk");
     }
 
     #[test]

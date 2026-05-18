@@ -296,6 +296,8 @@ async fn gateway_handles_admin_system_stats_locally_with_trusted_admin_principal
     assert_eq!(payload["providers"]["active"], json!(1));
     assert_eq!(payload["api_keys"], json!(0));
     assert_eq!(payload["requests"], json!(0));
+    assert_eq!(payload["usage_counter"]["status"], json!("idle"));
+    assert_eq!(payload["usage_counter"]["outbox_pending_rows"], json!(0));
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

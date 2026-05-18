@@ -125,6 +125,22 @@ DO UPDATE SET
   updated_at = NOW()
 "#;
 
+const ENQUEUE_PROVIDER_MONTHLY_USAGE_DELTA_SQL: &str = r#"
+INSERT INTO usage_counter_deltas (
+  id,
+  request_id,
+  kind,
+  target_id,
+  total_cost_usd_delta
+) VALUES (
+  $1,
+  $2,
+  'provider_monthly',
+  $3,
+  $4
+)
+"#;
+
 #[derive(Debug, Clone)]
 pub struct SqlxSettlementRepository {
     tx_runner: PostgresTransactionRunner,
@@ -187,6 +203,37 @@ where
         .bind(settlement.wallet_gift_balance_after)
         .bind(settlement.provider_monthly_used_usd)
         .bind(settlement.finalized_at_unix_secs.map(|value| value as f64))
+        .execute(executor)
+        .await
+        .map_postgres_err()?;
+    Ok(())
+}
+
+async fn enqueue_provider_monthly_usage_delta<'e, E>(
+    executor: E,
+    request_id: &str,
+    provider_id: &str,
+    total_cost_usd_delta: f64,
+) -> Result<(), DataLayerError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let request_id = request_id.trim();
+    let provider_id = provider_id.trim();
+    if request_id.is_empty() || provider_id.is_empty() || total_cost_usd_delta == 0.0 {
+        return Ok(());
+    }
+    if !total_cost_usd_delta.is_finite() {
+        return Err(DataLayerError::UnexpectedValue(format!(
+            "provider monthly usage delta is not finite for {provider_id}"
+        )));
+    }
+
+    sqlx::query(ENQUEUE_PROVIDER_MONTHLY_USAGE_DELTA_SQL)
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(request_id)
+        .bind(provider_id)
+        .bind(total_cost_usd_delta)
         .execute(executor)
         .await
         .map_postgres_err()?;
@@ -530,6 +577,20 @@ LIMIT 1
                             }
                             None => Some(0.0),
                         };
+                        if let Some(row) = wallet_row.as_ref() {
+                            let wallet_id: String = row.try_get("id").map_postgres_err()?;
+                            let before_recharge: f64 = row.try_get("balance").map_postgres_err()?;
+                            let before_gift: f64 =
+                                row.try_get("gift_balance").map_postgres_err()?;
+                            let before_total = before_recharge + before_gift;
+                            settlement.wallet_id = Some(wallet_id);
+                            settlement.wallet_balance_before = Some(before_total);
+                            settlement.wallet_balance_after = Some(before_total);
+                            settlement.wallet_recharge_balance_before = Some(before_recharge);
+                            settlement.wallet_recharge_balance_after = Some(before_recharge);
+                            settlement.wallet_gift_balance_before = Some(before_gift);
+                            settlement.wallet_gift_balance_after = Some(before_gift);
+                        }
 
                         let wallet_debit_cost_usd = if !api_key_is_standalone {
                             if let Some(user_id) =
@@ -649,23 +710,13 @@ WHERE id = $1
                             .as_deref()
                             .filter(|value| !value.is_empty())
                         {
-                            let quota_row = sqlx::query(
-                                r#"
-UPDATE providers
-SET
-  monthly_used_usd = COALESCE(monthly_used_usd, 0) + $2,
-  updated_at = NOW()
-WHERE id = $1
-RETURNING CAST(monthly_used_usd AS DOUBLE PRECISION) AS monthly_used_usd
-                                "#,
+                            enqueue_provider_monthly_usage_delta(
+                                &mut **tx,
+                                &input.request_id,
+                                provider_id,
+                                input.actual_total_cost_usd,
                             )
-                            .bind(provider_id)
-                            .bind(input.actual_total_cost_usd)
-                            .fetch_optional(&mut **tx)
-                            .await
-                            .map_postgres_err()?;
-                            settlement.provider_monthly_used_usd =
-                                quota_row.and_then(|row| row.try_get("monthly_used_usd").ok());
+                            .await?;
                         }
                     }
 
@@ -716,6 +767,14 @@ mod tests {
     fn settlement_sql_no_longer_dual_writes_wallet_snapshots_to_usage_rows() {
         let source = include_str!("postgres.rs");
         assert!(!source.contains("UPDATE \"usage\"\nSET\n  wallet_id = $2"));
+    }
+
+    #[test]
+    fn settlement_sql_enqueues_provider_monthly_usage_delta() {
+        let source = include_str!("postgres.rs");
+        assert!(super::ENQUEUE_PROVIDER_MONTHLY_USAGE_DELTA_SQL.contains("usage_counter_deltas"));
+        assert!(super::ENQUEUE_PROVIDER_MONTHLY_USAGE_DELTA_SQL.contains("'provider_monthly'"));
+        assert!(!source.contains("UPDATE providers\nSET\n  monthly_used_usd"));
     }
 
     #[test]

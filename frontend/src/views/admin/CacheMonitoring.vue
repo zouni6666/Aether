@@ -272,6 +272,8 @@ function formatClientFamily(family?: string | null): string {
       return 'OpenCode'
     case 'claude_code':
       return 'Claude Code'
+    case 'openai_js_sdk':
+      return 'OpenAI JS SDK'
     case 'generic':
       return '通用'
     case undefined:

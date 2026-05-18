@@ -47,6 +47,8 @@ mod stats_hourly;
 mod tests;
 #[path = "runtime/usage_cleanup.rs"]
 mod usage_cleanup;
+#[path = "runtime/usage_counter_flush.rs"]
+mod usage_counter_flush;
 #[path = "runtime/wallet_daily_usage.rs"]
 mod wallet_daily_usage;
 #[path = "runtime/workers.rs"]
@@ -108,6 +110,7 @@ use usage_cleanup::*;
 pub(crate) use usage_cleanup::{
     preview_manual_usage_cleanup, ManualUsageCleanupMode, ManualUsageCleanupOptions,
 };
+use usage_counter_flush::*;
 use wallet_daily_usage::*;
 pub(crate) use workers::*;
 
@@ -128,6 +131,12 @@ const PROXY_NODE_STALE_MIN_GRACE_SECS: u64 = 15;
 const PROXY_NODE_STALE_MISSED_HEARTBEATS: u64 = 3;
 const POOL_MONITOR_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const OAUTH_TOKEN_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+const USAGE_COUNTER_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
+const USAGE_COUNTER_FLUSH_BATCH_SIZE: usize = 1_000;
+const USAGE_COUNTER_FLUSH_CATCH_UP_BURST_LIMIT: usize = 20;
+const USAGE_COUNTER_DELTA_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
+const USAGE_COUNTER_DELTA_CLEANUP_BATCH_SIZE: usize = 5_000;
+const USAGE_COUNTER_DELTA_RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
 const PROVIDER_CHECKIN_CONCURRENCY: usize = 3;
 const PROVIDER_CHECKIN_DEFAULT_TIME: &str = "01:05";
 const REQUEST_CANDIDATE_CLEANUP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);

@@ -389,11 +389,25 @@ export interface ChatGPTWebUpstreamMetadata {
   user_id?: string | null
 }
 
+export interface GrokUpstreamMetadata {
+  updated_at?: number  // Unix 时间戳（秒）
+  plan_type?: string | null
+  pool_tier?: string | null
+  is_banned?: boolean | null
+  ban_reason?: string | null
+  last_rate_limit_probe_at?: number | null
+  clearance_state?: string | null
+  email?: string | null
+  account_id?: string | null
+  account_user_id?: string | null
+}
+
 export interface UpstreamMetadata {
   codex?: CodexUpstreamMetadata
   antigravity?: AntigravityUpstreamMetadata
   kiro?: KiroUpstreamMetadata
   chatgpt_web?: ChatGPTWebUpstreamMetadata
+  grok?: GrokUpstreamMetadata
 }
 
 // 按格式的健康度数据
@@ -512,7 +526,7 @@ export interface PublicEndpointStatusMonitorResponse {
   formats: PublicEndpointStatusMonitor[]
 }
 
-export type ProviderType = 'custom' | 'claude_code' | 'codex' | 'chatgpt_web' | 'gemini_cli' | 'antigravity' | 'kiro' | 'vertex_ai'
+export type ProviderType = 'custom' | 'claude_code' | 'codex' | 'chatgpt_web' | 'gemini_cli' | 'antigravity' | 'kiro' | 'grok' | 'vertex_ai'
 
 export interface ClaudeCodeAdvancedConfig {
   // 会话数量控制：null/undefined 表示不限制

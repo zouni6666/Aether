@@ -16,6 +16,7 @@ use axum::{
     Json,
 };
 use serde_json::json;
+use tracing::warn;
 
 pub(super) async fn maybe_build_local_admin_payment_orders_response(
     state: &AdminAppState<'_>,
@@ -211,6 +212,19 @@ async fn build_admin_payment_credit_order_response(
         .await?
     {
         crate::AdminWalletMutationOutcome::Applied((order, credited)) => {
+            if credited {
+                if let Err(err) = state
+                    .app()
+                    .apply_referral_rewards_for_payment_order_id(&order.id)
+                    .await
+                {
+                    warn!(
+                        error = ?err,
+                        order_id = %order.id,
+                        "failed to apply referral rewards for admin-credited payment order"
+                    );
+                }
+            }
             Ok(attach_admin_audit_response(
                 Json(json!({
                     "order": build_admin_payment_order_payload(&order),

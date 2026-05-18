@@ -229,7 +229,7 @@ pub fn endpoint_supports_rust_models_fetch(api_format: &str) -> bool {
 pub fn provider_type_uses_preset_models(provider_type: &str) -> bool {
     matches!(
         provider_type.trim().to_ascii_lowercase().as_str(),
-        "claude_code" | "gemini_cli"
+        "claude_code" | "gemini_cli" | "grok"
     )
 }
 
@@ -271,6 +271,27 @@ pub fn preset_models_for_provider(provider_type: &str) -> Option<Vec<Value>> {
             preset_model("gpt-5.4-mini", "openai", "GPT-5.4 Mini", "openai:responses"),
             preset_model("gpt-5.3-codex", "openai", "GPT-5.3 Codex", "openai:responses"),
             preset_model("gpt-5.3-codex-spark", "openai", "GPT-5.3 Codex Spark", "openai:responses"),
+        ],
+        "grok" => vec![
+            preset_model("grok-4.20-0309-non-reasoning", "xai", "Grok 4.20 0309 Non-Reasoning", "openai:chat"),
+            preset_model("grok-4.20-0309", "xai", "Grok 4.20 0309", "openai:chat"),
+            preset_model("grok-4.20-0309-reasoning", "xai", "Grok 4.20 0309 Reasoning", "openai:chat"),
+            preset_model("grok-4.20-0309-non-reasoning-super", "xai", "Grok 4.20 0309 Non-Reasoning Super", "openai:chat"),
+            preset_model("grok-4.20-0309-super", "xai", "Grok 4.20 0309 Super", "openai:chat"),
+            preset_model("grok-4.20-0309-reasoning-super", "xai", "Grok 4.20 0309 Reasoning Super", "openai:chat"),
+            preset_model("grok-4.20-0309-non-reasoning-heavy", "xai", "Grok 4.20 0309 Non-Reasoning Heavy", "openai:chat"),
+            preset_model("grok-4.20-0309-heavy", "xai", "Grok 4.20 0309 Heavy", "openai:chat"),
+            preset_model("grok-4.20-0309-reasoning-heavy", "xai", "Grok 4.20 0309 Reasoning Heavy", "openai:chat"),
+            preset_model("grok-4.20-multi-agent-0309", "xai", "Grok 4.20 Multi-Agent 0309", "openai:chat"),
+            preset_model("grok-4.20-auto", "xai", "Grok 4.20 Auto", "openai:chat"),
+            preset_model("grok-4.20-fast", "xai", "Grok 4.20 Fast", "openai:chat"),
+            preset_model("grok-4.20-expert", "xai", "Grok 4.20 Expert", "openai:chat"),
+            preset_model("grok-4.20-heavy", "xai", "Grok 4.20 Heavy", "openai:chat"),
+            preset_model("grok-4.3-beta", "xai", "Grok 4.3 Beta", "openai:chat"),
+            preset_model("grok-imagine-image-lite", "xai", "Grok Imagine Image Lite", "openai:image"),
+            preset_model("grok-imagine-image", "xai", "Grok Imagine Image", "openai:image"),
+            preset_model("grok-imagine-image-pro", "xai", "Grok Imagine Image Pro", "openai:image"),
+            preset_model("grok-imagine-image-edit", "xai", "Grok Imagine Image Edit", "openai:image"),
         ],
         _ => return None,
     };
@@ -933,5 +954,43 @@ mod tests {
         assert!(models
             .iter()
             .all(|model| model["api_formats"] == json!(["claude:messages"])));
+    }
+
+    #[test]
+    fn preset_models_cover_grok_non_video_catalog() {
+        let models = preset_models_for_provider("grok").expect("preset models should exist");
+        let model_ids = models
+            .iter()
+            .map(|model| model["id"].as_str().expect("model id"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            model_ids,
+            vec![
+                "grok-4.20-0309-non-reasoning",
+                "grok-4.20-0309",
+                "grok-4.20-0309-reasoning",
+                "grok-4.20-0309-non-reasoning-super",
+                "grok-4.20-0309-super",
+                "grok-4.20-0309-reasoning-super",
+                "grok-4.20-0309-non-reasoning-heavy",
+                "grok-4.20-0309-heavy",
+                "grok-4.20-0309-reasoning-heavy",
+                "grok-4.20-multi-agent-0309",
+                "grok-4.20-auto",
+                "grok-4.20-fast",
+                "grok-4.20-expert",
+                "grok-4.20-heavy",
+                "grok-4.3-beta",
+                "grok-imagine-image-lite",
+                "grok-imagine-image",
+                "grok-imagine-image-pro",
+                "grok-imagine-image-edit",
+            ]
+        );
+        assert!(!model_ids.contains(&"grok-imagine-video"));
+        assert_eq!(models[0]["api_formats"], json!(["openai:chat"]));
+        assert_eq!(models[10]["api_formats"], json!(["openai:chat"]));
+        assert_eq!(models[15]["api_formats"], json!(["openai:image"]));
+        assert_eq!(models[18]["api_formats"], json!(["openai:image"]));
     }
 }

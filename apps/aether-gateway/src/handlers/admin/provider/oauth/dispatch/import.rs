@@ -14,8 +14,9 @@ use super::super::state::{
     exchange_admin_provider_oauth_refresh_token, is_fixed_provider_type_for_provider_oauth,
     json_u64_value,
 };
+use super::helpers::admin_provider_oauth_key_name_from_auth_config;
 use super::token_import::{
-    build_provider_access_token_import_auth_config, normalize_single_import_tokens,
+    build_provider_access_token_import_auth_config, normalize_provider_import_tokens,
     provider_type_supports_access_token_import,
 };
 use crate::handlers::admin::provider::shared::paths::admin_provider_oauth_import_provider_id;
@@ -31,7 +32,6 @@ use axum::{
     Json,
 };
 use serde_json::json;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 struct AdminProviderOAuthSingleImportTokens {
     access_token: String,
@@ -72,7 +72,8 @@ fn apply_single_import_hints(
     payload: &serde_json::Map<String, serde_json::Value>,
     auth_config: &mut serde_json::Map<String, serde_json::Value>,
 ) {
-    if !provider_type_supports_access_token_import(provider_type) {
+    let provider_type = provider_type.trim().to_ascii_lowercase();
+    if !matches!(provider_type.as_str(), "codex" | "chatgpt_web" | "grok") {
         return;
     }
 
@@ -110,19 +111,40 @@ fn apply_single_import_hints(
             &["user_id", "userId", "chatgpt_user_id", "chatgptUserId"][..],
         ),
         ("account_name", &["account_name", "accountName"][..]),
+        ("sso_rw_token", &["sso_rw_token", "ssoRwToken"][..]),
+        (
+            "cf_cookies",
+            &["cf_cookies", "cfCookies", "cookie", "cookieHeader"][..],
+        ),
+        ("cf_clearance", &["cf_clearance", "cfClearance"][..]),
+        ("user_agent", &["user_agent", "userAgent"][..]),
+        (
+            "browser_profile",
+            &[
+                "browser_profile",
+                "browserProfile",
+                "browser",
+                "impersonate",
+            ][..],
+        ),
+        ("pool_tier", &["pool_tier", "poolTier", "tier"][..]),
     ] {
         let Some(value) = import_payload_string_any(payload, keys) else {
             continue;
         };
-        auth_config
-            .entry(target.to_string())
-            .or_insert_with(|| json!(value));
+        auth_config.entry(target.to_string()).or_insert_with(|| {
+            if target == "plan_type" || target == "pool_tier" {
+                json!(value.to_ascii_lowercase())
+            } else {
+                json!(value)
+            }
+        });
     }
 }
 
 async fn resolve_admin_provider_oauth_single_import_tokens(
     state: &AdminAppState<'_>,
-    template: AdminProviderOAuthTemplate,
+    template: Option<AdminProviderOAuthTemplate>,
     provider_type: &str,
     refresh_token: Option<&str>,
     access_token: Option<&str>,
@@ -133,6 +155,32 @@ async fn resolve_admin_provider_oauth_single_import_tokens(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
+        let Some(template) = template else {
+            if provider_type_supports_access_token_import(provider_type) {
+                if let Some(access_token) = access_token
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    let (auth_config, expires_at) = build_provider_access_token_import_auth_config(
+                        provider_type,
+                        access_token,
+                        Some(refresh_token),
+                        imported_expires_at,
+                        Some("Provider 不支持 Refresh Token 交换，已回退为 Session Token 导入"),
+                    );
+                    return Ok(AdminProviderOAuthSingleImportTokens {
+                        access_token: access_token.to_string(),
+                        auth_config,
+                        expires_at,
+                    });
+                }
+            }
+            return Err(build_internal_control_error_response(
+                http::StatusCode::BAD_REQUEST,
+                "该 Provider 不支持 Refresh Token 导入，请提供 sso_token 或 access_token",
+            ));
+        };
+
         let token_payload = match state
             .exchange_admin_provider_oauth_refresh_token(
                 template,
@@ -200,7 +248,7 @@ async fn resolve_admin_provider_oauth_single_import_tokens(
     if !provider_type_supports_access_token_import(provider_type) {
         return Err(build_internal_control_error_response(
             http::StatusCode::BAD_REQUEST,
-            "Access Token 导入仅支持 Codex / ChatGPT Web Provider",
+            "Access Token 导入仅支持 Codex / ChatGPT Web / Grok Provider",
         ));
     }
 
@@ -248,18 +296,11 @@ pub(super) async fn handle_admin_provider_oauth_import_refresh_token(
         }
     };
     let refresh_token_input = import_payload_string(&raw_payload, "refresh_token", "refreshToken");
-    let access_token_input = import_payload_string(&raw_payload, "access_token", "accessToken");
-    let imported_expires_at = import_payload_u64(&raw_payload, "expires_at", "expiresAt");
-    let (refresh_token_input, access_token_input) = normalize_single_import_tokens(
-        refresh_token_input.as_deref(),
-        access_token_input.as_deref(),
+    let access_token_input = import_payload_string_any(
+        &raw_payload,
+        &["access_token", "accessToken", "sso_token", "ssoToken"],
     );
-    if refresh_token_input.is_none() && access_token_input.is_none() {
-        return Ok(build_internal_control_error_response(
-            http::StatusCode::BAD_REQUEST,
-            "Refresh Token 或 Access Token 不能为空",
-        ));
-    }
+    let imported_expires_at = import_payload_u64(&raw_payload, "expires_at", "expiresAt");
     let name = raw_payload
         .get("name")
         .and_then(serde_json::Value::as_str)
@@ -285,6 +326,17 @@ pub(super) async fn handle_admin_provider_oauth_import_refresh_token(
         ));
     };
     let provider_type = provider.provider_type.trim().to_ascii_lowercase();
+    let (refresh_token_input, access_token_input) = normalize_provider_import_tokens(
+        &provider_type,
+        refresh_token_input.as_deref(),
+        access_token_input.as_deref(),
+    );
+    if refresh_token_input.is_none() && access_token_input.is_none() {
+        return Ok(build_internal_control_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "Refresh Token、Access Token 或 sso_token 不能为空",
+        ));
+    }
     if !is_fixed_provider_type_for_provider_oauth(&provider_type) {
         return Ok(build_internal_control_error_response(
             http::StatusCode::BAD_REQUEST,
@@ -297,9 +349,10 @@ pub(super) async fn handle_admin_provider_oauth_import_refresh_token(
             "Kiro 不支持单条 Refresh Token 导入，请使用批量导入或设备授权。",
         ));
     }
-    let Some(template) = admin_provider_oauth_template(&provider_type) else {
+    let template = admin_provider_oauth_template(&provider_type);
+    if template.is_none() && !provider_type_supports_access_token_import(&provider_type) {
         return Ok(build_admin_provider_oauth_backend_unavailable_response());
-    };
+    }
     let endpoint_resolution =
         resolve_provider_oauth_runtime_endpoints(state, &provider, &provider_type).await?;
     let endpoints = endpoint_resolution.endpoints;
@@ -380,25 +433,9 @@ pub(super) async fn handle_admin_provider_oauth_import_refresh_token(
             }
         }
     } else {
-        let name = name
-            .or_else(|| {
-                auth_config
-                    .get("email")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(ToOwned::to_owned)
-            })
-            .unwrap_or_else(|| {
-                format!(
-                    "账号_{}",
-                    SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .ok()
-                        .map(|duration| duration.as_secs())
-                        .unwrap_or(0)
-                )
-            });
+        let name = name.unwrap_or_else(|| {
+            admin_provider_oauth_key_name_from_auth_config(&provider_type, &auth_config, None)
+        });
         match state
             .create_provider_oauth_catalog_key(
                 &provider_id,

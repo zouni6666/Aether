@@ -1518,7 +1518,7 @@ fn map_auth_api_key_export_row(
         row_get(row, "is_active")?,
         row_get(row, "expires_at_unix_secs")?,
         row_get(row, "auto_delete_on_expiry")?,
-        row_get::<i32>(row, "total_requests")?.into(),
+        row_get::<i64>(row, "total_requests")?,
         row_get::<i64>(row, "total_tokens")?,
         row_get(row, "total_cost_usd")?,
         row_get(row, "is_standalone")?,

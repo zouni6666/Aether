@@ -573,7 +573,7 @@
                         <Copy class="w-2.5 h-2.5" />
                       </Button>
                       <span class="font-mono">
-                        {{ getProviderMaskedSecretLabel(key) }}
+                        {{ getProviderMaskedSecretLabel(key, selectedProviderType) }}
                       </span>
                       <template v-if="keyUiStateMap[key.key_id]?.showOAuthRefreshControl">
                         <Button
@@ -603,7 +603,7 @@
                         </span>
                       </template>
                       <Badge
-                        v-if="key.oauth_plan_type"
+                        v-if="keyUiStateMap[key.key_id]?.planLabel"
                         variant="outline"
                         class="text-[9px] px-1 py-0 h-4 shrink-0"
                         :class="keyUiStateMap[key.key_id]?.planClass || ''"
@@ -637,10 +637,11 @@
                       <div class="flex items-center justify-between text-[10px] leading-none">
                         <span class="text-muted-foreground font-medium shrink-0">{{ getQuotaProgressLabel(item.label) }}</span>
                         <span
-                          v-if="getQuotaProgressDisplayText(item)"
+                          v-if="getQuotaProgressResetDisplayText(item)"
+                          data-testid="pool-quota-reset-text"
                           class="text-muted-foreground/80 tabular-nums truncate"
-                          :title="item.detail"
-                        >{{ getQuotaProgressDisplayText(item) }}</span>
+                          :title="getQuotaProgressResetDisplayText(item)"
+                        >{{ getQuotaProgressResetDisplayText(item) }}</span>
                       </div>
                       <div class="flex items-center gap-1.5">
                         <div class="relative flex-1 h-1.5 rounded-full bg-border overflow-hidden">
@@ -651,9 +652,10 @@
                           />
                         </div>
                         <span
+                          data-testid="pool-quota-meter-text"
                           class="shrink-0 text-[10px] font-medium tabular-nums leading-none"
                           :class="getQuotaRemainingClassByRemaining(item.remainingPercent)"
-                        >{{ item.remainingPercent.toFixed(1) }}%</span>
+                        >{{ getQuotaProgressMeterDisplayText(item) }}</span>
                       </div>
                     </div>
                   </div>
@@ -1153,11 +1155,12 @@
                   >
                     <div class="flex items-center justify-between text-[10px] leading-none">
                       <span class="text-muted-foreground font-medium shrink-0">{{ getQuotaProgressLabel(item.label) }}</span>
-                      <span
-                        v-if="getQuotaProgressDisplayText(item)"
-                        class="text-muted-foreground/80 tabular-nums truncate"
-                        :title="item.detail"
-                      >{{ getQuotaProgressDisplayText(item) }}</span>
+                        <span
+                          v-if="getQuotaProgressResetDisplayText(item)"
+                          data-testid="pool-quota-reset-text"
+                          class="text-muted-foreground/80 tabular-nums truncate"
+                          :title="getQuotaProgressResetDisplayText(item)"
+                        >{{ getQuotaProgressResetDisplayText(item) }}</span>
                     </div>
                     <div class="flex items-center gap-1.5">
                       <div class="relative flex-1 h-1.5 rounded-full bg-border overflow-hidden">
@@ -1168,9 +1171,10 @@
                         />
                       </div>
                       <span
+                        data-testid="pool-quota-meter-text"
                         class="shrink-0 text-[10px] font-medium tabular-nums leading-none"
                         :class="getQuotaRemainingClassByRemaining(item.remainingPercent)"
-                      >{{ item.remainingPercent.toFixed(1) }}%</span>
+                      >{{ getQuotaProgressMeterDisplayText(item) }}</span>
                     </div>
                   </div>
                 </div>
@@ -2073,6 +2077,7 @@ const showAccountQuotaColumn = computed(() => {
     || selectedProviderType.value === 'gemini_cli'
     || selectedProviderType.value === 'kiro'
     || selectedProviderType.value === 'antigravity'
+    || selectedProviderType.value === 'grok'
     || selectedProviderType.value === 'chatgpt_web'
 })
 
@@ -2377,8 +2382,9 @@ const keyUiStateMap = computed<Record<string, PoolKeyUiState>>(() => {
     const visibleOAuthState = getVisibleOAuthState(key)
     const oauthOrgBadge = getOAuthOrgBadge(key)
     const quotaFallbackText = getQuotaFallbackText(key)
+    const planType = resolvePoolKeyPlanType(key)
     const canRefreshToken = canRefreshOAuthCredential(key)
-    const showOAuthRefreshControl = shouldShowOAuthRefreshControl(key)
+    const showOAuthRefreshControl = shouldShowOAuthRefreshControl(key, selectedProviderType.value)
 
     map[key.key_id] = {
       rowClass: getRowClass(key),
@@ -2391,8 +2397,8 @@ const keyUiStateMap = computed<Record<string, PoolKeyUiState>>(() => {
       oauthRefreshButtonTitle: showOAuthRefreshControl ? getOAuthRefreshButtonTitle(key) : '',
       showOAuthRefreshControl,
       canRefreshToken,
-      planLabel: key.oauth_plan_type ? formatOAuthPlanType(key.oauth_plan_type) : '',
-      planClass: key.oauth_plan_type ? getOAuthPlanTypeClass(key.oauth_plan_type) : '',
+      planLabel: planType ? formatOAuthPlanType(planType) : '',
+      planClass: planType ? getOAuthPlanTypeClass(planType) : '',
       quotaFallbackText,
       quotaTextClass: quotaFallbackText ? getQuotaTextClass(quotaFallbackText) : '',
       importedAtRelative: formatPoolKeyImportedAt(key),
@@ -2470,6 +2476,7 @@ const quotaRefreshSupported = computed(() => {
   return selectedProviderType.value === 'codex'
     || selectedProviderType.value === 'kiro'
     || selectedProviderType.value === 'antigravity'
+    || selectedProviderType.value === 'grok'
     || selectedProviderType.value === 'chatgpt_web'
 })
 
@@ -2589,7 +2596,12 @@ async function refreshCurrentPageQuotaInBackground(
 
     if (!options.silent) {
       const skippedText = skippedCount > 0 ? `，冷却跳过 ${skippedCount}` : ''
-      success(`当前页额度刷新完成：成功 ${successCount}，失败 ${failedCount}${skippedText}`)
+      const firstFailureMessage = result.results.find(item => item.status !== 'success')?.message?.trim()
+      if (successCount === 0 && failedCount > 0 && firstFailureMessage) {
+        showError(`当前页额度刷新失败：${firstFailureMessage}${skippedText}`)
+      } else {
+        success(`当前页额度刷新完成：成功 ${successCount}，失败 ${failedCount}${skippedText}`)
+      }
     }
     return true
   } catch (err) {
@@ -2714,7 +2726,7 @@ function toEndpointApiKey(key: PoolKeyDetail): EndpointAPIKey {
     id: key.key_id,
     provider_id: selectedProviderId.value || '',
     api_formats: key.api_formats || [],
-    api_key_masked: getProviderMaskedSecretLabel(key),
+    api_key_masked: getProviderMaskedSecretLabel(key, selectedProviderType.value),
     auth_type: normalizeAuthTypeForEdit(key),
     auth_type_by_format: key.auth_type_by_format ?? null,
     credential_kind: key.credential_kind ?? null,
@@ -3524,6 +3536,7 @@ function getMobileTagItems(key: PoolKeyDetail): PoolMobileTagItem[] {
   const accountAlert = getAccountAlertLabel(key)
   const oauthState = getVisibleOAuthState(key)
   const orgBadge = getOAuthOrgBadge(key)
+  const planType = resolvePoolKeyPlanType(key)
 
   return buildPoolMobileTagItems({
     accountStatusLabel: compactPoolStatusLabel(accountAlert),
@@ -3532,7 +3545,7 @@ function getMobileTagItems(key: PoolKeyDetail): PoolMobileTagItem[] {
     oauthStatusTone: getMobileOAuthTone(key),
     priorityLabel: `P${key.internal_priority ?? 50}`,
     authLabel: getAuthTypeChipLabel(key),
-    planLabel: key.oauth_plan_type ? formatOAuthPlanType(key.oauth_plan_type) : null,
+    planLabel: planType ? formatOAuthPlanType(planType) : null,
     orgLabel: orgBadge?.label ?? null,
     proxyLabel: key.proxy?.node_id ? '独立代理' : null,
   })
@@ -3565,6 +3578,9 @@ function formatOAuthPlanType(planType: string): string {
     ultra: 'Ultra',
     'pro+': 'Pro+',
     power: 'Power',
+    basic: 'Basic',
+    super: 'Super',
+    heavy: 'Heavy',
   }
   return labelMap[planType.toLowerCase()] || planType
 }
@@ -3580,6 +3596,9 @@ function getOAuthPlanTypeClass(planType: string): string {
     ultra: 'border-amber-500/50 text-amber-600 dark:text-amber-400',
     'pro+': 'border-purple-500/50 text-purple-600 dark:text-purple-400',
     power: 'border-amber-500/50 text-amber-600 dark:text-amber-400',
+    basic: 'border-primary/50 text-primary',
+    super: 'border-green-500/50 text-green-600 dark:text-green-400',
+    heavy: 'border-amber-500/50 text-amber-600 dark:text-amber-400',
   }
   return classes[planType.toLowerCase()] || ''
 }
@@ -3674,7 +3693,7 @@ function getQuotaProgressLabel(label: string): string {
 }
 
 function getQuotaProgressCountdown(item: QuotaProgressItem) {
-  if (!['5H', '周', 'Spark5H', 'Spark周'].includes(item.label)) return null
+  if (!['5H', '周', 'Spark5H', 'Spark周', 'Auto', 'Fast', 'Expert', 'Heavy', 'Grok 4.3'].includes(item.label)) return null
   if (item.resetAtSeconds == null && item.resetSeconds == null) return null
   return getCodexResetCountdown(
     item.resetAtSeconds,
@@ -3704,11 +3723,16 @@ function shouldHideQuotaProgressDetailText(text: string | null | undefined): boo
   return (text ?? '').trim().includes('已重置')
 }
 
-function getQuotaProgressDisplayText(item: QuotaProgressItem): string {
+function getQuotaProgressResetDisplayText(item: QuotaProgressItem): string {
   const countdownText = getQuotaProgressCountdownText(item)
   if (countdownText) return formatCompactQuotaCountdownText(countdownText)
+  return ''
+}
+
+function getQuotaProgressMeterDisplayText(item: QuotaProgressItem): string {
   const detail = item.detail?.trim() || ''
-  return shouldHideQuotaProgressDetailText(detail) ? '' : detail
+  if (!shouldHideQuotaProgressDetailText(detail) && detail) return detail
+  return `${item.remainingPercent.toFixed(1)}%`
 }
 
 function getQuotaFallbackText(key: PoolKeyDetail): string | null {
@@ -3718,6 +3742,11 @@ function getQuotaFallbackText(key: PoolKeyDetail): string | null {
 
 
 function getQuotaLabelOrder(label: string): number {
+  if (label === 'Auto') return 0
+  if (label === 'Fast') return 1
+  if (label === 'Expert') return 2
+  if (label === 'Heavy') return 3
+  if (label === 'Grok 4.3') return 4
   if (label === '5H') return 0
   if (label === '周') return 1
   if (label === 'Spark5H') return 2
@@ -3768,6 +3797,14 @@ function getCodexQuotaSnapshot(key: PoolKeyDetail): QuotaStatusSnapshot | null {
 
 function getQuotaSnapshotUpdatedAtSeconds(quota: QuotaStatusSnapshot | null | undefined): number | null {
   return normalizeUnixSeconds(quota?.updated_at ?? quota?.observed_at ?? null)
+}
+
+function getQuotaSnapshotResetAtSeconds(quota: QuotaStatusSnapshot | null | undefined): number | null {
+  return normalizeUnixSeconds(quota?.reset_at ?? null)
+}
+
+function getQuotaSnapshotResetSeconds(quota: QuotaStatusSnapshot | null | undefined): number | null {
+  return normalizeRemainingSeconds(quota?.reset_seconds ?? null)
 }
 
 function getQuotaSnapshotWindow(
@@ -3830,6 +3867,47 @@ function formatQuotaValue(value: number | null | undefined): string {
   return normalized.toFixed(1)
 }
 
+function getQuotaWindowValueText(window: QuotaWindowSnapshot | null | undefined): string | undefined {
+  if (!window || typeof window.limit_value !== 'number' || window.limit_value <= 0) return undefined
+  if (typeof window.remaining_value === 'number') {
+    return `${formatQuotaValue(window.remaining_value)}/${formatQuotaValue(window.limit_value)}`
+  }
+  if (typeof window.used_value === 'number') {
+    return `${formatQuotaValue(Math.max(window.limit_value - window.used_value, 0))}/${formatQuotaValue(window.limit_value)}`
+  }
+  return undefined
+}
+
+function resolvePoolKeyPlanType(key: PoolKeyDetail): string | null {
+  const direct = key.oauth_plan_type?.trim()
+  if (direct) return direct
+  const quota = getQuotaSnapshot(key)
+  const quotaPlan = quota?.plan_type?.trim()
+  if (quotaPlan) return quotaPlan
+  const quotaPoolTier = quota?.pool_tier?.trim()
+  return quotaPoolTier || null
+}
+
+const GROK_QUOTA_MODE_LABELS: Record<string, string> = {
+  quota_auto: 'Auto',
+  auto: 'Auto',
+  quota_fast: 'Fast',
+  fast: 'Fast',
+  quota_expert: 'Expert',
+  expert: 'Expert',
+  quota_heavy: 'Heavy',
+  heavy: 'Heavy',
+  quota_grok_4_3: 'Grok 4.3',
+  'grok-420-computer-use-sa': 'Grok 4.3',
+}
+
+function getGrokQuotaWindowLabel(window: QuotaWindowSnapshot): string {
+  const code = String(window.code || '').trim().replace(/^model:/i, '')
+  const label = String(window.label || window.model || code).trim()
+  const normalized = (label || code).toLowerCase()
+  return GROK_QUOTA_MODE_LABELS[normalized] || GROK_QUOTA_MODE_LABELS[code.toLowerCase()] || label || code || '模式'
+}
+
 function buildQuotaProgressItemsFromSnapshot(key: PoolKeyDetail): QuotaProgressItem[] {
   const quota = getQuotaSnapshot(key)
   if (!quota) return []
@@ -3838,6 +3916,8 @@ function buildQuotaProgressItemsFromSnapshot(key: PoolKeyDetail): QuotaProgressI
 
   if (providerType === 'codex') {
     const items: QuotaProgressItem[] = []
+    const quotaResetAtSeconds = getQuotaSnapshotResetAtSeconds(quota)
+    const quotaResetSeconds = getQuotaSnapshotResetSeconds(quota)
     for (const [label, code] of [
       ['5H', '5h'],
       ['周', 'weekly'],
@@ -3850,8 +3930,8 @@ function buildQuotaProgressItemsFromSnapshot(key: PoolKeyDetail): QuotaProgressI
       items.push({
         label,
         remainingPercent,
-        resetAtSeconds: normalizeUnixSeconds(window?.reset_at ?? null),
-        resetSeconds: normalizeRemainingSeconds(window?.reset_seconds ?? null),
+        resetAtSeconds: normalizeUnixSeconds(window?.reset_at ?? quotaResetAtSeconds ?? null),
+        resetSeconds: normalizeRemainingSeconds(window?.reset_seconds ?? quotaResetSeconds ?? null),
         updatedAtSeconds: getQuotaSnapshotUpdatedAtSeconds(quota),
       })
     }
@@ -3859,6 +3939,8 @@ function buildQuotaProgressItemsFromSnapshot(key: PoolKeyDetail): QuotaProgressI
   }
 
   if (providerType === 'kiro') {
+    const quotaResetAtSeconds = getQuotaSnapshotResetAtSeconds(quota)
+    const quotaResetSeconds = getQuotaSnapshotResetSeconds(quota)
     const window = getQuotaSnapshotWindow(quota, 'usage')
       ?? getQuotaSnapshotWindowsByScope(quota, 'account')[0]
       ?? null
@@ -3873,8 +3955,45 @@ function buildQuotaProgressItemsFromSnapshot(key: PoolKeyDetail): QuotaProgressI
       label: '剩余',
       remainingPercent,
       detail,
-      resetAtSeconds: normalizeUnixSeconds(window?.reset_at ?? null),
-      resetSeconds: normalizeRemainingSeconds(window?.reset_seconds ?? null),
+      resetAtSeconds: normalizeUnixSeconds(window?.reset_at ?? quotaResetAtSeconds ?? null),
+      resetSeconds: normalizeRemainingSeconds(window?.reset_seconds ?? quotaResetSeconds ?? null),
+      updatedAtSeconds: getQuotaSnapshotUpdatedAtSeconds(quota),
+    }]
+  }
+
+  if (providerType === 'grok') {
+    const quotaResetAtSeconds = getQuotaSnapshotResetAtSeconds(quota)
+    const quotaResetSeconds = getQuotaSnapshotResetSeconds(quota)
+    const modelWindows = getQuotaSnapshotWindowsByScope(quota, 'model')
+    if (modelWindows.length > 0) {
+      return modelWindows
+        .map((window): QuotaProgressItem | null => {
+          const remainingPercent = getQuotaWindowRemainingPercent(window)
+          if (remainingPercent == null) return null
+          return {
+            label: getGrokQuotaWindowLabel(window),
+            remainingPercent,
+            detail: getQuotaWindowValueText(window),
+            resetAtSeconds: normalizeUnixSeconds(window?.reset_at ?? quotaResetAtSeconds ?? null),
+            resetSeconds: normalizeRemainingSeconds(window?.reset_seconds ?? quotaResetSeconds ?? null),
+            updatedAtSeconds: getQuotaSnapshotUpdatedAtSeconds(quota),
+          }
+        })
+        .filter((item): item is QuotaProgressItem => item != null)
+    }
+
+    const window = getQuotaSnapshotWindow(quota, 'usage')
+      ?? getQuotaSnapshotWindowsByScope(quota, 'account')[0]
+      ?? null
+    const remainingPercent = getQuotaWindowRemainingPercent(window)
+    if (remainingPercent == null) return []
+
+    return [{
+      label: '剩余',
+      remainingPercent,
+      detail: getQuotaWindowValueText(window),
+      resetAtSeconds: normalizeUnixSeconds(window?.reset_at ?? quotaResetAtSeconds ?? null),
+      resetSeconds: normalizeRemainingSeconds(window?.reset_seconds ?? quotaResetSeconds ?? null),
       updatedAtSeconds: getQuotaSnapshotUpdatedAtSeconds(quota),
     }]
   }
@@ -4073,29 +4192,6 @@ function getQuotaTextClass(quotaText: string): string {
     return 'text-[11px] text-destructive leading-4'
   }
   return 'text-[11px] text-foreground/90 leading-4'
-}
-
-function formatStatInteger(value: number | null | undefined): string {
-  const n = Number(value ?? 0)
-  if (!Number.isFinite(n) || n <= 0) return '0'
-  return Math.round(n).toLocaleString('en-US')
-}
-
-function formatTokenCount(value: number | null | undefined): string {
-  const n = Number(value ?? 0)
-  if (!Number.isFinite(n) || n <= 0) return '0'
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
-  return String(Math.round(n))
-}
-
-function formatStatUsd(value: number | string | null | undefined): string {
-  const n = Number(value ?? 0)
-  if (!Number.isFinite(n) || n <= 0) return '$0.00'
-  if (n < 0.01) return `$${n.toFixed(4)}`
-  if (n < 1) return `$${n.toFixed(3)}`
-  if (n < 1000) return `$${n.toFixed(2)}`
-  return `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
 function formatPoolScore(value: number | null | undefined): string {

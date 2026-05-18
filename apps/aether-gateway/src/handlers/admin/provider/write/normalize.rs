@@ -4,9 +4,9 @@ pub(crate) fn normalize_provider_type_input(value: &str) -> Result<String, Strin
     let normalized = value.trim().to_ascii_lowercase();
     match normalized.as_str() {
         "custom" | "claude_code" | "kiro" | "codex" | "chatgpt_web" | "gemini_cli"
-        | "antigravity" | "vertex_ai" => Ok(normalized),
+        | "antigravity" | "vertex_ai" | "grok" => Ok(normalized),
         _ => Err(
-            "provider_type 仅支持 custom / claude_code / kiro / codex / chatgpt_web / gemini_cli / antigravity / vertex_ai"
+            "provider_type 仅支持 custom / claude_code / kiro / codex / chatgpt_web / gemini_cli / antigravity / vertex_ai / grok"
                 .to_string(),
         ),
     }
@@ -261,6 +261,14 @@ mod tests {
         assert_eq!(
             normalize_provider_type_input(" ChatGPT_Web ").expect("type should normalize"),
             "chatgpt_web"
+        );
+    }
+
+    #[test]
+    fn normalize_provider_type_supports_grok() {
+        assert_eq!(
+            normalize_provider_type_input(" Grok ").expect("type should normalize"),
+            "grok"
         );
     }
 

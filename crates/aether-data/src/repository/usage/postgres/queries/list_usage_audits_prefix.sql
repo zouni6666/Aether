@@ -93,6 +93,10 @@ SELECT
   "usage".first_byte_time_ms,
   "usage".status,
   COALESCE(usage_settlement_snapshots.billing_status, "usage".billing_status) AS billing_status,
+  COALESCE(
+    NULLIF(BTRIM("usage".request_metadata->'client_session_affinity'->>'client_family'), ''),
+    NULLIF(BTRIM("usage".request_metadata->>'client_family'), '')
+  ) AS client_family,
   NULL::json AS request_headers,
   NULL::json AS request_body,
   NULL::bytea AS request_body_compressed,
@@ -106,9 +110,21 @@ SELECT
   NULL::json AS client_response_body,
   NULL::bytea AS client_response_body_compressed,
   CASE
-    WHEN ("usage".request_metadata->>'client_requested_stream') IN ('true', 'false')
+    WHEN NULLIF(BTRIM("usage".request_metadata->>'client_ip'), '') IS NOT NULL
+      OR NULLIF(BTRIM("usage".request_metadata->>'user_agent'), '') IS NOT NULL
+      OR NULLIF(BTRIM("usage".request_metadata->>'request_path'), '') IS NOT NULL
+      OR NULLIF(BTRIM("usage".request_metadata->>'request_path_and_query'), '') IS NOT NULL
+      OR ("usage".request_metadata->>'client_requested_stream') IN ('true', 'false')
       OR ("usage".request_metadata->>'upstream_is_stream') IN ('true', 'false')
-      THEN jsonb_build_object(
+      THEN jsonb_strip_nulls(jsonb_build_object(
+        'client_ip',
+        NULLIF(BTRIM("usage".request_metadata->>'client_ip'), ''),
+        'user_agent',
+        NULLIF(BTRIM("usage".request_metadata->>'user_agent'), ''),
+        'request_path',
+        NULLIF(BTRIM("usage".request_metadata->>'request_path'), ''),
+        'request_path_and_query',
+        NULLIF(BTRIM("usage".request_metadata->>'request_path_and_query'), ''),
         'client_requested_stream',
         CASE
           WHEN ("usage".request_metadata->>'client_requested_stream') IN ('true', 'false')
@@ -121,7 +137,7 @@ SELECT
             THEN ("usage".request_metadata->>'upstream_is_stream')::boolean
           ELSE NULL
         END
-      )::json
+      ))::json
     ELSE NULL::json
   END AS request_metadata,
   NULL::varchar AS http_request_body_ref,

@@ -17,6 +17,22 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
+const props = withDefaults(defineProps<{
+  modelValue?: string
+  siteKey: string
+  action?: string
+  disabled?: boolean
+}>(), {
+  modelValue: '',
+  action: undefined,
+  disabled: false,
+})
+
+const emit = defineEmits<{
+  'update:modelValue': [value: string]
+  error: [message: string]
+}>()
+
 const TURNSTILE_SCRIPT_URL = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit'
 
 type TurnstileWidgetId = string
@@ -45,22 +61,6 @@ declare global {
     __aetherTurnstileScriptPromise?: Promise<void>
   }
 }
-
-const props = withDefaults(defineProps<{
-  modelValue?: string
-  siteKey: string
-  action?: string
-  disabled?: boolean
-}>(), {
-  modelValue: '',
-  action: undefined,
-  disabled: false,
-})
-
-const emit = defineEmits<{
-  'update:modelValue': [value: string]
-  error: [message: string]
-}>()
 
 const containerRef = ref<HTMLElement | null>(null)
 const widgetId = ref<TurnstileWidgetId | null>(null)

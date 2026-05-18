@@ -82,6 +82,7 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 mod adapter;
+mod capabilities;
 mod model_mapping;
 mod summary;
 
@@ -89,12 +90,16 @@ use self::adapter::{
     provider_query_antigravity_test_unsupported_reason,
     provider_query_antigravity_unsupported_reason,
     provider_query_default_antigravity_endpoint_test_body,
-    provider_query_model_test_endpoint_priority, provider_query_normalize_api_format_alias,
-    provider_query_standard_test_client_api_format,
+    provider_query_grok_test_unsupported_reason, provider_query_model_test_endpoint_priority,
+    provider_query_normalize_api_format_alias, provider_query_standard_test_client_api_format,
     provider_query_standard_test_unsupported_reason,
     provider_query_test_adapter_for_provider_api_format,
     provider_query_transport_supports_model_test_execution,
     provider_query_unsupported_test_api_format_message, ProviderQueryTestAdapter,
+};
+use self::capabilities::{
+    provider_query_openai_image_normalize_failure_message,
+    provider_query_openai_image_normalize_options,
 };
 use self::model_mapping::{
     provider_query_resolve_explicit_mapped_effective_model,
@@ -531,12 +536,20 @@ fn provider_query_build_test_request_body_for_route(
     provider_query_build_test_request_body_with_model_policy(payload, model, override_custom_model)
 }
 
-fn provider_query_build_test_request_body_with_model_policy(
+fn provider_query_build_test_request_body_for_api_format(
     payload: &Value,
     model: &str,
-    override_custom_model: bool,
+    route_path: &str,
+    client_api_format: &str,
 ) -> Value {
+    let client_api_format = provider_query_normalize_api_format_alias(client_api_format);
+    let override_custom_model = route_path.ends_with("/test-model-failover")
+        || provider_query_extract_mapped_model_name(payload).is_some();
     if let Some(mut body) = provider_query_extract_request_body(payload) {
+        let has_conversation = provider_query_request_body_has_conversation_for_api_format(
+            &body,
+            client_api_format.as_str(),
+        );
         if let Some(object) = body.as_object_mut() {
             if override_custom_model {
                 object.insert("model".to_string(), Value::String(model.to_string()));
@@ -544,6 +557,123 @@ fn provider_query_build_test_request_body_with_model_policy(
                 object
                     .entry("model".to_string())
                     .or_insert_with(|| Value::String(model.to_string()));
+            }
+            if !has_conversation {
+                provider_query_insert_default_test_conversation(
+                    object,
+                    client_api_format.as_str(),
+                    payload,
+                );
+            }
+        }
+        return body;
+    }
+
+    let message = provider_query_extract_message(payload)
+        .unwrap_or_else(|| DEFAULT_PROVIDER_QUERY_TEST_MESSAGE.to_string());
+    match client_api_format.as_str() {
+        "openai:responses" | "openai:responses:compact" => json!({
+            "model": model,
+            "input": message,
+            "max_output_tokens": 30,
+            "temperature": 0.7,
+            "stream": true,
+        }),
+        "claude:messages" => json!({
+            "model": model,
+            "messages": [{
+                "role": "user",
+                "content": message
+            }],
+            "max_tokens": 30,
+            "temperature": 0.7,
+            "stream": true,
+        }),
+        _ => json!({
+            "model": model,
+            "messages": [{
+                "role": "user",
+                "content": message
+            }],
+            "max_tokens": 30,
+            "temperature": 0.7,
+            "stream": true,
+        }),
+    }
+}
+
+fn provider_query_build_grok_test_request_body_for_api_format(
+    payload: &Value,
+    model: &str,
+    route_path: &str,
+    client_api_format: &str,
+) -> Value {
+    provider_query_build_test_request_body_for_api_format(
+        payload,
+        model,
+        route_path,
+        client_api_format,
+    )
+}
+
+fn provider_query_insert_default_test_conversation(
+    object: &mut Map<String, Value>,
+    client_api_format: &str,
+    payload: &Value,
+) {
+    let message = provider_query_extract_message(payload)
+        .unwrap_or_else(|| DEFAULT_PROVIDER_QUERY_TEST_MESSAGE.to_string());
+    match client_api_format {
+        "openai:responses" | "openai:responses:compact" => {
+            object.insert("input".to_string(), Value::String(message));
+        }
+        "claude:messages" => {
+            object.insert(
+                "messages".to_string(),
+                json!([{ "role": "user", "content": message }]),
+            );
+        }
+        _ => {
+            object.insert(
+                "messages".to_string(),
+                json!([{ "role": "user", "content": message }]),
+            );
+        }
+    }
+}
+
+fn provider_query_grok_test_client_api_format(provider_api_format: &str) -> &'static str {
+    match provider_query_normalize_api_format_alias(provider_api_format).as_str() {
+        "openai:responses" | "openai:responses:compact" => "openai:responses",
+        "claude:messages" => "claude:messages",
+        _ => "openai:chat",
+    }
+}
+
+fn provider_query_build_test_request_body_with_model_policy(
+    payload: &Value,
+    model: &str,
+    override_custom_model: bool,
+) -> Value {
+    if let Some(mut body) = provider_query_extract_request_body(payload) {
+        let has_conversation = provider_query_request_body_has_conversation(&body);
+        if let Some(object) = body.as_object_mut() {
+            if override_custom_model {
+                object.insert("model".to_string(), Value::String(model.to_string()));
+            } else {
+                object
+                    .entry("model".to_string())
+                    .or_insert_with(|| Value::String(model.to_string()));
+            }
+            if !has_conversation {
+                object.insert(
+                    "messages".to_string(),
+                    json!([{
+                        "role": "user",
+                        "content": provider_query_extract_message(payload)
+                            .unwrap_or_else(|| DEFAULT_PROVIDER_QUERY_TEST_MESSAGE.to_string())
+                    }]),
+                );
             }
         }
         return body;
@@ -559,6 +689,73 @@ fn provider_query_build_test_request_body_with_model_policy(
         "temperature": 0.7,
         "stream": true,
     })
+}
+
+fn provider_query_request_body_has_conversation(body: &Value) -> bool {
+    body.get("messages")
+        .and_then(Value::as_array)
+        .map(|messages| {
+            messages
+                .iter()
+                .any(|message| value_has_non_empty_text(message.get("content")))
+        })
+        .unwrap_or(false)
+        || value_has_non_empty_text(body.get("input"))
+        || value_has_non_empty_text(body.get("prompt"))
+        || value_has_non_empty_text(body.get("query"))
+        || value_has_non_empty_text(body.get("system"))
+}
+
+fn provider_query_request_body_has_conversation_for_api_format(
+    body: &Value,
+    client_api_format: &str,
+) -> bool {
+    match provider_query_normalize_api_format_alias(client_api_format).as_str() {
+        "openai:responses" | "openai:responses:compact" => {
+            value_has_non_empty_text(body.get("input"))
+                || value_has_non_empty_text(body.get("prompt"))
+        }
+        "claude:messages" => {
+            body.get("messages")
+                .and_then(Value::as_array)
+                .map(|messages| {
+                    messages
+                        .iter()
+                        .any(|message| value_has_non_empty_text(message.get("content")))
+                })
+                .unwrap_or(false)
+                || value_has_non_empty_text(body.get("system"))
+        }
+        _ => provider_query_request_body_has_conversation(body),
+    }
+}
+
+fn provider_query_request_body_is_openai_responses_shape(body: &Value) -> bool {
+    let Some(object) = body.as_object() else {
+        return false;
+    };
+    [
+        "input",
+        "tools",
+        "tool_choice",
+        "instructions",
+        "previous_response_id",
+    ]
+    .iter()
+    .any(|key| object.contains_key(*key))
+}
+
+fn value_has_non_empty_text(value: Option<&Value>) -> bool {
+    match value {
+        Some(Value::String(value)) => !value.trim().is_empty(),
+        Some(Value::Array(values)) => values
+            .iter()
+            .any(|value| value_has_non_empty_text(Some(value))),
+        Some(Value::Object(values)) => values
+            .values()
+            .any(|value| value_has_non_empty_text(Some(value))),
+        _ => false,
+    }
 }
 
 fn provider_query_request_body_model<'a>(request_body: &'a Value, fallback: &'a str) -> &'a str {
@@ -1599,6 +1796,32 @@ fn provider_query_chatgpt_web_image_internal_url(base_url: &str) -> String {
     format!("{base_url}/__aether/chatgpt-web-image")
 }
 
+fn provider_query_openai_image_test_upstream_url(
+    transport: &AdminGatewayProviderTransportSnapshot,
+    request_query: Option<&str>,
+) -> String {
+    if transport
+        .provider
+        .provider_type
+        .trim()
+        .eq_ignore_ascii_case("chatgpt_web")
+    {
+        provider_query_chatgpt_web_image_internal_url(&transport.endpoint.base_url)
+    } else if transport
+        .provider
+        .provider_type
+        .trim()
+        .eq_ignore_ascii_case("grok")
+    {
+        crate::provider_transport::build_grok_upstream_url(
+            transport,
+            crate::provider_transport::GROK_CHAT_PATH,
+        )
+    } else {
+        crate::provider_transport::build_openai_image_upstream_url(transport, request_query)
+    }
+}
+
 async fn provider_query_finalize_openai_image_result(
     route_path: &str,
     trace_id: &str,
@@ -1698,12 +1921,16 @@ async fn provider_query_execute_openai_image_test_candidate(
     *synthetic_request.headers_mut() = incoming_request_headers;
     let (parts, _) = synthetic_request.into_parts();
 
-    let Some(normalized_request) =
-        crate::ai_serving::normalize_openai_image_request(&parts, &request_body, None)
-    else {
+    let provider_type = transport.provider.provider_type.as_str();
+    let Some(normalized_request) = crate::ai_serving::normalize_openai_image_request_with_options(
+        &parts,
+        &request_body,
+        None,
+        provider_query_openai_image_normalize_options(provider_type),
+    ) else {
         return Ok(provider_query_skipped_execution_outcome(
             request_body.clone(),
-            "Provider request body could not be normalized for openai:image",
+            provider_query_openai_image_normalize_failure_message(provider_type, &request_body),
         ));
     };
 
@@ -1712,6 +1939,11 @@ async fn provider_query_execute_openai_image_test_candidate(
         .provider_type
         .trim()
         .eq_ignore_ascii_case("chatgpt_web");
+    let is_grok = transport
+        .provider
+        .provider_type
+        .trim()
+        .eq_ignore_ascii_case("grok");
     let mut provider_request_body = if is_chatgpt_web {
         match crate::ai_serving::build_chatgpt_web_image_request_body(&parts, &request_body, None) {
             Ok(body) => body,
@@ -1739,17 +1971,33 @@ async fn provider_query_execute_openai_image_test_candidate(
             "Provider auth is unavailable for openai:image",
         ));
     };
+    let transport_profile = state.resolve_transport_profile(&transport);
 
-    let Some(mut request_headers) = crate::provider_transport::build_openai_image_headers(
-        crate::provider_transport::ProviderOpenAiImageHeadersInput {
-            headers: &parts.headers,
-            auth_header: &auth_header,
-            auth_value: &auth_value,
-            header_rules: transport.endpoint.header_rules.as_ref(),
-            provider_request_body: &provider_request_body,
-            original_request_body: &request_body,
-        },
-    ) else {
+    let Some(mut request_headers) = (if is_grok {
+        crate::provider_transport::build_grok_browser_headers(
+            crate::provider_transport::GrokHeaderInput {
+                transport: &transport,
+                transport_profile: transport_profile.as_ref(),
+                request_headers: Some(&parts.headers),
+                content_type: "application/json",
+                accept: "*/*",
+                header_rules: transport.endpoint.header_rules.as_ref(),
+                provider_request_body: &provider_request_body,
+                original_request_body: &request_body,
+            },
+        )
+    } else {
+        crate::provider_transport::build_openai_image_headers(
+            crate::provider_transport::ProviderOpenAiImageHeadersInput {
+                headers: &parts.headers,
+                auth_header: &auth_header,
+                auth_value: &auth_value,
+                header_rules: transport.endpoint.header_rules.as_ref(),
+                provider_request_body: &provider_request_body,
+                original_request_body: &request_body,
+            },
+        )
+    }) else {
         return Ok(ProviderQueryExecutionOutcome {
             status: "failed",
             skip_reason: None,
@@ -1765,6 +2013,7 @@ async fn provider_query_execute_openai_image_test_candidate(
     };
     if is_chatgpt_web {
         request_headers.insert("x-aether-chatgpt-web-image".to_string(), "1".to_string());
+    } else if is_grok {
     } else {
         crate::ai_serving::apply_codex_openai_responses_special_headers(
             &mut request_headers,
@@ -1798,16 +2047,12 @@ async fn provider_query_execute_openai_image_test_candidate(
         .filter(|value| !value.is_empty())
         .unwrap_or(request_model.as_str())
         .to_string();
-    let image_request = if is_chatgpt_web {
+    let image_request = if is_chatgpt_web || is_grok {
         provider_request_body.clone()
     } else {
         normalized_request.summary_json.clone()
     };
-    let request_url = if is_chatgpt_web {
-        provider_query_chatgpt_web_image_internal_url(&transport.endpoint.base_url)
-    } else {
-        crate::provider_transport::build_openai_image_upstream_url(&transport, parts.uri.query())
-    };
+    let request_url = provider_query_openai_image_test_upstream_url(&transport, parts.uri.query());
     let upstream_is_stream = provider_request_body
         .get("stream")
         .and_then(Value::as_bool)
@@ -1833,11 +2078,27 @@ async fn provider_query_execute_openai_image_test_candidate(
         proxy: state
             .resolve_transport_proxy_snapshot_with_tunnel_affinity(&transport)
             .await,
-        transport_profile: state.resolve_transport_profile(&transport),
+        transport_profile: transport_profile.clone(),
         timeouts: state.resolve_transport_execution_timeouts(&transport),
     };
 
-    let result = if is_chatgpt_web {
+    let result = if is_grok {
+        let report_context = json!({
+            "client_api_format": "openai:image",
+            "provider_api_format": "openai:image",
+            "provider_type": "grok",
+            "model": request_model,
+            "mapped_model": mapped_model,
+            "image_request": image_request.clone(),
+        });
+        state
+            .execute_execution_runtime_sync_plan_with_report_context(
+                Some(trace_id),
+                &plan,
+                Some(&report_context),
+            )
+            .await?
+    } else if is_chatgpt_web {
         let report_context = json!({
             "client_api_format": "openai:image",
             "provider_api_format": "openai:image",
@@ -2152,6 +2413,177 @@ async fn provider_query_execute_antigravity_test_candidate(
     })
 }
 
+async fn provider_query_execute_grok_test_candidate(
+    state: &AdminAppState<'_>,
+    provider: &StoredProviderCatalogProvider,
+    candidate: &ProviderQueryTestCandidate,
+    payload: &Value,
+    route_path: &str,
+    trace_id: &str,
+) -> Result<ProviderQueryExecutionOutcome, GatewayError> {
+    let Some(transport) = state
+        .read_provider_transport_snapshot(&provider.id, &candidate.endpoint.id, &candidate.key.id)
+        .await?
+    else {
+        return Ok(provider_query_skipped_execution_outcome(
+            Value::Null,
+            "Provider transport snapshot is unavailable",
+        ));
+    };
+
+    let provider_api_format =
+        provider_query_normalize_api_format_alias(&candidate.endpoint.api_format);
+    let client_api_format = provider_query_grok_test_client_api_format(&provider_api_format);
+    let request_body = provider_query_build_grok_test_request_body_for_api_format(
+        payload,
+        &candidate.effective_model,
+        route_path,
+        client_api_format,
+    );
+    if let Some(reason) =
+        provider_query_grok_test_unsupported_reason(&transport, &provider_api_format)
+    {
+        return Ok(provider_query_skipped_execution_outcome(
+            request_body,
+            format!(
+                "{} ({reason})",
+                provider_query_unsupported_test_api_format_message(&candidate.endpoint.api_format)
+            ),
+        ));
+    }
+
+    let incoming_request_headers = provider_query_extract_request_headers(payload);
+    let mut synthetic_request = http::Request::builder()
+        .uri(route_path)
+        .body(())
+        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    *synthetic_request.headers_mut() = incoming_request_headers;
+    let (parts, _) = synthetic_request.into_parts();
+
+    let request_model =
+        provider_query_request_body_model(&request_body, &candidate.effective_model);
+    let request_url = crate::provider_transport::build_grok_upstream_url(
+        &transport,
+        crate::provider_transport::GROK_CHAT_PATH,
+    );
+    let provider_request_body = crate::provider_transport::build_grok_app_chat_body(
+        client_api_format,
+        Some(request_model),
+        &request_body,
+    );
+    let report_context = json!({
+        "provider_type": provider.provider_type,
+        "provider_api_format": provider_api_format,
+        "client_api_format": client_api_format,
+        "model": request_model,
+        "mapped_model": candidate.effective_model,
+        "request_path": route_path,
+        "request_body": request_body,
+    });
+    let transport_profile = state.resolve_transport_profile(&transport);
+    let Some(request_headers) = crate::provider_transport::build_grok_browser_headers(
+        crate::provider_transport::GrokHeaderInput {
+            transport: &transport,
+            transport_profile: transport_profile.as_ref(),
+            request_headers: Some(&parts.headers),
+            content_type: "application/json",
+            accept: "text/event-stream",
+            header_rules: transport.endpoint.header_rules.as_ref(),
+            provider_request_body: &provider_request_body,
+            original_request_body: &request_body,
+        },
+    ) else {
+        return Ok(ProviderQueryExecutionOutcome {
+            status: "failed",
+            skip_reason: None,
+            error_message: Some("provider request headers build failed".to_string()),
+            status_code: None,
+            latency_ms: None,
+            request_url,
+            request_headers: BTreeMap::new(),
+            request_body: provider_request_body,
+            response_headers: BTreeMap::new(),
+            response_body: None,
+        });
+    };
+
+    let plan = ExecutionPlan {
+        request_id: trace_id.to_string(),
+        candidate_id: Some(format!("provider-query-{}", candidate.key.id)),
+        provider_name: Some(provider.name.clone()),
+        provider_id: provider.id.clone(),
+        endpoint_id: candidate.endpoint.id.clone(),
+        key_id: candidate.key.id.clone(),
+        method: "POST".to_string(),
+        url: request_url.clone(),
+        headers: request_headers.clone(),
+        content_type: Some("application/json".to_string()),
+        content_encoding: None,
+        body: RequestBody::from_json(request_body.clone()),
+        stream: true,
+        client_api_format: client_api_format.to_string(),
+        provider_api_format: provider_api_format.clone(),
+        model_name: Some(request_model.to_string()),
+        proxy: state
+            .resolve_transport_proxy_snapshot_with_tunnel_affinity(&transport)
+            .await,
+        transport_profile,
+        timeouts: state.resolve_transport_execution_timeouts(&transport),
+    };
+
+    let result = match state
+        .execute_execution_runtime_sync_plan_with_report_context(
+            Some(trace_id),
+            &plan,
+            Some(&report_context),
+        )
+        .await
+    {
+        Ok(result) => result,
+        Err(err) => {
+            return Ok(ProviderQueryExecutionOutcome {
+                status: "failed",
+                skip_reason: None,
+                error_message: Some(format!("model test execution failed: {err:?}")),
+                status_code: None,
+                latency_ms: None,
+                request_url,
+                request_headers,
+                request_body: provider_request_body,
+                response_headers: BTreeMap::new(),
+                response_body: None,
+            });
+        }
+    };
+    let response_body = result.body.as_ref().and_then(|body| body.json_body.clone());
+    let did_fail = result.status_code >= 400 || response_body.is_none();
+    let error_message = if did_fail {
+        provider_query_extract_error_message(&result).or_else(|| {
+            response_body.is_none().then(|| {
+                format!(
+                    "Provider returned HTTP {} without a model-test response body",
+                    result.status_code
+                )
+            })
+        })
+    } else {
+        None
+    };
+
+    Ok(ProviderQueryExecutionOutcome {
+        status: if did_fail { "failed" } else { "success" },
+        skip_reason: None,
+        error_message,
+        status_code: Some(result.status_code),
+        latency_ms: result.telemetry.as_ref().and_then(|value| value.elapsed_ms),
+        request_url,
+        request_headers,
+        request_body: provider_request_body,
+        response_headers: result.headers,
+        response_body,
+    })
+}
+
 async fn provider_query_execute_standard_test_candidate(
     state: &AdminAppState<'_>,
     provider: &StoredProviderCatalogProvider,
@@ -2169,22 +2601,25 @@ async fn provider_query_execute_standard_test_candidate(
             "Provider transport snapshot is unavailable",
         ));
     };
-    let original_request_body = provider_query_build_test_request_body_for_route(
+    let provider_api_format = candidate.endpoint.api_format.as_str();
+    let normalized_provider_api_format =
+        crate::ai_serving::normalize_api_format_alias(provider_api_format);
+    let client_api_format =
+        provider_query_standard_test_client_api_format(normalized_provider_api_format.as_str());
+    let original_request_body = provider_query_build_test_request_body_for_api_format(
         payload,
         &candidate.effective_model,
         route_path,
+        client_api_format,
     );
     if !provider_query_transport_supports_model_test_execution(
         state,
         &transport,
-        candidate.endpoint.api_format.as_str(),
+        provider_api_format,
     ) {
         return Ok(provider_query_skipped_execution_outcome(
             original_request_body,
-            provider_query_standard_test_unsupported_reason(
-                &transport,
-                candidate.endpoint.api_format.as_str(),
-            ),
+            provider_query_standard_test_unsupported_reason(&transport, provider_api_format),
         ));
     }
 
@@ -2196,11 +2631,6 @@ async fn provider_query_execute_standard_test_candidate(
     let request_model =
         provider_query_request_body_model(&request_body, &candidate.effective_model);
 
-    let provider_api_format = candidate.endpoint.api_format.as_str();
-    let normalized_provider_api_format =
-        crate::ai_serving::normalize_api_format_alias(provider_api_format);
-    let client_api_format =
-        provider_query_standard_test_client_api_format(normalized_provider_api_format.as_str());
     let upstream_is_stream = provider_query_resolve_standard_test_upstream_is_stream(
         transport.endpoint.config.as_ref(),
         transport.provider.provider_type.as_str(),
@@ -2266,12 +2696,20 @@ async fn provider_query_execute_standard_test_candidate(
         }
         "openai:responses" | "openai:responses:compact" => {
             let Some(mut provider_request_body) =
-                crate::ai_serving::build_cross_format_openai_chat_request_body(
-                    &request_body,
-                    request_model,
-                    normalized_provider_api_format.as_str(),
-                    upstream_is_stream,
-                )
+                (if provider_query_request_body_is_openai_responses_shape(&request_body) {
+                    crate::ai_serving::build_local_openai_responses_request_body(
+                        &request_body,
+                        request_model,
+                        upstream_is_stream,
+                    )
+                } else {
+                    crate::ai_serving::build_cross_format_openai_chat_request_body(
+                        &request_body,
+                        request_model,
+                        normalized_provider_api_format.as_str(),
+                        upstream_is_stream,
+                    )
+                })
             else {
                 return Ok(provider_query_skipped_execution_outcome(
                     request_body.clone(),
@@ -2709,6 +3147,12 @@ async fn build_admin_provider_query_kiro_failover_response(
                     )
                     .await
                 }
+                Some(ProviderQueryTestAdapter::Grok) => {
+                    provider_query_execute_grok_test_candidate(
+                        state, &provider, candidate, payload, route_path, &trace_id,
+                    )
+                    .await
+                }
                 Some(ProviderQueryTestAdapter::Standard) => {
                     provider_query_execute_standard_test_candidate(
                         state, &provider, candidate, payload, route_path, &trace_id,
@@ -2768,7 +3212,10 @@ async fn build_admin_provider_query_kiro_failover_response(
         ));
         if is_success {
             success_body = response_body;
-            success_stream = matches!(adapter, Some(ProviderQueryTestAdapter::Kiro));
+            success_stream = matches!(
+                adapter,
+                Some(ProviderQueryTestAdapter::Kiro | ProviderQueryTestAdapter::Grok)
+            );
             winning_candidate_index = Some(candidate_index);
             break;
         }

@@ -7,21 +7,24 @@ use crate::data::GatewayDataState;
 use crate::AppState;
 
 use super::{
-    duration_until_next_daily_run, duration_until_next_db_maintenance_run,
-    duration_until_next_stats_aggregation_run, duration_until_next_stats_hourly_aggregation_run,
-    maintenance_timezone, parse_hhmm_time, perform_oauth_token_refresh_once,
-    provider_checkin_schedule, run_audit_cleanup_once, run_db_maintenance_once,
-    run_gemini_file_mapping_cleanup_once, run_pending_cleanup_once, run_pool_monitor_once,
-    run_provider_checkin_once, run_proxy_node_metrics_cleanup_once,
+    cleanup_processed_usage_counter_deltas_once, duration_until_next_daily_run,
+    duration_until_next_db_maintenance_run, duration_until_next_stats_aggregation_run,
+    duration_until_next_stats_hourly_aggregation_run, maintenance_timezone, parse_hhmm_time,
+    perform_oauth_token_refresh_once, provider_checkin_schedule, run_audit_cleanup_once,
+    run_db_maintenance_once, run_gemini_file_mapping_cleanup_once, run_pending_cleanup_once,
+    run_pool_monitor_once, run_provider_checkin_once, run_proxy_node_metrics_cleanup_once,
     run_proxy_node_stale_cleanup_once, run_proxy_upgrade_rollout_once,
     run_request_candidate_cleanup_once, run_stats_aggregation_once,
-    run_stats_hourly_aggregation_once, run_usage_cleanup_once,
+    run_stats_hourly_aggregation_once, run_usage_cleanup_once, run_usage_counter_flush_once,
     run_wallet_daily_usage_aggregation_once, AUDIT_LOG_CLEANUP_INTERVAL,
     GEMINI_FILE_MAPPING_CLEANUP_INTERVAL, OAUTH_TOKEN_REFRESH_INTERVAL, PENDING_CLEANUP_INTERVAL,
     POOL_MONITOR_INTERVAL, PROVIDER_CHECKIN_DEFAULT_TIME, PROXY_NODE_METRICS_CLEANUP_HOUR,
     PROXY_NODE_METRICS_CLEANUP_MINUTE, PROXY_NODE_STALE_SWEEP_INTERVAL,
     PROXY_UPGRADE_ROLLOUT_INTERVAL, REQUEST_CANDIDATE_CLEANUP_INTERVAL, USAGE_CLEANUP_HOUR,
-    USAGE_CLEANUP_MINUTE, WALLET_DAILY_USAGE_AGGREGATION_HOUR,
+    USAGE_CLEANUP_MINUTE, USAGE_COUNTER_DELTA_CLEANUP_BATCH_SIZE,
+    USAGE_COUNTER_DELTA_CLEANUP_INTERVAL, USAGE_COUNTER_DELTA_RETENTION_SECS,
+    USAGE_COUNTER_FLUSH_BATCH_SIZE, USAGE_COUNTER_FLUSH_CATCH_UP_BURST_LIMIT,
+    USAGE_COUNTER_FLUSH_INTERVAL, WALLET_DAILY_USAGE_AGGREGATION_HOUR,
     WALLET_DAILY_USAGE_AGGREGATION_MINUTE,
 };
 
@@ -158,6 +161,55 @@ pub(crate) fn spawn_usage_cleanup_worker(
             if let Err(err) = run_usage_cleanup_once(&data).await {
                 log_maintenance_worker_failure("usage_cleanup", "tick", &err);
             }
+        }
+    }))
+}
+
+pub(crate) fn spawn_usage_counter_flush_worker(
+    data: Arc<GatewayDataState>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if !data.has_usage_counter_flush_backend() {
+        return None;
+    }
+
+    Some(tokio::spawn(async move {
+        let mut interval = tokio::time::interval(USAGE_COUNTER_FLUSH_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        interval.tick().await;
+        let mut last_delta_cleanup = tokio::time::Instant::now();
+
+        loop {
+            let mut batches = 0_usize;
+            while batches < USAGE_COUNTER_FLUSH_CATCH_UP_BURST_LIMIT {
+                match run_usage_counter_flush_once(&data, USAGE_COUNTER_FLUSH_BATCH_SIZE).await {
+                    Ok(summary) if summary.rows_claimed > 0 => batches += 1,
+                    Ok(_) => break,
+                    Err(err) => {
+                        log_maintenance_worker_failure("usage_counter_flush", "tick", &err);
+                        break;
+                    }
+                }
+            }
+
+            if batches >= USAGE_COUNTER_FLUSH_CATCH_UP_BURST_LIMIT {
+                tokio::task::yield_now().await;
+                continue;
+            }
+
+            if last_delta_cleanup.elapsed() >= USAGE_COUNTER_DELTA_CLEANUP_INTERVAL {
+                if let Err(err) = cleanup_processed_usage_counter_deltas_once(
+                    &data,
+                    USAGE_COUNTER_DELTA_RETENTION_SECS,
+                    USAGE_COUNTER_DELTA_CLEANUP_BATCH_SIZE,
+                )
+                .await
+                {
+                    log_maintenance_worker_failure("usage_counter_delta_cleanup", "tick", &err);
+                }
+                last_delta_cleanup = tokio::time::Instant::now();
+            }
+
+            interval.tick().await;
         }
     }))
 }

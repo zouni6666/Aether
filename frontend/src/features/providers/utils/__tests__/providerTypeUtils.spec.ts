@@ -8,4 +8,10 @@ describe('providerTypeUtils', () => {
     expect(isOAuthAccountProviderType('ChatGPT_Web')).toBe(true)
     expect(isKeyManagedProviderType('chatgpt_web')).toBe(false)
   })
+
+  it('treats Grok as an OAuth account provider', () => {
+    expect(isOAuthAccountProviderType('grok')).toBe(true)
+    expect(isOAuthAccountProviderType('GROK')).toBe(true)
+    expect(isKeyManagedProviderType('grok')).toBe(false)
+  })
 })

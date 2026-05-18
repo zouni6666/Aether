@@ -1,3 +1,4 @@
+use super::super::helpers::admin_provider_oauth_key_name_from_auth_config;
 use super::super::token_import::{
     build_provider_access_token_import_auth_config, provider_type_supports_access_token_import,
 };
@@ -24,13 +25,11 @@ use crate::handlers::admin::provider::oauth::runtime::{
 use crate::handlers::admin::provider::oauth::state::{
     admin_provider_oauth_template, exchange_admin_provider_oauth_refresh_token,
 };
-use crate::handlers::admin::provider::shared::support::ADMIN_PROVIDER_OAUTH_DATA_UNAVAILABLE_DETAIL;
 use crate::handlers::admin::request::{AdminAppState, AdminProviderOAuthTemplate};
 use crate::GatewayError;
 use aether_admin::provider::oauth::parse_admin_provider_oauth_kiro_batch_import_entries;
 use aether_contracts::ProxySnapshot;
 use serde_json::{json, Map, Value};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 struct AdminProviderOAuthResolvedBatchImport {
     access_token: String,
@@ -45,7 +44,7 @@ pub(super) fn estimate_admin_provider_oauth_batch_import_total(
     if provider_type.eq_ignore_ascii_case("kiro") {
         parse_admin_provider_oauth_kiro_batch_import_entries(raw_credentials).len()
     } else {
-        parse_admin_provider_oauth_batch_import_entries(raw_credentials).len()
+        parse_admin_provider_oauth_batch_import_entries(provider_type, raw_credentials).len()
     }
 }
 
@@ -67,7 +66,8 @@ pub(super) async fn execute_admin_provider_oauth_batch_import_for_provider_type(
         )
         .await
     } else {
-        let entries = parse_admin_provider_oauth_batch_import_entries(raw_credentials);
+        let entries =
+            parse_admin_provider_oauth_batch_import_entries(provider_type, raw_credentials);
         execute_admin_provider_oauth_batch_import(
             state,
             provider_id,
@@ -82,7 +82,7 @@ pub(super) async fn execute_admin_provider_oauth_batch_import_for_provider_type(
 
 async fn resolve_admin_provider_oauth_batch_import_tokens(
     state: &AdminAppState<'_>,
-    template: AdminProviderOAuthTemplate,
+    template: Option<AdminProviderOAuthTemplate>,
     provider_type: &str,
     entry: &AdminProviderOAuthBatchImportEntry,
     request_proxy: Option<ProxySnapshot>,
@@ -99,6 +99,29 @@ async fn resolve_admin_provider_oauth_batch_import_tokens(
         .filter(|value| !value.is_empty());
 
     if let Some(refresh_token) = refresh_token {
+        let Some(template) = template else {
+            if provider_type_supports_access_token_import(provider_type) {
+                if let Some(access_token) = access_token {
+                    let (auth_config, expires_at) = build_provider_access_token_import_auth_config(
+                        provider_type,
+                        access_token,
+                        Some(refresh_token),
+                        entry.expires_at,
+                        Some("Provider 不支持 Refresh Token 交换，已回退为 Session Token 导入"),
+                    );
+                    return Ok(AdminProviderOAuthResolvedBatchImport {
+                        access_token: access_token.to_string(),
+                        auth_config,
+                        expires_at,
+                    });
+                }
+            }
+            return Err(
+                "该 Provider 不支持 Refresh Token 导入，请提供 sso_token 或 access_token"
+                    .to_string(),
+            );
+        };
+
         let token_payload = match exchange_admin_provider_oauth_refresh_token(
             state,
             template,
@@ -152,7 +175,7 @@ async fn resolve_admin_provider_oauth_batch_import_tokens(
 
     if let Some(access_token) = access_token {
         if !provider_type_supports_access_token_import(provider_type) {
-            return Err("Access Token 导入仅支持 Codex / ChatGPT Web Provider".to_string());
+            return Err("Access Token 导入仅支持 Codex / ChatGPT Web / Grok Provider".to_string());
         }
         let (auth_config, expires_at) = build_provider_access_token_import_auth_config(
             provider_type,
@@ -204,25 +227,7 @@ pub(super) async fn execute_admin_provider_oauth_batch_import(
         });
     };
 
-    let Some(template) = admin_provider_oauth_template(provider_type) else {
-        return Ok(AdminProviderOAuthBatchImportOutcome {
-            total: entries.len(),
-            success: 0,
-            failed: entries.len(),
-            results: entries
-                .iter()
-                .enumerate()
-                .map(|(index, _)| {
-                    json!({
-                        "index": index,
-                        "status": "error",
-                        "error": ADMIN_PROVIDER_OAUTH_DATA_UNAVAILABLE_DETAIL,
-                        "replaced": false,
-                    })
-                })
-                .collect(),
-        });
-    };
+    let template = admin_provider_oauth_template(provider_type);
 
     let endpoint_resolution =
         resolve_provider_oauth_runtime_endpoints(state, &provider, provider_type).await?;
@@ -340,24 +345,11 @@ pub(super) async fn execute_admin_provider_oauth_batch_import(
                 }
             }
         } else {
-            let key_name = auth_config
-                .get("email")
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(|email| format!("{provider_type}_{email}"))
-                .unwrap_or_else(|| {
-                    format!(
-                        "{}_{}_{}",
-                        provider_type,
-                        SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .ok()
-                            .map(|duration| duration.as_secs())
-                            .unwrap_or(0),
-                        index
-                    )
-                });
+            let key_name = admin_provider_oauth_key_name_from_auth_config(
+                provider_type,
+                &auth_config,
+                Some(index),
+            );
             match create_provider_oauth_catalog_key(
                 state,
                 provider_id,

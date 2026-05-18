@@ -363,14 +363,15 @@ mod sqlite;
 
 #[allow(unused_imports)]
 pub(crate) use aether_data_contracts::repository::usage::{
-    PendingUsageCleanupSummary, ProviderApiKeyWindowUsageRequest, StoredProviderApiKeyUsageSummary,
-    StoredProviderApiKeyWindowUsageSummary, StoredProviderUsageSummary, StoredProviderUsageWindow,
-    StoredRequestUsageAudit, StoredUsageAuditAggregation, StoredUsageAuditSummary,
-    StoredUsageBreakdownSummaryRow, StoredUsageCacheAffinityHitSummary,
-    StoredUsageCacheAffinityIntervalRow, StoredUsageCacheHitSummary, StoredUsageCostSavingsSummary,
-    StoredUsageDailySummary, StoredUsageDashboardDailyBreakdownRow,
-    StoredUsageDashboardProviderCount, StoredUsageDashboardSummary,
-    StoredUsageErrorDistributionRow, StoredUsageLeaderboardSummary,
+    usage_request_metadata_client_family, ApiKeyLastUsedDelta, ManagementTokenCounterDelta,
+    PendingUsageCleanupSummary, ProviderApiKeyWindowUsageRequest, ProxyNodeCounterDelta,
+    StoredProviderApiKeyUsageSummary, StoredProviderApiKeyWindowUsageSummary,
+    StoredProviderUsageSummary, StoredProviderUsageWindow, StoredRequestUsageAudit,
+    StoredUsageAuditAggregation, StoredUsageAuditSummary, StoredUsageBreakdownSummaryRow,
+    StoredUsageCacheAffinityHitSummary, StoredUsageCacheAffinityIntervalRow,
+    StoredUsageCacheHitSummary, StoredUsageCostSavingsSummary, StoredUsageDailySummary,
+    StoredUsageDashboardDailyBreakdownRow, StoredUsageDashboardProviderCount,
+    StoredUsageDashboardSummary, StoredUsageErrorDistributionRow, StoredUsageLeaderboardSummary,
     StoredUsagePerformancePercentilesRow, StoredUsageProviderPerformance,
     StoredUsageProviderPerformanceProviderRow, StoredUsageProviderPerformanceSummary,
     StoredUsageProviderPerformanceTimelineRow, StoredUsageSettledCostSummary,
@@ -379,7 +380,8 @@ pub(crate) use aether_data_contracts::repository::usage::{
     UsageAuditListQuery, UsageAuditSummaryQuery, UsageBreakdownGroupBy, UsageBreakdownSummaryQuery,
     UsageCacheAffinityHitSummaryQuery, UsageCacheAffinityIntervalGroupBy,
     UsageCacheAffinityIntervalQuery, UsageCacheHitSummaryQuery, UsageCleanupPreviewCounts,
-    UsageCleanupSummary, UsageCleanupWindow, UsageCostSavingsSummaryQuery, UsageDailyHeatmapQuery,
+    UsageCleanupSummary, UsageCleanupWindow, UsageCostSavingsSummaryQuery,
+    UsageCounterFlushSummary, UsageCounterHealthSnapshot, UsageDailyHeatmapQuery,
     UsageDashboardDailyBreakdownQuery, UsageDashboardProviderCountsQuery,
     UsageDashboardSummaryQuery, UsageErrorDistributionQuery, UsageLeaderboardGroupBy,
     UsageLeaderboardQuery, UsageMonitoringErrorCountQuery, UsageMonitoringErrorListQuery,
@@ -422,7 +424,10 @@ impl ApiKeyUsageDelta {
             total_requests: after.total_requests - before.total_requests,
             total_tokens: after.total_tokens - before.total_tokens,
             total_cost_usd: after.total_cost_usd - before.total_cost_usd,
-            candidate_last_used_at_unix_secs: after.last_used_at_unix_secs,
+            candidate_last_used_at_unix_secs: newer_last_used_at(
+                before.last_used_at_unix_secs,
+                after.last_used_at_unix_secs,
+            ),
             removed_last_used_at_unix_secs: None,
         }
     }
@@ -529,7 +534,10 @@ impl ProviderApiKeyUsageDelta {
             total_tokens: after.total_tokens - before.total_tokens,
             total_cost_usd: after.total_cost_usd - before.total_cost_usd,
             total_response_time_ms: after.total_response_time_ms - before.total_response_time_ms,
-            candidate_last_used_at_unix_secs: after.last_used_at_unix_secs,
+            candidate_last_used_at_unix_secs: newer_last_used_at(
+                before.last_used_at_unix_secs,
+                after.last_used_at_unix_secs,
+            ),
             removed_last_used_at_unix_secs: None,
             usage_created_at_unix_secs: after.usage_created_at_unix_secs,
         }
@@ -632,6 +640,9 @@ pub(crate) fn provider_api_key_usage_is_error(
 pub(crate) fn provider_api_key_usage_contribution(
     usage: &StoredRequestUsageAudit,
 ) -> Option<ProviderApiKeyUsageContribution> {
+    if matches!(usage.status.as_str(), "pending" | "streaming") {
+        return None;
+    }
     let key_id = usage
         .provider_api_key_id
         .as_deref()
@@ -693,6 +704,9 @@ pub(crate) fn model_usage_contribution(
 pub(crate) fn api_key_usage_contribution(
     usage: &StoredRequestUsageAudit,
 ) -> Option<ApiKeyUsageContribution> {
+    if matches!(usage.status.as_str(), "pending" | "streaming") {
+        return None;
+    }
     let api_key_id = usage
         .api_key_id
         .as_deref()
@@ -713,14 +727,23 @@ pub(crate) fn api_key_usage_contribution(
     })
 }
 
+fn newer_last_used_at(before: Option<u64>, after: Option<u64>) -> Option<u64> {
+    match (before, after) {
+        (Some(before), Some(after)) if after > before => Some(after),
+        (None, Some(after)) => Some(after),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         api_key_usage_contribution, incoming_usage_can_recover_terminal_failure,
         model_usage_contribution, provider_api_key_usage_contribution,
         provider_api_key_usage_is_error, provider_api_key_usage_is_success,
-        strip_deprecated_usage_display_fields, usage_can_recover_terminal_failure, ModelUsageDelta,
-        StoredRequestUsageAudit, UpsertUsageRecord,
+        strip_deprecated_usage_display_fields, usage_can_recover_terminal_failure,
+        ApiKeyUsageDelta, ModelUsageDelta, ProviderApiKeyUsageDelta, StoredRequestUsageAudit,
+        UpsertUsageRecord,
     };
 
     #[test]
@@ -995,6 +1018,95 @@ mod tests {
         assert_eq!(contribution.total_tokens, 20);
         assert_eq!(contribution.total_cost_usd, 0.25);
         assert_eq!(contribution.last_used_at_unix_secs, Some(123));
+
+        let mut streaming = usage.clone();
+        streaming.status = "streaming".to_string();
+        assert!(api_key_usage_contribution(&streaming).is_none());
+
+        let mut pending = usage;
+        pending.status = "pending".to_string();
+        assert!(api_key_usage_contribution(&pending).is_none());
+    }
+
+    #[test]
+    fn provider_api_key_usage_contribution_tracks_terminal_requests_only() {
+        let usage = StoredRequestUsageAudit::new(
+            "usage-1".to_string(),
+            "request-1".to_string(),
+            Some("user-1".to_string()),
+            Some("api-key-1".to_string()),
+            None,
+            None,
+            "OpenAI".to_string(),
+            "gpt-5".to_string(),
+            None,
+            Some("provider-1".to_string()),
+            None,
+            Some("provider-key-1".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            12,
+            8,
+            20,
+            0.25,
+            0.25,
+            Some(200),
+            None,
+            None,
+            Some(120),
+            None,
+            "completed".to_string(),
+            "settled".to_string(),
+            123,
+            124,
+            Some(125),
+        )
+        .expect("usage should build");
+
+        assert!(provider_api_key_usage_contribution(&usage).is_some());
+
+        let mut streaming = usage.clone();
+        streaming.status = "streaming".to_string();
+        assert!(provider_api_key_usage_contribution(&streaming).is_none());
+
+        let mut pending = usage;
+        pending.status = "pending".to_string();
+        assert!(provider_api_key_usage_contribution(&pending).is_none());
+    }
+
+    #[test]
+    fn usage_delta_between_does_not_emit_duplicate_last_used_candidate() {
+        let api_key_contribution = super::ApiKeyUsageContribution {
+            api_key_id: "api-key-1".to_string(),
+            total_requests: 1,
+            total_tokens: 20,
+            total_cost_usd: 0.25,
+            last_used_at_unix_secs: Some(123),
+        };
+        assert!(ApiKeyUsageDelta::between(&api_key_contribution, &api_key_contribution).is_noop());
+
+        let provider_contribution = super::ProviderApiKeyUsageContribution {
+            key_id: "provider-key-1".to_string(),
+            request_count: 1,
+            success_count: 1,
+            error_count: 0,
+            total_tokens: 20,
+            total_cost_usd: 0.25,
+            total_response_time_ms: 120,
+            last_used_at_unix_secs: Some(123),
+            usage_created_at_unix_secs: Some(123),
+        };
+        assert!(
+            ProviderApiKeyUsageDelta::between(&provider_contribution, &provider_contribution,)
+                .is_noop()
+        );
     }
 
     #[test]

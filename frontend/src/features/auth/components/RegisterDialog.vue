@@ -212,6 +212,45 @@
           </p>
         </div>
 
+        <div
+          v-if="inviteCode"
+          class="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs text-muted-foreground"
+        >
+          已识别邀请码 <span class="font-mono font-semibold text-foreground">{{ inviteCode }}</span>
+        </div>
+
+        <div
+          v-if="privacyPolicyEnabled"
+          class="rounded-lg border border-border bg-muted/30 p-3"
+        >
+          <label class="flex items-start gap-2 text-sm">
+            <Checkbox
+              :checked="privacyAccepted"
+              class="mt-0.5"
+              @update:checked="privacyAccepted = !!$event"
+            />
+            <span class="leading-6">
+              我已阅读并同意
+              <button
+                type="button"
+                class="font-medium text-primary underline-offset-4 hover:underline"
+                @click="privacyDialogOpen = true"
+              >
+                隐私政策
+              </button>
+              <RouterLink
+                to="/privacy-policy"
+                target="_blank"
+                class="ml-1 text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+              >
+                新窗口打开
+              </RouterLink>
+            </span>
+          </label>
+          <p class="mt-2 text-xs text-muted-foreground">
+            当前版本：{{ privacyPolicyVersion }}
+          </p>
+        </div>
       </form>
 
       <!-- 登录链接 -->
@@ -246,13 +285,37 @@
       </Button>
     </template>
   </Dialog>
+
+  <Dialog
+    v-model="privacyDialogOpen"
+    size="2xl"
+    title="隐私政策"
+  >
+    <!-- eslint-disable vue/no-v-html -->
+    <div
+      class="prose prose-sm dark:prose-invert max-h-[60vh] max-w-none overflow-y-auto"
+      v-html="renderedPrivacyPolicy"
+    />
+    <!-- eslint-enable vue/no-v-html -->
+    <template #footer>
+      <Button
+        type="button"
+        @click="privacyDialogOpen = false"
+      >
+        我知道了
+      </Button>
+    </template>
+  </Dialog>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, watch, onUnmounted, nextTick } from 'vue'
-import { authApi, type RegisterRequest } from '@/api/auth'
+import { RouterLink } from 'vue-router'
+import { marked } from 'marked'
+import { authApi, type RegisterRequest, type RegistrationPrivacyPolicySettings } from '@/api/auth'
 import { useToast } from '@/composables/useToast'
 import { parseApiError } from '@/utils/errorParser'
+import { sanitizeHtml, sanitizeMarkdown } from '@/utils/sanitize'
 import {
   getPasswordPolicyHint,
   getPasswordPolicyPlaceholder,
@@ -261,9 +324,12 @@ import {
 } from '@/utils/passwordPolicy'
 import { Dialog } from '@/components/ui'
 import Button from '@/components/ui/button.vue'
+import Checkbox from '@/components/ui/checkbox.vue'
 import Input from '@/components/ui/input.vue'
 import Label from '@/components/ui/label.vue'
 import TurnstileWidget from './TurnstileWidget.vue'
+
+const INVITE_CODE_STORAGE_KEY = 'aether_invite_code'
 
 interface Props {
   open?: boolean
@@ -272,6 +338,7 @@ interface Props {
   passwordPolicyLevel?: PasswordPolicyLevel
   turnstileEnabled?: boolean
   turnstileSiteKey?: string | null
+  privacyPolicy?: RegistrationPrivacyPolicySettings
 }
 
 interface Emits {
@@ -286,7 +353,13 @@ const props = withDefaults(defineProps<Props>(), {
   emailConfigured: true,
   passwordPolicyLevel: 'weak',
   turnstileEnabled: false,
-  turnstileSiteKey: null
+  turnstileSiteKey: null,
+  privacyPolicy: () => ({
+    enabled: false,
+    format: 'markdown',
+    content: '',
+    version: ''
+  })
 })
 
 const emit = defineEmits<Emits>()
@@ -423,6 +496,32 @@ const handleTurnstileError = (message: string) => {
   showError(message, '人机验证失败')
 }
 
+const inviteCode = ref<string | null>(null)
+const privacyAccepted = ref(false)
+const privacyDialogOpen = ref(false)
+const privacyPolicyEnabled = computed(() => !!props.privacyPolicy?.enabled)
+const privacyPolicyVersion = computed(() => props.privacyPolicy?.version || '1')
+const renderedPrivacyPolicy = computed(() => {
+  const policy = props.privacyPolicy
+  if (!policy?.content) return '<p>暂无隐私政策内容</p>'
+  if (policy.format === 'html') {
+    return sanitizeHtml(policy.content)
+  }
+  const rawHtml = marked(policy.content) as string
+  return sanitizeMarkdown(rawHtml)
+})
+
+function loadInviteCode(): string | null {
+  if (typeof window === 'undefined') return null
+  const fromQuery = new URLSearchParams(window.location.search).get('invite')
+  const normalized = (fromQuery || localStorage.getItem(INVITE_CODE_STORAGE_KEY) || '')
+    .trim()
+    .toUpperCase()
+  if (!normalized) return null
+  localStorage.setItem(INVITE_CODE_STORAGE_KEY, normalized)
+  return normalized
+}
+
 // Send code cooldown timer
 const canSendCode = computed(() => {
   if (!formData.value.email) return false
@@ -499,6 +598,10 @@ const canSubmit = computed(() => {
   }
 
   if (passwordError.value) {
+    return false
+  }
+
+  if (privacyPolicyEnabled.value && !privacyAccepted.value) {
     return false
   }
 
@@ -619,7 +722,9 @@ const resetForm = () => {
   isSendingCode.value = false
   codeSentAt.value = null
   cooldownSeconds.value = 0
-  resetTurnstile()
+  inviteCode.value = loadInviteCode()
+  privacyAccepted.value = false
+  privacyDialogOpen.value = false
 
   // Reset password field nonce
   formNonce.value = createFormNonce()
@@ -743,6 +848,11 @@ const handleSubmit = async () => {
     return
   }
 
+  if (privacyPolicyEnabled.value && !privacyAccepted.value) {
+    showError('请先阅读并同意隐私政策')
+    return
+  }
+
   isLoading.value = true
   loadingText.value = '注册中...'
 
@@ -758,6 +868,13 @@ const handleSubmit = async () => {
     }
     if (turnstileRequired.value && currentTurnstileAction.value === 'register') {
       registerData.turnstile_token = turnstileToken.value
+    }
+    if (inviteCode.value) {
+      registerData.invite_code = inviteCode.value
+    }
+    if (privacyPolicyEnabled.value) {
+      registerData.privacy_policy_accepted = privacyAccepted.value
+      registerData.privacy_policy_version = privacyPolicyVersion.value
     }
 
     const response = await authApi.register(registerData)

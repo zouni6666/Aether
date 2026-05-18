@@ -112,6 +112,7 @@ export interface PoolPresetMeta {
 export interface PoolKeyDetail {
   key_id: string
   key_name: string
+  provider_type?: string | null
   is_active: boolean
   auth_type: string
   auth_type_by_format?: Record<string, 'api_key' | 'bearer'> | null

@@ -50,15 +50,15 @@
       >
         <UsageModelTable
           :data="enhancedModelStats"
-        :is-admin="authStore.canAccessAdmin"
+          :is-admin="authStore.canAccessAdmin"
         />
         <UsageProviderTable
           :data="providerStats"
-        :is-admin="authStore.canAccessAdmin"
+          :is-admin="authStore.canAccessAdmin"
         />
         <UsageApiFormatTable
           :data="apiFormatStats"
-        :is-admin="authStore.canAccessAdmin"
+          :is-admin="authStore.canAccessAdmin"
         />
       </div>
       <!-- 用户：模型 + API格式（2列） -->
@@ -68,7 +68,7 @@
       >
         <UsageModelTable
           :data="enhancedModelStats"
-        :is-admin="authStore.canAccessAdmin"
+          :is-admin="authStore.canAccessAdmin"
         />
         <UsageApiFormatTable
           :data="apiFormatStats"
@@ -81,7 +81,7 @@
     <UsageRecordsTable
       :records="displayRecords"
       :is-admin="isAdminPage"
-        :show-actual-cost="authStore.canAccessAdmin"
+      :show-actual-cost="authStore.canAccessAdmin"
       :loading="isLoadingRecords"
       :time-range="timeRange"
       :filter-search="filterSearch"
@@ -90,9 +90,11 @@
       :filter-provider="filterProvider"
       :filter-api-format="filterApiFormat"
       :filter-status="filterStatus"
+      :filter-client-family="filterClientFamily"
       :available-users="availableUsers"
       :available-models="availableModels"
       :available-providers="availableProviders"
+      :available-client-families="availableClientFamilies"
       :current-page="currentPage"
       :page-size="pageSize"
       :total-records="effectiveTotalRecords"
@@ -105,6 +107,7 @@
       @update:filter-provider="handleFilterProviderChange"
       @update:filter-api-format="handleFilterApiFormatChange"
       @update:filter-status="handleFilterStatusChange"
+      @update:filter-client-family="handleFilterClientFamilyChange"
       @update:current-page="handlePageChange"
       @update:page-size="handlePageSizeChange"
       @update:auto-refresh="handleAutoRefreshChange"
@@ -226,6 +229,7 @@ const filterModel = ref('__all__')
 const filterProvider = ref('__all__')
 const filterApiFormat = ref('__all__')
 const filterStatus = ref<FilterStatusValue>('__all__')
+const filterClientFamily = ref('__all__')
 
 // 用户列表（仅管理员页面使用）
 const availableUsers = ref<UserOption[]>([])
@@ -372,7 +376,13 @@ const filteredRecords = computed(() => {
         records = records.filter(record => record.status === 'cancelled')
       } else if (filterStatus.value === 'has_fallback') {
         records = records.filter(record => hasUsageFallback(record))
+      } else if (filterStatus.value === 'has_retry') {
+        records = records.filter(record => record.has_retry === true)
       }
+    }
+
+    if (filterClientFamily.value !== '__all__') {
+      records = records.filter(record => record.client_family === filterClientFamily.value)
     }
 
     return records
@@ -704,6 +714,15 @@ const effectiveTotalRecords = computed(() => {
 // 显示的记录
 const displayRecords = computed(() => paginatedRecords.value)
 
+const availableClientFamilies = computed(() => {
+  const families = new Set<string>()
+  currentRecords.value.forEach((record) => {
+    const family = record.client_family?.trim()
+    if (family) families.add(family)
+  })
+  return Array.from(families).sort()
+})
+
 
 // 详情弹窗状态
 const detailModalOpen = ref(false)
@@ -787,7 +806,8 @@ function getCurrentFilters() {
     model: filterModel.value !== '__all__' ? filterModel.value : undefined,
     provider: filterProvider.value !== '__all__' ? filterProvider.value : undefined,
     api_format: filterApiFormat.value !== '__all__' ? filterApiFormat.value : undefined,
-    status: filterStatus.value !== '__all__' ? filterStatus.value : undefined
+    status: filterStatus.value !== '__all__' ? filterStatus.value : undefined,
+    client_family: filterClientFamily.value !== '__all__' ? filterClientFamily.value : undefined
   }
 }
 
@@ -841,6 +861,15 @@ async function handleFilterApiFormatChange(value: string) {
 
 async function handleFilterStatusChange(value: string) {
   filterStatus.value = value as FilterStatusValue
+  currentPage.value = 1
+
+  if (isAdminPage.value) {
+    await loadRecords({ page: 1, pageSize: pageSize.value }, getCurrentFilters(), timeRange.value)
+  }
+}
+
+async function handleFilterClientFamilyChange(value: string) {
+  filterClientFamily.value = value
   currentPage.value = 1
 
   if (isAdminPage.value) {

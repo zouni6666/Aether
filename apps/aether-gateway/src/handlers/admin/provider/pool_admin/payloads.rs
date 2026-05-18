@@ -3,7 +3,9 @@ use crate::handlers::admin::provider::shared::support::{
 };
 use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::{provider_key_status_snapshot_payload, unix_secs_to_rfc3339};
-use crate::provider_key_auth::{provider_key_auth_semantics, provider_key_effective_api_formats};
+use crate::provider_key_auth::{
+    provider_key_auth_semantics, provider_key_can_refresh_oauth, provider_key_effective_api_formats,
+};
 use aether_admin::provider::pool as admin_provider_pool_pure;
 use aether_admin::provider::quota as admin_provider_quota_pure;
 use aether_data_contracts::repository::pool_scores::StoredPoolMemberScore;
@@ -597,6 +599,185 @@ fn admin_pool_build_antigravity_account_quota_from_snapshot(
     ))
 }
 
+fn admin_pool_grok_quota_window_label(
+    window: &serde_json::Map<String, serde_json::Value>,
+) -> String {
+    let raw_code = window
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .trim_start_matches("model:")
+        .to_ascii_lowercase();
+    let raw_label = window
+        .get("label")
+        .or_else(|| window.get("model"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(raw_code.as_str())
+        .to_ascii_lowercase();
+    match raw_label.as_str() {
+        "quota_auto" | "auto" => "Auto".to_string(),
+        "quota_fast" | "fast" => "Fast".to_string(),
+        "quota_expert" | "expert" => "Expert".to_string(),
+        "quota_heavy" | "heavy" => "Heavy".to_string(),
+        "quota_grok_4_3" | "grok-420-computer-use-sa" => "Grok 4.3".to_string(),
+        _ => match raw_code.as_str() {
+            "quota_auto" | "auto" => "Auto".to_string(),
+            "quota_fast" | "fast" => "Fast".to_string(),
+            "quota_expert" | "expert" => "Expert".to_string(),
+            "quota_heavy" | "heavy" => "Heavy".to_string(),
+            "quota_grok_4_3" | "grok-420-computer-use-sa" => "Grok 4.3".to_string(),
+            _ => window
+                .get("label")
+                .or_else(|| window.get("model"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("模式")
+                .to_string(),
+        },
+    }
+}
+
+fn admin_pool_quota_window_remaining_percent(
+    window: &serde_json::Map<String, serde_json::Value>,
+) -> Option<f64> {
+    admin_pool_json_to_f64(window.get("remaining_ratio"))
+        .map(|value| (value * 100.0).clamp(0.0, 100.0))
+        .or_else(|| {
+            admin_pool_json_to_f64(window.get("used_ratio"))
+                .map(|value| ((1.0 - value) * 100.0).clamp(0.0, 100.0))
+        })
+        .or_else(|| {
+            admin_pool_json_to_f64(window.get("remaining_value"))
+                .zip(admin_pool_json_to_f64(window.get("limit_value")))
+                .and_then(|(remaining, limit)| {
+                    (limit > 0.0).then_some((remaining / limit * 100.0).clamp(0.0, 100.0))
+                })
+        })
+        .or_else(|| {
+            admin_pool_json_to_f64(window.get("used_value"))
+                .zip(admin_pool_json_to_f64(window.get("limit_value")))
+                .and_then(|(used, limit)| {
+                    (limit > 0.0).then_some(((1.0 - used / limit) * 100.0).clamp(0.0, 100.0))
+                })
+        })
+}
+
+fn admin_pool_quota_window_value_text(
+    window: &serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
+    let limit_value =
+        admin_pool_json_to_f64(window.get("limit_value")).filter(|value| *value > 0.0)?;
+    if let Some(remaining_value) = admin_pool_json_to_f64(window.get("remaining_value")) {
+        return Some(format!(
+            "{}/{}",
+            admin_pool_format_quota_value(remaining_value),
+            admin_pool_format_quota_value(limit_value),
+        ));
+    }
+    admin_pool_json_to_f64(window.get("used_value")).map(|used_value| {
+        format!(
+            "{}/{}",
+            admin_pool_format_quota_value((limit_value - used_value).max(0.0)),
+            admin_pool_format_quota_value(limit_value),
+        )
+    })
+}
+
+fn admin_pool_build_grok_account_quota_from_snapshot(
+    quota_snapshot: &serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
+    let code = quota_snapshot
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if code.eq_ignore_ascii_case("banned") {
+        return quota_snapshot
+            .get("label")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned)
+            .or_else(|| Some("账号已封禁".to_string()));
+    }
+    if code.eq_ignore_ascii_case("forbidden") {
+        return quota_snapshot
+            .get("label")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned)
+            .or_else(|| Some("访问受限".to_string()));
+    }
+
+    let model_parts = admin_pool_quota_windows(quota_snapshot)
+        .into_iter()
+        .filter(|window| {
+            window
+                .get("scope")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|scope| scope.eq_ignore_ascii_case("model"))
+        })
+        .filter_map(|window| {
+            let remaining_percent = admin_pool_quota_window_remaining_percent(window)?;
+            let mut part = format!(
+                "{}剩余 {}",
+                admin_pool_grok_quota_window_label(window),
+                admin_pool_format_percent(remaining_percent),
+            );
+            if let Some(value_text) = admin_pool_quota_window_value_text(window) {
+                part.push_str(&format!(" ({value_text})"));
+            }
+            Some(part)
+        })
+        .collect::<Vec<_>>();
+
+    if !model_parts.is_empty() {
+        return Some(model_parts.join(" | "));
+    }
+
+    let window = admin_pool_quota_window(quota_snapshot, "usage")
+        .or_else(|| admin_pool_quota_windows(quota_snapshot).into_iter().next())?;
+    let remaining_value = admin_pool_json_to_f64(window.get("remaining_value"));
+    let limit_value = admin_pool_json_to_f64(window.get("limit_value"));
+    if let (Some(remaining_value), Some(limit_value)) = (remaining_value, limit_value) {
+        if limit_value > 0.0 && remaining_value <= 0.0 {
+            return Some(format!(
+                "剩余 {}/{}",
+                admin_pool_format_quota_value(remaining_value),
+                admin_pool_format_quota_value(limit_value),
+            ));
+        }
+    }
+
+    if let Some(remaining_percent) = admin_pool_quota_window_remaining_percent(window) {
+        if let Some(value_text) = admin_pool_quota_window_value_text(window) {
+            return Some(format!(
+                "剩余 {} ({value_text})",
+                admin_pool_format_percent(remaining_percent),
+            ));
+        }
+        return Some(format!(
+            "剩余 {}",
+            admin_pool_format_percent(remaining_percent),
+        ));
+    }
+
+    match (remaining_value, limit_value) {
+        (Some(remaining_value), Some(limit_value)) if limit_value > 0.0 => Some(format!(
+            "剩余 {}/{}",
+            admin_pool_format_quota_value(remaining_value),
+            admin_pool_format_quota_value(limit_value),
+        )),
+        _ => quota_snapshot
+            .get("label")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+    }
+}
+
 fn admin_pool_build_gemini_cli_account_quota_from_snapshot(
     quota_snapshot: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<String> {
@@ -695,6 +876,13 @@ fn admin_pool_build_account_quota(
         "antigravity" => {
             if let Some(account_quota) =
                 admin_pool_build_antigravity_account_quota_from_snapshot(quota_snapshot)
+            {
+                return Some(account_quota);
+            }
+        }
+        "grok" => {
+            if let Some(account_quota) =
+                admin_pool_build_grok_account_quota_from_snapshot(quota_snapshot)
             {
                 return Some(account_quota);
             }
@@ -962,7 +1150,10 @@ pub(super) fn build_admin_pool_key_payload(
     );
     payload.insert(
         "can_refresh_oauth".to_string(),
-        json!(auth_semantics.can_refresh_oauth()),
+        json!(provider_key_can_refresh_oauth(
+            auth_semantics,
+            auth_config.as_ref()
+        )),
     );
     payload.insert(
         "can_export_oauth".to_string(),
@@ -1224,5 +1415,40 @@ mod tests {
         assert_eq!(usage["request_count"], json!(3));
         assert_eq!(usage["total_tokens"], json!(375));
         assert_eq!(usage["total_cost_usd"], json!("0.60000000"));
+    }
+
+    #[test]
+    fn grok_model_quota_is_rendered_for_pool_rows() {
+        let quota_snapshot = json!({
+            "provider_type": "grok",
+            "code": "ok",
+            "exhausted": false,
+            "plan_type": "heavy",
+            "pool_tier": "heavy",
+            "windows": [
+                {
+                    "code": "model:quota_auto",
+                    "label": "auto",
+                    "scope": "model",
+                    "remaining_ratio": 0.4,
+                    "used_value": 90,
+                    "limit_value": 150
+                },
+                {
+                    "code": "model:quota_heavy",
+                    "label": "heavy",
+                    "scope": "model",
+                    "remaining_ratio": 0.0,
+                    "used_value": 20,
+                    "limit_value": 20
+                }
+            ]
+        });
+        let quota_snapshot = quota_snapshot.as_object().unwrap();
+
+        assert_eq!(
+            admin_pool_build_account_quota("grok", Some(quota_snapshot)),
+            Some("Auto剩余 40.0% (60/150) | Heavy剩余 0.0% (0/20)".to_string())
+        );
     }
 }

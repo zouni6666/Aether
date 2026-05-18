@@ -10,6 +10,7 @@ use super::{
     build_auth_error_response, build_payment_callback_storage_unavailable_response, AppState,
     GatewayPublicRequestContext,
 };
+use tracing::warn;
 
 pub(super) async fn handle_payment_callback_with_wallet_repository(
     state: &AppState,
@@ -109,21 +110,30 @@ pub(super) async fn handle_payment_callback_with_wallet_repository(
             order_no,
             wallet_id,
             order,
-        } => build_auth_json_response(
-            http::StatusCode::OK,
-            json!({
-                "ok": true,
-                "duplicate": duplicate,
-                "credited": true,
-                "order_id": order_id,
-                "order_no": order_no,
-                "status": order.status,
-                "wallet_id": wallet_id,
-                "payment_method": payment_method,
-                "request_path": request_context.request_path,
-            }),
-            None,
-        ),
+        } => {
+            if let Err(err) = state.apply_referral_rewards_for_paid_order(&order).await {
+                warn!(
+                    error = ?err,
+                    order_id = %order_id,
+                    "failed to apply referral rewards for credited payment order"
+                );
+            }
+            build_auth_json_response(
+                http::StatusCode::OK,
+                json!({
+                    "ok": true,
+                    "duplicate": duplicate,
+                    "credited": true,
+                    "order_id": order_id,
+                    "order_no": order_no,
+                    "status": order.status,
+                    "wallet_id": wallet_id,
+                    "payment_method": payment_method,
+                    "request_path": request_context.request_path,
+                }),
+                None,
+            )
+        }
     }
 }
 

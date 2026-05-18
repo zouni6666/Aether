@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use super::super::provider_query_key_display_name;
 use super::{ProviderQueryExecutionOutcome, ProviderQueryTestCandidate};
 use serde_json::{json, Value};
@@ -40,9 +42,9 @@ pub(super) fn provider_query_test_attempt_payload(
         "status_code": execution.status_code,
         "latency_ms": execution.latency_ms,
         "request_url": execution.request_url,
-        "request_headers": execution.request_headers,
+        "request_headers": provider_query_redact_diagnostic_headers(&execution.request_headers),
         "request_body": execution.request_body,
-        "response_headers": execution.response_headers,
+        "response_headers": provider_query_redact_diagnostic_headers(&execution.response_headers),
         "response_body": execution.response_body,
     })
 }
@@ -170,6 +172,36 @@ fn provider_query_endpoint_route_payload(
     })
 }
 
+fn provider_query_redact_diagnostic_headers(
+    headers: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    headers
+        .iter()
+        .map(|(name, value)| {
+            if provider_query_header_is_sensitive(name) {
+                (name.clone(), "<redacted>".to_string())
+            } else {
+                (name.clone(), value.clone())
+            }
+        })
+        .collect()
+}
+
+fn provider_query_header_is_sensitive(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "authorization"
+            | "proxy-authorization"
+            | "cookie"
+            | "set-cookie"
+            | "x-api-key"
+            | "api-key"
+            | "x-goog-api-key"
+            | "anthropic-api-key"
+            | "openai-api-key"
+    )
+}
+
 pub(super) fn provider_query_candidate_summary_payload(
     total_candidates: usize,
     total_attempts: usize,
@@ -273,4 +305,38 @@ pub(super) fn provider_query_candidate_summary_payload(
             .cloned()
             .unwrap_or(Value::Null),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_query_diagnostic_headers_redact_credentials() {
+        let headers = BTreeMap::from([
+            ("cookie".to_string(), "sso=secret".to_string()),
+            ("authorization".to_string(), "Bearer secret".to_string()),
+            ("x-goog-api-key".to_string(), "secret".to_string()),
+            ("content-type".to_string(), "application/json".to_string()),
+        ]);
+
+        let redacted = provider_query_redact_diagnostic_headers(&headers);
+
+        assert_eq!(
+            redacted.get("cookie").map(String::as_str),
+            Some("<redacted>")
+        );
+        assert_eq!(
+            redacted.get("authorization").map(String::as_str),
+            Some("<redacted>")
+        );
+        assert_eq!(
+            redacted.get("x-goog-api-key").map(String::as_str),
+            Some("<redacted>")
+        );
+        assert_eq!(
+            redacted.get("content-type").map(String::as_str),
+            Some("application/json")
+        );
+    }
 }

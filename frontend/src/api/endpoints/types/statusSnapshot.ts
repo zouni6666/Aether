@@ -64,6 +64,7 @@ export interface QuotaStatusSnapshot {
   reset_at?: number | null
   reset_seconds?: number | null
   plan_type?: string | null
+  pool_tier?: string | null
   credits?: QuotaCreditsSnapshot | null
   windows?: QuotaWindowSnapshot[] | null
 }

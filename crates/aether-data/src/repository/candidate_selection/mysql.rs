@@ -445,6 +445,13 @@ fn key_auth_channel_matches(row: &CandidateSelectionRow, api_format: &str) -> bo
         "gemini_cli" | "antigravity" => {
             auth_type == "oauth" && api_format == "gemini:generate_content"
         }
+        "grok" => {
+            auth_type == "oauth"
+                && matches!(
+                    api_format.as_str(),
+                    "openai:chat" | "openai:responses" | "claude:messages" | "openai:image"
+                )
+        }
         "vertex_ai" => {
             (auth_type == "api_key"
                 && matches!(

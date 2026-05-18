@@ -139,6 +139,19 @@
       <!-- 分隔线 -->
       <div class="hidden sm:block h-4 w-px bg-border" />
 
+      <!-- 列显示配置（桌面端） -->
+      <MultiSelect
+        v-model="visibleColumnIds"
+        :options="columnSelectOptions"
+        placeholder="显示列"
+        trigger-class="hidden md:flex w-40 h-8 text-xs border-border/60"
+        dropdown-min-width="14rem"
+        :searchable="false"
+      />
+
+      <!-- 分隔线 -->
+      <div class="hidden sm:block h-4 w-px bg-border" />
+
       <!-- 自动刷新按钮 -->
       <Button
         variant="ghost"
@@ -293,35 +306,44 @@
     </div>
 
     <!-- 桌面端表格视图 -->
-    <Table :class="['hidden md:table table-fixed w-full', isAdmin ? 'min-w-[1120px]' : 'min-w-[960px]']">
+    <Table
+      class="hidden md:table table-fixed w-full"
+      :class="[desktopTableMinWidthClass]"
+    >
       <colgroup v-if="isAdmin">
-        <col class="w-[8%]">
-        <col class="w-[12%]">
-        <col class="w-[14%]">
-        <col class="w-[16%]">
-        <col class="w-[15%]">
-        <col class="w-[10%]">
-        <col class="w-[10%]">
-        <col class="w-[6%]">
-        <col class="w-[9%]">
+        <col v-if="isColumnVisible('time')" class="w-[8%]">
+        <col v-if="isColumnVisible('user')" class="w-[12%]">
+        <col v-if="isColumnVisible('model')" class="w-[14%]">
+        <col v-if="isColumnVisible('provider')" class="w-[16%]">
+        <col v-if="isColumnVisible('api_format')" class="w-[15%]">
+        <col v-if="isColumnVisible('status')" class="w-[10%]">
+        <col v-if="isColumnVisible('tokens')" class="w-[10%]">
+        <col v-if="isColumnVisible('cost')" class="w-[6%]">
+        <col v-if="isColumnVisible('performance')" class="w-[9%]">
+        <col v-if="isColumnVisible('client_family')" class="w-[12%]">
+        <col v-if="isColumnVisible('client_ip')" class="w-[10%]">
+        <col v-if="isColumnVisible('user_agent')" class="w-[13%]">
       </colgroup>
       <colgroup v-else>
-        <col class="w-[9%]">
-        <col class="w-[17%]">
-        <col class="w-[22%]">
-        <col class="w-[14%]">
-        <col class="w-[10%]">
-        <col class="w-[11%]">
-        <col class="w-[7%]">
-        <col class="w-[10%]">
+        <col v-if="isColumnVisible('time')" class="w-[9%]">
+        <col v-if="isColumnVisible('key')" class="w-[17%]">
+        <col v-if="isColumnVisible('model')" class="w-[22%]">
+        <col v-if="isColumnVisible('api_format')" class="w-[14%]">
+        <col v-if="isColumnVisible('status')" class="w-[10%]">
+        <col v-if="isColumnVisible('tokens')" class="w-[11%]">
+        <col v-if="isColumnVisible('cost')" class="w-[7%]">
+        <col v-if="isColumnVisible('performance')" class="w-[10%]">
+        <col v-if="isColumnVisible('client_family')" class="w-[12%]">
+        <col v-if="isColumnVisible('client_ip')" class="w-[10%]">
+        <col v-if="isColumnVisible('user_agent')" class="w-[13%]">
       </colgroup>
       <TableHeader>
         <TableRow class="border-b border-border/60 hover:bg-transparent">
-          <TableHead class="h-12 font-semibold w-[8%]">
+          <TableHead v-if="isColumnVisible('time')" class="h-12 font-semibold w-[8%]">
             时间
           </TableHead>
           <SortableTableHead
-            v-if="isAdmin"
+            v-if="isAdmin && isColumnVisible('user')"
             class="h-12 font-semibold w-[12%]"
             column-key="user"
             :sortable="false"
@@ -340,13 +362,15 @@
             </template>
           </SortableTableHead>
           <TableHead
-            v-if="!isAdmin"
+            v-if="!isAdmin && isColumnVisible('key')"
             class="h-12 font-semibold w-[17%]"
           >
             密钥
           </TableHead>
           <SortableTableHead
-            :class="['h-12 font-semibold', isAdmin ? 'w-[14%]' : 'w-[22%]']"
+            v-if="isColumnVisible('model')"
+            class="h-12 font-semibold"
+            :class="[isAdmin ? 'w-[14%]' : 'w-[22%]']"
             column-key="model"
             :sortable="false"
             :filter-active="filterModel !== '__all__'"
@@ -364,7 +388,7 @@
             </template>
           </SortableTableHead>
           <SortableTableHead
-            v-if="isAdmin"
+            v-if="isAdmin && isColumnVisible('provider')"
             class="h-12 font-semibold w-[16%]"
             column-key="provider"
             :sortable="false"
@@ -383,7 +407,9 @@
             </template>
           </SortableTableHead>
           <SortableTableHead
-            :class="['h-12 font-semibold', isAdmin ? 'w-[15%]' : 'w-[14%]']"
+            v-if="isColumnVisible('api_format')"
+            class="h-12 font-semibold"
+            :class="[isAdmin ? 'w-[15%]' : 'w-[14%]']"
             column-key="api_format"
             :sortable="false"
             :filter-active="filterApiFormat !== '__all__'"
@@ -401,6 +427,7 @@
             </template>
           </SortableTableHead>
           <SortableTableHead
+            v-if="isColumnVisible('status')"
             class="h-12 font-semibold w-[10%] text-center"
             column-key="status"
             :sortable="false"
@@ -419,24 +446,49 @@
               />
             </template>
           </SortableTableHead>
-          <TableHead class="h-12 font-semibold w-[10%] text-center">
+          <TableHead v-if="isColumnVisible('tokens')" class="h-12 font-semibold w-[10%] text-center">
             Tokens
           </TableHead>
-          <TableHead class="h-12 font-semibold w-[6%] text-right">
+          <TableHead v-if="isColumnVisible('cost')" class="h-12 font-semibold w-[6%] text-right">
             费用
           </TableHead>
-          <TableHead class="h-12 font-semibold w-[9%] text-right">
+          <TableHead v-if="isColumnVisible('performance')" class="h-12 font-semibold w-[9%] text-right">
             <div class="flex flex-col items-end text-xs gap-0.5">
               <span class="whitespace-nowrap">首字/总耗时</span>
               <span class="text-muted-foreground font-normal">输出速度</span>
             </div>
+          </TableHead>
+          <SortableTableHead
+            v-if="isColumnVisible('client_family')"
+            class="h-12 font-semibold w-[12%]"
+            column-key="client_family"
+            :sortable="false"
+            :filter-active="filterClientFamily !== '__all__'"
+            filter-title="筛选客户端"
+            filter-content-class="w-44 p-1 rounded-2xl border-border bg-card text-foreground shadow-2xl backdrop-blur-xl"
+          >
+            客户端
+            <template #filter="{ close }">
+              <TableFilterMenu
+                :model-value="filterClientFamily"
+                :options="clientFamilyFilterOptions"
+                @update:model-value="$emit('update:filterClientFamily', $event)"
+                @select="close"
+              />
+            </template>
+          </SortableTableHead>
+          <TableHead v-if="isColumnVisible('client_ip')" class="h-12 font-semibold w-[10%]">
+            IP 地址
+          </TableHead>
+          <TableHead v-if="isColumnVisible('user_agent')" class="h-12 font-semibold w-[13%]">
+            User-Agent
           </TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
         <TableRow v-if="records.length === 0">
           <TableCell
-            :colspan="isAdmin ? 9 : 8"
+            :colspan="visibleColumnCount"
             class="text-center py-12 text-muted-foreground"
           >
             暂无请求记录
@@ -450,7 +502,7 @@
           @mousedown="handleRowMouseDown($event, record.id)"
           @click="handleRowClick($event, record.id)"
         >
-          <TableCell class="py-4 w-[8%] align-top">
+          <TableCell v-if="isColumnVisible('time')" class="py-4 w-[8%] align-top">
             <div class="flex flex-col gap-0.5 leading-tight">
               <span class="text-xs text-foreground tabular-nums whitespace-nowrap">
                 {{ formatRecordTime(record.created_at) }}
@@ -461,7 +513,7 @@
             </div>
           </TableCell>
           <TableCell
-            v-if="isAdmin"
+            v-if="isAdmin && isColumnVisible('user')"
             class="py-4 w-[12%] truncate"
             :title="record.username || record.user_email || (record.user_id ? `User ${record.user_id}` : '已删除用户')"
           >
@@ -480,7 +532,7 @@
           </TableCell>
           <!-- 用户页面的密钥列 -->
           <TableCell
-            v-if="!isAdmin"
+            v-if="!isAdmin && isColumnVisible('key')"
             class="py-4 w-[17%]"
             :title="record.api_key?.name || '-'"
           >
@@ -495,7 +547,9 @@
             </div>
           </TableCell>
           <TableCell
-            :class="['font-medium py-4', isAdmin ? 'w-[14%]' : 'w-[22%]']"
+            v-if="isColumnVisible('model')"
+            class="font-medium py-4"
+            :class="[isAdmin ? 'w-[14%]' : 'w-[22%]']"
             :title="getModelTooltip(record)"
           >
             <div
@@ -525,7 +579,7 @@
             >{{ record.model }}</span>
           </TableCell>
           <TableCell
-            v-if="isAdmin"
+            v-if="isAdmin && isColumnVisible('provider')"
             class="py-4 w-[16%]"
           >
             <div class="flex min-w-0 items-center gap-1">
@@ -582,7 +636,9 @@
             </div>
           </TableCell>
           <TableCell
-            :class="['py-4', isAdmin ? 'w-[15%]' : 'w-[14%]']"
+            v-if="isColumnVisible('api_format')"
+            class="py-4"
+            :class="[isAdmin ? 'w-[15%]' : 'w-[14%]']"
             :title="getApiFormatTooltip(record)"
           >
             <!-- 有格式转换或同族格式差异：两行显示 -->
@@ -617,7 +673,7 @@
               class="text-muted-foreground text-xs"
             >-</span>
           </TableCell>
-          <TableCell class="text-center py-4 w-[10%]">
+          <TableCell v-if="isColumnVisible('status')" class="text-center py-4 w-[10%]">
             <!-- 优先显示请求状态 -->
             <Badge
               v-if="getDisplayStatus(record) === 'pending'"
@@ -668,7 +724,7 @@
               {{ getStreamModeLabel(record) }}
             </Badge>
           </TableCell>
-          <TableCell class="py-4 w-[10%]">
+          <TableCell v-if="isColumnVisible('tokens')" class="py-4 w-[10%]">
             <div class="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] gap-x-1 text-xs leading-tight tabular-nums">
               <span class="justify-self-end whitespace-nowrap text-right">
                 {{ formatTokens(getRecordEffectiveInputTokens(record)) }}
@@ -682,8 +738,8 @@
             </div>
             <div class="mt-0.5 grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] gap-x-1 text-xs leading-tight tabular-nums text-muted-foreground">
               <span
+                class="justify-self-end whitespace-nowrap text-right"
                 :class="[
-                  'justify-self-end whitespace-nowrap text-right',
                   hasPositiveTokens(getRecordCacheReadTokens(record)) ? 'text-foreground/70' : ''
                 ]"
               >
@@ -693,8 +749,8 @@
                 /
               </span>
               <span
+                class="justify-self-start whitespace-nowrap text-left"
                 :class="[
-                  'justify-self-start whitespace-nowrap text-left',
                   hasPositiveTokens(getRecordCacheCreationTokens(record)) ? 'text-foreground/70' : ''
                 ]"
               >
@@ -702,7 +758,7 @@
               </span>
             </div>
           </TableCell>
-          <TableCell class="text-right py-4 w-[6%]">
+          <TableCell v-if="isColumnVisible('cost')" class="text-right py-4 w-[6%]">
             <div class="flex flex-col items-end text-xs gap-0.5">
               <span class="text-primary font-medium">{{ formatCurrency(record.cost || 0) }}</span>
               <span
@@ -713,7 +769,7 @@
               </span>
             </div>
           </TableCell>
-          <TableCell class="text-right py-4 w-[9%]">
+          <TableCell v-if="isColumnVisible('performance')" class="text-right py-4 w-[9%]">
             <!-- pending/streaming 状态：首字与动态总耗时保留在同一行 -->
             <div
               v-if="getDisplayStatus(record) === 'pending' || getDisplayStatus(record) === 'streaming'"
@@ -746,6 +802,32 @@
               class="text-muted-foreground"
             >-</span>
           </TableCell>
+          <TableCell
+            v-if="isColumnVisible('client_family')"
+            class="py-4 w-[12%] text-xs"
+            :title="formatClientFamily(record.client_family)"
+          >
+            <Badge
+              variant="outline"
+              class="w-fit max-w-full border-border/60 text-muted-foreground"
+            >
+              <span class="truncate">{{ formatClientFamily(record.client_family) }}</span>
+            </Badge>
+          </TableCell>
+          <TableCell
+            v-if="isColumnVisible('client_ip')"
+            class="py-4 w-[10%] text-xs truncate"
+            :title="record.client_ip || '-'"
+          >
+            {{ record.client_ip || '-' }}
+          </TableCell>
+          <TableCell
+            v-if="isColumnVisible('user_agent')"
+            class="py-4 w-[13%] text-xs truncate"
+            :title="record.user_agent || '-'"
+          >
+            {{ formatUserAgent(record.user_agent) }}
+          </TableCell>
         </TableRow>
       </TableBody>
     </Table>
@@ -768,7 +850,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import { useDebounceFn } from '@vueuse/core'
+import { useDebounceFn, useLocalStorage } from '@vueuse/core'
 import {
   TableCard,
   Badge,
@@ -808,7 +890,8 @@ import {
 import { useRowClick } from '@/composables/useRowClick'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
 import type { DateRangeParams, UsageRecord } from '../types'
-import { TimeRangePicker } from '@/components/common'
+import { MultiSelect, TimeRangePicker } from '@/components/common'
+import type { MultiSelectOption } from '@/components/common/MultiSelect.vue'
 import ElapsedTimeText from './ElapsedTimeText.vue'
 import ServerUserSelector from './ServerUserSelector.vue'
 
@@ -824,6 +907,67 @@ interface FilterOption {
   disabled?: boolean
 }
 
+type UsageRecordColumnId =
+  | 'time'
+  | 'user'
+  | 'key'
+  | 'model'
+  | 'provider'
+  | 'api_format'
+  | 'status'
+  | 'tokens'
+  | 'cost'
+  | 'performance'
+  | 'client_family'
+  | 'client_ip'
+  | 'user_agent'
+
+interface UsageRecordColumnOption {
+  id: UsageRecordColumnId
+  label: string
+  adminOnly?: boolean
+  userOnly?: boolean
+}
+
+const USAGE_RECORD_COLUMN_OPTIONS: UsageRecordColumnOption[] = [
+  { id: 'time', label: '时间' },
+  { id: 'user', label: '用户', adminOnly: true },
+  { id: 'key', label: '密钥', userOnly: true },
+  { id: 'model', label: '模型' },
+  { id: 'provider', label: '提供商', adminOnly: true },
+  { id: 'api_format', label: 'API格式' },
+  { id: 'status', label: '类型/状态' },
+  { id: 'tokens', label: 'Tokens' },
+  { id: 'cost', label: '费用' },
+  { id: 'performance', label: '耗时/速度' },
+  { id: 'client_family', label: '客户端类型' },
+  { id: 'client_ip', label: 'IP 地址' },
+  { id: 'user_agent', label: 'User-Agent' },
+]
+
+const DEFAULT_ADMIN_COLUMNS: UsageRecordColumnId[] = [
+  'time',
+  'user',
+  'model',
+  'provider',
+  'api_format',
+  'status',
+  'tokens',
+  'cost',
+  'performance',
+]
+
+const DEFAULT_USER_COLUMNS: UsageRecordColumnId[] = [
+  'time',
+  'key',
+  'model',
+  'api_format',
+  'status',
+  'tokens',
+  'cost',
+  'performance',
+]
+
 const props = defineProps<{
   records: UsageRecord[]
   isAdmin: boolean
@@ -838,9 +982,11 @@ const props = defineProps<{
   filterProvider: string
   filterApiFormat: string
   filterStatus: string
+  filterClientFamily: string
   availableUsers: UserOption[]
   availableModels: string[]
   availableProviders: string[]
+  availableClientFamilies: string[]
   // 分页
   currentPage: number
   pageSize: number
@@ -858,6 +1004,7 @@ const emit = defineEmits<{
   'update:filterProvider': [value: string]
   'update:filterApiFormat': [value: string]
   'update:filterStatus': [value: string]
+  'update:filterClientFamily': [value: string]
   'update:currentPage': [value: number]
   'update:pageSize': [value: number]
   'update:autoRefresh': [value: boolean]
@@ -881,6 +1028,74 @@ const AVAILABLE_API_FORMATS = [
 // 使用模块级常量
 const availableApiFormats = AVAILABLE_API_FORMATS
 
+const adminVisibleColumnIds = useLocalStorage<UsageRecordColumnId[]>(
+  'usage-records-visible-columns-admin',
+  DEFAULT_ADMIN_COLUMNS,
+)
+const userVisibleColumnIds = useLocalStorage<UsageRecordColumnId[]>(
+  'usage-records-visible-columns-user',
+  DEFAULT_USER_COLUMNS,
+)
+
+const roleColumnOptions = computed(() => USAGE_RECORD_COLUMN_OPTIONS.filter((column) => {
+  if (column.adminOnly && !props.isAdmin) return false
+  if (column.userOnly && props.isAdmin) return false
+  return true
+}))
+
+const roleColumnIds = computed(() => new Set(roleColumnOptions.value.map(column => column.id)))
+
+function sanitizeColumnIds(
+  ids: readonly string[],
+  fallback: readonly UsageRecordColumnId[],
+): UsageRecordColumnId[] {
+  const seen = new Set<UsageRecordColumnId>()
+  const sanitized = ids.filter((id): id is UsageRecordColumnId => {
+    if (!roleColumnIds.value.has(id as UsageRecordColumnId)) return false
+    if (seen.has(id as UsageRecordColumnId)) return false
+    seen.add(id as UsageRecordColumnId)
+    return true
+  })
+  return sanitized.length > 0 ? sanitized : [...fallback]
+}
+
+const visibleColumnIds = computed<UsageRecordColumnId[]>({
+  get: () => sanitizeColumnIds(
+    props.isAdmin ? adminVisibleColumnIds.value : userVisibleColumnIds.value,
+    props.isAdmin ? DEFAULT_ADMIN_COLUMNS : DEFAULT_USER_COLUMNS,
+  ),
+  set: (value) => {
+    const sanitized = sanitizeColumnIds(value, props.isAdmin ? DEFAULT_ADMIN_COLUMNS : DEFAULT_USER_COLUMNS)
+    if (props.isAdmin) {
+      adminVisibleColumnIds.value = sanitized
+    } else {
+      userVisibleColumnIds.value = sanitized
+    }
+  },
+})
+
+const visibleColumnSet = computed(() => new Set<UsageRecordColumnId>(visibleColumnIds.value))
+const visibleColumnCount = computed(() => visibleColumnIds.value.length)
+const desktopTableMinWidthClass = computed(() => {
+  const metadataColumnCount = visibleColumnIds.value.filter(column => (
+    column === 'client_family' ||
+    column === 'client_ip' ||
+    column === 'user_agent'
+  )).length
+  if (metadataColumnCount >= 3) return 'min-w-[1520px]'
+  if (metadataColumnCount > 0) return 'min-w-[1320px]'
+  return props.isAdmin ? 'min-w-[1120px]' : 'min-w-[960px]'
+})
+
+const columnSelectOptions = computed<MultiSelectOption[]>(() => roleColumnOptions.value.map(column => ({
+  value: column.id,
+  label: column.label,
+})))
+
+function isColumnVisible(column: UsageRecordColumnId): boolean {
+  return visibleColumnSet.value.has(column)
+}
+
 const modelFilterOptions = computed<FilterOption[]>(() => [
   { value: '__all__', label: '全部模型' },
   ...props.availableModels.map((model) => ({
@@ -896,6 +1111,34 @@ const providerFilterOptions = computed<FilterOption[]>(() => [
     label: provider,
   })),
 ])
+
+function formatClientFamily(value: string | null | undefined): string {
+  const normalized = value?.trim().toLowerCase()
+  if (!normalized) return '-'
+  if (normalized === 'codex') return 'Codex'
+  if (normalized === 'codex_vscode') return 'Codex VS Code'
+  if (normalized === 'claude_code') return 'Claude Code'
+  if (normalized === 'opencode') return 'OpenCode'
+  if (normalized === 'gemini_cli') return 'Gemini CLI'
+  if (normalized === 'openai_js_sdk') return 'OpenAI JS SDK'
+  if (normalized === 'generic') return '通用客户端'
+  return value?.trim() || '-'
+}
+
+const clientFamilyFilterOptions = computed<FilterOption[]>(() => {
+  const families = new Set<string>(props.availableClientFamilies)
+  props.records.forEach((record) => {
+    const family = record.client_family?.trim()
+    if (family) families.add(family)
+  })
+  return [
+    { value: '__all__', label: '全部客户端' },
+    ...Array.from(families).sort().map((family) => ({
+      value: family,
+      label: formatClientFamily(family),
+    })),
+  ]
+})
 
 const apiFormatFilterOptions = computed<FilterOption[]>(() => [
   { value: '__all__', label: '全部格式' },
@@ -1046,6 +1289,12 @@ function formatOutputRateTokensPerSecond(outputRate: number | null | undefined):
   const value = formatOutputRateValue(outputRate)
   if (value === '-') return value
   return `${value} tokens/s`
+}
+
+function formatUserAgent(value: string | null | undefined): string {
+  const userAgent = value?.trim()
+  if (!userAgent) return '-'
+  return userAgent.length > 48 ? `${userAgent.slice(0, 45)}...` : userAgent
 }
 
 // useDebounceFn 自动处理清理，无需 onUnmounted

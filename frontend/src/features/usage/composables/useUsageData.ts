@@ -30,6 +30,7 @@ export interface FilterParams {
   provider?: string
   api_format?: string
   status?: string
+  client_family?: string
 }
 
 function isUsageProviderVisible(provider: string | undefined | null): provider is string {
@@ -370,6 +371,9 @@ export function useUsageData(options: UseUsageDataOptions) {
         }
         if (filters?.status) {
           params.status = filters.status
+        }
+        if (filters?.client_family) {
+          params.client_family = filters.client_family
         }
 
         const response = await usageApi.getAllUsageRecords(params)

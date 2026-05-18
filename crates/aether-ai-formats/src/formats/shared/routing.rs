@@ -201,10 +201,7 @@ pub fn resolve_execution_runtime_sync_plan_kind(
     if route_family == Some("openai")
         && route_kind == Some("image")
         && *method == Method::POST
-        && matches!(
-            path,
-            "/v1/images/generations" | "/v1/images/edits" | "/v1/images/variations"
-        )
+        && matches!(path, "/v1/images/generations" | "/v1/images/edits")
     {
         return Some(OPENAI_IMAGE_SYNC_PLAN_KIND);
     }
@@ -770,7 +767,7 @@ mod tests {
                 &Method::POST,
                 "/v1/images/variations",
             ),
-            Some(OPENAI_IMAGE_SYNC_PLAN_KIND)
+            None
         );
         assert!(supports_sync_execution_decision_kind(
             OPENAI_IMAGE_SYNC_PLAN_KIND

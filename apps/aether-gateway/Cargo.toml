@@ -23,6 +23,7 @@ aether-oauth.workspace = true
 aether-pool-core.workspace = true
 aether-provider-pool.workspace = true
 aether-provider-transport.workspace = true
+aether-routing-core.workspace = true
 aether-scheduler-core.workspace = true
 aether-runtime.workspace = true
 aether-runtime-state.workspace = true
@@ -64,6 +65,8 @@ tracing.workspace = true
 url.workspace = true
 uuid.workspace = true
 webpki-roots.workspace = true
+wreq.workspace = true
+wreq-util.workspace = true
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.6"

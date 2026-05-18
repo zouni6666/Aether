@@ -82,6 +82,18 @@ pub(crate) fn build_local_execution_report_context(
         .client_session_affinity
         .and_then(client_session_affinity_report_context_value)
     {
+        if let Some(client_family) = value
+            .as_object()
+            .and_then(|object| object.get("client_family"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|client_family| !client_family.is_empty())
+        {
+            extra_fields.insert(
+                "client_family".to_string(),
+                Value::String(client_family.to_ascii_lowercase()),
+            );
+        }
         extra_fields.insert(
             CLIENT_SESSION_AFFINITY_REPORT_CONTEXT_FIELD.to_string(),
             value,

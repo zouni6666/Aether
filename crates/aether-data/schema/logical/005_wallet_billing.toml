@@ -770,6 +770,10 @@ columns = ["user_entitlement_id", "request_id"]
 name = "idx_entitlement_usage_user_date"
 columns = ["user_id", "usage_date"]
 
+[[table.entitlement_usage_ledgers.indexes]]
+name = "idx_entitlement_usage_entitlement_date"
+columns = ["user_entitlement_id", "usage_date"]
+
 [[table.payment_callbacks.indexes]]
 name = "idx_payment_callbacks_order"
 columns = ["order_no"]

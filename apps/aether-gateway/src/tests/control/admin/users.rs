@@ -568,6 +568,121 @@ async fn gateway_allows_default_user_group_access_policy_updates() {
 }
 
 #[tokio::test]
+async fn gateway_allows_removing_default_group_members_when_other_group_remains() {
+    let upstream = Router::new().fallback(any(|_request: Request| async {
+        (StatusCode::OK, Body::from("unexpected upstream hit"))
+    }));
+
+    let user_repository = Arc::new(
+        InMemoryUserReadRepository::seed_auth_users(vec![
+            sample_admin_user_with_role("admin-1", "admin", "admin@example.com", "admin"),
+            sample_admin_user_with_role("user-2", "user", "bob@example.com", "bob"),
+            sample_admin_user_with_role("user-3", "user", "carol@example.com", "carol"),
+        ])
+        .with_export_users(vec![
+            sample_admin_export_user_with("admin", true, "admin-1", "admin@example.com", "admin"),
+            sample_admin_export_user_with("user", true, "user-2", "bob@example.com", "bob"),
+            sample_admin_export_user_with("user", true, "user-3", "carol@example.com", "carol"),
+        ]),
+    );
+    let default_group = user_repository
+        .create_user_group(UpsertUserGroupRecord {
+            name: "Default".to_string(),
+            description: None,
+            priority: 0,
+            allowed_providers: None,
+            allowed_providers_mode: "unrestricted".to_string(),
+            allowed_api_formats: None,
+            allowed_api_formats_mode: "unrestricted".to_string(),
+            allowed_models: None,
+            allowed_models_mode: "unrestricted".to_string(),
+            rate_limit: None,
+            rate_limit_mode: "system".to_string(),
+        })
+        .await
+        .expect("default group should create")
+        .expect("default group should exist");
+    let team_group = user_repository
+        .create_user_group(UpsertUserGroupRecord {
+            name: "Team".to_string(),
+            description: None,
+            priority: 0,
+            allowed_providers: None,
+            allowed_providers_mode: "unrestricted".to_string(),
+            allowed_api_formats: None,
+            allowed_api_formats_mode: "unrestricted".to_string(),
+            allowed_models: None,
+            allowed_models_mode: "unrestricted".to_string(),
+            rate_limit: None,
+            rate_limit_mode: "system".to_string(),
+        })
+        .await
+        .expect("team group should create")
+        .expect("team group should exist");
+    user_repository
+        .add_user_to_group(&team_group.id, "user-2")
+        .await
+        .expect("team membership should create");
+
+    let (upstream_url, upstream_handle) = start_server(upstream).await;
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_user_reader_for_tests(user_repository.clone())
+                    .with_system_config_values_for_tests(vec![(
+                        crate::constants::DEFAULT_USER_GROUP_CONFIG_KEY.to_string(),
+                        json!(default_group.id),
+                    )]),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+
+    user_repository
+        .add_user_to_group(&default_group.id, "user-2")
+        .await
+        .expect("default membership should create");
+    user_repository
+        .add_user_to_group(&default_group.id, "user-3")
+        .await
+        .expect("default membership should create");
+
+    let remove_user_with_other_group = client
+        .put(format!(
+            "{gateway_url}/api/admin/user-groups/{}/members",
+            default_group.id
+        ))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({ "user_ids": ["user-3"] }))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(remove_user_with_other_group.status(), StatusCode::OK);
+
+    let reject_groupless_user = client
+        .put(format!(
+            "{gateway_url}/api/admin/user-groups/{}/members",
+            default_group.id
+        ))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({ "user_ids": [] }))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(reject_groupless_user.status(), StatusCode::BAD_REQUEST);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_resolves_admin_user_batch_selection_locally() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);

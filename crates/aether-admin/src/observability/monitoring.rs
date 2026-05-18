@@ -727,6 +727,7 @@ pub fn build_admin_monitoring_system_status_payload_response(
     active_streams: usize,
     path_prefixes: &[&str],
     recent_errors: usize,
+    usage_counter: Value,
 ) -> Response<Body> {
     Json(json!({
         "timestamp": timestamp.to_rfc3339(),
@@ -757,6 +758,7 @@ pub fn build_admin_monitoring_system_status_payload_response(
             "path_prefixes": path_prefixes,
         },
         "recent_errors": recent_errors,
+        "usage_counter": usage_counter,
     }))
     .into_response()
 }

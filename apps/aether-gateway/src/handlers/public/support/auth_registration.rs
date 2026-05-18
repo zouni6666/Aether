@@ -18,6 +18,9 @@ struct AuthRegisterRequest {
     username: String,
     password: String,
     turnstile_token: Option<String>,
+    invite_code: Option<String>,
+    privacy_policy_accepted: Option<bool>,
+    privacy_policy_version: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -129,6 +132,26 @@ pub(crate) fn validate_auth_register_password(password: &str, policy: &str) -> R
         }
     }
     Ok(())
+}
+
+struct RegistrationPrivacyPolicySettings {
+    enabled: bool,
+    version: String,
+}
+
+async fn read_registration_privacy_policy_settings(
+    state: &AppState,
+) -> Result<RegistrationPrivacyPolicySettings, GatewayError> {
+    let enabled = state
+        .read_system_config_json_value("registration_privacy_policy_enabled")
+        .await?;
+    let version = state
+        .read_system_config_json_value("registration_privacy_policy_version")
+        .await?;
+    Ok(RegistrationPrivacyPolicySettings {
+        enabled: system_config_bool(enabled.as_ref(), false),
+        version: system_config_string(version.as_ref()).unwrap_or_else(|| "1".to_string()),
+    })
 }
 
 pub(crate) async fn auth_password_policy_level(state: &AppState) -> Result<String, GatewayError> {
@@ -388,6 +411,31 @@ pub(super) async fn handle_auth_register(
     if !enable_registration {
         return build_auth_error_response(http::StatusCode::FORBIDDEN, "系统暂不开放注册", false);
     }
+    let privacy_policy = match read_registration_privacy_policy_settings(state).await {
+        Ok(value) => value,
+        Err(err) => {
+            return build_auth_error_response(
+                http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("auth settings lookup failed: {err:?}"),
+                false,
+            );
+        }
+    };
+    if privacy_policy.enabled {
+        let accepted = payload.privacy_policy_accepted.unwrap_or(false);
+        let accepted_version = payload
+            .privacy_policy_version
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default();
+        if !accepted || accepted_version != privacy_policy.version {
+            return build_auth_error_response(
+                http::StatusCode::BAD_REQUEST,
+                "请先阅读并同意当前版本的隐私政策",
+                false,
+            );
+        }
+    }
 
     if let Err(response) = verify_auth_turnstile(
         state,
@@ -554,6 +602,63 @@ pub(super) async fn handle_auth_register(
             format!("auth default user group assignment failed: {err:?}"),
             false,
         );
+    }
+    if privacy_policy.enabled {
+        match state
+            .record_user_privacy_policy_acceptance(&user.id, &privacy_policy.version)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                let _ = state.delete_local_auth_user(&user.id).await;
+                return build_auth_error_response(
+                    http::StatusCode::SERVICE_UNAVAILABLE,
+                    AUTH_REGISTRATION_STORAGE_UNAVAILABLE_DETAIL,
+                    false,
+                );
+            }
+            Err(err) => {
+                let _ = state.delete_local_auth_user(&user.id).await;
+                return build_auth_error_response(
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("auth privacy policy acceptance failed: {err:?}"),
+                    false,
+                );
+            }
+        }
+    }
+    let invite_code = payload
+        .invite_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if invite_code.is_some() {
+        let source = json!({
+            "channel": "registration",
+            "ip": cf_connecting_ip,
+            "user_agent": headers
+                .get(http::header::USER_AGENT)
+                .and_then(|value| value.to_str().ok()),
+        });
+        if let Err(err) = state
+            .bind_referral_invite_after_registration(
+                &user.id,
+                user.email_verified,
+                invite_code,
+                Some(source),
+            )
+            .await
+        {
+            let _ = state.delete_local_auth_user(&user.id).await;
+            let (status, detail) = match err {
+                GatewayError::Client { status, message } => (status, message),
+                other => (
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("auth referral binding failed: {other:?}"),
+                ),
+            };
+            return build_auth_error_response(status, detail, false);
+        }
     }
 
     if require_verification {

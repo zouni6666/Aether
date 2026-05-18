@@ -51,7 +51,7 @@
               @update:model-value="(v: string) => { selectedProxyNodeId = v; proxyPopoverOpen = false }"
             />
             <p class="text-[10px] text-muted-foreground">
-              {{ selectedProxyNodeId ? '授权、刷新、额度查询均走此代理' : '未设置，依次回退到提供商代理 → 系统代理' }}
+              {{ selectedProxyNodeId ? `${providerCredentialActionLabel}、刷新、额度查询均走此代理` : '未设置，依次回退到提供商代理 → 系统代理' }}
             </p>
           </div>
         </PopoverContent>
@@ -60,7 +60,10 @@
 
     <div class="space-y-4">
       <!-- Tab 切换 -->
-      <div class="flex rounded-lg border border-border p-0.5 bg-muted/30">
+      <div
+        v-if="showAuthorizationMode"
+        class="flex rounded-lg border border-border p-0.5 bg-muted/30"
+      >
         <button
           class="flex-1 px-3 py-1.5 text-xs font-medium rounded-md transition-all"
           :class="[
@@ -79,7 +82,7 @@
             : 'text-muted-foreground hover:text-foreground'"
           @click="switchMode('import')"
         >
-          导入授权
+          {{ importModeLabel }}
         </button>
       </div>
 
@@ -458,11 +461,12 @@
             v-model="importText"
             :disabled="importing"
             :reset-key="importInputResetKey"
-            drop-title="拖入授权文件或点击选择"
-            drop-hint="支持 .json / .txt，可多选"
-            manual-placeholder="粘贴 Refresh Token / Access Token 或 JSON 内容"
-            paste-toggle-text="或手动粘贴 Token"
-            file-toggle-text="或选择 JSON 文件导入"
+            :drop-title="importDropTitle"
+            :drop-hint="importDropHint"
+            :manual-placeholder="importManualPlaceholder"
+            :manual-description="importManualDescription"
+            :paste-toggle-text="importPasteToggleText"
+            :file-toggle-text="importFileToggleText"
             textarea-class="min-h-[200px] text-xs font-mono break-all !rounded-xl"
             @error="handleImportInputError"
           />
@@ -523,7 +527,7 @@
         取消
       </Button>
       <Button
-        v-if="mode === 'oauth' && !isKiroProvider"
+        v-if="mode === 'oauth' && showAuthorizationMode && !isKiroProvider"
         :disabled="!canCompleteOAuth"
         @click="handleCompleteOAuth"
       >
@@ -541,7 +545,7 @@
         :disabled="!canImport"
         @click="handleImport"
       >
-        {{ importing ? (importTask ? `导入中 ${importTask.progress_percent}%` : '导入中...') : '导入' }}
+        {{ importing ? (importTask ? `导入中 ${importTask.progress_percent}%` : '导入中...') : importButtonLabel }}
       </Button>
     </template>
   </Dialog>
@@ -644,7 +648,7 @@ function getSelectedNodeLabel(): string {
 
 // 模式
 type DialogMode = 'oauth' | 'import'
-const mode = ref<DialogMode>('oauth')
+const mode = ref<DialogMode>((props.providerType || '').toLowerCase() === 'grok' ? 'import' : 'oauth')
 
 // OAuth 状态
 interface OAuthState {
@@ -736,6 +740,9 @@ const importPolling = ref(false)
 const isOpen = computed(() => props.open)
 
 const isKiroProvider = computed(() => (props.providerType || '').toLowerCase() === 'kiro')
+const isGrokProvider = computed(() => (props.providerType || '').toLowerCase() === 'grok')
+const showAuthorizationMode = computed(() => !isGrokProvider.value)
+const defaultMode = computed<DialogMode>(() => (isGrokProvider.value ? 'import' : 'oauth'))
 
 const isSocialDeviceAuth = computed(() =>
   device.value.auth_type === 'google' || device.value.auth_type === 'github'
@@ -781,6 +788,32 @@ const canCompleteKiroSocialDeviceAuth = computed(() => {
 const canImport = computed(() => {
   return importText.value.trim().length > 0 && !importing.value
 })
+
+const importModeLabel = computed(() => (isGrokProvider.value ? '导入账号' : '导入授权'))
+const importButtonLabel = computed(() => (isGrokProvider.value ? '导入账号' : '导入'))
+const importDropTitle = computed(() => (
+  isGrokProvider.value ? '拖入 Grok 账号文件或点击选择' : '拖入授权文件或点击选择'
+))
+const importDropHint = computed(() => (
+  isGrokProvider.value ? '支持 .json / .txt，可多选、批量导入' : '支持 .json / .txt，可多选'
+))
+const importManualPlaceholder = computed(() => (
+  isGrokProvider.value
+    ? '粘贴 Grok sso/session token，支持每行一个；或粘贴包含 token、sso_token、access_token、plan_type、pool_tier 的 JSON'
+    : '粘贴 Refresh Token / Access Token 或 JSON 内容'
+))
+const importManualDescription = computed(() => (
+  isGrokProvider.value
+    ? 'plan_type / pool_tier 会作为账号套餐与能力特征保存，不是路由池选择。'
+    : ''
+))
+const importPasteToggleText = computed(() => (
+  isGrokProvider.value ? '或手动粘贴 Grok Token' : '或手动粘贴 Token'
+))
+const importFileToggleText = computed(() => (
+  isGrokProvider.value ? '或选择 Grok Token 文件导入' : '或选择 JSON 文件导入'
+))
+const providerCredentialActionLabel = computed(() => (isGrokProvider.value ? '导入' : '授权'))
 
 function stopImportPolling() {
   if (importPollTimer) {
@@ -923,7 +956,7 @@ function resetDeviceRuntimeState() {
   device.value.error = ''
 }
 
-function isKiroDeviceAuthOptionDisabled(authType: DeviceAuthType): boolean {
+function isKiroDeviceAuthOptionDisabled(_authType: DeviceAuthType): boolean {
   if (device.value.starting) {
     return !isSocialDeviceAuth.value
   }
@@ -976,11 +1009,12 @@ function resetForm() {
   importInputResetKey.value += 1
   proxyPopoverOpen.value = false
   selectedProxyNodeId.value = ''
-  mode.value = 'oauth'
+  mode.value = defaultMode.value
 }
 
 function switchMode(newMode: DialogMode) {
   if (mode.value === newMode) return
+  if (newMode === 'oauth' && !showAuthorizationMode.value) return
 
   mode.value = newMode
   if (newMode === 'oauth') {
@@ -1011,6 +1045,7 @@ function openAuthorizationUrl() {
 
 async function initOAuth() {
   if (!props.providerId) return
+  if (!showAuthorizationMode.value) return
   if (isKiroProvider.value) return
   if (oauth.value.starting) return
 
@@ -1095,6 +1130,12 @@ function parseImportText(text: string): {
   account_id?: string
   account_user_id?: string
   plan_type?: string
+  pool_tier?: string
+  sso_rw_token?: string
+  cf_cookies?: string
+  cf_clearance?: string
+  user_agent?: string
+  browser_profile?: string
   user_id?: string
   account_name?: string
 } | null {
@@ -1106,30 +1147,50 @@ function parseImportText(text: string): {
     return { refresh_token: trimmed }
   }
 
+  if (isGrokProvider.value) {
+    const cookieImport = parseGrokCookieImport(trimmed)
+    if (cookieImport) {
+      return cookieImport
+    }
+  }
+
   try {
     const parsed: unknown = JSON.parse(trimmed)
     if (typeof parsed === 'object' && parsed !== null) {
       const obj = parsed as Record<string, unknown>
+      const grokCookieImport = isGrokProvider.value
+        ? parseGrokCookieImport(normalizeStringField(obj.cookie) ?? normalizeStringField(obj.cookieHeader) ?? '')
+        : null
       const refreshToken = obj.refresh_token
       const refreshTokenCamel = obj.refreshToken
       const accessToken = obj.access_token
       const accessTokenCamel = obj.accessToken
+      const grokSsoToken = isGrokProvider.value
+        ? normalizeStringField(obj.sso_token) ?? normalizeStringField(obj.ssoToken) ?? normalizeStringField(obj.token) ?? grokCookieImport?.access_token
+        : undefined
       const normalizedRefreshToken = typeof refreshToken === 'string' && refreshToken.trim()
         ? refreshToken.trim()
         : (typeof refreshTokenCamel === 'string' && refreshTokenCamel.trim() ? refreshTokenCamel.trim() : undefined)
       const normalizedAccessToken = typeof accessToken === 'string' && accessToken.trim()
         ? accessToken.trim()
         : (typeof accessTokenCamel === 'string' && accessTokenCamel.trim() ? accessTokenCamel.trim() : undefined)
-      if (normalizedRefreshToken || normalizedAccessToken) {
+      const importedAccessToken = normalizedAccessToken ?? grokSsoToken
+      if (normalizedRefreshToken || importedAccessToken) {
         return {
           refresh_token: normalizedRefreshToken,
-          access_token: normalizedAccessToken,
+          access_token: importedAccessToken,
           expires_at: normalizeNumberField(obj.expires_at) ?? normalizeNumberField(obj.expiresAt),
           name: (typeof obj.name === 'string' ? obj.name : undefined) || (typeof obj.oauth_email === 'string' ? obj.oauth_email : undefined),
           email: normalizeStringField(obj.email) ?? normalizeStringField(obj.oauth_email),
           account_id: normalizeStringField(obj.account_id) ?? normalizeStringField(obj.accountId) ?? normalizeStringField(obj.chatgpt_account_id) ?? normalizeStringField(obj.chatgptAccountId),
           account_user_id: normalizeStringField(obj.account_user_id) ?? normalizeStringField(obj.accountUserId) ?? normalizeStringField(obj.chatgpt_account_user_id) ?? normalizeStringField(obj.chatgptAccountUserId),
           plan_type: normalizeStringField(obj.plan_type) ?? normalizeStringField(obj.planType) ?? normalizeStringField(obj.chatgpt_plan_type) ?? normalizeStringField(obj.chatgptPlanType),
+          pool_tier: isGrokProvider.value ? normalizeStringField(obj.pool_tier) ?? normalizeStringField(obj.poolTier) ?? normalizeStringField(obj.tier) : undefined,
+          sso_rw_token: isGrokProvider.value ? normalizeStringField(obj.sso_rw_token) ?? normalizeStringField(obj.ssoRwToken) ?? grokCookieImport?.sso_rw_token : undefined,
+          cf_cookies: isGrokProvider.value ? normalizeStringField(obj.cf_cookies) ?? normalizeStringField(obj.cfCookies) ?? grokCookieImport?.cf_cookies : undefined,
+          cf_clearance: isGrokProvider.value ? normalizeStringField(obj.cf_clearance) ?? normalizeStringField(obj.cfClearance) ?? grokCookieImport?.cf_clearance : undefined,
+          user_agent: isGrokProvider.value ? normalizeStringField(obj.user_agent) ?? normalizeStringField(obj.userAgent) ?? grokCookieImport?.user_agent : undefined,
+          browser_profile: isGrokProvider.value ? normalizeStringField(obj.browser_profile) ?? normalizeStringField(obj.browserProfile) ?? normalizeStringField(obj.browser) ?? normalizeStringField(obj.impersonate) ?? grokCookieImport?.browser_profile : undefined,
           user_id: normalizeStringField(obj.user_id) ?? normalizeStringField(obj.userId) ?? normalizeStringField(obj.chatgpt_user_id) ?? normalizeStringField(obj.chatgptUserId),
           account_name: normalizeStringField(obj.account_name) ?? normalizeStringField(obj.accountName),
         }
@@ -1145,6 +1206,72 @@ function parseImportText(text: string): {
   }
 
   return { refresh_token: trimmed }
+}
+
+function parseGrokCookieImport(text: string): {
+  access_token: string
+  sso_rw_token?: string
+  cf_cookies?: string
+  cf_clearance?: string
+  user_agent?: string
+  browser_profile?: string
+  user_id?: string
+} | null {
+  const cookies = parseCookieHeader(text)
+  const sso = cookies.get('sso')
+  if (!sso) return null
+  const userAgent = currentBrowserUserAgent()
+
+  return {
+    access_token: sso,
+    sso_rw_token: cookies.get('sso-rw'),
+    cf_cookies: buildGrokCookieProfile(cookies),
+    cf_clearance: cookies.get('cf_clearance'),
+    user_agent: userAgent,
+    browser_profile: inferGrokBrowserProfile(userAgent),
+    user_id: cookies.get('x-userid'),
+  }
+}
+
+function currentBrowserUserAgent(): string | undefined {
+  const value = typeof navigator !== 'undefined' ? navigator.userAgent?.trim() : ''
+  return value || undefined
+}
+
+function inferGrokBrowserProfile(userAgent: string | undefined): string | undefined {
+  const value = (userAgent || '').toLowerCase()
+  if (!value) return 'chrome136'
+  if (value.includes('firefox/')) return 'firefox'
+  if (value.includes('safari/') && !value.includes('chrome/') && !value.includes('chromium/')) {
+    return value.includes('iphone') || value.includes('ipad') ? 'safari_ios' : 'safari'
+  }
+  return 'chrome136'
+}
+
+function buildGrokCookieProfile(cookies: Map<string, string>): string | undefined {
+  const parts: string[] = []
+  for (const [name, value] of cookies) {
+    if (name === 'sso' || name === 'sso-rw') continue
+    parts.push(`${name}=${value}`)
+  }
+  return parts.length > 0 ? parts.join('; ') : undefined
+}
+
+function parseCookieHeader(text: string): Map<string, string> {
+  const normalized = text.trim().replace(/^cookie:\s*/i, '')
+  const cookies = new Map<string, string>()
+  for (const segment of normalized.split(';')) {
+    const part = segment.trim()
+    if (!part) continue
+    const separator = part.indexOf('=')
+    if (separator <= 0) continue
+    const name = part.slice(0, separator).trim().toLowerCase()
+    const value = part.slice(separator + 1).trim()
+    if (name && value) {
+      cookies.set(name, value)
+    }
+  }
+  return cookies
 }
 
 function normalizeStringField(value: unknown): string | undefined {
@@ -1404,6 +1531,10 @@ onBeforeUnmount(() => {
 watch(() => props.open, (newOpen) => {
   if (newOpen) {
     proxyNodesStore.ensureLoaded()
+    mode.value = defaultMode.value
+    if (!showAuthorizationMode.value) {
+      return
+    }
     if (isKiroProvider.value) {
       void ensureKiroSocialDeviceAuth()
     } else {
@@ -1417,6 +1548,10 @@ watch(() => props.open, (newOpen) => {
 watch(
   () => [props.open, props.providerId, props.providerType] as const,
   () => {
+    if (props.open && !showAuthorizationMode.value) {
+      mode.value = 'import'
+      return
+    }
     if (props.open && isKiroProvider.value && mode.value === 'oauth') {
       void ensureKiroSocialDeviceAuth()
     }

@@ -339,6 +339,43 @@
 
     <RouterView />
 
+    <Dialog
+      v-model="requiredAnnouncementOpen"
+      persistent
+      size="lg"
+      title="必读公告"
+      description="请确认后继续使用"
+    >
+      <div
+        v-if="currentRequiredAnnouncement"
+        class="space-y-4"
+      >
+        <div>
+          <h3 class="text-lg font-semibold text-foreground">
+            {{ currentRequiredAnnouncement.title }}
+          </h3>
+          <p class="mt-1 text-xs text-muted-foreground">
+            {{ formatRequiredAnnouncementDate(currentRequiredAnnouncement.created_at) }}
+          </p>
+        </div>
+        <!-- eslint-disable vue/no-v-html -->
+        <div
+          class="prose prose-sm dark:prose-invert max-h-[50vh] max-w-none overflow-y-auto"
+          v-html="renderRequiredAnnouncement(currentRequiredAnnouncement.content)"
+        />
+        <!-- eslint-enable vue/no-v-html -->
+      </div>
+      <template #footer>
+        <Button
+          type="button"
+          :disabled="acknowledgingRequiredAnnouncement"
+          @click="acknowledgeRequiredAnnouncement"
+        >
+          {{ acknowledgingRequiredAnnouncement ? '确认中...' : '确认已读' }}
+        </Button>
+      </template>
+    </Dialog>
+
     <!-- 更新提示弹窗 -->
     <UpdateDialog
       v-if="updateInfo"
@@ -355,13 +392,16 @@
 <script setup lang="ts">
 import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { marked } from 'marked'
 import { useAuthStore } from '@/stores/auth'
 import { useModuleStore } from '@/stores/modules'
 import { useDarkMode } from '@/composables/useDarkMode'
 import { useSiteInfo } from '@/composables/useSiteInfo'
 import { isDemoMode } from '@/config/demo'
 import { adminApi, type CheckUpdateResponse } from '@/api/admin'
+import { announcementApi, type Announcement } from '@/api/announcements'
 import Button from '@/components/ui/button.vue'
+import { Dialog } from '@/components/ui'
 import AppShell from '@/components/layout/AppShell.vue'
 import SidebarNav from '@/components/layout/SidebarNav.vue'
 import HeaderLogo from '@/components/HeaderLogo.vue'
@@ -393,6 +433,7 @@ import {
   Wallet,
   CreditCard,
   Package,
+  Gift,
   Menu,
   X,
   Puzzle,
@@ -406,6 +447,7 @@ import {
 import GithubIcon from '@/components/icons/GithubIcon.vue'
 import { BUILTIN_TOOL_BREADCRUMBS } from '@/config/builtin-tools'
 import { prefetchAdminNavigationTarget } from '@/utils/adminNavigationPrefetch'
+import { sanitizeMarkdown } from '@/utils/sanitize'
 
 const router = useRouter()
 const route = useRoute()
@@ -418,6 +460,15 @@ const isAdmin = computed(() => authStore.user?.role === 'admin')
 
 const showAuthError = ref(false)
 const mobileMenuOpen = ref(false)
+const requiredAnnouncements = ref<Announcement[]>([])
+const acknowledgingRequiredAnnouncement = ref(false)
+const requiredAnnouncementOpen = computed({
+  get: () => requiredAnnouncements.value.length > 0,
+  set: (value) => {
+    if (value) void loadRequiredAnnouncements()
+  }
+})
+const currentRequiredAnnouncement = computed(() => requiredAnnouncements.value[0] ?? null)
 
 // 更新检查相关
 const showUpdateDialog = ref(false)
@@ -559,9 +610,44 @@ watch(
   () => [authStore.user, authStore.token] as const,
   () => {
     showAuthError.value = !!authStore.user && !authStore.token
+    if (authStore.user && authStore.token) {
+      void loadRequiredAnnouncements()
+    } else {
+      requiredAnnouncements.value = []
+    }
   },
   { immediate: true }
 )
+
+async function loadRequiredAnnouncements() {
+  if (!authStore.user || !authStore.token) return
+  try {
+    const response = await announcementApi.getRequiredUnreadAnnouncements()
+    requiredAnnouncements.value = response.items.filter(item => item.requires_ack && !item.is_read)
+  } catch {
+    requiredAnnouncements.value = []
+  }
+}
+
+function renderRequiredAnnouncement(content: string): string {
+  return sanitizeMarkdown(marked(content || '') as string)
+}
+
+function formatRequiredAnnouncementDate(value: string): string {
+  return new Date(value).toLocaleString('zh-CN')
+}
+
+async function acknowledgeRequiredAnnouncement() {
+  const announcement = currentRequiredAnnouncement.value
+  if (!announcement) return
+  acknowledgingRequiredAnnouncement.value = true
+  try {
+    await announcementApi.markAsRead(announcement.id)
+    requiredAnnouncements.value = requiredAnnouncements.value.slice(1)
+  } finally {
+    acknowledgingRequiredAnnouncement.value = false
+  }
+}
 
 onMounted(() => {
   window.addEventListener('storage', handleStorageChange)
@@ -573,6 +659,7 @@ onMounted(() => {
     moduleStore.fetchModules()
   }
   void loadVersionStatus()
+  void loadRequiredAnnouncements()
 
   // 延迟检查更新，避免影响页面加载
   setTimeout(() => {
@@ -640,6 +727,7 @@ const navigation = computed(() => {
       items: [
          { name: '钱包中心', href: '/dashboard/wallet', icon: Wallet },
          { name: '套餐中心', href: '/dashboard/billing', icon: Package },
+         { name: '我的邀请', href: '/dashboard/referral', icon: Gift },
          { name: '使用统计', href: '/dashboard/usage', icon: BarChart3 },
       ]
     }
@@ -696,11 +784,13 @@ const navigation = computed(() => {
         { name: '用户管理', href: '/admin/users', icon: Users },
         { name: '提供商', href: '/admin/providers', icon: FolderTree },
         { name: '模型管理', href: '/admin/models', icon: Layers },
+        { name: '调度策略', href: '/admin/routing', icon: SlidersHorizontal },
         { name: '号池管理', href: '/admin/pool', icon: Database },
         { name: '独立密钥', href: '/admin/keys', icon: Key },
         { name: '钱包管理', href: '/admin/wallets', icon: Wallet },
         { name: '支付配置', href: '/admin/payment-gateways', icon: CreditCard },
         { name: '套餐管理', href: '/admin/billing-plans', icon: Package },
+        { name: '邀请返利', href: '/admin/referrals', icon: Gift },
         { name: '异步任务', href: '/admin/async-tasks', icon: Zap },
         { name: '使用记录', href: '/admin/usage', icon: BarChart3 },
       ]

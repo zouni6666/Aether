@@ -1,4 +1,5 @@
 use crate::handlers::admin::request::AdminAppState;
+use crate::handlers::admin::shared::build_admin_usage_counter_health_payload;
 use crate::handlers::shared::{system_config_bool, system_config_string};
 use crate::GatewayError;
 use aether_admin::system::{
@@ -114,6 +115,15 @@ pub(crate) async fn build_admin_system_stats_payload(
         .filter(|provider| provider.is_active)
         .count() as u64;
     let stats = state.read_admin_system_stats().await?;
+    let now_unix_secs = chrono::Utc::now().timestamp().max(0) as u64;
+    let usage_counter_snapshot = state
+        .as_ref()
+        .data
+        .read_usage_counter_health()
+        .await
+        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    let usage_counter =
+        build_admin_usage_counter_health_payload(&usage_counter_snapshot, now_unix_secs);
 
     Ok(build_admin_system_stats_payload_pure(
         stats.total_users,
@@ -122,6 +132,7 @@ pub(crate) async fn build_admin_system_stats_payload(
         active_providers,
         stats.total_api_keys,
         stats.total_requests,
+        usage_counter,
     ))
 }
 

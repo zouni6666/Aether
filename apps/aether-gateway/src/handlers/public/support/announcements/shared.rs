@@ -78,6 +78,7 @@ pub(super) fn build_public_announcement_payload(
         "priority": announcement.priority,
         "is_active": announcement.is_active,
         "is_pinned": announcement.is_pinned,
+        "requires_ack": announcement.requires_ack,
         "author": {
             "id": announcement.author_id,
             "username": announcement.author_username,

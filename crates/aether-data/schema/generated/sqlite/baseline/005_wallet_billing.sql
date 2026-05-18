@@ -182,6 +182,7 @@ CREATE TABLE IF NOT EXISTS entitlement_usage_ledgers (
     UNIQUE (user_entitlement_id, request_id)
 );
 CREATE INDEX IF NOT EXISTS idx_entitlement_usage_user_date ON entitlement_usage_ledgers (user_id, usage_date);
+CREATE INDEX IF NOT EXISTS idx_entitlement_usage_entitlement_date ON entitlement_usage_ledgers (user_entitlement_id, usage_date);
 
 CREATE TABLE IF NOT EXISTS refund_requests (
     id TEXT PRIMARY KEY NOT NULL,

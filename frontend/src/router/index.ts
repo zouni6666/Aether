@@ -18,6 +18,18 @@ const routes: RouteRecordRaw[] = [
     component: () => importWithRetry(() => import('@/views/public/Home.vue')),
     meta: { requiresAuth: false }
   },
+  {
+    path: '/register',
+    name: 'RegisterEntry',
+    component: () => importWithRetry(() => import('@/views/public/Home.vue')),
+    meta: { requiresAuth: false }
+  },
+  {
+    path: '/privacy-policy',
+    name: 'PrivacyPolicy',
+    component: () => importWithRetry(() => import('@/views/public/PrivacyPolicy.vue')),
+    meta: { requiresAuth: false }
+  },
 
   {
     path: '/guide',
@@ -133,6 +145,11 @@ const routes: RouteRecordRaw[] = [
         component: () => importWithRetry(() => import('@/views/user/BillingPlans.vue'))
       },
       {
+        path: 'referral',
+        name: 'ReferralCenter',
+        component: () => importWithRetry(() => import('@/views/user/ReferralCenter.vue'))
+      },
+      {
         path: 'models',
         name: 'ModelCatalog',
         component: () => importWithRetry(() => import('@/views/user/ModelCatalog.vue'))
@@ -180,6 +197,11 @@ const routes: RouteRecordRaw[] = [
         component: () => importWithRetry(() => import('@/views/admin/BillingPlansManagement.vue'))
       },
       {
+        path: 'referrals',
+        name: 'ReferralManagement',
+        component: () => importWithRetry(() => import('@/views/admin/ReferralManagement.vue'))
+      },
+      {
         path: 'management-tokens',
         name: 'AdminManagementTokens',
         component: () => importWithRetry(() => import('@/views/user/ManagementTokens.vue')),
@@ -199,6 +221,11 @@ const routes: RouteRecordRaw[] = [
         path: 'models',
         name: 'ModelManagement',
         component: () => importWithRetry(() => import('@/views/admin/ModelManagement.vue'))
+      },
+      {
+        path: 'routing',
+        name: 'RoutingProfiles',
+        component: () => importWithRetry(() => import('@/views/admin/RoutingProfiles.vue'))
       },
       {
         path: 'health-monitor',

@@ -2,14 +2,20 @@ use std::env;
 use std::process::Command;
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=AETHER_BUILD_VERSION");
     println!("cargo:rerun-if-env-changed=AETHER_VERSION");
     println!("cargo:rerun-if-env-changed=GITHUB_REF_NAME");
     println!("cargo:rerun-if-changed=../../.git/HEAD");
 
     let package_version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_string());
-    let version = env::var("AETHER_VERSION")
+    let version = env::var("AETHER_BUILD_VERSION")
         .ok()
         .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            env::var("AETHER_VERSION")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
         .or_else(|| {
             env::var("GITHUB_REF_NAME")
                 .ok()

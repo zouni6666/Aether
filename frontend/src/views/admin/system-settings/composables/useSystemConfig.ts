@@ -20,6 +20,15 @@ export interface SystemConfig {
   turnstile_secret_key: string
   turnstile_secret_key_is_set: boolean
   turnstile_allowed_hostnames: string[]
+  referral_enabled: boolean
+  referral_reward_mode: string
+  referral_recharge_percent: number
+  referral_headcount_amount_usd: number
+  referral_headcount_trigger: string
+  registration_privacy_policy_enabled: boolean
+  registration_privacy_policy_format: string
+  registration_privacy_policy_content: string
+  registration_privacy_policy_version: string
   // 独立余额 Key 过期管理
   auto_delete_expired_keys: boolean
   // 格式转换
@@ -65,6 +74,15 @@ const CONFIG_KEYS = [
   'turnstile_site_key',
   'turnstile_secret_key',
   'turnstile_allowed_hostnames',
+  'referral_enabled',
+  'referral_reward_mode',
+  'referral_recharge_percent',
+  'referral_headcount_amount_usd',
+  'referral_headcount_trigger',
+  'registration_privacy_policy_enabled',
+  'registration_privacy_policy_format',
+  'registration_privacy_policy_content',
+  'registration_privacy_policy_version',
   // 独立余额 Key 过期管理
   'auto_delete_expired_keys',
   // 格式转换
@@ -112,6 +130,15 @@ function createDefaultConfig(): SystemConfig {
     turnstile_secret_key: '',
     turnstile_secret_key_is_set: false,
     turnstile_allowed_hostnames: [],
+    referral_enabled: false,
+    referral_reward_mode: 'percent',
+    referral_recharge_percent: 5,
+    referral_headcount_amount_usd: 0,
+    referral_headcount_trigger: 'registration',
+    registration_privacy_policy_enabled: false,
+    registration_privacy_policy_format: 'markdown',
+    registration_privacy_policy_content: '',
+    registration_privacy_policy_version: '1',
     // 独立余额 Key 过期管理
     auto_delete_expired_keys: false,
     // 格式转换
@@ -184,6 +211,19 @@ export function useSystemConfig() {
       systemConfig.value.turnstile_secret_key.trim() !== '' ||
       JSON.stringify(systemConfig.value.turnstile_allowed_hostnames) !==
       JSON.stringify(originalConfig.value.turnstile_allowed_hostnames) ||
+      systemConfig.value.referral_enabled !== originalConfig.value.referral_enabled ||
+      systemConfig.value.referral_reward_mode !== originalConfig.value.referral_reward_mode ||
+      systemConfig.value.referral_recharge_percent !== originalConfig.value.referral_recharge_percent ||
+      systemConfig.value.referral_headcount_amount_usd !== originalConfig.value.referral_headcount_amount_usd ||
+      systemConfig.value.referral_headcount_trigger !== originalConfig.value.referral_headcount_trigger ||
+      systemConfig.value.registration_privacy_policy_enabled !==
+      originalConfig.value.registration_privacy_policy_enabled ||
+      systemConfig.value.registration_privacy_policy_format !==
+      originalConfig.value.registration_privacy_policy_format ||
+      systemConfig.value.registration_privacy_policy_content !==
+      originalConfig.value.registration_privacy_policy_content ||
+      systemConfig.value.registration_privacy_policy_version !==
+      originalConfig.value.registration_privacy_policy_version ||
       systemConfig.value.auto_delete_expired_keys !== originalConfig.value.auto_delete_expired_keys ||
       systemConfig.value.enable_format_conversion !== originalConfig.value.enable_format_conversion ||
       systemConfig.value.enable_openai_image_sync_heartbeat !== originalConfig.value.enable_openai_image_sync_heartbeat
@@ -387,6 +427,51 @@ export function useSystemConfig() {
           description: 'Cloudflare Turnstile 允许的 hostname 列表',
         },
         {
+          key: 'referral_enabled',
+          value: systemConfig.value.referral_enabled,
+          description: '邀请返利开关',
+        },
+        {
+          key: 'referral_reward_mode',
+          value: systemConfig.value.referral_reward_mode,
+          description: '邀请返利方式',
+        },
+        {
+          key: 'referral_recharge_percent',
+          value: systemConfig.value.referral_recharge_percent,
+          description: '邀请充值比例返利百分比',
+        },
+        {
+          key: 'referral_headcount_amount_usd',
+          value: systemConfig.value.referral_headcount_amount_usd,
+          description: '邀请人头返利金额（美元）',
+        },
+        {
+          key: 'referral_headcount_trigger',
+          value: systemConfig.value.referral_headcount_trigger,
+          description: '邀请人头返利触发时机',
+        },
+        {
+          key: 'registration_privacy_policy_enabled',
+          value: systemConfig.value.registration_privacy_policy_enabled,
+          description: '注册隐私政策确认开关',
+        },
+        {
+          key: 'registration_privacy_policy_format',
+          value: systemConfig.value.registration_privacy_policy_format,
+          description: '注册隐私政策内容格式',
+        },
+        {
+          key: 'registration_privacy_policy_content',
+          value: systemConfig.value.registration_privacy_policy_content,
+          description: '注册隐私政策内容',
+        },
+        {
+          key: 'registration_privacy_policy_version',
+          value: systemConfig.value.registration_privacy_policy_version,
+          description: '注册隐私政策版本',
+        },
+        {
           key: 'auto_delete_expired_keys',
           value: systemConfig.value.auto_delete_expired_keys,
           description: '是否自动删除过期的API Key',
@@ -426,6 +511,21 @@ export function useSystemConfig() {
         originalConfig.value.turnstile_allowed_hostnames = [
           ...systemConfig.value.turnstile_allowed_hostnames,
         ]
+        originalConfig.value.referral_enabled = systemConfig.value.referral_enabled
+        originalConfig.value.referral_reward_mode = systemConfig.value.referral_reward_mode
+        originalConfig.value.referral_recharge_percent = systemConfig.value.referral_recharge_percent
+        originalConfig.value.referral_headcount_amount_usd =
+          systemConfig.value.referral_headcount_amount_usd
+        originalConfig.value.referral_headcount_trigger =
+          systemConfig.value.referral_headcount_trigger
+        originalConfig.value.registration_privacy_policy_enabled =
+          systemConfig.value.registration_privacy_policy_enabled
+        originalConfig.value.registration_privacy_policy_format =
+          systemConfig.value.registration_privacy_policy_format
+        originalConfig.value.registration_privacy_policy_content =
+          systemConfig.value.registration_privacy_policy_content
+        originalConfig.value.registration_privacy_policy_version =
+          systemConfig.value.registration_privacy_policy_version
         if (turnstileSecret) {
           systemConfig.value.turnstile_secret_key = ''
           systemConfig.value.turnstile_secret_key_is_set = true

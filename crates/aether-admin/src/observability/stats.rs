@@ -667,7 +667,9 @@ pub fn admin_stats_performance_percentiles_empty_response() -> Response<Body> {
     Json(json!([])).into_response()
 }
 
-pub fn admin_stats_provider_performance_empty_response() -> Response<Body> {
+pub fn admin_stats_provider_performance_empty_response(
+    usage_counter: serde_json::Value,
+) -> Response<Body> {
     Json(json!({
         "summary": {
             "request_count": 0,
@@ -678,6 +680,7 @@ pub fn admin_stats_provider_performance_empty_response() -> Response<Body> {
         },
         "providers": [],
         "timeline": [],
+        "usage_counter": usage_counter,
     }))
     .into_response()
 }
@@ -1093,6 +1096,7 @@ pub fn build_admin_stats_performance_percentiles_response_from_summaries(
 
 pub fn build_admin_stats_provider_performance_response(
     performance: &StoredUsageProviderPerformance,
+    usage_counter: serde_json::Value,
 ) -> Response<Body> {
     let summary = &performance.summary;
     let providers = performance
@@ -1158,6 +1162,7 @@ pub fn build_admin_stats_provider_performance_response(
         },
         "providers": providers,
         "timeline": timeline,
+        "usage_counter": usage_counter,
     }))
     .into_response()
 }

@@ -34,6 +34,8 @@ pub struct StoredRequestUsageAudit {
     pub provider_endpoint_kind: Option<String>,
     pub has_format_conversion: bool,
     pub is_stream: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_family: Option<String>,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub total_tokens: u64,
@@ -211,6 +213,7 @@ impl StoredRequestUsageAudit {
             provider_endpoint_kind,
             has_format_conversion,
             is_stream,
+            client_family: None,
             input_tokens: parse_u64(input_tokens, "usage.input_tokens")?,
             output_tokens: parse_u64(output_tokens, "usage.output_tokens")?,
             total_tokens: parse_u64(total_tokens, "usage.total_tokens")?,
@@ -309,6 +312,10 @@ impl StoredRequestUsageAudit {
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
+    }
+
+    pub fn request_metadata_client_family(&self) -> Option<&str> {
+        usage_request_metadata_client_family(self.request_metadata.as_ref())
     }
 
     fn billing_snapshot_resolved_number(&self, key: &str) -> Option<f64> {
@@ -1511,6 +1518,12 @@ pub trait UsageReadRepository: Send + Sync {
         &self,
         query: &UsageDailyHeatmapQuery,
     ) -> Result<Vec<StoredUsageDailySummary>, crate::DataLayerError>;
+
+    async fn read_usage_counter_health(
+        &self,
+    ) -> Result<UsageCounterHealthSnapshot, crate::DataLayerError> {
+        Ok(UsageCounterHealthSnapshot::default())
+    }
 }
 
 /// Repository write model for a single usage aggregate.
@@ -1683,6 +1696,47 @@ pub trait UsageWriteRepository: Send + Sync {
         Ok(PendingUsageCleanupSummary::default())
     }
 
+    async fn flush_usage_counter_deltas(
+        &self,
+        batch_size: usize,
+    ) -> Result<UsageCounterFlushSummary, crate::DataLayerError> {
+        let _ = batch_size;
+        Ok(UsageCounterFlushSummary::default())
+    }
+
+    async fn enqueue_proxy_node_counter_delta(
+        &self,
+        delta: ProxyNodeCounterDelta,
+    ) -> Result<bool, crate::DataLayerError> {
+        let _ = delta;
+        Ok(false)
+    }
+
+    async fn enqueue_management_token_counter_delta(
+        &self,
+        delta: ManagementTokenCounterDelta,
+    ) -> Result<bool, crate::DataLayerError> {
+        let _ = delta;
+        Ok(false)
+    }
+
+    async fn enqueue_api_key_last_used_delta(
+        &self,
+        delta: ApiKeyLastUsedDelta,
+    ) -> Result<bool, crate::DataLayerError> {
+        let _ = delta;
+        Ok(false)
+    }
+
+    async fn cleanup_processed_usage_counter_deltas(
+        &self,
+        cutoff_unix_secs: u64,
+        batch_size: usize,
+    ) -> Result<usize, crate::DataLayerError> {
+        let _ = (cutoff_unix_secs, batch_size);
+        Ok(0)
+    }
+
     async fn cleanup_usage(
         &self,
         window: &UsageCleanupWindow,
@@ -1714,6 +1768,80 @@ impl<T> UsageRepository for T where T: UsageReadRepository + UsageWriteRepositor
 pub struct PendingUsageCleanupSummary {
     pub failed: usize,
     pub recovered: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UsageCounterFlushSummary {
+    pub rows_claimed: usize,
+    pub api_key_targets: usize,
+    pub provider_api_key_targets: usize,
+    pub model_targets: usize,
+    pub provider_monthly_targets: usize,
+    pub proxy_node_targets: usize,
+    pub management_token_targets: usize,
+    pub api_key_last_used_targets: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct UsageCounterHealthSnapshot {
+    pub pending_rows: u64,
+    pub processed_rows: u64,
+    pub oldest_pending_created_at_unix_secs: Option<u64>,
+    pub latest_processed_at_unix_secs: Option<u64>,
+    pub pending_by_kind: std::collections::BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyNodeCounterDelta {
+    pub node_id: String,
+    pub total_requests_delta: i64,
+    pub failed_requests_delta: i64,
+    pub dns_failures_delta: i64,
+    pub stream_errors_delta: i64,
+}
+
+impl ProxyNodeCounterDelta {
+    pub fn is_noop(&self) -> bool {
+        self.node_id.trim().is_empty()
+            || (self.total_requests_delta <= 0
+                && self.failed_requests_delta <= 0
+                && self.dns_failures_delta <= 0
+                && self.stream_errors_delta <= 0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagementTokenCounterDelta {
+    pub token_id: String,
+    pub usage_count_delta: i64,
+    pub last_used_at_unix_secs: Option<u64>,
+    pub last_used_ip: Option<String>,
+}
+
+impl ManagementTokenCounterDelta {
+    pub fn is_noop(&self) -> bool {
+        self.token_id.trim().is_empty()
+            || (self.usage_count_delta <= 0
+                && self.last_used_at_unix_secs.is_none()
+                && self
+                    .last_used_ip
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or("")
+                    .is_empty())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiKeyLastUsedDelta {
+    pub api_key_id: String,
+    pub last_used_at_unix_secs: u64,
+}
+
+impl ApiKeyLastUsedDelta {
+    pub fn is_noop(&self) -> bool {
+        self.api_key_id.trim().is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -1792,6 +1920,18 @@ pub struct UsageCleanupPreviewCounts {
     pub compressed: u64,
     pub header: u64,
     pub log: u64,
+}
+
+pub fn usage_request_metadata_client_family(value: Option<&Value>) -> Option<&str> {
+    let metadata = value.and_then(Value::as_object)?;
+    metadata
+        .get("client_session_affinity")
+        .and_then(Value::as_object)
+        .and_then(|affinity| affinity.get("client_family"))
+        .and_then(Value::as_str)
+        .or_else(|| metadata.get("client_family").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 fn parse_u64(value: i32, field_name: &str) -> Result<u64, crate::DataLayerError> {

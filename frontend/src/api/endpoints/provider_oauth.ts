@@ -111,6 +111,12 @@ export async function importProviderRefreshToken(
     account_id?: string
     account_user_id?: string
     plan_type?: string
+    pool_tier?: string
+    sso_rw_token?: string
+    cf_cookies?: string
+    cf_clearance?: string
+    user_agent?: string
+    browser_profile?: string
     user_id?: string
     account_name?: string
   }

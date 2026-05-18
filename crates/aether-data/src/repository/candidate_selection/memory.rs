@@ -316,6 +316,13 @@ fn key_auth_channel_matches(row: &StoredMinimalCandidateSelectionRow, api_format
         "gemini_cli" | "antigravity" => {
             auth_type == "oauth" && api_format == "gemini:generate_content"
         }
+        "grok" => {
+            auth_type == "oauth"
+                && matches!(
+                    api_format.as_str(),
+                    "openai:chat" | "openai:responses" | "claude:messages" | "openai:image"
+                )
+        }
         "vertex_ai" => {
             (auth_type == "api_key"
                 && matches!(
@@ -421,6 +428,35 @@ mod tests {
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].provider_id, "provider-1");
+    }
+
+    #[tokio::test]
+    async fn includes_grok_oauth_rows_for_chat_models() {
+        let mut row = sample_row(
+            "provider-grok",
+            "openai:chat",
+            "grok-4.20-0309-non-reasoning",
+            10,
+        );
+        row.provider_type = "grok".to_string();
+        row.provider_name = "grok".to_string();
+        row.key_auth_type = "oauth".to_string();
+        row.key_api_formats = Some(vec![
+            "openai:chat".to_string(),
+            "openai:responses".to_string(),
+            "claude:messages".to_string(),
+            "openai:image".to_string(),
+        ]);
+        let repository = InMemoryMinimalCandidateSelectionReadRepository::seed(vec![row]);
+
+        let rows = repository
+            .list_for_exact_api_format("openai:chat")
+            .await
+            .expect("list should succeed");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].provider_type, "grok");
+        assert_eq!(rows[0].global_model_name, "grok-4.20-0309-non-reasoning");
     }
 
     #[tokio::test]

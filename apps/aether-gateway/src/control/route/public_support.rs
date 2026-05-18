@@ -279,6 +279,20 @@ pub(super) fn classify_public_support_route(
             "user:announcements",
             false,
         ))
+    } else if method == http::Method::GET
+        && matches!(
+            normalized_path,
+            "/api/announcements/users/me/required-unread"
+                | "/api/announcements/users/me/required-unread/"
+        )
+    {
+        Some(classified(
+            "public_support",
+            "announcement_user",
+            "required_unread",
+            "user:announcements",
+            false,
+        ))
     } else if method == http::Method::POST
         && matches!(
             normalized_path,
@@ -462,6 +476,7 @@ pub(super) fn classify_public_support_route(
                 | "/api/users/me/available-models"
                 | "/api/users/me/endpoint-status"
                 | "/api/users/me/preferences"
+                | "/api/users/me/referral"
                 | "/api/users/me/model-capabilities"
         )
     {
@@ -477,6 +492,7 @@ pub(super) fn classify_public_support_route(
             "/api/users/me/available-models" => "available_models",
             "/api/users/me/endpoint-status" => "endpoint_status",
             "/api/users/me/preferences" => "preferences",
+            "/api/users/me/referral" => "referral",
             "/api/users/me/model-capabilities" => "model_capabilities",
             _ => "detail",
         };

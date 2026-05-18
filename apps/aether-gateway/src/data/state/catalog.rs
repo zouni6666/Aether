@@ -1,10 +1,10 @@
 use super::{
-    DataLayerError, GatewayDataState, GeminiFileMappingListQuery, GeminiFileMappingStats,
-    ProviderCatalogKeyListQuery, PublicHealthStatusCount, PublicHealthTimelineBucket,
-    StoredGeminiFileMapping, StoredGeminiFileMappingListPage, StoredProviderCatalogEndpoint,
-    StoredProviderCatalogKey, StoredProviderCatalogKeyPage, StoredProviderCatalogKeyStats,
-    StoredProviderCatalogProvider, StoredRequestCandidate, UpsertGeminiFileMappingRecord,
-    UpsertRequestCandidateRecord,
+    ApiKeyLastUsedDelta, DataLayerError, GatewayDataState, GeminiFileMappingListQuery,
+    GeminiFileMappingStats, ProviderCatalogKeyListQuery, PublicHealthStatusCount,
+    PublicHealthTimelineBucket, StoredGeminiFileMapping, StoredGeminiFileMappingListPage,
+    StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogKeyPage,
+    StoredProviderCatalogKeyStats, StoredProviderCatalogProvider, StoredRequestCandidate,
+    UpsertGeminiFileMappingRecord, UpsertRequestCandidateRecord,
 };
 
 impl GatewayDataState {
@@ -121,6 +121,18 @@ impl GatewayDataState {
         &self,
         api_key_id: &str,
     ) -> Result<bool, DataLayerError> {
+        if let Some(repository) = &self.usage_writer {
+            let enqueued = repository
+                .enqueue_api_key_last_used_delta(ApiKeyLastUsedDelta {
+                    api_key_id: api_key_id.to_string(),
+                    last_used_at_unix_secs: chrono::Utc::now().timestamp().max(0) as u64,
+                })
+                .await?;
+            if enqueued {
+                return Ok(true);
+            }
+        }
+
         match &self.auth_api_key_writer {
             Some(repository) => repository.touch_last_used_at(api_key_id).await,
             None => Ok(false),

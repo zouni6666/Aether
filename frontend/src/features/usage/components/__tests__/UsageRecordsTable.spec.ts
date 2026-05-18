@@ -55,6 +55,12 @@ vi.mock('@/components/common', async () => {
   const { defineComponent, h } = await import('vue')
 
   return {
+    MultiSelect: defineComponent({
+      name: 'MultiSelectStub',
+      setup() {
+        return () => h('div')
+      },
+    }),
     TimeRangePicker: defineComponent({
       name: 'TimeRangePickerStub',
       setup() {
@@ -135,9 +141,11 @@ function mountUsageRecordsTable(records: UsageRecord[], overrides: Record<string
     filterProvider: '__all__',
     filterApiFormat: '__all__',
     filterStatus: '__all__',
+    filterClientFamily: '__all__',
     availableUsers: [],
     availableModels: [],
     availableProviders: [],
+    availableClientFamilies: [],
     currentPage: 1,
     pageSize: 20,
     totalRecords: records.length,

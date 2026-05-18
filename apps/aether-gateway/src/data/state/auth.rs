@@ -1,15 +1,15 @@
 use super::{
     AuthApiKeyLookupKey, CreateManagementTokenRecord, DataLayerError, GatewayAuthApiKeySnapshot,
-    GatewayDataState, ManagementTokenListQuery, ProxyNodeHeartbeatMutation,
-    ProxyNodeManualCreateMutation, ProxyNodeManualUpdateMutation, ProxyNodeRegistrationMutation,
-    ProxyNodeRemoteConfigMutation, ProxyNodeTrafficMutation, ProxyNodeTunnelStatusMutation,
-    RegenerateManagementTokenSecret, StoredAuthApiKeyExportRecord, StoredAuthApiKeySnapshot,
-    StoredLdapModuleConfig, StoredManagementToken, StoredManagementTokenListPage,
-    StoredManagementTokenWithUser, StoredOAuthProviderConfig, StoredOAuthProviderModuleConfig,
-    StoredProxyFleetMetricsBucket, StoredProxyNode, StoredProxyNodeEvent,
-    StoredProxyNodeMetricsBucket, StoredUserAuthRecord, StoredUserOAuthLinkSummary,
-    StoredUserPreferenceRecord, StoredUserSessionRecord, StoredWalletSnapshot,
-    UpdateManagementTokenRecord, UpsertOAuthProviderConfigRecord,
+    GatewayDataState, ManagementTokenCounterDelta, ManagementTokenListQuery, ProxyNodeCounterDelta,
+    ProxyNodeHeartbeatMutation, ProxyNodeManualCreateMutation, ProxyNodeManualUpdateMutation,
+    ProxyNodeRegistrationMutation, ProxyNodeRemoteConfigMutation, ProxyNodeTrafficMutation,
+    ProxyNodeTunnelStatusMutation, RegenerateManagementTokenSecret, StoredAuthApiKeyExportRecord,
+    StoredAuthApiKeySnapshot, StoredLdapModuleConfig, StoredManagementToken,
+    StoredManagementTokenListPage, StoredManagementTokenWithUser, StoredOAuthProviderConfig,
+    StoredOAuthProviderModuleConfig, StoredProxyFleetMetricsBucket, StoredProxyNode,
+    StoredProxyNodeEvent, StoredProxyNodeMetricsBucket, StoredUserAuthRecord,
+    StoredUserOAuthLinkSummary, StoredUserPreferenceRecord, StoredUserSessionRecord,
+    StoredWalletSnapshot, UpdateManagementTokenRecord, UpsertOAuthProviderConfigRecord,
 };
 use crate::LocalMutationOutcome;
 use aether_data::repository::auth::{
@@ -1117,6 +1117,20 @@ impl GatewayDataState {
         token_id: &str,
         last_used_ip: Option<&str>,
     ) -> Result<Option<StoredManagementToken>, DataLayerError> {
+        if let Some(repository) = &self.usage_writer {
+            let enqueued = repository
+                .enqueue_management_token_counter_delta(ManagementTokenCounterDelta {
+                    token_id: token_id.to_string(),
+                    usage_count_delta: 1,
+                    last_used_at_unix_secs: Some(chrono::Utc::now().timestamp().max(0) as u64),
+                    last_used_ip: last_used_ip.map(ToOwned::to_owned),
+                })
+                .await?;
+            if enqueued {
+                return Ok(None);
+            }
+        }
+
         match &self.management_token_writer {
             Some(repository) => {
                 repository
@@ -1278,6 +1292,21 @@ impl GatewayDataState {
         &self,
         mutation: &ProxyNodeTrafficMutation,
     ) -> Result<bool, DataLayerError> {
+        if let Some(repository) = &self.usage_writer {
+            let enqueued = repository
+                .enqueue_proxy_node_counter_delta(ProxyNodeCounterDelta {
+                    node_id: mutation.node_id.clone(),
+                    total_requests_delta: mutation.total_requests_delta,
+                    failed_requests_delta: mutation.failed_requests_delta,
+                    dns_failures_delta: mutation.dns_failures_delta,
+                    stream_errors_delta: mutation.stream_errors_delta,
+                })
+                .await?;
+            if enqueued {
+                return Ok(true);
+            }
+        }
+
         match &self.proxy_node_writer {
             Some(repository) => repository.record_traffic(mutation).await,
             None => Ok(false),
@@ -1925,12 +1954,36 @@ fn resolve_effective_list_policy(
         &aether_data::repository::users::StoredUserGroup,
     ) -> (&str, Option<Vec<String>>),
 ) -> Option<Vec<String>> {
-    let group_policy = groups.iter().fold(None, |effective, group| {
-        let (mode, values) = group_field(group);
-        intersect_list_policies(effective, list_restriction_from_mode(mode, values))
-    });
+    let group_policy = union_group_list_policies(groups, group_field);
     let user_policy = list_restriction_from_mode(user_mode, user_values);
     intersect_list_policies(group_policy, user_policy)
+}
+
+fn union_group_list_policies(
+    groups: &[aether_data::repository::users::StoredUserGroup],
+    group_field: impl Fn(
+        &aether_data::repository::users::StoredUserGroup,
+    ) -> (&str, Option<Vec<String>>),
+) -> Option<Vec<String>> {
+    let mut saw_restrictive_group = false;
+    let mut values = std::collections::BTreeSet::new();
+
+    for group in groups {
+        let (mode, group_values) = group_field(group);
+        match mode {
+            "unrestricted" => return None,
+            "specific" => {
+                saw_restrictive_group = true;
+                values.extend(group_values.unwrap_or_default());
+            }
+            "deny_all" => {
+                saw_restrictive_group = true;
+            }
+            _ => {}
+        }
+    }
+
+    saw_restrictive_group.then(|| values.into_iter().collect())
 }
 
 fn list_restriction_from_mode(mode: &str, values: Option<Vec<String>>) -> Option<Vec<String>> {
@@ -2148,7 +2201,7 @@ mod tests {
     }
 
     #[test]
-    fn list_policy_intersects_group_and_user_restrictions() {
+    fn list_policy_intersects_unrestricted_group_union_with_user_restriction() {
         let groups = vec![
             sample_group("default", 0, None, "unrestricted", None, "system"),
             sample_group(
@@ -2168,11 +2221,14 @@ mod tests {
             |group| (&group.allowed_models_mode, group.allowed_models.clone()),
         );
 
-        assert_eq!(policy, Some(vec!["gpt-4.1".to_string()]));
+        assert_eq!(
+            policy,
+            Some(vec!["gpt-4.1".to_string(), "gemini-2.5-pro".to_string()])
+        );
     }
 
     #[test]
-    fn list_policy_intersects_multiple_group_restrictions() {
+    fn list_policy_unions_multiple_group_restrictions_legacy_case() {
         let groups = vec![
             sample_group(
                 "team-a",
@@ -2196,7 +2252,91 @@ mod tests {
             (&group.allowed_models_mode, group.allowed_models.clone())
         });
 
-        assert_eq!(policy, Some(vec!["gpt-4.1".to_string()]));
+        assert_eq!(
+            policy,
+            Some(vec![
+                "gemini-2.5-pro".to_string(),
+                "gpt-4.1".to_string(),
+                "gpt-5".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn list_policy_unions_multiple_group_restrictions() {
+        let groups = vec![
+            sample_group(
+                "team-a",
+                10,
+                Some(vec!["gpt-5", "gpt-4.1"]),
+                "specific",
+                None,
+                "system",
+            ),
+            sample_group(
+                "team-b",
+                20,
+                Some(vec!["gpt-4.1", "gemini-2.5-pro"]),
+                "specific",
+                None,
+                "system",
+            ),
+        ];
+
+        let policy = resolve_effective_list_policy(None, "unrestricted", &groups, |group| {
+            (&group.allowed_models_mode, group.allowed_models.clone())
+        });
+
+        assert_eq!(
+            policy,
+            Some(vec![
+                "gemini-2.5-pro".to_string(),
+                "gpt-4.1".to_string(),
+                "gpt-5".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn unrestricted_group_makes_group_policy_unrestricted() {
+        let groups = vec![
+            sample_group(
+                "restricted",
+                10,
+                Some(vec!["gpt-5"]),
+                "specific",
+                None,
+                "system",
+            ),
+            sample_group("unrestricted", 20, None, "unrestricted", None, "system"),
+        ];
+
+        let policy = resolve_effective_list_policy(None, "unrestricted", &groups, |group| {
+            (&group.allowed_models_mode, group.allowed_models.clone())
+        });
+
+        assert_eq!(policy, None);
+    }
+
+    #[test]
+    fn deny_all_group_does_not_remove_other_group_grants() {
+        let groups = vec![
+            sample_group("deny", 10, None, "deny_all", None, "system"),
+            sample_group(
+                "restricted",
+                20,
+                Some(vec!["gpt-5"]),
+                "specific",
+                None,
+                "system",
+            ),
+        ];
+
+        let policy = resolve_effective_list_policy(None, "unrestricted", &groups, |group| {
+            (&group.allowed_models_mode, group.allowed_models.clone())
+        });
+
+        assert_eq!(policy, Some(vec!["gpt-5".to_string()]));
     }
 
     #[test]
