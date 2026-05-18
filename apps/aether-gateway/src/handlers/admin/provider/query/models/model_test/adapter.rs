@@ -46,6 +46,22 @@ pub(super) fn provider_query_standard_test_unsupported_reason(
     api_format: &str,
 ) -> String {
     let normalized_api_format = crate::ai_serving::normalize_api_format_alias(api_format);
+    if crate::provider_transport::is_windsurf_provider_transport(transport)
+        && normalized_api_format == "openai:chat"
+    {
+        let reason =
+            crate::provider_transport::local_windsurf_request_transport_unsupported_reason_with_network(
+                transport,
+            );
+        return match reason {
+            Some(reason) => format!(
+                "{} ({reason})",
+                provider_query_unsupported_test_api_format_message(api_format)
+            ),
+            None => provider_query_unsupported_test_api_format_message(api_format),
+        };
+    }
+
     let reason = match normalized_api_format.as_str() {
         "openai:chat" => {
             crate::provider_transport::policy::local_openai_chat_transport_unsupported_reason(
@@ -294,6 +310,15 @@ pub(super) fn provider_query_transport_supports_model_test_execution(
     transport: &AdminGatewayProviderTransportSnapshot,
     api_format: &str,
 ) -> bool {
+    if crate::provider_transport::is_windsurf_provider_transport(transport)
+        && provider_query_normalize_api_format_alias(api_format) == "openai:chat"
+    {
+        return crate::provider_transport::local_windsurf_request_transport_unsupported_reason_with_network(
+            transport,
+        )
+        .is_none();
+    }
+
     match provider_query_test_adapter_for_provider_api_format(
         transport.provider.provider_type.as_str(),
         api_format,

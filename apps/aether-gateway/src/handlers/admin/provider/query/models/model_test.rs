@@ -2659,6 +2659,22 @@ async fn provider_query_execute_standard_test_candidate(
         route_path,
         client_api_format,
     );
+    if crate::provider_transport::is_windsurf_provider_transport(&transport)
+        && provider_query_normalize_api_format_alias(candidate.endpoint.api_format.as_str())
+            == "openai:chat"
+    {
+        return provider_query_execute_windsurf_test_candidate(
+            state,
+            provider,
+            candidate,
+            payload,
+            route_path,
+            trace_id,
+            transport,
+            original_request_body,
+        )
+        .await;
+    }
     if !provider_query_transport_supports_model_test_execution(
         state,
         &transport,
@@ -3037,6 +3053,165 @@ async fn provider_query_execute_standard_test_candidate(
     } else {
         result.body.as_ref().and_then(|body| body.json_body.clone())
     };
+    let missing_success_body = result.status_code < 400 && response_body.is_none();
+    let did_fail = result.status_code >= 400 || missing_success_body;
+    let error_message = if did_fail {
+        provider_query_extract_error_message(&result).or_else(|| {
+            missing_success_body.then(|| {
+                format!(
+                    "Provider returned HTTP {} without a model-test response body",
+                    result.status_code
+                )
+            })
+        })
+    } else {
+        None
+    };
+
+    Ok(ProviderQueryExecutionOutcome {
+        status: if did_fail { "failed" } else { "success" },
+        skip_reason: None,
+        error_message,
+        status_code: Some(result.status_code),
+        latency_ms: result.telemetry.as_ref().and_then(|value| value.elapsed_ms),
+        request_url,
+        request_headers,
+        request_body: provider_request_body,
+        response_headers: result.headers,
+        response_body,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn provider_query_execute_windsurf_test_candidate(
+    state: &AdminAppState<'_>,
+    provider: &StoredProviderCatalogProvider,
+    candidate: &ProviderQueryTestCandidate,
+    payload: &Value,
+    route_path: &str,
+    trace_id: &str,
+    transport: AdminGatewayProviderTransportSnapshot,
+    original_request_body: Value,
+) -> Result<ProviderQueryExecutionOutcome, GatewayError> {
+    if let Some(_reason) =
+        crate::provider_transport::local_windsurf_request_transport_unsupported_reason_with_network(
+            &transport,
+        )
+    {
+        return Ok(provider_query_skipped_execution_outcome(
+            original_request_body,
+            provider_query_standard_test_unsupported_reason(
+                &transport,
+                candidate.endpoint.api_format.as_str(),
+            ),
+        ));
+    }
+
+    let incoming_request_headers = provider_query_extract_request_headers(payload);
+    let mut request_body = original_request_body.clone();
+    if let Some(object) = request_body.as_object_mut() {
+        object.insert("stream".to_string(), Value::Bool(false));
+    }
+    let request_model =
+        provider_query_request_body_model(&request_body, &candidate.effective_model);
+    let upstream_is_stream = provider_query_resolve_standard_test_upstream_is_stream(
+        transport.endpoint.config.as_ref(),
+        transport.provider.provider_type.as_str(),
+        candidate.endpoint.api_format.as_str(),
+    );
+    let Some((auth_header, auth_value)) =
+        crate::provider_transport::windsurf::resolve_windsurf_cascade_auth(&transport).or_else(
+            || crate::provider_transport::auth::resolve_local_openai_bearer_auth(&transport),
+        )
+    else {
+        return Ok(provider_query_skipped_execution_outcome(
+            request_body,
+            "Provider auth is unavailable for windsurf".to_string(),
+        ));
+    };
+
+    let mut synthetic_request = http::Request::builder()
+        .uri(route_path)
+        .body(())
+        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    *synthetic_request.headers_mut() = incoming_request_headers;
+    let (parts, _) = synthetic_request.into_parts();
+
+    let Some(provider_request_body) =
+        crate::provider_transport::build_windsurf_cascade_request_body(
+            &request_body,
+            request_model,
+            &auth_value,
+            transport.endpoint.body_rules.as_ref(),
+            Some(&parts.headers),
+            upstream_is_stream,
+        )
+    else {
+        return Ok(provider_query_skipped_execution_outcome(
+            request_body,
+            "Provider request body could not be built for windsurf".to_string(),
+        ));
+    };
+    let Some(request_url) = crate::provider_transport::build_windsurf_cascade_upstream_url(
+        transport.endpoint.base_url.as_str(),
+        parts.uri.query(),
+    ) else {
+        return Ok(provider_query_skipped_execution_outcome(
+            provider_request_body,
+            "Provider request URL is unavailable for windsurf".to_string(),
+        ));
+    };
+    let Some(request_headers) = crate::provider_transport::build_windsurf_cascade_headers(
+        &parts.headers,
+        &provider_request_body,
+        &request_body,
+        transport.endpoint.header_rules.as_ref(),
+        &auth_header,
+        &auth_value,
+        upstream_is_stream,
+    ) else {
+        return Ok(ProviderQueryExecutionOutcome {
+            status: "failed",
+            skip_reason: None,
+            error_message: Some("provider request headers build failed".to_string()),
+            status_code: None,
+            latency_ms: None,
+            request_url,
+            request_headers: BTreeMap::new(),
+            request_body: provider_request_body,
+            response_headers: BTreeMap::new(),
+            response_body: None,
+        });
+    };
+
+    let plan = ExecutionPlan {
+        request_id: trace_id.to_string(),
+        candidate_id: Some(format!("provider-query-{}", candidate.key.id)),
+        provider_name: Some(provider.name.clone()),
+        provider_id: provider.id.clone(),
+        endpoint_id: candidate.endpoint.id.clone(),
+        key_id: candidate.key.id.clone(),
+        method: "POST".to_string(),
+        url: request_url.clone(),
+        headers: request_headers.clone(),
+        content_type: Some("application/json".to_string()),
+        content_encoding: None,
+        body: RequestBody::from_json(provider_request_body.clone()),
+        stream: upstream_is_stream,
+        client_api_format: "openai:chat".to_string(),
+        provider_api_format: candidate.endpoint.api_format.clone(),
+        model_name: Some(request_model.to_string()),
+        proxy: state
+            .resolve_transport_proxy_snapshot_with_tunnel_affinity(&transport)
+            .await,
+        transport_profile: state.resolve_transport_profile(&transport),
+        timeouts: state.resolve_transport_execution_timeouts(&transport),
+    };
+
+    let result = state
+        .execute_execution_runtime_sync_plan(Some(trace_id), &plan)
+        .await?;
+    let response_body = result.body.as_ref().and_then(|body| body.json_body.clone());
     let missing_success_body = result.status_code < 400 && response_body.is_none();
     let did_fail = result.status_code >= 400 || missing_success_body;
     let error_message = if did_fail {
