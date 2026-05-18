@@ -423,7 +423,7 @@ mod tests {
         candidate_common_transport_skip_reason, candidate_transport_pair_skip_reason,
         request_conversion_direct_auth, request_conversion_enabled_for_transport,
         request_conversion_transport_supported, request_pair_allowed_for_transport,
-        CandidateTransportPolicyFacts,
+        request_pair_direct_auth, CandidateTransportPolicyFacts,
     };
     use aether_ai_formats::formats::matrix::RequestConversionKind;
     use serde_json::json;
@@ -589,6 +589,21 @@ mod tests {
         ));
         assert_eq!(
             request_conversion_direct_auth(&transport, RequestConversionKind::ToGeminiStandard),
+            Some(("key".to_string(), "secret".to_string()))
+        );
+    }
+
+    #[test]
+    fn vertex_gemini_embedding_transport_supports_openai_embedding_conversion() {
+        let transport = transport_snapshot("vertex_ai", "gemini:embedding", "api_key", true, None);
+
+        assert!(request_pair_allowed_for_transport(
+            &transport,
+            "openai:embedding",
+            "gemini:embedding"
+        ));
+        assert_eq!(
+            request_pair_direct_auth(&transport, "gemini:embedding"),
             Some(("key".to_string(), "secret".to_string()))
         );
     }

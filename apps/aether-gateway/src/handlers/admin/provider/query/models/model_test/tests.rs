@@ -29,6 +29,17 @@ fn provider_query_test_request_body_defaults_missing_model() {
 }
 
 #[test]
+fn provider_query_default_test_request_body_does_not_set_max_tokens() {
+    let body = provider_query_build_test_request_body(&json!({}), "fallback-model");
+
+    assert_eq!(body["model"], json!("fallback-model"));
+    assert!(
+        body.get("max_tokens").is_none(),
+        "admin model test must not silently force a low max_tokens value"
+    );
+}
+
+#[test]
 fn provider_query_failover_request_body_overrides_custom_model() {
     let payload = json!({
         "request_body": {
@@ -166,6 +177,40 @@ fn provider_query_standard_test_aggregates_responses_stream_body() {
 
     assert_eq!(body["model"], json!("gpt-5.4-mini"));
     assert_eq!(body["output"][0]["content"][0]["text"], json!("Hello"));
+}
+
+#[test]
+fn provider_query_standard_test_rejects_gemini_success_without_visible_output() {
+    let result = aether_contracts::ExecutionResult {
+        request_id: "provider-test".to_string(),
+        candidate_id: Some("candidate-0".to_string()),
+        status_code: 200,
+        headers: BTreeMap::new(),
+        body: Some(aether_contracts::ResponseBody {
+            json_body: Some(json!({
+                "candidates": [{
+                    "content": {"role": "model"},
+                    "finishReason": "MAX_TOKENS"
+                }],
+                "usageMetadata": {
+                    "promptTokenCount": 8,
+                    "candidatesTokenCount": 1,
+                    "thoughtsTokenCount": 25,
+                    "totalTokenCount": 34
+                },
+                "modelVersion": "gemini-3-flash-preview",
+                "responseId": "resp-empty"
+            })),
+            body_bytes_b64: None,
+        }),
+        telemetry: None,
+        error: None,
+    };
+
+    assert!(
+        provider_query_standard_execution_response_body("gemini:generate_content", &result)
+            .is_none()
+    );
 }
 
 #[test]

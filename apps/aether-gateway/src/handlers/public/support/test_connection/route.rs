@@ -179,9 +179,6 @@ pub(super) async fn maybe_build_local_test_connection_route_response(
                 "role": "user",
                 "parts": [{"text": "Health check"}],
             }],
-            "generationConfig": {
-                "maxOutputTokens": 5,
-            },
         }),
         _ => return None,
     };

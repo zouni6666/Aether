@@ -241,6 +241,11 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
         upstream_is_stream,
         request_requires_body_stream_field(body_json, force_body_stream_field),
     );
+    apply_transport_request_body_semantics(
+        &mut provider_request_body,
+        transport,
+        provider_api_format,
+    );
     if let Some(mapping) =
         crate::system_features::reasoning_model_directive_mapping_for_api_format_and_model(
             state,
@@ -260,6 +265,11 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
             provider_api_format,
             upstream_is_stream,
             request_requires_body_stream_field(body_json, force_body_stream_field),
+        );
+        apply_transport_request_body_semantics(
+            &mut provider_request_body,
+            transport,
+            provider_api_format,
         );
     }
 
@@ -366,6 +376,28 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
         envelope_name: None,
         transport: Arc::clone(transport),
     })
+}
+
+fn apply_transport_request_body_semantics(
+    provider_request_body: &mut Value,
+    transport: &GatewayProviderTransportSnapshot,
+    provider_api_format: &str,
+) {
+    if !crate::ai_serving::api_format_alias_matches(provider_api_format, "gemini:embedding")
+        || !crate::ai_serving::transport::vertex::is_vertex_transport_context(transport)
+    {
+        return;
+    }
+
+    let Some(object) = provider_request_body.as_object_mut() else {
+        return;
+    };
+
+    if object.contains_key("requests") {
+        return;
+    }
+
+    object.remove("model");
 }
 
 async fn resolve_local_gemini_image_to_openai_image_candidate_payload_parts(
