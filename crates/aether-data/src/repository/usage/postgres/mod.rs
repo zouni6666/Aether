@@ -8543,6 +8543,9 @@ fn map_usage_row(
         .try_get::<f64, _>("cache_read_cost_usd")
         .map_postgres_err()?;
     usage.output_price_per_1m = row.try_get("output_price_per_1m").map_postgres_err()?;
+    usage.client_family = row
+        .try_get::<Option<String>, _>("client_family")
+        .map_postgres_err()?;
     usage.request_headers = row.try_get("request_headers").map_postgres_err()?;
     let request_body = usage_json_column(
         row,

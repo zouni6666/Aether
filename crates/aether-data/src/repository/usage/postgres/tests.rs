@@ -628,6 +628,9 @@ fn usage_sql_uses_json_null_placeholders_for_usage_payload_columns() {
         assert!(sql.contains("request_metadata->>'client_ip'"));
         assert!(sql.contains("'user_agent'"));
         assert!(sql.contains("request_metadata->>'user_agent'"));
+        assert!(sql.contains("AS client_family"));
+        assert!(sql.contains("request_metadata->'client_session_affinity'->>'client_family'"));
+        assert!(sql.contains("request_metadata->>'client_family'"));
         assert!(sql.contains("CAST(\"usage\".input_tokens AS INTEGER) AS input_tokens"));
         assert!(sql.contains(
             "usage_settlement_snapshots.billing_input_tokens AS settlement_billing_input_tokens"

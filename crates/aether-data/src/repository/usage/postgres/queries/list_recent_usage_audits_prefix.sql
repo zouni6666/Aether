@@ -93,6 +93,10 @@ SELECT
   "usage".first_byte_time_ms,
   "usage".status,
   COALESCE(usage_settlement_snapshots.billing_status, "usage".billing_status) AS billing_status,
+  COALESCE(
+    NULLIF(BTRIM("usage".request_metadata->'client_session_affinity'->>'client_family'), ''),
+    NULLIF(BTRIM("usage".request_metadata->>'client_family'), '')
+  ) AS client_family,
   NULL::json AS request_headers,
   NULL::json AS request_body,
   NULL::bytea AS request_body_compressed,
