@@ -2,8 +2,9 @@ use async_trait::async_trait;
 use sqlx::{PgPool, Row};
 
 use super::{
-    finite_wallet_available_usd, plan_finite_wallet_debit, SettlementWriteRepository,
-    StoredUsageSettlement, UsageSettlementInput, SETTLEMENT_EPSILON_USD,
+    finite_wallet_available_usd, plan_finite_wallet_debit,
+    settlement_billing_status_for_usage_status, SettlementWriteRepository, StoredUsageSettlement,
+    UsageSettlementInput, SETTLEMENT_EPSILON_USD,
 };
 use crate::driver::postgres::PostgresTransactionRunner;
 use crate::error::SqlxResultExt;
@@ -455,11 +456,8 @@ impl SettlementWriteRepository for SqlxSettlementRepository {
                         return settlement_from_row(&usage_row).map(Some);
                     }
 
-                    let mut final_billing_status = if input.status == "completed" {
-                        "settled".to_string()
-                    } else {
-                        "void".to_string()
-                    };
+                    let mut final_billing_status =
+                        settlement_billing_status_for_usage_status(&input.status).to_string();
                     let finalized_at =
                         i64::try_from(input.finalized_at_unix_secs.unwrap_or_else(|| {
                             std::time::SystemTime::now()

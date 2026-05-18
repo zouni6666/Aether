@@ -275,6 +275,9 @@
                       <template v-if="perRequestCost > 0">
                         + 按次费用 <span class="font-medium">${{ perRequestCost.toFixed(6) }}</span>
                       </template>
+                      <template v-if="imageOutputCostTotal > 0">
+                        + 图片输出费用 <span class="font-medium">${{ imageOutputCostTotal.toFixed(6) }}</span>
+                      </template>
                       <template v-if="videoCostTotal > 0">
                         + {{ detail.video_billing?.task_type === 'image' ? '图像' : detail.video_billing?.task_type === 'audio' ? '音频' : '视频' }}费用 <span class="font-medium">${{ videoCostTotal.toFixed(6) }}</span>
                       </template>
@@ -426,7 +429,52 @@
                     </div>
                   </div>
 
-                  <!-- ========== 4. 视频/图像/音频计费（独立隔离，与Token计费风格一致） ========== -->
+                  <!-- ========== 4. 图片输出计费 ========== -->
+                  <div
+                    v-if="hasImageBillingDetail"
+                    class="rounded-lg p-3 space-y-2 bg-primary/5 border border-primary/30 mb-3"
+                  >
+                    <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1 sm:gap-2 text-xs">
+                      <div class="flex items-center gap-2 flex-wrap">
+                        <span class="font-medium text-primary">图片输出</span>
+                        <Badge
+                          variant="outline"
+                          class="text-[10px] px-1.5 py-0 h-4"
+                        >
+                          {{ imageOutputBillingLabel }}
+                        </Badge>
+                        <span
+                          v-if="imageOutputPricingDescriptor"
+                          class="text-muted-foreground font-mono"
+                        >{{ imageOutputPricingDescriptor }}</span>
+                      </div>
+                      <div class="text-muted-foreground flex items-center gap-2 flex-wrap">
+                        <span
+                          v-if="imageOutputPricePerImage !== null"
+                          class="font-mono"
+                        >{{ formatNumber(imageOutputCount) }} 张 × ${{ imageOutputPricePerImage.toFixed(6) }}/张 = ${{ imageOutputCostTotal.toFixed(6) }}</span>
+                      </div>
+                    </div>
+
+                    <div class="flex items-center">
+                      <div class="flex items-center flex-1">
+                        <span class="text-xs text-muted-foreground w-[56px]">数量</span>
+                        <span class="text-sm font-semibold font-mono flex-1 text-center">{{ formatNumber(imageOutputCount) }}</span>
+                        <span class="text-xs font-mono">${{ imageOutputCostTotal.toFixed(6) }}</span>
+                      </div>
+                      <Separator
+                        orientation="vertical"
+                        class="h-4 mx-4"
+                      />
+                      <div class="flex items-center flex-1">
+                        <span class="text-xs text-muted-foreground w-[56px]">格式</span>
+                        <span class="text-sm font-semibold font-mono flex-1 text-center">{{ imageOutputFormat || '-' }}</span>
+                        <span class="text-xs font-mono text-muted-foreground">{{ imageOutputBillingLabel }}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- ========== 5. 视频/图像/音频计费（独立隔离，与Token计费风格一致） ========== -->
                   <div
                     v-if="detail.video_billing"
                     class="rounded-lg p-3 space-y-2 bg-primary/5 border border-primary/30"
@@ -943,6 +991,11 @@ function getNestedNumber(record: JsonRecord | null, ...path: string[]): number |
   return toNumber(getNestedValue(record, ...path))
 }
 
+function getNestedString(record: JsonRecord | null, ...path: string[]): string | null {
+  const value = getNestedValue(record, ...path)
+  return typeof value === 'string' && value.trim() ? value.trim() : null
+}
+
 function normalizeCacheTtlPricing(value: unknown): CacheTTLPriceEntry[] {
   if (!Array.isArray(value)) return []
   return value
@@ -1078,6 +1131,10 @@ const billingSnapshot = computed<JsonRecord | null>(() =>
 
 const billingResolvedVariables = computed<JsonRecord | null>(() =>
   asRecord(billingSnapshot.value?.resolved_variables),
+)
+
+const billingResolvedDimensions = computed<JsonRecord | null>(() =>
+  asRecord(billingSnapshot.value?.resolved_dimensions),
 )
 
 const billingCostBreakdown = computed<JsonRecord | null>(() =>
@@ -1420,6 +1477,108 @@ const effectiveRequestCost = computed(() => {
   }
   return 0
 })
+
+const effectiveImageOutputCost = computed(() =>
+  getNestedNumber(billingCostBreakdown.value, 'image_output_cost')
+  ?? toNumber(detail.value?.image_output_cost)
+  ?? 0,
+)
+
+const imageOutputCostTotal = computed(() => effectiveImageOutputCost.value)
+
+const imageOutputPricePerImage = computed(() =>
+  getNestedNumber(billingResolvedVariables.value, 'image_output_price_per_image'),
+)
+
+const imageOutputCount = computed(() =>
+  getNestedNumber(billingResolvedDimensions.value, 'image_count')
+  ?? getNestedNumber(traceRequestMetadata.value, 'billing_dimensions', 'image_count')
+  ?? getNestedNumber(traceRequestMetadata.value, 'dimensions', 'image_count')
+  ?? 0,
+)
+
+const imageOutputSize = computed(() =>
+  getNestedString(billingResolvedDimensions.value, 'image_size')
+  ?? getNestedString(traceRequestMetadata.value, 'billing_dimensions', 'image_size')
+  ?? getNestedString(traceRequestMetadata.value, 'dimensions', 'image_size'),
+)
+
+const imageOutputQuality = computed(() =>
+  getNestedString(billingResolvedDimensions.value, 'image_quality')
+  ?? getNestedString(traceRequestMetadata.value, 'billing_dimensions', 'image_quality')
+  ?? getNestedString(traceRequestMetadata.value, 'dimensions', 'image_quality'),
+)
+
+const imageOutputFormat = computed(() =>
+  getNestedString(billingResolvedDimensions.value, 'image_output_format')
+  ?? getNestedString(traceRequestMetadata.value, 'billing_dimensions', 'image_output_format')
+  ?? getNestedString(traceRequestMetadata.value, 'dimensions', 'image_output_format'),
+)
+
+const imagePriceKey = computed(() => {
+  const snapshotKey = getNestedString(billingResolvedDimensions.value, 'image_price_key')
+  if (snapshotKey) return snapshotKey
+  const fallbackKey = [imageOutputSize.value, imageOutputQuality.value].filter(Boolean).join(':')
+  return fallbackKey || null
+})
+
+const imageOutputPriceBucket = computed(() =>
+  getNestedString(billingResolvedDimensions.value, 'image_output_price_bucket'),
+)
+
+const imageOutputPixels = computed(() =>
+  getNestedNumber(billingResolvedDimensions.value, 'image_pixels')
+  ?? parseImageSizePixels(imageOutputSize.value),
+)
+
+const imageOutputPricingMode = computed(() =>
+  getNestedString(billingResolvedDimensions.value, 'image_output_pricing_mode'),
+)
+
+const imageOutputPricingEnabled = computed(() =>
+  getNestedValue(billingResolvedDimensions.value, 'image_output_pricing_enabled') === true
+    || imageOutputPricingMode.value === 'matrix'
+    || imageOutputPricingMode.value === 'pixel_tiers'
+    || imageOutputPricingMode.value === 'per_image'
+    || imageOutputCostTotal.value > 0,
+)
+
+const imageOutputMatrixEnabled = computed(() => {
+  if (imageOutputPricingMode.value) return imageOutputPricingMode.value === 'matrix'
+  return getNestedValue(billingResolvedDimensions.value, 'image_output_matrix_enabled') === true
+})
+
+const imageOutputRangeEnabled = computed(() => {
+  if (imageOutputPricingMode.value) return imageOutputPricingMode.value === 'pixel_tiers'
+  return getNestedValue(billingResolvedDimensions.value, 'image_output_range_enabled') === true
+})
+
+const imageOutputBillingLabel = computed(() => {
+  if (imageOutputMatrixEnabled.value) return '矩阵计费'
+  if (imageOutputRangeEnabled.value) return '像素区间'
+  return '默认计费'
+})
+
+const imageOutputPricingDescriptor = computed(() => {
+  if (imageOutputMatrixEnabled.value && imagePriceKey.value) return imagePriceKey.value
+
+  const parts: string[] = []
+  if (imageOutputPriceBucket.value && imageOutputPriceBucket.value !== 'default') {
+    parts.push(formatImagePriceBucket(imageOutputPriceBucket.value))
+  }
+  const sizeQuality = [imageOutputSize.value, imageOutputQuality.value].filter(Boolean).join(' / ')
+  if (sizeQuality) parts.push(sizeQuality)
+  if (imageOutputRangeEnabled.value && imageOutputPixels.value !== null) {
+    parts.push(formatPixels(imageOutputPixels.value))
+  }
+  if (parts.length > 0) return parts.join(' · ')
+  if (imageOutputPriceBucket.value === 'default') return '默认价'
+  return null
+})
+
+const hasImageBillingDetail = computed(() =>
+  imageOutputPricingEnabled.value && (imageOutputCount.value > 0 || imageOutputCostTotal.value > 0),
+)
 
 const fallbackCacheTtlPricing = computed<CacheTTLPriceEntry[]>(() => {
   const tierPricing = normalizeCacheTtlPricing(billingTierInfo.value?.cache_ttl_pricing)
@@ -2121,6 +2280,34 @@ function formatNumber(num: number): string {
     return `${(num / 1_000).toFixed(1)  }K`
   }
   return num.toLocaleString()
+}
+
+function parseImageSizePixels(size: string | null): number | null {
+  if (!size) return null
+  const normalized = size.trim().toLowerCase().replace(/\s+/g, '').replace(/×/g, 'x')
+  const [widthText, heightText] = normalized.split('x')
+  const width = Number(widthText)
+  const height = Number(heightText)
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null
+  return Math.trunc(width * height)
+}
+
+function formatImagePriceBucket(bucket: string): string {
+  if (bucket === 'default') return '默认价'
+  if (bucket === 'unbounded') return '无上限'
+  const match = bucket.match(/^<=([0-9]+)px$/)
+  if (match) return `<= ${formatPixels(Number(match[1]))}`
+  return bucket
+}
+
+function formatPixels(value: number): string {
+  if (value >= 1_000_000) {
+    return `${(value / 1_000_000).toFixed(value % 1_000_000 === 0 ? 0 : 2)}M px`
+  }
+  if (value >= 1_000) {
+    return `${(value / 1_000).toFixed(0)}K px`
+  }
+  return `${value} px`
 }
 
 // 格式化响应时间，自动选择合适的单位

@@ -4,8 +4,8 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 
 use super::{
-    plan_finite_wallet_debit, SettlementWriteRepository, StoredUsageSettlement,
-    UsageSettlementInput, SETTLEMENT_EPSILON_USD,
+    plan_finite_wallet_debit, settlement_billing_status_for_usage_status,
+    SettlementWriteRepository, StoredUsageSettlement, UsageSettlementInput, SETTLEMENT_EPSILON_USD,
 };
 use crate::repository::wallet::{InMemoryWalletRepository, StoredWalletSnapshot};
 use crate::DataLayerError;
@@ -102,11 +102,8 @@ impl SettlementWriteRepository for InMemorySettlementRepository {
             })));
         }
 
-        let mut final_billing_status = if input.status == "completed" {
-            "settled".to_string()
-        } else {
-            "void".to_string()
-        };
+        let mut final_billing_status =
+            settlement_billing_status_for_usage_status(&input.status).to_string();
         let mut settlement = self.wallets.with_mut(|wallets| {
             let wallet_id = input
                 .api_key_id
@@ -304,6 +301,32 @@ mod tests {
         assert_eq!(settlement.wallet_id.as_deref(), Some("wallet-user-1"));
         assert_eq!(settlement.wallet_balance_before, Some(12.0));
         assert_eq!(settlement.wallet_balance_after, Some(9.0));
+    }
+
+    #[tokio::test]
+    async fn settles_cancelled_usage_against_wallet_and_provider_quota() {
+        let repository = InMemorySettlementRepository::seed(vec![sample_wallet()]);
+        let settlement = repository
+            .settle_usage(UsageSettlementInput {
+                request_id: "req-cancelled".to_string(),
+                user_id: Some("user-1".to_string()),
+                api_key_id: Some("key-1".to_string()),
+                api_key_is_standalone: false,
+                provider_id: Some("provider-1".to_string()),
+                status: "cancelled".to_string(),
+                billing_status: "pending".to_string(),
+                total_cost_usd: 3.0,
+                actual_total_cost_usd: 1.5,
+                finalized_at_unix_secs: Some(200),
+            })
+            .await
+            .expect("settlement should succeed")
+            .expect("settlement should exist");
+
+        assert_eq!(settlement.billing_status, "settled");
+        assert_eq!(settlement.wallet_balance_before, Some(12.0));
+        assert_eq!(settlement.wallet_balance_after, Some(9.0));
+        assert_eq!(settlement.provider_monthly_used_usd, Some(1.5));
     }
 
     #[tokio::test]

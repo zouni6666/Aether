@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::formats::openai::image::stream::OpenAiImageStreamState;
+use crate::formats::openai::image::stream::{OpenAiImageChatStreamState, OpenAiImageStreamState};
 use crate::formats::shared::model_directives::model_directive_display_model_from_report_context;
 use crate::formats::shared::stream_core::StreamingStandardFormatMatrix;
 use crate::formats::shared::AiSurfaceFinalizeError;
@@ -15,6 +15,7 @@ pub enum FinalizeStreamRewriteMode {
     EnvelopeUnwrap,
     ModelDirectiveDisplay,
     OpenAiImage,
+    OpenAiImageToOpenAiChat,
     Standard,
     KiroToClaudeCli,
     KiroToClaudeCliThenStandard,
@@ -57,6 +58,14 @@ pub fn resolve_finalize_stream_rewrite_mode(
         .then_some(FinalizeStreamRewriteMode::KiroToClaudeCliThenStandard);
     }
 
+    if provider_api_format == "openai:image" && client_api_format == "openai:chat" {
+        return Some(FinalizeStreamRewriteMode::OpenAiImageToOpenAiChat);
+    }
+
+    if provider_api_format == "openai:image" && client_api_format == "openai:image" {
+        return Some(FinalizeStreamRewriteMode::OpenAiImage);
+    }
+
     if needs_conversion {
         // CPA strategy: when provider and client share the same wire format
         // (exact match or same family), pass through the stream verbatim.
@@ -71,10 +80,6 @@ pub fn resolve_finalize_stream_rewrite_mode(
             client_api_format.as_str(),
         )
         .then_some(FinalizeStreamRewriteMode::Standard);
-    }
-
-    if provider_api_format == "openai:image" && client_api_format == "openai:image" {
-        return Some(FinalizeStreamRewriteMode::OpenAiImage);
     }
 
     if envelope_name.eq_ignore_ascii_case(KIRO_ENVELOPE_NAME) {
@@ -106,6 +111,7 @@ enum AiSurfaceStreamRewriteState {
     EnvelopeUnwrap,
     ModelDirectiveDisplay,
     OpenAiImage(Box<OpenAiImageStreamState>),
+    OpenAiImageToOpenAiChat(Box<OpenAiImageChatStreamState>),
     Standard(Box<StreamingStandardFormatMatrix>),
     KiroToClaudeCli(Box<KiroToClaudeCliStreamState>),
     KiroToClaudeCliThenStandard {
@@ -131,6 +137,11 @@ pub fn maybe_build_ai_surface_stream_rewriter<'a>(
         }
         FinalizeStreamRewriteMode::OpenAiImage => {
             AiSurfaceStreamRewriteState::OpenAiImage(Box::<OpenAiImageStreamState>::default())
+        }
+        FinalizeStreamRewriteMode::OpenAiImageToOpenAiChat => {
+            AiSurfaceStreamRewriteState::OpenAiImageToOpenAiChat(
+                Box::<OpenAiImageChatStreamState>::default(),
+            )
         }
         FinalizeStreamRewriteMode::Standard => {
             AiSurfaceStreamRewriteState::Standard(Box::<StreamingStandardFormatMatrix>::default())
@@ -159,6 +170,9 @@ impl AiSurfaceStreamRewriter<'_> {
             AiSurfaceStreamRewriteState::OpenAiImage(state) => {
                 state.push_chunk(self.report_context, chunk)
             }
+            AiSurfaceStreamRewriteState::OpenAiImageToOpenAiChat(state) => {
+                state.push_chunk(self.report_context, chunk)
+            }
             AiSurfaceStreamRewriteState::KiroToClaudeCli(state) => {
                 state.push_chunk(self.report_context, chunk)
             }
@@ -183,6 +197,9 @@ impl AiSurfaceStreamRewriter<'_> {
     pub fn finish(&mut self) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
         match &mut self.state {
             AiSurfaceStreamRewriteState::OpenAiImage(state) => state.finish(self.report_context),
+            AiSurfaceStreamRewriteState::OpenAiImageToOpenAiChat(state) => {
+                state.finish(self.report_context)
+            }
             AiSurfaceStreamRewriteState::KiroToClaudeCli(state) => {
                 state.finish(self.report_context)
             }
@@ -228,6 +245,7 @@ impl AiSurfaceStreamRewriter<'_> {
                 transform_standard_line(state, self.report_context, line)
             }
             AiSurfaceStreamRewriteState::OpenAiImage(_)
+            | AiSurfaceStreamRewriteState::OpenAiImageToOpenAiChat(_)
             | AiSurfaceStreamRewriteState::KiroToClaudeCli(_)
             | AiSurfaceStreamRewriteState::KiroToClaudeCliThenStandard { .. } => Ok(Vec::new()),
         }
@@ -685,5 +703,59 @@ data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"thinki
             resolve_finalize_stream_rewrite_mode(&report_context),
             Some(FinalizeStreamRewriteMode::OpenAiImage)
         );
+    }
+
+    #[test]
+    fn rewrites_openai_image_stream_to_openai_chat_final_chunk() {
+        let report_context = json!({
+            "provider_api_format": "openai:image",
+            "client_api_format": "openai:chat",
+            "mapped_model": "gpt-image-2",
+            "request_id": "trace-image-chat-stream",
+            "needs_conversion": false,
+        });
+        assert_eq!(
+            resolve_finalize_stream_rewrite_mode(&report_context),
+            Some(FinalizeStreamRewriteMode::OpenAiImageToOpenAiChat)
+        );
+        let mut rewriter = maybe_build_ai_surface_stream_rewriter(Some(&report_context))
+            .expect("image to chat stream rewriter should exist");
+
+        let progress = rewriter
+            .push_chunk(
+                br#"event: response.image_generation_call.partial_image
+data: {"type":"response.image_generation_call.partial_image","partial_image_b64":"cGFydGlhbA=="}
+
+"#,
+            )
+            .expect("partial image should rewrite as progress");
+        let progress_text = String::from_utf8(progress).expect("progress output should be utf8");
+        assert!(progress_text.contains("\"object\":\"chat.completion.chunk\""));
+        assert!(!progress_text.contains("cGFydGlhbA=="));
+
+        let output_item = rewriter
+            .push_chunk(
+                br#"event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"type":"image_generation_call","id":"ig_1","result":"aGVsbG8=","output_format":"png"}}
+
+"#,
+            )
+            .expect("output item should rewrite");
+        let output_item_text = String::from_utf8(output_item).expect("output item should be utf8");
+        assert!(output_item_text.is_empty());
+
+        let final_output = rewriter
+            .push_chunk(
+                br#"event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_123","model":"gpt-image-2","tool_usage":{"image_gen":{"total_tokens":0}},"output":[]}}
+
+"#,
+            )
+            .expect("completed event should rewrite");
+        let final_text = String::from_utf8(final_output).expect("final output should be utf8");
+        assert!(final_text.contains("\"object\":\"chat.completion.chunk\""));
+        assert!(final_text.contains("![generated image](data:image/png;base64,aGVsbG8=)"));
+        assert!(final_text.contains("data: [DONE]"));
+        assert!(!final_text.contains("image_generation.completed"));
     }
 }

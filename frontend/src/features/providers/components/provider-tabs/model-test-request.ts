@@ -149,14 +149,16 @@ export function buildDefaultModelTestRequestBody(
   apiFormat?: string | null,
   model?: ModelTestImageSource | null,
 ): string {
-  if (apiFormat?.trim().toLowerCase().endsWith(':embedding')) {
+  const normalizedApiFormat = normalizeApiFormatAlias(apiFormat ?? '')
+
+  if (normalizedApiFormat.endsWith(':embedding')) {
     return JSON.stringify({
       model: modelName,
       input: 'This is a test embedding input.',
     }, null, 2)
   }
 
-  if (apiFormat?.trim().toLowerCase().endsWith(':rerank')) {
+  if (normalizedApiFormat.endsWith(':rerank')) {
     return JSON.stringify({
       model: modelName,
       query: 'Apple',
@@ -171,7 +173,7 @@ export function buildDefaultModelTestRequestBody(
     }, null, 2)
   }
 
-  if (normalizeApiFormatAlias(apiFormat ?? '') === 'openai:image') {
+  if (normalizedApiFormat === 'openai:image') {
     return JSON.stringify({
       model: modelName,
       prompt: DEFAULT_MODEL_TEST_MESSAGE,
@@ -181,7 +183,7 @@ export function buildDefaultModelTestRequestBody(
     }, null, 2)
   }
 
-  if (normalizeApiFormatAlias(apiFormat ?? '') === 'openai:responses' && modelSupportsImageGeneration(model)) {
+  if (normalizedApiFormat === 'openai:responses' && modelSupportsImageGeneration(model)) {
     return JSON.stringify({
       model: modelName,
       input: DEFAULT_MODEL_TEST_MESSAGE,

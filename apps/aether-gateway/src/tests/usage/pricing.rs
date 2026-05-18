@@ -113,10 +113,7 @@ struct ExpectedUsagePricing {
 
 impl ExpectedUsagePricing {
     fn total_tokens(self) -> u64 {
-        self.input_tokens
-            .saturating_add(self.output_tokens)
-            .saturating_add(self.cache_creation_tokens)
-            .saturating_add(self.cache_read_tokens)
+        self.input_tokens.saturating_add(self.output_tokens)
     }
 
     fn cache_creation_uncategorized_tokens(self) -> u64 {

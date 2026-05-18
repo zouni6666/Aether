@@ -243,7 +243,8 @@ pub fn build_lifecycle_usage_seed(
     let model = context_string(context, "model")
         .or_else(|| non_empty_str(plan.model_name.as_deref()))
         .unwrap_or_else(|| "unknown".to_string());
-    let request_type = infer_request_type(api_format.as_deref());
+    let request_type =
+        infer_request_type_from_contracts(api_format.as_deref(), endpoint_api_format.as_deref());
     let api_family = api_format
         .as_deref()
         .and_then(infer_api_family)
@@ -618,6 +619,14 @@ fn build_terminal_usage_event_from_seed_impl(
         }
     }
 
+    if matches!(event_type, UsageEventType::Completed) {
+        apply_completed_image_usage_estimate(&mut data);
+    }
+
+    if matches!(event_type, UsageEventType::Cancelled) {
+        apply_cancelled_usage_estimate(&mut data);
+    }
+
     let data = if trusted_request_metadata {
         sanitize_usage_event_capture_fields_trusted(data)
     } else {
@@ -641,7 +650,10 @@ pub fn build_terminal_usage_context_seed(
         .or_else(|| context_string(context, "provider_api_format"))
         .or_else(|| non_empty_str(Some(plan.provider_api_format.as_str())))
         .unwrap_or_default();
-    let request_type = infer_request_type(Some(client_contract.as_str()));
+    let request_type = infer_request_type_from_contracts(
+        Some(client_contract.as_str()),
+        Some(provider_contract.as_str()),
+    );
     let has_format_conversion = resolve_has_format_conversion(
         context,
         client_contract.as_str(),
@@ -1233,7 +1245,10 @@ fn build_usage_event_data_seed_with_detail(
     let provider_name = context_string(context, "provider_name")
         .or_else(|| non_empty_str(plan.provider_name.as_deref()))
         .unwrap_or_else(|| "unknown".to_string());
-    let request_type = Some(infer_request_type(api_format.as_deref()));
+    let request_type = Some(infer_request_type_from_contracts(
+        api_format.as_deref(),
+        endpoint_api_format.as_deref(),
+    ));
     let api_family = api_format
         .as_deref()
         .and_then(infer_api_family)
@@ -1854,6 +1869,19 @@ fn infer_request_type(api_format: Option<&str>) -> String {
     }
 }
 
+fn infer_request_type_from_contracts(
+    client_api_format: Option<&str>,
+    provider_api_format: Option<&str>,
+) -> String {
+    if matches!(
+        infer_endpoint_kind(provider_api_format.unwrap_or_default()),
+        Some("image")
+    ) {
+        return "image".to_string();
+    }
+    infer_request_type(client_api_format)
+}
+
 fn infer_api_family(api_format: &str) -> Option<&str> {
     api_format.split_once(':').map(|(family, _)| family)
 }
@@ -1887,13 +1915,63 @@ fn apply_standardized_usage_seed(usage: &StandardizedUsage, data: &mut UsageEven
     if total_tokens > 0 {
         data.total_tokens = Some(total_tokens);
     }
+    apply_standardized_usage_dimensions_seed(usage, data);
+}
+
+fn apply_standardized_usage_dimensions_seed(usage: &StandardizedUsage, data: &mut UsageEventData) {
+    if usage.dimensions.is_empty() && usage.request_count <= 0 {
+        return;
+    }
+
+    let mut dimensions = usage
+        .dimensions
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<Map<String, Value>>();
+    if usage.request_count > 0 {
+        dimensions
+            .entry("request_count".to_string())
+            .or_insert_with(|| json!(usage.request_count));
+    }
+    if dimensions.is_empty() {
+        return;
+    }
+
+    let mut metadata = match data.request_metadata.take() {
+        Some(Value::Object(object)) => object,
+        _ => Map::new(),
+    };
+    let mut existing_dimensions = match metadata.remove("dimensions") {
+        Some(Value::Object(object)) => object,
+        _ => Map::new(),
+    };
+    for (key, value) in dimensions {
+        existing_dimensions.insert(key, value);
+    }
+    metadata.insert("dimensions".to_string(), Value::Object(existing_dimensions));
+    data.request_metadata = Some(Value::Object(metadata));
 }
 
 fn standardized_usage_total_tokens(usage: &StandardizedUsage) -> u64 {
+    if let Some(total_tokens) = standardized_usage_explicit_total_tokens(usage) {
+        return total_tokens;
+    }
+
     positive_usage_component(usage.input_tokens)
         .saturating_add(positive_usage_component(usage.output_tokens))
-        .saturating_add(positive_usage_component(usage.cache_creation_tokens))
-        .saturating_add(positive_usage_component(usage.cache_read_tokens))
+        .saturating_add(positive_usage_component(usage.reasoning_tokens))
+}
+
+fn standardized_usage_explicit_total_tokens(usage: &StandardizedUsage) -> Option<u64> {
+    usage
+        .dimensions
+        .get("total_tokens")
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_i64().and_then(|v| u64::try_from(v).ok()))
+        })
+        .filter(|value| *value > 0)
 }
 
 fn positive_usage_component(value: i64) -> u64 {
@@ -2174,12 +2252,653 @@ fn extract_token_counts_from_value(value: &Value) -> Option<(u64, u64, u64)> {
     }
 }
 
+fn apply_cancelled_usage_estimate(data: &mut UsageEventData) {
+    let provider_usage_available = data
+        .response_body
+        .as_ref()
+        .and_then(extract_token_counts_from_value)
+        .is_some();
+    let request_usage = data
+        .provider_request_body
+        .as_ref()
+        .or(data.request_body.as_ref())
+        .and_then(estimate_request_usage);
+
+    if positive_tokens(data.input_tokens) == 0 {
+        if let Some(usage) = request_usage.as_ref() {
+            data.input_tokens = Some(usage.input_tokens);
+        }
+    }
+
+    if !provider_usage_available {
+        apply_cancelled_request_cache_estimate(data, request_usage.as_ref());
+    }
+
+    if positive_tokens(data.output_tokens) == 0 {
+        if let Some(output_tokens) = data
+            .response_body
+            .as_ref()
+            .or(data.client_response_body.as_ref())
+            .and_then(estimate_response_output_tokens)
+        {
+            data.output_tokens = Some(output_tokens);
+        }
+    }
+
+    if positive_tokens(data.total_tokens) == 0 {
+        let total_tokens =
+            positive_tokens(data.input_tokens).saturating_add(positive_tokens(data.output_tokens));
+        if total_tokens > 0 {
+            data.total_tokens = Some(total_tokens);
+        }
+    }
+}
+
+fn apply_completed_image_usage_estimate(data: &mut UsageEventData) {
+    if !usage_event_data_is_image(data) {
+        return;
+    }
+    apply_completed_image_dimensions(data);
+    if data
+        .response_body
+        .as_ref()
+        .and_then(extract_token_counts_from_value)
+        .is_some()
+    {
+        return;
+    }
+    let request_usage = data
+        .provider_request_body
+        .as_ref()
+        .or(data.request_body.as_ref())
+        .and_then(estimate_request_usage);
+
+    if positive_tokens(data.input_tokens) == 0 {
+        if let Some(usage) = request_usage.as_ref() {
+            data.input_tokens = Some(usage.input_tokens);
+        }
+    }
+    apply_cancelled_request_cache_estimate(data, request_usage.as_ref());
+    if positive_tokens(data.total_tokens) == 0 {
+        let total_tokens =
+            positive_tokens(data.input_tokens).saturating_add(positive_tokens(data.output_tokens));
+        if total_tokens > 0 {
+            data.total_tokens = Some(total_tokens);
+        }
+    }
+}
+
+fn apply_completed_image_dimensions(data: &mut UsageEventData) {
+    let image_count = usage_dimension_i64(data.request_metadata.as_ref(), "image_count")
+        .or_else(|| image_response_count(data.response_body.as_ref()))
+        .or_else(|| image_request_count(data.provider_request_body.as_ref()))
+        .or_else(|| image_request_count(data.request_body.as_ref()));
+
+    if let Some(image_count) = image_count.filter(|value| *value > 0) {
+        set_usage_dimension_if_absent(data, "image_count", json!(image_count));
+    }
+
+    for (dimension, request_key) in [
+        ("image_size", "size"),
+        ("image_quality", "quality"),
+        ("image_output_format", "output_format"),
+    ] {
+        if usage_dimension_string(data.request_metadata.as_ref(), dimension).is_some() {
+            continue;
+        }
+        if let Some(value) = image_request_string(data.provider_request_body.as_ref(), request_key)
+            .or_else(|| image_request_string(data.request_body.as_ref(), request_key))
+        {
+            set_usage_dimension_if_absent(data, dimension, json!(value));
+        }
+    }
+}
+
+fn usage_dimension_i64(metadata: Option<&Value>, key: &str) -> Option<i64> {
+    metadata
+        .and_then(Value::as_object)
+        .and_then(|object| object.get("dimensions"))
+        .and_then(Value::as_object)
+        .and_then(|object| object.get(key))
+        .and_then(|value| {
+            value
+                .as_i64()
+                .or_else(|| value.as_u64().and_then(|number| i64::try_from(number).ok()))
+        })
+}
+
+fn usage_dimension_string(metadata: Option<&Value>, key: &str) -> Option<String> {
+    metadata
+        .and_then(Value::as_object)
+        .and_then(|object| object.get("dimensions"))
+        .and_then(Value::as_object)
+        .and_then(|object| object.get(key))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn set_usage_dimension_if_absent(data: &mut UsageEventData, key: &str, value: Value) {
+    let mut metadata = match data.request_metadata.take() {
+        Some(Value::Object(object)) => object,
+        _ => Map::new(),
+    };
+    let mut dimensions = match metadata.remove("dimensions") {
+        Some(Value::Object(object)) => object,
+        _ => Map::new(),
+    };
+    dimensions.entry(key.to_string()).or_insert(value);
+    metadata.insert("dimensions".to_string(), Value::Object(dimensions));
+    data.request_metadata = Some(Value::Object(metadata));
+}
+
+fn image_response_count(value: Option<&Value>) -> Option<i64> {
+    let value = value?;
+    value
+        .get("data")
+        .and_then(Value::as_array)
+        .map(|items| items.len() as i64)
+        .filter(|count| *count > 0)
+        .or_else(|| image_result_count(value.get("result")))
+}
+
+fn image_result_count(value: Option<&Value>) -> Option<i64> {
+    match value? {
+        Value::Array(items) => Some(items.len() as i64).filter(|count| *count > 0),
+        Value::Object(object) if !object.is_empty() => Some(1),
+        Value::String(text) if !text.trim().is_empty() => Some(1),
+        _ => None,
+    }
+}
+
+fn image_request_count(value: Option<&Value>) -> Option<i64> {
+    value
+        .and_then(|value| value.get("n"))
+        .and_then(|value| {
+            value
+                .as_i64()
+                .or_else(|| value.as_u64().and_then(|number| i64::try_from(number).ok()))
+        })
+        .filter(|count| *count > 0)
+}
+
+fn image_request_string(value: Option<&Value>, key: &str) -> Option<String> {
+    value
+        .and_then(|value| value.get(key))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn usage_event_data_is_image(data: &UsageEventData) -> bool {
+    data.request_type
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case("image"))
+        || data
+            .endpoint_kind
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case("image"))
+        || data
+            .provider_endpoint_kind
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case("image"))
+        || data
+            .endpoint_api_format
+            .as_deref()
+            .and_then(infer_endpoint_kind)
+            .is_some_and(|value| value.eq_ignore_ascii_case("image"))
+        || data
+            .api_format
+            .as_deref()
+            .and_then(infer_endpoint_kind)
+            .is_some_and(|value| value.eq_ignore_ascii_case("image"))
+}
+
+fn apply_cancelled_request_cache_estimate(
+    data: &mut UsageEventData,
+    request_usage: Option<&EstimatedRequestUsage>,
+) {
+    let Some(request_usage) = request_usage else {
+        return;
+    };
+    if positive_tokens(data.cache_read_input_tokens) == 0 && request_usage.cache_read_tokens > 0 {
+        data.cache_read_input_tokens = Some(request_usage.cache_read_tokens);
+    }
+    if positive_tokens(data.cache_creation_input_tokens) == 0
+        && request_usage.cache_creation_tokens > 0
+    {
+        data.cache_creation_input_tokens = Some(request_usage.cache_creation_tokens);
+    }
+    if positive_tokens(data.cache_creation_ephemeral_5m_input_tokens) == 0
+        && request_usage.cache_creation_ephemeral_5m_tokens > 0
+    {
+        data.cache_creation_ephemeral_5m_input_tokens =
+            Some(request_usage.cache_creation_ephemeral_5m_tokens);
+    }
+    if positive_tokens(data.cache_creation_ephemeral_1h_input_tokens) == 0
+        && request_usage.cache_creation_ephemeral_1h_tokens > 0
+    {
+        data.cache_creation_ephemeral_1h_input_tokens =
+            Some(request_usage.cache_creation_ephemeral_1h_tokens);
+    }
+}
+
+fn positive_tokens(value: Option<u64>) -> u64 {
+    value.unwrap_or_default()
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct EstimatedRequestUsage {
+    input_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
+    cache_creation_ephemeral_5m_tokens: u64,
+    cache_creation_ephemeral_1h_tokens: u64,
+}
+
+fn estimate_request_usage(value: &Value) -> Option<EstimatedRequestUsage> {
+    let preferred_total = match value {
+        Value::Object(object) => [
+            "instructions",
+            "input",
+            "messages",
+            "prompt",
+            "contents",
+            "system",
+            "tools",
+        ]
+        .into_iter()
+        .filter_map(|field| object.get(field))
+        .map(estimate_json_tokens)
+        .fold(0u64, u64::saturating_add),
+        _ => 0,
+    };
+    let total = if preferred_total > 0 {
+        preferred_total
+    } else {
+        estimate_json_tokens(value)
+    };
+    if total == 0 {
+        return None;
+    }
+
+    let mut usage = EstimatedRequestUsage {
+        input_tokens: total,
+        ..EstimatedRequestUsage::default()
+    };
+    apply_explicit_request_cache_usage(value, &mut usage);
+    Some(usage)
+}
+
+fn apply_explicit_request_cache_usage(value: &Value, usage: &mut EstimatedRequestUsage) {
+    usage.cache_read_tokens = first_positive_u64_path(
+        value,
+        &[
+            &["cache_read_input_tokens"],
+            &["cache_read_tokens"],
+            &["input_tokens_details", "cached_tokens"],
+            &["prompt_tokens_details", "cached_tokens"],
+        ],
+    )
+    .unwrap_or_default();
+    usage.cache_creation_tokens = first_positive_u64_path(
+        value,
+        &[
+            &["cache_creation_input_tokens"],
+            &["cache_creation_tokens"],
+            &["input_tokens_details", "cached_creation_tokens"],
+            &["prompt_tokens_details", "cached_creation_tokens"],
+        ],
+    )
+    .unwrap_or_default();
+    usage.cache_creation_ephemeral_5m_tokens = first_positive_u64_path(
+        value,
+        &[
+            &["cache_creation", "ephemeral_5m_input_tokens"],
+            &["cache_creation_ephemeral_5m_input_tokens"],
+        ],
+    )
+    .unwrap_or_default();
+    usage.cache_creation_ephemeral_1h_tokens = first_positive_u64_path(
+        value,
+        &[
+            &["cache_creation", "ephemeral_1h_input_tokens"],
+            &["cache_creation_ephemeral_1h_input_tokens"],
+        ],
+    )
+    .unwrap_or_default();
+    if usage.cache_creation_tokens == 0 {
+        usage.cache_creation_tokens = usage
+            .cache_creation_ephemeral_5m_tokens
+            .saturating_add(usage.cache_creation_ephemeral_1h_tokens);
+    }
+}
+
+fn first_positive_u64_path(value: &Value, paths: &[&[&str]]) -> Option<u64> {
+    paths
+        .iter()
+        .find_map(|path| value_at_path(value, path).and_then(value_as_positive_u64))
+}
+
+fn value_at_path<'a>(mut value: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    for segment in path {
+        value = value.get(*segment)?;
+    }
+    Some(value)
+}
+
+fn value_as_positive_u64(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_i64().and_then(|number| u64::try_from(number).ok()))
+        .filter(|value| *value > 0)
+}
+
+fn estimate_json_tokens(value: &Value) -> u64 {
+    match value {
+        Value::String(text) => estimate_text_tokens(text),
+        Value::Array(items) => items
+            .iter()
+            .map(estimate_json_tokens)
+            .fold(0u64, u64::saturating_add),
+        Value::Object(object) => object
+            .iter()
+            .map(|(key, value)| {
+                estimate_text_tokens(key).saturating_add(estimate_json_tokens(value))
+            })
+            .fold(0u64, u64::saturating_add),
+        Value::Null => 0,
+        _ => 1,
+    }
+}
+
+fn estimate_text_tokens(text: &str) -> u64 {
+    let chars = text.chars().count() as u64;
+    if chars == 0 {
+        0
+    } else {
+        chars.div_ceil(4).max(1)
+    }
+}
+
+#[derive(Default)]
+struct StreamOutputEstimate {
+    text: String,
+    saw_delta: bool,
+}
+
+impl StreamOutputEstimate {
+    fn push_delta(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.saw_delta = true;
+        self.text.push_str(text);
+    }
+
+    fn push_done(&mut self, text: &str) {
+        if text.is_empty() || self.saw_delta {
+            return;
+        }
+        self.text.push_str(text);
+    }
+}
+
+fn estimate_response_output_tokens(value: &Value) -> Option<u64> {
+    let mut estimate = StreamOutputEstimate::default();
+    collect_stream_output_text(value, &mut estimate);
+    let tokens = estimate_text_tokens(estimate.text.as_str());
+    (tokens > 0).then_some(tokens)
+}
+
+fn collect_stream_output_text(value: &Value, estimate: &mut StreamOutputEstimate) {
+    match value {
+        Value::String(text) => {
+            for_each_sse_payload(text, |payload| {
+                if payload == "[DONE]" {
+                    return;
+                }
+                if let Ok(json_body) = serde_json::from_str::<Value>(payload) {
+                    collect_stream_output_text(&json_body, estimate);
+                }
+            });
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_stream_output_text(item, estimate);
+            }
+        }
+        Value::Object(object) => {
+            if let Some(chunks) = object.get("chunks").and_then(Value::as_array) {
+                for chunk in chunks {
+                    collect_stream_output_text(chunk, estimate);
+                }
+                return;
+            }
+            collect_openai_responses_output_text(object, estimate);
+            collect_openai_chat_output_text(object, estimate);
+            collect_claude_output_text(object, estimate);
+            collect_gemini_output_text(object, estimate);
+        }
+        _ => {}
+    }
+}
+
+fn collect_openai_responses_output_text(
+    object: &Map<String, Value>,
+    estimate: &mut StreamOutputEstimate,
+) {
+    match object
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "response.output_text.delta" | "response.outtext.delta" => {
+            if let Some(text) = openai_delta_text(object.get("delta")) {
+                estimate.push_delta(text.as_str());
+            }
+        }
+        "response.reasoning_summary_text.delta" | "response.function_call_arguments.delta" => {
+            if let Some(text) = object.get("delta").and_then(Value::as_str) {
+                estimate.push_delta(text);
+            }
+        }
+        "response.output_text.done" | "response.reasoning_summary_text.done" => {
+            if let Some(text) = object
+                .get("text")
+                .and_then(Value::as_str)
+                .or_else(|| part_text(object.get("part")))
+            {
+                estimate.push_done(text);
+            }
+        }
+        "response.function_call_arguments.done" => {
+            if let Some(text) = object.get("arguments").and_then(Value::as_str) {
+                estimate.push_done(text);
+            }
+        }
+        "response.output_item.done" => {
+            if let Some(item) = object.get("item").and_then(Value::as_object) {
+                collect_openai_responses_output_item_text(item, estimate);
+            }
+        }
+        "response.completed" => {
+            if let Some(response) = object.get("response").and_then(Value::as_object) {
+                collect_openai_responses_completed_text(response, estimate);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_openai_responses_completed_text(
+    response: &Map<String, Value>,
+    estimate: &mut StreamOutputEstimate,
+) {
+    for item in response
+        .get("output")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+    {
+        collect_openai_responses_output_item_text(item, estimate);
+    }
+}
+
+fn collect_openai_responses_output_item_text(
+    item: &Map<String, Value>,
+    estimate: &mut StreamOutputEstimate,
+) {
+    match item.get("type").and_then(Value::as_str).unwrap_or_default() {
+        "message" => {
+            for content in item
+                .get("content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_object)
+            {
+                if content.get("type").and_then(Value::as_str) == Some("output_text") {
+                    if let Some(text) = content.get("text").and_then(Value::as_str) {
+                        estimate.push_done(text);
+                    }
+                }
+            }
+        }
+        "reasoning" => {
+            for summary in item
+                .get("summary")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_object)
+            {
+                if let Some(text) = summary.get("text").and_then(Value::as_str) {
+                    estimate.push_done(text);
+                }
+            }
+        }
+        "function_call" => {
+            if let Some(arguments) = item.get("arguments").and_then(Value::as_str) {
+                estimate.push_done(arguments);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_openai_chat_output_text(
+    object: &Map<String, Value>,
+    estimate: &mut StreamOutputEstimate,
+) {
+    for choice in object
+        .get("choices")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+    {
+        if let Some(delta) = choice.get("delta").and_then(Value::as_object) {
+            if let Some(content) = delta.get("content").and_then(Value::as_str) {
+                estimate.push_delta(content);
+            }
+            if let Some(reasoning_content) = delta.get("reasoning_content").and_then(Value::as_str)
+            {
+                estimate.push_delta(reasoning_content);
+            }
+            for tool_call in delta
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_object)
+            {
+                if let Some(arguments) = tool_call
+                    .get("function")
+                    .and_then(Value::as_object)
+                    .and_then(|function| function.get("arguments"))
+                    .and_then(Value::as_str)
+                {
+                    estimate.push_delta(arguments);
+                }
+            }
+        }
+    }
+}
+
+fn collect_claude_output_text(object: &Map<String, Value>, estimate: &mut StreamOutputEstimate) {
+    if object.get("type").and_then(Value::as_str) != Some("content_block_delta") {
+        return;
+    }
+    let Some(delta) = object.get("delta").and_then(Value::as_object) else {
+        return;
+    };
+    match delta
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "text_delta" => {
+            if let Some(text) = delta.get("text").and_then(Value::as_str) {
+                estimate.push_delta(text);
+            }
+        }
+        "thinking_delta" => {
+            if let Some(text) = delta.get("thinking").and_then(Value::as_str) {
+                estimate.push_delta(text);
+            }
+        }
+        "input_json_delta" => {
+            if let Some(text) = delta.get("partial_json").and_then(Value::as_str) {
+                estimate.push_delta(text);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_gemini_output_text(object: &Map<String, Value>, estimate: &mut StreamOutputEstimate) {
+    for part in object
+        .get("candidates")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|candidate| candidate.get("content"))
+        .filter_map(Value::as_object)
+        .filter_map(|content| content.get("parts"))
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(Value::as_object)
+    {
+        if let Some(text) = part.get("text").and_then(Value::as_str) {
+            estimate.push_delta(text);
+        }
+    }
+}
+
+fn openai_delta_text(value: Option<&Value>) -> Option<String> {
+    match value {
+        Some(Value::String(text)) => Some(text.clone()),
+        Some(Value::Object(object)) => object
+            .get("text")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        _ => None,
+    }
+}
+
+fn part_text(value: Option<&Value>) -> Option<&str> {
+    value
+        .and_then(Value::as_object)
+        .and_then(|part| part.get("text"))
+        .and_then(Value::as_str)
+}
+
 fn extract_token_counts_from_json(value: &Value) -> Option<(u64, u64, u64)> {
     if let Some(usage) = value.get("usage").and_then(Value::as_object) {
-        let usage_details = usage
-            .get("input_tokens_details")
-            .or_else(|| usage.get("prompt_tokens_details"))
-            .and_then(Value::as_object);
         let input = usage
             .get("input_tokens")
             .or_else(|| usage.get("prompt_tokens"))
@@ -2190,20 +2909,22 @@ fn extract_token_counts_from_json(value: &Value) -> Option<(u64, u64, u64)> {
             .or_else(|| usage.get("completion_tokens"))
             .and_then(Value::as_u64)
             .unwrap_or_default();
-        let raw_total = usage
+        let reasoning = usage
+            .get("reasoning_tokens")
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                usage
+                    .get("output_tokens_details")
+                    .or_else(|| usage.get("completion_tokens_details"))
+                    .and_then(Value::as_object)
+                    .and_then(|details| details.get("reasoning_tokens"))
+                    .and_then(Value::as_u64)
+            })
+            .unwrap_or_default();
+        let total = usage
             .get("total_tokens")
             .and_then(Value::as_u64)
-            .unwrap_or(input + output);
-        let cache_creation = extract_cache_creation_tokens_from_usage_object(usage, usage_details);
-        let cache_read = extract_cache_read_tokens_from_usage_object(usage, usage_details);
-        let total = if cache_creation > 0 || cache_read > 0 {
-            input
-                .saturating_add(output)
-                .saturating_add(cache_creation)
-                .saturating_add(cache_read)
-        } else {
-            raw_total
-        };
+            .unwrap_or_else(|| input.saturating_add(output).saturating_add(reasoning));
         return Some((input, output, total));
     }
 
@@ -2234,59 +2955,6 @@ fn extract_token_counts_from_json(value: &Value) -> Option<(u64, u64, u64)> {
     }
 
     None
-}
-
-fn extract_cache_creation_tokens_from_usage_object(
-    usage: &serde_json::Map<String, Value>,
-    usage_details: Option<&serde_json::Map<String, Value>>,
-) -> u64 {
-    let direct = usage
-        .get("cache_creation_input_tokens")
-        .and_then(Value::as_u64)
-        .unwrap_or_default();
-    if direct > 0 {
-        return direct;
-    }
-
-    let breakdown = usage
-        .get("cache_creation")
-        .and_then(Value::as_object)
-        .map(|cache_creation| {
-            cache_creation
-                .get("ephemeral_5m_input_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or_default()
-                .saturating_add(
-                    cache_creation
-                        .get("ephemeral_1h_input_tokens")
-                        .and_then(Value::as_u64)
-                        .unwrap_or_default(),
-                )
-        })
-        .unwrap_or_default();
-    if breakdown > 0 {
-        return breakdown;
-    }
-
-    usage_details
-        .and_then(|details| details.get("cached_creation_tokens"))
-        .and_then(Value::as_u64)
-        .unwrap_or_default()
-}
-
-fn extract_cache_read_tokens_from_usage_object(
-    usage: &serde_json::Map<String, Value>,
-    usage_details: Option<&serde_json::Map<String, Value>>,
-) -> u64 {
-    usage
-        .get("cache_read_input_tokens")
-        .and_then(Value::as_u64)
-        .or_else(|| {
-            usage_details
-                .and_then(|details| details.get("cached_tokens"))
-                .and_then(Value::as_u64)
-        })
-        .unwrap_or_default()
 }
 
 fn empty_to_none(value: Option<String>) -> Option<String> {
@@ -2348,7 +3016,7 @@ mod tests {
         }))
         .expect("tokens should exist");
 
-        assert_eq!(tokens, (3, 5, 11));
+        assert_eq!(tokens, (3, 5, 8));
     }
 
     #[test]
@@ -2366,7 +3034,7 @@ mod tests {
         }))
         .expect("tokens should exist");
 
-        assert_eq!(tokens, (3, 5, 11));
+        assert_eq!(tokens, (3, 5, 8));
     }
 
     #[test]
@@ -2381,7 +3049,7 @@ mod tests {
         }))
         .expect("tokens should exist");
 
-        assert_eq!(tokens, (6, 20, 41883));
+        assert_eq!(tokens, (6, 20, 26));
     }
 
     #[test]
@@ -2429,7 +3097,7 @@ mod tests {
         }))
         .expect("tokens should exist");
 
-        assert_eq!(tokens, (9, 4, 20));
+        assert_eq!(tokens, (9, 4, 13));
     }
 
     #[test]
@@ -2806,6 +3474,198 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_stream_usage_estimates_tokens_from_request_and_partial_response() {
+        let plan = ExecutionPlan {
+            request_id: "req-stream-cancelled-estimated-usage-1".to_string(),
+            candidate_id: Some("cand-stream-cancelled-estimated-usage-1".to_string()),
+            provider_name: Some("OpenAI".to_string()),
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            key_id: "key-1".to_string(),
+            method: "POST".to_string(),
+            url: "https://example.com/v1/responses".to_string(),
+            headers: BTreeMap::new(),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({
+                "model": "gpt-5.4",
+                "input": "Write a short greeting for a usage test",
+                "stream": true
+            })),
+            stream: true,
+            client_api_format: "openai:responses".to_string(),
+            provider_api_format: "openai:responses".to_string(),
+            model_name: Some("gpt-5.4".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+        let sse_body = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_cancel_123\",\"model\":\"gpt-5.4\"}}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello there friend\"}\n\n"
+        );
+        let payload = GatewayStreamReportRequest {
+            trace_id: "trace-stream-cancelled-estimated-usage-1".to_string(),
+            report_kind: "openai_responses_stream_cancelled".to_string(),
+            report_context: Some(json!({
+                "client_api_format": "openai:responses",
+                "provider_api_format": "openai:responses",
+                "provider_request_body": {
+                    "model": "gpt-5.4",
+                    "input": "Write a short greeting for a usage test",
+                    "stream": true
+                }
+            })),
+            status_code: 499,
+            headers: BTreeMap::new(),
+            provider_body_base64: Some(base64::engine::general_purpose::STANDARD.encode(sse_body)),
+            provider_body_state: Some(UsageBodyCaptureState::Inline),
+            client_body_base64: None,
+            client_body_state: Some(UsageBodyCaptureState::None),
+            terminal_summary: None,
+            telemetry: None,
+        };
+
+        let event =
+            build_stream_terminal_usage_event(&plan, payload.report_context.as_ref(), &payload)
+                .expect("usage event should build");
+
+        assert_eq!(event.event_type, UsageEventType::Cancelled);
+        assert!(event.data.input_tokens.unwrap_or_default() > 0);
+        assert_eq!(event.data.output_tokens, Some(5));
+        assert_eq!(
+            event.data.total_tokens,
+            Some(event.data.input_tokens.unwrap_or_default() + 5)
+        );
+    }
+
+    #[test]
+    fn cancelled_stream_usage_does_not_infer_cache_read_from_prompt_cache_key() {
+        let request_body = json!({
+            "model": "gpt-5.4",
+            "input": "Use the cached project context and answer briefly",
+            "prompt_cache_key": "prompt-session-1",
+            "stream": true
+        });
+        let plan = ExecutionPlan {
+            request_id: "req-stream-cancelled-cache-estimated-usage-1".to_string(),
+            candidate_id: Some("cand-stream-cancelled-cache-estimated-usage-1".to_string()),
+            provider_name: Some("OpenAI".to_string()),
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            key_id: "key-1".to_string(),
+            method: "POST".to_string(),
+            url: "https://example.com/v1/responses".to_string(),
+            headers: BTreeMap::new(),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody::from_json(request_body.clone()),
+            stream: true,
+            client_api_format: "openai:responses".to_string(),
+            provider_api_format: "openai:responses".to_string(),
+            model_name: Some("gpt-5.4".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+        let payload = GatewayStreamReportRequest {
+            trace_id: "trace-stream-cancelled-cache-estimated-usage-1".to_string(),
+            report_kind: "openai_responses_stream_cancelled".to_string(),
+            report_context: Some(json!({
+                "client_api_format": "openai:responses",
+                "provider_api_format": "openai:responses",
+                "provider_request_body": request_body
+            })),
+            status_code: 499,
+            headers: BTreeMap::new(),
+            provider_body_base64: Some(base64::engine::general_purpose::STANDARD.encode(
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"cached answer\"}\n\n",
+            )),
+            provider_body_state: Some(UsageBodyCaptureState::Inline),
+            client_body_base64: None,
+            client_body_state: Some(UsageBodyCaptureState::None),
+            terminal_summary: None,
+            telemetry: None,
+        };
+
+        let event =
+            build_stream_terminal_usage_event(&plan, payload.report_context.as_ref(), &payload)
+                .expect("usage event should build");
+        let input_tokens = event
+            .data
+            .input_tokens
+            .expect("input estimate should exist");
+
+        assert_eq!(event.event_type, UsageEventType::Cancelled);
+        assert_eq!(event.data.cache_read_input_tokens, None);
+        assert_eq!(event.data.output_tokens, Some(4));
+        assert_eq!(event.data.total_tokens, Some(input_tokens + 4));
+    }
+
+    #[test]
+    fn failed_stream_usage_does_not_estimate_partial_response_tokens() {
+        let plan = ExecutionPlan {
+            request_id: "req-stream-failed-estimated-usage-1".to_string(),
+            candidate_id: Some("cand-stream-failed-estimated-usage-1".to_string()),
+            provider_name: Some("OpenAI".to_string()),
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            key_id: "key-1".to_string(),
+            method: "POST".to_string(),
+            url: "https://example.com/v1/responses".to_string(),
+            headers: BTreeMap::new(),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({
+                "model": "gpt-5.4",
+                "input": "This failed request should not be billed",
+                "stream": true
+            })),
+            stream: true,
+            client_api_format: "openai:responses".to_string(),
+            provider_api_format: "openai:responses".to_string(),
+            model_name: Some("gpt-5.4".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+        let payload = GatewayStreamReportRequest {
+            trace_id: "trace-stream-failed-estimated-usage-1".to_string(),
+            report_kind: "openai_responses_stream_failed".to_string(),
+            report_context: Some(json!({
+                "client_api_format": "openai:responses",
+                "provider_api_format": "openai:responses",
+                "provider_request_body": {
+                    "model": "gpt-5.4",
+                    "input": "This failed request should not be billed",
+                    "stream": true
+                }
+            })),
+            status_code: 500,
+            headers: BTreeMap::new(),
+            provider_body_base64: Some(base64::engine::general_purpose::STANDARD.encode(
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial text\"}\n\n",
+            )),
+            provider_body_state: Some(UsageBodyCaptureState::Inline),
+            client_body_base64: None,
+            client_body_state: Some(UsageBodyCaptureState::None),
+            terminal_summary: None,
+            telemetry: None,
+        };
+
+        let event =
+            build_stream_terminal_usage_event(&plan, payload.report_context.as_ref(), &payload)
+                .expect("usage event should build");
+
+        assert_eq!(event.event_type, UsageEventType::Failed);
+        assert_eq!(event.data.input_tokens, None);
+        assert_eq!(event.data.output_tokens, None);
+        assert_eq!(event.data.total_tokens, None);
+    }
+
+    #[test]
     fn stream_terminal_usage_marks_redirect_status_as_failed() {
         let plan = ExecutionPlan {
             request_id: "req-stream-redirect-usage".to_string(),
@@ -2944,11 +3804,237 @@ mod tests {
 
         assert_eq!(event.data.input_tokens, Some(13));
         assert_eq!(event.data.output_tokens, Some(21));
-        assert_eq!(event.data.total_tokens, Some(39));
+        assert_eq!(event.data.total_tokens, Some(34));
         assert_eq!(event.data.cache_creation_input_tokens, Some(2));
         assert_eq!(event.data.cache_read_input_tokens, Some(3));
         assert!(event.data.response_body.is_none());
         assert!(event.data.client_response_body.is_none());
+    }
+
+    #[test]
+    fn completed_image_usage_estimates_request_tokens_when_provider_usage_is_missing() {
+        let plan = ExecutionPlan {
+            request_id: "req-image-completed-estimate-1".to_string(),
+            candidate_id: Some("cand-image-completed-estimate-1".to_string()),
+            provider_name: Some("OpenAI".to_string()),
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            key_id: "key-1".to_string(),
+            method: "POST".to_string(),
+            url: "https://example.com/v1/images/generations".to_string(),
+            headers: BTreeMap::new(),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({
+                "model": "gpt-image-2",
+                "prompt": "draw a small red cube on a clean desk",
+                "size": "1024x1024",
+                "quality": "medium"
+            })),
+            stream: true,
+            client_api_format: "openai:chat".to_string(),
+            provider_api_format: "openai:image".to_string(),
+            model_name: Some("gpt-image-2".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+        let mut standardized_usage = StandardizedUsage::new();
+        standardized_usage.request_count = 1;
+        standardized_usage
+            .dimensions
+            .insert("image_count".to_string(), json!(1));
+        standardized_usage
+            .dimensions
+            .insert("image_size".to_string(), json!("1024x1024"));
+        standardized_usage
+            .dimensions
+            .insert("image_quality".to_string(), json!("medium"));
+        let payload = GatewayStreamReportRequest {
+            trace_id: "trace-image-completed-estimate-1".to_string(),
+            report_kind: "openai_chat_stream_success".to_string(),
+            report_context: Some(json!({
+                "client_api_format": "openai:chat",
+                "provider_api_format": "openai:image",
+                "image_request": {
+                    "size": "1024x1024",
+                    "quality": "medium"
+                }
+            })),
+            status_code: 200,
+            headers: BTreeMap::new(),
+            provider_body_base64: None,
+            provider_body_state: Some(UsageBodyCaptureState::None),
+            client_body_base64: None,
+            client_body_state: Some(UsageBodyCaptureState::None),
+            terminal_summary: Some(ExecutionStreamTerminalSummary {
+                standardized_usage: Some(standardized_usage),
+                finish_reason: Some("stop".to_string()),
+                response_id: Some("resp_image_estimate_1".to_string()),
+                model: Some("gpt-image-2".to_string()),
+                observed_finish: true,
+                unknown_event_count: 0,
+                parser_error: None,
+            }),
+            telemetry: None,
+        };
+
+        let event =
+            build_stream_terminal_usage_event(&plan, payload.report_context.as_ref(), &payload)
+                .expect("usage event should build");
+
+        assert_eq!(event.event_type, UsageEventType::Completed);
+        assert!(event.data.input_tokens.unwrap_or_default() > 0);
+        assert_eq!(event.data.output_tokens.unwrap_or_default(), 0);
+        assert_eq!(event.data.total_tokens, event.data.input_tokens);
+        assert_eq!(
+            event
+                .data
+                .request_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("dimensions"))
+                .and_then(|dimensions| dimensions.get("image_count"))
+                .and_then(Value::as_i64),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn sync_completed_openai_image_usage_infers_image_dimensions_from_response() {
+        let request_body = json!({
+            "model": "gpt-image-2",
+            "prompt": "draw a small red cube on a clean desk",
+            "size": "1024x1024",
+            "quality": "medium",
+            "output_format": "png"
+        });
+        let plan = ExecutionPlan {
+            request_id: "req-image-sync-completed-dimensions-1".to_string(),
+            candidate_id: Some("cand-image-sync-completed-dimensions-1".to_string()),
+            provider_name: Some("OpenAI".to_string()),
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            key_id: "key-1".to_string(),
+            method: "POST".to_string(),
+            url: "https://example.com/v1/images/generations".to_string(),
+            headers: BTreeMap::new(),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody::from_json(request_body.clone()),
+            stream: false,
+            client_api_format: "openai:image".to_string(),
+            provider_api_format: "openai:image".to_string(),
+            model_name: Some("gpt-image-2".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+        let payload = GatewaySyncReportRequest {
+            trace_id: "trace-image-sync-completed-dimensions-1".to_string(),
+            report_kind: "openai_image_sync_success".to_string(),
+            report_context: Some(json!({
+                "client_api_format": "openai:image",
+                "provider_api_format": "openai:image",
+                "provider_request_body": request_body
+            })),
+            status_code: 200,
+            headers: BTreeMap::new(),
+            body_json: Some(json!({
+                "created": 1_700_000_000,
+                "data": [{ "b64_json": "abc" }]
+            })),
+            client_body_json: None,
+            body_base64: None,
+            telemetry: None,
+        };
+
+        let event =
+            build_sync_terminal_usage_event(&plan, payload.report_context.as_ref(), &payload)
+                .expect("usage event should build");
+
+        let dimensions = event
+            .data
+            .request_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("dimensions"))
+            .expect("dimensions should exist");
+        assert_eq!(event.event_type, UsageEventType::Completed);
+        assert!(event.data.input_tokens.unwrap_or_default() > 0);
+        assert_eq!(dimensions.get("image_count"), Some(&json!(1)));
+        assert_eq!(dimensions.get("image_size"), Some(&json!("1024x1024")));
+        assert_eq!(dimensions.get("image_quality"), Some(&json!("medium")));
+        assert_eq!(dimensions.get("image_output_format"), Some(&json!("png")));
+    }
+
+    #[test]
+    fn sync_completed_openai_image_usage_preserves_native_usage_with_image_count() {
+        let request_body = json!({
+            "model": "gpt-image-2",
+            "prompt": "draw a small red cube on a clean desk",
+            "size": "1024x1024",
+            "quality": "medium"
+        });
+        let plan = ExecutionPlan {
+            request_id: "req-image-sync-native-usage-1".to_string(),
+            candidate_id: Some("cand-image-sync-native-usage-1".to_string()),
+            provider_name: Some("OpenAI".to_string()),
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            key_id: "key-1".to_string(),
+            method: "POST".to_string(),
+            url: "https://example.com/v1/images/generations".to_string(),
+            headers: BTreeMap::new(),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody::from_json(request_body.clone()),
+            stream: false,
+            client_api_format: "openai:image".to_string(),
+            provider_api_format: "openai:image".to_string(),
+            model_name: Some("gpt-image-2".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+        let payload = GatewaySyncReportRequest {
+            trace_id: "trace-image-sync-native-usage-1".to_string(),
+            report_kind: "openai_image_sync_success".to_string(),
+            report_context: Some(json!({
+                "client_api_format": "openai:image",
+                "provider_api_format": "openai:image",
+                "provider_request_body": request_body
+            })),
+            status_code: 200,
+            headers: BTreeMap::new(),
+            body_json: Some(json!({
+                "usage": {
+                    "input_tokens": 11,
+                    "output_tokens": 22,
+                    "total_tokens": 33
+                },
+                "data": [{ "b64_json": "abc" }]
+            })),
+            client_body_json: None,
+            body_base64: None,
+            telemetry: None,
+        };
+
+        let event =
+            build_sync_terminal_usage_event(&plan, payload.report_context.as_ref(), &payload)
+                .expect("usage event should build");
+
+        assert_eq!(event.event_type, UsageEventType::Completed);
+        assert_eq!(event.data.input_tokens, Some(11));
+        assert_eq!(event.data.output_tokens, Some(22));
+        assert_eq!(event.data.total_tokens, Some(33));
+        assert_eq!(
+            event
+                .data
+                .request_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("dimensions"))
+                .and_then(|dimensions| dimensions.get("image_count")),
+            Some(&json!(1))
+        );
     }
 
     #[test]
@@ -3116,7 +4202,7 @@ mod tests {
 
         assert_eq!(event.data.input_tokens, Some(3));
         assert_eq!(event.data.output_tokens, Some(5));
-        assert_eq!(event.data.total_tokens, Some(11));
+        assert_eq!(event.data.total_tokens, Some(8));
         assert_eq!(event.data.cache_creation_input_tokens, Some(1));
         assert_eq!(event.data.cache_read_input_tokens, Some(2));
         assert_eq!(

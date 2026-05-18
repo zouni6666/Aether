@@ -58,7 +58,7 @@ describe('buildDefaultModelTestRequestBody', () => {
     expect(body.input).toBeUndefined()
   })
 
-  it('uses prompt payloads for openai image api formats', () => {
+  it('uses image prompt payloads for OpenAI image test requests', () => {
     const body = JSON.parse(buildDefaultModelTestRequestBody('gpt-image-2', 'openai:image'))
 
     expect(body).toEqual({
@@ -240,6 +240,8 @@ describe('isModelTestableApiFormat', () => {
   it.each([
     'openai:chat',
     'openai:responses',
+    'openai:responses:compact',
+    'openai:image',
     'claude:messages',
     'gemini:generate_content',
     'openai:image',
@@ -349,6 +351,23 @@ describe('isModelTestableEndpoint', () => {
       api_format: 'openai:responses',
       is_active: true,
     }, keys)).toBe(true)
+  })
+
+  it('lets fixed provider OAuth keys inherit testable endpoint formats', () => {
+    const keys = [{
+      api_formats: ['legacy:mismatch'],
+      auth_type: 'oauth',
+      is_active: true,
+    }]
+
+    expect(isModelTestableEndpoint({
+      api_format: 'openai:image',
+      is_active: true,
+    }, keys, 'chatgpt_web')).toBe(true)
+    expect(isModelTestableEndpoint({
+      api_format: 'openai:image',
+      is_active: true,
+    }, keys, 'custom')).toBe(false)
   })
 })
 

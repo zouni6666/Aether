@@ -36,6 +36,31 @@ fn plan_finite_wallet_debit(
     }
 }
 
+fn settlement_billing_status_for_usage_status(status: &str) -> &'static str {
+    match status {
+        "completed" | "cancelled" => "settled",
+        _ => "void",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::settlement_billing_status_for_usage_status;
+
+    #[test]
+    fn cancelled_usage_status_is_billable() {
+        assert_eq!(
+            settlement_billing_status_for_usage_status("completed"),
+            "settled"
+        );
+        assert_eq!(
+            settlement_billing_status_for_usage_status("cancelled"),
+            "settled"
+        );
+        assert_eq!(settlement_billing_status_for_usage_status("failed"), "void");
+    }
+}
+
 #[allow(unused_imports)]
 pub(crate) use aether_data_contracts::repository::settlement::{
     SettlementRepository, SettlementWriteRepository, StoredUsageSettlement, UsageSettlementInput,

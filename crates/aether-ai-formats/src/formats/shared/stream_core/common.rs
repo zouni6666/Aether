@@ -92,8 +92,7 @@ pub fn canonical_usage_from_openai_usage(value: Option<&Value>) -> Option<Canoni
     let total_tokens = usage.get("total_tokens").and_then(Value::as_u64).unwrap_or(
         input_tokens
             .saturating_add(output_tokens)
-            .saturating_add(cache_creation_tokens)
-            .saturating_add(cache_read_tokens),
+            .saturating_add(reasoning_tokens),
     );
     if input_tokens == 0 && total_tokens > output_tokens {
         input_tokens = total_tokens.saturating_sub(output_tokens);
@@ -150,8 +149,7 @@ pub fn canonical_usage_from_claude_usage(value: Option<&Value>) -> Option<Canoni
         output_tokens,
         total_tokens: input_tokens
             .saturating_add(output_tokens)
-            .saturating_add(cache_creation_tokens)
-            .saturating_add(cache_read_tokens),
+            .saturating_add(reasoning_tokens),
         cache_creation_tokens,
         cache_creation_ephemeral_5m_tokens,
         cache_creation_ephemeral_1h_tokens,
@@ -235,7 +233,7 @@ pub fn canonical_usage_from_gemini_usage(value: Option<&Value>) -> Option<Canoni
         .unwrap_or(
             input_tokens
                 .saturating_add(output_tokens)
-                .saturating_add(cache_read_tokens),
+                .saturating_add(reasoning_tokens),
         );
     Some(CanonicalUsage {
         input_tokens,

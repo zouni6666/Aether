@@ -2,8 +2,9 @@ use async_trait::async_trait;
 use sqlx::{sqlite::SqliteRow, Row};
 
 use super::{
-    finite_wallet_available_usd, plan_finite_wallet_debit, SettlementWriteRepository,
-    StoredUsageSettlement, UsageSettlementInput, SETTLEMENT_EPSILON_USD,
+    finite_wallet_available_usd, plan_finite_wallet_debit,
+    settlement_billing_status_for_usage_status, SettlementWriteRepository, StoredUsageSettlement,
+    UsageSettlementInput, SETTLEMENT_EPSILON_USD,
 };
 use crate::driver::sqlite::{sqlite_optional_real, sqlite_real, SqlitePool};
 use crate::error::SqlResultExt;
@@ -377,11 +378,8 @@ impl SettlementWriteRepository for SqliteSettlementRepository {
             return Ok(Some(settlement));
         }
 
-        let mut final_billing_status = if input.status == "completed" {
-            "settled".to_string()
-        } else {
-            "void".to_string()
-        };
+        let mut final_billing_status =
+            settlement_billing_status_for_usage_status(&input.status).to_string();
         let mut settlement = StoredUsageSettlement {
             request_id: input.request_id.clone(),
             wallet_id: None,

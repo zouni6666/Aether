@@ -443,9 +443,10 @@ const activeEndpoints = computed(() => (props.endpoints ?? [])
     if (typeof endpoint.active_keys === 'number') {
       return endpoint.is_active !== false
         && isModelTestableApiFormat(endpoint.api_format)
-        && endpoint.active_keys > 0
+        && (endpoint.active_keys > 0
+          || isModelTestableEndpoint(endpoint, providerKeysState.value, props.provider.provider_type))
     }
-    return isModelTestableEndpoint(endpoint, providerKeysState.value)
+    return isModelTestableEndpoint(endpoint, providerKeysState.value, props.provider.provider_type)
   }))
 const selectableTestEndpoints = computed(() => mappingTestEndpoints.value ?? activeEndpoints.value)
 const parsedTestRequestHeaders = computed(() => parseModelTestRequestHeadersDraft(testRequestHeadersDraft.value))

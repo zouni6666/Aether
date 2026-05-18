@@ -13,6 +13,16 @@ fn sync_plan_kind_disables_local_candidate_failover(plan_kind: &str) -> bool {
     )
 }
 
+fn openai_image_success_disables_local_success_failover(
+    plan: &ExecutionPlan,
+    status_code: u16,
+) -> bool {
+    status_code == 200
+        && plan
+            .provider_api_format
+            .eq_ignore_ascii_case("openai:image")
+}
+
 pub(crate) async fn should_retry_next_local_candidate_sync(
     state: &AppState,
     plan: &ExecutionPlan,
@@ -45,6 +55,10 @@ pub(crate) async fn analyze_local_candidate_failover_sync(
     response_text: Option<&str>,
 ) -> LocalFailoverAnalysis {
     if sync_plan_kind_disables_local_candidate_failover(plan_kind) {
+        return LocalFailoverAnalysis::use_default();
+    }
+
+    if openai_image_success_disables_local_success_failover(plan, result.status_code) {
         return LocalFailoverAnalysis::use_default();
     }
 
@@ -218,6 +232,10 @@ pub(crate) async fn resolve_local_candidate_failover_analysis_stream(
     status_code: u16,
     response_text: Option<&str>,
 ) -> LocalFailoverAnalysis {
+    if openai_image_success_disables_local_success_failover(plan, status_code) {
+        return LocalFailoverAnalysis::use_default();
+    }
+
     resolve_local_failover_analysis_for_attempt(
         state,
         plan,
@@ -753,6 +771,75 @@ mod tests {
                 Some("{\"error\":{\"message\":\"invalid auth token\"}}"),
             )
             .await
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_success_failover_does_not_retry_openai_image_success() {
+        let local_report_context = serde_json::json!({
+            "candidate_index": 0,
+            "retry_index": 0,
+        });
+        let state = build_state_with_provider_config(Some(serde_json::json!({
+            "failover_rules": {
+                "success_failover_patterns": [
+                    {"pattern": ".*"}
+                ]
+            }
+        })));
+        let mut plan = sample_plan();
+        plan.provider_api_format = "openai:image".to_string();
+
+        assert!(
+            !should_retry_next_local_candidate_stream(
+                &state,
+                &plan,
+                "openai_image_stream",
+                Some(&local_report_context),
+                200,
+                Some("{\"data\":[{\"b64_json\":\"aGVsbG8=\"}]}"),
+            )
+            .await,
+            "successful OpenAI image responses should not be retried by success failover rules"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_success_failover_does_not_retry_openai_image_success() {
+        let local_report_context = serde_json::json!({
+            "candidate_index": 0,
+            "retry_index": 0,
+        });
+        let state = build_state_with_provider_config(Some(serde_json::json!({
+            "failover_rules": {
+                "success_failover_patterns": [
+                    {"pattern": ".*"}
+                ]
+            }
+        })));
+        let mut plan = sample_plan();
+        plan.provider_api_format = "openai:image".to_string();
+        let result = ExecutionResult {
+            request_id: "req-1".to_string(),
+            candidate_id: None,
+            status_code: 200,
+            headers: Default::default(),
+            body: None,
+            telemetry: None,
+            error: None,
+        };
+
+        assert!(
+            !should_retry_next_local_candidate_sync(
+                &state,
+                &plan,
+                "openai_image_sync",
+                Some(&local_report_context),
+                &result,
+                Some("{\"data\":[{\"b64_json\":\"aGVsbG8=\"}]}")
+            )
+            .await,
+            "successful OpenAI image responses should not be retried by success failover rules"
         );
     }
 

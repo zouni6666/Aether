@@ -313,9 +313,10 @@ const activeEndpoints = computed(() => (props.endpoints ?? [])
     if (typeof endpoint.active_keys === 'number') {
       return endpoint.is_active !== false
         && isModelTestableApiFormat(endpoint.api_format)
-        && endpoint.active_keys > 0
+        && (endpoint.active_keys > 0
+          || isModelTestableEndpoint(endpoint, props.providerKeys ?? [], props.provider.provider_type))
     }
-    return isModelTestableEndpoint(endpoint, props.providerKeys ?? [])
+    return isModelTestableEndpoint(endpoint, props.providerKeys ?? [], props.provider.provider_type)
   }))
 const parsedTestRequestHeaders = computed(() => parseModelTestRequestHeadersDraft(testRequestHeadersDraft.value))
 const testRequestHeadersError = computed(() => parsedTestRequestHeaders.value.error)

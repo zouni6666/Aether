@@ -8,6 +8,7 @@ use crate::formats::openai::chat::stream::{
     OpenAIChatClientEmitter, OpenAIChatProviderState, OpenAIResponsesClientEmitter,
     OpenAIResponsesProviderState,
 };
+use crate::formats::openai::image::stream::OpenAiImageStreamTerminalState;
 use crate::formats::shared::error_body::{
     build_core_error_body_for_client_format, LocalCoreSyncErrorKind,
 };
@@ -97,7 +98,7 @@ impl StreamingStandardFormatMatrix {
 
 #[derive(Default)]
 pub struct StreamingStandardTerminalObserver {
-    provider: Option<ProviderStreamParser>,
+    provider: Option<TerminalStreamParser>,
     latest_summary: Option<ExecutionStreamTerminalSummary>,
 }
 
@@ -111,8 +112,17 @@ impl StreamingStandardTerminalObserver {
         let Some(provider) = self.provider.as_mut() else {
             return Ok(());
         };
-        let frames = provider.push_line(report_context, line)?;
-        self.observe_frames(frames);
+        match provider {
+            TerminalStreamParser::Standard(provider) => {
+                let frames = provider.push_line(report_context, line)?;
+                self.observe_frames(frames);
+            }
+            TerminalStreamParser::OpenAIImage(provider) => {
+                if let Some(summary) = provider.push_line(report_context, line)? {
+                    self.latest_summary = Some(summary);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -124,8 +134,17 @@ impl StreamingStandardTerminalObserver {
         let Some(provider) = self.provider.as_mut() else {
             return Ok(self.latest_summary.clone());
         };
-        let frames = provider.finish(report_context)?;
-        self.observe_frames(frames);
+        match provider {
+            TerminalStreamParser::Standard(provider) => {
+                let frames = provider.finish(report_context)?;
+                self.observe_frames(frames);
+            }
+            TerminalStreamParser::OpenAIImage(provider) => {
+                if let Some(summary) = provider.finish(report_context)? {
+                    self.latest_summary = Some(summary);
+                }
+            }
+        }
         Ok(self.latest_summary.clone())
     }
 
@@ -153,7 +172,7 @@ impl StreamingStandardTerminalObserver {
             return;
         }
         let provider_api_format = provider_api_format_for_context(report_context);
-        self.provider = ProviderStreamParser::for_api_format(provider_api_format.as_str());
+        self.provider = TerminalStreamParser::for_api_format(provider_api_format.as_str());
     }
 
     fn observe_frames(&mut self, frames: Vec<CanonicalStreamFrame>) {
@@ -191,6 +210,23 @@ impl StreamingStandardTerminalObserver {
             }
             _ => {}
         }
+    }
+}
+
+enum TerminalStreamParser {
+    Standard(ProviderStreamParser),
+    OpenAIImage(OpenAiImageStreamTerminalState),
+}
+
+impl TerminalStreamParser {
+    fn for_api_format(provider_api_format: &str) -> Option<Self> {
+        if provider_api_format
+            .trim()
+            .eq_ignore_ascii_case("openai:image")
+        {
+            return Some(Self::OpenAIImage(OpenAiImageStreamTerminalState::default()));
+        }
+        ProviderStreamParser::for_api_format(provider_api_format).map(Self::Standard)
     }
 }
 
@@ -935,5 +971,87 @@ mod tests {
         assert_eq!(summary.model.as_deref(), Some("gpt-5.4"));
         assert_eq!(summary.unknown_event_count, 1);
         assert!(!summary.observed_finish);
+    }
+
+    #[test]
+    fn terminal_observer_tracks_openai_image_stream_usage() {
+        let mut report_context = report_context("openai:image", "openai:chat");
+        report_context["image_request"] = json!({
+            "size": "1024x1024",
+            "quality": "medium",
+            "output_format": "png",
+        });
+        let mut observer = StreamingStandardTerminalObserver::default();
+
+        observer
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {
+                        "id": "ig_123",
+                        "type": "image_generation_call",
+                        "result": "aGVsbG8=",
+                    },
+                })),
+            )
+            .expect("image output item should parse");
+        observer
+            .push_line(&report_context, b"\n".to_vec())
+            .expect("image output event should flush");
+        observer
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_image_123",
+                        "model": "gpt-image-2",
+                        "output": [],
+                        "tool_usage": {
+                            "image_gen": {
+                                "input_tokens": 40,
+                                "output_tokens": 60,
+                                "total_tokens": 100,
+                            },
+                        },
+                    },
+                })),
+            )
+            .expect("image completed should parse");
+        observer
+            .push_line(&report_context, b"\n".to_vec())
+            .expect("image completed event should flush");
+
+        let summary = observer
+            .finish(&report_context)
+            .expect("image summary should finish")
+            .expect("summary should exist");
+        let usage = summary
+            .standardized_usage
+            .expect("standardized usage should exist");
+
+        assert_eq!(summary.response_id.as_deref(), Some("resp_image_123"));
+        assert_eq!(summary.model.as_deref(), Some("gpt-image-2"));
+        assert_eq!(summary.finish_reason.as_deref(), Some("stop"));
+        assert!(summary.observed_finish);
+        assert_eq!(usage.input_tokens, 40);
+        assert_eq!(usage.output_tokens, 60);
+        assert_eq!(usage.request_count, 1);
+        assert_eq!(usage.dimensions.get("image_count"), Some(&json!(1)));
+        assert_eq!(usage.dimensions.get("total_tokens"), Some(&json!(100)));
+        assert_eq!(
+            usage.dimensions.get("image_size"),
+            Some(&json!("1024x1024"))
+        );
+        assert_eq!(
+            usage.dimensions.get("image_output_format"),
+            Some(&json!("png"))
+        );
+        assert_eq!(
+            usage.dimensions.get("image_quality"),
+            Some(&json!("medium"))
+        );
     }
 }

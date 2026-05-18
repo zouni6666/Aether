@@ -121,7 +121,7 @@ pub(super) async fn materialize_local_standard_candidate_attempts(
         planner_state,
         spec_metadata.api_format,
         &input.requested_model,
-        spec_metadata.require_streaming,
+        false,
         input.required_capabilities.as_ref(),
         &input.auth_snapshot,
         input.routing_policy.as_ref(),

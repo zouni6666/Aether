@@ -18,9 +18,20 @@ export interface PricingTier {
   cache_ttl_pricing?: CacheTTLPricing[]
 }
 
+export type ImageOutputQuality = 'low' | 'medium' | 'high'
+
+export interface ImageOutputPriceRange {
+  up_to_pixels: number | null
+  prices: Partial<Record<ImageOutputQuality, number>>
+  label?: string | null
+}
+
 /** 阶梯计费配置 */
 export interface TieredPricingConfig {
   tiers: PricingTier[]
+  image_output_prices?: Record<string, Record<string, number>> | null
+  image_output_price_default?: number | null
+  image_output_price_ranges?: ImageOutputPriceRange[] | null
 }
 
 export interface Model {

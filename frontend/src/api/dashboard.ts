@@ -196,6 +196,7 @@ export interface RequestDetail {
   total_cost?: number
   cache_creation_cost?: number
   cache_read_cost?: number
+  image_output_cost?: number
   request_cost?: number  // 按次计费费用
   // Historical pricing fields (per 1M tokens)
   input_price_per_1m?: number
