@@ -236,6 +236,7 @@ pub(crate) async fn resolve_local_openai_responses_candidate_payload_parts(
     );
     let force_body_stream_field =
         endpoint_config_forces_body_stream_field(transport.endpoint.config.as_ref());
+    let effective_headers = input.effective_headers(&parts.headers);
     let Some(mut base_provider_request_body) = (if needs_bidirectional_conversion {
         build_cross_format_openai_responses_request_body(
             body_json,
@@ -251,7 +252,7 @@ pub(crate) async fn resolve_local_openai_responses_candidate_payload_parts(
                 transport.endpoint.body_rules.as_ref()
             },
             Some(input.auth_context.api_key_id.as_str()),
-            &parts.headers,
+            effective_headers,
             enable_model_directives,
         )
     } else {
@@ -268,7 +269,7 @@ pub(crate) async fn resolve_local_openai_responses_candidate_payload_parts(
                 transport.endpoint.body_rules.as_ref()
             },
             Some(input.auth_context.api_key_id.as_str()),
-            &parts.headers,
+            effective_headers,
             enable_model_directives,
         )
     }) else {
@@ -432,7 +433,7 @@ pub(crate) async fn resolve_local_openai_responses_candidate_payload_parts(
             transport,
             provider_api_format,
             same_format,
-            headers: &parts.headers,
+            headers: effective_headers,
             auth_header: &auth_header,
             auth_value: &auth_value,
             extra_headers: &extra_headers,
@@ -463,7 +464,7 @@ pub(crate) async fn resolve_local_openai_responses_candidate_payload_parts(
     apply_codex_openai_responses_special_headers(
         &mut provider_request_headers,
         &provider_request_body,
-        &parts.headers,
+        effective_headers,
         transport.provider.provider_type.as_str(),
         provider_api_format,
         Some(trace_id),
@@ -545,12 +546,13 @@ async fn build_kiro_openai_responses_payload_parts(
     kiro_auth: &KiroRequestAuth,
 ) -> Option<LocalOpenAiResponsesCandidatePayloadParts> {
     let candidate = &eligible.candidate;
+    let effective_headers = input.effective_headers(&parts.headers);
     let provider_request_body = match build_kiro_provider_request_body(
         &claude_request_body,
         &mapped_model,
         &kiro_auth.auth_config,
         transport.endpoint.body_rules.as_ref(),
-        Some(&parts.headers),
+        Some(effective_headers),
     ) {
         Some(body) => body,
         None => {
@@ -601,7 +603,7 @@ async fn build_kiro_openai_responses_payload_parts(
         }
     };
     let provider_request_headers = match build_kiro_provider_headers(KiroProviderHeadersInput {
-        headers: &parts.headers,
+        headers: effective_headers,
         provider_request_body: &provider_request_body,
         original_request_body: original_body_json,
         header_rules: transport.endpoint.header_rules.as_ref(),
