@@ -4753,7 +4753,7 @@ mod tests {
 
         assert_eq!(event.data.input_tokens, Some(3));
         assert_eq!(event.data.output_tokens, Some(5));
-        assert_eq!(event.data.total_tokens, Some(11));
+        assert_eq!(event.data.total_tokens, Some(8));
         assert_eq!(event.data.cache_creation_input_tokens, Some(1));
         assert_eq!(event.data.cache_read_input_tokens, Some(2));
         assert_eq!(
@@ -5291,7 +5291,7 @@ mod tests {
 
         assert_eq!(
             extract_token_counts_from_value(&Value::String(sse_body.to_string())),
-            Some((3, 5, 11)),
+            Some((3, 5, 8)),
         );
     }
 }

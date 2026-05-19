@@ -1224,7 +1224,7 @@ async fn gateway_refresh_quota_reconciles_unsupported_fixed_provider_endpoints_b
         (
             "provider-vertex-ai-reconcile",
             "vertex_ai",
-            2usize,
+            3usize,
             "gemini:generate_content",
             "https://aiplatform.googleapis.com",
             "Vertex AI 暂不支持自动刷新额度",

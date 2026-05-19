@@ -53,7 +53,7 @@ fn provider_query_endpoint_route_payload(
     candidate: &ProviderQueryTestCandidate,
     execution: &ProviderQueryExecutionOutcome,
 ) -> Value {
-    let api_format = aether_ai_formats::normalize_api_format_alias(&candidate.endpoint.api_format);
+    let api_format = crate::ai_serving::normalize_api_format_alias(&candidate.endpoint.api_format);
     let request_url = execution.request_url.to_ascii_lowercase();
     let base_url = candidate.endpoint.base_url.to_ascii_lowercase();
     let is_vertex = request_url.contains("aiplatform.googleapis.com")

@@ -1494,7 +1494,7 @@ fn provider_query_standard_execution_response_body(
     if result.status_code < 400
         && provider_query_normalize_api_format_alias(provider_api_format)
             == "gemini:generate_content"
-        && aether_ai_formats::formats::gemini::generate_content::response::from_raw(&body).is_none()
+        && !crate::ai_serving::gemini_generate_content_response_has_visible_output(&body)
     {
         return None;
     }

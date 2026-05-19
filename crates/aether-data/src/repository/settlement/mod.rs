@@ -43,6 +43,15 @@ fn settlement_billing_status_for_usage_status(status: &str) -> &'static str {
     }
 }
 
+#[allow(unused_imports)]
+pub(crate) use aether_data_contracts::repository::settlement::{
+    SettlementRepository, SettlementWriteRepository, StoredUsageSettlement, UsageSettlementInput,
+};
+pub use memory::InMemorySettlementRepository;
+pub use mysql::MysqlSettlementRepository;
+pub use postgres::SqlxSettlementRepository;
+pub use sqlite::SqliteSettlementRepository;
+
 #[cfg(test)]
 mod tests {
     use super::settlement_billing_status_for_usage_status;
@@ -60,12 +69,3 @@ mod tests {
         assert_eq!(settlement_billing_status_for_usage_status("failed"), "void");
     }
 }
-
-#[allow(unused_imports)]
-pub(crate) use aether_data_contracts::repository::settlement::{
-    SettlementRepository, SettlementWriteRepository, StoredUsageSettlement, UsageSettlementInput,
-};
-pub use memory::InMemorySettlementRepository;
-pub use mysql::MysqlSettlementRepository;
-pub use postgres::SqlxSettlementRepository;
-pub use sqlite::SqliteSettlementRepository;

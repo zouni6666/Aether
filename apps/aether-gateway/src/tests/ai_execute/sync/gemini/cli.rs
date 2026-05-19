@@ -349,7 +349,13 @@ async fn gateway_executes_gemini_cli_sync_via_local_decision_gate_with_local_syn
                     },
                     "body": {
                         "json_body": {
-                            "candidates": [],
+                            "candidates": [{
+                                "content": {
+                                    "role": "model",
+                                    "parts": [{"text": "Hello from Gemini CLI"}]
+                                },
+                                "finishReason": "STOP"
+                            }],
                             "usageMetadata": {
                                 "promptTokenCount": 1,
                                 "candidatesTokenCount": 2,
@@ -1117,7 +1123,13 @@ async fn gateway_executes_gemini_cli_sync_via_local_decision_gate_after_oauth_re
                     },
                     "body": {
                         "json_body": {
-                            "candidates": [],
+                            "candidates": [{
+                                "content": {
+                                    "role": "model",
+                                    "parts": [{"text": "Hello from Gemini CLI"}]
+                                },
+                                "finishReason": "STOP"
+                            }],
                             "usageMetadata": {
                                 "promptTokenCount": 1,
                                 "candidatesTokenCount": 2,
@@ -1595,7 +1607,13 @@ async fn gateway_executes_vertex_ai_gemini_cli_sync_via_local_decision_gate_with
                     },
                     "body": {
                         "json_body": {
-                            "candidates": [],
+                            "candidates": [{
+                                "content": {
+                                    "role": "model",
+                                    "parts": [{"text": "Hello from Vertex Gemini CLI"}]
+                                },
+                                "finishReason": "STOP"
+                            }],
                             "usageMetadata": {
                                 "promptTokenCount": 1,
                                 "candidatesTokenCount": 2,

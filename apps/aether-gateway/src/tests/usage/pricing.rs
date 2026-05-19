@@ -1177,7 +1177,13 @@ async fn gateway_records_gemini_sync_usage_and_pricing_with_cache_read_tokens_im
         },
         "body": {
             "json_body": {
-                "candidates": [],
+                "candidates": [{
+                    "content": {
+                        "role": "model",
+                        "parts": [{"text": "Hello from Gemini"}]
+                    },
+                    "finishReason": "STOP"
+                }],
                 "usageMetadata": {
                     "promptTokenCount": expected.input_tokens,
                     "candidatesTokenCount": expected.output_tokens,

@@ -199,7 +199,7 @@ fn local_core_sync_finalize_has_invalid_provider_success(
         return Ok(false);
     }
     let provider_api_format = resolve_local_sync_provider_api_format(payload);
-    if aether_ai_formats::normalize_api_format_alias(&provider_api_format)
+    if crate::ai_serving::normalize_api_format_alias(&provider_api_format)
         != "gemini:generate_content"
     {
         return Ok(false);
@@ -210,10 +210,7 @@ fn local_core_sync_finalize_has_invalid_provider_success(
     if has_nested_error(&body_json) {
         return Ok(false);
     }
-    Ok(
-        aether_ai_formats::formats::gemini::generate_content::response::from_raw(&body_json)
-            .is_none(),
-    )
+    Ok(!crate::ai_serving::gemini_generate_content_response_has_visible_output(&body_json))
 }
 
 pub(crate) fn build_best_effort_local_core_error_body(

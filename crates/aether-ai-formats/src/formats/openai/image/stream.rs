@@ -680,16 +680,15 @@ impl OpenAiImageStreamTerminalState {
 
     fn observe_image_completed(&mut self, event: &Value) {
         self.observed_finish = true;
-        if self.image_count == 0 {
-            if event
+        if self.image_count == 0
+            && event
                 .get("b64_json")
                 .or_else(|| event.get("result"))
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .is_some_and(|value| !value.is_empty())
-            {
-                self.image_count = 1;
-            }
+        {
+            self.image_count = 1;
         }
         self.usage = event.get("usage").cloned().or_else(|| self.usage.clone());
     }
@@ -798,7 +797,7 @@ fn openai_image_stream_standardized_usage(
 ) -> Option<StandardizedUsage> {
     let mut standardized_usage = usage
         .and_then(openai_image_usage_to_standardized_usage)
-        .unwrap_or_else(StandardizedUsage::new);
+        .unwrap_or_default();
     if image_count > 0 {
         standardized_usage.request_count = i64::try_from(image_count).unwrap_or(i64::MAX);
         standardized_usage

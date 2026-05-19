@@ -13,6 +13,7 @@ use crate::{usage::GatewaySyncReportRequest, AppState, GatewayError};
 pub(crate) use self::adaptation::{
     maybe_build_provider_private_stream_normalizer, ProviderPrivateStreamNormalizer,
 };
+pub(crate) use self::api::gemini_generate_content_response_has_visible_output;
 pub(crate) use self::finalize::common::LocalCoreSyncFinalizeOutcome;
 pub(crate) use self::finalize::internal::{
     maybe_bridge_standard_sync_json_to_stream, maybe_build_stream_response_rewriter,

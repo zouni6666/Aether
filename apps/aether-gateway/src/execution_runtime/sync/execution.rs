@@ -363,7 +363,7 @@ fn invalid_gemini_provider_success_message(
         .and_then(|value| value.get("provider_api_format"))
         .and_then(Value::as_str)
         .unwrap_or(plan.provider_api_format.as_str());
-    if aether_ai_formats::normalize_api_format_alias(provider_api_format)
+    if crate::ai_serving::normalize_api_format_alias(provider_api_format)
         != "gemini:generate_content"
     {
         return None;
@@ -375,8 +375,7 @@ fn invalid_gemini_provider_success_message(
     {
         return None;
     }
-    if aether_ai_formats::formats::gemini::generate_content::response::from_raw(body_json).is_some()
-    {
+    if crate::ai_serving::gemini_generate_content_response_has_visible_output(body_json) {
         return None;
     }
     Some("Provider returned HTTP 200 but the Gemini response did not contain visible model output; refusing to finalize it as a successful response.")

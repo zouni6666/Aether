@@ -454,7 +454,7 @@ fn openai_image_standardized_usage(
 ) -> Option<StandardizedUsage> {
     let mut standardized_usage = usage
         .and_then(standardized_usage_from_openai_usage)
-        .unwrap_or_else(StandardizedUsage::new);
+        .unwrap_or_default();
     if image_count > 0 {
         standardized_usage.request_count = i64::try_from(image_count).unwrap_or(i64::MAX);
         standardized_usage

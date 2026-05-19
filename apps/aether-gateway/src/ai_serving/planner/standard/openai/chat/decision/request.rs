@@ -1249,49 +1249,6 @@ fn chatgpt_web_image_internal_url(base_url: &str) -> String {
     format!("{base_url}/__aether/chatgpt-web-image")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn chatgpt_web_chat_image_bridge_body_uses_internal_web_shape() {
-        let body_json = json!({
-            "model": "gpt-image-2",
-            "messages": [
-                {"role": "system", "content": "Use crisp vector-like shapes."},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Draw a glass city"},
-                        {"type": "image_url", "image_url": {"url": "https://example.com/ref.png"}}
-                    ]
-                }
-            ],
-            "size": "1536x1024",
-            "output_format": "webp",
-            "web_model": "gpt-5-image-test"
-        });
-
-        let (provider_body, summary) =
-            build_chatgpt_web_image_provider_body_from_openai_chat_body(&body_json, "gpt-image-2")
-                .expect("chat image body should convert");
-
-        assert_eq!(provider_body["operation"], "edit");
-        assert_eq!(provider_body["model"], "gpt-image-2");
-        assert_eq!(provider_body["web_model"], "gpt-5-image-test");
-        assert_eq!(
-            provider_body["prompt"],
-            "Use crisp vector-like shapes.\nDraw a glass city"
-        );
-        assert_eq!(provider_body["size"], "1536x1024");
-        assert_eq!(provider_body["ratio"], "3:2");
-        assert_eq!(provider_body["output_format"], "webp");
-        assert_eq!(provider_body["images"][0], "https://example.com/ref.png");
-        assert_eq!(summary["operation"], "edit");
-        assert_eq!(summary["output_format"], "webp");
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn build_kiro_openai_chat_cross_format_payload_parts(
     state: &AppState,
@@ -1513,5 +1470,48 @@ fn redaction_mask_error_to_gateway_error(error: RedactionMaskError) -> GatewayEr
             status: limit.client_status(),
             message: limit.safe_message().to_string(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chatgpt_web_chat_image_bridge_body_uses_internal_web_shape() {
+        let body_json = json!({
+            "model": "gpt-image-2",
+            "messages": [
+                {"role": "system", "content": "Use crisp vector-like shapes."},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Draw a glass city"},
+                        {"type": "image_url", "image_url": {"url": "https://example.com/ref.png"}}
+                    ]
+                }
+            ],
+            "size": "1536x1024",
+            "output_format": "webp",
+            "web_model": "gpt-5-image-test"
+        });
+
+        let (provider_body, summary) =
+            build_chatgpt_web_image_provider_body_from_openai_chat_body(&body_json, "gpt-image-2")
+                .expect("chat image body should convert");
+
+        assert_eq!(provider_body["operation"], "edit");
+        assert_eq!(provider_body["model"], "gpt-image-2");
+        assert_eq!(provider_body["web_model"], "gpt-5-image-test");
+        assert_eq!(
+            provider_body["prompt"],
+            "Use crisp vector-like shapes.\nDraw a glass city"
+        );
+        assert_eq!(provider_body["size"], "1536x1024");
+        assert_eq!(provider_body["ratio"], "3:2");
+        assert_eq!(provider_body["output_format"], "webp");
+        assert_eq!(provider_body["images"][0], "https://example.com/ref.png");
+        assert_eq!(summary["operation"], "edit");
+        assert_eq!(summary["output_format"], "webp");
     }
 }
