@@ -2116,6 +2116,7 @@ mod tests {
             api_key_allowed_providers: None,
             api_key_allowed_api_formats: None,
             api_key_allowed_models: None,
+            api_key_allowed_ips: None,
         }
     }
 
