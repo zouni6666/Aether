@@ -127,7 +127,8 @@ CREATE TABLE IF NOT EXISTS provider_api_keys (
     `created_at` BIGINT NOT NULL,
     `updated_at` BIGINT NOT NULL,
     PRIMARY KEY (`id`),
-    KEY provider_api_keys_provider_id_idx (`provider_id`)
+    KEY provider_api_keys_provider_id_idx (`provider_id`),
+    KEY idx_provider_api_keys_provider_default_sort (`provider_id`, `internal_priority`, `name`, `id`)
 );
 
 CREATE TABLE IF NOT EXISTS pool_member_scores (

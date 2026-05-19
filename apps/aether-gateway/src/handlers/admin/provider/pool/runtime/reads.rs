@@ -13,6 +13,7 @@ use crate::provider_pool_demand::{
     provider_pool_burst_pending, read_provider_pool_demand_snapshot,
 };
 use aether_runtime_state::{DataLayerError, RuntimeState};
+use futures_util::future::join_all;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
@@ -32,15 +33,16 @@ pub(crate) async fn read_admin_provider_pool_cooldown_counts(
     runtime: &RuntimeState,
     provider_ids: &[String],
 ) -> BTreeMap<String, usize> {
-    let mut counts = BTreeMap::new();
-    for provider_id in provider_ids {
+    join_all(provider_ids.iter().map(|provider_id| async move {
         let count = runtime
             .set_len(&pool_cooldown_index_key(provider_id))
             .await
             .unwrap_or(0);
-        counts.insert(provider_id.clone(), count);
-    }
-    counts
+        (provider_id.clone(), count)
+    }))
+    .await
+    .into_iter()
+    .collect()
 }
 
 pub(crate) async fn read_admin_provider_pool_runtime_state(
@@ -170,11 +172,15 @@ pub(crate) async fn read_admin_provider_pool_runtime_state(
     }
 
     let now = current_unix_secs();
-    for (key_id, cost_key) in key_ids.iter().zip(cost_keys) {
-        let window_start = now.saturating_sub(pool_config.cost_window_seconds) as f64;
-        let total = runtime
-            .score_range_by_min(&cost_key, window_start)
-            .await
+    let cost_window_start = now.saturating_sub(pool_config.cost_window_seconds) as f64;
+    let cost_results = join_all(
+        cost_keys
+            .iter()
+            .map(|cost_key| runtime.score_range_by_min(cost_key, cost_window_start)),
+    )
+    .await;
+    for (key_id, members) in key_ids.iter().zip(cost_results) {
+        let total = members
             .unwrap_or_default()
             .iter()
             .map(|member| parse_pool_cost_member(member))
@@ -184,11 +190,15 @@ pub(crate) async fn read_admin_provider_pool_runtime_state(
         }
     }
 
-    for (key_id, latency_key) in key_ids.iter().zip(latency_keys) {
-        let window_start = now.saturating_sub(pool_config.latency_window_seconds) as f64;
-        let samples = runtime
-            .score_range_by_min(&latency_key, window_start)
-            .await
+    let latency_window_start = now.saturating_sub(pool_config.latency_window_seconds) as f64;
+    let latency_results = join_all(
+        latency_keys
+            .iter()
+            .map(|latency_key| runtime.score_range_by_min(latency_key, latency_window_start)),
+    )
+    .await;
+    for (key_id, members) in key_ids.iter().zip(latency_results) {
+        let samples = members
             .unwrap_or_default()
             .iter()
             .map(|member| parse_pool_latency_member(member))

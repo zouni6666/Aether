@@ -133,6 +133,7 @@ CREATE TABLE IF NOT EXISTS public.provider_api_keys (
 
 ALTER TABLE ONLY public.provider_api_keys ADD CONSTRAINT provider_api_keys_pkey PRIMARY KEY (id);
 CREATE INDEX IF NOT EXISTS provider_api_keys_provider_id_idx ON public.provider_api_keys USING btree (provider_id);
+CREATE INDEX IF NOT EXISTS idx_provider_api_keys_provider_default_sort ON public.provider_api_keys USING btree (provider_id, internal_priority, name, id);
 
 CREATE TABLE IF NOT EXISTS public.pool_member_scores (
     id character varying(192) NOT NULL,
