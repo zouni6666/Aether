@@ -727,7 +727,7 @@ const navigation = computed(() => {
       items: [
          { name: '钱包中心', href: '/dashboard/wallet', icon: Wallet },
          { name: '套餐中心', href: '/dashboard/billing', icon: Package },
-         { name: '我的邀请', href: '/dashboard/referral', icon: Gift },
+         ...(moduleStore.isActive('referral') ? [{ name: '我的邀请', href: '/dashboard/referral', icon: Gift }] : []),
          { name: '使用统计', href: '/dashboard/usage', icon: BarChart3 },
       ]
     }
@@ -749,19 +749,21 @@ const navigation = computed(() => {
     Puzzle,
     Server,
     SlidersHorizontal,
+    CreditCard,
+    Gift,
   }
 
-  // 添加模块菜单项（按 admin_menu_order 排序，只显示已激活的）
-  const moduleMenuItems = Object.values(moduleStore.modules)
-    .filter(m => m.active && m.admin_route && m.admin_menu_group === 'system')
-    .sort((a, b) => a.admin_menu_order - b.admin_menu_order)
-    .map(m => ({
-      name: m.display_name,
-      href: m.admin_route ?? '',
-      icon: iconMap[m.admin_menu_icon || ''] || Puzzle
-    }))
+  const activeModuleItems = (group: string) =>
+    Object.values(moduleStore.modules)
+      .filter(m => m.active && m.admin_route && m.admin_menu_group === group)
+      .sort((a, b) => a.admin_menu_order - b.admin_menu_order)
+      .map(m => ({
+        name: m.display_name,
+        href: m.admin_route ?? '',
+        icon: iconMap[m.admin_menu_icon || ''] || Puzzle
+      }))
 
-  systemItems.push(...moduleMenuItems)
+  systemItems.push(...activeModuleItems('system'))
 
   // 模块管理和系统设置放在最后
   systemItems.push({ name: '模块管理', href: '/admin/modules', icon: Puzzle })
@@ -788,9 +790,8 @@ const navigation = computed(() => {
         { name: '号池管理', href: '/admin/pool', icon: Database },
         { name: '独立密钥', href: '/admin/keys', icon: Key },
         { name: '钱包管理', href: '/admin/wallets', icon: Wallet },
-        { name: '支付配置', href: '/admin/payment-gateways', icon: CreditCard },
         { name: '套餐管理', href: '/admin/billing-plans', icon: Package },
-        { name: '邀请返利', href: '/admin/referrals', icon: Gift },
+        ...activeModuleItems('management'),
         { name: '异步任务', href: '/admin/async-tasks', icon: Zap },
         { name: '使用记录', href: '/admin/usage', icon: BarChart3 },
       ]

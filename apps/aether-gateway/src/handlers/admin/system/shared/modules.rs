@@ -115,6 +115,30 @@ pub(crate) const ADMIN_MODULE_DEFINITIONS: &[AdminModuleDefinition] = &[
         admin_menu_group: Some("system"),
         admin_menu_order: 60,
     },
+    AdminModuleDefinition {
+        name: "payment_gateways",
+        display_name: "支付配置",
+        description: "配置易支付、支付宝官方、微信支付官方和 Stripe 等支付网关",
+        category: "integration",
+        env_key: "PAYMENT_GATEWAYS_AVAILABLE",
+        default_available: true,
+        admin_route: Some("/admin/payment-gateways"),
+        admin_menu_icon: Some("CreditCard"),
+        admin_menu_group: None,
+        admin_menu_order: 70,
+    },
+    AdminModuleDefinition {
+        name: "referral",
+        display_name: "邀请返利",
+        description: "管理用户邀请关系与返利记录，支持比例返利和人头返利",
+        category: "integration",
+        env_key: "REFERRAL_AVAILABLE",
+        default_available: true,
+        admin_route: Some("/admin/referrals"),
+        admin_menu_icon: Some("Gift"),
+        admin_menu_group: Some("management"),
+        admin_menu_order: 75,
+    },
 ];
 
 #[derive(Debug, Clone, serde::Deserialize)]

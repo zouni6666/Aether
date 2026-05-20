@@ -71,7 +71,9 @@ export interface UsageByUser {
 }
 
 export interface UsageByProvider {
-  provider_id: string
+  provider_id?: string | null
+  provider_key?: string
+  provider_identity_source?: 'provider_id' | 'legacy_name'
   provider: string
   request_count: number
   total_tokens: number

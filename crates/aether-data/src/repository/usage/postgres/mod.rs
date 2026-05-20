@@ -1488,8 +1488,16 @@ const REBUILD_PROVIDER_API_KEY_CODEX_WINDOW_USAGE_STATS_SQL: &str =
     include_str!("queries/rebuild_provider_api_key_codex_window_usage_stats_sql.sql");
 
 const LIST_USAGE_AUDITS_PREFIX: &str = include_str!("queries/list_usage_audits_prefix.sql");
-const USAGE_RESERVED_PROVIDER_LABELS_FILTER_SQL: &str = " AND BTRIM(COALESCE(\"usage\".provider_name, '')) <> '' AND lower(BTRIM(COALESCE(\"usage\".provider_name, ''))) NOT IN ('unknown', 'unknow', 'pending')";
-const USAGE_PROVIDER_IDENTITY_FILTER_SQL: &str = " AND BTRIM(COALESCE(\"usage\".provider_id, '')) <> '' AND lower(BTRIM(COALESCE(\"usage\".provider_id, ''))) NOT IN ('unknown', 'unknow', 'pending')";
+const USAGE_PROVIDER_IDENTITY_FILTER_SQL: &str = r#" AND (
+      (
+        BTRIM(COALESCE("usage".provider_id, '')) <> ''
+        AND lower(BTRIM(COALESCE("usage".provider_id, ''))) NOT IN ('unknown', 'unknow', 'pending')
+      )
+      OR (
+        BTRIM(COALESCE("usage".provider_name, '')) <> ''
+        AND lower(BTRIM(COALESCE("usage".provider_name, ''))) NOT IN ('unknown', 'unknow', 'pending')
+      )
+    )"#;
 const USAGE_RAW_PROVIDER_GROUP_KEY_SQL: &str = r#"CASE
       WHEN BTRIM(COALESCE("usage".provider_id, '')) = ''
         OR lower(BTRIM(COALESCE("usage".provider_id, ''))) IN ('unknown', 'unknow', 'pending')
@@ -1502,13 +1510,33 @@ const USAGE_RAW_PROVIDER_DISPLAY_NAME_SQL: &str = r#"CASE
       THEN NULL
       ELSE BTRIM("usage".provider_name)
     END"#;
+const USAGE_PROVIDER_IDENTITY_SOURCE_SQL: &str = r#"CASE
+      WHEN BTRIM(COALESCE("usage".provider_id, '')) <> ''
+        AND lower(BTRIM(COALESCE("usage".provider_id, ''))) NOT IN ('unknown', 'unknow', 'pending')
+      THEN 'provider_id'
+      WHEN BTRIM(COALESCE("usage".provider_name, '')) <> ''
+        AND lower(BTRIM(COALESCE("usage".provider_name, ''))) NOT IN ('unknown', 'unknow', 'pending')
+      THEN 'legacy_name'
+      ELSE NULL
+    END"#;
 const USAGE_PROVIDER_IDENTITY_JOIN_SQL: &str = r#"  LEFT JOIN providers AS provider_by_id
     ON BTRIM(COALESCE("usage".provider_id, '')) <> ''
    AND lower(BTRIM(COALESCE("usage".provider_id, ''))) NOT IN ('unknown', 'unknow', 'pending')
    AND provider_by_id.id = BTRIM("usage".provider_id)"#;
 const USAGE_RESOLVED_PROVIDER_GROUP_KEY_SQL: &str = r#"COALESCE(
       provider_by_id.id,
-      BTRIM("usage".provider_id)
+      CASE
+        WHEN BTRIM(COALESCE("usage".provider_id, '')) = ''
+          OR lower(BTRIM(COALESCE("usage".provider_id, ''))) IN ('unknown', 'unknow', 'pending')
+        THEN NULL
+        ELSE BTRIM("usage".provider_id)
+      END,
+      CASE
+        WHEN BTRIM(COALESCE("usage".provider_name, '')) = ''
+          OR lower(BTRIM(COALESCE("usage".provider_name, ''))) IN ('unknown', 'unknow', 'pending')
+        THEN NULL
+        ELSE BTRIM("usage".provider_name)
+      END
     )"#;
 const USAGE_RESOLVED_PROVIDER_DISPLAY_NAME_SQL: &str = r#"COALESCE(
       provider_by_id.name,
@@ -1558,9 +1586,9 @@ fn usage_audit_aggregation_sql_fragments(
             filtered_extra_where: "",
             group_key_expr: "provider_group_key",
             display_name_expr: "provider_display_name",
-            secondary_name_expr: "NULL::varchar",
+            secondary_name_expr: "provider_identity_source",
             aggregate_display_name_expr: "MAX(display_name)",
-            aggregate_secondary_name_expr: "NULL::varchar",
+            aggregate_secondary_name_expr: "CASE WHEN COUNT(*) FILTER (WHERE secondary_name = 'provider_id') > 0 THEN 'provider_id' WHEN COUNT(*) FILTER (WHERE secondary_name = 'legacy_name') > 0 THEN 'legacy_name' ELSE NULL END",
             avg_response_time_expr: "AVG(response_time_ms::DOUBLE PRECISION)",
             success_count_expr: "COALESCE(SUM(success_flag), 0)::BIGINT",
         },
@@ -6687,10 +6715,10 @@ ORDER BY request_count DESC, group_key ASC
     ) -> Result<Vec<StoredUsageAuditAggregation>, DataLayerError> {
         let fragments = usage_audit_aggregation_sql_fragments(query.group_by);
         let provider_extra_where =
-            if matches!(query.group_by, UsageAuditAggregationGroupBy::Provider) {
+            if matches!(query.group_by, UsageAuditAggregationGroupBy::Provider)
+                || query.exclude_reserved_provider_labels
+            {
                 USAGE_PROVIDER_IDENTITY_FILTER_SQL
-            } else if query.exclude_reserved_provider_labels {
-                USAGE_RESERVED_PROVIDER_LABELS_FILTER_SQL
             } else {
                 ""
             };
@@ -6702,6 +6730,7 @@ WITH filtered_usage AS (
     "usage".user_id AS user_id,
     {provider_group_key_expr} AS provider_group_key,
     {provider_display_name_expr} AS provider_display_name,
+    {provider_identity_source_expr} AS provider_identity_source,
     COALESCE("usage".api_format, 'unknown') AS api_format_group_key,
     GREATEST(COALESCE("usage".input_tokens, 0), 0) AS input_tokens,
     GREATEST(COALESCE("usage".output_tokens, 0), 0) AS output_tokens,
@@ -6835,6 +6864,7 @@ LIMIT $3
             provider_identity_join = fragments.provider_identity_join,
             provider_group_key_expr = fragments.provider_group_key_expr,
             provider_display_name_expr = fragments.provider_display_name_expr,
+            provider_identity_source_expr = USAGE_PROVIDER_IDENTITY_SOURCE_SQL,
             group_key_expr = fragments.group_key_expr,
             display_name_expr = fragments.display_name_expr,
             secondary_name_expr = fragments.secondary_name_expr,

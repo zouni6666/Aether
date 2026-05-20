@@ -464,16 +464,24 @@ fn usage_sql_aggregate_usage_audits_supports_daily_model_and_provider_aggregates
 #[test]
 fn usage_sql_provider_aggregation_excludes_unknown_provider_labels() {
     let source = include_str!("mod.rs");
-    assert!(source.contains(
-        r#"const USAGE_PROVIDER_IDENTITY_FILTER_SQL: &str = " AND BTRIM(COALESCE(\"usage\".provider_id, '')) <> ''"#
-    ));
+    assert!(source.contains("const USAGE_PROVIDER_IDENTITY_FILTER_SQL"));
+    assert!(source.contains("const USAGE_PROVIDER_IDENTITY_SOURCE_SQL"));
+    assert!(source.contains(r#"BTRIM(COALESCE("usage".provider_id, '')) <> ''"#));
+    assert!(source.contains(r#"BTRIM(COALESCE("usage".provider_name, '')) <> ''"#));
     assert!(source.contains("LEFT JOIN providers AS provider_by_id"));
     assert!(source.contains("provider_by_id.id = BTRIM(\"usage\".provider_id)"));
+    assert!(source.contains("COALESCE(\n      provider_by_id.id,\n      CASE"));
     assert!(
-        source.contains("COALESCE(\n      provider_by_id.id,\n      BTRIM(\"usage\".provider_id)")
+        source.contains(
+            "ELSE BTRIM(\"usage\".provider_id)\n      END,\n      CASE\n        WHEN BTRIM(COALESCE(\"usage\".provider_name, ''))"
+        )
     );
     assert!(source.contains("COALESCE(\n      provider_by_id.name,"));
     assert!(!source.contains("provider_by_name.name = BTRIM(\"usage\".provider_name)"));
+    assert!(source.contains("{provider_identity_source_expr} AS provider_identity_source"));
+    assert!(source.contains(r#"secondary_name_expr: "provider_identity_source""#));
+    assert!(source
+        .contains("COUNT(*) FILTER (WHERE secondary_name = 'provider_id') > 0 THEN 'provider_id'"));
     assert!(source.contains(
         "if matches!(query.group_by, UsageAuditAggregationGroupBy::Provider) {\n            return self.aggregate_usage_audits_raw(query).await;"
     ));

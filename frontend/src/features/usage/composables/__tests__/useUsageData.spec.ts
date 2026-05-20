@@ -129,6 +129,9 @@ describe('useUsageData', () => {
     ])
     getUsageByProviderMock.mockResolvedValueOnce([
       {
+        provider_id: 'provider-openai',
+        provider_key: 'provider-openai',
+        provider_identity_source: 'provider_id',
         provider: 'OpenAI',
         request_count: 3,
         total_tokens: 300,
@@ -159,6 +162,11 @@ describe('useUsageData', () => {
     })
     expect(modelStats.value).toHaveLength(1)
     expect(providerStats.value).toHaveLength(1)
+    expect(providerStats.value[0]).toMatchObject({
+      providerId: 'provider-openai',
+      providerKey: 'provider-openai',
+      providerIdentitySource: 'provider_id',
+    })
     expect(apiFormatStats.value).toHaveLength(1)
     expect(availableModels.value).toEqual(['gpt-5'])
     expect(availableProviders.value).toEqual(['OpenAI'])

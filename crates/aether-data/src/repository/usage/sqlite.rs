@@ -223,10 +223,19 @@ WHERE request_id = ?
   AND status IN ('streaming', 'success')
 "#;
 
-const SQLITE_PROVIDER_NAME_IS_NOT_RESERVED: &str = r#"
-provider_name IS NOT NULL
-AND TRIM(provider_name) <> ''
-AND LOWER(TRIM(provider_name)) NOT IN ('unknown', 'unknow', 'pending')
+const SQLITE_PROVIDER_IDENTITY_IS_NOT_RESERVED: &str = r#"
+(
+  (
+    provider_id IS NOT NULL
+    AND TRIM(provider_id) <> ''
+    AND LOWER(TRIM(provider_id)) NOT IN ('unknown', 'unknow', 'pending')
+  )
+  OR (
+    provider_name IS NOT NULL
+    AND TRIM(provider_name) <> ''
+    AND LOWER(TRIM(provider_name)) NOT IN ('unknown', 'unknow', 'pending')
+  )
+)
 "#;
 
 const SQLITE_USAGE_CACHE_CREATION_TOKENS_EXPR: &str = r#"
@@ -617,6 +626,23 @@ THEN TRIM(provider_id) ELSE TRIM(provider_name) END"
     }
 }
 
+fn sqlite_usage_aggregation_secondary_expr(group_by: UsageAuditAggregationGroupBy) -> &'static str {
+    match group_by {
+        UsageAuditAggregationGroupBy::Provider => {
+            "CASE WHEN SUM(CASE WHEN provider_id IS NOT NULL \
+AND TRIM(provider_id) <> '' \
+AND LOWER(TRIM(provider_id)) NOT IN ('unknown', 'unknow', 'pending') \
+THEN 1 ELSE 0 END) > 0 THEN 'provider_id' \
+WHEN SUM(CASE WHEN provider_name IS NOT NULL \
+AND TRIM(provider_name) <> '' \
+AND LOWER(TRIM(provider_name)) NOT IN ('unknown', 'unknow', 'pending') \
+THEN 1 ELSE 0 END) > 0 THEN 'legacy_name' \
+ELSE NULL END"
+        }
+        _ => "NULL",
+    }
+}
+
 fn sqlite_aggregate_u64(row: &SqliteRow, field: &str) -> Result<u64, DataLayerError> {
     Ok(row.try_get::<i64, _>(field).map_sql_err()?.max(0) as u64)
 }
@@ -682,7 +708,7 @@ fn decode_sqlite_usage_aggregation_row(
     Ok(StoredUsageAuditAggregation {
         group_key: row.try_get::<String, _>("group_key").map_sql_err()?,
         display_name: row.try_get("display_name").map_sql_err()?,
-        secondary_name: None,
+        secondary_name: row.try_get("secondary_name").map_sql_err()?,
         request_count: sqlite_aggregate_u64(row, "request_count")?,
         total_tokens: sqlite_aggregate_u64(row, "total_tokens")?,
         output_tokens: sqlite_aggregate_u64(row, "output_tokens")?,
@@ -1323,8 +1349,9 @@ FROM "usage"
         }
 
         let group_expr = sqlite_usage_aggregation_group_expr(query.group_by);
+        let secondary_expr = sqlite_usage_aggregation_secondary_expr(query.group_by);
         let display_expr = if matches!(query.group_by, UsageAuditAggregationGroupBy::Provider) {
-            "NULLIF(TRIM(provider_name), '')"
+            "CASE WHEN provider_name IS NOT NULL AND TRIM(provider_name) <> '' AND LOWER(TRIM(provider_name)) NOT IN ('unknown', 'unknow', 'pending') THEN TRIM(provider_name) ELSE NULL END"
         } else {
             "NULL"
         };
@@ -1348,6 +1375,7 @@ FROM "usage"
 SELECT
   {group_expr} AS group_key,
   {display_expr} AS display_name,
+  {secondary_expr} AS secondary_name,
   COUNT(*) AS request_count,
   COALESCE(SUM(MAX(COALESCE(total_tokens, 0), 0)), 0) AS total_tokens,
   COALESCE(SUM(MAX(COALESCE(output_tokens, 0), 0)), 0) AS output_tokens,
@@ -1368,6 +1396,7 @@ FROM "usage"
 "#,
             effective_input_expr = SQLITE_USAGE_EFFECTIVE_INPUT_TOKENS_EXPR,
             total_input_context_expr = SQLITE_USAGE_TOTAL_INPUT_CONTEXT_EXPR,
+            secondary_expr = secondary_expr,
             cache_creation_expr = SQLITE_USAGE_CACHE_CREATION_TOKENS_EXPR
         ));
         let mut has_where = false;
@@ -1383,7 +1412,7 @@ FROM "usage"
         builder.push("status NOT IN ('pending', 'streaming')");
         if query.exclude_reserved_provider_labels {
             push_sqlite_usage_where(&mut builder, &mut has_where);
-            builder.push(SQLITE_PROVIDER_NAME_IS_NOT_RESERVED);
+            builder.push(SQLITE_PROVIDER_IDENTITY_IS_NOT_RESERVED);
         }
         if matches!(query.group_by, UsageAuditAggregationGroupBy::User) {
             push_sqlite_usage_where(&mut builder, &mut has_where);

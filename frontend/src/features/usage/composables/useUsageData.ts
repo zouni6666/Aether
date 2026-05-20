@@ -173,6 +173,9 @@ export function useUsageData(options: UseUsageDataOptions) {
 
           const visibleProviderData = providerData.filter(item => isUsageProviderVisible(item.provider))
           providerStats.value = visibleProviderData.map(item => ({
+            providerId: item.provider_id,
+            providerKey: item.provider_key,
+            providerIdentitySource: item.provider_identity_source,
             provider: item.provider,
             requests: item.request_count,
             totalTokens: item.total_tokens || 0,
