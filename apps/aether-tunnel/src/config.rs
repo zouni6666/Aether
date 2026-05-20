@@ -571,6 +571,24 @@ pub struct Config {
     )]
     pub tunnel_connect_timeout_ms: u64,
 
+    /// Force direct WebSocket tunnel TCP connects, or Aether outbound proxy endpoint connects, to IPv4 addresses only.
+    #[arg(
+        long,
+        env = "AETHER_TUNNEL_IPV4_ONLY",
+        default_value_t = false,
+        conflicts_with = "tunnel_ipv6_only"
+    )]
+    pub tunnel_ipv4_only: bool,
+
+    /// Force direct WebSocket tunnel TCP connects, or Aether outbound proxy endpoint connects, to IPv6 addresses only.
+    #[arg(
+        long,
+        env = "AETHER_TUNNEL_IPV6_ONLY",
+        default_value_t = false,
+        conflicts_with = "tunnel_ipv4_only"
+    )]
+    pub tunnel_ipv6_only: bool,
+
     /// WebSocket tunnel TCP keepalive in seconds (0 disables)
     #[arg(long, env = "AETHER_TUNNEL_TCP_KEEPALIVE", default_value_t = 30)]
     pub tunnel_tcp_keepalive_secs: u64,
@@ -654,6 +672,9 @@ impl Config {
         let tunnel_connect_timeout = self.tunnel_connect_timeout()?;
         if tunnel_connect_timeout.is_zero() {
             anyhow::bail!("effective tunnel connect timeout must be > 0");
+        }
+        if self.tunnel_ipv4_only && self.tunnel_ipv6_only {
+            anyhow::bail!("tunnel_ipv4_only and tunnel_ipv6_only cannot both be enabled");
         }
         let tunnel_ping_interval = self.tunnel_ping_interval()?;
         if tunnel_ping_interval.is_zero() {
@@ -761,6 +782,16 @@ impl Config {
 
     pub fn tunnel_connect_timeout(&self) -> anyhow::Result<Duration> {
         Ok(Duration::from_millis(self.tunnel_connect_timeout_ms))
+    }
+
+    pub fn tunnel_ip_family(&self) -> crate::egress_proxy::IpFamily {
+        if self.tunnel_ipv4_only {
+            crate::egress_proxy::IpFamily::Ipv4Only
+        } else if self.tunnel_ipv6_only {
+            crate::egress_proxy::IpFamily::Ipv6Only
+        } else {
+            crate::egress_proxy::IpFamily::Any
+        }
     }
 
     pub fn tunnel_stale_timeout(&self) -> anyhow::Result<Duration> {
@@ -959,6 +990,10 @@ pub struct ConfigFile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tunnel_connect_timeout_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub tunnel_ipv4_only: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tunnel_ipv6_only: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tunnel_tcp_keepalive_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tunnel_tcp_nodelay: Option<bool>,
@@ -1147,6 +1182,8 @@ impl ConfigFile {
             TUNNEL_CONNECT_TIMEOUT_MS_ENV,
             self.tunnel_connect_timeout_ms
         );
+        set!("AETHER_TUNNEL_IPV4_ONLY", self.tunnel_ipv4_only);
+        set!("AETHER_TUNNEL_IPV6_ONLY", self.tunnel_ipv6_only);
         set!(
             "AETHER_TUNNEL_TCP_KEEPALIVE",
             self.tunnel_tcp_keepalive_secs
@@ -1336,6 +1373,20 @@ mod tests {
     fn config_file_deserializes_allow_private_targets() {
         let cfg: ConfigFile = toml::from_str("allow_private_targets = true").expect("bool toml");
         assert_eq!(cfg.allow_private_targets, Some(true));
+    }
+
+    #[test]
+    fn config_file_deserializes_tunnel_ip_family_flags() {
+        let cfg: ConfigFile = toml::from_str(
+            r#"
+tunnel_ipv4_only = true
+tunnel_ipv6_only = false
+"#,
+        )
+        .expect("tunnel IP-family TOML");
+
+        assert_eq!(cfg.tunnel_ipv4_only, Some(true));
+        assert_eq!(cfg.tunnel_ipv6_only, Some(false));
     }
 
     #[test]
@@ -1529,6 +1580,106 @@ node_name = "tunnel-test"
             "tunnel-test",
         ]);
         assert!(config.allow_private_targets);
+    }
+
+    #[test]
+    fn cli_defaults_tunnel_ip_family_to_any() {
+        let config = Config::parse_from([
+            "aether-tunnel",
+            "--aether-url",
+            "https://example.com",
+            "--management-token",
+            "ae_test",
+            "--node-name",
+            "tunnel-test",
+        ]);
+
+        assert!(!config.tunnel_ipv4_only);
+        assert!(!config.tunnel_ipv6_only);
+        assert_eq!(
+            config.tunnel_ip_family(),
+            crate::egress_proxy::IpFamily::Any
+        );
+    }
+
+    #[test]
+    fn cli_accepts_tunnel_ipv4_only() {
+        let config = Config::parse_from([
+            "aether-tunnel",
+            "--aether-url",
+            "https://example.com",
+            "--management-token",
+            "ae_test",
+            "--node-name",
+            "tunnel-test",
+            "--tunnel-ipv4-only",
+        ]);
+
+        assert!(config.tunnel_ipv4_only);
+        assert_eq!(
+            config.tunnel_ip_family(),
+            crate::egress_proxy::IpFamily::Ipv4Only
+        );
+    }
+
+    #[test]
+    fn cli_accepts_tunnel_ipv6_only() {
+        let config = Config::parse_from([
+            "aether-tunnel",
+            "--aether-url",
+            "https://example.com",
+            "--management-token",
+            "ae_test",
+            "--node-name",
+            "tunnel-test",
+            "--tunnel-ipv6-only",
+        ]);
+
+        assert!(config.tunnel_ipv6_only);
+        assert_eq!(
+            config.tunnel_ip_family(),
+            crate::egress_proxy::IpFamily::Ipv6Only
+        );
+    }
+
+    #[test]
+    fn cli_rejects_conflicting_tunnel_ip_family_flags() {
+        let error = Config::try_parse_from([
+            "aether-tunnel",
+            "--aether-url",
+            "https://example.com",
+            "--management-token",
+            "ae_test",
+            "--node-name",
+            "tunnel-test",
+            "--tunnel-ipv4-only",
+            "--tunnel-ipv6-only",
+        ])
+        .expect_err("conflicting tunnel IP-family flags should fail");
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn validate_rejects_conflicting_toml_tunnel_ip_family_flags() {
+        let config = Config {
+            tunnel_ipv4_only: true,
+            tunnel_ipv6_only: true,
+            ..Config::parse_from([
+                "aether-tunnel",
+                "--aether-url",
+                "https://example.com",
+                "--management-token",
+                "ae_test",
+                "--node-name",
+                "tunnel-test",
+            ])
+        };
+
+        let error = config
+            .validate()
+            .expect_err("conflicting TOML-injected tunnel family flags should fail validation");
+        assert!(error.to_string().contains("tunnel_ipv4_only"));
     }
 
     #[test]
