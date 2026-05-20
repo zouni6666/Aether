@@ -18,6 +18,11 @@ export interface UseUsageDataOptions {
   isAdminPage: Ref<boolean>
 }
 
+export interface LoadStatsOptions {
+  force?: boolean
+  preserveOnFailure?: boolean
+}
+
 export interface PaginationParams {
   page: number
   pageSize: number
@@ -76,7 +81,7 @@ export function useUsageData(options: UseUsageDataOptions) {
   })
 
   // 加载统计数据（不加载记录）
-  async function loadStats(dateRange?: DateRangeParams): Promise<boolean> {
+  async function loadStats(dateRange?: DateRangeParams, options: LoadStatsOptions = {}): Promise<boolean> {
     const requestId = ++loadStatsRequestId
     isLoadingStats.value = true
     currentDateRange.value = dateRange
@@ -84,14 +89,17 @@ export function useUsageData(options: UseUsageDataOptions) {
     try {
       if (isAdminPage.value) {
         // 管理员页面顺序加载统计数据，避免刷新使用记录时瞬时打满后端 worker。
-        stats.value = createDefaultStats()
-        modelStats.value = []
-        providerStats.value = []
-        apiFormatStats.value = []
-        availableModels.value = []
-        availableProviders.value = []
+        if (!options.preserveOnFailure) {
+          stats.value = createDefaultStats()
+          modelStats.value = []
+          providerStats.value = []
+          apiFormatStats.value = []
+          availableModels.value = []
+          availableProviders.value = []
+        }
 
         let hadFailure = false
+        const requestOptions = options.force ? { skipCache: true } : undefined
         const markFailure = (error: unknown) => {
           hadFailure = true
           if (getErrorStatus(error) !== 403) {
@@ -100,7 +108,7 @@ export function useUsageData(options: UseUsageDataOptions) {
         }
 
         try {
-          const statsData = await usageApi.getUsageStats(dateRange)
+          const statsData = await usageApi.getUsageStats(dateRange, requestOptions)
           if (requestId !== loadStatsRequestId) {
             return true
           }
@@ -127,7 +135,7 @@ export function useUsageData(options: UseUsageDataOptions) {
         }
 
         try {
-          const modelData = await usageApi.getUsageByModel(dateRange)
+          const modelData = await usageApi.getUsageByModel(dateRange, requestOptions)
           if (requestId !== loadStatsRequestId) {
             return true
           }
@@ -158,7 +166,7 @@ export function useUsageData(options: UseUsageDataOptions) {
         }
 
         try {
-          const providerData = await usageApi.getUsageByProvider(dateRange)
+          const providerData = await usageApi.getUsageByProvider(dateRange, requestOptions)
           if (requestId !== loadStatsRequestId) {
             return true
           }
@@ -191,7 +199,7 @@ export function useUsageData(options: UseUsageDataOptions) {
         }
 
         try {
-          const apiFormatData = await usageApi.getUsageByApiFormat(dateRange)
+          const apiFormatData = await usageApi.getUsageByApiFormat(dateRange, requestOptions)
           if (requestId !== loadStatsRequestId) {
             return true
           }
@@ -312,9 +320,9 @@ export function useUsageData(options: UseUsageDataOptions) {
       if (getErrorStatus(error) !== 403) {
         log.error('加载统计数据失败:', error)
       }
-      stats.value = createDefaultStats()
-      modelStats.value = []
       if (!isAdminPage.value) {
+        stats.value = createDefaultStats()
+        modelStats.value = []
         // 用户页的 records 依赖 stats 一起加载；管理员页的 records 是独立分页，不应被统计失败清空。
         currentRecords.value = []
         totalRecords.value = 0

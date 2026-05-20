@@ -111,7 +111,7 @@
       @update:current-page="handlePageChange"
       @update:page-size="handlePageSizeChange"
       @update:auto-refresh="handleAutoRefreshChange"
-      @refresh="refreshData"
+      @refresh="handleManualRefresh"
       @prefetch-detail="prefetchRequestDetail"
       @show-detail="showRequestDetail"
     />
@@ -289,7 +289,7 @@ async function loadAdminUsers() {
   }
 }
 
-async function refreshAdminAnalytics(options: { force?: boolean } = {}) {
+async function refreshAdminAnalytics(options: { force?: boolean; preserveOnFailure?: boolean } = {}) {
   if (!isAdminPage.value) return
   if (!options.force && !isPageVisible.value) return
 
@@ -300,13 +300,19 @@ async function refreshAdminAnalytics(options: { force?: boolean } = {}) {
   if (!options.force && adminAnalyticsRefreshInFlight) {
     return adminAnalyticsRefreshInFlight
   }
+  if (!options.force) {
+    lastAdminAnalyticsRefreshAt = now
+  }
 
   const refreshGeneration = ++adminAnalyticsRefreshGeneration
   const refreshPromise = (async () => {
     let hasSuccessfulRefresh = false
 
     try {
-      const hadFailure = await loadStats(timeRange.value)
+      const hadFailure = await loadStats(getCurrentStatsFilters(), {
+        force: options.force,
+        preserveOnFailure: options.preserveOnFailure,
+      })
       if (refreshGeneration !== adminAnalyticsRefreshGeneration) {
         return
       }
@@ -335,6 +341,21 @@ async function refreshAdminAnalytics(options: { force?: boolean } = {}) {
       adminAnalyticsRefreshInFlight = null
     }
   }
+}
+
+function getCurrentStatsFilters() {
+  const filters = getCurrentFilters()
+  return {
+    ...timeRange.value,
+    user_id: filters.user_id,
+    model: filters.model,
+    provider: filters.provider,
+  }
+}
+
+async function refreshAdminAnalyticsForSelectionChange() {
+  if (!isAdminPage.value) return
+  await refreshAdminAnalytics({ force: true, preserveOnFailure: false })
 }
 
 // 用户页面需要前端筛选
@@ -740,7 +761,7 @@ onMounted(async () => {
       timeRange.value
     )
     void (async () => {
-      await refreshAdminAnalytics({ force: true })
+      await refreshAdminAnalytics({ force: true, preserveOnFailure: false })
       await loadHeatmapData()
       await loadAdminUsers()
     })()
@@ -772,7 +793,7 @@ async function handleTimeRangeChange(value: DateRangeParams) {
   currentPage.value = 1 // 重置到第一页
   if (isAdminPage.value) {
     await loadRecords({ page: 1, pageSize: pageSize.value }, getCurrentFilters(), timeRange.value)
-    await refreshAdminAnalytics({ force: true })
+    await refreshAdminAnalyticsForSelectionChange()
     return
   }
   await loadStats(timeRange.value)
@@ -829,6 +850,7 @@ async function handleFilterUserChange(value: string) {
 
   if (isAdminPage.value) {
     await loadRecords({ page: 1, pageSize: pageSize.value }, getCurrentFilters(), timeRange.value)
+    await refreshAdminAnalyticsForSelectionChange()
   }
 }
 
@@ -838,6 +860,7 @@ async function handleFilterModelChange(value: string) {
 
   if (isAdminPage.value) {
     await loadRecords({ page: 1, pageSize: pageSize.value }, getCurrentFilters(), timeRange.value)
+    await refreshAdminAnalyticsForSelectionChange()
   }
 }
 
@@ -847,6 +870,7 @@ async function handleFilterProviderChange(value: string) {
 
   if (isAdminPage.value) {
     await loadRecords({ page: 1, pageSize: pageSize.value }, getCurrentFilters(), timeRange.value)
+    await refreshAdminAnalyticsForSelectionChange()
   }
 }
 
@@ -889,8 +913,6 @@ async function refreshData() {
         getCurrentFilters(),
         timeRange.value
       )
-      // 热力图反映长期活跃分布，不跟随自动刷新链路一起重载。
-      void refreshAdminAnalytics()
       return
     }
 
@@ -903,6 +925,11 @@ async function refreshData() {
   } finally {
     refreshInFlight = null
   }
+}
+
+async function handleManualRefresh() {
+  if (!isPageVisible.value) return
+  await refreshData()
 }
 
 // 显示请求详情
