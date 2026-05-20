@@ -44,16 +44,27 @@ fn is_openai_image_request(provider_api_format: &str) -> bool {
         .eq_ignore_ascii_case("openai:image")
 }
 
-fn codex_openai_responses_body_uses_image_generation_tool(
+/// Returns true only when `tool_choice` *explicitly* targets image_generation,
+/// matching either the `"image_generation"` string form or the
+/// `{"type":"image_generation"}` object form.
+///
+/// Intentionally does NOT inspect the `tools` array: tools merely advertise
+/// what is available, while only `tool_choice` expresses the caller's
+/// selection. Treating "image_generation present in tools" as a trigger
+/// caused codex CLI requests (which list image_generation alongside ~20
+/// other tools under `tool_choice: "auto"`) to be incorrectly rewritten
+/// into image-generation-only requests, leading to upstream 400s.
+fn codex_openai_responses_tool_choice_references_image_generation(
     body_object: &serde_json::Map<String, Value>,
 ) -> bool {
-    body_object
-        .get("tools")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_object)
-        .any(|tool| tool.get("type").and_then(Value::as_str) == Some("image_generation"))
+    match body_object.get("tool_choice") {
+        Some(Value::String(name)) => name.trim().eq_ignore_ascii_case("image_generation"),
+        Some(Value::Object(choice)) => choice
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("image_generation")),
+        _ => false,
+    }
 }
 
 fn apply_codex_openai_image_tool_overrides(body_object: &mut serde_json::Map<String, Value>) {
@@ -410,7 +421,7 @@ pub fn apply_codex_openai_responses_special_body_edits(
         body_object.insert("instructions".to_string(), json!(""));
     }
     if is_openai_image_request(provider_api_format)
-        || codex_openai_responses_body_uses_image_generation_tool(body_object)
+        || codex_openai_responses_tool_choice_references_image_generation(body_object)
     {
         body_object.insert(
             "model".to_string(),
@@ -733,7 +744,8 @@ mod tests {
             "input": "generate image",
             "tools": [{
                 "type": "image_generation"
-            }]
+            }],
+            "tool_choice": {"type": "image_generation"}
         });
 
         apply_codex_openai_responses_special_body_edits(
@@ -756,6 +768,131 @@ mod tests {
         assert_eq!(
             provider_request_body["tool_choice"]["type"],
             json!("image_generation")
+        );
+    }
+
+    #[test]
+    fn codex_responses_image_tool_edits_triggered_by_string_tool_choice() {
+        let mut provider_request_body = json!({
+            "model": "gpt-image-2",
+            "input": "generate image",
+            "tools": [{"type": "image_generation"}],
+            "tool_choice": "image_generation"
+        });
+
+        apply_codex_openai_responses_special_body_edits(
+            &mut provider_request_body,
+            "codex",
+            "openai:responses",
+            None,
+            None,
+        );
+
+        assert_eq!(
+            provider_request_body["model"],
+            json!(CODEX_OPENAI_IMAGE_INTERNAL_MODEL)
+        );
+        assert_eq!(
+            provider_request_body["tool_choice"]["type"],
+            json!("image_generation")
+        );
+    }
+
+    #[test]
+    fn codex_responses_image_tool_edits_skipped_when_tool_choice_is_auto() {
+        let original_model = "gpt-5.5";
+        let mut provider_request_body = json!({
+            "model": original_model,
+            "input": [{"role": "user", "content": "hi"}],
+            "tools": [
+                {"type": "function", "name": "shell"},
+                {"type": "image_generation"},
+                {"type": "web_search"}
+            ],
+            "tool_choice": "auto"
+        });
+
+        apply_codex_openai_responses_special_body_edits(
+            &mut provider_request_body,
+            "codex",
+            "openai:responses",
+            None,
+            None,
+        );
+
+        assert_eq!(provider_request_body["model"], json!(original_model));
+        assert_eq!(provider_request_body["tool_choice"], json!("auto"));
+        assert_eq!(
+            provider_request_body["tools"]
+                .as_array()
+                .map(Vec::len)
+                .unwrap_or_default(),
+            3,
+            "tools array should be preserved when tool_choice is auto"
+        );
+    }
+
+    #[test]
+    fn codex_responses_image_tool_edits_skipped_when_tool_choice_absent() {
+        let original_model = "gpt-5.5";
+        let mut provider_request_body = json!({
+            "model": original_model,
+            "input": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "image_generation"}]
+        });
+
+        apply_codex_openai_responses_special_body_edits(
+            &mut provider_request_body,
+            "codex",
+            "openai:responses",
+            None,
+            None,
+        );
+
+        assert_eq!(provider_request_body["model"], json!(original_model));
+        assert!(
+            provider_request_body.get("tool_choice").is_none(),
+            "tool_choice should not be injected when caller did not set it"
+        );
+        assert_eq!(
+            provider_request_body["tools"][0]["type"],
+            json!("image_generation")
+        );
+        assert_eq!(
+            provider_request_body["tools"]
+                .as_array()
+                .map(Vec::len)
+                .unwrap_or_default(),
+            1,
+            "tools array should be preserved verbatim when tool_choice is absent"
+        );
+    }
+
+    #[test]
+    fn codex_responses_image_tool_edits_skipped_when_tool_choice_targets_other_tool() {
+        let original_model = "gpt-5.5";
+        let mut provider_request_body = json!({
+            "model": original_model,
+            "input": [{"role": "user", "content": "hi"}],
+            "tools": [
+                {"type": "function", "name": "shell"},
+                {"type": "image_generation"}
+            ],
+            "tool_choice": {"type": "function", "name": "shell"}
+        });
+
+        apply_codex_openai_responses_special_body_edits(
+            &mut provider_request_body,
+            "codex",
+            "openai:responses",
+            None,
+            None,
+        );
+
+        assert_eq!(provider_request_body["model"], json!(original_model));
+        assert_eq!(
+            provider_request_body["tool_choice"],
+            json!({"type": "function", "name": "shell"})
         );
     }
 
