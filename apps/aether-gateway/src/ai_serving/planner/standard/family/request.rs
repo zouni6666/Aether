@@ -625,7 +625,8 @@ async fn resolve_local_gemini_image_to_openai_image_candidate_payload_parts(
     };
 
     let upstream_is_stream = true;
-    let upstream_url = build_openai_image_upstream_url(transport, None);
+    let upstream_url =
+        build_openai_image_upstream_url(transport, Some("/v1/images/generations"), None);
     let effective_headers = input.effective_headers(&parts.headers);
     let Some(mut provider_request_headers) =
         build_openai_image_headers(ProviderOpenAiImageHeadersInput {

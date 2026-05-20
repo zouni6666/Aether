@@ -344,6 +344,156 @@ pub fn build_openai_chat_usage_chunk(
     total_tokens: u64,
     reasoning_tokens: u64,
 ) -> Value {
+    build_openai_chat_usage_chunk_with_cache(
+        id,
+        model,
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        reasoning_tokens,
+        0,
+        0,
+    )
+}
+
+pub fn build_openai_chat_usage_chunk_with_cache(
+    id: &str,
+    model: &str,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    total_tokens: u64,
+    reasoning_tokens: u64,
+    cache_creation_tokens: u64,
+    cache_read_tokens: u64,
+) -> Value {
+    let usage = openai_chat_usage_payload(
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        reasoning_tokens,
+        cache_creation_tokens,
+        cache_read_tokens,
+    );
+    json!({
+        "id": id,
+        "object": "chat.completion.chunk",
+        "model": model,
+        "choices": [],
+        "usage": usage,
+    })
+}
+
+pub fn build_openai_chat_usage_chunk_from_usage(
+    id: &str,
+    model: &str,
+    usage: &CanonicalUsage,
+) -> Value {
+    build_openai_chat_usage_chunk_with_cache(
+        id,
+        model,
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.total_tokens,
+        usage.reasoning_tokens,
+        cache_creation_tokens_for_usage(usage),
+        usage.cache_read_tokens,
+    )
+}
+
+pub fn openai_responses_usage_from_usage(usage: &CanonicalUsage) -> Value {
+    let mut output = Map::new();
+    output.insert("input_tokens".to_string(), Value::from(usage.input_tokens));
+    output.insert(
+        "output_tokens".to_string(),
+        Value::from(usage.output_tokens),
+    );
+    output.insert("total_tokens".to_string(), Value::from(usage.total_tokens));
+    if usage.reasoning_tokens > 0 {
+        output.insert(
+            "output_tokens_details".to_string(),
+            json!({ "reasoning_tokens": usage.reasoning_tokens }),
+        );
+    }
+    insert_openai_token_details(
+        &mut output,
+        "input_tokens_details",
+        cache_creation_tokens_for_usage(usage),
+        usage.cache_read_tokens,
+    );
+    Value::Object(output)
+}
+
+pub fn claude_usage_from_usage(usage: &CanonicalUsage) -> Value {
+    let mut output = Map::new();
+    output.insert("input_tokens".to_string(), Value::from(usage.input_tokens));
+    output.insert(
+        "output_tokens".to_string(),
+        Value::from(usage.output_tokens),
+    );
+    if usage.cache_read_tokens > 0 {
+        output.insert(
+            "cache_read_input_tokens".to_string(),
+            Value::from(usage.cache_read_tokens),
+        );
+    }
+    let cache_creation_tokens = cache_creation_tokens_for_usage(usage);
+    if cache_creation_tokens > 0 {
+        output.insert(
+            "cache_creation_input_tokens".to_string(),
+            Value::from(cache_creation_tokens),
+        );
+    }
+    if usage.cache_creation_ephemeral_5m_tokens > 0 || usage.cache_creation_ephemeral_1h_tokens > 0
+    {
+        output.insert(
+            "cache_creation".to_string(),
+            json!({
+                "ephemeral_5m_input_tokens": usage.cache_creation_ephemeral_5m_tokens,
+                "ephemeral_1h_input_tokens": usage.cache_creation_ephemeral_1h_tokens,
+            }),
+        );
+    }
+    Value::Object(output)
+}
+
+pub fn gemini_usage_metadata_from_usage(usage: &CanonicalUsage) -> Value {
+    let visible_output_tokens = usage.output_tokens.saturating_sub(usage.reasoning_tokens);
+    let mut output = Map::new();
+    output.insert(
+        "promptTokenCount".to_string(),
+        Value::from(usage.input_tokens),
+    );
+    output.insert(
+        "candidatesTokenCount".to_string(),
+        Value::from(visible_output_tokens),
+    );
+    output.insert(
+        "totalTokenCount".to_string(),
+        Value::from(usage.total_tokens),
+    );
+    if usage.reasoning_tokens > 0 {
+        output.insert(
+            "thoughtsTokenCount".to_string(),
+            Value::from(usage.reasoning_tokens),
+        );
+    }
+    if usage.cache_read_tokens > 0 {
+        output.insert(
+            "cachedContentTokenCount".to_string(),
+            Value::from(usage.cache_read_tokens),
+        );
+    }
+    Value::Object(output)
+}
+
+fn openai_chat_usage_payload(
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    total_tokens: u64,
+    reasoning_tokens: u64,
+    cache_creation_tokens: u64,
+    cache_read_tokens: u64,
+) -> Map<String, Value> {
     let mut usage = Map::new();
     usage.insert("prompt_tokens".to_string(), Value::from(prompt_tokens));
     usage.insert(
@@ -357,11 +507,43 @@ pub fn build_openai_chat_usage_chunk(
             json!({ "reasoning_tokens": reasoning_tokens }),
         );
     }
-    json!({
-        "id": id,
-        "object": "chat.completion.chunk",
-        "model": model,
-        "choices": [],
-        "usage": usage,
-    })
+    insert_openai_token_details(
+        &mut usage,
+        "prompt_tokens_details",
+        cache_creation_tokens,
+        cache_read_tokens,
+    );
+    usage
+}
+
+fn insert_openai_token_details(
+    output: &mut Map<String, Value>,
+    details_key: &str,
+    cache_creation_tokens: u64,
+    cache_read_tokens: u64,
+) {
+    if cache_creation_tokens == 0 && cache_read_tokens == 0 {
+        return;
+    }
+    let mut details = Map::new();
+    if cache_read_tokens > 0 {
+        details.insert("cached_tokens".to_string(), Value::from(cache_read_tokens));
+    }
+    if cache_creation_tokens > 0 {
+        details.insert(
+            "cached_creation_tokens".to_string(),
+            Value::from(cache_creation_tokens),
+        );
+    }
+    output.insert(details_key.to_string(), Value::Object(details));
+}
+
+fn cache_creation_tokens_for_usage(usage: &CanonicalUsage) -> u64 {
+    if usage.cache_creation_tokens > 0 {
+        usage.cache_creation_tokens
+    } else {
+        usage
+            .cache_creation_ephemeral_5m_tokens
+            .saturating_add(usage.cache_creation_ephemeral_1h_tokens)
+    }
 }

@@ -114,7 +114,7 @@ pub(crate) async fn resolve_local_openai_responses_candidate_payload_parts(
         .trim()
         .eq_ignore_ascii_case("grok");
 
-    if provider_api_format.eq_ignore_ascii_case("openai:image") {
+    if !is_grok && provider_api_format.eq_ignore_ascii_case("openai:image") {
         return resolve_openai_responses_to_openai_image_payload_parts(
             state,
             parts,
@@ -739,7 +739,11 @@ async fn resolve_openai_responses_to_openai_image_payload_parts(
     let upstream_url = if is_chatgpt_web {
         chatgpt_web_image_internal_url(&transport.endpoint.base_url)
     } else {
-        build_openai_image_upstream_url(transport, parts.uri.query())
+        build_openai_image_upstream_url(
+            transport,
+            Some("/v1/images/generations"),
+            parts.uri.query(),
+        )
     };
     let Some(mut provider_request_headers) =
         build_openai_image_headers(ProviderOpenAiImageHeadersInput {

@@ -113,6 +113,7 @@ use crate::{
 const OPENAI_IMAGE_STREAM_PLAN_KIND: &str = "openai_image_stream";
 const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const SSE_KEEPALIVE_BYTES: &[u8] = b": aether-keepalive\n\n";
+const SSE_CONTROL_FILTER_MAX_BUFFER_BYTES: usize = 1024 * 1024;
 const STREAM_IDLE_LOG_INTERVAL: Duration = Duration::from_secs(60);
 const STREAM_IDLE_LOG_INTERVAL_MS: u64 = 60_000;
 const REWRITTEN_STREAM_PREFETCH_TIMEOUT: Duration = Duration::from_millis(750);
@@ -1279,10 +1280,13 @@ fn build_sse_body_stream(
     keepalive_interval: Duration,
 ) -> impl futures_util::Stream<Item = Result<Bytes, IoError>> + Send + 'static {
     stream! {
+        let mut upstream_control_filter = emit_keepalive.then(SseControlBlockFilter::default);
         let mut sent_prefetched_chunk = false;
         for chunk in prefetched_chunks_for_body {
-            sent_prefetched_chunk = true;
-            yield Ok(chunk);
+            if let Some(chunk) = filter_upstream_sse_control_chunk(&mut upstream_control_filter, chunk) {
+                sent_prefetched_chunk = true;
+                yield Ok(chunk);
+            }
         }
 
         if emit_keepalive {
@@ -1299,12 +1303,22 @@ fn build_sse_body_stream(
                         let Some(item) = item else {
                             break;
                         };
-                        yield item;
+                        match item {
+                            Ok(chunk) => {
+                                if let Some(chunk) = filter_upstream_sse_control_chunk(&mut upstream_control_filter, chunk) {
+                                    yield Ok(chunk);
+                                }
+                            }
+                            Err(err) => yield Err(err),
+                        }
                     }
                     _ = keepalive.tick() => {
                         yield Ok(Bytes::from_static(SSE_KEEPALIVE_BYTES));
                     }
                 }
+            }
+            if let Some(chunk) = flush_upstream_sse_control_filter(&mut upstream_control_filter) {
+                yield Ok(chunk);
             }
         } else {
             while let Some(item) = rx.recv().await {
@@ -1314,10 +1328,118 @@ fn build_sse_body_stream(
     }
 }
 
+#[derive(Default)]
+struct SseControlBlockFilter {
+    buffered: Vec<u8>,
+}
+
+impl SseControlBlockFilter {
+    fn push_chunk(&mut self, chunk: &[u8]) -> Vec<u8> {
+        if chunk.is_empty() {
+            return Vec::new();
+        }
+
+        self.buffered.extend_from_slice(chunk);
+        let mut output = Vec::new();
+        while let Some((block_end, separator_len)) = find_sse_block_boundary(&self.buffered) {
+            let block = self
+                .buffered
+                .drain(..block_end + separator_len)
+                .collect::<Vec<_>>();
+            if sse_block_has_data_line(&block) {
+                output.extend(block);
+            }
+        }
+
+        if self.buffered.len() > SSE_CONTROL_FILTER_MAX_BUFFER_BYTES {
+            output.extend(std::mem::take(&mut self.buffered));
+        }
+
+        output
+    }
+
+    fn finish(&mut self) -> Vec<u8> {
+        if self.buffered.is_empty() {
+            return Vec::new();
+        }
+
+        let block = std::mem::take(&mut self.buffered);
+        if sse_block_has_data_line(&block) {
+            block
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+fn filter_upstream_sse_control_chunk(
+    filter: &mut Option<SseControlBlockFilter>,
+    chunk: Bytes,
+) -> Option<Bytes> {
+    let Some(filter) = filter.as_mut() else {
+        return Some(chunk);
+    };
+
+    let filtered = filter.push_chunk(chunk.as_ref());
+    (!filtered.is_empty()).then(|| Bytes::from(filtered))
+}
+
+fn flush_upstream_sse_control_filter(filter: &mut Option<SseControlBlockFilter>) -> Option<Bytes> {
+    let filtered = filter.as_mut()?.finish();
+    (!filtered.is_empty()).then(|| Bytes::from(filtered))
+}
+
+fn find_sse_block_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
+    let lf = buffer
+        .windows(2)
+        .position(|window| window == b"\n\n")
+        .map(|index| (index, 2));
+    let crlf = buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| (index, 4));
+
+    match (lf, crlf) {
+        (Some(lf), Some(crlf)) => Some(if lf.0 <= crlf.0 { lf } else { crlf }),
+        (Some(lf), None) => Some(lf),
+        (None, Some(crlf)) => Some(crlf),
+        (None, None) => None,
+    }
+}
+
+fn sse_block_has_data_line(block: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(block) else {
+        return true;
+    };
+
+    text.lines()
+        .any(|line| line.trim_start().starts_with("data:"))
+}
+
 fn stream_chunk_contains_sse_done(chunk: &[u8]) -> bool {
-    std::str::from_utf8(chunk)
-        .ok()
-        .is_some_and(|text| text.lines().any(|line| line.trim() == "data: [DONE]"))
+    std::str::from_utf8(chunk).ok().is_some_and(|text| {
+        text.lines().any(|line| {
+            let line = line.trim();
+            if matches!(
+                line,
+                "data: [DONE]" | "event: message_stop" | "event: response.completed"
+            ) {
+                return true;
+            }
+            let Some(data) = line.strip_prefix("data:").map(str::trim) else {
+                return false;
+            };
+            data == "[DONE]"
+                || serde_json::from_str::<serde_json::Value>(data).is_ok_and(|value| {
+                    value
+                        .get("type")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|event_type| {
+                            matches!(event_type, "message_stop" | "response.completed")
+                        })
+                })
+        })
+    })
 }
 
 async fn next_stream_frame<R>(
@@ -3364,7 +3486,7 @@ mod tests {
         build_sse_body_stream, execute_execution_runtime_stream, execute_stream_from_frame_stream,
         maybe_apply_kiro_prompt_cache_usage_to_stream_summary, merge_stream_terminal_summary,
         should_limit_direct_finalize_prefetch, should_probe_success_failover_before_stream,
-        should_skip_direct_finalize_prefetch,
+        should_skip_direct_finalize_prefetch, stream_chunk_contains_sse_done,
     };
     use crate::control::GatewayControlDecision;
     use crate::tunnel::{tunnel_protocol, TunnelProxyConn};
@@ -3379,6 +3501,20 @@ mod tests {
             Some("openai:chat".to_string()),
         )
         .with_execution_runtime_candidate(true)
+    }
+
+    #[test]
+    fn detects_client_visible_sse_terminal_events() {
+        assert!(stream_chunk_contains_sse_done(b"data: [DONE]\n\n"));
+        assert!(stream_chunk_contains_sse_done(
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+        ));
+        assert!(stream_chunk_contains_sse_done(
+            b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n"
+        ));
+        assert!(!stream_chunk_contains_sse_done(
+            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\"}\n\n"
+        ));
     }
 
     fn tunnel_proxy_snapshot(base_url: String) -> aether_contracts::ProxySnapshot {
@@ -4114,6 +4250,80 @@ mod tests {
             .expect("stream should yield periodic keepalive")
             .expect("periodic keepalive should be ok");
         assert_eq!(second.as_ref(), b": aether-keepalive\n\n");
+    }
+
+    #[tokio::test]
+    async fn sse_body_stream_drops_upstream_control_only_blocks() {
+        let (_tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(1);
+        let mut body_stream = Box::pin(build_sse_body_stream(
+            vec![
+                Bytes::from_static(b": upstream-keepalive\n\n"),
+                Bytes::from_static(b"event: ping\nid: 1\nretry: 1000\n\n"),
+                Bytes::from_static(
+                    b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+                ),
+            ],
+            rx,
+            true,
+            Duration::from_secs(60),
+        ));
+
+        let chunk = tokio::time::timeout(Duration::from_millis(50), body_stream.next())
+            .await
+            .expect("business chunk should arrive")
+            .expect("stream should yield business chunk")
+            .expect("business chunk should be ok");
+        let text = std::str::from_utf8(chunk.as_ref()).expect("chunk should be utf8");
+        assert!(text.contains("event: response.output_text.delta"));
+        assert!(text.contains("data: {\"type\":\"response.output_text.delta\""));
+        assert!(!text.contains("upstream-keepalive"));
+        assert!(!text.contains("event: ping"));
+        assert!(!text.contains("retry: 1000"));
+    }
+
+    #[tokio::test]
+    async fn sse_body_stream_filters_control_blocks_across_chunk_boundaries() {
+        let (_tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(1);
+        let mut body_stream = Box::pin(build_sse_body_stream(
+            vec![
+                Bytes::from_static(b": upstream-keepalive\n"),
+                Bytes::from_static(b"\n"),
+                Bytes::from_static(b"event: response.created\n"),
+                Bytes::from_static(b"data: {\"type\":\"response.created\"}\n\n"),
+            ],
+            rx,
+            true,
+            Duration::from_secs(60),
+        ));
+
+        let chunk = tokio::time::timeout(Duration::from_millis(50), body_stream.next())
+            .await
+            .expect("business chunk should arrive")
+            .expect("stream should yield business chunk")
+            .expect("business chunk should be ok");
+        let text = std::str::from_utf8(chunk.as_ref()).expect("chunk should be utf8");
+        assert_eq!(
+            text,
+            "event: response.created\ndata: {\"type\":\"response.created\"}\n\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn sse_body_stream_uses_local_keepalive_when_prefetched_blocks_are_control_only() {
+        let (_tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(1);
+        let mut body_stream = Box::pin(build_sse_body_stream(
+            vec![Bytes::from_static(b": upstream-keepalive\n\n")],
+            rx,
+            true,
+            Duration::from_secs(60),
+        ));
+
+        let first = tokio::time::timeout(Duration::from_millis(50), body_stream.next())
+            .await
+            .expect("local keepalive should arrive")
+            .expect("stream should yield local keepalive")
+            .expect("local keepalive should be ok");
+        assert_eq!(first.as_ref(), b": aether-keepalive\n\n");
     }
 
     #[tokio::test]

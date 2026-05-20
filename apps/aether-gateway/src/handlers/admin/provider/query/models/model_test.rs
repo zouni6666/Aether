@@ -1486,6 +1486,17 @@ fn provider_query_decode_execution_body(
         .and_then(|value| base64::engine::general_purpose::STANDARD.decode(value).ok())
 }
 
+fn provider_query_execution_json_body(result: &aether_contracts::ExecutionResult) -> Option<Value> {
+    result
+        .body
+        .as_ref()
+        .and_then(|body| body.json_body.clone())
+        .or_else(|| {
+            provider_query_decode_execution_body(result)
+                .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
+        })
+}
+
 fn provider_query_aggregate_standard_stream_sync_response(
     provider_api_format: &str,
     body: &[u8],
@@ -1505,10 +1516,7 @@ fn provider_query_standard_execution_response_body(
     provider_api_format: &str,
     result: &aether_contracts::ExecutionResult,
 ) -> Option<Value> {
-    let body = result
-        .body
-        .as_ref()
-        .and_then(|body| body.json_body.clone())
+    let body = provider_query_execution_json_body(result)
         .or_else(|| {
             provider_query_decode_execution_body(result).and_then(|body| {
                 provider_query_aggregate_standard_stream_sync_response(provider_api_format, &body)
@@ -1527,10 +1535,8 @@ fn provider_query_standard_execution_response_body(
 fn provider_query_extract_error_message(
     result: &aether_contracts::ExecutionResult,
 ) -> Option<String> {
-    result
-        .body
+    provider_query_execution_json_body(result)
         .as_ref()
-        .and_then(|body| body.json_body.as_ref())
         .and_then(Value::as_object)
         .and_then(|value| {
             value
@@ -1589,7 +1595,7 @@ async fn provider_query_finalize_kiro_result(
         })),
         status_code: result.status_code,
         headers: result.headers.clone(),
-        body_json: result.body.as_ref().and_then(|body| body.json_body.clone()),
+        body_json: provider_query_execution_json_body(result),
         client_body_json: None,
         body_base64: result
             .body
@@ -1821,6 +1827,7 @@ fn provider_query_chatgpt_web_image_internal_url(base_url: &str) -> String {
 
 fn provider_query_openai_image_test_upstream_url(
     transport: &AdminGatewayProviderTransportSnapshot,
+    request_path: Option<&str>,
     request_query: Option<&str>,
 ) -> String {
     if transport
@@ -1841,7 +1848,11 @@ fn provider_query_openai_image_test_upstream_url(
             crate::provider_transport::GROK_CHAT_PATH,
         )
     } else {
-        crate::provider_transport::build_openai_image_upstream_url(transport, request_query)
+        crate::provider_transport::build_openai_image_upstream_url(
+            transport,
+            request_path,
+            request_query,
+        )
     }
 }
 
@@ -1874,7 +1885,7 @@ async fn provider_query_finalize_openai_image_result(
         })),
         status_code: result.status_code,
         headers: result.headers.clone(),
-        body_json: result.body.as_ref().and_then(|body| body.json_body.clone()),
+        body_json: provider_query_execution_json_body(result),
         client_body_json: None,
         body_base64: result
             .body
@@ -1967,13 +1978,23 @@ async fn provider_query_execute_openai_image_test_candidate(
         .provider_type
         .trim()
         .eq_ignore_ascii_case("grok");
+    let is_codex = transport
+        .provider
+        .provider_type
+        .trim()
+        .eq_ignore_ascii_case("codex");
     let mut provider_request_body = if is_chatgpt_web {
         match crate::ai_serving::build_chatgpt_web_image_request_body(&parts, &request_body, None) {
             Ok(body) => body,
             Err(err) => err.to_error_json(),
         }
-    } else {
+    } else if is_codex || is_grok {
         crate::ai_serving::build_openai_image_provider_request_body(&normalized_request)
+    } else {
+        crate::ai_serving::build_openai_image_api_provider_request_body(
+            &normalized_request,
+            Some(candidate.effective_model.as_str()),
+        )
     };
     if !is_chatgpt_web {
         crate::ai_serving::apply_codex_openai_responses_special_body_edits(
@@ -2075,7 +2096,11 @@ async fn provider_query_execute_openai_image_test_candidate(
     } else {
         normalized_request.summary_json.clone()
     };
-    let request_url = provider_query_openai_image_test_upstream_url(&transport, parts.uri.query());
+    let request_url = provider_query_openai_image_test_upstream_url(
+        &transport,
+        Some(parts.uri.path()),
+        parts.uri.query(),
+    );
     let upstream_is_stream = provider_request_body
         .get("stream")
         .and_then(Value::as_bool)
@@ -2158,9 +2183,9 @@ async fn provider_query_execute_openai_image_test_candidate(
             &result,
         )
         .await?
-        .or_else(|| result.body.as_ref().and_then(|body| body.json_body.clone()))
+        .or_else(|| provider_query_execution_json_body(&result))
     } else {
-        result.body.as_ref().and_then(|body| body.json_body.clone())
+        provider_query_execution_json_body(&result)
     };
     let did_fail = result.status_code >= 400;
     let error_message = if did_fail {

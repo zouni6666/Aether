@@ -1566,15 +1566,12 @@ impl OpenAIChatClientEmitter {
                 if let Some(usage) = usage {
                     out.extend(encode_json_sse(
                         None,
-                        &build_openai_chat_usage_chunk(
+                        &build_openai_chat_usage_chunk_from_usage(
                             self.response_id
                                 .as_deref()
                                 .unwrap_or("chatcmpl-local-stream"),
                             self.model.as_deref().unwrap_or("unknown"),
-                            usage.input_tokens,
-                            usage.output_tokens,
-                            usage.total_tokens,
-                            usage.reasoning_tokens,
+                            &usage,
                         ),
                     )?);
                 }
@@ -2202,20 +2199,6 @@ impl OpenAIResponsesClientEmitter {
         }
         ordered_output.sort_by_key(|(output_index, _)| *output_index);
 
-        let mut usage_payload = Map::new();
-        usage_payload.insert("input_tokens".to_string(), Value::from(usage.input_tokens));
-        usage_payload.insert(
-            "output_tokens".to_string(),
-            Value::from(usage.output_tokens),
-        );
-        usage_payload.insert("total_tokens".to_string(), Value::from(usage.total_tokens));
-        if usage.reasoning_tokens > 0 {
-            usage_payload.insert(
-                "output_tokens_details".to_string(),
-                json!({ "reasoning_tokens": usage.reasoning_tokens }),
-            );
-        }
-
         json!({
             "id": self.response_id(),
             "object": "response",
@@ -2225,7 +2208,7 @@ impl OpenAIResponsesClientEmitter {
                 .into_iter()
                 .map(|(_, item)| item)
                 .collect::<Vec<_>>(),
-            "usage": usage_payload,
+            "usage": openai_responses_usage_from_usage(&usage),
         })
     }
 
@@ -3297,6 +3280,8 @@ mod tests {
                             input_tokens: 1,
                             output_tokens: 2,
                             total_tokens: 3,
+                            cache_creation_tokens: 5,
+                            cache_read_tokens: 4,
                             reasoning_tokens: 1,
                             ..CanonicalUsage::default()
                         }),
@@ -3311,6 +3296,8 @@ mod tests {
         assert!(sse.contains("\"prompt_tokens\":1"));
         assert!(sse.contains("\"completion_tokens\":2"));
         assert!(sse.contains("\"completion_tokens_details\":{\"reasoning_tokens\":1}"));
+        assert!(sse.contains("\"cached_creation_tokens\":5"));
+        assert!(sse.contains("\"cached_tokens\":4"));
         assert!(sse.contains("\"total_tokens\":3"));
         assert!(sse.contains("data: [DONE]\n\n"));
     }
@@ -3418,6 +3405,8 @@ mod tests {
                             input_tokens: 1,
                             output_tokens: 2,
                             total_tokens: 3,
+                            cache_creation_tokens: 5,
+                            cache_read_tokens: 4,
                             reasoning_tokens: 1,
                             ..CanonicalUsage::default()
                         }),
@@ -3430,6 +3419,9 @@ mod tests {
         assert!(sse.contains("\"type\":\"reasoning\""));
         assert!(sse.contains("\"text\":\"because\""));
         assert!(sse.contains("\"output_tokens_details\":{\"reasoning_tokens\":1}"));
+        assert!(sse.contains("\"input_tokens_details\""));
+        assert!(sse.contains("\"cached_creation_tokens\":5"));
+        assert!(sse.contains("\"cached_tokens\":4"));
     }
 
     #[test]
