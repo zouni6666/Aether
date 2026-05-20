@@ -2556,6 +2556,8 @@ mod tests {
             tunnel_ping_interval_ms: 15_000,
             tunnel_max_streams: Some(8),
             tunnel_connect_timeout_ms: 15_000,
+            tunnel_ipv4_only: false,
+            tunnel_ipv6_only: false,
             tunnel_tcp_keepalive_secs: 30,
             tunnel_tcp_nodelay: true,
             tunnel_stale_timeout_ms: 45_000,

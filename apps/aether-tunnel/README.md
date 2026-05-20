@@ -126,6 +126,8 @@ sudo aether-tunnel uninstall
 | `--tunnel-max-streams` | `AETHER_TUNNEL_MAX_STREAMS` | 自动（硬件估算） | 单连接最大并发 stream 数 |
 | `--tunnel-ping-interval-ms` | `AETHER_TUNNEL_PING_INTERVAL_MS` | `10000` | WebSocket ping 周期（毫秒） |
 | `--tunnel-connect-timeout-ms` | `AETHER_TUNNEL_CONNECT_TIMEOUT_MS` | `3000` | tunnel 建连超时（毫秒） |
+| `--tunnel-ipv4-only` | `AETHER_TUNNEL_IPV4_ONLY` | `false` | 仅使用 IPv4 地址建立直连 WebSocket tunnel；配置 `aether_outbound_proxy_url` 时仅限制代理端点解析 |
+| `--tunnel-ipv6-only` | `AETHER_TUNNEL_IPV6_ONLY` | `false` | 仅使用 IPv6 地址建立直连 WebSocket tunnel；配置 `aether_outbound_proxy_url` 时仅限制代理端点解析 |
 | `--tunnel-stale-timeout-ms` | `AETHER_TUNNEL_STALE_TIMEOUT_MS` | `30000` | 无入站数据断连阈值（毫秒） |
 | `--tunnel-scale-check-interval-ms` | `AETHER_TUNNEL_SCALE_CHECK_INTERVAL_MS` | `1000` | autoscale 采样周期（毫秒） |
 | `--tunnel-scale-up-threshold-percent` | `AETHER_TUNNEL_SCALE_UP_THRESHOLD_PERCENT` | `50` | 单 tunnel 占用率超过该值时扩容 |
@@ -137,6 +139,8 @@ sudo aether-tunnel uninstall
 | `--tunnel-reconnect-max-ms` | `AETHER_TUNNEL_RECONNECT_MAX_MS` | `250` | 指数退避上限（毫秒） |
 
 省略 `tunnel_connections` 时，tunnel 会按设备能力自动计算一个基线值和偏单机上限的扩容上限：默认至少保留 2 条常驻 tunnel，并会更早触发扩容；如果显式设置了 `tunnel_connections` 但没有设置 `tunnel_connections_max`，则保持固定连接池，不自动扩缩。
+
+`tunnel_ipv4_only` / `tunnel_ipv6_only` 只能二选一。它们只改变 WebSocket tunnel 回连的 TCP 地址选择：直连 Aether 时过滤 Aether 域名的 DNS 结果；配置 `aether_outbound_proxy_url` 时过滤代理服务器端点的 DNS 结果，Host/SNI 仍使用原始 WebSocket URL。该选项不会影响 provider 上游请求；如需限制 provider 上游流量，请在 `upstream_proxy_url` 或系统网络层处理。对于 Cloudflare 等边缘 IP 会变化的域名，优先使用该选项而不是固定 `/etc/hosts`。
 
 #### 上游 HTTP 请求
 

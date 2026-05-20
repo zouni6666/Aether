@@ -1,5 +1,7 @@
 //! WebSocket tunnel client: connect, authenticate, and run the tunnel.
 
+use std::io;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -10,7 +12,9 @@ use tokio_tungstenite::tungstenite::http;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tracing::{debug, info, warn};
 
-use crate::egress_proxy::{connect_target_via_proxy, ProxyConnectOptions, UpstreamProxyConfig};
+use crate::egress_proxy::{
+    connect_target_via_proxy, IpFamily, ProxyConnectOptions, UpstreamProxyConfig,
+};
 use crate::state::{AppState, ServerContext};
 use aether_contracts::tunnel::{CURRENT_TUNNEL_PROTOCOL_VERSION, TUNNEL_PROTOCOL_VERSION_HEADER};
 
@@ -325,6 +329,7 @@ async fn connect_tunnel_tcp(
                     tcp_nodelay: state.config.tunnel_tcp_nodelay,
                     tcp_keepalive: (state.config.tunnel_tcp_keepalive_secs > 0)
                         .then(|| Duration::from_secs(state.config.tunnel_tcp_keepalive_secs)),
+                    ip_family: state.config.tunnel_ip_family(),
                 },
             ),
         )
@@ -338,15 +343,54 @@ async fn connect_tunnel_tcp(
         .map_err(anyhow::Error::from);
     }
 
-    tokio::time::timeout(connect_timeout, TcpStream::connect((host, port)))
+    let ip_family = state.config.tunnel_ip_family();
+    tokio::time::timeout(
+        connect_timeout,
+        connect_direct_tunnel_tcp(host, port, ip_family),
+    )
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "tunnel TCP connect timeout ({}ms)",
+            connect_timeout.as_millis()
+        )
+    })?
+    .map_err(anyhow::Error::from)
+}
+
+async fn connect_direct_tunnel_tcp(
+    host: &str,
+    port: u16,
+    ip_family: IpFamily,
+) -> io::Result<TcpStream> {
+    let resolved = tokio::net::lookup_host((host, port))
         .await
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "tunnel TCP connect timeout ({}ms)",
-                connect_timeout.as_millis()
-            )
-        })?
-        .map_err(anyhow::Error::from)
+        .map_err(|err| io::Error::other(format!("tunnel DNS failed: {err}")))?;
+    let addrs = filter_socket_addrs(resolved, ip_family);
+
+    if addrs.is_empty() {
+        return Err(io::Error::other(ip_family.no_address_message("tunnel")));
+    }
+
+    let mut last_error = None;
+    for addr in addrs {
+        match TcpStream::connect(addr).await {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| io::Error::other("tunnel DNS returned no addresses")))
+}
+
+fn filter_socket_addrs(
+    addrs: impl IntoIterator<Item = SocketAddr>,
+    ip_family: IpFamily,
+) -> Vec<SocketAddr> {
+    addrs
+        .into_iter()
+        .filter(|addr| ip_family.allows(*addr))
+        .collect()
 }
 
 /// Configure TCP keepalive and NODELAY on an established socket.
@@ -391,4 +435,41 @@ fn build_tunnel_url(server: &ServerContext) -> String {
         format!("wss://{}", base)
     };
     format!("{}/api/internal/proxy-tunnel", ws_base)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    use super::*;
+
+    fn mixed_addrs() -> Vec<SocketAddr> {
+        vec![
+            SocketAddr::from((Ipv6Addr::LOCALHOST, 443)),
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 443)),
+        ]
+    }
+
+    #[test]
+    fn filter_socket_addrs_keeps_all_addresses_by_default() {
+        let addrs = filter_socket_addrs(mixed_addrs(), IpFamily::Any);
+
+        assert_eq!(addrs.len(), 2);
+        assert!(addrs[0].is_ipv6());
+        assert!(addrs[1].is_ipv4());
+    }
+
+    #[test]
+    fn filter_socket_addrs_keeps_only_ipv4_addresses() {
+        let addrs = filter_socket_addrs(mixed_addrs(), IpFamily::Ipv4Only);
+
+        assert_eq!(addrs, vec![SocketAddr::from((Ipv4Addr::LOCALHOST, 443))]);
+    }
+
+    #[test]
+    fn filter_socket_addrs_keeps_only_ipv6_addresses() {
+        let addrs = filter_socket_addrs(mixed_addrs(), IpFamily::Ipv6Only);
+
+        assert_eq!(addrs, vec![SocketAddr::from((Ipv6Addr::LOCALHOST, 443))]);
+    }
 }
