@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::io::Read;
 
+use aether_ai_formats::UPSTREAM_IS_STREAM_KEY;
 use aether_data_contracts::repository::usage::{parse_usage_body_ref, UsageBodyField};
 use async_trait::async_trait;
 use flate2::read::GzDecoder;
@@ -3874,7 +3875,7 @@ fn usage_upstream_is_stream(usage: &UpsertUsageRecord) -> bool {
         .request_metadata
         .as_ref()
         .and_then(serde_json::Value::as_object)
-        .and_then(|metadata| metadata.get("upstream_is_stream"))
+        .and_then(|metadata| metadata.get(UPSTREAM_IS_STREAM_KEY))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or_else(|| usage.is_stream.unwrap_or(false))
 }
@@ -3888,7 +3889,7 @@ fn merge_usage_stream_metadata(metadata: &mut Option<serde_json::Value>, upstrea
         return;
     };
     object
-        .entry("upstream_is_stream")
+        .entry(UPSTREAM_IS_STREAM_KEY)
         .or_insert(serde_json::Value::Bool(upstream));
 }
 
