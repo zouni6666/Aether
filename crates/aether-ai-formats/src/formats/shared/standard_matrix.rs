@@ -538,6 +538,15 @@ mod tests {
             converted["messages"][2]["content"][0]["tool_use_id"],
             "call_1"
         );
+        assert_eq!(
+            serde_json::from_str::<Value>(
+                converted["messages"][2]["content"][0]["content"]
+                    .as_str()
+                    .expect("object tool result content should be serialized for Claude")
+            )
+            .expect("serialized tool result content should remain JSON"),
+            json!({"rows": 1})
+        );
         assert_eq!(converted["tool_choice"]["type"], "auto");
         assert_eq!(converted["stream"], true);
     }

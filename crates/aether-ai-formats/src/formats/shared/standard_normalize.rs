@@ -835,6 +835,15 @@ mod tests {
             provider_request_body["messages"][2]["content"][0]["type"],
             "tool_result"
         );
+        assert_eq!(
+            serde_json::from_str::<Value>(
+                provider_request_body["messages"][2]["content"][0]["content"]
+                    .as_str()
+                    .expect("object tool result content should be serialized for Claude")
+            )
+            .expect("serialized tool result content should remain JSON"),
+            json!({"rows": 1})
+        );
         assert_eq!(provider_request_body["tool_choice"]["type"], "auto");
         assert_eq!(provider_request_body["stream"], true);
     }
