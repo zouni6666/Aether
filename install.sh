@@ -2232,15 +2232,9 @@ install_compose_mode() {
     info "preparing Docker Compose deployment in ${COMPOSE_DIR}"
     ensure_directory "${COMPOSE_DIR}"
     ensure_directory "${COMPOSE_DIR}/logs"
-    ensure_directory "${COMPOSE_DIR}/datas"
-    ensure_directory "${COMPOSE_DIR}/datas/postgres"
-    ensure_directory "${COMPOSE_DIR}/datas/redis"
-    ensure_directory "${COMPOSE_DIR}/datas/mysql"
-    ensure_directory "${COMPOSE_DIR}/datas/sqlite"
     install_project_file "docker-compose.yml" "${COMPOSE_DIR}/docker-compose.yml" "0644"
     install_project_file ".env.example" "${COMPOSE_DIR}/.env.example" "0644"
     install_project_file "update.sh" "${COMPOSE_DIR}/update.sh" "0755"
-    install_project_file "scripts/migrate-compose-data-layout.sh" "${COMPOSE_DIR}/migrate-compose-data-layout.sh" "0755"
     install_generate_keys_script "${COMPOSE_DIR}/generate_keys.sh"
 
     if [[ -f "${COMPOSE_DIR}/.env" ]]; then
@@ -2258,13 +2252,8 @@ Docker Compose files are ready:
   ${COMPOSE_DIR}/.env
   ${COMPOSE_DIR}/.env.example
   ${COMPOSE_DIR}/update.sh
-  ${COMPOSE_DIR}/migrate-compose-data-layout.sh
   ${COMPOSE_DIR}/generate_keys.sh
   ${COMPOSE_DIR}/logs
-  ${COMPOSE_DIR}/datas/postgres
-  ${COMPOSE_DIR}/datas/redis
-  ${COMPOSE_DIR}/datas/mysql
-  ${COMPOSE_DIR}/datas/sqlite
 EOF
 
     if [[ "${SKIP_START}" == "true" ]]; then
@@ -2281,14 +2270,12 @@ install_compose_single_node_mode() {
     resolve_compose_dir
     info "preparing Docker Compose single-node deployment in ${COMPOSE_DIR}"
     ensure_directory "${COMPOSE_DIR}"
-    ensure_directory "${COMPOSE_DIR}/datas"
-    ensure_directory "${COMPOSE_DIR}/datas/sqlite"
+    ensure_directory "${COMPOSE_DIR}/data"
     ensure_directory "${COMPOSE_DIR}/logs"
 
     install_project_file "docker-compose.single-node.yml" "${COMPOSE_DIR}/docker-compose.yml" "0644"
     install_project_file ".env.example" "${COMPOSE_DIR}/.env.example" "0644"
     install_project_file "update.sh" "${COMPOSE_DIR}/update.sh" "0755"
-    install_project_file "scripts/migrate-compose-data-layout.sh" "${COMPOSE_DIR}/migrate-compose-data-layout.sh" "0755"
     install_generate_keys_script "${COMPOSE_DIR}/generate_keys.sh"
 
     if [[ -f "${COMPOSE_DIR}/.env" ]]; then
@@ -2306,9 +2293,8 @@ Docker Compose single-node files are ready:
   ${COMPOSE_DIR}/.env
   ${COMPOSE_DIR}/.env.example
   ${COMPOSE_DIR}/update.sh
-  ${COMPOSE_DIR}/migrate-compose-data-layout.sh
   ${COMPOSE_DIR}/generate_keys.sh
-  ${COMPOSE_DIR}/datas/sqlite
+  ${COMPOSE_DIR}/data
   ${COMPOSE_DIR}/logs
 EOF
 

@@ -730,15 +730,15 @@ preflight() {
 
   NOW="$(date +%Y%m%d%H%M%S)"
   if [[ -z "$WORK_DIR" ]]; then
-    WORK_DIR="${SOURCE_COMPOSE_DIR}/datas/sqlite/pg-compose-to-single-node-${NOW}"
+    WORK_DIR="${SOURCE_COMPOSE_DIR}/data/pg-compose-to-single-node-${NOW}"
   fi
   WORK_DIR="$(absolute_path_maybe_missing "$WORK_DIR")"
   mkdir -p "$WORK_DIR"
 
   prepare_target_compose
   mkdir -p "${TARGET_COMPOSE_DIR}/logs"
-  mkdir -p "${TARGET_COMPOSE_DIR}/datas/sqlite"
-  TARGET_DB="${TARGET_DB:-${TARGET_COMPOSE_DIR}/datas/sqlite/aether.db}"
+  mkdir -p "${TARGET_COMPOSE_DIR}/data"
+  TARGET_DB="${TARGET_DB:-${TARGET_COMPOSE_DIR}/data/aether.db}"
   TARGET_DB="$(absolute_path_maybe_missing "$TARGET_DB")"
 
   DB_USER="$(env_file_get "$SOURCE_ENV" "DB_USER")"

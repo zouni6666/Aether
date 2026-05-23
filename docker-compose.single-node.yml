@@ -25,6 +25,6 @@ services:
     ports:
       - "${APP_PORT:-8084}:${APP_PORT:-8084}"
     volumes:
-      - ./datas/sqlite:/opt/aether/data
+      - ./data:/opt/aether/data
       - ./logs:/opt/aether/logs
     restart: unless-stopped

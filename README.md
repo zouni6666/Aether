@@ -63,7 +63,7 @@ Docker Compose 部署后，可在部署目录直接执行：
 ./update.sh
 ```
 
-`update.sh` 会拉取最新 `app` 镜像并重建 `app` 容器，`./datas`、`./logs`、Postgres、Redis 不会被删除。Single Node 部署也可显式指定：
+`update.sh` 会拉取最新 `app` 镜像并重建 `app` 容器，Docker named volumes、`./data` 和 `./logs` 不会被删除。Single Node 部署也可显式指定：
 
 ```bash
 ./update.sh --mode single-node
@@ -75,20 +75,7 @@ Docker Compose 部署后，可在部署目录直接执行：
 
 源码或本地构建版本不会启用后台在线更新，请继续使用源码更新流程。Docker Compose 用户如果希望“容器重建后也保持镜像层面的新版本”，仍建议定期运行 `./update.sh` 拉取并重建 app 镜像。服务器访问 GitHub 需要代理时，可设置 `AETHER_UPDATE_PROXY_URL`，也兼容 `UPDATE_PROXY_URL`、`HTTPS_PROXY`、`ALL_PROXY`、`HTTP_PROXY` 以及 `NO_PROXY`。共享出口触发 GitHub API 限流时，可设置只读 `AETHER_UPDATE_GITHUB_TOKEN`，也兼容 `GITHUB_TOKEN` / `GH_TOKEN`。下载总超时默认 600 秒，连续无响应/无数据默认 30 秒，可通过 `AETHER_UPDATE_DOWNLOAD_TIMEOUT_SECS` 和 `AETHER_UPDATE_DOWNLOAD_IDLE_TIMEOUT_SECS` 调整。
 
-旧版 Docker Compose 使用 Docker named volume 存放 Postgres/Redis/MySQL，旧版 Single Node 使用 `./data`。升级到当前 `./datas/*` 布局前，先运行一次迁移脚本：
-
-```bash
-# 先查看将迁移哪些数据
-scripts/migrate-compose-data-layout.sh --dry-run
-
-# 标准 Compose: postgres_data/redis_data/mysql_data -> ./datas/*
-scripts/migrate-compose-data-layout.sh --mode compose --stop-services
-
-# 旧 Single Node: ./data -> ./datas/sqlite
-scripts/migrate-compose-data-layout.sh --mode single-node --stop-services
-```
-
-如果是 `install.sh` 安装到独立 Compose 目录，脚本会被复制为部署目录下的 `./migrate-compose-data-layout.sh`。迁移脚本不会删除旧 volume 或旧 `./data`，确认新版本启动正常后再手动清理。
+标准 Docker Compose 使用 Docker named volumes 存放 Postgres/Redis/MySQL 数据；Single Node 使用部署目录下的 `./data` 存放 SQLite 数据。
 
 如果是本地源码构建镜像的部署，继续使用：
 

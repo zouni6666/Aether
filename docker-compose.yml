@@ -12,7 +12,7 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       TZ: Asia/Shanghai
     volumes:
-      - ./datas/postgres:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
     ports:
       - "127.0.0.1:${DB_PORT:-5432}:5432"
     command: >
@@ -39,7 +39,7 @@ services:
     container_name: aether-redis
     command: redis-server --appendonly yes --appendfsync everysec --save 60 1000 --requirepass ${REDIS_PASSWORD} --maxclients ${REDIS_MAXCLIENTS:-10000}
     volumes:
-      - ./datas/redis:/data
+      - redis_data:/data
     ports:
       - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     healthcheck:
@@ -61,7 +61,7 @@ services:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-aether_root}
       TZ: Asia/Shanghai
     volumes:
-      - ./datas/mysql:/var/lib/mysql
+      - mysql_data:/var/lib/mysql
     healthcheck:
       test:
         [
@@ -103,3 +103,8 @@ services:
     volumes:
       - ./logs:/opt/aether/logs
     restart: unless-stopped
+
+volumes:
+  postgres_data:
+  mysql_data:
+  redis_data:
