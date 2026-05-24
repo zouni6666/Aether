@@ -257,6 +257,19 @@ describe('UsageRecordsTable', () => {
     expect(root.textContent).not.toContain('等待中')
   })
 
+  it('shows failed instead of waiting when an active row has an HTTP error code', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      status: 'pending',
+      status_code: 524,
+      error_message: 'error code: 524',
+      response_time_ms: null,
+      first_byte_time_ms: null,
+    })])
+
+    expect(root.textContent).toContain('失败')
+    expect(root.textContent).not.toContain('等待中')
+  })
+
   it('renders output TPS in the non-admin usage table', () => {
     const root = mountUsageRecordsTable([buildRecord()], { isAdmin: false })
 

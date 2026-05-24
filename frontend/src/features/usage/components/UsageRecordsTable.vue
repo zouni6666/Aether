@@ -654,7 +654,14 @@
           <TableCell v-if="isColumnVisible('status')" class="text-center py-4 w-[10%]">
             <!-- 优先显示请求状态 -->
             <Badge
-              v-if="getDisplayStatus(record) === 'pending'"
+              v-if="isUsageRecordFailed(record)"
+              variant="destructive"
+              class="whitespace-nowrap"
+            >
+              失败
+            </Badge>
+            <Badge
+              v-else-if="getDisplayStatus(record) === 'pending'"
               variant="outline"
               class="whitespace-nowrap animate-pulse border-muted-foreground/30 text-muted-foreground"
             >
@@ -666,13 +673,6 @@
               class="whitespace-nowrap animate-pulse border-primary/50 text-primary"
             >
               传输中
-            </Badge>
-            <Badge
-              v-else-if="isUsageRecordFailed(record)"
-              variant="destructive"
-              class="whitespace-nowrap"
-            >
-              失败
             </Badge>
             <Badge
               v-else-if="record.status === 'cancelled'"

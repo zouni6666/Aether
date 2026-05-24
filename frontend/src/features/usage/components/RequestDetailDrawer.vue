@@ -828,6 +828,16 @@ import {
   type RenderBlock,
 } from '../conversation'
 
+type RequestStateStatus = 'pending' | 'streaming' | 'completed' | 'failed' | 'cancelled'
+
+const REQUEST_STATE_STATUSES = new Set<RequestStateStatus>([
+  'pending',
+  'streaming',
+  'completed',
+  'failed',
+  'cancelled',
+])
+
 const props = defineProps<{
   isOpen: boolean
   requestId: string | null
@@ -838,7 +848,7 @@ const emit = defineEmits<{
   requestState: [state: {
     id: string
     requestId?: string | null
-    status?: 'pending' | 'streaming' | 'completed' | 'failed' | 'cancelled'
+    status?: RequestStateStatus
     statusCode?: number | null
     responseTimeMs?: number | null
     imageProgress?: ImageProgress | null
@@ -922,7 +932,7 @@ function formatErrorDomainMeta(domain: NormalizedErrorDomain): string {
 
 function mapTraceFinalStatusToRequestStatus(
   status?: RequestTrace['final_status'] | null
-): 'pending' | 'streaming' | 'completed' | 'failed' | 'cancelled' | undefined {
+): RequestStateStatus | undefined {
   switch (status) {
     case 'success':
       return 'completed'
@@ -939,6 +949,49 @@ function mapTraceFinalStatusToRequestStatus(
   }
 }
 
+function normalizeRequestStateStatus(status: unknown): RequestStateStatus | undefined {
+  const normalized = typeof status === 'string' ? status.trim().toLowerCase() : ''
+  return REQUEST_STATE_STATUSES.has(normalized as RequestStateStatus)
+    ? normalized as RequestStateStatus
+    : undefined
+}
+
+function hasRequestFailureSignal(statusCode?: number | null, errorMessage?: string | null): boolean {
+  return (typeof statusCode === 'number' && statusCode >= 400) ||
+    (typeof errorMessage === 'string' && errorMessage.trim().length > 0)
+}
+
+function resolveRequestStateStatus(
+  status: unknown,
+  statusCode?: number | null,
+  errorMessage?: string | null
+): RequestStateStatus | undefined {
+  const normalized = normalizeRequestStateStatus(status)
+  if ((normalized == null || normalized === 'pending' || normalized === 'streaming') &&
+    hasRequestFailureSignal(statusCode, errorMessage)) {
+    return 'failed'
+  }
+  return normalized
+}
+
+function resolveRequestStateStatusFromDetail(nextDetail: Pick<RequestDetail, 'status' | 'status_code' | 'error_message'>): RequestStateStatus | undefined {
+  return resolveRequestStateStatus(nextDetail.status, nextDetail.status_code, nextDetail.error_message)
+}
+
+function emitDetailRequestState(nextDetail: RequestDetail) {
+  const id = props.requestId
+  if (!id) return
+
+  emit('requestState', {
+    id,
+    requestId: nextDetail.request_id || nextDetail.id || null,
+    status: resolveRequestStateStatusFromDetail(nextDetail),
+    statusCode: nextDetail.status_code ?? undefined,
+    responseTimeMs: nextDetail.response_time_ms ?? undefined,
+    errorMessage: nextDetail.error_message ?? undefined,
+  })
+}
+
 function handleTraceState(state: {
   loaded: boolean
   hasTrace: boolean
@@ -953,7 +1006,11 @@ function handleTraceState(state: {
   const id = props.requestId
   if (!id) return
 
-  const status = mapTraceFinalStatusToRequestStatus(state.finalStatus)
+  const status = resolveRequestStateStatus(
+    mapTraceFinalStatusToRequestStatus(state.finalStatus),
+    state.statusCode,
+    state.errorMessage
+  )
   const imageFailed = state.imageProgress?.phase === 'failed'
   if (!status && !state.imageProgress && state.statusCode == null && state.latencyMs == null) return
 
@@ -2094,8 +2151,9 @@ async function loadDetail(id: string, silent = false) {
     const prevKey = previousDetail?.request_id || previousDetail?.id
     const currKey = response.request_id || response.id
     const sameRequest = !!prevKey && prevKey === currKey
-    detail.value = {
+    const nextDetail: RequestDetail = {
       ...response,
+      status: resolveRequestStateStatusFromDetail(response) ?? response.status,
       request_body: sameRequest ? previousDetail?.request_body : undefined,
       provider_request_body: sameRequest ? previousDetail?.provider_request_body : undefined,
       response_body: sameRequest ? previousDetail?.response_body : undefined,
@@ -2108,7 +2166,9 @@ async function loadDetail(id: string, silent = false) {
       error_flow: response.error_flow,
       scheduling_failure: response.scheduling_failure,
     }
+    detail.value = nextDetail
     bodiesLoadedForRequestId.value = sameRequest ? bodiesLoadedForRequestId.value : null
+    emitDetailRequestState(nextDetail)
 
     // 首次加载时优先停留在轻量 tab，避免默认触发大 body 加载
     if (!silent) {

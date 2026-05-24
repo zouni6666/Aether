@@ -156,6 +156,7 @@ import {
   hasUsageFallback,
   isUsageRecordFailed,
   isUsageUpstreamStream,
+  normalizeRequestStatus,
   resolveDisplayRequestStatus,
 } from '@/features/usage/utils/status'
 import type { DateRangeParams, FilterStatusValue, RequestStatus } from '@/features/usage/types'
@@ -974,6 +975,8 @@ function handleDetailRequestState(update: {
   const record = currentRecords.value.find(record => record.id === update.id)
   if (!record) return
 
+  const nextStatus = resolveDetailUpdateStatus(update)
+
   const statusPriority: Record<RequestStatus, number> = {
     pending: 0,
     streaming: 1,
@@ -981,11 +984,11 @@ function handleDetailRequestState(update: {
     failed: 2,
     cancelled: 2,
   }
-  if (update.status) {
+  if (nextStatus) {
     const currentRank = record.status ? statusPriority[record.status] : 0
-    const nextRank = statusPriority[update.status]
+    const nextRank = statusPriority[nextStatus]
     if (nextRank >= currentRank) {
-      record.status = update.status
+      record.status = nextStatus
     }
   }
   if ('statusCode' in update) {
@@ -1003,6 +1006,24 @@ function handleDetailRequestState(update: {
   if ('errorMessage' in update) {
     record.error_message = update.errorMessage ?? undefined
   }
+}
+
+function resolveDetailUpdateStatus(update: {
+  status?: RequestStatus
+  statusCode?: number | null
+  imageProgress?: ImageProgress | null
+  errorMessage?: string | null
+}): RequestStatus | undefined {
+  const status = normalizeRequestStatus(update.status)
+  const hasFailureSignal =
+    (typeof update.statusCode === 'number' && update.statusCode >= 400) ||
+    (typeof update.errorMessage === 'string' && update.errorMessage.trim().length > 0) ||
+    update.imageProgress?.phase === 'failed'
+
+  if ((status == null || status === 'pending' || status === 'streaming') && hasFailureSignal) {
+    return 'failed'
+  }
+  return status
 }
 
 function prefetchRequestDetail(id: string) {

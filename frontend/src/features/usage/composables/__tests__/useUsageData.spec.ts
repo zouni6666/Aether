@@ -102,6 +102,47 @@ describe('useUsageData', () => {
     expect(totalRecords.value).toBe(1)
   })
 
+  it('keeps locally resolved failure fields when a stale active record refreshes', async () => {
+    const isAdminPage = ref(true)
+    const { loadRecords, currentRecords } = useUsageData({ isAdminPage })
+    const dateRange = { preset: 'today', tz_offset_minutes: 0 }
+
+    getAllUsageRecordsMock.mockResolvedValueOnce({
+      records: [buildUsageRecord({
+        status: 'failed',
+        status_code: 524,
+        error_message: 'error code: 524',
+        response_time_ms: 125_000,
+      })],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    })
+
+    await loadRecords({ page: 1, pageSize: 20 }, undefined, dateRange)
+
+    getAllUsageRecordsMock.mockResolvedValueOnce({
+      records: [buildUsageRecord({
+        status: 'pending',
+        status_code: undefined,
+        error_message: undefined,
+        response_time_ms: null,
+      })],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    })
+
+    await loadRecords({ page: 1, pageSize: 20 }, undefined, dateRange)
+
+    expect(currentRecords.value[0]).toMatchObject({
+      status: 'failed',
+      status_code: 524,
+      error_message: 'error code: 524',
+      response_time_ms: 125_000,
+    })
+  })
+
   it('continues loading admin breakdowns when the summary request fails', async () => {
     const isAdminPage = ref(true)
     const {
