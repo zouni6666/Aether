@@ -849,13 +849,15 @@ async fn select_keys_for_provider(
     }
 
     let result = async {
-        let keys = state
-            .list_provider_catalog_keys_by_provider_ids(std::slice::from_ref(&provider.id))
+        let summaries = state
+            .list_provider_catalog_key_maintenance_summaries_by_provider_ids(std::slice::from_ref(
+                &provider.id,
+            ))
             .await?
             .into_iter()
-            .filter(|key| key.is_active)
+            .filter(|summary| summary.is_active)
             .collect::<Vec<_>>();
-        if keys.is_empty() {
+        if summaries.is_empty() {
             return Ok(PoolQuotaProbeSelectionOutcome::Empty);
         }
 
@@ -864,7 +866,7 @@ async fn select_keys_for_provider(
                 sample_provider_pool_demand(
                     runtime,
                     &provider.id,
-                    keys.len(),
+                    summaries.len(),
                     config.max_keys_per_provider,
                 )
                 .await
@@ -873,14 +875,14 @@ async fn select_keys_for_provider(
                 read_provider_pool_demand_snapshot(
                     runtime,
                     &provider.id,
-                    keys.len(),
+                    summaries.len(),
                     config.max_keys_per_provider,
                 )
                 .await
             }
         };
         let target_active_count = pool_quota_probe_target_count_for_mode(
-            keys.len(),
+            summaries.len(),
             pool_config,
             demand_snapshot.desired_hot,
             config,
@@ -894,7 +896,10 @@ async fn select_keys_for_provider(
             return Ok(PoolQuotaProbeSelectionOutcome::Empty);
         }
 
-        let key_ids = keys.iter().map(|key| key.id.clone()).collect::<Vec<_>>();
+        let key_ids = summaries
+            .iter()
+            .map(|summary| summary.id.clone())
+            .collect::<Vec<_>>();
         let scores_by_key = load_provider_key_account_scores(state, &provider.id, &key_ids).await;
         let mut active_member_ids =
             load_pruned_active_probe_member_ids(runtime, &provider.id, &key_ids, &scores_by_key)
@@ -965,7 +970,9 @@ async fn select_keys_for_provider(
         )
         .await;
 
-        let mut keys_by_id = keys
+        let mut keys_by_id = state
+            .list_provider_catalog_keys_by_ids(&selected_ids)
+            .await?
             .into_iter()
             .map(|key| (key.id.clone(), key))
             .collect::<BTreeMap<_, _>>();

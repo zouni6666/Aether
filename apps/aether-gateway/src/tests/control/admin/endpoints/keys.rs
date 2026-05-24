@@ -7,8 +7,8 @@ use aether_crypto::{
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use aether_data_contracts::repository::provider_catalog::{
     ProviderCatalogKeyListQuery, ProviderCatalogReadRepository, StoredProviderCatalogEndpoint,
-    StoredProviderCatalogKey, StoredProviderCatalogKeyPage, StoredProviderCatalogKeyStats,
-    StoredProviderCatalogProvider,
+    StoredProviderCatalogKey, StoredProviderCatalogKeyMaintenanceSummary,
+    StoredProviderCatalogKeyPage, StoredProviderCatalogKeyStats, StoredProviderCatalogProvider,
 };
 use aether_data_contracts::DataLayerError;
 use axum::body::Body;
@@ -105,6 +105,15 @@ impl ProviderCatalogReadRepository for SummaryNullingProviderCatalogReadReposito
             key.circuit_breaker_by_format = None;
         }
         Ok(keys)
+    }
+
+    async fn list_key_maintenance_summaries_by_provider_ids(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogKeyMaintenanceSummary>, DataLayerError> {
+        self.inner
+            .list_key_maintenance_summaries_by_provider_ids(provider_ids)
+            .await
     }
 
     async fn list_keys_page(

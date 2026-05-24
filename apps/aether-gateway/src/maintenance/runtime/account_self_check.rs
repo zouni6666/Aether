@@ -312,17 +312,22 @@ async fn select_keys_for_provider(
     }
 
     let result = async {
-        let keys = state
-            .list_provider_catalog_keys_by_provider_ids(std::slice::from_ref(&provider.id))
+        let summaries = state
+            .list_provider_catalog_key_maintenance_summaries_by_provider_ids(std::slice::from_ref(
+                &provider.id,
+            ))
             .await?
             .into_iter()
-            .filter(|key| key.is_active)
+            .filter(|summary| summary.is_active)
             .collect::<Vec<_>>();
-        if keys.is_empty() {
+        if summaries.is_empty() {
             return Ok(Vec::new());
         }
 
-        let key_ids = keys.iter().map(|key| key.id.clone()).collect::<Vec<_>>();
+        let key_ids = summaries
+            .iter()
+            .map(|summary| summary.id.clone())
+            .collect::<Vec<_>>();
         let check_stamps = load_check_timestamps(runtime, &provider.id, &key_ids).await;
         let selected_ids = select_account_self_check_key_ids(
             &key_ids,
@@ -344,7 +349,9 @@ async fn select_keys_for_provider(
         )
         .await;
 
-        let mut keys_by_id = keys
+        let mut keys_by_id = state
+            .list_provider_catalog_keys_by_ids(&selected_ids)
+            .await?
             .into_iter()
             .map(|key| (key.id.clone(), key))
             .collect::<BTreeMap<_, _>>();

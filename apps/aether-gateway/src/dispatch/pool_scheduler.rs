@@ -53,6 +53,7 @@ const POOL_ACTIVE_PROBE_SEALED_SKIP_REASON: &str = "pool_active_probe_sealed";
 const ROUTING_PROFILE_DISALLOWED_KEY_SKIP_REASON: &str = "routing_profile_disallowed_key";
 const POOL_SCORE_SCHEDULE_INTEREST_CONCURRENCY: usize = 4;
 const POOL_SCORE_SCHEDULE_INTEREST_MAX_PER_BATCH: usize = 16;
+const POOL_SCORE_SCHEDULE_INTEREST_MIN_INTERVAL_SECS: u64 = 60;
 
 type PoolCatalogKeyContext = PoolMemberSignals;
 
@@ -862,30 +863,18 @@ impl<'a> PoolKeyCursor<'a> {
             return;
         }
 
-        let Ok(permit) = POOL_SCORE_SCHEDULE_INTEREST_SEMAPHORE
-            .clone()
-            .try_acquire_owned()
-        else {
-            debug!(
-                event_name = "pool_group_score_interest_dropped",
-                log_type = "event",
-                provider_id = %self.group.candidate.provider_id,
-                endpoint_id = %self.group.candidate.endpoint_id,
-                model_id = %self.group.candidate.model_id,
-                score_count = scores.len(),
-                "gateway pool scheduler dropped score schedule interest because the background writer is saturated"
-            );
-            return;
-        };
-
         let scheduled_at = current_unix_ms() / 1000;
         let provider_id = self.group.candidate.provider_id.clone();
         let endpoint_id = self.group.candidate.endpoint_id.clone();
         let model_id = self.group.candidate.model_id.clone();
-        let score_count = scores.len().min(POOL_SCORE_SCHEDULE_INTEREST_MAX_PER_BATCH);
-        let app = self.state.app().clone();
         let feedback = scores
             .iter()
+            .filter(|score| {
+                score.last_scheduled_at.is_none_or(|last_scheduled_at| {
+                    scheduled_at.saturating_sub(last_scheduled_at)
+                        >= POOL_SCORE_SCHEDULE_INTEREST_MIN_INTERVAL_SECS
+                })
+            })
             .take(POOL_SCORE_SCHEDULE_INTEREST_MAX_PER_BATCH)
             .map(|score| PoolMemberScheduleFeedback {
                 identity: PoolMemberIdentity {
@@ -912,6 +901,28 @@ impl<'a> PoolKeyCursor<'a> {
                 })),
             })
             .collect::<Vec<_>>();
+        let score_count = feedback.len();
+        if feedback.is_empty() {
+            return;
+        }
+
+        let Ok(permit) = POOL_SCORE_SCHEDULE_INTEREST_SEMAPHORE
+            .clone()
+            .try_acquire_owned()
+        else {
+            debug!(
+                event_name = "pool_group_score_interest_dropped",
+                log_type = "event",
+                provider_id = %self.group.candidate.provider_id,
+                endpoint_id = %self.group.candidate.endpoint_id,
+                model_id = %self.group.candidate.model_id,
+                score_count = scores.len(),
+                "gateway pool scheduler dropped score schedule interest because the background writer is saturated"
+            );
+            return;
+        };
+
+        let app = self.state.app().clone();
 
         tokio::spawn(async move {
             let _permit = permit;

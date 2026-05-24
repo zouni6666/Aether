@@ -313,6 +313,7 @@ fn empty_database_snapshot_covers_current_cutoff_versions() {
             20260520000000,
             20260520010000,
             20260522000000,
+            20260524000000,
         ]
     );
 }
@@ -389,6 +390,10 @@ fn empty_database_snapshot_sql_includes_usage_body_blobs_and_audit_admin_role() 
     assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("ix_usage_counter_deltas_unprocessed"));
     assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("idx_entitlement_usage_entitlement_date"));
     assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("idx_provider_api_keys_provider_default_sort"));
+    assert!(
+        EMPTY_DATABASE_SNAPSHOT_SQL.contains("idx_provider_api_keys_provider_active_priority_id")
+    );
+    assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("pool_member_scores_scheduler_account_rank_idx"));
     assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("idx_video_tasks_due_poll"));
     assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("request_count bigint DEFAULT 0"));
     assert!(EMPTY_DATABASE_SNAPSHOT_SQL.contains("usage_count bigint DEFAULT 0 NOT NULL"));
@@ -662,6 +667,7 @@ fn mysql_and_sqlite_migrations_include_enabled_incrementals() {
             20260519130000,
             20260520000000,
             20260520010000,
+            20260524000000,
         ]
     );
     assert_eq!(
@@ -685,6 +691,7 @@ fn mysql_and_sqlite_migrations_include_enabled_incrementals() {
             20260519130000,
             20260520000000,
             20260520010000,
+            20260524000000,
         ]
     );
 }
@@ -1209,6 +1216,7 @@ fn pending_migrations_from_applied_skips_versions_already_applied() {
             20260520000000,
             20260520010000,
             20260522000000,
+            20260524000000,
         ]
     );
 }
