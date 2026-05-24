@@ -61,10 +61,7 @@ use crate::clock::current_unix_ms as current_request_candidate_unix_ms;
 use crate::constants::{CONTROL_CANDIDATE_ID_HEADER, CONTROL_REQUEST_ID_HEADER};
 use crate::control::GatewayControlDecision;
 use crate::execution_runtime::build_direct_execution_frame_stream;
-use crate::execution_runtime::chatgpt_web_image::{
-    maybe_apply_chatgpt_web_image_quota_request_delta_at_candidate_start,
-    maybe_execute_chatgpt_web_image_stream,
-};
+use crate::execution_runtime::chatgpt_web_image::maybe_execute_chatgpt_web_image_stream;
 use crate::execution_runtime::grok::maybe_execute_grok_stream;
 use crate::execution_runtime::kiro_cache::{
     billed_input_tokens as kiro_billed_input_tokens, build_kiro_prompt_cache_profile,
@@ -861,12 +858,6 @@ pub(crate) async fn execute_execution_runtime_stream(
             .await;
         });
     }
-    maybe_apply_chatgpt_web_image_quota_request_delta_at_candidate_start(
-        state,
-        &plan,
-        report_context.as_ref(),
-    )
-    .await;
     let plan_request_id_for_log = short_request_id(plan.request_id.as_str());
     let provider_name = plan
         .provider_name

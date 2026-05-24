@@ -308,7 +308,9 @@ fn usage_sql_rebuild_matches_online_provider_key_usage_semantics() {
     assert!(super::REBUILD_PROVIDER_API_KEY_USAGE_STATS_SQL
         .contains("AND BTRIM(provider_api_key_id) <> ''"));
     assert!(super::REBUILD_PROVIDER_API_KEY_USAGE_STATS_SQL
-        .contains("AND status NOT IN ('pending', 'streaming')"));
+        .contains("WHEN status NOT IN ('pending', 'streaming')"));
+    assert!(super::REBUILD_PROVIDER_API_KEY_USAGE_STATS_SQL
+        .contains("WHEN status IN ('pending', 'streaming') THEN 0"));
 }
 
 #[test]

@@ -135,17 +135,6 @@ pub(crate) async fn maybe_execute_chatgpt_web_image_stream(
     }))
 }
 
-pub(crate) async fn maybe_apply_chatgpt_web_image_quota_request_delta_at_candidate_start(
-    state: &AppState,
-    plan: &ExecutionPlan,
-    report_context: Option<&Value>,
-) {
-    if !is_chatgpt_web_image_plan(plan, report_context) {
-        return;
-    }
-    apply_chatgpt_web_image_quota_request_delta_at_start(state, plan).await;
-}
-
 fn is_chatgpt_web_image_plan(plan: &ExecutionPlan, report_context: Option<&Value>) -> bool {
     if !plan
         .provider_api_format
@@ -200,8 +189,6 @@ async fn execute_chatgpt_web_image(
         "gateway executing ChatGPT-Web image request"
     );
 
-    apply_chatgpt_web_image_quota_request_delta_at_start(state, plan).await;
-
     web_bootstrap(plan, &base_url, &fp).await?;
     let requirements = web_requirements(plan, &base_url, &fp, token.as_str()).await?;
     let mut uploads = Vec::new();
@@ -240,6 +227,7 @@ async fn execute_chatgpt_web_image(
         &uploads,
     )
     .await?;
+    apply_chatgpt_web_image_quota_request_delta_after_conversation_start(state, plan).await;
     spawn_chatgpt_web_image_quota_refresh_after_request(state, plan, &base_url, token.as_str());
     filter_uploaded_asset_ids(&mut summary, &uploads);
 
@@ -967,7 +955,7 @@ async fn execute_subrequest(
         .await
 }
 
-async fn apply_chatgpt_web_image_quota_request_delta_at_start(
+async fn apply_chatgpt_web_image_quota_request_delta_after_conversation_start(
     state: &AppState,
     plan: &ExecutionPlan,
 ) {
@@ -987,7 +975,7 @@ async fn apply_chatgpt_web_image_quota_request_delta_at_start(
                 candidate_id = ?plan.candidate_id,
                 provider_id = %plan.provider_id,
                 key_id = %plan.key_id,
-                "gateway persisted ChatGPT-Web image quota request delta"
+                "gateway persisted ChatGPT-Web image quota request delta after conversation start"
             );
         }
         Ok(false) => {
@@ -998,7 +986,7 @@ async fn apply_chatgpt_web_image_quota_request_delta_at_start(
                 candidate_id = ?plan.candidate_id,
                 provider_id = %plan.provider_id,
                 key_id = %plan.key_id,
-                "gateway skipped ChatGPT-Web image quota request delta"
+                "gateway skipped ChatGPT-Web image quota request delta after conversation start"
             );
         }
         Err(err) => {
@@ -1010,7 +998,7 @@ async fn apply_chatgpt_web_image_quota_request_delta_at_start(
                 provider_id = %plan.provider_id,
                 key_id = %plan.key_id,
                 error = %err,
-                "gateway failed to persist ChatGPT-Web image quota request delta"
+                "gateway failed to persist ChatGPT-Web image quota request delta after conversation start"
             );
         }
     }
@@ -2339,7 +2327,9 @@ fn gpt_image2_dimensions_are_plausible(width: u64, height: u64) -> bool {
 }
 
 fn gpt_image2_dimensions_are_valid(width: u64, height: u64) -> bool {
-    width % 16 == 0 && height % 16 == 0 && gpt_image2_dimensions_are_plausible(width, height)
+    width.is_multiple_of(16)
+        && height.is_multiple_of(16)
+        && gpt_image2_dimensions_are_plausible(width, height)
 }
 
 fn normalize_gpt_image2_quality(value: &str) -> String {
@@ -3065,12 +3055,21 @@ fn should_use_web_download_headers(base_url: &str, raw_url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
+    use aether_data_contracts::repository::provider_catalog::{
+        ProviderCatalogReadRepository, StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
+        StoredProviderCatalogProvider,
+    };
     use axum::body::Body;
     use axum::extract::Request;
     use axum::routing::any;
     use axum::Router;
     use futures_util::StreamExt as _;
     use http::{Method, StatusCode};
+
+    use crate::data::GatewayDataState;
 
     fn sample_plan(base_url: &str, body: Value, stream: bool) -> ExecutionPlan {
         ExecutionPlan {
@@ -3100,6 +3099,100 @@ mod tests {
             transport_profile: None,
             timeouts: None,
         }
+    }
+
+    fn sample_provider_catalog_provider() -> StoredProviderCatalogProvider {
+        StoredProviderCatalogProvider::new(
+            "provider-chatgpt-web-image-test".to_string(),
+            "ChatGPT Web".to_string(),
+            Some(CHATGPT_WEB_DEFAULT_BASE_URL.to_string()),
+            "chatgpt_web".to_string(),
+        )
+        .expect("provider should build")
+    }
+
+    fn sample_provider_catalog_endpoint(base_url: &str) -> StoredProviderCatalogEndpoint {
+        StoredProviderCatalogEndpoint::new(
+            "endpoint-chatgpt-web-image-test".to_string(),
+            "provider-chatgpt-web-image-test".to_string(),
+            "openai:image".to_string(),
+            Some("openai".to_string()),
+            Some("image".to_string()),
+            true,
+        )
+        .expect("endpoint should build")
+        .with_transport_fields(
+            base_url.to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("endpoint transport fields should build")
+    }
+
+    fn sample_provider_catalog_key(upstream_metadata: Value) -> StoredProviderCatalogKey {
+        let mut key = StoredProviderCatalogKey::new(
+            "key-chatgpt-web-image-test".to_string(),
+            "provider-chatgpt-web-image-test".to_string(),
+            "ChatGPT Web test key".to_string(),
+            "oauth".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build")
+        .with_transport_fields(
+            Some(json!(["openai:image"])),
+            Some("test-access-token".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("key transport fields should build");
+        key.upstream_metadata = Some(upstream_metadata);
+        key
+    }
+
+    fn state_with_chatgpt_web_key(
+        base_url: &str,
+        upstream_metadata: Value,
+    ) -> (AppState, Arc<InMemoryProviderCatalogReadRepository>) {
+        let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider_catalog_provider()],
+            vec![sample_provider_catalog_endpoint(base_url)],
+            vec![sample_provider_catalog_key(upstream_metadata)],
+        ));
+        let state = crate::AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(Arc::clone(
+                    &repository,
+                )),
+            );
+        (state, repository)
+    }
+
+    async fn reloaded_chatgpt_web_metadata(
+        repository: &InMemoryProviderCatalogReadRepository,
+    ) -> Map<String, Value> {
+        repository
+            .list_keys_by_ids(&["key-chatgpt-web-image-test".to_string()])
+            .await
+            .expect("key reload should succeed")
+            .into_iter()
+            .next()
+            .expect("key should exist")
+            .upstream_metadata
+            .and_then(|value| value.get("chatgpt_web").cloned())
+            .and_then(|value| value.as_object().cloned())
+            .expect("chatgpt_web metadata should exist")
     }
 
     fn completed_response_from_sse(sse: &str) -> Value {
@@ -3510,6 +3603,26 @@ mod tests {
         (format!("http://{addr}"), handle)
     }
 
+    async fn start_bootstrap_failing_chatgpt_web() -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().fallback(any(|_request: Request| async move {
+            response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "text/plain",
+                "bootstrap failed",
+            )
+        }));
+        let listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr should resolve");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("mock server should run");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
     fn response(
         status: StatusCode,
         content_type: &'static str,
@@ -3671,6 +3784,107 @@ data: [DONE]
             completed["tool_usage"]["image_gen"]["output_tokens"],
             json!(1756)
         );
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn chatgpt_web_image_executor_decrements_quota_after_conversation_start_once() {
+        let (base_url, handle) = start_mock_chatgpt_web().await;
+        let (state, repository) = state_with_chatgpt_web_key(
+            base_url.as_str(),
+            json!({
+                "chatgpt_web": {
+                    "plan_type": "free",
+                    "image_quota_remaining": 25.0,
+                    "image_quota_total": 25.0,
+                    "image_quota_used": 0.0
+                }
+            }),
+        );
+        let plan = sample_plan(
+            base_url.as_str(),
+            json!({
+                "operation": "generate",
+                "model": "gpt-image-2",
+                "web_model": "gpt-5-5-thinking",
+                "prompt": "draw a precise test image",
+                "size": "512x512",
+                "ratio": "1:1",
+                "images": [],
+                "count": 1,
+                "output_format": "png"
+            }),
+            false,
+        );
+
+        let result = maybe_execute_chatgpt_web_image_sync(
+            &state,
+            &plan,
+            Some(&json!({"chatgpt_web_image": true})),
+        )
+        .await
+        .expect("executor should run")
+        .expect("plan should be intercepted");
+
+        assert_eq!(result.status_code, 200);
+        let metadata = reloaded_chatgpt_web_metadata(repository.as_ref()).await;
+        assert_eq!(metadata["image_quota_remaining"], json!(24.0));
+        assert_eq!(metadata["image_quota_used"], json!(1.0));
+        assert_eq!(metadata["image_quota_local_request_count"], json!(1u64));
+        assert_eq!(
+            metadata["image_quota_last_local_request_key"],
+            json!("req-chatgpt-web-image-test:cand-chatgpt-web-image-test")
+        );
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn chatgpt_web_image_executor_does_not_decrement_quota_before_conversation_start() {
+        let (base_url, handle) = start_bootstrap_failing_chatgpt_web().await;
+        let (state, repository) = state_with_chatgpt_web_key(
+            base_url.as_str(),
+            json!({
+                "chatgpt_web": {
+                    "plan_type": "free",
+                    "image_quota_remaining": 25.0,
+                    "image_quota_total": 25.0,
+                    "image_quota_used": 0.0
+                }
+            }),
+        );
+        let plan = sample_plan(
+            base_url.as_str(),
+            json!({
+                "operation": "generate",
+                "model": "gpt-image-2",
+                "web_model": "gpt-5-5-thinking",
+                "prompt": "draw a precise test image",
+                "size": "512x512",
+                "ratio": "1:1",
+                "images": [],
+                "count": 1,
+                "output_format": "png"
+            }),
+            false,
+        );
+
+        let result = maybe_execute_chatgpt_web_image_sync(
+            &state,
+            &plan,
+            Some(&json!({"chatgpt_web_image": true})),
+        )
+        .await
+        .expect("executor should run")
+        .expect("plan should be intercepted");
+
+        assert_ne!(result.status_code, 200);
+        let metadata = reloaded_chatgpt_web_metadata(repository.as_ref()).await;
+        assert_eq!(metadata["image_quota_remaining"], json!(25.0));
+        assert_eq!(metadata["image_quota_used"], json!(0.0));
+        assert_eq!(metadata.get("image_quota_local_request_count"), None);
+        assert_eq!(metadata.get("image_quota_last_local_request_key"), None);
 
         handle.abort();
     }

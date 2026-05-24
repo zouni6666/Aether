@@ -39,10 +39,7 @@ use crate::api::response::{
 };
 use crate::clock::current_unix_ms as current_request_candidate_unix_ms;
 use crate::control::GatewayControlDecision;
-use crate::execution_runtime::chatgpt_web_image::{
-    maybe_apply_chatgpt_web_image_quota_request_delta_at_candidate_start,
-    maybe_execute_chatgpt_web_image_sync,
-};
+use crate::execution_runtime::chatgpt_web_image::maybe_execute_chatgpt_web_image_sync;
 use crate::execution_runtime::grok::maybe_execute_grok_sync;
 use crate::execution_runtime::oauth_retry::refresh_oauth_plan_auth_for_retry;
 #[cfg(test)]
@@ -1336,12 +1333,6 @@ async fn execute_execution_runtime_sync_impl(
             started_at_unix_ms: Some(candidate_started_unix_secs),
             finished_at_unix_ms: None,
         },
-    )
-    .await;
-    maybe_apply_chatgpt_web_image_quota_request_delta_at_candidate_start(
-        state,
-        &plan,
-        report_context.as_ref(),
     )
     .await;
     let mut terminal_guard = SyncAttemptTerminalGuard::new(
