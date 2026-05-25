@@ -244,7 +244,7 @@ impl MysqlUsageReadRepository {
             r#"
 SELECT
   DATE_FORMAT(FROM_UNIXTIME(created_at_unix_ms), '%Y-%m-%d') AS date,
-  COUNT(*) AS requests,
+  CAST(COUNT(*) AS SIGNED) AS requests,
   CAST(COALESCE(SUM(
     GREATEST(COALESCE(input_tokens, 0), 0)
     + GREATEST(COALESCE(output_tokens, 0), 0)
@@ -641,7 +641,7 @@ WHERE user_id IN (
             r#"
 SELECT
   `usage`.user_id,
-  COUNT(*) AS request_count,
+  CAST(COUNT(*) AS SIGNED) AS request_count,
   CAST(COALESCE(SUM(GREATEST(COALESCE(`usage`.total_tokens, 0), 0)), 0) AS SIGNED) AS total_tokens
 FROM `usage`
 JOIN (
@@ -1510,6 +1510,7 @@ mod tests {
         assert!(source.contains("FROM stats_daily"));
         assert!(source.contains("FROM stats_user_daily"));
         assert!(source.contains("AS SIGNED) AS total_tokens"));
+        assert!(source.contains("CAST(COUNT(*) AS SIGNED) AS requests"));
         assert!(source.contains("summaries.entry(item.date.clone()).or_insert(item)"));
     }
 
@@ -1520,6 +1521,9 @@ mod tests {
         assert!(source.contains("FROM stats_user_daily"));
         assert!(source.contains("MAX(`date`) AS latest_date"));
         assert!(source.contains("AS SIGNED) AS request_count"));
+        assert!(
+            source.contains("CAST(COALESCE(SUM(total_requests), 0) AS SIGNED) AS request_count")
+        );
         assert!(source.contains("requested.cutoff_unix_secs"));
     }
 
@@ -1532,6 +1536,10 @@ mod tests {
         assert!(source.contains("FROM stats_user_daily"));
         assert!(source.contains("'aggregate' AS model"));
         assert!(source.contains("AS SIGNED) AS total_requests"));
+        assert!(
+            source.contains("CAST(COALESCE(SUM(total_requests), 0) AS SIGNED) AS total_requests")
+        );
+        assert!(source.contains("CAST(COALESCE(SUM(total_requests), 0) AS SIGNED) AS requests"));
     }
 
     #[tokio::test]
