@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::formats::openai::shared::map_thinking_budget_to_openai_reasoning_effort;
+use crate::formats::shared::response::remove_empty_pages_from_tool_input_value;
 
 pub use crate::protocol::stream::{CanonicalStreamEvent, CanonicalStreamFrame};
 
@@ -3825,7 +3826,7 @@ pub(crate) fn canonical_block_to_claude(
             input,
             extensions,
         } => {
-            let input = claude_tool_use_input_without_empty_read_pages(name, input);
+            let input = remove_empty_pages_from_tool_input_value(name, input);
             let mut out = Map::new();
             out.insert("type".to_string(), Value::String("tool_use".to_string()));
             out.insert(
@@ -3866,18 +3867,6 @@ pub(crate) fn canonical_block_to_claude(
         }
         CanonicalContentBlock::Unknown { .. } => Some(None),
     }
-}
-
-fn claude_tool_use_input_without_empty_read_pages(name: &str, input: &Value) -> Value {
-    if name != "Read" || input.get("pages").and_then(Value::as_str) != Some("") {
-        return input.clone();
-    }
-    let Some(object) = input.as_object() else {
-        return input.clone();
-    };
-    let mut object = object.clone();
-    object.remove("pages");
-    Value::Object(object)
 }
 
 fn canonical_tool_result_content_to_claude(
