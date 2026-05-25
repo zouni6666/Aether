@@ -468,7 +468,6 @@
                           <Shield class="w-3.5 h-3.5" />
                         </Button>
                         <Button
-                          v-if="key.auto_fetch_models"
                           variant="ghost"
                           size="icon"
                           class="h-7 w-7"
