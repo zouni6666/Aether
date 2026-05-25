@@ -600,6 +600,8 @@ pub struct CreateAdminGlobalModelRecord {
     pub default_tiered_pricing: Option<Value>,
     pub supported_capabilities: Option<Value>,
     pub config: Option<Value>,
+    #[serde(default)]
+    pub usage_count: Option<u64>,
 }
 
 impl CreateAdminGlobalModelRecord {
@@ -645,6 +647,7 @@ impl CreateAdminGlobalModelRecord {
             default_tiered_pricing,
             supported_capabilities,
             config,
+            usage_count: None,
         })
     }
 }
@@ -658,6 +661,8 @@ pub struct UpdateAdminGlobalModelRecord {
     pub default_tiered_pricing: Option<Value>,
     pub supported_capabilities: Option<Value>,
     pub config: Option<Value>,
+    #[serde(default)]
+    pub usage_count: Option<u64>,
 }
 
 impl UpdateAdminGlobalModelRecord {
@@ -696,6 +701,7 @@ impl UpdateAdminGlobalModelRecord {
             default_tiered_pricing,
             supported_capabilities,
             config,
+            usage_count: None,
         })
     }
 }

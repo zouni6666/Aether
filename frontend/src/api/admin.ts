@@ -142,6 +142,8 @@ export interface UserExport {
   unlimited?: boolean
   wallet?: BillingSummary | null
   is_active: boolean
+  request_count?: number
+  total_tokens?: number
   api_keys: UserApiKeyExport[]
 }
 
@@ -237,6 +239,7 @@ export interface UsageAggregateImportSummary {
 export interface GlobalModelExport {
   name: string
   display_name: string
+  usage_count?: number | null
   default_price_per_request?: number | null
   default_tiered_pricing: Record<string, unknown>
   supported_capabilities?: string[] | null

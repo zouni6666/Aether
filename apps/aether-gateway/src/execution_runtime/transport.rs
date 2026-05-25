@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::error::Error as _;
+use std::future::Future;
 use std::io::Read;
 use std::io::Write;
 use std::time::{Duration, Instant};
@@ -226,6 +227,7 @@ pub(crate) struct DirectUpstreamStreamExecution {
     pub(crate) stream_summary_report_context: Value,
     pub(crate) response: DirectUpstreamResponse,
     pub(crate) started_at: Instant,
+    pub(crate) stream_first_byte_timeout: Option<Duration>,
 }
 
 impl DirectSyncExecutionRuntime {
@@ -240,32 +242,39 @@ impl DirectSyncExecutionRuntime {
         let body_bytes = build_request_body(plan)?;
 
         let started_at = Instant::now();
-        let response = send_request(plan, body_bytes).await?;
-        let ttfb_ms = started_at.elapsed().as_millis() as u64;
-        let status_code = response.status_code();
-        let headers = response.headers();
-        let body_bytes = response.bytes().await?;
-        let decoded_body_bytes = decode_response_body_bytes(&headers, &body_bytes)
-            .unwrap_or_else(|| body_bytes.to_vec());
-        let elapsed_ms = started_at.elapsed().as_millis() as u64;
-        let upstream_bytes = body_bytes.len() as u64;
+        with_non_stream_total_timeout(plan, async move {
+            let response = send_request_inner(plan, body_bytes, false).await?;
+            let ttfb_ms = started_at.elapsed().as_millis() as u64;
+            let status_code = response.status_code();
+            let headers = response.headers();
+            let body_bytes = response.bytes().await?;
+            let decoded_body_bytes = decode_response_body_bytes(&headers, &body_bytes)
+                .unwrap_or_else(|| body_bytes.to_vec());
+            let elapsed_ms = started_at.elapsed().as_millis() as u64;
+            let upstream_bytes = body_bytes.len() as u64;
 
-        let body =
-            build_execution_response_body(&headers, &body_bytes, &decoded_body_bytes, plan.stream)?;
+            let body = build_execution_response_body(
+                &headers,
+                &body_bytes,
+                &decoded_body_bytes,
+                plan.stream,
+            )?;
 
-        Ok(ExecutionResult {
-            request_id: plan.request_id.clone(),
-            candidate_id: plan.candidate_id.clone(),
-            status_code,
-            headers,
-            body,
-            telemetry: Some(ExecutionTelemetry {
-                ttfb_ms: Some(ttfb_ms),
-                elapsed_ms: Some(elapsed_ms),
-                upstream_bytes: Some(upstream_bytes),
-            }),
-            error: None,
+            Ok(ExecutionResult {
+                request_id: plan.request_id.clone(),
+                candidate_id: plan.candidate_id.clone(),
+                status_code,
+                headers,
+                body,
+                telemetry: Some(ExecutionTelemetry {
+                    ttfb_ms: Some(ttfb_ms),
+                    elapsed_ms: Some(elapsed_ms),
+                    upstream_bytes: Some(upstream_bytes),
+                }),
+                error: None,
+            })
         })
+        .await
     }
 
     pub(crate) async fn execute_stream(
@@ -294,6 +303,7 @@ impl DirectSyncExecutionRuntime {
             stream_summary_report_context,
             response: response.into_direct_upstream_response(),
             started_at,
+            stream_first_byte_timeout: resolve_stream_first_byte_timeout(plan),
         })
     }
 }
@@ -405,6 +415,7 @@ pub(crate) async fn execute_stream_plan_via_local_tunnel(
         stream_summary_report_context: build_stream_summary_report_context(plan),
         response: DirectUpstreamResponse::LocalTunnel(response),
         started_at,
+        stream_first_byte_timeout: resolve_stream_first_byte_timeout(plan),
     }))
 }
 
@@ -479,6 +490,13 @@ fn manual_proxy_node_id(proxy: Option<&ProxySnapshot>) -> Option<String> {
 }
 
 async fn execute_sync_plan_via_local_tunnel(
+    state: &AppState,
+    plan: &ExecutionPlan,
+) -> Result<ExecutionResult, ExecutionRuntimeTransportError> {
+    with_non_stream_total_timeout(plan, execute_sync_plan_via_local_tunnel_inner(state, plan)).await
+}
+
+async fn execute_sync_plan_via_local_tunnel_inner(
     state: &AppState,
     plan: &ExecutionPlan,
 ) -> Result<ExecutionResult, ExecutionRuntimeTransportError> {
@@ -617,6 +635,14 @@ pub(crate) async fn send_request(
     plan: &ExecutionPlan,
     body_bytes: Vec<u8>,
 ) -> Result<DirectHttpResponse, ExecutionRuntimeTransportError> {
+    send_request_inner(plan, body_bytes, true).await
+}
+
+async fn send_request_inner(
+    plan: &ExecutionPlan,
+    body_bytes: Vec<u8>,
+    apply_request_total_timeout: bool,
+) -> Result<DirectHttpResponse, ExecutionRuntimeTransportError> {
     if let Some(detail) = gateway_frontdoor_self_loop_guard_error(plan.url.as_str()) {
         return Err(ExecutionRuntimeTransportError::UpstreamRequest(detail));
     }
@@ -628,11 +654,12 @@ pub(crate) async fn send_request(
         plan.content_encoding.as_deref(),
         plan.body.body_bytes_b64.is_some(),
     )?;
-    let total_timeout = plan
-        .timeouts
-        .as_ref()
-        .and_then(|timeouts| timeouts.total_ms)
-        .map(Duration::from_millis);
+    let total_timeout = if apply_request_total_timeout {
+        resolve_non_stream_total_timeout(plan)
+    } else {
+        None
+    };
+    let stream_first_byte_timeout = resolve_stream_first_byte_timeout(plan);
 
     if transport_profile_uses_browser_wreq(plan.transport_profile.as_ref()) {
         return send_via_browser_wreq_transport(
@@ -641,7 +668,9 @@ pub(crate) async fn send_request(
             headers,
             body_bytes,
             total_timeout,
+            stream_first_byte_timeout,
             transport_controls,
+            apply_request_total_timeout,
         )
         .await;
     }
@@ -654,6 +683,7 @@ pub(crate) async fn send_request(
             body_bytes,
             &node_id,
             total_timeout,
+            stream_first_byte_timeout,
             transport_controls,
         )
         .await
@@ -671,13 +701,9 @@ pub(crate) async fn send_request(
     if let Some(timeout) = total_timeout {
         request = request.timeout(timeout);
     }
-    request
-        .send()
+    send_reqwest_request(request, stream_first_byte_timeout)
         .await
         .map(DirectHttpResponse::Reqwest)
-        .map_err(|err| {
-            ExecutionRuntimeTransportError::UpstreamRequest(format_upstream_request_error(&err))
-        })
 }
 
 pub(crate) enum DirectHttpResponse {
@@ -731,7 +757,9 @@ async fn send_via_browser_wreq_transport(
     headers: HeaderMap,
     body_bytes: Vec<u8>,
     total_timeout: Option<Duration>,
+    stream_first_byte_timeout: Option<Duration>,
     transport_controls: ExecutionTransportControls,
+    apply_request_total_timeout: bool,
 ) -> Result<DirectHttpResponse, ExecutionRuntimeTransportError> {
     let profile = plan.transport_profile.as_ref().ok_or_else(|| {
         ExecutionRuntimeTransportError::UnsupportedTransportProfile(String::new())
@@ -741,6 +769,7 @@ async fn send_via_browser_wreq_transport(
         plan.proxy.as_ref(),
         profile,
         transport_controls,
+        apply_request_total_timeout && !plan.stream,
     )?;
     let method = wreq::Method::from_bytes(method.as_str().as_bytes())
         .map_err(ExecutionRuntimeTransportError::InvalidMethod)?;
@@ -751,15 +780,9 @@ async fn send_via_browser_wreq_transport(
     if let Some(timeout) = total_timeout {
         request = request.timeout(timeout);
     }
-    request
-        .send()
+    send_wreq_request(request, stream_first_byte_timeout)
         .await
         .map(DirectHttpResponse::BrowserWreq)
-        .map_err(|err| {
-            ExecutionRuntimeTransportError::UpstreamRequest(format_wreq_upstream_request_error(
-                &err,
-            ))
-        })
 }
 
 async fn send_via_tunnel_relay(
@@ -769,6 +792,7 @@ async fn send_via_tunnel_relay(
     body_bytes: Vec<u8>,
     node_id: &str,
     total_timeout: Option<Duration>,
+    stream_first_byte_timeout: Option<Duration>,
     transport_controls: ExecutionTransportControls,
 ) -> Result<reqwest::Response, ExecutionRuntimeTransportError> {
     let client = build_relay_client(plan.timeouts.as_ref())?;
@@ -822,7 +846,7 @@ async fn send_via_tunnel_relay(
     }
 
     let first_byte_timeout = if plan.stream {
-        resolve_tunnel_first_byte_timeout(plan)
+        stream_first_byte_timeout.or_else(|| resolve_tunnel_first_byte_timeout(plan))
     } else {
         None
     };
@@ -1022,6 +1046,101 @@ fn resolve_tunnel_first_byte_timeout(plan: &ExecutionPlan) -> Option<Duration> {
     })
 }
 
+fn resolve_non_stream_total_timeout(plan: &ExecutionPlan) -> Option<Duration> {
+    if plan.stream {
+        return None;
+    }
+    plan.timeouts
+        .as_ref()
+        .and_then(|timeouts| timeouts.total_ms)
+        .map(|value| Duration::from_millis(value.max(1)))
+}
+
+pub(crate) fn resolve_stream_first_byte_timeout(plan: &ExecutionPlan) -> Option<Duration> {
+    if !plan.stream {
+        return None;
+    }
+    plan.timeouts
+        .as_ref()
+        .and_then(|timeouts| timeouts.first_byte_ms.or(timeouts.total_ms))
+        .map(|value| Duration::from_millis(value.max(1)))
+}
+
+pub(crate) async fn with_non_stream_total_timeout<T, F>(
+    plan: &ExecutionPlan,
+    future: F,
+) -> Result<T, ExecutionRuntimeTransportError>
+where
+    F: Future<Output = Result<T, ExecutionRuntimeTransportError>>,
+{
+    let Some(timeout) = resolve_non_stream_total_timeout(plan) else {
+        return future.await;
+    };
+
+    match tokio::time::timeout(timeout, future).await {
+        Ok(result) => result,
+        Err(_) => Err(ExecutionRuntimeTransportError::UpstreamRequest(
+            non_stream_total_timeout_message(timeout),
+        )),
+    }
+}
+
+async fn send_reqwest_request(
+    request: reqwest::RequestBuilder,
+    stream_first_byte_timeout: Option<Duration>,
+) -> Result<reqwest::Response, ExecutionRuntimeTransportError> {
+    if let Some(timeout) = stream_first_byte_timeout {
+        return match tokio::time::timeout(timeout, request.send()).await {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(error)) => Err(ExecutionRuntimeTransportError::UpstreamRequest(
+                format_upstream_request_error(&error),
+            )),
+            Err(_) => Err(ExecutionRuntimeTransportError::UpstreamRequest(
+                stream_first_byte_timeout_message(timeout),
+            )),
+        };
+    }
+
+    request.send().await.map_err(|err| {
+        ExecutionRuntimeTransportError::UpstreamRequest(format_upstream_request_error(&err))
+    })
+}
+
+async fn send_wreq_request(
+    request: wreq::RequestBuilder,
+    stream_first_byte_timeout: Option<Duration>,
+) -> Result<wreq::Response, ExecutionRuntimeTransportError> {
+    if let Some(timeout) = stream_first_byte_timeout {
+        return match tokio::time::timeout(timeout, request.send()).await {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(error)) => Err(ExecutionRuntimeTransportError::UpstreamRequest(
+                format_wreq_upstream_request_error(&error),
+            )),
+            Err(_) => Err(ExecutionRuntimeTransportError::UpstreamRequest(
+                stream_first_byte_timeout_message(timeout),
+            )),
+        };
+    }
+
+    request.send().await.map_err(|err| {
+        ExecutionRuntimeTransportError::UpstreamRequest(format_wreq_upstream_request_error(&err))
+    })
+}
+
+fn non_stream_total_timeout_message(timeout: Duration) -> String {
+    format!(
+        "provider non-stream request total timeout after {} ms",
+        timeout.as_millis()
+    )
+}
+
+pub(crate) fn stream_first_byte_timeout_message(timeout: Duration) -> String {
+    format!(
+        "provider stream first byte timeout after {} ms",
+        timeout.as_millis()
+    )
+}
+
 fn resolve_tunnel_timeout_metadata(plan: &ExecutionPlan) -> TunnelTimeoutMetadata {
     TunnelTimeoutMetadata {
         request_timeout_ms: plan
@@ -1128,6 +1247,7 @@ pub(crate) fn build_browser_wreq_client(
     proxy: Option<&ProxySnapshot>,
     transport_profile: &ResolvedTransportProfile,
     transport_controls: ExecutionTransportControls,
+    apply_total_timeout: bool,
 ) -> Result<wreq::Client, ExecutionRuntimeTransportError> {
     let emulation = browser_wreq_emulation_from_profile(transport_profile)?;
     let mut builder = wreq::Client::builder().emulation(emulation);
@@ -1143,8 +1263,10 @@ pub(crate) fn build_browser_wreq_client(
     if let Some(connect_ms) = timeouts.and_then(|timeouts| timeouts.connect_ms) {
         builder = builder.connect_timeout(Duration::from_millis(connect_ms));
     }
-    if let Some(total_ms) = timeouts.and_then(|timeouts| timeouts.total_ms) {
-        builder = builder.timeout(Duration::from_millis(total_ms));
+    if apply_total_timeout {
+        if let Some(total_ms) = timeouts.and_then(|timeouts| timeouts.total_ms) {
+            builder = builder.timeout(Duration::from_millis(total_ms));
+        }
     }
     if let Some(read_ms) = timeouts.and_then(|timeouts| timeouts.read_ms) {
         builder = builder.read_timeout(Duration::from_millis(read_ms));
@@ -1764,6 +1886,34 @@ mod tests {
         }
     }
 
+    fn direct_timeout_plan(
+        url: String,
+        stream: bool,
+        timeouts: ExecutionTimeouts,
+    ) -> ExecutionPlan {
+        ExecutionPlan {
+            request_id: "req-direct-timeout".into(),
+            candidate_id: None,
+            provider_name: Some("provider".into()),
+            provider_id: "prov-direct-timeout".into(),
+            endpoint_id: "ep-direct-timeout".into(),
+            key_id: "key-direct-timeout".into(),
+            method: "POST".into(),
+            url,
+            headers: BTreeMap::from([("content-type".into(), "application/json".into())]),
+            content_type: Some("application/json".into()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({"model": "gpt-4.1"})),
+            stream,
+            client_api_format: "openai:chat".into(),
+            provider_api_format: "openai:chat".into(),
+            model_name: Some("gpt-4.1".into()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: Some(timeouts),
+        }
+    }
+
     fn tunnel_proxy_snapshot(base_url: String) -> ProxySnapshot {
         ProxySnapshot {
             enabled: Some(true),
@@ -1895,6 +2045,147 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_sync_execution_runtime_applies_non_stream_total_timeout_to_body() {
+        let listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr should resolve");
+        let app = Router::new().route(
+            "/chat",
+            post(|| async {
+                let body = Body::from_stream(async_stream::stream! {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    yield Ok::<Bytes, std::io::Error>(Bytes::from_static(br#"{"ok":true}"#));
+                });
+                axum::response::Response::builder()
+                    .status(http::StatusCode::OK)
+                    .header("content-type", "application/json")
+                    .body(body)
+                    .expect("response should build")
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("test server should run");
+        });
+
+        let result = DirectSyncExecutionRuntime::new()
+            .execute_sync(&direct_timeout_plan(
+                format!("http://{addr}/chat"),
+                false,
+                ExecutionTimeouts {
+                    total_ms: Some(50),
+                    ..ExecutionTimeouts::default()
+                },
+            ))
+            .await;
+
+        server.abort();
+
+        let error = match result {
+            Ok(_) => panic!("non-stream body should hit total timeout"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("provider non-stream request total timeout after 50 ms"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_stream_execution_runtime_applies_first_byte_timeout() {
+        let listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr should resolve");
+        let app = Router::new().route(
+            "/chat",
+            post(|| async {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                axum::response::Response::builder()
+                    .status(http::StatusCode::OK)
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from(Bytes::from_static(b"data: {}\n\n")))
+                    .expect("response should build")
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("test server should run");
+        });
+
+        let result = DirectSyncExecutionRuntime::new()
+            .execute_stream(&direct_timeout_plan(
+                format!("http://{addr}/chat"),
+                true,
+                ExecutionTimeouts {
+                    first_byte_ms: Some(50),
+                    total_ms: Some(5_000),
+                    ..ExecutionTimeouts::default()
+                },
+            ))
+            .await;
+
+        server.abort();
+
+        let error = match result {
+            Ok(_) => panic!("stream should hit first-byte timeout"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("provider stream first byte timeout after 50 ms"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_stream_execution_runtime_prefers_first_byte_timeout_over_total_timeout() {
+        let listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr should resolve");
+        let app = Router::new().route(
+            "/chat",
+            post(|| async {
+                tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+                axum::response::Response::builder()
+                    .status(http::StatusCode::OK)
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from(Bytes::from_static(b"data: {}\n\n")))
+                    .expect("response should build")
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("test server should run");
+        });
+
+        let execution = DirectSyncExecutionRuntime::new()
+            .execute_stream(&direct_timeout_plan(
+                format!("http://{addr}/chat"),
+                true,
+                ExecutionTimeouts {
+                    first_byte_ms: Some(250),
+                    total_ms: Some(25),
+                    ..ExecutionTimeouts::default()
+                },
+            ))
+            .await
+            .expect("stream should use first-byte timeout instead of total timeout");
+
+        server.abort();
+
+        assert_eq!(execution.status_code, http::StatusCode::OK.as_u16());
+    }
+
+    #[tokio::test]
     async fn direct_sync_execution_runtime_routes_browser_wreq_transport_in_process() {
         async fn browser_upstream(headers: AxumHeaderMap, body: Bytes) -> axum::response::Response {
             assert_eq!(
@@ -2007,6 +2298,7 @@ mod tests {
             None,
             &profile,
             ExecutionTransportControls::default(),
+            true,
         ) {
             Ok(_) => panic!("unknown browser profile should fail loudly"),
             Err(error) => error,

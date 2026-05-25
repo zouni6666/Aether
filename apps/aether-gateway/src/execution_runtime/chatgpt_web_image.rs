@@ -29,7 +29,7 @@ use crate::ai_serving::api::StreamingStandardTerminalObserver;
 use crate::clock::current_unix_secs;
 use crate::execution_runtime::ndjson::encode_stream_frame_ndjson;
 use crate::execution_runtime::transport::{
-    DirectSyncExecutionRuntime, ExecutionRuntimeTransportError,
+    with_non_stream_total_timeout, DirectSyncExecutionRuntime, ExecutionRuntimeTransportError,
 };
 use crate::handlers::shared::{
     sync_provider_key_oauth_status_snapshot, sync_provider_key_quota_status_snapshot,
@@ -108,12 +108,16 @@ pub(crate) async fn maybe_execute_chatgpt_web_image_sync(
     if !is_chatgpt_web_image_plan(plan, report_context) {
         return Ok(None);
     }
-    let started_at = Instant::now();
-    let result = match execute_chatgpt_web_image(state, plan, report_context, started_at).await {
-        Ok(result) => result,
-        Err(err) => chatgpt_web_transport_error_execution_result(plan, started_at, &err),
-    };
-    Ok(Some(result))
+    with_non_stream_total_timeout(plan, async move {
+        let started_at = Instant::now();
+        let result = match execute_chatgpt_web_image(state, plan, report_context, started_at).await
+        {
+            Ok(result) => result,
+            Err(err) => chatgpt_web_transport_error_execution_result(plan, started_at, &err),
+        };
+        Ok(Some(result))
+    })
+    .await
 }
 
 pub(crate) async fn maybe_execute_chatgpt_web_image_stream(

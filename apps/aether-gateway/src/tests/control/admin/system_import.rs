@@ -81,6 +81,7 @@ fn sample_system_import_payload() -> Value {
         "global_models": [{
             "name": "gpt-5",
             "display_name": "GPT 5",
+            "usage_count": 123,
             "default_price_per_request": 0.03,
             "default_tiered_pricing": {
                 "tiers": [{
@@ -345,6 +346,7 @@ async fn gateway_imports_admin_system_config_locally_and_persists_data() {
         .expect("global models should load");
     assert_eq!(global_models.items.len(), 1);
     assert_eq!(global_models.items[0].name, "gpt-5");
+    assert_eq!(global_models.items[0].usage_count, 123);
 
     let providers = provider_catalog_repository
         .list_providers(false)
@@ -836,7 +838,7 @@ async fn gateway_rejects_unknown_admin_system_config_import_versions() {
     let (gateway_url, gateway_handle) = start_server(gateway).await;
     let client = reqwest::Client::new();
 
-    for version in ["1.9", "2.3"] {
+    for version in ["1.9", "2.4"] {
         let response = client
             .post(format!("{gateway_url}/api/admin/system/config/import"))
             .header(GATEWAY_HEADER, "rust-phase3b")
@@ -859,7 +861,7 @@ async fn gateway_rejects_unknown_admin_system_config_import_versions() {
             .as_str()
             .expect("detail should be a string");
         assert!(detail.contains(&format!("不支持的配置版本: {version}")));
-        assert!(detail.contains("支持的版本: 2.0, 2.1, 2.2"));
+        assert!(detail.contains("支持的版本: 2.0, 2.1, 2.2, 2.3"));
     }
 
     gateway_handle.abort();

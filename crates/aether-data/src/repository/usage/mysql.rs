@@ -245,7 +245,7 @@ impl MysqlUsageReadRepository {
 SELECT
   DATE_FORMAT(FROM_UNIXTIME(created_at_unix_ms), '%Y-%m-%d') AS date,
   COUNT(*) AS requests,
-    CAST(COALESCE(SUM(
+  CAST(COALESCE(SUM(
     GREATEST(COALESCE(input_tokens, 0), 0)
     + GREATEST(COALESCE(output_tokens, 0), 0)
     + CASE
@@ -255,9 +255,9 @@ SELECT
         ELSE GREATEST(COALESCE(cache_creation_input_tokens, 0), 0)
       END
     + GREATEST(COALESCE(cache_read_input_tokens, 0), 0)
-    ), 0) AS SIGNED) AS total_tokens,
-    CAST(COALESCE(SUM(COALESCE(total_cost_usd, 0)), 0) AS DOUBLE) AS total_cost_usd,
-    CAST(COALESCE(SUM(COALESCE(actual_total_cost_usd, 0)), 0) AS DOUBLE) AS actual_total_cost_usd
+  ), 0) AS SIGNED) AS total_tokens,
+  CAST(COALESCE(SUM(COALESCE(total_cost_usd, 0)), 0) AS DOUBLE) AS total_cost_usd,
+  CAST(COALESCE(SUM(COALESCE(actual_total_cost_usd, 0)), 0) AS DOUBLE) AS actual_total_cost_usd
 FROM `usage`
 WHERE created_at_unix_ms >= ?
   AND created_at_unix_ms < ?
@@ -375,21 +375,21 @@ ORDER BY `date` ASC
             sqlx::query(
                 r#"
 SELECT
-    CAST(COALESCE(SUM(total_requests), 0) AS SIGNED) AS total_requests,
-    CAST(COALESCE(SUM(input_tokens), 0) AS SIGNED) AS input_tokens,
-    CAST(COALESCE(SUM(input_tokens), 0) AS SIGNED) AS effective_input_tokens,
-    CAST(COALESCE(SUM(output_tokens), 0) AS SIGNED) AS output_tokens,
-    CAST(COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens), 0) AS SIGNED) AS total_tokens,
-    CAST(COALESCE(SUM(cache_creation_tokens), 0) AS SIGNED) AS cache_creation_tokens,
-    CAST(COALESCE(SUM(cache_read_tokens), 0) AS SIGNED) AS cache_read_tokens,
-    CAST(COALESCE(SUM(input_tokens + cache_creation_tokens + cache_read_tokens), 0) AS SIGNED) AS total_input_context,
-    CAST(0 AS DOUBLE) AS cache_creation_cost_usd,
-    CAST(0 AS DOUBLE) AS cache_read_cost_usd,
-    CAST(COALESCE(SUM(COALESCE(total_cost, 0)), 0) AS DOUBLE) AS total_cost_usd,
-    CAST(COALESCE(SUM(COALESCE(total_cost, 0)), 0) AS DOUBLE) AS actual_total_cost_usd,
-    CAST(COALESCE(SUM(error_requests), 0) AS SIGNED) AS error_requests,
-    CAST(0 AS DOUBLE) AS response_time_sum_ms,
-    CAST(0 AS SIGNED) AS response_time_samples
+  CAST(COALESCE(SUM(total_requests), 0) AS SIGNED) AS total_requests,
+  CAST(COALESCE(SUM(input_tokens), 0) AS SIGNED) AS input_tokens,
+  CAST(COALESCE(SUM(input_tokens), 0) AS SIGNED) AS effective_input_tokens,
+  CAST(COALESCE(SUM(output_tokens), 0) AS SIGNED) AS output_tokens,
+  CAST(COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens), 0) AS SIGNED) AS total_tokens,
+  CAST(COALESCE(SUM(cache_creation_tokens), 0) AS SIGNED) AS cache_creation_tokens,
+  CAST(COALESCE(SUM(cache_read_tokens), 0) AS SIGNED) AS cache_read_tokens,
+  CAST(COALESCE(SUM(input_tokens + cache_creation_tokens + cache_read_tokens), 0) AS SIGNED) AS total_input_context,
+  CAST(0.0 AS DOUBLE) AS cache_creation_cost_usd,
+  CAST(0.0 AS DOUBLE) AS cache_read_cost_usd,
+  CAST(COALESCE(SUM(COALESCE(total_cost, 0)), 0) AS DOUBLE) AS total_cost_usd,
+  CAST(COALESCE(SUM(COALESCE(total_cost, 0)), 0) AS DOUBLE) AS actual_total_cost_usd,
+  CAST(COALESCE(SUM(error_requests), 0) AS SIGNED) AS error_requests,
+  CAST(0.0 AS DOUBLE) AS response_time_sum_ms,
+  CAST(0 AS SIGNED) AS response_time_samples
 FROM stats_user_daily
 WHERE user_id = ?
   AND `date` >= ?
@@ -412,21 +412,21 @@ WHERE user_id = ?
             sqlx::query(
                 r#"
 SELECT
-    CAST(COALESCE(SUM(total_requests), 0) AS SIGNED) AS total_requests,
-    CAST(COALESCE(SUM(input_tokens), 0) AS SIGNED) AS input_tokens,
-    CAST(COALESCE(SUM(input_tokens), 0) AS SIGNED) AS effective_input_tokens,
-    CAST(COALESCE(SUM(output_tokens), 0) AS SIGNED) AS output_tokens,
-    CAST(COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens), 0) AS SIGNED) AS total_tokens,
-    CAST(COALESCE(SUM(cache_creation_tokens), 0) AS SIGNED) AS cache_creation_tokens,
-    CAST(COALESCE(SUM(cache_read_tokens), 0) AS SIGNED) AS cache_read_tokens,
-    CAST(COALESCE(SUM(input_tokens + cache_creation_tokens + cache_read_tokens), 0) AS SIGNED) AS total_input_context,
-    CAST(COALESCE(SUM(COALESCE(cache_creation_cost, 0)), 0) AS DOUBLE) AS cache_creation_cost_usd,
-    CAST(COALESCE(SUM(COALESCE(cache_read_cost, 0)), 0) AS DOUBLE) AS cache_read_cost_usd,
-    CAST(COALESCE(SUM(COALESCE(total_cost, 0)), 0) AS DOUBLE) AS total_cost_usd,
-    CAST(COALESCE(SUM(COALESCE(actual_total_cost, 0)), 0) AS DOUBLE) AS actual_total_cost_usd,
-    CAST(COALESCE(SUM(error_requests), 0) AS SIGNED) AS error_requests,
-    CAST(0 AS DOUBLE) AS response_time_sum_ms,
-    CAST(0 AS SIGNED) AS response_time_samples
+  CAST(COALESCE(SUM(total_requests), 0) AS SIGNED) AS total_requests,
+  CAST(COALESCE(SUM(input_tokens), 0) AS SIGNED) AS input_tokens,
+  CAST(COALESCE(SUM(input_tokens), 0) AS SIGNED) AS effective_input_tokens,
+  CAST(COALESCE(SUM(output_tokens), 0) AS SIGNED) AS output_tokens,
+  CAST(COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens), 0) AS SIGNED) AS total_tokens,
+  CAST(COALESCE(SUM(cache_creation_tokens), 0) AS SIGNED) AS cache_creation_tokens,
+  CAST(COALESCE(SUM(cache_read_tokens), 0) AS SIGNED) AS cache_read_tokens,
+  CAST(COALESCE(SUM(input_tokens + cache_creation_tokens + cache_read_tokens), 0) AS SIGNED) AS total_input_context,
+  CAST(COALESCE(SUM(COALESCE(cache_creation_cost, 0)), 0) AS DOUBLE) AS cache_creation_cost_usd,
+  CAST(COALESCE(SUM(COALESCE(cache_read_cost, 0)), 0) AS DOUBLE) AS cache_read_cost_usd,
+  CAST(COALESCE(SUM(COALESCE(total_cost, 0)), 0) AS DOUBLE) AS total_cost_usd,
+  CAST(COALESCE(SUM(COALESCE(actual_total_cost, 0)), 0) AS DOUBLE) AS actual_total_cost_usd,
+  CAST(COALESCE(SUM(error_requests), 0) AS SIGNED) AS error_requests,
+  CAST(0.0 AS DOUBLE) AS response_time_sum_ms,
+  CAST(0 AS SIGNED) AS response_time_samples
 FROM stats_daily
 WHERE `date` >= ?
   AND `date` < ?
@@ -474,11 +474,11 @@ SELECT
   DATE_FORMAT(FROM_UNIXTIME(`date`), '%Y-%m-%d') AS date,
   'aggregate' AS model,
   'aggregate' AS provider,
-    CAST(COALESCE(SUM(total_requests), 0) AS SIGNED) AS requests,
-    CAST(COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens), 0) AS SIGNED) AS total_tokens,
-    CAST(COALESCE(SUM(COALESCE(total_cost, 0)), 0) AS DOUBLE) AS total_cost_usd,
-    CAST(0 AS DOUBLE) AS response_time_sum_ms,
-    CAST(0 AS SIGNED) AS response_time_samples
+  CAST(COALESCE(SUM(total_requests), 0) AS SIGNED) AS requests,
+  CAST(COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens), 0) AS SIGNED) AS total_tokens,
+  CAST(COALESCE(SUM(COALESCE(total_cost, 0)), 0) AS DOUBLE) AS total_cost_usd,
+  CAST(0.0 AS DOUBLE) AS response_time_sum_ms,
+  CAST(0 AS SIGNED) AS response_time_samples
 FROM stats_user_daily
 WHERE user_id = ?
   AND `date` >= ?
@@ -507,11 +507,11 @@ SELECT
   DATE_FORMAT(FROM_UNIXTIME(`date`), '%Y-%m-%d') AS date,
   'aggregate' AS model,
   'aggregate' AS provider,
-    CAST(COALESCE(SUM(total_requests), 0) AS SIGNED) AS requests,
-    CAST(COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens), 0) AS SIGNED) AS total_tokens,
-    CAST(COALESCE(SUM(COALESCE(total_cost, 0)), 0) AS DOUBLE) AS total_cost_usd,
-    CAST(0 AS DOUBLE) AS response_time_sum_ms,
-    CAST(0 AS SIGNED) AS response_time_samples
+  CAST(COALESCE(SUM(total_requests), 0) AS SIGNED) AS requests,
+  CAST(COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens), 0) AS SIGNED) AS total_tokens,
+  CAST(COALESCE(SUM(COALESCE(total_cost, 0)), 0) AS DOUBLE) AS total_cost_usd,
+  CAST(0.0 AS DOUBLE) AS response_time_sum_ms,
+  CAST(0 AS SIGNED) AS response_time_samples
 FROM stats_daily
 WHERE `date` >= ?
   AND `date` < ?
@@ -600,11 +600,11 @@ ORDER BY `date` ASC
             r#"
 SELECT
   user_id,
-    CAST(COALESCE(SUM(total_requests), 0) AS SIGNED) AS request_count,
-    CAST(COALESCE(
+  CAST(COALESCE(SUM(total_requests), 0) AS SIGNED) AS request_count,
+  CAST(COALESCE(
     SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens),
     0
-    ) AS SIGNED) AS total_tokens,
+  ) AS SIGNED) AS total_tokens,
   MAX(`date`) AS latest_date
 FROM stats_user_daily
 WHERE user_id IN (
@@ -642,7 +642,7 @@ WHERE user_id IN (
 SELECT
   `usage`.user_id,
   COUNT(*) AS request_count,
-    CAST(COALESCE(SUM(GREATEST(COALESCE(`usage`.total_tokens, 0), 0)), 0) AS SIGNED) AS total_tokens
+  CAST(COALESCE(SUM(GREATEST(COALESCE(`usage`.total_tokens, 0), 0)), 0) AS SIGNED) AS total_tokens
 FROM `usage`
 JOIN (
 "#,
@@ -1509,6 +1509,7 @@ mod tests {
         assert!(source.contains("summarize_usage_daily_heatmap_from_daily_aggregates"));
         assert!(source.contains("FROM stats_daily"));
         assert!(source.contains("FROM stats_user_daily"));
+        assert!(source.contains("AS SIGNED) AS total_tokens"));
         assert!(source.contains("summaries.entry(item.date.clone()).or_insert(item)"));
     }
 
@@ -1518,6 +1519,7 @@ mod tests {
         assert!(source.contains("async fn summarize_usage_totals_by_user_ids"));
         assert!(source.contains("FROM stats_user_daily"));
         assert!(source.contains("MAX(`date`) AS latest_date"));
+        assert!(source.contains("AS SIGNED) AS request_count"));
         assert!(source.contains("requested.cutoff_unix_secs"));
     }
 
@@ -1529,6 +1531,7 @@ mod tests {
         assert!(source.contains("FROM stats_daily"));
         assert!(source.contains("FROM stats_user_daily"));
         assert!(source.contains("'aggregate' AS model"));
+        assert!(source.contains("AS SIGNED) AS total_requests"));
     }
 
     #[tokio::test]

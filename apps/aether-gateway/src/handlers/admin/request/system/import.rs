@@ -39,8 +39,8 @@ use aether_data::repository::oauth_providers::{
     EncryptedSecretUpdate, UpsertOAuthProviderConfigRecord,
 };
 use aether_data::repository::system::{
-    AdminSystemUsageAggregateImportMode, AdminSystemUsageAggregateImportSummary,
-    AdminSystemUsageAggregateSnapshot,
+    AdminSystemStatsUserDailyAggregate, AdminSystemUsageAggregateImportMode,
+    AdminSystemUsageAggregateImportSummary, AdminSystemUsageAggregateSnapshot,
 };
 use aether_data::repository::wallet::WalletLookupKey;
 use aether_data_contracts::repository::global_models::{
@@ -694,6 +694,58 @@ fn imported_user_rate_limit_policy_mode(
     })
 }
 
+fn build_imported_user_usage_total_aggregates(
+    users: &[Value],
+    exported_at: Option<&Value>,
+) -> Result<Vec<AdminSystemStatsUserDailyAggregate>, String> {
+    let date_unix_secs = imported_export_day_unix_secs(exported_at);
+    let mut rows = Vec::new();
+    for (index, raw_user) in users.iter().enumerate() {
+        let user = imported_object_field(raw_user, &format!("users[{index}]"))?;
+        let Some(user_id) = imported_optional_string(user.get("id"))? else {
+            continue;
+        };
+        let request_count = imported_optional_u64(user.get("request_count"), "request_count")?;
+        let total_tokens = imported_optional_u64(user.get("total_tokens"), "total_tokens")?;
+        if request_count.is_none() && total_tokens.is_none() {
+            continue;
+        }
+        let total_requests = request_count.unwrap_or(0);
+        let input_tokens = total_tokens.unwrap_or(0);
+        if total_requests == 0 && input_tokens == 0 {
+            continue;
+        }
+        rows.push(AdminSystemStatsUserDailyAggregate {
+            user_id,
+            username: imported_optional_string(user.get("username"))?,
+            date_unix_secs,
+            total_requests,
+            success_requests: total_requests,
+            error_requests: 0,
+            input_tokens,
+            output_tokens: 0,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            total_cost: 0.0,
+        });
+    }
+    Ok(rows)
+}
+
+fn imported_export_day_unix_secs(exported_at: Option<&Value>) -> u64 {
+    imported_optional_string(exported_at)
+        .ok()
+        .flatten()
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(&value).ok())
+        .map(|value| unix_day_start_secs(value.timestamp()))
+        .unwrap_or_else(|| unix_day_start_secs(chrono::Utc::now().timestamp()))
+}
+
+fn unix_day_start_secs(timestamp: i64) -> u64 {
+    let timestamp = timestamp.max(0) as u64;
+    timestamp - (timestamp % 86_400)
+}
+
 fn imported_rfc3339_to_unix_secs(
     value: Option<&Value>,
     field_name: &str,
@@ -1194,7 +1246,7 @@ impl<'a> AdminAppState<'a> {
                         return Ok(Err(invalid_request(format!("GlobalModel '{name}' 已存在"))));
                     }
                     AdminImportMergeMode::Overwrite => {
-                        let record = invalid!(UpdateAdminGlobalModelRecord::new(
+                        let mut record = invalid!(UpdateAdminGlobalModelRecord::new(
                             existing.id.clone(),
                             display_name,
                             model.is_active,
@@ -1204,6 +1256,7 @@ impl<'a> AdminAppState<'a> {
                             config,
                         )
                         .map_err(|err| err.to_string()));
+                        record.usage_count = model.usage_count;
                         let Some(updated) = self.update_admin_global_model(&record).await? else {
                             return Ok(Err(invalid_request(format!(
                                 "更新 GlobalModel '{name}' 失败"
@@ -1216,7 +1269,7 @@ impl<'a> AdminAppState<'a> {
                 continue;
             }
 
-            let record = invalid!(CreateAdminGlobalModelRecord::new(
+            let mut record = invalid!(CreateAdminGlobalModelRecord::new(
                 Uuid::new_v4().to_string(),
                 name.clone(),
                 display_name,
@@ -1227,6 +1280,7 @@ impl<'a> AdminAppState<'a> {
                 config,
             )
             .map_err(|err| err.to_string()));
+            record.usage_count = model.usage_count;
             let Some(created) = self.create_admin_global_model(&record).await? else {
                 return Ok(Err(invalid_request(format!(
                     "创建 GlobalModel '{name}' 失败"
@@ -2081,6 +2135,9 @@ impl<'a> AdminAppState<'a> {
             root.get("version")
         ));
 
+        let supplemental_user_usage_aggregates = invalid_value!(
+            build_imported_user_usage_total_aggregates(users, root.get("exported_at"))
+        );
         let mut stats = AdminSystemUsersImportStats::default();
         let mut imported_user_id_map = BTreeMap::<String, String>::new();
         let mut imported_api_key_id_map = BTreeMap::<String, String>::new();
@@ -2758,6 +2815,7 @@ impl<'a> AdminAppState<'a> {
                 if let Some(summary) = self
                     .import_admin_system_user_usage_aggregates(
                         root.get("usage_aggregates"),
+                        &supplemental_user_usage_aggregates,
                         &imported_user_id_map,
                         &imported_api_key_id_map,
                         merge_mode,
@@ -3012,6 +3070,7 @@ impl<'a> AdminAppState<'a> {
         if let Some(summary) = self
             .import_admin_system_user_usage_aggregates(
                 root.get("usage_aggregates"),
+                &supplemental_user_usage_aggregates,
                 &imported_user_id_map,
                 &imported_api_key_id_map,
                 merge_mode,
@@ -3030,21 +3089,63 @@ impl<'a> AdminAppState<'a> {
     async fn import_admin_system_user_usage_aggregates(
         &self,
         value: Option<&Value>,
+        supplemental_user_daily: &[AdminSystemStatsUserDailyAggregate],
         user_id_map: &BTreeMap<String, String>,
         api_key_id_map: &BTreeMap<String, String>,
         merge_mode: AdminImportMergeMode,
     ) -> Result<Option<AdminSystemUsageAggregateImportSummary>, GatewayError> {
-        let Some(value) = value else {
-            return Ok(None);
-        };
-        if value.is_null() {
-            return Ok(None);
-        }
-        let snapshot = serde_json::from_value::<AdminSystemUsageAggregateSnapshot>(value.clone())
+        let mut snapshot = match value {
+            Some(value) if !value.is_null() => serde_json::from_value::<
+                AdminSystemUsageAggregateSnapshot,
+            >(value.clone())
             .map_err(|err| GatewayError::Client {
-            status: http::StatusCode::BAD_REQUEST,
-            message: format!("usage_aggregates 格式无效: {err}"),
-        })?;
+                status: http::StatusCode::BAD_REQUEST,
+                message: format!("usage_aggregates 格式无效: {err}"),
+            })?,
+            _ => AdminSystemUsageAggregateSnapshot::default(),
+        };
+        let mut existing_user_totals = BTreeMap::<String, (u64, u64)>::new();
+        for row in &snapshot.stats_user_daily {
+            let total_tokens = row
+                .input_tokens
+                .saturating_add(row.output_tokens)
+                .saturating_add(row.cache_creation_tokens)
+                .saturating_add(row.cache_read_tokens);
+            let entry = existing_user_totals
+                .entry(row.user_id.clone())
+                .or_insert((0, 0));
+            entry.0 = entry.0.saturating_add(row.total_requests);
+            entry.1 = entry.1.saturating_add(total_tokens);
+        }
+        for row in supplemental_user_daily {
+            let existing = existing_user_totals
+                .get(&row.user_id)
+                .copied()
+                .unwrap_or_default();
+            let request_delta = row.total_requests.saturating_sub(existing.0);
+            let token_delta = row.input_tokens.saturating_sub(existing.1);
+            if request_delta == 0 && token_delta == 0 {
+                continue;
+            }
+            if let Some(existing_row) = snapshot
+                .stats_user_daily
+                .iter_mut()
+                .rev()
+                .find(|existing_row| existing_row.user_id == row.user_id)
+            {
+                existing_row.total_requests =
+                    existing_row.total_requests.saturating_add(request_delta);
+                existing_row.success_requests =
+                    existing_row.success_requests.saturating_add(request_delta);
+                existing_row.input_tokens = existing_row.input_tokens.saturating_add(token_delta);
+            } else {
+                let mut row = row.clone();
+                row.total_requests = request_delta;
+                row.success_requests = request_delta;
+                row.input_tokens = token_delta;
+                snapshot.stats_user_daily.push(row);
+            }
+        }
         if snapshot.stats_daily.is_empty()
             && snapshot.stats_user_daily.is_empty()
             && snapshot.stats_daily_api_key.is_empty()
@@ -3185,25 +3286,64 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        imported_optional_bool, imported_optional_f64, imported_optional_i32,
-        imported_optional_u64, imported_rfc3339_to_unix_secs, imported_string_list_from_value,
-        normalize_import_endpoint_format, normalize_import_key_formats,
-        normalize_import_key_raw_payload, normalize_imported_wallet_target,
-        validate_imported_system_users_export_version, ImportedProviderKey,
+        build_imported_user_usage_total_aggregates, imported_optional_bool, imported_optional_f64,
+        imported_optional_i32, imported_optional_u64, imported_rfc3339_to_unix_secs,
+        imported_string_list_from_value, normalize_import_endpoint_format,
+        normalize_import_key_formats, normalize_import_key_raw_payload,
+        normalize_imported_wallet_target, validate_imported_system_users_export_version,
+        ImportedProviderKey,
     };
 
     #[test]
     fn users_import_requires_supported_export_version() {
         assert!(validate_imported_system_users_export_version(Some(&json!("1.3"))).is_ok());
         assert!(validate_imported_system_users_export_version(Some(&json!("1.4"))).is_ok());
+        assert!(validate_imported_system_users_export_version(Some(&json!("1.5"))).is_ok());
         assert_eq!(
             validate_imported_system_users_export_version(Some(&json!("2.2"))).unwrap_err(),
-            "不支持的用户数据版本: 2.2，支持的版本: 1.3, 1.4"
+            "不支持的用户数据版本: 2.2，支持的版本: 1.3, 1.4, 1.5"
         );
         assert_eq!(
             validate_imported_system_users_export_version(Some(&json!(null))).unwrap_err(),
             "version 必须是 x.y 字符串"
         );
+    }
+
+    #[test]
+    fn users_import_builds_supplemental_usage_aggregates_from_summary_fields() {
+        let users = vec![
+            json!({
+                "id": "source-user-1",
+                "username": "alice",
+                "request_count": 12,
+                "total_tokens": 3456
+            }),
+            json!({
+                "id": "source-user-zero",
+                "username": "zero",
+                "request_count": 0,
+                "total_tokens": 0
+            }),
+            json!({
+                "username": "no-source-id",
+                "request_count": 5,
+                "total_tokens": 6
+            }),
+        ];
+
+        let rows = build_imported_user_usage_total_aggregates(
+            &users,
+            Some(&json!("2026-05-25T12:34:56Z")),
+        )
+        .expect("supplemental usage aggregates should build");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].user_id, "source-user-1");
+        assert_eq!(rows[0].username.as_deref(), Some("alice"));
+        assert_eq!(rows[0].total_requests, 12);
+        assert_eq!(rows[0].success_requests, 12);
+        assert_eq!(rows[0].input_tokens, 3456);
+        assert_eq!(rows[0].date_unix_secs % 86_400, 0);
     }
 
     #[test]

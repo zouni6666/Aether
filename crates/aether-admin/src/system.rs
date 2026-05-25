@@ -43,12 +43,12 @@ pub struct AdminEmailTemplateUpdate {
     pub html: Option<String>,
 }
 
-pub const ADMIN_SYSTEM_CONFIG_EXPORT_VERSION: &str = "2.2";
+pub const ADMIN_SYSTEM_CONFIG_EXPORT_VERSION: &str = "2.3";
 pub const ADMIN_SYSTEM_CONFIG_SUPPORTED_VERSIONS: &[&str] =
-    &["2.0", "2.1", ADMIN_SYSTEM_CONFIG_EXPORT_VERSION];
-pub const ADMIN_SYSTEM_USERS_EXPORT_VERSION: &str = "1.4";
+    &["2.0", "2.1", "2.2", ADMIN_SYSTEM_CONFIG_EXPORT_VERSION];
+pub const ADMIN_SYSTEM_USERS_EXPORT_VERSION: &str = "1.5";
 pub const ADMIN_SYSTEM_USERS_SUPPORTED_VERSIONS: &[&str] =
-    &["1.3", ADMIN_SYSTEM_USERS_EXPORT_VERSION];
+    &["1.3", "1.4", ADMIN_SYSTEM_USERS_EXPORT_VERSION];
 pub const ADMIN_SYSTEM_PROVIDER_OPS_SENSITIVE_CREDENTIAL_FIELDS: &[&str] = &[
     "api_key",
     "password",
@@ -271,6 +271,28 @@ where
     }
 }
 
+fn deserialize_optional_u64_from_number<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(number)) => number
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| de::Error::custom("expected a non-negative integer or numeric string")),
+        Some(Value::String(raw)) if !raw.trim().is_empty() => raw
+            .trim()
+            .parse::<u64>()
+            .map(Some)
+            .map_err(|_| de::Error::custom("expected a non-negative integer or numeric string")),
+        Some(_) => Err(de::Error::custom(
+            "expected a non-negative integer or numeric string",
+        )),
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AdminImportMergeMode {
@@ -347,6 +369,8 @@ pub struct AdminSystemConfigImportStats {
 pub struct AdminSystemConfigGlobalModel {
     pub name: String,
     pub display_name: String,
+    #[serde(default, deserialize_with = "deserialize_optional_u64_from_number")]
+    pub usage_count: Option<u64>,
     #[serde(default, deserialize_with = "deserialize_optional_f64_from_number")]
     pub default_price_per_request: Option<f64>,
     #[serde(default)]
@@ -3147,7 +3171,7 @@ mod tests {
 
     #[test]
     fn parse_admin_system_config_import_request_rejects_unknown_versions() {
-        for version in ["1.9", "2.3"] {
+        for version in ["1.9", "2.4"] {
             let err = parse_admin_system_config_import_request(
                 json!({
                     "version": version,
@@ -3223,6 +3247,7 @@ mod tests {
                 "global_models": [{
                     "name": "veo3.1",
                     "display_name": "Veo 3.1",
+                    "usage_count": "42",
                     "default_price_per_request": "1.80000000",
                 }],
                 "providers": [{
@@ -3243,6 +3268,7 @@ mod tests {
         .expect("numeric string fields from Python exports should parse");
 
         let global_model = &parsed.request.document.global_models[0];
+        assert_eq!(global_model.usage_count, Some(42));
         assert_eq!(global_model.default_price_per_request, Some(1.8));
 
         let provider = &parsed.request.document.providers[0];

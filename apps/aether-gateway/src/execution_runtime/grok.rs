@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::io::Error as IoError;
 use std::net::IpAddr;
 use std::sync::OnceLock;
@@ -29,7 +30,9 @@ use crate::execution_runtime::ndjson::encode_stream_frame_ndjson;
 use crate::execution_runtime::transport::{
     build_browser_wreq_client, build_request_body, build_request_headers,
     decode_response_body_bytes, format_upstream_request_error, format_wreq_upstream_request_error,
-    send_request, DirectHttpResponse, ExecutionRuntimeTransportError, ExecutionTransportControls,
+    resolve_stream_first_byte_timeout, send_request, stream_first_byte_timeout_message,
+    with_non_stream_total_timeout, DirectHttpResponse, ExecutionRuntimeTransportError,
+    ExecutionTransportControls,
 };
 
 const GROK_INTERNAL_HEADER: &str = "x-aether-grok-runtime";
@@ -148,9 +151,12 @@ pub(crate) async fn maybe_execute_grok_sync(
     if !is_grok_plan(plan, report_context) {
         return Ok(None);
     }
-    let mut collected = execute_grok_app_chat(plan, report_context).await?;
-    materialize_grok_image_assets(plan, &mut collected).await;
-    Ok(Some(grok_execution_result(plan, collected, report_context)))
+    with_non_stream_total_timeout(plan, async move {
+        let mut collected = execute_grok_app_chat(plan, report_context).await?;
+        materialize_grok_image_assets(plan, &mut collected).await;
+        Ok(Some(grok_execution_result(plan, collected, report_context)))
+    })
+    .await
 }
 
 pub(crate) async fn maybe_execute_grok_stream(
@@ -387,6 +393,7 @@ async fn grok_imagine_websocket_images(
         plan.proxy.as_ref(),
         profile,
         ExecutionTransportControls::default(),
+        true,
     )?;
     let response = client
         .websocket(GROK_IMAGINE_WS_URL)
@@ -561,6 +568,7 @@ fn grok_success_frame_stream(
     started_at: Instant,
     mut body_stream: GrokUpstreamBodyStream,
 ) -> BoxStream<'static, Result<Bytes, IoError>> {
+    let stream_first_byte_timeout = resolve_stream_first_byte_timeout(&plan);
     async_stream::stream! {
         match encode_grok_headers_frame(
             status_code,
@@ -581,8 +589,36 @@ fn grok_success_frame_stream(
         let mut text_len = 0usize;
         let mut thinking_len = 0usize;
         let mut image_len = 0usize;
+        let mut terminal_error_emitted = false;
 
-        while let Some(item) = body_stream.next().await {
+        loop {
+            let item = if ttfb_ms.is_none() {
+                match await_grok_stream_first_byte(
+                    body_stream.next(),
+                    started_at,
+                    stream_first_byte_timeout,
+                )
+                .await
+                {
+                    Ok(item) => item,
+                    Err(timeout) => {
+                        match encode_grok_first_byte_timeout_frame(timeout) {
+                            Ok(frame) => yield Ok(frame),
+                            Err(err) => {
+                                yield Err(err);
+                                return;
+                            }
+                        }
+                        terminal_error_emitted = true;
+                        break;
+                    }
+                }
+            } else {
+                body_stream.next().await
+            };
+            let Some(item) = item else {
+                break;
+            };
             let chunk = match item {
                 Ok(chunk) => chunk,
                 Err(message) => {
@@ -593,6 +629,7 @@ fn grok_success_frame_stream(
                             return;
                         }
                     }
+                    terminal_error_emitted = true;
                     break;
                 }
             };
@@ -628,6 +665,25 @@ fn grok_success_frame_stream(
                     return;
                 }
             }
+        }
+
+        if terminal_error_emitted {
+            match encode_grok_telemetry_frame(
+                ttfb_ms,
+                Some(started_at.elapsed().as_millis() as u64),
+                upstream_bytes,
+            ) {
+                Ok(frame) => yield Ok(frame),
+                Err(err) => {
+                    yield Err(err);
+                    return;
+                }
+            }
+            match encode_stream_frame_ndjson(&StreamFrame::eof_with_summary(None)) {
+                Ok(frame) => yield Ok(frame),
+                Err(err) => yield Err(err),
+            }
+            return;
         }
 
         adapter.finish();
@@ -689,6 +745,28 @@ fn grok_success_frame_stream(
         }
     }
     .boxed()
+}
+
+async fn await_grok_stream_first_byte<T, F>(
+    future: F,
+    started_at: Instant,
+    timeout: Option<Duration>,
+) -> Result<T, Duration>
+where
+    F: Future<Output = T>,
+{
+    let Some(timeout) = timeout else {
+        return Ok(future.await);
+    };
+    let Some(remaining) = timeout.checked_sub(started_at.elapsed()) else {
+        return Err(timeout);
+    };
+    if remaining.is_zero() {
+        return Err(timeout);
+    }
+    tokio::time::timeout(remaining, future)
+        .await
+        .map_err(|_| timeout)
 }
 
 fn emit_grok_adapter_deltas(
@@ -785,6 +863,22 @@ fn encode_grok_error_frame(status_code: u16, message: String) -> Result<Bytes, I
                 upstream_status: Some(status_code),
                 retryable: false,
                 failover_recommended: false,
+            },
+        },
+    })
+}
+
+fn encode_grok_first_byte_timeout_frame(timeout: Duration) -> Result<Bytes, IoError> {
+    encode_stream_frame_ndjson(&StreamFrame {
+        frame_type: StreamFrameType::Error,
+        payload: StreamFramePayload::Error {
+            error: aether_contracts::ExecutionError {
+                kind: aether_contracts::ExecutionErrorKind::FirstByteTimeout,
+                phase: aether_contracts::ExecutionPhase::FirstByte,
+                message: stream_first_byte_timeout_message(timeout),
+                upstream_status: Some(504),
+                retryable: true,
+                failover_recommended: true,
             },
         },
     })

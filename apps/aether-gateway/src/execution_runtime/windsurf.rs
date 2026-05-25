@@ -36,7 +36,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use super::ndjson::encode_stream_frame_ndjson;
-use super::transport::ExecutionRuntimeTransportError;
+use super::transport::{with_non_stream_total_timeout, ExecutionRuntimeTransportError};
 use crate::AppState;
 
 const LS_SERVICE: &str = "/exa.language_server_pb.LanguageServerService";
@@ -215,66 +215,69 @@ pub(crate) async fn maybe_execute_windsurf_sync(
     let Some(input) = detect_windsurf_request(plan, report_context) else {
         return Ok(None);
     };
-    let key_upstream_metadata = read_windsurf_key_upstream_metadata(state, plan).await;
-    let prepared = prepare_windsurf_cascade(plan, input, key_upstream_metadata).await?;
-    let started_at = Instant::now();
-    let mut deltas = Vec::new();
-    let poll_result = poll_windsurf_cascade_with_transport_recovery(&prepared, |event| {
-        if let WindsurfPollEvent::TextDelta(delta) = event {
-            deltas.push(sanitize_windsurf_text(&delta));
+    with_non_stream_total_timeout(plan, async move {
+        let key_upstream_metadata = read_windsurf_key_upstream_metadata(state, plan).await;
+        let prepared = prepare_windsurf_cascade(plan, input, key_upstream_metadata).await?;
+        let started_at = Instant::now();
+        let mut deltas = Vec::new();
+        let poll_result = poll_windsurf_cascade_with_transport_recovery(&prepared, |event| {
+            if let WindsurfPollEvent::TextDelta(delta) = event {
+                deltas.push(sanitize_windsurf_text(&delta));
+            }
+            Ok(())
+        })
+        .await?;
+        let elapsed_ms = started_at.elapsed().as_millis() as u64;
+        let content = deltas.concat();
+        let parsed_tool_calls = parse_and_filter_windsurf_tool_calls(&content, &prepared.input);
+        let mut tool_calls = poll_result.native_tool_calls;
+        tool_calls.extend(parsed_tool_calls.tool_calls);
+        let has_tool_calls = !tool_calls.is_empty();
+        let message = if has_tool_calls {
+            json!({
+                "role": "assistant",
+                "content": Value::Null,
+                "tool_calls": openai_tool_call_values(&tool_calls),
+            })
+        } else {
+            json!({
+                "role": "assistant",
+                "content": content,
+            })
+        };
+        let mut body_json = json!({
+            "id": format!("chatcmpl-{}", prepared.request_id),
+            "object": "chat.completion",
+            "created": current_unix_secs(),
+            "model": prepared.model,
+            "choices": [{
+                "index": 0,
+                "message": message,
+                "finish_reason": if has_tool_calls { "tool_calls" } else { "stop" },
+            }],
+        });
+        if let Some(usage) = poll_result.usage {
+            body_json["usage"] = windsurf_openai_usage_json(&usage);
         }
-        Ok(())
-    })
-    .await?;
-    let elapsed_ms = started_at.elapsed().as_millis() as u64;
-    let content = deltas.concat();
-    let parsed_tool_calls = parse_and_filter_windsurf_tool_calls(&content, &prepared.input);
-    let mut tool_calls = poll_result.native_tool_calls;
-    tool_calls.extend(parsed_tool_calls.tool_calls);
-    let has_tool_calls = !tool_calls.is_empty();
-    let message = if has_tool_calls {
-        json!({
-            "role": "assistant",
-            "content": Value::Null,
-            "tool_calls": openai_tool_call_values(&tool_calls),
-        })
-    } else {
-        json!({
-            "role": "assistant",
-            "content": content,
-        })
-    };
-    let mut body_json = json!({
-        "id": format!("chatcmpl-{}", prepared.request_id),
-        "object": "chat.completion",
-        "created": current_unix_secs(),
-        "model": prepared.model,
-        "choices": [{
-            "index": 0,
-            "message": message,
-            "finish_reason": if has_tool_calls { "tool_calls" } else { "stop" },
-        }],
-    });
-    if let Some(usage) = poll_result.usage {
-        body_json["usage"] = windsurf_openai_usage_json(&usage);
-    }
 
-    Ok(Some(ExecutionResult {
-        request_id: prepared.request_id,
-        candidate_id: prepared.candidate_id,
-        status_code: 200,
-        headers: BTreeMap::from([("content-type".to_string(), "application/json".to_string())]),
-        body: Some(ResponseBody {
-            json_body: Some(body_json),
-            body_bytes_b64: None,
-        }),
-        telemetry: Some(ExecutionTelemetry {
-            ttfb_ms: None,
-            elapsed_ms: Some(elapsed_ms),
-            upstream_bytes: None,
-        }),
-        error: None,
-    }))
+        Ok(Some(ExecutionResult {
+            request_id: prepared.request_id,
+            candidate_id: prepared.candidate_id,
+            status_code: 200,
+            headers: BTreeMap::from([("content-type".to_string(), "application/json".to_string())]),
+            body: Some(ResponseBody {
+                json_body: Some(body_json),
+                body_bytes_b64: None,
+            }),
+            telemetry: Some(ExecutionTelemetry {
+                ttfb_ms: None,
+                elapsed_ms: Some(elapsed_ms),
+                upstream_bytes: None,
+            }),
+            error: None,
+        }))
+    })
+    .await
 }
 
 async fn prepare_windsurf_cascade(
