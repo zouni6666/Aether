@@ -1408,6 +1408,8 @@ function parseImportText(text: string): {
       const refreshTokenCamel = obj.refreshToken
       const accessToken = obj.access_token
       const accessTokenCamel = obj.accessToken
+      const sessionToken = obj.session_token
+      const sessionTokenCamel = obj.sessionToken
       const grokSsoToken = isGrokProvider.value
         ? normalizeStringField(obj.sso_token) ?? normalizeStringField(obj.ssoToken) ?? normalizeStringField(obj.token) ?? grokCookieImport?.access_token
         : undefined
@@ -1417,12 +1419,15 @@ function parseImportText(text: string): {
       const normalizedAccessToken = typeof accessToken === 'string' && accessToken.trim()
         ? accessToken.trim()
         : (typeof accessTokenCamel === 'string' && accessTokenCamel.trim() ? accessTokenCamel.trim() : undefined)
-      const importedAccessToken = normalizedAccessToken ?? grokSsoToken
+      const normalizedSessionToken = typeof sessionToken === 'string' && sessionToken.trim()
+        ? sessionToken.trim()
+        : (typeof sessionTokenCamel === 'string' && sessionTokenCamel.trim() ? sessionTokenCamel.trim() : undefined)
+      const importedAccessToken = normalizedAccessToken ?? grokSsoToken ?? normalizedSessionToken
       if (normalizedRefreshToken || importedAccessToken) {
         return {
           refresh_token: normalizedRefreshToken,
           access_token: importedAccessToken,
-          expires_at: normalizeNumberField(obj.expires_at) ?? normalizeNumberField(obj.expiresAt),
+          expires_at: normalizeExpiryField(obj.expires_at) ?? normalizeExpiryField(obj.expiresAt) ?? normalizeExpiryField(obj.expired),
           name: (typeof obj.name === 'string' ? obj.name : undefined) || (typeof obj.oauth_email === 'string' ? obj.oauth_email : undefined),
           email: normalizeStringField(obj.email) ?? normalizeStringField(obj.oauth_email),
           account_id: normalizeStringField(obj.account_id) ?? normalizeStringField(obj.accountId) ?? normalizeStringField(obj.chatgpt_account_id) ?? normalizeStringField(obj.chatgptAccountId),
@@ -1529,6 +1534,18 @@ function normalizeNumberField(value: unknown): number | undefined {
     const parsed = Number(value.trim())
     if (Number.isFinite(parsed) && parsed > 0) {
       return Math.floor(parsed)
+    }
+  }
+  return undefined
+}
+
+function normalizeExpiryField(value: unknown): number | undefined {
+  const numeric = normalizeNumberField(value)
+  if (numeric) return numeric
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Date.parse(value.trim())
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.floor(parsed / 1000)
     }
   }
   return undefined

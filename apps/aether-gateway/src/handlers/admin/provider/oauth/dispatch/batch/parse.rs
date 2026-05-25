@@ -76,6 +76,26 @@ fn coerce_admin_provider_oauth_import_str(value: Option<&serde_json::Value>) -> 
         .map(ToOwned::to_owned)
 }
 
+fn json_import_expiry_value(value: Option<&serde_json::Value>) -> Option<u64> {
+    let value = value?;
+    json_u64_value(Some(value)).or_else(|| {
+        value
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .and_then(|value| u64::try_from(value.timestamp()).ok())
+    })
+}
+
+fn json_import_expiry_from_keys(
+    object: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Option<u64> {
+    keys.iter()
+        .find_map(|key| json_import_expiry_value(object.get(*key)))
+}
+
 fn grok_cookie_value(raw: &str, name: &str) -> Option<String> {
     raw.trim()
         .strip_prefix("Cookie:")
@@ -188,6 +208,8 @@ fn extract_admin_provider_oauth_batch_import_entry(
                 object
                     .get("sso_token")
                     .or_else(|| object.get("ssoToken"))
+                    .or_else(|| object.get("session_token"))
+                    .or_else(|| object.get("sessionToken"))
                     .or(grok_token_alias),
             )
             .or_else(|| {
@@ -238,7 +260,7 @@ fn extract_admin_provider_oauth_batch_import_entry(
                 refresh_token
             };
             let expires_at =
-                json_u64_value(object.get("expires_at").or_else(|| object.get("expiresAt")));
+                json_import_expiry_from_keys(object, &["expires_at", "expiresAt", "expired"]);
             let account_id = coerce_admin_provider_oauth_import_str(
                 object
                     .get("account_id")
@@ -617,6 +639,21 @@ mod tests {
         assert_eq!(entries[0].expires_at, Some(2_100_000_000));
         assert_eq!(entries[0].account_id.as_deref(), Some("acc-1"));
         assert_eq!(entries[0].email.as_deref(), Some("u@example.com"));
+    }
+
+    #[test]
+    fn parses_common_chatgpt_web_json_aliases() {
+        let entries = parse_admin_provider_oauth_batch_import_entries(
+            "chatgpt_web",
+            r#"[{"session_token":"session-1","expired":"2030-01-01T00:00:00Z","chatgpt_account_id":"acc-1","chatgpt_plan_type":"plus"}]"#,
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].refresh_token, None);
+        assert_eq!(entries[0].access_token.as_deref(), Some("session-1"));
+        assert_eq!(entries[0].expires_at, Some(1_893_456_000));
+        assert_eq!(entries[0].account_id.as_deref(), Some("acc-1"));
+        assert_eq!(entries[0].plan_type.as_deref(), Some("plus"));
     }
 
     #[test]

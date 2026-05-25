@@ -106,12 +106,21 @@ fn import_payload_string_any(
         .map(ToOwned::to_owned)
 }
 
-fn import_payload_u64(
+fn import_payload_u64_any(
     payload: &serde_json::Map<String, serde_json::Value>,
-    snake_case: &str,
-    camel_case: &str,
+    keys: &[&str],
 ) -> Option<u64> {
-    json_u64_value(payload.get(snake_case).or_else(|| payload.get(camel_case)))
+    keys.iter().find_map(|key| {
+        let value = payload.get(*key)?;
+        json_u64_value(Some(value)).or_else(|| {
+            value
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .and_then(|value| u64::try_from(value.timestamp()).ok())
+        })
+    })
 }
 
 fn apply_single_import_hints(
@@ -409,9 +418,17 @@ pub(super) async fn handle_admin_provider_oauth_import_refresh_token(
     let refresh_token_input = import_payload_string(&raw_payload, "refresh_token", "refreshToken");
     let access_token_input = import_payload_string_any(
         &raw_payload,
-        &["access_token", "accessToken", "sso_token", "ssoToken"],
+        &[
+            "access_token",
+            "accessToken",
+            "sso_token",
+            "ssoToken",
+            "session_token",
+            "sessionToken",
+        ],
     );
-    let imported_expires_at = import_payload_u64(&raw_payload, "expires_at", "expiresAt");
+    let imported_expires_at =
+        import_payload_u64_any(&raw_payload, &["expires_at", "expiresAt", "expired"]);
     let name = raw_payload
         .get("name")
         .and_then(serde_json::Value::as_str)
@@ -622,8 +639,39 @@ pub(super) async fn handle_admin_provider_oauth_import_refresh_token(
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_windsurf_import_error;
+    use super::{import_payload_string_any, import_payload_u64_any, sanitize_windsurf_import_error};
     use aether_oauth::core::OAuthError;
+    use serde_json::json;
+
+    #[test]
+    fn single_import_accepts_session_token_alias() {
+        let payload = json!({
+            "session_token": "session-1",
+        })
+        .as_object()
+        .cloned()
+        .expect("payload should be an object");
+
+        assert_eq!(
+            import_payload_string_any(&payload, &["access_token", "session_token"]).as_deref(),
+            Some("session-1")
+        );
+    }
+
+    #[test]
+    fn single_import_accepts_iso_expired_alias() {
+        let payload = json!({
+            "expired": "2030-01-01T00:00:00Z",
+        })
+        .as_object()
+        .cloned()
+        .expect("payload should be an object");
+
+        assert_eq!(
+            import_payload_u64_any(&payload, &["expires_at", "expiresAt", "expired"]),
+            Some(1_893_456_000)
+        );
+    }
 
     #[test]
     fn windsurf_import_error_redacts_http_body() {
