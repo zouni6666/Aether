@@ -11,7 +11,8 @@ use crate::ai_serving::planner::materialization_policy::{
     build_local_candidate_persistence_policy, LocalCandidatePersistencePolicyKind,
 };
 use crate::ai_serving::planner::report_context::{
-    build_local_execution_report_context, LocalExecutionReportContextParts,
+    build_local_execution_report_context, insert_native_client_envelope_name,
+    LocalExecutionReportContextParts,
 };
 use crate::ai_serving::planner::spec_metadata::local_same_format_provider_spec_metadata;
 use crate::ai_serving::planner::CandidateFailureDiagnostic;
@@ -89,6 +90,11 @@ pub(crate) async fn maybe_build_local_same_format_provider_decision_payload_for_
         extra_fields.insert(
             "envelope_name".to_string(),
             json!(super::super::ANTIGRAVITY_ENVELOPE_NAME),
+        );
+        insert_native_client_envelope_name(
+            &mut extra_fields,
+            super::super::ANTIGRAVITY_ENVELOPE_NAME,
+            parts.uri.path(),
         );
     }
     let provider_api_format = resolved.provider_api_format.clone();

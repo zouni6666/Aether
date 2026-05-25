@@ -721,7 +721,7 @@ async fn gateway_handles_antigravity_v1internal_control_plane_without_proxying()
     let client = reqwest::Client::new();
 
     let user_settings = json!({
-        "preferredModelId": "gemini-3.5-flash-low",
+        "preferredModelId": "gemini-3.1-flash-lite",
         "theme": "dark"
     });
     let requests = vec![
@@ -783,30 +783,66 @@ async fn gateway_handles_antigravity_v1internal_control_plane_without_proxying()
                     payload["cloudaicompanionProject"],
                     "aether-antigravity-local"
                 );
-                assert_eq!(payload["currentTier"], "free");
-                assert_eq!(payload["paidTier"], false);
+                assert_eq!(payload["currentTier"]["id"], "free-tier");
+                assert_eq!(payload["currentTier"]["name"], "Antigravity");
+                assert_eq!(payload["paidTier"]["id"], "g1-pro-tier");
                 assert_eq!(payload["gcpManaged"], false);
-                assert_eq!(payload["allowedTiers"], json!(["free"]));
-                assert_eq!(payload["upgradeSubscriptionUri"], "");
+                assert_eq!(payload["allowedTiers"][0]["id"], "free-tier");
+                assert_eq!(payload["allowedTiers"][0]["isDefault"], true);
+                assert_eq!(payload["allowedTiers"][1]["id"], "standard-tier");
+                assert_eq!(
+                    payload["upgradeSubscriptionUri"],
+                    "https://codeassist.google.com/upgrade"
+                );
             }
             "/v1internal:fetchAvailableModels" => {
-                assert_eq!(payload["defaultAgentModelId"], "gemini-3.5-flash-low");
-                assert_eq!(payload["tieredModelIds"]["flash"], "gemini-3-flash-agent");
+                assert_eq!(payload["defaultAgentModelId"], "gemini-3.1-flash-lite");
                 assert_eq!(
-                    payload["models"]["gemini-3.5-flash-low"]["id"],
-                    "gemini-3.5-flash-low"
+                    payload["tieredModelIds"]["flash"],
+                    json!(["gemini-3-flash-agent"])
                 );
+                assert_eq!(
+                    payload["models"]["gemini-3.5-flash-low"]["displayName"],
+                    "Gemini 3.5 Flash Low"
+                );
+                assert_eq!(
+                    payload["models"]["gemini-3.5-flash-low"]["apiProvider"],
+                    "API_PROVIDER_GOOGLE_GEMINI"
+                );
+                assert_eq!(
+                    payload["models"]["gemini-2.5-flash-lite"]["model"],
+                    "MODEL_GOOGLE_GEMINI_2_5_FLASH_LITE"
+                );
+                assert_eq!(
+                    payload["agentModelSorts"][0]["groups"][0]["modelIds"],
+                    json!([
+                        "gemini-3.1-flash-lite",
+                        "gemini-3-flash-agent",
+                        "gemini-3.1-pro-low",
+                        "gemini-3.5-flash-low"
+                    ])
+                );
+                assert_eq!(payload["deprecatedModelIds"], json!({}));
                 assert_eq!(payload["commandModelIds"], json!(["gemini-3-flash"]));
                 assert_eq!(
                     payload["imageGenerationModelIds"],
                     json!(["gemini-3.1-flash-image"])
+                );
+                assert_eq!(payload["mqueryModelIds"], json!(["gemini-3.1-flash-lite"]));
+                assert_eq!(
+                    payload["webSearchModelIds"],
+                    json!(["gemini-3.1-flash-lite"])
+                );
+                assert_eq!(
+                    payload["commitMessageModelIds"],
+                    json!(["gemini-3.1-flash-lite"])
                 );
             }
             "/v1internal:fetchUserInfo" => {
                 assert_eq!(payload["regionCode"], "US");
                 assert_eq!(
                     payload["userSettings"]["preferredModelId"],
-                    "gemini-3.5-flash-low"
+                    "gemini-3.1-flash-lite"
                 );
             }
             "/v1internal:fetchAdminControls" => {
@@ -814,7 +850,7 @@ async fn gateway_handles_antigravity_v1internal_control_plane_without_proxying()
             }
             "/v1internal:listExperiments" => {
                 assert_eq!(payload["experimentIds"], json!([]));
-                assert_eq!(payload["flags"], json!({}));
+                assert_eq!(payload["flags"], json!([]));
             }
             "/v1internal:recordCodeAssistMetrics" => {
                 assert_eq!(payload, json!({}));

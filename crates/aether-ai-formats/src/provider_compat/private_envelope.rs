@@ -47,6 +47,13 @@ pub fn normalize_provider_private_report_context(report_context: Option<&Value>)
         .get("provider_api_format")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    if report_context_preserves_private_client_envelope(
+        report_context,
+        envelope_name,
+        provider_api_format,
+    ) {
+        return Some(report_context.clone());
+    }
     if provider_adaptation_descriptor_for_envelope(envelope_name, provider_api_format).is_none() {
         return Some(report_context.clone());
     }
@@ -64,6 +71,22 @@ pub fn normalize_provider_private_response_value(
     {
         return Some(data);
     }
+    let envelope_name = report_context
+        .get("envelope_name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let provider_api_format = report_context
+        .get("provider_api_format")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if report_context_preserves_private_client_envelope(
+        report_context,
+        envelope_name,
+        provider_api_format,
+    ) {
+        return Some(data);
+    }
+
     let mut unwrapped = match report_context.get("envelope_name").and_then(Value::as_str) {
         Some(KIRO_ENVELOPE_NAME) => data,
         Some(GEMINI_CLI_V1INTERNAL_ENVELOPE_NAME) => {
@@ -153,6 +176,13 @@ fn transform_provider_private_stream_line_with_event_state(
         .and_then(Value::as_str)
         .unwrap_or_default();
     if !provider_adaptation_should_unwrap_stream_envelope(envelope_name, provider_api_format) {
+        return Ok(line);
+    }
+    if report_context_preserves_private_client_envelope(
+        report_context,
+        envelope_name,
+        provider_api_format,
+    ) {
         return Ok(line);
     }
     if envelope_name == WINDSURF_ENVELOPE_NAME && looks_like_windsurf_error(&body) {
@@ -305,6 +335,13 @@ pub fn maybe_build_provider_private_stream_normalizer<'a>(
         .unwrap_or_default();
     let descriptor =
         provider_adaptation_descriptor_for_envelope(envelope_name, provider_api_format)?;
+    if report_context_preserves_private_client_envelope(
+        report_context,
+        envelope_name,
+        provider_api_format,
+    ) {
+        return None;
+    }
     let mode = if descriptor
         .envelope_name
         .eq_ignore_ascii_case(KIRO_ENVELOPE_NAME)
@@ -679,6 +716,24 @@ fn clear_private_envelope_context(report_context: &Value) -> Value {
     normalized
 }
 
+fn report_context_preserves_private_client_envelope(
+    report_context: &Value,
+    envelope_name: &str,
+    provider_api_format: &str,
+) -> bool {
+    if envelope_name.is_empty()
+        || provider_adaptation_descriptor_for_envelope(envelope_name, provider_api_format).is_none()
+    {
+        return false;
+    }
+    report_context
+        .get("client_envelope_name")
+        .and_then(Value::as_str)
+        .is_some_and(|client_envelope_name| {
+            client_envelope_name.eq_ignore_ascii_case(envelope_name)
+        })
+}
+
 fn local_finalize_response_model(report_context: &Value) -> &str {
     report_context
         .get("mapped_model")
@@ -995,6 +1050,20 @@ mod tests {
         let output_text = String::from_utf8(output).expect("text should decode");
         assert!(output_text.contains("\"_v1internal_response_id\":\"resp_123\""));
         assert!(output_text.contains("\"id\":\"call_get_weather_0\""));
+    }
+
+    #[test]
+    fn private_stream_normalizer_preserves_antigravity_native_client_envelope() {
+        let report_context = json!({
+            "has_envelope": true,
+            "provider_api_format": "gemini:generate_content",
+            "client_api_format": "gemini:generate_content",
+            "envelope_name": "antigravity:v1internal",
+            "client_envelope_name": "antigravity:v1internal",
+            "mapped_model": "claude-sonnet-4-5",
+        });
+
+        assert!(maybe_build_provider_private_stream_normalizer(Some(&report_context)).is_none());
     }
 
     #[test]

@@ -69,8 +69,10 @@ const SCHEDULER_AFFECTING_SYSTEM_CONFIG_KEYS: &[&str] = &[
     "provider_priority_mode",
     "scheduling_mode",
 ];
-const AUTH_AFFECTING_SYSTEM_CONFIG_KEYS: &[&str] =
-    &[crate::constants::DEFAULT_USER_GROUP_CONFIG_KEY];
+const AUTH_AFFECTING_SYSTEM_CONFIG_KEYS: &[&str] = &[
+    crate::constants::DEFAULT_USER_GROUP_CONFIG_KEY,
+    crate::constants::ANTIGRAVITY_BEARER_BRIDGE_CONFIG_KEY,
+];
 const FRONTDOOR_RPM_AFFECTING_SYSTEM_CONFIG_KEYS: &[&str] = &["rate_limit_per_minute"];
 
 fn system_config_key_affects_scheduler(key: &str) -> bool {

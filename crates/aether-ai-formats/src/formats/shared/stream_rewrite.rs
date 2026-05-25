@@ -47,6 +47,18 @@ pub fn resolve_finalize_stream_rewrite_mode(
         .trim()
         .to_ascii_lowercase();
 
+    if !needs_conversion
+        && client_consumes_same_private_stream_envelope(
+            report_context,
+            envelope_name.as_str(),
+            provider_api_format.as_str(),
+            client_api_format.as_str(),
+        )
+    {
+        return model_directive_display_model_from_report_context(report_context)
+            .map(|_| FinalizeStreamRewriteMode::ModelDirectiveDisplay);
+    }
+
     if needs_conversion
         && envelope_name.eq_ignore_ascii_case(KIRO_ENVELOPE_NAME)
         && provider_api_format == "claude:messages"
@@ -105,6 +117,26 @@ pub fn resolve_finalize_stream_rewrite_mode(
             provider_api_format.as_str(),
         ))
     .then_some(FinalizeStreamRewriteMode::EnvelopeUnwrap)
+}
+
+fn client_consumes_same_private_stream_envelope(
+    report_context: &Value,
+    envelope_name: &str,
+    provider_api_format: &str,
+    client_api_format: &str,
+) -> bool {
+    if envelope_name.is_empty()
+        || provider_api_format != client_api_format
+        || !provider_adaptation_should_unwrap_stream_envelope(envelope_name, provider_api_format)
+    {
+        return false;
+    }
+    report_context
+        .get("client_envelope_name")
+        .and_then(Value::as_str)
+        .is_some_and(|client_envelope_name| {
+            client_envelope_name.eq_ignore_ascii_case(envelope_name)
+        })
 }
 
 enum AiSurfaceStreamRewriteState {
@@ -449,6 +481,45 @@ mod tests {
             resolve_finalize_stream_rewrite_mode(&report_context),
             Some(FinalizeStreamRewriteMode::EnvelopeUnwrap)
         );
+    }
+
+    #[test]
+    fn resolves_no_rewriter_when_client_consumes_same_private_envelope() {
+        let report_context = json!({
+            "provider_api_format": "gemini:generate_content",
+            "client_api_format": "gemini:generate_content",
+            "envelope_name": "antigravity:v1internal",
+            "client_envelope_name": "antigravity:v1internal",
+            "needs_conversion": false,
+        });
+        assert_eq!(resolve_finalize_stream_rewrite_mode(&report_context), None);
+        assert!(maybe_build_ai_surface_stream_rewriter(Some(&report_context)).is_none());
+    }
+
+    #[test]
+    fn native_private_envelope_client_keeps_response_wrapper_for_model_display_rewrite() {
+        let report_context = json!({
+            "provider_api_format": "gemini:generate_content",
+            "client_api_format": "gemini:generate_content",
+            "envelope_name": "antigravity:v1internal",
+            "client_envelope_name": "antigravity:v1internal",
+            "model": "gemini-2.5-pro-high",
+            "mapped_model": "gemini-2.5-pro",
+            "needs_conversion": false,
+        });
+        let mut rewriter = maybe_build_ai_surface_stream_rewriter(Some(&report_context))
+            .expect("display-model rewriter should exist");
+        let output = rewriter
+            .push_chunk(
+                b"data: {\"response\":{\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[]},\"responseId\":\"resp_native_123\"}\n\n",
+            )
+            .expect("rewrite should succeed");
+        let output = String::from_utf8(output).expect("output should be utf8");
+
+        assert!(output.contains("\"response\":"));
+        assert!(output.contains("\"responseId\":\"resp_native_123\""));
+        assert!(output.contains("\"modelVersion\":\"gemini-2.5-pro-high\""));
+        assert!(!output.contains("_v1internal_response_id"));
     }
 
     #[test]

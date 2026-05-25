@@ -2,8 +2,8 @@ use crate::ai_serving::build_request_trace_proxy_value;
 use crate::ai_serving::planner::common::OPENAI_CHAT_STREAM_PLAN_KIND;
 use crate::ai_serving::planner::decision_input::apply_provider_request_routing_policy_to_decision;
 use crate::ai_serving::planner::report_context::{
-    build_local_execution_report_context, insert_provider_stream_event_api_format,
-    LocalExecutionReportContextParts,
+    build_local_execution_report_context, insert_native_client_envelope_name,
+    insert_provider_stream_event_api_format, LocalExecutionReportContextParts,
 };
 use crate::ai_serving::planner::{
     build_ai_execution_decision_response, AiExecutionDecisionResponseParts,
@@ -84,6 +84,7 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
             "envelope_name".to_string(),
             serde_json::Value::String(envelope_name.to_string()),
         );
+        insert_native_client_envelope_name(&mut extra_fields, envelope_name, parts.uri.path());
     }
     insert_provider_stream_event_api_format(
         &mut extra_fields,

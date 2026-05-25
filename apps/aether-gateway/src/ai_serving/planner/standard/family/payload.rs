@@ -9,7 +9,8 @@ use crate::ai_serving::planner::materialization_policy::{
 };
 use crate::ai_serving::planner::passthrough::maybe_build_local_same_format_provider_decision_payload_for_candidate;
 use crate::ai_serving::planner::report_context::{
-    build_local_execution_report_context, LocalExecutionReportContextParts,
+    build_local_execution_report_context, insert_native_client_envelope_name,
+    LocalExecutionReportContextParts,
 };
 use crate::ai_serving::planner::spec_metadata::local_standard_spec_metadata;
 use crate::ai_serving::planner::CandidateFailureDiagnostic;
@@ -92,6 +93,7 @@ pub(super) async fn maybe_build_local_standard_decision_payload_for_candidate(
             "envelope_name".to_string(),
             serde_json::Value::String(envelope_name.to_string()),
         );
+        insert_native_client_envelope_name(&mut extra_fields, envelope_name, parts.uri.path());
     }
     let (execution_strategy, conversion_mode) = ai_local_execution_contract_for_formats(
         spec_metadata.api_format,
