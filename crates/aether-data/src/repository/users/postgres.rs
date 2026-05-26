@@ -6,8 +6,8 @@ use super::types::{
     normalize_user_group_name, LdapAuthUserProvisioningOutcome, StoredUserAuthRecord,
     StoredUserExportRow, StoredUserGroup, StoredUserGroupMember, StoredUserGroupMembership,
     StoredUserOAuthLinkSummary, StoredUserPreferenceRecord, StoredUserSessionRecord,
-    StoredUserSummary, UpsertUserGroupRecord, UserExportListQuery, UserExportSummary,
-    UserReadRepository,
+    StoredUserSummary, UpsertUserGroupRecord, UserExportListQuery, UserExportSortBy,
+    UserExportSummary, UserReadRepository,
 };
 use crate::{error::SqlxResultExt, DataLayerError};
 
@@ -1001,8 +1001,24 @@ WHERE user_group_members.user_id IN (
                 .push(")");
         }
 
+        match query.sort_by {
+            UserExportSortBy::CreatedAt => {
+                builder
+                    .push(" ORDER BY created_at ")
+                    .push(if query.sort_order.is_desc() {
+                        "DESC"
+                    } else {
+                        "ASC"
+                    })
+                    .push(", id ASC");
+            }
+            UserExportSortBy::Id => {
+                builder.push(" ORDER BY id ASC");
+            }
+        }
+
         builder
-            .push(" ORDER BY id ASC OFFSET ")
+            .push(" OFFSET ")
             .push_bind(i64::try_from(query.skip).map_err(|_| {
                 DataLayerError::InvalidInput(format!("invalid user export skip: {}", query.skip))
             })?)

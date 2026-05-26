@@ -7,8 +7,8 @@ use super::types::{
     normalize_user_group_name, LdapAuthUserProvisioningOutcome, StoredUserAuthRecord,
     StoredUserExportRow, StoredUserGroup, StoredUserGroupMember, StoredUserGroupMembership,
     StoredUserOAuthLinkSummary, StoredUserPreferenceRecord, StoredUserSessionRecord,
-    StoredUserSummary, UpsertUserGroupRecord, UserExportListQuery, UserExportSummary,
-    UserReadRepository,
+    StoredUserSummary, UpsertUserGroupRecord, UserExportListQuery, UserExportSortBy,
+    UserExportSummary, UserReadRepository,
 };
 use crate::DataLayerError;
 
@@ -408,6 +408,34 @@ fn filter_memory_export_rows(
                     .to_ascii_lowercase()
                     .contains(&search)
         });
+    }
+    match query.sort_by {
+        UserExportSortBy::CreatedAt => {
+            let created_at_by_id = repository
+                .auth_by_id
+                .read()
+                .expect("user repository lock")
+                .iter()
+                .filter_map(|(user_id, user)| {
+                    user.created_at
+                        .map(|created_at| (user_id.clone(), created_at.timestamp_millis()))
+                })
+                .collect::<BTreeMap<_, _>>();
+            rows.sort_by(|left, right| {
+                let primary = created_at_by_id
+                    .get(&left.id)
+                    .cmp(&created_at_by_id.get(&right.id));
+                let ordered = if query.sort_order.is_desc() {
+                    primary.reverse()
+                } else {
+                    primary
+                };
+                ordered.then_with(|| left.id.cmp(&right.id))
+            });
+        }
+        UserExportSortBy::Id => {
+            rows.sort_by(|left, right| left.id.cmp(&right.id));
+        }
     }
     rows
 }
@@ -2682,6 +2710,7 @@ mod tests {
                 is_active: Some(true),
                 search: None,
                 group_id: None,
+                ..Default::default()
             })
             .await
             .expect("paged export should succeed");

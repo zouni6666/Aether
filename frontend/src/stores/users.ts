@@ -14,6 +14,8 @@ import {
   type UserBatchActionRequest,
   type UserBatchActionResponse,
   type UserRole,
+  type AdminUserSortBy,
+  type AdminUserSortOrder,
   type UserGroup,
   type UserGroupMember,
   type UpsertUserGroupRequest,
@@ -40,6 +42,8 @@ export const useUsersStore = defineStore('users', () => {
     role?: UserRole
     is_active?: boolean
     group_id?: string
+    sort_by?: AdminUserSortBy
+    sort_order?: AdminUserSortOrder
     skip?: number
     limit?: number
   } = {}) {

@@ -37,6 +37,13 @@ pub(in super::super) async fn build_admin_list_users_response(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
 
+    let sort_by = query_param_value(request_context.query_string(), "sort_by")
+        .and_then(|value| aether_data::repository::users::UserExportSortBy::parse(&value))
+        .unwrap_or_default();
+    let sort_order = query_param_value(request_context.query_string(), "sort_order")
+        .and_then(|value| aether_data::repository::users::UserExportSortOrder::parse(&value))
+        .unwrap_or_default();
+
     let query = aether_data::repository::users::UserExportListQuery {
         skip,
         limit,
@@ -44,6 +51,8 @@ pub(in super::super) async fn build_admin_list_users_response(
         is_active,
         search,
         group_id,
+        sort_by,
+        sort_order,
     };
     let (paged_rows_result, total_result) = tokio::join!(
         state.list_export_users_page(&query),

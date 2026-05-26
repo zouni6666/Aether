@@ -41,8 +41,8 @@
             </div>
           </div>
           <!-- 筛选器 -->
-          <div class="flex items-center gap-2">
-            <div class="relative flex-1">
+          <div class="flex flex-wrap items-center gap-2">
+            <div class="relative min-w-40 flex-1">
               <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground z-10 pointer-events-none" />
               <Input
                 id="users-search-mobile"
@@ -107,6 +107,22 @@
                 </SelectItem>
                 <SelectItem value="inactive">
                   禁用
+                </SelectItem>
+              </SelectContent>
+            </Select>
+            <Select
+              v-model="sortOption"
+            >
+              <SelectTrigger class="w-32 h-8 text-xs border-border/60">
+                <SelectValue placeholder="排序" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem
+                  v-for="option in userSortOptions"
+                  :key="option.value"
+                  :value="option.value"
+                >
+                  {{ option.label }}
                 </SelectItem>
               </SelectContent>
             </Select>
@@ -200,6 +216,23 @@
                 </SelectItem>
               </SelectContent>
             </Select>
+
+            <div class="xl:hidden">
+              <Select v-model="sortOption">
+                <SelectTrigger class="w-40 h-8 text-xs border-border/60">
+                  <SelectValue placeholder="排序" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem
+                    v-for="option in userSortOptions"
+                    :key="option.value"
+                    :value="option.value"
+                  >
+                    {{ option.label }}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
 
             <!-- 分隔线 -->
             <div class="h-4 w-px bg-border" />
@@ -317,9 +350,17 @@
               <TableHead class="w-[170px] h-12 font-semibold">
                 统计/限速
               </TableHead>
-              <TableHead class="w-[110px] h-12 font-semibold">
+              <SortableTableHead
+                class="w-[110px] h-12 font-semibold"
+                column-key="created_at"
+                :active-key="sortBy"
+                :direction="sortOrder"
+                default-direction="desc"
+                title="按创建时间排序"
+                @sort="handleTableSort"
+              >
                 创建时间
-              </TableHead>
+              </SortableTableHead>
               <SortableTableHead
                 class="w-[180px] h-12 font-semibold"
                 column-key="status"
@@ -1470,7 +1511,18 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useUsersStore } from '@/stores/users'
 import { useAuthStore } from '@/stores/auth'
-import { usersApi, type User, type ApiKey, type UserSession, type UserBatchActionResponse, type UserBatchSelectionFilters, type UserGroup, type AdminUserPlanEntitlement } from '@/api/users'
+import {
+  usersApi,
+  type User,
+  type ApiKey,
+  type UserSession,
+  type UserBatchActionResponse,
+  type UserBatchSelectionFilters,
+  type UserGroup,
+  type AdminUserPlanEntitlement,
+  type AdminUserSortBy,
+  type AdminUserSortOrder,
+} from '@/api/users'
 import { formatSessionMeta } from '@/types/session'
 import { adminWalletApi, type AdminWallet } from '@/api/admin-wallets'
 import { adminBillingPlansApi, type BillingEntitlement, type BillingPlan } from '@/api/billing'
@@ -1598,6 +1650,7 @@ const searchQuery = ref('')
 const filterRole = ref<'all' | User['role']>('all')
 const filterStatus = ref<'all' | 'active' | 'inactive'>('all')
 const filterGroup = ref('all')
+const sortOption = ref<'default' | 'created_at_desc' | 'created_at_asc'>('default')
 const userGroups = ref<UserGroup[]>([])
 const userRoleFilterOptions = [
   { value: 'all', label: '全部角色' },
@@ -1610,6 +1663,17 @@ const userStatusFilterOptions = [
   { value: 'active', label: '活跃' },
   { value: 'inactive', label: '禁用' },
 ]
+const userSortOptions = [
+  { value: 'default', label: '默认排序' },
+  { value: 'created_at_desc', label: '创建时间 新到旧' },
+  { value: 'created_at_asc', label: '创建时间 旧到新' },
+]
+const sortBy = computed<AdminUserSortBy | null>(() =>
+  sortOption.value === 'default' ? null : 'created_at'
+)
+const sortOrder = computed<AdminUserSortOrder>(() =>
+  sortOption.value === 'created_at_asc' ? 'asc' : 'desc'
+)
 
 const currentPage = ref(1)
 const pageSize = ref(20)
@@ -1659,7 +1723,7 @@ const grantableBillingPlans = computed(() =>
 )
 
 // Watch filter changes and reset to first page
-watch([searchQuery, filterRole, filterStatus, filterGroup], () => {
+watch([searchQuery, filterRole, filterStatus, filterGroup, sortOption], () => {
   currentPage.value = 1
   resetBatchSelection()
   void refreshUsers()
@@ -1691,6 +1755,8 @@ async function refreshUsers(options: { preferCache?: boolean } = {}) {
       role: filterRole.value === 'all' ? undefined : filterRole.value,
       is_active: filterStatus.value === 'all' ? undefined : filterStatus.value === 'active',
       group_id: filterGroup.value === 'all' ? undefined : filterGroup.value,
+      sort_by: sortBy.value ?? undefined,
+      sort_order: sortBy.value ? sortOrder.value : undefined,
       skip: (currentPage.value - 1) * pageSize.value,
       limit: pageSize.value,
     }),
@@ -1699,6 +1765,11 @@ async function refreshUsers(options: { preferCache?: boolean } = {}) {
   void loadUserWallets({
     cacheTtlMs: options.preferCache ? USER_WALLETS_CACHE_TTL_MS : 0,
   })
+}
+
+function handleTableSort(payload: { key: string, direction: AdminUserSortOrder }): void {
+  if (payload.key !== 'created_at') return
+  sortOption.value = payload.direction === 'asc' ? 'created_at_asc' : 'created_at_desc'
 }
 
 function handlePageChange(page: number): void {

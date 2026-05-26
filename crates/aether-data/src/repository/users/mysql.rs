@@ -6,8 +6,8 @@ use super::types::{
     normalize_user_group_name, LdapAuthUserProvisioningOutcome, StoredUserAuthRecord,
     StoredUserExportRow, StoredUserGroup, StoredUserGroupMember, StoredUserGroupMembership,
     StoredUserOAuthLinkSummary, StoredUserPreferenceRecord, StoredUserSessionRecord,
-    StoredUserSummary, UpsertUserGroupRecord, UserExportListQuery, UserExportSummary,
-    UserReadRepository,
+    StoredUserSummary, UpsertUserGroupRecord, UserExportListQuery, UserExportSortBy,
+    UserExportSummary, UserReadRepository,
 };
 use crate::driver::mysql::MysqlPool;
 use crate::error::SqlResultExt;
@@ -313,8 +313,24 @@ impl UserReadRepository for MysqlUserReadRepository {
                 .push_bind(pattern)
                 .push(")");
         }
+        match query.sort_by {
+            UserExportSortBy::CreatedAt => {
+                builder
+                    .push(" ORDER BY created_at ")
+                    .push(if query.sort_order.is_desc() {
+                        "DESC"
+                    } else {
+                        "ASC"
+                    })
+                    .push(", id ASC");
+            }
+            UserExportSortBy::Id => {
+                builder.push(" ORDER BY id ASC");
+            }
+        }
+
         builder
-            .push(" ORDER BY id ASC LIMIT ")
+            .push(" LIMIT ")
             .push_bind(i64::try_from(query.limit).map_err(|_| {
                 DataLayerError::InvalidInput(format!("invalid user export limit: {}", query.limit))
             })?)

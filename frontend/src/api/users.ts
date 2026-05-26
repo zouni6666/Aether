@@ -6,6 +6,8 @@ import type { BillingPlan, UserPlanEntitlement } from './billing'
 export type UserRole = 'admin' | 'audit_admin' | 'user'
 export type ListPolicyMode = 'inherit' | 'unrestricted' | 'specific' | 'deny_all'
 export type RateLimitPolicyMode = 'inherit' | 'system' | 'custom'
+export type AdminUserSortBy = 'created_at'
+export type AdminUserSortOrder = 'asc' | 'desc'
 export type FeatureSettings = Record<string, unknown>
 
 export interface UserGroupSummary {
@@ -261,6 +263,8 @@ export interface GetAllUsersOptions {
   role?: UserRole
   is_active?: boolean
   group_id?: string
+  sort_by?: AdminUserSortBy
+  sort_order?: AdminUserSortOrder
   skip?: number
   limit?: number
   cacheTtlMs?: number
@@ -298,6 +302,8 @@ export const usersApi = {
     if (options.role) params.role = options.role
     if (options.is_active !== undefined) params.is_active = options.is_active ? 'true' : 'false'
     if (options.group_id) params.group_id = options.group_id
+    if (options.sort_by) params.sort_by = options.sort_by
+    if (options.sort_order) params.sort_order = options.sort_order
     if (options.skip !== undefined) params.skip = options.skip
     if (options.limit !== undefined) params.limit = options.limit
 
@@ -309,6 +315,8 @@ export const usersApi = {
           options.role ?? '',
           options.is_active ?? '',
           options.group_id ?? '',
+          options.sort_by ?? '',
+          options.sort_order ?? '',
           options.skip ?? '',
           options.limit ?? '',
           options.cacheKeySuffix ?? '',

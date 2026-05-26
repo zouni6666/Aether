@@ -15,7 +15,7 @@ use aether_data_contracts::repository::usage::StoredRequestUsageAudit;
 use axum::body::Body;
 use axum::routing::{any, delete, get, patch, post, put};
 use axum::{extract::Request, Router};
-use chrono::Utc;
+use chrono::{TimeZone, Utc};
 use http::StatusCode;
 use serde_json::json;
 
@@ -38,6 +38,16 @@ fn sample_admin_user_with_role(
     email: &str,
     username: &str,
 ) -> StoredUserAuthRecord {
+    sample_admin_user_with_role_and_created_at(user_id, role, email, username, Utc::now())
+}
+
+fn sample_admin_user_with_role_and_created_at(
+    user_id: &str,
+    role: &str,
+    email: &str,
+    username: &str,
+    created_at: chrono::DateTime<Utc>,
+) -> StoredUserAuthRecord {
     StoredUserAuthRecord::new(
         user_id.to_string(),
         Some(email.to_string()),
@@ -51,7 +61,7 @@ fn sample_admin_user_with_role(
         Some(json!(["gpt-4.1"])),
         true,
         false,
-        Some(Utc::now()),
+        Some(created_at),
         Some(Utc::now()),
     )
     .expect("user should build")
@@ -204,6 +214,113 @@ fn sample_admin_api_key_snapshot(user_id: &str, api_key_id: &str) -> StoredAuthA
         Some(json!(["gpt-4.1"])),
     )
     .expect("api key snapshot should build")
+}
+
+#[tokio::test]
+async fn gateway_sorts_admin_users_by_created_at() {
+    let oldest = Utc
+        .with_ymd_and_hms(2026, 1, 10, 0, 0, 0)
+        .single()
+        .expect("valid timestamp");
+    let middle = Utc
+        .with_ymd_and_hms(2026, 2, 10, 0, 0, 0)
+        .single()
+        .expect("valid timestamp");
+    let newest = Utc
+        .with_ymd_and_hms(2026, 3, 10, 0, 0, 0)
+        .single()
+        .expect("valid timestamp");
+
+    let user_repository = Arc::new(
+        InMemoryUserReadRepository::seed_auth_users(vec![
+            sample_admin_user_with_role_and_created_at(
+                "user-old",
+                "user",
+                "old@example.com",
+                "old",
+                oldest,
+            ),
+            sample_admin_user_with_role_and_created_at(
+                "user-middle",
+                "user",
+                "middle@example.com",
+                "middle",
+                middle,
+            ),
+            sample_admin_user_with_role_and_created_at(
+                "user-new",
+                "user",
+                "new@example.com",
+                "new",
+                newest,
+            ),
+        ])
+        .with_export_users(vec![
+            sample_admin_export_user_with("user", true, "user-old", "old@example.com", "old"),
+            sample_admin_export_user_with(
+                "user",
+                true,
+                "user-middle",
+                "middle@example.com",
+                "middle",
+            ),
+            sample_admin_export_user_with("user", true, "user-new", "new@example.com", "new"),
+        ]),
+    );
+
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(GatewayDataState::with_user_reader_for_tests(
+                user_repository,
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+
+    let desc_response = client
+        .get(format!(
+            "{gateway_url}/api/admin/users?skip=0&limit=10&sort_by=created_at&sort_order=desc"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(desc_response.status(), StatusCode::OK);
+    let desc_payload: serde_json::Value = desc_response.json().await.expect("json should parse");
+    let desc_ids = desc_payload["items"]
+        .as_array()
+        .expect("items should be array")
+        .iter()
+        .map(|item| item["id"].as_str().expect("id should be string"))
+        .collect::<Vec<_>>();
+    assert_eq!(desc_ids, vec!["user-new", "user-middle", "user-old"]);
+
+    let asc_response = client
+        .get(format!(
+            "{gateway_url}/api/admin/users?skip=0&limit=10&sort_by=created_at&sort_order=asc"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(asc_response.status(), StatusCode::OK);
+    let asc_payload: serde_json::Value = asc_response.json().await.expect("json should parse");
+    let asc_ids = asc_payload["items"]
+        .as_array()
+        .expect("items should be array")
+        .iter()
+        .map(|item| item["id"].as_str().expect("id should be string"))
+        .collect::<Vec<_>>();
+    assert_eq!(asc_ids, vec!["user-old", "user-middle", "user-new"]);
+
+    gateway_handle.abort();
 }
 
 #[tokio::test]
