@@ -24,6 +24,27 @@ use sha2::{Digest, Sha256};
 
 const ORIGINAL_EMAIL: &str = "alice@example.com";
 
+fn run_async_test_on_large_stack<F>(name: &'static str, future: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime should build")
+                .block_on(future);
+        })
+        .expect("large-stack pii redaction format test thread should spawn");
+
+    if let Err(payload) = handle.join() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StandardFormat {
     OpenAiChat,
@@ -220,19 +241,24 @@ async fn ai_execute_openai_responses_pii_redaction_round_trip_same_format() {
     assert_restored_response(&response_json, StandardFormat::OpenAiResponses);
 }
 
-#[tokio::test]
-async fn ai_execute_claude_messages_pii_redaction_round_trip_same_format() {
-    let (response_json, seen) = run_redaction_format_case(RedactionFormatCase {
-        test_id: "claude-messages-pii-redaction-same-format",
-        trace_id: "trace-claude-messages-pii-redaction-same-format",
-        client_format: StandardFormat::ClaudeMessages,
-        provider_format: StandardFormat::ClaudeMessages,
-    })
-    .await;
+#[test]
+fn ai_execute_claude_messages_pii_redaction_round_trip_same_format() {
+    run_async_test_on_large_stack(
+        "ai_execute_claude_messages_pii_redaction_round_trip_same_format",
+        async {
+            let (response_json, seen) = run_redaction_format_case(RedactionFormatCase {
+                test_id: "claude-messages-pii-redaction-same-format",
+                trace_id: "trace-claude-messages-pii-redaction-same-format",
+                client_format: StandardFormat::ClaudeMessages,
+                provider_format: StandardFormat::ClaudeMessages,
+            })
+            .await;
 
-    assert_provider_request_redacted(&seen, StandardFormat::ClaudeMessages);
-    assert!(seen.body.get("messages").is_some());
-    assert_restored_response(&response_json, StandardFormat::ClaudeMessages);
+            assert_provider_request_redacted(&seen, StandardFormat::ClaudeMessages);
+            assert!(seen.body.get("messages").is_some());
+            assert_restored_response(&response_json, StandardFormat::ClaudeMessages);
+        },
+    );
 }
 
 #[tokio::test]
@@ -273,23 +299,28 @@ async fn ai_execute_openai_responses_pii_redaction_before_claude_conversion() {
     assert_restored_response(&response_json, StandardFormat::OpenAiResponses);
 }
 
-#[tokio::test]
-async fn ai_execute_claude_messages_pii_redaction_before_openai_chat_conversion() {
-    let (response_json, seen) = run_redaction_format_case(RedactionFormatCase {
-        test_id: "claude-messages-pii-redaction-before-openai-chat-conversion",
-        trace_id: "trace-claude-messages-pii-redaction-before-openai-chat-conversion",
-        client_format: StandardFormat::ClaudeMessages,
-        provider_format: StandardFormat::OpenAiChat,
-    })
-    .await;
+#[test]
+fn ai_execute_claude_messages_pii_redaction_before_openai_chat_conversion() {
+    run_async_test_on_large_stack(
+        "ai_execute_claude_messages_pii_redaction_before_openai_chat_conversion",
+        async {
+            let (response_json, seen) = run_redaction_format_case(RedactionFormatCase {
+                test_id: "claude-messages-pii-redaction-before-openai-chat-conversion",
+                trace_id: "trace-claude-messages-pii-redaction-before-openai-chat-conversion",
+                client_format: StandardFormat::ClaudeMessages,
+                provider_format: StandardFormat::OpenAiChat,
+            })
+            .await;
 
-    assert_provider_request_redacted(&seen, StandardFormat::OpenAiChat);
-    assert!(seen.body.get("messages").is_some());
-    assert_eq!(
-        seen.body["model"],
-        StandardFormat::OpenAiChat.provider_model()
+            assert_provider_request_redacted(&seen, StandardFormat::OpenAiChat);
+            assert!(seen.body.get("messages").is_some());
+            assert_eq!(
+                seen.body["model"],
+                StandardFormat::OpenAiChat.provider_model()
+            );
+            assert_restored_response(&response_json, StandardFormat::ClaudeMessages);
+        },
     );
-    assert_restored_response(&response_json, StandardFormat::ClaudeMessages);
 }
 
 async fn run_redaction_format_case(
