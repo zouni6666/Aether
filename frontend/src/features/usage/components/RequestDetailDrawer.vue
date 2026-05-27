@@ -55,8 +55,8 @@
                 </Badge>
                 <Badge
                   v-if="detail && resolveUsageStreamLabelSegments(detail).hasConversion"
-                  :variant="resolveUsageStreamLabelSegments(detail).client === '流式' ? 'secondary' : 'outline'"
-                  :class="resolveUsageStreamLabelSegments(detail).client === '流式'
+                  :variant="streamBadgeVariant(resolveUsageStreamLabelSegments(detail).client === '流式')"
+                  :class="streamBadgeVariant(resolveUsageStreamLabelSegments(detail).client === '流式') === 'secondary'
                     ? 'text-xs inline-flex items-center gap-1'
                     : 'text-xs inline-flex items-center gap-1 border-border/60 text-muted-foreground'"
                 >
@@ -66,8 +66,8 @@
                 </Badge>
                 <Badge
                   v-else-if="detail"
-                  :variant="isUsageUpstreamStream(detail) ? 'secondary' : 'outline'"
-                  :class="isUsageUpstreamStream(detail)
+                  :variant="streamBadgeVariant(isUsageUpstreamStream(detail))"
+                  :class="streamBadgeVariant(isUsageUpstreamStream(detail)) === 'secondary'
                     ? 'text-xs'
                     : 'text-xs border-border/60 text-muted-foreground'"
                 >
@@ -1087,6 +1087,13 @@ watch(activeTab, (newTab) => {
 })
 
 const { isDark } = useDarkMode()
+
+function streamBadgeVariant(isStream: boolean): 'secondary' | 'outline' {
+  if (isDark.value) {
+    return isStream ? 'outline' : 'secondary'
+  }
+  return isStream ? 'secondary' : 'outline'
+}
 
 const traceRequestMetadata = computed<Record<string, unknown> | null>(() => {
   const meta = detail.value?.metadata

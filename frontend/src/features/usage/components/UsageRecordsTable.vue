@@ -225,7 +225,7 @@
               <Badge
                 v-if="getFastBadge(record)"
                 variant="outline"
-                class="h-4 rounded-full px-1.5 text-[10px] leading-4 flex-shrink-0"
+                class="h-4 rounded-full px-1.5 text-[10px] leading-4 text-foreground flex-shrink-0"
                 :title="getFastBadgeTitle(record)"
               >
                 fast
@@ -279,8 +279,8 @@
             </Badge>
             <Badge
               v-else-if="getStreamModeSegments(record).hasConversion"
-              :variant="getStreamModeSegments(record).client === '流式' ? 'secondary' : 'outline'"
-              :class="getStreamModeSegments(record).client === '流式'
+              :variant="streamBadgeVariant(getStreamModeSegments(record).client === '流式')"
+              :class="(streamBadgeVariant(getStreamModeSegments(record).client === '流式') === 'secondary')
                 ? 'whitespace-nowrap text-[10px] px-1.5 h-4 leading-4 inline-flex items-center gap-0.5'
                 : 'whitespace-nowrap border-border/60 text-muted-foreground text-[10px] px-1.5 h-4 leading-4 inline-flex items-center gap-0.5'"
             >
@@ -290,8 +290,8 @@
             </Badge>
             <Badge
               v-else
-              :variant="getUpstreamStream(record) ? 'secondary' : 'outline'"
-              :class="getUpstreamStream(record)
+              :variant="streamBadgeVariant(getUpstreamStream(record))"
+              :class="(streamBadgeVariant(getUpstreamStream(record)) === 'secondary')
                 ? 'whitespace-nowrap text-[10px] px-1.5 h-4 leading-4 inline-flex items-center'
                 : 'whitespace-nowrap border-border/60 text-muted-foreground text-[10px] px-1.5 h-4 leading-4 inline-flex items-center'"
             >
@@ -624,7 +624,7 @@
                 <Badge
                   v-if="getFastBadge(record)"
                   variant="outline"
-                  class="h-4 rounded-full border-amber-500/30 bg-amber-500/5 px-1.5 text-[10px] leading-4 text-amber-600 dark:text-amber-400 flex-shrink-0"
+                  class="h-4 rounded-full px-1.5 text-[10px] leading-4 text-foreground flex-shrink-0"
                   :title="getFastBadgeTitle(record)"
                 >
                   fast
@@ -648,7 +648,7 @@
               <Badge
                 v-if="getFastBadge(record)"
                 variant="outline"
-                class="h-4 rounded-full px-1.5 text-[10px] leading-4 flex-shrink-0"
+                class="h-4 rounded-full px-1.5 text-[10px] leading-4 text-foreground flex-shrink-0"
                 :title="getFastBadgeTitle(record)"
               >
                 fast
@@ -760,8 +760,8 @@
             </Badge>
             <Badge
               v-else-if="getStreamModeSegments(record).hasConversion"
-              :variant="getStreamModeSegments(record).client === '流式' ? 'secondary' : 'outline'"
-              :class="getStreamModeSegments(record).client === '流式'
+              :variant="streamBadgeVariant(getStreamModeSegments(record).client === '流式')"
+              :class="(streamBadgeVariant(getStreamModeSegments(record).client === '流式') === 'secondary')
                 ? 'whitespace-nowrap inline-flex items-center gap-1'
                 : 'whitespace-nowrap border-border/60 text-muted-foreground inline-flex items-center gap-1'"
             >
@@ -771,8 +771,8 @@
             </Badge>
             <Badge
               v-else
-              :variant="getUpstreamStream(record) ? 'secondary' : 'outline'"
-              :class="getUpstreamStream(record)
+              :variant="streamBadgeVariant(getUpstreamStream(record))"
+              :class="(streamBadgeVariant(getUpstreamStream(record)) === 'secondary')
                 ? 'whitespace-nowrap'
                 : 'whitespace-nowrap border-border/60 text-muted-foreground'"
             >
@@ -943,6 +943,7 @@ import {
   resolveUsageStreamLabelSegments
 } from '../utils/status'
 import { useRowClick } from '@/composables/useRowClick'
+import { useDarkMode } from '@/composables/useDarkMode'
 import { API_FORMAT_ORDER, formatApiFormat } from '@/api/endpoints/types/api-format'
 import { formatClientFamily } from '@/features/usage/utils/clientFamily'
 import type { DateRangeParams, UsageRecord } from '../types'
@@ -1253,6 +1254,15 @@ watch(localSearch, (value) => {
 
 // 使用复用的行点击逻辑
 const { handleMouseDown, shouldTriggerRowClick } = useRowClick()
+const { isDark } = useDarkMode()
+
+// 暗色模式下交换"流式"与"标准"徽章的填充/描边样式
+function streamBadgeVariant(isStream: boolean): 'secondary' | 'outline' {
+  if (isDark.value) {
+    return isStream ? 'outline' : 'secondary'
+  }
+  return isStream ? 'secondary' : 'outline'
+}
 
 function handleRowMouseDown(event: MouseEvent, id: string) {
   handleMouseDown(event)
