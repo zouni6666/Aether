@@ -24,6 +24,7 @@ use aether_data::repository::auth::{
 use aether_data::repository::auth_modules::{
     InMemoryAuthModuleReadRepository, StoredLdapModuleConfig, StoredOAuthProviderModuleConfig,
 };
+use aether_data::repository::billing::InMemoryBillingReadRepository;
 use aether_data::repository::management_tokens::{
     InMemoryManagementTokenRepository, StoredManagementToken, StoredManagementTokenUserSummary,
     StoredManagementTokenWithUser,
@@ -35,6 +36,10 @@ use aether_data::repository::users::{
 };
 use aether_data::repository::wallet::{
     InMemoryWalletRepository, StoredWalletSnapshot, WalletWriteRepository,
+};
+use aether_data_contracts::repository::billing::{
+    AdminBillingMutationOutcome, BillingPlanWriteInput, BillingReadRepository,
+    PaymentGatewayConfigWriteInput,
 };
 use aether_data_contracts::repository::global_models::StoredProviderActiveGlobalModel;
 use aether_data_contracts::repository::provider_catalog::ProviderCatalogReadRepository;
@@ -3872,6 +3877,209 @@ async fn gateway_creates_wallet_recharge_orders_locally_without_proxying_upstrea
     assert_eq!(
         detail_payload["order"]["gateway_response"]["gateway"],
         "alipay"
+    );
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_reuses_pending_billing_plan_checkout_order_without_proxying_upstream() {
+    let now = Utc::now();
+    let user = StoredUserAuthRecord::new(
+        "user-billing-checkout-reuse".to_string(),
+        Some("billing-checkout-reuse@example.com".to_string()),
+        true,
+        "billing_checkout_reuse_user".to_string(),
+        Some("$2y$10$.OBQfixAECpsb8V/VS3csOMf00x2E/jD/gnud20t6RG0yiQosyOZ2".to_string()),
+        "user".to_string(),
+        "local".to_string(),
+        Some(json!(["openai"])),
+        Some(json!(["openai:chat"])),
+        Some(json!(["gpt-5"])),
+        true,
+        false,
+        Some(now),
+        Some(now),
+    )
+    .expect("auth user should build");
+    let wallet = StoredWalletSnapshot::new(
+        "wallet-billing-checkout-reuse".to_string(),
+        Some(user.id.clone()),
+        None,
+        12.5,
+        3.0,
+        "finite".to_string(),
+        "USD".to_string(),
+        "active".to_string(),
+        20.0,
+        4.5,
+        0.0,
+        0.0,
+        now.timestamp(),
+    )
+    .expect("wallet should build");
+    let access_token = build_test_auth_token(
+        "access",
+        serde_json::Map::from_iter([
+            ("user_id".to_string(), json!(user.id.clone())),
+            ("role".to_string(), json!(user.role.clone())),
+            (
+                "created_at".to_string(),
+                json!(user.created_at.map(|value| value.to_rfc3339())),
+            ),
+            (
+                "session_id".to_string(),
+                json!("session-billing-checkout-reuse"),
+            ),
+        ]),
+        now + chrono::Duration::hours(1),
+    );
+    let billing_repository = Arc::new(InMemoryBillingReadRepository::seed(Vec::new()));
+    let encrypted_key = encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "epay-secret")
+        .expect("merchant key should encrypt");
+    let AdminBillingMutationOutcome::Applied(_) = billing_repository
+        .upsert_payment_gateway_config(&PaymentGatewayConfigWriteInput {
+            provider: "epay".to_string(),
+            enabled: true,
+            endpoint_url: "https://pay.example.com/".to_string(),
+            callback_base_url: Some("https://app.example.com".to_string()),
+            merchant_id: "merchant-1".to_string(),
+            merchant_key_encrypted: Some(encrypted_key),
+            preserve_existing_secret: false,
+            pay_currency: "CNY".to_string(),
+            usd_exchange_rate: 7.25,
+            min_recharge_usd: 1.0,
+            channels_json: json!([
+                {
+                    "channel": "alipay",
+                    "display_name": "支付宝"
+                }
+            ]),
+        })
+        .await
+        .expect("gateway config should create")
+    else {
+        panic!("gateway config should apply");
+    };
+    let plan = match billing_repository
+        .create_billing_plan(&BillingPlanWriteInput {
+            title: "每日额度月卡".to_string(),
+            description: Some("测试套餐".to_string()),
+            price_amount: 100.0,
+            price_currency: "CNY".to_string(),
+            duration_unit: "month".to_string(),
+            duration_value: 1,
+            enabled: true,
+            sort_order: 1,
+            max_active_per_user: 1,
+            purchase_limit_scope: "active_period".to_string(),
+            entitlements_json: json!([
+                {
+                    "type": "daily_quota",
+                    "daily_quota_usd": 50.0,
+                    "reset_timezone": "Asia/Shanghai",
+                    "allow_wallet_overage": false
+                }
+            ]),
+        })
+        .await
+        .expect("billing plan should create")
+    {
+        AdminBillingMutationOutcome::Applied(plan) => plan,
+        other => panic!("billing plan should apply, got {other:?}"),
+    };
+
+    let upstream_hits = Arc::new(Mutex::new(0usize));
+    let upstream_hits_clone = Arc::clone(&upstream_hits);
+    let upstream = Router::new().route(
+        "/{*path}",
+        any(move |_request: Request| {
+            let upstream_hits_inner = Arc::clone(&upstream_hits_clone);
+            async move {
+                *upstream_hits_inner.lock().expect("mutex should lock") += 1;
+                (StatusCode::OK, Body::from("proxied"))
+            }
+        }),
+    );
+
+    let (_upstream_url, upstream_handle) = start_server(upstream).await;
+    let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![user]));
+    let wallet_repository = Arc::new(InMemoryWalletRepository::seed(vec![wallet]));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(GatewayDataState::with_user_billing_and_wallet_for_tests(
+            user_repository,
+            billing_repository,
+            wallet_repository,
+        ))
+        .with_auth_sessions_for_tests([sample_auth_session(
+            "user-billing-checkout-reuse",
+            "session-billing-checkout-reuse",
+            "device-billing-checkout-reuse",
+            "refresh-token-placeholder",
+            now,
+        )]);
+    let gateway = build_router_with_state(state);
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let client = reqwest::Client::new();
+    let checkout_body = json!({
+        "payment_provider": "epay",
+        "payment_method": "epay",
+        "payment_channel": "alipay",
+    });
+    let first_response = client
+        .post(format!(
+            "{gateway_url}/api/billing/plans/{}/checkout",
+            plan.id
+        ))
+        .header("authorization", format!("Bearer {access_token}"))
+        .header("x-client-device-id", "device-billing-checkout-reuse")
+        .header("user-agent", "AetherTest/1.0")
+        .json(&checkout_body)
+        .send()
+        .await
+        .expect("first checkout request should succeed");
+    assert_eq!(first_response.status(), StatusCode::OK);
+    let first_payload: serde_json::Value = first_response
+        .json()
+        .await
+        .expect("first checkout json should parse");
+    let first_order_id = first_payload["order"]["id"]
+        .as_str()
+        .expect("first order id should exist")
+        .to_string();
+    assert_eq!(first_payload["order"]["status"], "pending");
+    assert_eq!(first_payload["order"]["product_id"], plan.id);
+    assert_eq!(
+        first_payload["reused_pending_order"],
+        serde_json::Value::Null
+    );
+
+    let second_response = client
+        .post(format!(
+            "{gateway_url}/api/billing/plans/{}/checkout",
+            plan.id
+        ))
+        .header("authorization", format!("Bearer {access_token}"))
+        .header("x-client-device-id", "device-billing-checkout-reuse")
+        .header("user-agent", "AetherTest/1.0")
+        .json(&checkout_body)
+        .send()
+        .await
+        .expect("second checkout request should succeed");
+    assert_eq!(second_response.status(), StatusCode::OK);
+    let second_payload: serde_json::Value = second_response
+        .json()
+        .await
+        .expect("second checkout json should parse");
+    assert_eq!(second_payload["order"]["id"], first_order_id);
+    assert_eq!(second_payload["reused_pending_order"], true);
+    assert_eq!(
+        second_payload["payment_instructions"],
+        first_payload["payment_instructions"]
     );
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 

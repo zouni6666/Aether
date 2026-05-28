@@ -715,6 +715,21 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn find_pending_plan_purchase_order_by_user_id(
+        &self,
+        user_id: &str,
+        product_id: &str,
+    ) -> Result<Option<StoredAdminPaymentOrder>, DataLayerError> {
+        match &self.wallet_reader {
+            Some(repository) => {
+                repository
+                    .find_pending_plan_purchase_order_by_user_id(user_id, product_id)
+                    .await
+            }
+            None => Ok(None),
+        }
+    }
+
     pub(crate) async fn find_wallet_refund(
         &self,
         wallet_id: &str,

@@ -138,6 +138,18 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
+    pub(crate) async fn find_pending_plan_purchase_order_by_user_id(
+        &self,
+        user_id: &str,
+        product_id: &str,
+    ) -> Result<Option<aether_data::repository::wallet::StoredAdminPaymentOrder>, GatewayError>
+    {
+        self.data
+            .find_pending_plan_purchase_order_by_user_id(user_id, product_id)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn find_wallet_refund(
         &self,
         wallet_id: &str,

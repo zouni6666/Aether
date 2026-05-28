@@ -783,6 +783,32 @@ LIMIT 1
         row.as_ref().map(map_payment_order_row).transpose()
     }
 
+    async fn find_pending_plan_purchase_order_by_user_id(
+        &self,
+        user_id: &str,
+        product_id: &str,
+    ) -> Result<Option<StoredAdminPaymentOrder>, DataLayerError> {
+        let sql = payment_order_select_sql(
+            r#"
+WHERE user_id = ?
+  AND product_id = ?
+  AND order_kind = 'plan_purchase'
+  AND status = 'pending'
+  AND expires_at > ?
+ORDER BY created_at DESC
+LIMIT 1
+"#,
+        );
+        let row = sqlx::query(&sql)
+            .bind(user_id)
+            .bind(product_id)
+            .bind(current_unix_secs_i64())
+            .fetch_optional(&self.pool)
+            .await
+            .map_sql_err()?;
+        row.as_ref().map(map_payment_order_row).transpose()
+    }
+
     async fn find_wallet_refund(
         &self,
         wallet_id: &str,
@@ -5458,6 +5484,175 @@ INSERT INTO billing_plans (
             .await
             .expect("wallet balance should query");
         assert_eq!(wallet_balance, 0.0);
+    }
+
+    #[tokio::test]
+    async fn sqlite_finds_reusable_pending_plan_purchase_order() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool should connect");
+        run_sqlite_migrations(&pool)
+            .await
+            .expect("sqlite migrations should run");
+
+        let repository = SqliteWalletReadRepository::new(pool);
+        sqlx::query(
+            "INSERT INTO users (id, username, email, auth_source, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind("user-pending-plan-1")
+        .bind("Pending Buyer")
+        .bind("pending-plan@example.com")
+        .bind("local")
+        .bind(1_i64)
+        .bind(1_i64)
+        .execute(repository.pool())
+        .await
+        .expect("user should seed");
+
+        let _wallet_order = match repository
+            .create_wallet_recharge_order(CreateWalletRechargeOrderInput {
+                preferred_wallet_id: Some("wallet-pending-plan-1".to_string()),
+                user_id: "user-pending-plan-1".to_string(),
+                amount_usd: 1.0,
+                pay_amount: Some(1.0),
+                pay_currency: Some("USD".to_string()),
+                exchange_rate: Some(1.0),
+                payment_method: "bootstrap".to_string(),
+                payment_provider: None,
+                payment_channel: None,
+                gateway_order_id: "gateway-bootstrap-pending-plan-1".to_string(),
+                gateway_response: json!({ "bootstrap": true }),
+                order_no: "order-bootstrap-pending-plan-1".to_string(),
+                expires_at_unix_secs: 4_102_444_800,
+            })
+            .await
+            .expect("wallet should be created")
+        {
+            CreateWalletRechargeOrderOutcome::Created(order) => order,
+            CreateWalletRechargeOrderOutcome::WalletInactive => {
+                panic!("new wallet should be active")
+            }
+        };
+
+        let plan_snapshot = json!({
+            "id": "pending-plan",
+            "title": "每日额度月卡",
+            "duration_unit": "month",
+            "duration_value": 1,
+            "max_active_per_user": 1,
+            "purchase_limit_scope": "active_period",
+            "entitlements": [
+                {
+                    "type": "daily_quota",
+                    "daily_quota_usd": 50.0,
+                    "reset_timezone": "Asia/Shanghai",
+                    "allow_wallet_overage": false
+                }
+            ]
+        });
+        let pending_order = match repository
+            .create_plan_purchase_order(CreatePlanPurchaseOrderInput {
+                preferred_wallet_id: None,
+                user_id: "user-pending-plan-1".to_string(),
+                amount_usd: 13.8,
+                pay_amount: 100.0,
+                pay_currency: "CNY".to_string(),
+                exchange_rate: 7.24637681,
+                payment_method: "alipay".to_string(),
+                payment_provider: Some("epay".to_string()),
+                payment_channel: Some("alipay".to_string()),
+                gateway_order_id: "gateway-pending-plan-1".to_string(),
+                gateway_response: json!({ "checkout": true }),
+                order_no: "order-pending-plan-1".to_string(),
+                product_id: "pending-plan".to_string(),
+                product_snapshot: plan_snapshot.clone(),
+                expires_at_unix_secs: 4_102_444_800,
+            })
+            .await
+            .expect("pending plan order should create")
+        {
+            CreatePlanPurchaseOrderOutcome::Created(order) => order,
+            other => panic!("pending plan order should be created, got {other:?}"),
+        };
+        let now = chrono::Utc::now().timestamp().max(0);
+        for (id, order_no, status, product_id, user_id, expires_at, created_at) in [
+            (
+                "expired-pending-plan-order",
+                "order-expired-pending-plan",
+                "pending",
+                "pending-plan",
+                "user-pending-plan-1",
+                now - 10,
+                now + 10,
+            ),
+            (
+                "credited-pending-plan-order",
+                "order-credited-pending-plan",
+                "credited",
+                "pending-plan",
+                "user-pending-plan-1",
+                now + 3_600,
+                now + 20,
+            ),
+            (
+                "other-user-pending-plan-order",
+                "order-other-user-pending-plan",
+                "pending",
+                "pending-plan",
+                "other-user",
+                now + 3_600,
+                now + 30,
+            ),
+        ] {
+            sqlx::query(
+                r#"
+INSERT INTO payment_orders (
+  id, order_no, wallet_id, user_id, amount_usd, pay_amount, pay_currency,
+  exchange_rate, refunded_amount_usd, refundable_amount_usd, payment_method,
+  payment_provider, payment_channel, order_kind, product_id, product_snapshot,
+  fulfillment_status, gateway_order_id, gateway_response, status, created_at, expires_at
+) VALUES (?, ?, ?, ?, 13.8, 100.0, 'CNY', 7.24637681, 0, 0, 'alipay',
+  'epay', 'alipay', 'plan_purchase', ?, ?, 'pending', ?, ?, ?, ?, ?)
+                "#,
+            )
+            .bind(id)
+            .bind(order_no)
+            .bind("wallet-pending-plan-1")
+            .bind(user_id)
+            .bind(product_id)
+            .bind(plan_snapshot.to_string())
+            .bind(format!("gateway-{id}"))
+            .bind(json!({ "checkout": id }).to_string())
+            .bind(status)
+            .bind(created_at)
+            .bind(expires_at)
+            .execute(repository.pool())
+            .await
+            .expect("extra payment order should seed");
+        }
+
+        let found = repository
+            .find_pending_plan_purchase_order_by_user_id("user-pending-plan-1", "pending-plan")
+            .await
+            .expect("pending plan lookup should run")
+            .expect("pending plan order should be found");
+        assert_eq!(found.id, pending_order.id);
+        assert_eq!(
+            repository
+                .find_pending_plan_purchase_order_by_user_id("user-pending-plan-1", "missing-plan")
+                .await
+                .expect("missing plan lookup should run"),
+            None
+        );
+        assert_eq!(
+            repository
+                .find_pending_plan_purchase_order_by_user_id("missing-user", "pending-plan")
+                .await
+                .expect("missing user lookup should run"),
+            None
+        );
     }
 
     #[tokio::test]
