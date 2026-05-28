@@ -439,6 +439,7 @@ fn embedding_response_namespace_for_api_format(api_format: &str) -> Option<&'sta
         "openai:embedding" => Some("openai"),
         "jina:embedding" => Some("jina"),
         "gemini:embedding" => Some("gemini"),
+        "aliyun:multimodal_embedding" => Some("aliyun"),
         _ => None,
     }
 }

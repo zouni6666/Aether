@@ -74,6 +74,7 @@ pub(super) fn provider_query_standard_test_unsupported_reason(
         | "openai:embedding"
         | "jina:embedding"
         | "doubao:embedding"
+        | "aliyun:multimodal_embedding"
         | "openai:rerank"
         | "jina:rerank" => {
             crate::provider_transport::policy::local_standard_transport_unsupported_reason_with_network(
@@ -253,6 +254,7 @@ pub(super) fn provider_query_test_adapter_for_provider_api_format(
             | "gemini:embedding"
             | "jina:embedding"
             | "doubao:embedding"
+            | "aliyun:multimodal_embedding"
             | "openai:rerank"
             | "jina:rerank"
     ) {
@@ -352,6 +354,7 @@ pub(super) fn provider_query_transport_supports_model_test_execution(
         | "openai:embedding"
         | "jina:embedding"
         | "doubao:embedding"
+        | "aliyun:multimodal_embedding"
         | "openai:rerank"
         | "jina:rerank" => {
             crate::provider_transport::policy::supports_local_standard_transport_with_network(

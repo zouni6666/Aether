@@ -1452,6 +1452,14 @@ async fn gateway_handles_admin_system_api_formats_locally_with_trusted_admin_pri
     assert!(formats.iter().any(|item| item["value"] == "jina:embedding"));
     assert!(formats.iter().any(|item| item["value"] == "jina:rerank"));
     assert!(formats.iter().any(|item| item["value"] == "gemini:video"));
+    let aliyun_embedding = formats
+        .iter()
+        .find(|item| item["value"] == "aliyun:multimodal_embedding")
+        .expect("aliyun multimodal embedding format should exist");
+    assert_eq!(
+        aliyun_embedding["default_path"],
+        "/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding"
+    );
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

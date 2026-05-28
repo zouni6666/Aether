@@ -113,6 +113,7 @@ mod tests {
                 dimensions: None,
                 task: None,
                 user: None,
+                parameters: None,
                 extensions: BTreeMap::new(),
             }),
             ..CanonicalRequest::default()

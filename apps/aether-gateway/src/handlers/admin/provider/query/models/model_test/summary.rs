@@ -138,6 +138,12 @@ fn provider_query_endpoint_route_payload(
             "embeddings",
             "openai_batch",
         ),
+        "aliyun:multimodal_embedding" => (
+            "Aliyun DashScope",
+            "dashscope_native",
+            "multimodal-embedding",
+            "dashscope_contents",
+        ),
         "openai:chat" if is_vertex && is_openai_compat => (
             "Vertex AI OpenAI-compatible",
             "openai_compatible",

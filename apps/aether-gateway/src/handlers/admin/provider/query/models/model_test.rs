@@ -597,6 +597,22 @@ fn provider_query_build_test_request_body_for_api_format(
     let message = provider_query_extract_message(payload)
         .unwrap_or_else(|| DEFAULT_PROVIDER_QUERY_TEST_MESSAGE.to_string());
     match client_api_format.as_str() {
+        "openai:embedding" => json!({
+            "model": model,
+            "input": message,
+        }),
+        "openai:rerank" => json!({
+            "model": model,
+            "query": message,
+            "documents": [
+                "apple",
+                "banana",
+                "fruit",
+                "vegetable"
+            ],
+            "return_documents": true,
+            "top_n": 4,
+        }),
         "openai:responses" | "openai:responses:compact" => json!({
             "model": model,
             "input": message,
@@ -649,6 +665,21 @@ fn provider_query_insert_default_test_conversation(
     let message = provider_query_extract_message(payload)
         .unwrap_or_else(|| DEFAULT_PROVIDER_QUERY_TEST_MESSAGE.to_string());
     match client_api_format {
+        "openai:embedding" => {
+            object.insert("input".to_string(), Value::String(message));
+        }
+        "openai:rerank" => {
+            object.insert("query".to_string(), Value::String(message));
+            object
+                .entry("documents".to_string())
+                .or_insert_with(|| json!(["apple", "banana", "fruit", "vegetable"]));
+            object
+                .entry("return_documents".to_string())
+                .or_insert(Value::Bool(true));
+            object
+                .entry("top_n".to_string())
+                .or_insert_with(|| Value::from(4_u64));
+        }
         "openai:responses" | "openai:responses:compact" => {
             object.insert("input".to_string(), Value::String(message));
         }
@@ -2914,8 +2945,13 @@ async fn provider_query_execute_standard_test_candidate(
             );
             provider_request_body
         }
-        "openai:embedding" | "gemini:embedding" | "jina:embedding" | "doubao:embedding"
-        | "openai:rerank" | "jina:rerank" => {
+        "openai:embedding"
+        | "gemini:embedding"
+        | "jina:embedding"
+        | "doubao:embedding"
+        | "aliyun:multimodal_embedding"
+        | "openai:rerank"
+        | "jina:rerank" => {
             let Some(mut provider_request_body) =
                 crate::ai_serving::build_standard_request_body_with_model_directives_and_request_headers(
                     &request_body,
@@ -2982,6 +3018,7 @@ async fn provider_query_execute_standard_test_candidate(
             | "gemini:embedding"
             | "jina:embedding"
             | "doubao:embedding"
+            | "aliyun:multimodal_embedding"
             | "openai:rerank"
             | "jina:rerank" => state.resolve_local_oauth_header_auth(&transport).await?,
             _ => None,
@@ -2993,6 +3030,7 @@ async fn provider_query_execute_standard_test_candidate(
         | "openai:embedding"
         | "jina:embedding"
         | "doubao:embedding"
+        | "aliyun:multimodal_embedding"
         | "openai:rerank"
         | "jina:rerank" => {
             crate::provider_transport::auth::resolve_local_openai_bearer_auth(&transport)

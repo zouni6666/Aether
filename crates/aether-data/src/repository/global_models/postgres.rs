@@ -71,6 +71,7 @@ SELECT
     OR COALESCE(gm.config->'api_formats' @> '["jina:embedding"]'::jsonb, FALSE)
     OR COALESCE(gm.config->'api_formats' @> '["gemini:embedding"]'::jsonb, FALSE)
     OR COALESCE(gm.config->'api_formats' @> '["doubao:embedding"]'::jsonb, FALSE)
+    OR COALESCE(gm.config->'api_formats' @> '["aliyun:multimodal_embedding"]'::jsonb, FALSE)
     OR LOWER(COALESCE(m.config->>'embedding', 'false')) = 'true'
     OR LOWER(COALESCE(m.config->>'model_type', '')) = 'embedding'
     OR LOWER(COALESCE(m.config->>'type', '')) = 'embedding'
@@ -80,6 +81,7 @@ SELECT
     OR COALESCE(m.config::jsonb->'api_formats' @> '["jina:embedding"]'::jsonb, FALSE)
     OR COALESCE(m.config::jsonb->'api_formats' @> '["gemini:embedding"]'::jsonb, FALSE)
     OR COALESCE(m.config::jsonb->'api_formats' @> '["doubao:embedding"]'::jsonb, FALSE)
+    OR COALESCE(m.config::jsonb->'api_formats' @> '["aliyun:multimodal_embedding"]'::jsonb, FALSE)
   ) AS supports_embedding,
   m.is_active
 FROM models m

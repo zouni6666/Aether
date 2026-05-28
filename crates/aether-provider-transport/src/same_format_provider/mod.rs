@@ -159,6 +159,14 @@ pub fn build_same_format_provider_request_body(
         );
     }
 
+    if embedding_multimodal_input_requires_aliyun_provider(
+        input.client_api_format,
+        input.provider_api_format,
+        input.body_json,
+    ) {
+        return None;
+    }
+
     let mut provider_request_body = if aether_ai_formats::api_format_alias_matches(
         input.client_api_format,
         input.provider_api_format,
@@ -233,6 +241,31 @@ pub fn build_same_format_provider_request_body(
         require_body_stream_field,
     );
     Some(provider_request_body)
+}
+
+fn embedding_multimodal_input_requires_aliyun_provider(
+    client_api_format: &str,
+    provider_api_format: &str,
+    body_json: &Value,
+) -> bool {
+    aether_ai_formats::is_embedding_api_format(client_api_format)
+        && embedding_input_is_multimodal(body_json.get("input"))
+        && aether_ai_formats::normalize_api_format_alias(provider_api_format)
+            != "aliyun:multimodal_embedding"
+}
+
+fn embedding_input_is_multimodal(value: Option<&Value>) -> bool {
+    value
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty() && items.iter().all(embedding_content_is_multimodal))
+}
+
+fn embedding_content_is_multimodal(value: &Value) -> bool {
+    value.as_object().is_some_and(|object| {
+        ["text", "image", "video", "multi_images"]
+            .iter()
+            .any(|key| object.contains_key(*key))
+    })
 }
 
 fn strip_gemini_function_response_ids(value: &mut Value) {
@@ -726,6 +759,33 @@ mod tests {
 
         assert_eq!(body.get("model"), Some(&json!("upstream-model")));
         assert_eq!(body.get("stream"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn same_format_embedding_body_rejects_multimodal_for_openai_like_provider() {
+        let body = build_same_format_provider_request_body(SameFormatProviderRequestBodyInput {
+            body_json: &json!({
+                "model": "qwen3-vl-embedding",
+                "input": [
+                    {"text": "white running shoes"},
+                    {"image": "https://example.com/shoe.png"}
+                ]
+            }),
+            mapped_model: "openai-qwen-fallback",
+            client_api_format: "openai:embedding",
+            provider_api_format: "openai:embedding",
+            source_model: Some("qwen3-vl-embedding"),
+            family: SameFormatProviderFamily::Standard,
+            body_rules: None,
+            request_headers: None,
+            upstream_is_stream: false,
+            force_body_stream_field: false,
+            kiro_auth_config: None,
+            is_claude_code: false,
+            enable_model_directives: false,
+        });
+
+        assert!(body.is_none());
     }
 
     #[test]

@@ -184,7 +184,11 @@ pub fn request_pair_transport_unsupported_reason(
                 )
             }
         }
-        "openai:embedding" | "jina:embedding" | "doubao:embedding" | "openai:rerank"
+        "openai:embedding"
+        | "jina:embedding"
+        | "doubao:embedding"
+        | "aliyun:multimodal_embedding"
+        | "openai:rerank"
         | "jina:rerank" => local_standard_transport_unsupported_reason_with_network(
             transport,
             provider_api_format.as_str(),
@@ -221,6 +225,7 @@ fn request_direct_auth_for_provider_format(
         | "openai:embedding"
         | "jina:embedding"
         | "doubao:embedding"
+        | "aliyun:multimodal_embedding"
         | "openai:rerank"
         | "jina:rerank" => resolve_local_openai_bearer_auth(transport),
         "gemini:generate_content" | "gemini:embedding" => {

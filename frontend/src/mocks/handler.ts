@@ -1622,7 +1622,7 @@ function generateMockModelsForProvider(providerId: string) {
   const hasClaude = provider.api_formats.some(f => f.includes('claude'))
   const hasOpenAI = provider.api_formats.some(f => f.includes('openai'))
   const hasGemini = provider.api_formats.some(f => f.includes('gemini'))
-  const hasEmbedding = provider.api_formats.some(f => f.endsWith(':embedding'))
+  const hasEmbedding = provider.api_formats.some(f => f.endsWith(':embedding') || f === 'aliyun:multimodal_embedding')
   const hasRerank = provider.api_formats.some(f => f.endsWith(':rerank'))
 
   const models: Record<string, unknown>[] = []
