@@ -277,6 +277,30 @@ fn admin_usage_matches_client_family(
     admin_usage_client_family(item).is_some_and(|value| value.eq_ignore_ascii_case(client_family))
 }
 
+fn admin_usage_bool_query_param(query: Option<&str>, name: &str) -> bool {
+    query_param_value(query, name)
+        .as_deref()
+        .map(str::trim)
+        .map(|value| {
+            value == "1"
+                || value.eq_ignore_ascii_case("true")
+                || value.eq_ignore_ascii_case("yes")
+                || value.eq_ignore_ascii_case("on")
+        })
+        .unwrap_or(false)
+}
+
+fn admin_usage_is_unknown_label(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "unknown" | "unknow"
+    )
+}
+
+fn admin_usage_has_unknown_model_or_provider(item: &StoredRequestUsageAudit) -> bool {
+    admin_usage_is_unknown_label(&item.model) || admin_usage_is_unknown_label(&item.provider_name)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_admin_usage_records_response_with_attempt_flags(
     items: &[StoredRequestUsageAudit],
@@ -615,6 +639,8 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
             let search = query_param_value(query, "search");
             let username_filter = query_param_value(query, "username");
             let client_family_filter = query_param_value(query, "client_family");
+            let hide_unknown_records = admin_usage_bool_query_param(query, "hide_unknown")
+                || admin_usage_bool_query_param(query, "hide_unknown_records");
             let limit = match admin_usage_parse_limit(query) {
                 Ok(value) => value,
                 Err(detail) => return Ok(Some(admin_usage_bad_request_response(detail))),
@@ -652,7 +678,8 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
             let active_client_family_filter = client_family_filter
                 .as_deref()
                 .filter(|value| !value.trim().is_empty());
-            let (usage, total) = if attempt_status_filter.is_some()
+            let (usage, total) = if hide_unknown_records
+                || attempt_status_filter.is_some()
                 || active_client_family_filter.is_some()
             {
                 let mut usage = state.list_usage_audits(&base_query).await?;
@@ -692,6 +719,8 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
                             request_candidate_reader_available,
                         )
                     }) && admin_usage_matches_client_family(item, active_client_family_filter)
+                        && (!hide_unknown_records
+                            || !admin_usage_has_unknown_model_or_provider(item))
                 });
                 sort_usage_newest_first(&mut usage);
                 let total = usage.len();

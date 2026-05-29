@@ -847,6 +847,7 @@ pub(super) async fn handle_users_me_usage_get(
                 created_from_unix_secs,
                 created_until_unix_secs,
                 user_id: Some(auth.user.id.clone()),
+                provider_name: None,
                 group_by: UsageBreakdownGroupBy::Model,
             })
             .await
@@ -866,6 +867,7 @@ pub(super) async fn handle_users_me_usage_get(
                     created_from_unix_secs,
                     created_until_unix_secs,
                     user_id: Some(auth.user.id.clone()),
+                    provider_name: None,
                     group_by: UsageBreakdownGroupBy::Provider,
                 })
                 .await
@@ -885,6 +887,7 @@ pub(super) async fn handle_users_me_usage_get(
                 created_from_unix_secs,
                 created_until_unix_secs,
                 user_id: Some(auth.user.id.clone()),
+                provider_name: None,
                 group_by: UsageBreakdownGroupBy::ApiFormat,
             })
             .await

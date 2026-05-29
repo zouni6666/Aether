@@ -257,6 +257,46 @@ describe('HorizontalRequestTimeline', () => {
     expect(nodeDots[2].classList.contains('status-pending')).toBe(true)
   })
 
+  it('keeps successful runtime pool key visible when only pool_key_index is recorded', async () => {
+    const trace = buildTrace([
+      buildCandidate({
+        id: 'pool-skipped',
+        provider_id: 'provider-pool',
+        provider_name: 'CodexFree2',
+        key_id: 'pool-group',
+        key_name: 'CodexFree2',
+        candidate_index: 0,
+        status: 'skipped',
+        started_at: undefined,
+        finished_at: undefined,
+        extra_data: { pool_group_id: 'provider-pool' },
+      }),
+      buildCandidate({
+        id: 'pool-success',
+        provider_id: 'provider-pool',
+        provider_name: 'CodexFree2',
+        key_id: 'key-success',
+        key_name: 'Success Key',
+        candidate_index: 1,
+        status: 'success',
+        extra_data: { pool_key_index: 0 },
+      }),
+    ])
+
+    const root = mountTimeline(trace)
+    await nextTick()
+
+    const labels = [...root.querySelectorAll<HTMLElement>('.node-label')]
+      .map(label => label.textContent?.trim())
+    expect(labels).toEqual(['CodexFree2'])
+    expect(root.querySelector<HTMLElement>('.node-dot')?.classList.contains('status-success'))
+      .toBe(true)
+    expect([...root.querySelectorAll<HTMLButtonElement>('.sub-dot')]
+      .map(dot => dot.getAttribute('title'))).toEqual([
+      '#1 · Success Key · 成功',
+    ])
+  })
+
   it('uses candidate terminal status for node colors instead of overriding with HTTP code', async () => {
     const trace = buildTrace([
       buildCandidate({

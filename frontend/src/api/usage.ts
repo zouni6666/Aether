@@ -472,6 +472,7 @@ export const usageApi = {
     provider?: string
     api_format?: string  // API 格式筛选（如 openai:chat, claude:messages）
     status?: string // 'stream' | 'standard' | 'error'
+    hide_unknown?: boolean
     limit?: number
     offset?: number
   }): Promise<{

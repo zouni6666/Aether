@@ -9,6 +9,7 @@ use crate::auth::{
 };
 use crate::claude_code::build_claude_code_passthrough_headers;
 use crate::claude_code::local_claude_code_transport_unsupported_reason_with_network;
+use crate::gemini_cli::is_gemini_cli_provider_transport;
 use crate::grok::{is_grok_provider_transport, resolve_grok_session_auth};
 use crate::kiro::{
     build_kiro_provider_headers, build_kiro_provider_request_body, is_kiro_provider_transport,
@@ -48,6 +49,7 @@ pub struct SameFormatProviderRequestBehaviorParams<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SameFormatProviderRequestBehavior {
     pub is_antigravity: bool,
+    pub is_gemini_cli: bool,
     pub is_claude_code: bool,
     pub is_vertex: bool,
     pub is_kiro: bool,
@@ -103,6 +105,7 @@ pub fn classify_same_format_provider_request_behavior(
     params: SameFormatProviderRequestBehaviorParams<'_>,
 ) -> SameFormatProviderRequestBehavior {
     let is_antigravity = is_antigravity_provider_transport(transport);
+    let is_gemini_cli = is_gemini_cli_provider_transport(transport);
     let is_claude_code = transport
         .provider
         .provider_type
@@ -110,11 +113,17 @@ pub fn classify_same_format_provider_request_behavior(
         .eq_ignore_ascii_case("claude_code");
     let is_vertex = is_vertex_transport_context(transport);
     let is_kiro = is_kiro_provider_transport(transport);
+    let gemini_cli_requires_upstream_streaming = is_gemini_cli
+        && crate::gemini_cli::gemini_cli_v1internal_requires_upstream_streaming(
+            params.provider_api_format,
+            params.require_streaming,
+        );
     let upstream_is_stream = aether_ai_formats::resolve_upstream_is_stream_from_endpoint_config(
         transport.endpoint.config.as_ref(),
         params.require_streaming,
         is_kiro
             || is_antigravity
+            || gemini_cli_requires_upstream_streaming
             || aether_ai_formats::api::force_upstream_streaming_for_provider(
                 transport.provider.provider_type.as_str(),
                 params.provider_api_format,
@@ -125,7 +134,7 @@ pub fn classify_same_format_provider_request_behavior(
     );
     let report_kind = if is_kiro && !params.require_streaming {
         "claude_cli_sync_finalize"
-    } else if is_antigravity && !params.require_streaming {
+    } else if (is_gemini_cli || is_antigravity) && !params.require_streaming {
         match params.report_kind {
             "gemini_chat_sync_success" => "gemini_chat_sync_finalize",
             "gemini_cli_sync_success" => "gemini_cli_sync_finalize",
@@ -137,6 +146,7 @@ pub fn classify_same_format_provider_request_behavior(
 
     SameFormatProviderRequestBehavior {
         is_antigravity,
+        is_gemini_cli,
         is_claude_code,
         is_vertex,
         is_kiro,
@@ -404,6 +414,7 @@ pub fn same_format_provider_transport_unsupported_reason_for_trace(
     );
     if !behavior.is_antigravity
         && !behavior.is_claude_code
+        && !behavior.is_gemini_cli
         && !behavior.is_vertex
         && !behavior.is_kiro
     {
@@ -518,6 +529,7 @@ mod tests {
                 expires_at_unix_secs: None,
                 proxy: None,
                 fingerprint: None,
+                upstream_metadata: None,
                 decrypted_api_key: "secret".to_string(),
                 decrypted_auth_config: None,
             },
@@ -553,6 +565,19 @@ mod tests {
         assert!(behavior.is_antigravity);
         assert!(behavior.upstream_is_stream);
         assert_eq!(behavior.report_kind, "gemini_chat_sync_finalize");
+
+        let gemini_cli = sample_transport("gemini_cli");
+        let behavior = classify_same_format_provider_request_behavior(
+            &gemini_cli,
+            SameFormatProviderRequestBehaviorParams {
+                require_streaming: false,
+                provider_api_format: "gemini:generate_content",
+                report_kind: "gemini_cli_sync_success",
+            },
+        );
+
+        assert!(!behavior.upstream_is_stream);
+        assert_eq!(behavior.report_kind, "gemini_cli_sync_finalize");
     }
 
     #[test]
@@ -626,6 +651,34 @@ mod tests {
         );
 
         assert!(behavior.upstream_is_stream);
+    }
+
+    #[test]
+    fn same_format_behavior_preserves_gemini_cli_streaming_requests() {
+        let mut gemini_cli = sample_transport("gemini_cli");
+        gemini_cli.endpoint.config = Some(json!({
+            "upstream_stream_policy": "force_non_stream"
+        }));
+
+        let stream_behavior = classify_same_format_provider_request_behavior(
+            &gemini_cli,
+            SameFormatProviderRequestBehaviorParams {
+                require_streaming: true,
+                provider_api_format: "gemini:generate_content",
+                report_kind: "gemini_cli_stream_success",
+            },
+        );
+        assert!(stream_behavior.upstream_is_stream);
+
+        let sync_behavior = classify_same_format_provider_request_behavior(
+            &gemini_cli,
+            SameFormatProviderRequestBehaviorParams {
+                require_streaming: false,
+                provider_api_format: "gemini:generate_content",
+                report_kind: "gemini_cli_sync_success",
+            },
+        );
+        assert!(!sync_behavior.upstream_is_stream);
     }
 
     #[test]
@@ -993,6 +1046,7 @@ mod tests {
             header_rules: None,
             behavior: SameFormatProviderRequestBehavior {
                 is_antigravity: false,
+                is_gemini_cli: false,
                 is_claude_code: false,
                 is_vertex: false,
                 is_kiro: false,

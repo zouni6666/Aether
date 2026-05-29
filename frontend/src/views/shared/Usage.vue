@@ -100,6 +100,7 @@
       :total-records="effectiveTotalRecords"
       :page-size-options="pageSizeOptions"
       :auto-refresh="globalAutoRefresh"
+      :hide-unknown-records="hideUnknownRecords"
       @update:time-range="handleTimeRangeChange"
       @update:filter-search="handleFilterSearchChange"
       @update:filter-user="handleFilterUserChange"
@@ -111,6 +112,7 @@
       @update:current-page="handlePageChange"
       @update:page-size="handlePageSizeChange"
       @update:auto-refresh="handleAutoRefreshChange"
+      @update:hide-unknown-records="handleHideUnknownRecordsChange"
       @refresh="handleManualRefresh"
       @prefetch-detail="prefetchRequestDetail"
       @show-detail="showRequestDetail"
@@ -159,7 +161,7 @@ import {
   normalizeRequestStatus,
   resolveDisplayRequestStatus,
 } from '@/features/usage/utils/status'
-import type { DateRangeParams, FilterStatusValue, RequestStatus } from '@/features/usage/types'
+import type { DateRangeParams, FilterStatusValue, RequestStatus, UsageRecord } from '@/features/usage/types'
 import type { UserOption } from '@/features/usage/components/UsageRecordsTable.vue'
 import { log } from '@/utils/logger'
 import type { ActivityHeatmap } from '@/types/activity'
@@ -174,6 +176,7 @@ const isAdminPage = computed(() => route.path.startsWith('/admin'))
 
 // 用量分析面板折叠状态（默认展开，持久化到 localStorage）
 const statsExpanded = useLocalStorage('usage-stats-expanded', true)
+const hideUnknownRecords = useLocalStorage('usage-hide-unknown-records', false)
 
 // 时间范围选择
 const timeRange = ref<DateRangeParams>(
@@ -359,11 +362,25 @@ async function refreshAdminAnalyticsForSelectionChange() {
   await refreshAdminAnalytics({ force: true, preserveOnFailure: false })
 }
 
-// 用户页面需要前端筛选
-const filteredRecords = computed(() => {
-  if (!isAdminPage.value) {
-    let records = [...currentRecords.value]
+function isUnknownUsageLabel(value: unknown): boolean {
+  if (typeof value !== 'string') return false
+  const normalized = value.trim().toLowerCase()
+  return normalized === 'unknown' || normalized === 'unknow'
+}
 
+function hasUnknownModelOrProvider(record: UsageRecord): boolean {
+  if (isUnknownUsageLabel(record.model)) return true
+  if (isUnknownUsageLabel(record.provider)) return true
+  return false
+}
+
+// 用户页面需要前端筛选；隐藏 unknown 的开关对管理员当前页也生效。
+const filteredRecords = computed(() => {
+  let records = hideUnknownRecords.value
+    ? currentRecords.value.filter(record => !hasUnknownModelOrProvider(record))
+    : [...currentRecords.value]
+
+  if (!isAdminPage.value) {
     if (filterModel.value !== '__all__') {
       records = records.filter(record => record.model === filterModel.value)
     }
@@ -409,7 +426,7 @@ const filteredRecords = computed(() => {
 
     return records
   }
-  return currentRecords.value
+  return records
 })
 
 // 获取活跃请求的 ID 列表
@@ -708,6 +725,14 @@ function handleAutoRefreshChange(value: boolean) {
   }
 }
 
+async function handleHideUnknownRecordsChange(value: boolean) {
+  hideUnknownRecords.value = value
+  currentPage.value = 1
+  if (isAdminPage.value) {
+    await loadRecords({ page: 1, pageSize: pageSize.value }, getCurrentFilters(), timeRange.value)
+  }
+}
+
 function handleVisibilityChange() {
   isPageVisible.value = !document.hidden
   if (!isPageVisible.value) {
@@ -741,7 +766,7 @@ const paginatedRecords = computed(() => {
     const end = start + pageSize.value
     return filteredRecords.value.slice(start, end)
   }
-  return currentRecords.value
+  return filteredRecords.value
 })
 
 // 用户页面使用前端筛选后的总数，管理员页面使用后端返回的总数
@@ -848,7 +873,8 @@ function getCurrentFilters() {
     provider: filterProvider.value !== '__all__' ? filterProvider.value : undefined,
     api_format: filterApiFormat.value !== '__all__' ? filterApiFormat.value : undefined,
     status: filterStatus.value !== '__all__' ? filterStatus.value : undefined,
-    client_family: filterClientFamily.value !== '__all__' ? filterClientFamily.value : undefined
+    client_family: filterClientFamily.value !== '__all__' ? filterClientFamily.value : undefined,
+    hideUnknownRecords: hideUnknownRecords.value || undefined
   }
 }
 

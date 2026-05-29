@@ -81,6 +81,7 @@ vi.mock('lucide-vue-next', async () => {
 
   return {
     RefreshCcw: Icon,
+    EyeOff: Icon,
     Search: Icon,
     Shuffle: Icon,
     ChevronDown: Icon,
@@ -152,6 +153,7 @@ function mountUsageRecordsTable(records: UsageRecord[], overrides: Record<string
     totalRecords: records.length,
     pageSizeOptions: [20, 50],
     autoRefresh: false,
+    hideUnknownRecords: false,
     ...overrides,
   })
 
@@ -299,6 +301,17 @@ describe('UsageRecordsTable', () => {
     expect(root.textContent).toContain('Gemini Embedding')
     expect(root.textContent).toContain('Jina Embedding')
     expect(root.textContent).toContain('Doubao Embedding')
+  })
+
+  it('emits hide unknown toggle changes', () => {
+    const onUpdateHideUnknownRecords = vi.fn()
+    const root = mountUsageRecordsTable([buildRecord()], {
+      'onUpdate:hideUnknownRecords': onUpdateHideUnknownRecords,
+    })
+
+    root.querySelector<HTMLElement>('[data-usage-hide-unknown-toggle="desktop"]')?.click()
+
+    expect(onUpdateHideUnknownRecords).toHaveBeenCalledWith(true)
   })
 
   it('shows retry and fallback markers together when both flags are set', () => {

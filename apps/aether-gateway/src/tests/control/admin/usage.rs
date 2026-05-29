@@ -1259,6 +1259,84 @@ async fn gateway_handles_admin_usage_records_locally_with_trusted_admin_principa
 }
 
 #[tokio::test]
+async fn gateway_filters_admin_usage_records_with_unknown_model_or_provider() {
+    let (upstream_url, upstream_hits, upstream_handle) =
+        start_usage_upstream("/api/admin/usage/records").await;
+
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
+        sample_usage_row(
+            "usage-visible",
+            "req-visible",
+            Some("user-1"),
+            Some("key-1"),
+            Some("primary"),
+            "OpenAI",
+            "gpt-5",
+            "completed",
+            120,
+            30,
+            0.3,
+            0.36,
+            DAY_2_UNIX_SECS,
+        ),
+        sample_usage_row(
+            "usage-unknown-provider",
+            "req-unknown-provider",
+            Some("user-1"),
+            Some("key-1"),
+            Some("primary"),
+            "unknow",
+            "gpt-5",
+            "completed",
+            120,
+            30,
+            0.3,
+            0.36,
+            DAY_2_UNIX_SECS,
+        ),
+        sample_usage_row(
+            "usage-unknown-model",
+            "req-unknown-model",
+            Some("user-1"),
+            Some("key-1"),
+            Some("primary"),
+            "OpenAI",
+            "unknown",
+            "completed",
+            120,
+            30,
+            0.3,
+            0.36,
+            DAY_1_UNIX_SECS,
+        ),
+    ]));
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(GatewayDataState::with_usage_reader_for_tests(
+                usage_repository,
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = admin_request(reqwest::Client::new().get(format!(
+        "{gateway_url}/api/admin/usage/records?start_date=2024-03-21&end_date=2024-03-22&tz_offset_minutes=0&hide_unknown=true&limit=10&offset=0"
+    )))
+    .send()
+    .await
+    .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["total"], 1);
+    assert_eq!(payload["records"][0]["id"], "usage-visible");
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_handles_admin_usage_records_with_provider_key_name_fallback_from_request_metadata()
 {
     let (upstream_url, upstream_hits, upstream_handle) =
@@ -2438,7 +2516,7 @@ async fn gateway_handles_admin_usage_curl_locally_with_trusted_admin_principal()
     assert_eq!(payload["method"], "POST");
     assert_eq!(
         payload["url"],
-        "https://api.openai.example/v1/chat/completions"
+        "https://api.openai.example/chat/completions"
     );
     assert_eq!(payload["headers"]["Content-Type"], "application/json");
     assert_eq!(payload["headers"]["Authorization"], "Bearer provider-real");
@@ -2458,7 +2536,7 @@ async fn gateway_handles_admin_usage_curl_locally_with_trusted_admin_principal()
     );
     let curl = payload["curl"].as_str().expect("curl should be string");
     assert!(curl.contains("curl"));
-    assert!(curl.contains("https://api.openai.example/v1/chat/completions"));
+    assert!(curl.contains("https://api.openai.example/chat/completions"));
     assert!(curl.contains("Content-Type: application/json"));
     assert!(curl.contains("Authorization: Bearer provider-real"));
     assert!(curl.contains("\"model\":\"gpt-5-target\""));

@@ -37,6 +37,7 @@ export interface FilterParams {
   api_format?: string
   status?: string
   client_family?: string
+  hideUnknownRecords?: boolean
 }
 
 export function useUsageData(options: UseUsageDataOptions) {
@@ -360,6 +361,9 @@ export function useUsageData(options: UseUsageDataOptions) {
         }
         if (filters?.client_family) {
           params.client_family = filters.client_family
+        }
+        if (filters?.hideUnknownRecords) {
+          params.hide_unknown = true
         }
 
         const response = await usageApi.getAllUsageRecords(params)
