@@ -65,7 +65,7 @@ use crate::execution_runtime::chatgpt_web_image::maybe_execute_chatgpt_web_image
 use crate::execution_runtime::grok::maybe_execute_grok_stream;
 use crate::execution_runtime::kiro_cache::{
     billed_input_tokens as kiro_billed_input_tokens, build_kiro_prompt_cache_profile,
-    compute_kiro_prompt_cache_usage, estimate_kiro_prompt_input_tokens, kiro_prompt_cache_tracker,
+    compute_kiro_prompt_cache_usage, estimate_kiro_prompt_input_tokens,
     kiro_simulated_cache_enabled_from_provider_config,
     kiro_simulated_cache_enabled_from_report_context, KiroPromptCacheUsage,
     KIRO_SIMULATED_CACHE_ENABLED_CONTEXT_FIELD,
@@ -499,7 +499,8 @@ fn kiro_cache_usage_from_report_context(report_context: &Value) -> Option<KiroPr
         .and_then(kiro_cache_usage_from_context_object)
 }
 
-fn maybe_apply_kiro_prompt_cache_usage_to_stream_summary(
+async fn maybe_apply_kiro_prompt_cache_usage_to_stream_summary(
+    state: &AppState,
     plan: &ExecutionPlan,
     report_context: Option<&Value>,
     summary: &mut Option<ExecutionStreamTerminalSummary>,
@@ -577,8 +578,12 @@ fn maybe_apply_kiro_prompt_cache_usage_to_stream_summary(
         return;
     };
 
-    let cache_usage = kiro_prompt_cache_tracker()
-        .compute_and_update(kiro_stream_cache_credential_id(plan), &profile);
+    let cache_usage = compute_kiro_prompt_cache_usage(
+        state.runtime_state(),
+        kiro_stream_cache_credential_id(plan),
+        &profile,
+    )
+    .await;
     if cache_usage.cache_creation_input_tokens == 0 && cache_usage.cache_read_input_tokens == 0 {
         return;
     }
@@ -3705,10 +3710,12 @@ async fn execute_stream_from_frame_stream(
         }
 
         maybe_apply_kiro_prompt_cache_usage_to_stream_summary(
+            &state_for_report,
             &plan_for_report,
             report_context_owned.as_ref(),
             &mut stream_terminal_summary,
-        );
+        )
+        .await;
         let requires_observed_terminal_event = stream_requires_observed_terminal_event(
             plan_for_report.provider_api_format.as_str(),
             stream_usage_report_context.as_ref(),
@@ -3951,6 +3958,10 @@ mod tests {
         .with_execution_runtime_candidate(true)
     }
 
+    fn test_state() -> AppState {
+        AppState::new().expect("gateway state should build")
+    }
+
     #[test]
     fn detects_client_visible_sse_terminal_events() {
         assert!(stream_chunk_contains_sse_done(b"data: [DONE]\n\n"));
@@ -4129,8 +4140,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn kiro_stream_summary_applies_prompt_cache_usage_from_original_request() {
+    #[tokio::test]
+    async fn kiro_stream_summary_applies_prompt_cache_usage_from_original_request() {
         let request_body = json!({
             "model": "claude-opus-4-7",
             "system": [
@@ -4178,6 +4189,7 @@ mod tests {
             transport_profile: None,
             timeouts: None,
         };
+        let state = test_state();
 
         let mut first_summary = Some(ExecutionStreamTerminalSummary {
             standardized_usage: Some(StandardizedUsage {
@@ -4188,10 +4200,12 @@ mod tests {
             ..ExecutionStreamTerminalSummary::default()
         });
         maybe_apply_kiro_prompt_cache_usage_to_stream_summary(
+            &state,
             &plan,
             Some(&report_context),
             &mut first_summary,
-        );
+        )
+        .await;
         let first_usage = first_summary
             .as_ref()
             .and_then(|summary| summary.standardized_usage.as_ref())
@@ -4208,10 +4222,12 @@ mod tests {
             ..ExecutionStreamTerminalSummary::default()
         });
         maybe_apply_kiro_prompt_cache_usage_to_stream_summary(
+            &state,
             &plan,
             Some(&report_context),
             &mut second_summary,
-        );
+        )
+        .await;
         let second_usage = second_summary
             .as_ref()
             .and_then(|summary| summary.standardized_usage.as_ref())
@@ -4222,8 +4238,8 @@ mod tests {
         assert_eq!(second_usage.output_tokens, 19);
     }
 
-    #[test]
-    fn kiro_stream_summary_reads_cached_prefix_within_prompt_cache_lookback_window() {
+    #[tokio::test]
+    async fn kiro_stream_summary_reads_cached_prefix_within_prompt_cache_lookback_window() {
         let first_request_body = json!({
             "model": "claude-sonnet-4.6",
             "messages": [{
@@ -4289,6 +4305,7 @@ mod tests {
             "original_request_body": second_request_body,
             "kiro_simulated_cache_enabled": true,
         });
+        let state = test_state();
 
         let mut first_summary = Some(ExecutionStreamTerminalSummary {
             standardized_usage: Some(StandardizedUsage {
@@ -4299,10 +4316,12 @@ mod tests {
             ..ExecutionStreamTerminalSummary::default()
         });
         maybe_apply_kiro_prompt_cache_usage_to_stream_summary(
+            &state,
             &plan,
             Some(&first_report_context),
             &mut first_summary,
-        );
+        )
+        .await;
         let first_usage = first_summary
             .as_ref()
             .and_then(|summary| summary.standardized_usage.as_ref())
@@ -4319,10 +4338,12 @@ mod tests {
             ..ExecutionStreamTerminalSummary::default()
         });
         maybe_apply_kiro_prompt_cache_usage_to_stream_summary(
+            &state,
             &plan,
             Some(&second_report_context),
             &mut second_summary,
-        );
+        )
+        .await;
         let second_usage = second_summary
             .as_ref()
             .and_then(|summary| summary.standardized_usage.as_ref())
@@ -4335,8 +4356,8 @@ mod tests {
         assert_eq!(second_usage.output_tokens, 19);
     }
 
-    #[test]
-    fn kiro_stream_summary_seeds_input_tokens_without_cache_control() {
+    #[tokio::test]
+    async fn kiro_stream_summary_seeds_input_tokens_without_cache_control() {
         let request_body = json!({
             "model": "claude-opus-4-7",
             "system": [
@@ -4382,6 +4403,7 @@ mod tests {
             transport_profile: None,
             timeouts: None,
         };
+        let state = test_state();
 
         let mut summary = Some(ExecutionStreamTerminalSummary {
             standardized_usage: Some(StandardizedUsage {
@@ -4393,10 +4415,12 @@ mod tests {
         });
 
         maybe_apply_kiro_prompt_cache_usage_to_stream_summary(
+            &state,
             &plan,
             Some(&report_context),
             &mut summary,
-        );
+        )
+        .await;
 
         let usage = summary
             .as_ref()
@@ -4409,8 +4433,8 @@ mod tests {
         assert_eq!(usage.output_tokens, 13);
     }
 
-    #[test]
-    fn kiro_stream_summary_bills_existing_cache_usage_when_input_is_zero() {
+    #[tokio::test]
+    async fn kiro_stream_summary_bills_existing_cache_usage_when_input_is_zero() {
         let request_body = json!({
             "model": "claude-opus-4-7",
             "system": [
@@ -4456,6 +4480,7 @@ mod tests {
             transport_profile: None,
             timeouts: None,
         };
+        let state = test_state();
 
         let mut summary = Some(ExecutionStreamTerminalSummary {
             standardized_usage: Some(StandardizedUsage {
@@ -4468,10 +4493,12 @@ mod tests {
         });
 
         maybe_apply_kiro_prompt_cache_usage_to_stream_summary(
+            &state,
             &plan,
             Some(&report_context),
             &mut summary,
-        );
+        )
+        .await;
 
         let usage = summary
             .as_ref()
@@ -4484,8 +4511,8 @@ mod tests {
         assert_eq!(usage.output_tokens, 23);
     }
 
-    #[test]
-    fn kiro_stream_summary_clears_cache_usage_when_simulated_cache_disabled() {
+    #[tokio::test]
+    async fn kiro_stream_summary_clears_cache_usage_when_simulated_cache_disabled() {
         let request_body = json!({
             "model": "claude-opus-4-7",
             "system": [
@@ -4532,6 +4559,7 @@ mod tests {
             transport_profile: None,
             timeouts: None,
         };
+        let state = test_state();
 
         let mut summary = Some(ExecutionStreamTerminalSummary {
             standardized_usage: Some(StandardizedUsage {
@@ -4545,10 +4573,12 @@ mod tests {
         });
 
         maybe_apply_kiro_prompt_cache_usage_to_stream_summary(
+            &state,
             &plan,
             Some(&report_context),
             &mut summary,
-        );
+        )
+        .await;
 
         let usage = summary
             .as_ref()
@@ -4561,8 +4591,8 @@ mod tests {
         assert_eq!(usage.output_tokens, 23);
     }
 
-    #[test]
-    fn kiro_stream_summary_does_not_subtract_cache_from_already_billed_input() {
+    #[tokio::test]
+    async fn kiro_stream_summary_does_not_subtract_cache_from_already_billed_input() {
         let request_body = json!({
             "model": "claude-opus-4-7",
             "messages": [
@@ -4610,6 +4640,7 @@ mod tests {
             transport_profile: None,
             timeouts: None,
         };
+        let state = test_state();
 
         let mut summary = Some(ExecutionStreamTerminalSummary {
             standardized_usage: Some(StandardizedUsage {
@@ -4623,10 +4654,12 @@ mod tests {
         });
 
         maybe_apply_kiro_prompt_cache_usage_to_stream_summary(
+            &state,
             &plan,
             Some(&report_context),
             &mut summary,
-        );
+        )
+        .await;
 
         let usage = summary
             .as_ref()

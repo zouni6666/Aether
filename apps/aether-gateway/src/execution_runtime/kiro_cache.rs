@@ -9,9 +9,12 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tracing::warn;
 
+use crate::clock::current_unix_ms;
+
 const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(300);
 const ONE_HOUR_CACHE_TTL: Duration = Duration::from_secs(3600);
 const MAX_ENTRIES: usize = 2048;
+const KIRO_PROMPT_CACHE_INDEX_KEY: &str = "kiro:prompt-cache:index";
 const PREFIX_LOOKBACK_WINDOW: usize = 20;
 const TOKENS_PER_TOOL: u64 = 150;
 const TOKENS_PER_MESSAGE: u64 = 4;
@@ -148,13 +151,7 @@ async fn compute_kiro_prompt_cache_usage_with_runtime_state(
     }
 
     if let Some((key, entry)) = matched_refresh {
-        runtime_state
-            .kv_set(
-                key.as_str(),
-                encode_kiro_prompt_cache_runtime_entry(entry),
-                Some(Duration::from_secs(entry.ttl_secs.max(1))),
-            )
-            .await?;
+        store_kiro_prompt_cache_runtime_entry(runtime_state, key.as_str(), entry).await?;
     }
 
     let creation_tokens = last_breakpoint
@@ -176,19 +173,102 @@ async fn compute_kiro_prompt_cache_usage_with_runtime_state(
                 token_count: breakpoint.cumulative_tokens,
                 ttl_secs,
             });
-        runtime_state
-            .kv_set(
-                key.as_str(),
-                encode_kiro_prompt_cache_runtime_entry(entry),
-                Some(Duration::from_secs(entry.ttl_secs.max(1))),
-            )
-            .await?;
+        store_kiro_prompt_cache_runtime_entry(runtime_state, key.as_str(), entry).await?;
     }
+
+    trim_kiro_prompt_cache_runtime_state(runtime_state, MAX_ENTRIES).await;
 
     Ok(KiroPromptCacheUsage {
         cache_creation_input_tokens: creation_tokens,
         cache_read_input_tokens: matched_tokens,
     })
+}
+
+async fn store_kiro_prompt_cache_runtime_entry(
+    runtime_state: &RuntimeState,
+    key: &str,
+    entry: KiroPromptCacheRuntimeEntry,
+) -> Result<(), DataLayerError> {
+    let ttl = Duration::from_secs(entry.ttl_secs.max(1));
+    runtime_state
+        .kv_set(
+            key,
+            encode_kiro_prompt_cache_runtime_entry(entry),
+            Some(ttl),
+        )
+        .await?;
+
+    let expires_at_ms = current_unix_ms().saturating_add(entry.ttl_secs.saturating_mul(1000));
+    if let Err(err) = runtime_state
+        .score_set(KIRO_PROMPT_CACHE_INDEX_KEY, key, expires_at_ms as f64)
+        .await
+    {
+        warn!(
+            event_name = "kiro_simulated_cache_index_update_failed",
+            log_type = "event",
+            cache_key = %key,
+            error = ?err,
+            "failed to update Kiro simulated cache index; cache entry was persisted but cleanup may lag"
+        );
+    }
+
+    Ok(())
+}
+
+async fn trim_kiro_prompt_cache_runtime_state(runtime_state: &RuntimeState, max_entries: usize) {
+    if let Err(err) = runtime_state
+        .score_remove_by_score(KIRO_PROMPT_CACHE_INDEX_KEY, current_unix_ms() as f64)
+        .await
+    {
+        warn!(
+            event_name = "kiro_simulated_cache_index_expiry_trim_failed",
+            log_type = "event",
+            error = ?err,
+            "failed to trim expired Kiro simulated cache index entries"
+        );
+        return;
+    }
+
+    let Ok(index_len) = runtime_state.score_len(KIRO_PROMPT_CACHE_INDEX_KEY).await else {
+        return;
+    };
+    if index_len <= max_entries {
+        return;
+    }
+
+    let Ok(all_members) = runtime_state
+        .score_range_by_min(KIRO_PROMPT_CACHE_INDEX_KEY, 0.0)
+        .await
+    else {
+        return;
+    };
+    let trim_count = index_len.saturating_sub(max_entries);
+    if trim_count == 0 {
+        return;
+    }
+
+    let trimmed_members = all_members.into_iter().take(trim_count).collect::<Vec<_>>();
+    if let Err(err) = runtime_state.kv_delete_many(&trimmed_members).await {
+        warn!(
+            event_name = "kiro_simulated_cache_kv_trim_failed",
+            log_type = "event",
+            error = ?err,
+            trim_count,
+            "failed to delete trimmed Kiro simulated cache KV entries"
+        );
+    }
+    if let Err(err) = runtime_state
+        .score_remove_by_rank(KIRO_PROMPT_CACHE_INDEX_KEY, 0, trim_count as i64 - 1)
+        .await
+    {
+        warn!(
+            event_name = "kiro_simulated_cache_index_trim_failed",
+            log_type = "event",
+            error = ?err,
+            trim_count,
+            "failed to delete trimmed Kiro simulated cache index entries"
+        );
+    }
 }
 
 fn parse_kiro_prompt_cache_runtime_entry(value: &str) -> Option<KiroPromptCacheRuntimeEntry> {
@@ -985,6 +1065,66 @@ mod tests {
         assert_eq!(first.cache_read_input_tokens, 0);
         assert_eq!(second.cache_creation_input_tokens, 0);
         assert!(second.cache_read_input_tokens > 0);
+    }
+
+    #[tokio::test]
+    async fn runtime_state_tracker_trims_oldest_entries_to_capacity() {
+        let runtime = RuntimeState::memory(MemoryRuntimeStateConfig::default());
+        let now_ms = current_unix_ms();
+        let keys = [
+            "kiro:prompt-cache:test-oldest".to_string(),
+            "kiro:prompt-cache:test-middle".to_string(),
+            "kiro:prompt-cache:test-newest".to_string(),
+        ];
+
+        for (index, key) in keys.iter().enumerate() {
+            runtime
+                .kv_set(
+                    key,
+                    encode_kiro_prompt_cache_runtime_entry(KiroPromptCacheRuntimeEntry {
+                        token_count: 100 + index as u64,
+                        ttl_secs: 120,
+                    }),
+                    Some(Duration::from_secs(120)),
+                )
+                .await
+                .expect("cache entry should store");
+            runtime
+                .score_set(
+                    KIRO_PROMPT_CACHE_INDEX_KEY,
+                    key,
+                    now_ms.saturating_add(60_000 + index as u64 * 1_000) as f64,
+                )
+                .await
+                .expect("cache index should store");
+        }
+
+        trim_kiro_prompt_cache_runtime_state(&runtime, 2).await;
+
+        assert_eq!(
+            runtime
+                .kv_get(&keys[0])
+                .await
+                .expect("oldest entry should read"),
+            None
+        );
+        assert!(runtime
+            .kv_get(&keys[1])
+            .await
+            .expect("middle entry should read")
+            .is_some());
+        assert!(runtime
+            .kv_get(&keys[2])
+            .await
+            .expect("newest entry should read")
+            .is_some());
+        assert_eq!(
+            runtime
+                .score_range_by_min(KIRO_PROMPT_CACHE_INDEX_KEY, 0.0)
+                .await
+                .expect("cache index should read"),
+            vec![keys[1].clone(), keys[2].clone()]
+        );
     }
 
     #[test]
