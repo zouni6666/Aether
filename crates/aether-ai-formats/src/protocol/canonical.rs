@@ -5198,65 +5198,6 @@ pub(crate) fn gemini_generation_config_extra(
         .collect()
 }
 
-pub(crate) fn gemini_openai_extra_body(request: &Map<String, Value>) -> Option<Value> {
-    let mut extra_body = Map::new();
-    if let Some(generation_config) = request
-        .get("generationConfig")
-        .or_else(|| request.get("generation_config"))
-        .and_then(Value::as_object)
-    {
-        let mut google = Map::new();
-        if let Some(thinking_config) =
-            gemini_value_by_case(generation_config, "thinkingConfig", "thinking_config").cloned()
-        {
-            google.insert("thinking_config".to_string(), thinking_config);
-        }
-        if let Some(response_modalities) = gemini_value_by_case(
-            generation_config,
-            "responseModalities",
-            "response_modalities",
-        )
-        .cloned()
-        {
-            google.insert("response_modalities".to_string(), response_modalities);
-        }
-        if !google.is_empty() {
-            extra_body.insert("google".to_string(), Value::Object(google));
-        }
-
-        let generation_config_extra = gemini_generation_config_extra(generation_config);
-        if !generation_config_extra.is_empty() {
-            extra_body.insert(
-                "gemini".to_string(),
-                json!({ "generation_config_extra": generation_config_extra }),
-            );
-        }
-    }
-    if let Some(safety_settings) = request
-        .get("safetySettings")
-        .or_else(|| request.get("safety_settings"))
-        .cloned()
-    {
-        let gemini = extra_body
-            .entry("gemini".to_string())
-            .or_insert_with(|| Value::Object(Map::new()))
-            .as_object_mut()?;
-        gemini.insert("safety_settings".to_string(), safety_settings);
-    }
-    if let Some(cached_content) = request
-        .get("cachedContent")
-        .or_else(|| request.get("cached_content"))
-        .cloned()
-    {
-        let gemini = extra_body
-            .entry("gemini".to_string())
-            .or_insert_with(|| Value::Object(Map::new()))
-            .as_object_mut()?;
-        gemini.insert("cached_content".to_string(), cached_content);
-    }
-    (!extra_body.is_empty()).then_some(Value::Object(extra_body))
-}
-
 pub(crate) fn extract_gemini_model_from_path(path: &str) -> Option<String> {
     let marker = "/models/";
     let start = path.find(marker)? + marker.len();

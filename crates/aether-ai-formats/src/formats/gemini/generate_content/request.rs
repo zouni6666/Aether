@@ -15,7 +15,7 @@ use crate::{
         apply_gemini_request_extensions, canonical_extension_object_mut,
         canonical_openai_reasoning_effort, extract_gemini_model_from_path,
         gemini_contents_to_canonical_messages, gemini_extensions, gemini_generation_config,
-        gemini_generation_config_extra, gemini_google_search_grounding, gemini_openai_extra_body,
+        gemini_generation_config_extra, gemini_google_search_grounding,
         gemini_response_format_to_canonical, gemini_system_to_canonical_instructions,
         gemini_thinking_to_canonical, gemini_tool_choice_to_canonical, gemini_tools_to_canonical,
         gemini_value_by_case, CanonicalContentBlock, CanonicalMessage, CanonicalRequest,
@@ -172,10 +172,6 @@ pub fn from_raw(body_json: &Value, request_path: &str) -> Option<CanonicalReques
     {
         canonical_extension_object_mut(&mut canonical.extensions, "gemini")
             .insert("raw_tool_config".to_string(), tool_config);
-    }
-    if let Some(extra_body) = gemini_openai_extra_body(request) {
-        canonical_extension_object_mut(&mut canonical.extensions, "openai")
-            .insert("extra_body".to_string(), extra_body);
     }
     if let Some(web_search_options) = web_search_options {
         canonical_extension_object_mut(&mut canonical.extensions, "openai")

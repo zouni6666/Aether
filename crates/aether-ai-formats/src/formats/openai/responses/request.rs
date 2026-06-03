@@ -5,7 +5,7 @@ use serde_json::{json, Map, Value};
 use crate::{
     formats::context::FormatContext,
     formats::openai::shared::{
-        map_thinking_budget_to_openai_reasoning_effort, OpenAiReasoningEffort,
+        map_thinking_budget_to_openai_reasoning_effort, OpenAiResponsesReasoningEffort,
     },
     protocol::canonical::{
         canonical_response_format_to_openai, canonicalize_tool_arguments,
@@ -660,7 +660,9 @@ fn reasoning_config_to_responses(thinking: &CanonicalThinkingConfig) -> Option<V
 fn openai_responses_reasoning_effort(effort: &str) -> Option<&'static str> {
     match effort.trim().to_ascii_lowercase().as_str() {
         "max" => Some("xhigh"),
-        value => OpenAiReasoningEffort::parse(value).map(OpenAiReasoningEffort::as_str),
+        value => {
+            OpenAiResponsesReasoningEffort::parse(value).map(OpenAiResponsesReasoningEffort::as_str)
+        }
     }
 }
 

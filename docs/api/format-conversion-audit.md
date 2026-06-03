@@ -9,9 +9,11 @@ Statuses:
 - `native`: emitted as a target-native field without semantic change.
 - `mapped`: converted through canonical/provider-specific mapping.
 - `extension-preserved`: preserved in same-format canonical roundtrip or target-approved extension namespace.
+- `unsupported`: rejected because the source field is outside the audited source schema or conversion surface.
 - `lossy-blocked`: conversion fails closed.
 - `invalid-enum`: conversion fails closed because a provider enum value is not valid for the target mapping.
-- `pending`: parser/emitter exists, but strict field-by-field audit is not complete.
+
+Full schema field coverage is tracked in `docs/api/format-field-coverage-matrix.md`. That matrix is generated from `docs/api/provider-interface-definitions.md` and gives every documented OpenAI, Claude, and Gemini schema field a handling status. “Handled” means mapped, same-format/native preserved, extension-preserved, blocked with a structured error, or explicitly marked outside the canonical conversion surface.
 
 ## Implemented Boundary Changes
 
@@ -22,7 +24,8 @@ Statuses:
 | Same-format provider path | Bypasses canonical conversion and copies the parsed JSON object before transport edits. |
 | Cross-format same-format-provider path | Uses `convert_request_pure`, then applies model/body/stream edits in transport. |
 | Conversion errors | Added `UnsupportedField`, `InvalidEnumValue`, `LossyConversionBlocked`, and `InvalidTargetField`. |
-| Reporting | Added `ConversionReport` with field statuses. Current report is top-level request-field oriented; nested exhaustive reporting is pending. |
+| Reporting | Added `ConversionReport` with field statuses. Runtime reports remain conversion-operation oriented; exhaustive nested schema coverage is enforced by `format-field-coverage-matrix.md`. |
+| Source schema coverage | Cross-format request conversion rejects unknown source root fields before emit. Every documented schema field is covered by the field coverage matrix. |
 | Tool schema roundtrip | Claude `input_schema` and Gemini `functionDeclarations.parameters` preserve raw same-format schema through provider-specific extensions. |
 | Tool result ids | Chat `tool_call_id`, Responses `call_id`, Claude `tool_use_id`, and Gemini `functionResponse.id` are mapped through canonical tool IDs. |
 
@@ -62,7 +65,7 @@ Statuses:
 | `safety_identifier` | OpenAI extension | `safety_identifier` | extension-preserved |
 | `prompt_cache_key` | OpenAI extension | `prompt_cache_key` | extension-preserved |
 | `user` | legacy Chat user field | none | lossy-blocked |
-| unknown top-level fields | OpenAI extension | none unless target-approved | pending strict nested reporting |
+| unknown top-level fields | source schema guard | none | unsupported |
 
 ## OpenAI Responses -> OpenAI Chat
 
@@ -99,11 +102,11 @@ Statuses:
 | `conversation` | Responses-only | none | lossy-blocked |
 | `background` | Responses-only | none | lossy-blocked |
 | `max_tool_calls` | Responses-only | none | lossy-blocked |
-| unknown top-level fields | Responses extension | none unless Chat-approved | pending strict nested reporting |
+| unknown top-level fields | source schema guard | none | unsupported |
 
-## Claude Messages <-> OpenAI
+## Claude Messages <-> OpenAI Chat / Responses
 
-Current parser/emitter coverage exists, but strict audit is pending for the third batch.
+Claude to OpenAI Chat, Claude to OpenAI Responses, and the reverse directions are included in the field coverage matrix. Runtime strict guards cover request root fields, provider extension namespaces, thinking/cache/tool-result hazards, and target generation-field gaps. Fields without a lossless target equivalent fail closed instead of being dropped.
 
 High-risk fields:
 
@@ -115,11 +118,12 @@ High-risk fields:
 | `tools[].input_schema` | OpenAI tool parameters | mapped; raw same-format schema preservation implemented |
 | `tool_choice.disable_parallel_tool_use` | OpenAI `parallel_tool_calls` | mapped, implemented |
 | `tool_result` multi-block content | OpenAI tool output/content | same-format preserved; cross-format to Chat/Responses is lossy-blocked |
-| `metadata` / container fields | OpenAI metadata or extension | field-by-field decision pending |
+| `metadata` | OpenAI metadata | mapped when the target has metadata |
+| `container`, `inference_geo`, `service_tier` | OpenAI target has no audited equivalent | lossy-blocked unless a target-approved mapping is added |
 
-## Gemini GenerateContent <-> OpenAI/Claude
+## Gemini GenerateContent <-> OpenAI Chat / Responses / Claude
 
-Current parser/emitter coverage exists, but strict audit is pending for the fourth batch.
+Gemini to OpenAI Chat, Gemini to OpenAI Responses, Gemini to Claude, and reverse generation paths are included in the field coverage matrix. Gemini-only request fields are preserved same-format and blocked cross-format unless the target mapping is explicitly audited.
 
 High-risk fields:
 
@@ -138,8 +142,7 @@ High-risk fields:
 
 ## Embedding And Rerank
 
-Fifth batch first pass is implemented for request parse/emit capability and strict target
-guards. Nested per-field reporting is still pending.
+Embedding and rerank request parse/emit capability and strict target guards are implemented. Provider schema fields outside these canonical conversion surfaces are marked `not-in-conversion-surface` in the field coverage matrix instead of being left implicit.
 
 Embedding source capability:
 
@@ -199,8 +202,8 @@ still outside canonical conversion.
 Sixth batch first pass is implemented for unknown event handling and runtime
 same-format boundaries. Sync response finish/status parity has a first strict
 pass; stream finish-reason guardrails are implemented for unknown/unmappable
-terminal reasons, while nested stream field snapshots still need
-provider-by-provider golden fixtures.
+terminal reasons. Stream event schema fields are covered in the field coverage
+matrix; provider-by-provider fixtures cover the runtime event behavior.
 
 Current stream behavior:
 

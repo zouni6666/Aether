@@ -11,7 +11,7 @@ Status values used below:
 
 ## OpenAI Reasoning Effort
 
-Provider-specific type: `OpenAiReasoningEffort`.
+Provider-specific types: `OpenAiChatReasoningEffort` for Chat `reasoning_effort`, and `OpenAiResponsesReasoningEffort` for Responses `reasoning.effort`. They are intentionally separate even when their current value sets overlap; a value accepted by one field is not treated as valid for the other unless that field's own enum accepts it.
 
 | Source field | Source value | Target field | Target value | Status |
 | --- | --- | --- | --- | --- |
@@ -28,6 +28,7 @@ Provider-specific type: `OpenAiReasoningEffort`.
 | Responses `reasoning.effort` | `medium` | Chat `reasoning_effort` | `medium` | native |
 | Responses `reasoning.effort` | `high` | Chat `reasoning_effort` | `high` | native |
 | Responses `reasoning.effort` | `xhigh` | Chat `reasoning_effort` | `xhigh` | native |
+| Responses `reasoning.effort` | `max` | Chat `reasoning_effort` | none | blocked, invalid Responses enum |
 | Responses `reasoning.summary` | any | Chat | none | blocked |
 | Responses `reasoning.budget_tokens` | any | Chat | none | blocked |
 

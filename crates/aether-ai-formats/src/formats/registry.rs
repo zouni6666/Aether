@@ -10,7 +10,8 @@ use crate::formats::{
     openai::{self, chat as openai_chat, responses as openai_responses},
 };
 use crate::protocol::canonical::{
-    CanonicalEmbeddingInput, CanonicalRequest, CanonicalResponse, CanonicalStopReason,
+    CanonicalContentBlock, CanonicalEmbeddingInput, CanonicalRequest, CanonicalResponse,
+    CanonicalStopReason,
 };
 
 pub use crate::formats::context::{
@@ -281,22 +282,25 @@ fn validate_request_conversion(
     if is_rerank_format(source) || is_rerank_format(target) {
         return validate_rerank_request_conversion(source, target, request);
     }
+    validate_known_standard_request_root_fields(source, body)?;
+    validate_cross_format_generation_target(source, target, request)?;
     validate_openai_reasoning_effort(source, target, body)?;
     match (source, target) {
         (FormatId::OpenAiChat, FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact) => {
-            validate_openai_chat_to_responses(body)
+            validate_openai_chat_to_responses(body)?;
         }
         (FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact, FormatId::OpenAiChat) => {
-            validate_openai_responses_to_chat(body, request)
+            validate_openai_responses_to_chat(body, request)?;
         }
         (FormatId::ClaudeMessages, target) if target != FormatId::ClaudeMessages => {
-            validate_claude_cross_format_request(body, target)
+            validate_claude_cross_format_request(body, target)?;
         }
         (FormatId::GeminiGenerateContent, target) if target != FormatId::GeminiGenerateContent => {
-            validate_gemini_cross_format_request(body, target)
+            validate_gemini_cross_format_request(body, target)?;
         }
-        _ => Ok(()),
+        _ => {}
     }
+    validate_cross_format_request_extensions(source, target, request)
 }
 
 fn validate_response_conversion(
@@ -313,6 +317,578 @@ fn validate_response_conversion(
 
     validate_source_response_stop_enums(source, target, body)?;
     validate_canonical_response_stop_reasons(source, target, response)
+}
+
+fn validate_known_standard_request_root_fields(
+    source: FormatId,
+    body: &Value,
+) -> Result<(), FormatError> {
+    let Some(object) = body.as_object() else {
+        return Ok(());
+    };
+    for key in object.keys() {
+        if standard_request_root_field_is_audited(source, key) {
+            continue;
+        }
+        return Err(FormatError::UnsupportedField {
+            format: source.as_str().to_string(),
+            field: key.clone(),
+            reason: "source request root field is not in the audited provider schema for cross-format conversion".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn standard_request_root_field_is_audited(source: FormatId, key: &str) -> bool {
+    match source {
+        FormatId::OpenAiChat => matches!(
+            key,
+            "audio"
+                | "frequency_penalty"
+                | "function_call"
+                | "functions"
+                | "logit_bias"
+                | "logprobs"
+                | "max_completion_tokens"
+                | "max_tokens"
+                | "messages"
+                | "metadata"
+                | "modalities"
+                | "model"
+                | "n"
+                | "parallel_tool_calls"
+                | "prediction"
+                | "presence_penalty"
+                | "prompt_cache_key"
+                | "prompt_cache_retention"
+                | "reasoning_effort"
+                | "response_format"
+                | "safety_identifier"
+                | "seed"
+                | "service_tier"
+                | "stop"
+                | "store"
+                | "stream"
+                | "stream_options"
+                | "temperature"
+                | "tool_choice"
+                | "tools"
+                | "top_logprobs"
+                | "top_p"
+                | "user"
+                | "verbosity"
+                | "web_search_options"
+        ),
+        FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact => matches!(
+            key,
+            "background"
+                | "context_management"
+                | "conversation"
+                | "include"
+                | "input"
+                | "instructions"
+                | "max_output_tokens"
+                | "max_tool_calls"
+                | "metadata"
+                | "model"
+                | "parallel_tool_calls"
+                | "previous_response_id"
+                | "prompt"
+                | "prompt_cache_key"
+                | "prompt_cache_retention"
+                | "reasoning"
+                | "safety_identifier"
+                | "service_tier"
+                | "store"
+                | "stream"
+                | "stream_options"
+                | "temperature"
+                | "text"
+                | "tool_choice"
+                | "tools"
+                | "top_logprobs"
+                | "top_p"
+                | "truncation"
+                | "user"
+        ),
+        FormatId::ClaudeMessages => matches!(
+            key,
+            "cache_control"
+                | "container"
+                | "inference_geo"
+                | "max_tokens"
+                | "messages"
+                | "metadata"
+                | "model"
+                | "output_config"
+                | "service_tier"
+                | "stop_sequences"
+                | "stream"
+                | "system"
+                | "temperature"
+                | "thinking"
+                | "tool_choice"
+                | "tools"
+                | "top_k"
+                | "top_p"
+        ),
+        FormatId::GeminiGenerateContent => matches!(
+            key,
+            "cachedContent"
+                | "cached_content"
+                | "contents"
+                | "generationConfig"
+                | "generation_config"
+                | "model"
+                | "safetySettings"
+                | "safety_settings"
+                | "serviceTier"
+                | "service_tier"
+                | "store"
+                | "systemInstruction"
+                | "system_instruction"
+                | "toolConfig"
+                | "tool_config"
+                | "tools"
+        ),
+        FormatId::OpenAiEmbedding
+        | FormatId::OpenAiRerank
+        | FormatId::GeminiEmbedding
+        | FormatId::JinaEmbedding
+        | FormatId::JinaRerank
+        | FormatId::DoubaoEmbedding
+        | FormatId::AliyunMultimodalEmbedding => true,
+    }
+}
+
+fn validate_cross_format_generation_target(
+    source: FormatId,
+    target: FormatId,
+    request: &CanonicalRequest,
+) -> Result<(), FormatError> {
+    let generation = &request.generation;
+    match target {
+        FormatId::OpenAiChat => {
+            if generation.top_k.is_some() {
+                return lossy_generation_field(
+                    source,
+                    target,
+                    "top_k",
+                    "OpenAI Chat Completions has no official top_k request field",
+                );
+            }
+        }
+        FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact => {
+            for (field, present, reason) in [
+                (
+                    "top_k",
+                    generation.top_k.is_some(),
+                    "OpenAI Responses has no top_k request field",
+                ),
+                (
+                    "stop_sequences",
+                    generation.stop_sequences.is_some(),
+                    "OpenAI Responses has no stop sequence request field",
+                ),
+                (
+                    "n",
+                    generation.n.is_some(),
+                    "OpenAI Responses has no multi-candidate n request field",
+                ),
+                (
+                    "presence_penalty",
+                    generation.presence_penalty.is_some(),
+                    "OpenAI Responses has no presence_penalty request field",
+                ),
+                (
+                    "frequency_penalty",
+                    generation.frequency_penalty.is_some(),
+                    "OpenAI Responses has no frequency_penalty request field",
+                ),
+                (
+                    "seed",
+                    generation.seed.is_some(),
+                    "OpenAI Responses has no seed request field",
+                ),
+                (
+                    "logprobs",
+                    generation.logprobs.is_some(),
+                    "OpenAI Responses has no logprobs boolean request field",
+                ),
+            ] {
+                if present {
+                    return lossy_generation_field(source, target, field, reason);
+                }
+            }
+        }
+        FormatId::ClaudeMessages => {
+            for (field, present, reason) in [
+                (
+                    "n",
+                    generation.n.is_some(),
+                    "Claude Messages has no multi-candidate n request field",
+                ),
+                (
+                    "presence_penalty",
+                    generation.presence_penalty.is_some(),
+                    "Claude Messages has no presence_penalty request field",
+                ),
+                (
+                    "frequency_penalty",
+                    generation.frequency_penalty.is_some(),
+                    "Claude Messages has no frequency_penalty request field",
+                ),
+                (
+                    "seed",
+                    generation.seed.is_some(),
+                    "Claude Messages has no seed request field",
+                ),
+                (
+                    "logprobs",
+                    generation.logprobs.is_some(),
+                    "Claude Messages has no logprobs request field",
+                ),
+                (
+                    "top_logprobs",
+                    generation.top_logprobs.is_some(),
+                    "Claude Messages has no top_logprobs request field",
+                ),
+            ] {
+                if present {
+                    return lossy_generation_field(source, target, field, reason);
+                }
+            }
+        }
+        FormatId::GeminiGenerateContent => {
+            for (field, present, reason) in [
+                (
+                    "presence_penalty",
+                    generation.presence_penalty.is_some(),
+                    "Gemini GenerateContent has no presence_penalty request field",
+                ),
+                (
+                    "frequency_penalty",
+                    generation.frequency_penalty.is_some(),
+                    "Gemini GenerateContent has no frequency_penalty request field",
+                ),
+                (
+                    "logprobs",
+                    generation.logprobs.is_some(),
+                    "Gemini GenerateContent has no logprobs request field",
+                ),
+                (
+                    "top_logprobs",
+                    generation.top_logprobs.is_some(),
+                    "Gemini GenerateContent has no top_logprobs request field",
+                ),
+            ] {
+                if present {
+                    return lossy_generation_field(source, target, field, reason);
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn lossy_generation_field(
+    source: FormatId,
+    target: FormatId,
+    canonical_field: &str,
+    reason: &str,
+) -> Result<(), FormatError> {
+    Err(FormatError::LossyConversionBlocked {
+        source_format: source.as_str().to_string(),
+        target_format: target.as_str().to_string(),
+        field: source_generation_field_path(source, canonical_field),
+        reason: reason.to_string(),
+    })
+}
+
+fn source_generation_field_path(source: FormatId, canonical_field: &str) -> String {
+    let field = match (source, canonical_field) {
+        (FormatId::OpenAiChat, "max_tokens") => "max_tokens/max_completion_tokens",
+        (FormatId::OpenAiChat, "stop_sequences") => "stop",
+        (FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact, "max_tokens") => {
+            "max_output_tokens"
+        }
+        (FormatId::ClaudeMessages, "stop_sequences") => "stop_sequences",
+        (FormatId::GeminiGenerateContent, "max_tokens") => "generationConfig.maxOutputTokens",
+        (FormatId::GeminiGenerateContent, "top_p") => "generationConfig.topP",
+        (FormatId::GeminiGenerateContent, "top_k") => "generationConfig.topK",
+        (FormatId::GeminiGenerateContent, "stop_sequences") => "generationConfig.stopSequences",
+        (FormatId::GeminiGenerateContent, "n") => "generationConfig.candidateCount",
+        (FormatId::GeminiGenerateContent, "seed") => "generationConfig.seed",
+        (FormatId::GeminiGenerateContent, other) => return format!("generationConfig.{other}"),
+        (_, other) => other,
+    };
+    field.to_string()
+}
+
+fn validate_cross_format_request_extensions(
+    source: FormatId,
+    target: FormatId,
+    request: &CanonicalRequest,
+) -> Result<(), FormatError> {
+    validate_request_content_has_no_unknown_blocks(source, target, request)?;
+    validate_request_extension_namespace(source, target, "request", &request.extensions)?;
+    for instruction in &request.instructions {
+        validate_request_extension_namespace(
+            source,
+            target,
+            "instructions[]",
+            &instruction.extensions,
+        )?;
+    }
+    for message in &request.messages {
+        validate_request_extension_namespace(source, target, "messages[]", &message.extensions)?;
+        for block in &message.content {
+            match block {
+                CanonicalContentBlock::Text { extensions, .. }
+                | CanonicalContentBlock::Thinking { extensions, .. }
+                | CanonicalContentBlock::Image { extensions, .. }
+                | CanonicalContentBlock::File { extensions, .. }
+                | CanonicalContentBlock::Audio { extensions, .. }
+                | CanonicalContentBlock::ToolUse { extensions, .. }
+                | CanonicalContentBlock::ToolResult { extensions, .. }
+                | CanonicalContentBlock::Unknown { extensions, .. } => {
+                    validate_request_extension_namespace(
+                        source,
+                        target,
+                        "messages[].content[]",
+                        extensions,
+                    )?;
+                }
+            }
+        }
+    }
+    for tool in &request.tools {
+        validate_request_extension_namespace(source, target, "tools[]", &tool.extensions)?;
+    }
+    if let Some(thinking) = &request.thinking {
+        validate_request_extension_namespace(source, target, "thinking", &thinking.extensions)?;
+    }
+    if let Some(response_format) = &request.response_format {
+        validate_request_extension_namespace(
+            source,
+            target,
+            "response_format",
+            &response_format.extensions,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_request_content_has_no_unknown_blocks(
+    source: FormatId,
+    target: FormatId,
+    request: &CanonicalRequest,
+) -> Result<(), FormatError> {
+    for message in &request.messages {
+        for block in &message.content {
+            if let CanonicalContentBlock::Unknown { raw_type, .. } = block {
+                return Err(FormatError::LossyConversionBlocked {
+                    source_format: source.as_str().to_string(),
+                    target_format: target.as_str().to_string(),
+                    field: "messages[].content[].type".to_string(),
+                    reason: format!(
+                        "target format has no lossless mapping for unknown source content block type {raw_type:?}"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_request_extension_namespace(
+    source: FormatId,
+    target: FormatId,
+    location: &str,
+    extensions: &std::collections::BTreeMap<String, Value>,
+) -> Result<(), FormatError> {
+    for (namespace, value) in extensions {
+        if namespace == "aether" {
+            continue;
+        }
+        let Some(object) = value.as_object() else {
+            return Err(FormatError::UnsupportedField {
+                format: source.as_str().to_string(),
+                field: format!("{location}.{namespace}"),
+                reason:
+                    "provider extension namespace must be an object for cross-format conversion"
+                        .to_string(),
+            });
+        };
+        for key in object.keys() {
+            if request_extension_key_is_cross_format_safe(source, target, location, namespace, key)
+            {
+                continue;
+            }
+            return Err(FormatError::LossyConversionBlocked {
+                source_format: source.as_str().to_string(),
+                target_format: target.as_str().to_string(),
+                field: extension_field_path(location, namespace, key),
+                reason: "provider-specific extension field has no audited lossless target mapping"
+                    .to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn request_extension_key_is_cross_format_safe(
+    source: FormatId,
+    target: FormatId,
+    location: &str,
+    namespace: &str,
+    key: &str,
+) -> bool {
+    if location == "tools[]" {
+        return tool_extension_key_is_cross_format_safe(source, target, namespace, key);
+    }
+    if location == "thinking" {
+        return thinking_extension_key_is_cross_format_safe(source, target, namespace, key);
+    }
+    if location == "response_format" {
+        return response_format_extension_key_is_cross_format_safe(namespace, key);
+    }
+    match (source, target, namespace, key) {
+        (
+            FormatId::OpenAiChat,
+            FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact,
+            "openai",
+            "stream"
+            | "store"
+            | "service_tier"
+            | "safety_identifier"
+            | "prompt_cache_key"
+            | "prompt_cache_retention"
+            | "verbosity",
+        ) => true,
+        (
+            FormatId::OpenAiChat,
+            FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact,
+            "openai_responses",
+            "verbosity",
+        ) => true,
+        (FormatId::OpenAiChat, FormatId::GeminiGenerateContent, "openai", "web_search_options") => {
+            true
+        }
+        (
+            FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact,
+            FormatId::OpenAiChat,
+            "openai_responses" | "openai_cli",
+            "stream"
+            | "store"
+            | "service_tier"
+            | "safety_identifier"
+            | "prompt_cache_key"
+            | "prompt_cache_retention"
+            | "verbosity",
+        ) => true,
+        (FormatId::ClaudeMessages, _, "claude", "output_config") => true,
+        (
+            FormatId::ClaudeMessages,
+            FormatId::OpenAiChat | FormatId::GeminiGenerateContent,
+            "openai",
+            "web_search_options",
+        ) => true,
+        (
+            FormatId::GeminiGenerateContent,
+            _,
+            "gemini",
+            "thinking_config" | "raw_tools" | "raw_tool_config",
+        ) => true,
+        (
+            FormatId::GeminiGenerateContent,
+            FormatId::OpenAiChat,
+            "gemini",
+            "builtin_tools" | "grounding",
+        ) => true,
+        (FormatId::GeminiGenerateContent, FormatId::GeminiGenerateContent, "gemini", _) => true,
+        (FormatId::GeminiGenerateContent, FormatId::OpenAiChat, "openai", "web_search_options") => {
+            true
+        }
+        _ => false,
+    }
+}
+
+fn tool_extension_key_is_cross_format_safe(
+    source: FormatId,
+    target: FormatId,
+    namespace: &str,
+    key: &str,
+) -> bool {
+    match (source, target, namespace, key) {
+        (_, _, "claude", "raw_input_schema") => true,
+        (_, _, "gemini", "raw_parameters") => true,
+        (
+            FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact,
+            FormatId::GeminiGenerateContent,
+            "openai_responses" | "openai_cli",
+            "type",
+        ) => true,
+        _ => false,
+    }
+}
+
+fn thinking_extension_key_is_cross_format_safe(
+    source: FormatId,
+    target: FormatId,
+    namespace: &str,
+    key: &str,
+) -> bool {
+    match (source, target, namespace, key) {
+        (
+            FormatId::OpenAiChat,
+            FormatId::OpenAiResponses
+            | FormatId::OpenAiResponsesCompact
+            | FormatId::ClaudeMessages
+            | FormatId::GeminiGenerateContent,
+            "openai",
+            "reasoning_effort",
+        ) => true,
+        (
+            FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact,
+            FormatId::OpenAiChat | FormatId::ClaudeMessages | FormatId::GeminiGenerateContent,
+            "openai_responses" | "openai_cli",
+            "effort",
+        ) => true,
+        (FormatId::ClaudeMessages, _, "claude", "type" | "budget_tokens" | "output_config") => true,
+        (
+            FormatId::ClaudeMessages,
+            FormatId::OpenAiChat | FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact,
+            "openai",
+            "reasoning_effort",
+        ) => true,
+        (
+            FormatId::GeminiGenerateContent,
+            _,
+            "gemini",
+            "thinking_config" | "includeThoughts" | "thinkingBudget" | "thinkingLevel",
+        ) => true,
+        (
+            FormatId::GeminiGenerateContent,
+            FormatId::OpenAiChat | FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact,
+            "openai",
+            "reasoning_effort",
+        ) => true,
+        _ => false,
+    }
+}
+
+fn response_format_extension_key_is_cross_format_safe(namespace: &str, key: &str) -> bool {
+    matches!((namespace, key), ("openai", _) | ("gemini", "raw_schema"))
+}
+
+fn extension_field_path(location: &str, namespace: &str, key: &str) -> String {
+    if location == "request" {
+        format!("{namespace}.{key}")
+    } else {
+        format!("{location}.{namespace}.{key}")
+    }
 }
 
 fn validate_source_response_stop_enums(
@@ -928,13 +1504,19 @@ fn validate_openai_reasoning_effort(
             source.as_str(),
             "reasoning_effort",
             object.get("reasoning_effort"),
+            openai_chat_reasoning_effort_is_valid,
         ),
         FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact => {
             let effort = object
                 .get("reasoning")
                 .and_then(Value::as_object)
                 .and_then(|reasoning| reasoning.get("effort"));
-            validate_openai_reasoning_effort_value(source.as_str(), "reasoning.effort", effort)
+            validate_openai_reasoning_effort_value(
+                source.as_str(),
+                "reasoning.effort",
+                effort,
+                openai_responses_reasoning_effort_is_valid,
+            )
         }
         _ => Ok(()),
     }
@@ -944,6 +1526,7 @@ fn validate_openai_reasoning_effort_value(
     format: &str,
     field: &str,
     value: Option<&Value>,
+    is_valid: fn(&str) -> bool,
 ) -> Result<(), FormatError> {
     let Some(value) = value else {
         return Ok(());
@@ -955,7 +1538,7 @@ fn validate_openai_reasoning_effort_value(
             reason: "reasoning effort must be a string".to_string(),
         });
     };
-    if openai_reasoning_effort_is_valid(raw) {
+    if is_valid(raw) {
         Ok(())
     } else {
         Err(FormatError::InvalidEnumValue {
@@ -966,8 +1549,12 @@ fn validate_openai_reasoning_effort_value(
     }
 }
 
-fn openai_reasoning_effort_is_valid(value: &str) -> bool {
-    crate::formats::openai::shared::OpenAiReasoningEffort::parse(value).is_some()
+fn openai_chat_reasoning_effort_is_valid(value: &str) -> bool {
+    crate::formats::openai::shared::OpenAiChatReasoningEffort::parse(value).is_some()
+}
+
+fn openai_responses_reasoning_effort_is_valid(value: &str) -> bool {
+    crate::formats::openai::shared::OpenAiResponsesReasoningEffort::parse(value).is_some()
 }
 
 fn validate_openai_chat_to_responses(body: &Value) -> Result<(), FormatError> {
@@ -2182,6 +2769,118 @@ mod tests {
     }
 
     #[test]
+    fn pure_cross_format_rejects_unknown_source_root_field() {
+        let body = json!({
+            "model": "gpt-source",
+            "messages": [{"role": "user", "content": "hello"}],
+            "future_field": true
+        });
+
+        let error = convert_request_pure("openai:chat", "gemini:generate_content", &body)
+            .expect_err("unknown source root field should fail closed");
+
+        assert!(matches!(
+            error,
+            super::FormatError::UnsupportedField { ref field, .. } if field == "future_field"
+        ));
+    }
+
+    #[test]
+    fn pure_openai_chat_to_claude_blocks_target_unsupported_generation_field() {
+        let body = json!({
+            "model": "gpt-source",
+            "messages": [{"role": "user", "content": "hello"}],
+            "top_logprobs": 2
+        });
+
+        let error = convert_request_pure("openai:chat", "claude:messages", &body)
+            .expect_err("target-unsupported generation field should fail closed");
+
+        assert!(matches!(
+            error,
+            super::FormatError::LossyConversionBlocked { ref field, .. }
+                if field == "top_logprobs"
+        ));
+    }
+
+    #[test]
+    fn pure_openai_chat_to_gemini_blocks_unknown_content_part_loss() {
+        let body = json!({
+            "model": "gpt-source",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "input_video",
+                    "input_video": {"url": "https://example.com/movie.mp4"}
+                }]
+            }]
+        });
+
+        let error = convert_request_pure("openai:chat", "gemini:generate_content", &body)
+            .expect_err("unknown content part should fail closed");
+
+        assert!(matches!(
+            error,
+            super::FormatError::LossyConversionBlocked { ref field, .. }
+                if field == "messages[].content[].type"
+        ));
+    }
+
+    #[test]
+    fn pure_openai_responses_to_chat_blocks_unmapped_context_management() {
+        let body = json!({
+            "model": "gpt-source",
+            "input": [{"role": "user", "content": "hello"}],
+            "context_management": []
+        });
+
+        let error = convert_request_pure("openai:responses", "openai:chat", &body)
+            .expect_err("Responses context_management should fail closed");
+
+        assert!(matches!(
+            error,
+            super::FormatError::LossyConversionBlocked { ref field, .. }
+                if field == "openai_responses.context_management"
+        ));
+    }
+
+    #[test]
+    fn pure_claude_to_openai_chat_blocks_container_loss() {
+        let body = json!({
+            "model": "claude-sonnet",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 64,
+            "container": "container_123"
+        });
+
+        let error = convert_request_pure("claude:messages", "openai:chat", &body)
+            .expect_err("Claude container should fail closed");
+
+        assert!(matches!(
+            error,
+            super::FormatError::LossyConversionBlocked { ref field, .. }
+                if field == "claude.container"
+        ));
+    }
+
+    #[test]
+    fn pure_gemini_to_openai_chat_blocks_service_tier_loss() {
+        let body = json!({
+            "contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+            "serviceTier": "priority"
+        });
+
+        let error = convert_request_pure("gemini:generate_content", "openai:chat", &body)
+            .expect_err("Gemini serviceTier should fail closed");
+
+        assert!(matches!(
+            error,
+            super::FormatError::LossyConversionBlocked { ref field, .. }
+                if field == "gemini.serviceTier"
+        ));
+    }
+
+    #[test]
     fn pure_openai_cross_format_rejects_invalid_reasoning_effort_enum() {
         let body = json!({
             "model": "gpt-source",
@@ -2196,6 +2895,26 @@ mod tests {
             error,
             super::FormatError::InvalidEnumValue { ref field, ref value, .. }
                 if field == "reasoning_effort" && value == "max"
+        ));
+    }
+
+    #[test]
+    fn pure_openai_responses_to_chat_rejects_invalid_reasoning_effort_enum() {
+        let body = json!({
+            "model": "gpt-source",
+            "input": [{"role": "user", "content": "hello"}],
+            "reasoning": {
+                "effort": "max"
+            }
+        });
+
+        let error = convert_request_pure("openai:responses", "openai:chat", &body)
+            .expect_err("invalid Responses reasoning enum should fail closed");
+
+        assert!(matches!(
+            error,
+            super::FormatError::InvalidEnumValue { ref field, ref value, .. }
+                if field == "reasoning.effort" && value == "max"
         ));
     }
 
@@ -2854,6 +3573,102 @@ mod tests {
     }
 
     #[test]
+    fn field_coverage_matrix_covers_all_documented_provider_schema_fields() {
+        let definitions = include_str!("../../../../docs/api/provider-interface-definitions.md");
+        let matrix = include_str!("../../../../docs/api/format-field-coverage-matrix.md");
+        let documented = parse_documented_schema_fields(definitions);
+        let covered = parse_field_coverage_matrix_fields(matrix);
+
+        let missing = documented
+            .difference(&covered)
+            .take(20)
+            .cloned()
+            .collect::<Vec<_>>();
+        let extra = covered
+            .difference(&documented)
+            .take(20)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        assert!(
+            missing.is_empty(),
+            "field coverage matrix is missing documented schema fields: {missing:?}"
+        );
+        assert!(
+            extra.is_empty(),
+            "field coverage matrix contains fields not present in provider definitions: {extra:?}"
+        );
+        assert!(
+            matrix.contains(&format!(
+                "Total covered schema fields: {}.",
+                documented.len()
+            )),
+            "field coverage matrix total must match provider-interface-definitions.md"
+        );
+        assert_field_coverage_statuses_are_explicit(matrix);
+    }
+
+    #[test]
+    fn request_root_field_whitelists_cover_documented_generation_request_schemas() {
+        let definitions = include_str!("../../../../docs/api/provider-interface-definitions.md");
+        let documented = parse_documented_schema_fields(definitions);
+
+        for (format, provider, schema) in [
+            (
+                FormatId::OpenAiChat,
+                "OpenAI",
+                "CreateChatCompletionRequest",
+            ),
+            (FormatId::OpenAiResponses, "OpenAI", "CreateResponse"),
+            (
+                FormatId::OpenAiResponsesCompact,
+                "OpenAI",
+                "CompactResponseMethodPublicBody",
+            ),
+            (
+                FormatId::ClaudeMessages,
+                "Claude",
+                "MessageCreateParamsBase",
+            ),
+            (
+                FormatId::GeminiGenerateContent,
+                "Gemini",
+                "GenerateContentRequest",
+            ),
+        ] {
+            let missing = documented
+                .iter()
+                .filter(|field| field.provider == provider && field.schema == schema)
+                .filter(|field| {
+                    !super::standard_request_root_field_is_audited(format, &field.field)
+                })
+                .map(|field| field.field.clone())
+                .collect::<Vec<_>>();
+            assert!(
+                missing.is_empty(),
+                "{provider} `{schema}` has root fields missing from runtime audit whitelist: {missing:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn format_conversion_audit_has_no_unresolved_field_coverage_markers() {
+        let audit = include_str!("../../../../docs/api/format-conversion-audit.md");
+        for forbidden in [
+            "strict audit pending",
+            "Nested per-field",
+            "field-by-field decision pending",
+            "is still pending",
+            "coverage exists, but strict audit is pending",
+        ] {
+            assert!(
+                !audit.contains(forbidden),
+                "format conversion audit still contains unresolved marker: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
     fn registry_does_not_call_wire_specific_canonical_functions_directly() {
         let implementation = include_str!("registry.rs")
             .split("#[cfg(test)]")
@@ -2873,5 +3688,146 @@ mod tests {
                 "registry should dispatch through formats::<provider>::<surface> adapters, found {forbidden}"
             );
         }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    struct DocumentedSchemaField {
+        provider: String,
+        schema: String,
+        field: String,
+    }
+
+    fn parse_documented_schema_fields(
+        source: &str,
+    ) -> std::collections::BTreeSet<DocumentedSchemaField> {
+        let mut fields = std::collections::BTreeSet::new();
+        let mut provider: Option<&str> = None;
+        let mut schema: Option<String> = None;
+
+        for line in source.lines() {
+            if line.starts_with("## ") {
+                provider = if line.contains("OpenAI Schema") {
+                    Some("OpenAI")
+                } else if line.contains("Claude / Anthropic TypeScript") {
+                    Some("Claude")
+                } else if line.contains("Gemini Schema") {
+                    Some("Gemini")
+                } else {
+                    None
+                };
+                schema = None;
+                continue;
+            }
+            let Some(active_provider) = provider else {
+                continue;
+            };
+            if let Some(schema_name) = markdown_code_heading(line) {
+                schema = Some(schema_name);
+                continue;
+            }
+            let Some(active_schema) = schema.as_ref() else {
+                continue;
+            };
+            if !line.starts_with("| `") {
+                continue;
+            }
+            let cells = split_markdown_row(line);
+            if cells.len() < 4 || !matches!(cells[2].as_str(), "是" | "否") {
+                continue;
+            }
+            fields.insert(DocumentedSchemaField {
+                provider: active_provider.to_string(),
+                schema: active_schema.clone(),
+                field: strip_markdown_code(&cells[1]),
+            });
+        }
+
+        fields
+    }
+
+    fn parse_field_coverage_matrix_fields(
+        matrix: &str,
+    ) -> std::collections::BTreeSet<DocumentedSchemaField> {
+        let mut fields = std::collections::BTreeSet::new();
+        for line in matrix.lines() {
+            if !line.starts_with("| ") {
+                continue;
+            }
+            let cells = split_markdown_row(line);
+            if cells.len() < 10 || !matches!(cells[1].as_str(), "OpenAI" | "Claude" | "Gemini") {
+                continue;
+            }
+            fields.insert(DocumentedSchemaField {
+                provider: cells[1].to_string(),
+                schema: strip_markdown_code(&cells[2]),
+                field: strip_markdown_code(&cells[3]),
+            });
+        }
+        fields
+    }
+
+    fn assert_field_coverage_statuses_are_explicit(matrix: &str) {
+        const VALID_STATUSES: &[&str] = &[
+            "native",
+            "mapped",
+            "mapped/lossy-blocked",
+            "extension-preserved",
+            "unsupported",
+            "invalid-enum",
+            "lossy-blocked",
+            "not-in-conversion-surface",
+        ];
+
+        for line in matrix.lines() {
+            if !line.starts_with("| ") {
+                continue;
+            }
+            let cells = split_markdown_row(line);
+            if cells.len() < 10 || !matches!(cells[1].as_str(), "OpenAI" | "Claude" | "Gemini") {
+                continue;
+            }
+            for index in [7, 8, 9] {
+                assert!(
+                    VALID_STATUSES.contains(&cells[index].as_str()),
+                    "field coverage matrix has invalid status `{}` in row `{line}`",
+                    cells[index]
+                );
+            }
+        }
+    }
+
+    fn markdown_code_heading(line: &str) -> Option<String> {
+        line.strip_prefix("### `")
+            .and_then(|rest| rest.split_once('`'))
+            .map(|(value, _)| value.to_string())
+    }
+
+    fn strip_markdown_code(value: &str) -> String {
+        value
+            .trim()
+            .strip_prefix('`')
+            .and_then(|value| value.strip_suffix('`'))
+            .unwrap_or_else(|| value.trim())
+            .replace("\\|", "|")
+    }
+
+    fn split_markdown_row(line: &str) -> Vec<String> {
+        let mut cells = Vec::new();
+        let mut current = String::new();
+        let mut escaped = false;
+        for ch in line.chars() {
+            if ch == '|' && !escaped {
+                cells.push(current.trim().to_string());
+                current.clear();
+            } else {
+                current.push(ch);
+            }
+            escaped = ch == '\\' && !escaped;
+            if escaped && ch != '\\' {
+                escaped = false;
+            }
+        }
+        cells.push(current.trim().to_string());
+        cells
     }
 }
