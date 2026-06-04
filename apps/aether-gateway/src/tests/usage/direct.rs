@@ -19,6 +19,27 @@ fn large_request_body(stream: bool) -> String {
     .expect("request body should encode")
 }
 
+fn run_async_test_on_large_stack<F>(name: &'static str, future: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime should build")
+                .block_on(future);
+        })
+        .expect("large-stack usage direct test thread should spawn");
+
+    if let Err(payload) = handle.join() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
 #[tokio::test]
 async fn gateway_records_usage_for_execution_runtime_sync_when_runtime_enabled() {
     let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
@@ -131,8 +152,15 @@ async fn gateway_records_usage_for_execution_runtime_sync_when_runtime_enabled()
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_records_pending_usage_before_execution_runtime_sync_result_arrives() {
+#[test]
+fn gateway_records_pending_usage_before_execution_runtime_sync_result_arrives() {
+    run_async_test_on_large_stack(
+        "gateway_records_pending_usage_before_execution_runtime_sync_result_arrives",
+        gateway_records_pending_usage_before_execution_runtime_sync_result_arrives_impl(),
+    );
+}
+
+async fn gateway_records_pending_usage_before_execution_runtime_sync_result_arrives_impl() {
     let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
     let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
     let execution_request_started = Arc::new(tokio::sync::Notify::new());

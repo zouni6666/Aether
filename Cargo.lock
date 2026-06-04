@@ -480,7 +480,7 @@ dependencies = [
 
 [[package]]
 name = "aether-tunnel"
-version = "0.3.14"
+version = "0.3.16"
 dependencies = [
  "aether-contracts",
  "aether-gateway",

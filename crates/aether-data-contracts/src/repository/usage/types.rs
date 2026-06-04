@@ -851,6 +851,7 @@ pub struct UsageSettledCostSummaryQuery {
     pub created_from_unix_secs: u64,
     pub created_until_unix_secs: u64,
     pub user_id: Option<String>,
+    pub api_key_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]

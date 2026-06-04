@@ -660,6 +660,29 @@ async fn connect_protocol_peer(
 
     let (socket, _response) = tokio_tungstenite::connect_async(request).await?;
     let (mut sink, mut stream) = socket.split();
+    sink.send(Message::Binary(
+        protocol::encode_hello(&protocol::HelloPayload {
+            protocol_version: aether_contracts::tunnel::CURRENT_TUNNEL_PROTOCOL_VERSION,
+            capabilities: vec![
+                "flow-control".to_string(),
+                "reset-stream".to_string(),
+                "graceful-drain".to_string(),
+            ],
+            session_id: Some("capacity-curve-session".to_string()),
+            replica_id: Some("capacity-curve-replica".to_string()),
+        })
+        .into(),
+    ))
+    .await?;
+    sink.send(Message::Binary(
+        protocol::encode_settings(&protocol::SettingsPayload {
+            initial_stream_window_bytes: 4 * 1024 * 1024,
+            min_window_update_bytes: 1024 * 1024,
+            drain_deadline_ms: 30_000,
+        })
+        .into(),
+    ))
+    .await?;
     Ok(tokio::spawn(async move {
         while let Some(message) = stream.next().await {
             let Ok(message) = message else {
@@ -707,7 +730,17 @@ where
             let payload = protocol::decode_payload(&data, &header).unwrap_or_default();
             let _ = serde_json::from_slice::<protocol::RequestMeta>(&payload);
         }
-        protocol::REQUEST_BODY if header.flags & protocol::FLAG_END_STREAM != 0 => {
+        protocol::REQUEST_BODY => {
+            let payload = protocol::decode_payload(&data, &header).unwrap_or_default();
+            if !payload.is_empty() {
+                sink.send(Message::Binary(
+                    protocol::encode_window_update(header.stream_id, payload.len() as u32).into(),
+                ))
+                .await?;
+            }
+            if header.flags & protocol::FLAG_END_STREAM == 0 {
+                return Ok(());
+            }
             tokio::time::sleep(hold).await;
             let response_meta = protocol::ResponseMeta {
                 status: 200,

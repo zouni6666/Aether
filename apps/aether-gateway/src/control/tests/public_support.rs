@@ -464,6 +464,23 @@ fn classifies_users_me_routes_as_public_support_route() {
 }
 
 #[test]
+fn classifies_ccswitch_usage_as_api_key_public_support_route() {
+    let headers = headers(&[]);
+    let uri: Uri = "/api/ccswitch/usage".parse().expect("uri should parse");
+    let decision =
+        classify_control_route(&http::Method::GET, &uri, &headers).expect("route should classify");
+
+    assert_eq!(decision.route_class.as_deref(), Some("public_support"));
+    assert_eq!(decision.route_family.as_deref(), Some("ccswitch"));
+    assert_eq!(decision.route_kind.as_deref(), Some("usage"));
+    assert_eq!(
+        decision.auth_endpoint_signature.as_deref(),
+        Some("aether:ccswitch_usage")
+    );
+    assert!(!decision.is_execution_runtime_candidate());
+}
+
+#[test]
 fn user_api_key_install_session_create_buffers_request_body() {
     let headers = headers(&[]);
     let uri: Uri = "/api/users/me/api-keys/key-1/install-sessions"

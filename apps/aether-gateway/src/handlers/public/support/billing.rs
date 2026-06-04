@@ -327,6 +327,32 @@ pub(super) async fn handle_billing_plan_checkout(
             false,
         );
     }
+    match state
+        .find_pending_plan_purchase_order_by_user_id(&auth.user.id, &plan.id)
+        .await
+    {
+        Ok(Some(order)) => {
+            return build_auth_json_response(
+                http::StatusCode::OK,
+                json!({
+                    "order": payment_order_payload(&order, &plan),
+                    "payment_instructions": sanitize_wallet_gateway_response(
+                        order.gateway_response.clone()
+                    ),
+                    "reused_pending_order": true,
+                }),
+                None,
+            )
+        }
+        Ok(None) => {}
+        Err(err) => {
+            return build_auth_error_response(
+                http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("pending billing checkout lookup failed: {err:?}"),
+                false,
+            )
+        }
+    }
     let now = Utc::now();
     let order_no = billing_order_no(now);
     let expires_at = now + chrono::Duration::minutes(30);

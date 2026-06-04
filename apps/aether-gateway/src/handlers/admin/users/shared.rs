@@ -278,6 +278,9 @@ pub(crate) fn normalize_admin_user_api_formats(
         if item.is_empty() {
             return Err("allowed_api_formats 不能为空".to_string());
         }
+        if !looks_like_admin_api_format_signature(item) {
+            return Err(format!("allowed_api_formats 格式无效: {item}"));
+        }
         let Some(normalized_item) = crate::api::ai::normalize_admin_endpoint_signature(item) else {
             return Err(format!("allowed_api_formats 格式无效: {item}"));
         };
@@ -287,6 +290,12 @@ pub(crate) fn normalize_admin_user_api_formats(
         }
     }
     Ok(Some(normalized))
+}
+
+fn looks_like_admin_api_format_signature(value: &str) -> bool {
+    value
+        .split_once(':')
+        .is_some_and(|(family, kind)| !family.trim().is_empty() && !kind.trim().is_empty())
 }
 
 pub(crate) fn normalize_admin_user_ip_rules(

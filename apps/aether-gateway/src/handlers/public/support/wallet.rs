@@ -28,12 +28,16 @@ mod redeem;
 #[path = "wallet/refunds.rs"]
 mod refunds;
 use self::flow::handle_wallet_flow;
-pub(in crate::handlers::public::support) use self::reads::build_wallet_balance_payload_for_user;
+pub(in crate::handlers::public::support) use self::reads::{
+    build_wallet_balance_payload_for_auth_scope, build_wallet_balance_payload_for_user,
+    build_wallet_live_today_usage_payload_for_api_key,
+    build_wallet_live_today_usage_payload_for_user,
+};
 use self::reads::{
-    build_wallet_daily_usage_payload, build_wallet_live_today_usage_payload_for_user,
-    build_wallet_payload, build_wallet_zero_today_entry, handle_wallet_balance,
-    handle_wallet_today_cost, handle_wallet_transactions, parse_wallet_limit, parse_wallet_offset,
-    wallet_fixed_offset, wallet_transaction_payload_from_record,
+    build_wallet_daily_usage_payload, build_wallet_payload, build_wallet_zero_today_entry,
+    handle_wallet_balance, handle_wallet_today_cost, handle_wallet_transactions,
+    parse_wallet_limit, parse_wallet_offset, wallet_fixed_offset,
+    wallet_transaction_payload_from_record,
 };
 pub(crate) use self::recharge::{direct_gateway_channels, sanitize_wallet_gateway_response};
 use self::recharge::{

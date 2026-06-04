@@ -199,6 +199,11 @@ export interface ApiKeyInstallSession {
   powershell_command: string
 }
 
+export interface UserClientConfig {
+  base_url: string
+  site_name?: string
+}
+
 // 不再需要 ProviderBinding 接口
 
 export interface ChangePasswordRequest {
@@ -275,6 +280,11 @@ export const meApi = {
       `/api/users/me/api-keys/${keyId}`,
       { params: { include_key: true } }
     )
+    return response.data
+  },
+
+  async getClientConfig(): Promise<UserClientConfig> {
+    const response = await apiClient.get<UserClientConfig>('/api/users/me/client-config')
     return response.data
   },
 

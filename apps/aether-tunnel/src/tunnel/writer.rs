@@ -188,7 +188,13 @@ fn classify_frame_priority(frame: &Frame) -> FramePriority {
         | MsgType::Pong
         | MsgType::GoAway
         | MsgType::HeartbeatData
-        | MsgType::HeartbeatAck => FramePriority::High,
+        | MsgType::HeartbeatAck
+        | MsgType::Hello
+        | MsgType::Settings
+        | MsgType::WindowUpdate
+        | MsgType::ResetStream
+        | MsgType::ConnectionClose
+        | MsgType::LoadReport => FramePriority::High,
         MsgType::RequestHeaders
         | MsgType::RequestBody
         | MsgType::ResponseBody

@@ -548,6 +548,10 @@ mod tests {
             tunnel_reconnect_max_ms: 250,
             tunnel_ping_interval_ms: 1_000,
             tunnel_max_streams: Some(8),
+            tunnel_profile: crate::config::TunnelProfileArg::Lite,
+            tunnel_stream_initial_window_bytes:
+                crate::config::DEFAULT_TUNNEL_STREAM_INITIAL_WINDOW_BYTES,
+            tunnel_drain_deadline_ms: crate::config::DEFAULT_TUNNEL_DRAIN_DEADLINE_MS,
             tunnel_connect_timeout_ms: 2_000,
             tunnel_ipv4_only: false,
             tunnel_ipv6_only: false,

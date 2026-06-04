@@ -54,15 +54,40 @@ pub(in crate::handlers::public::support) async fn build_wallet_balance_payload_f
     user_id: &str,
     wallet: Option<&aether_data::repository::wallet::StoredWalletSnapshot>,
 ) -> serde_json::Value {
+    build_wallet_balance_payload_for_quota_user(state, Some(user_id), wallet).await
+}
+
+pub(in crate::handlers::public::support) async fn build_wallet_balance_payload_for_auth_scope(
+    state: &AppState,
+    user_id: &str,
+    api_key_is_standalone: bool,
+    wallet: Option<&aether_data::repository::wallet::StoredWalletSnapshot>,
+) -> serde_json::Value {
+    let quota_user_id = if api_key_is_standalone {
+        None
+    } else {
+        Some(user_id)
+    };
+    build_wallet_balance_payload_for_quota_user(state, quota_user_id, wallet).await
+}
+
+async fn build_wallet_balance_payload_for_quota_user(
+    state: &AppState,
+    quota_user_id: Option<&str>,
+    wallet: Option<&aether_data::repository::wallet::StoredWalletSnapshot>,
+) -> serde_json::Value {
     let mut payload = build_wallet_balance_payload(wallet);
     let wallet_balance = wallet
         .map(|value| value.balance + value.gift_balance)
         .unwrap_or(0.0);
-    let daily_quota = state
-        .find_user_daily_quota_availability(user_id)
-        .await
-        .ok()
-        .flatten();
+    let daily_quota = match quota_user_id {
+        Some(user_id) => state
+            .find_user_daily_quota_availability(user_id)
+            .await
+            .ok()
+            .flatten(),
+        None => None,
+    };
     let (has_active_daily_quota, total_quota_usd, used_usd, remaining_usd, allow_wallet_overage) =
         daily_quota
             .map(|quota| {
@@ -213,9 +238,10 @@ pub(super) fn build_wallet_zero_today_entry() -> serde_json::Value {
     )
 }
 
-pub(super) async fn build_wallet_live_today_usage_payload_for_user(
+async fn build_wallet_live_today_usage_payload_for_auth_scope(
     state: &AppState,
-    user_id: &str,
+    user_id: Option<&str>,
+    api_key_id: Option<&str>,
 ) -> Result<Option<serde_json::Value>, String> {
     if !state.has_usage_data_reader() {
         return Ok(None);
@@ -225,7 +251,8 @@ pub(super) async fn build_wallet_live_today_usage_payload_for_user(
         .summarize_usage_settled_cost(&UsageSettledCostSummaryQuery {
             created_from_unix_secs: start_unix_secs,
             created_until_unix_secs: end_unix_secs,
-            user_id: Some(user_id.to_string()),
+            user_id: user_id.map(ToOwned::to_owned),
+            api_key_id: api_key_id.map(ToOwned::to_owned),
         })
         .await
         .map_err(|err| format!("wallet today cost lookup failed: {err:?}"))?;
@@ -248,6 +275,20 @@ pub(super) async fn build_wallet_live_today_usage_payload_for_user(
         Some(Utc::now().to_rfc3339()),
         true,
     )))
+}
+
+pub(in crate::handlers::public::support) async fn build_wallet_live_today_usage_payload_for_user(
+    state: &AppState,
+    user_id: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    build_wallet_live_today_usage_payload_for_auth_scope(state, Some(user_id), None).await
+}
+
+pub(in crate::handlers::public::support) async fn build_wallet_live_today_usage_payload_for_api_key(
+    state: &AppState,
+    api_key_id: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    build_wallet_live_today_usage_payload_for_auth_scope(state, None, Some(api_key_id)).await
 }
 
 pub(super) fn wallet_transaction_payload_from_record(

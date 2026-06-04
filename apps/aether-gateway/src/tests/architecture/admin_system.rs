@@ -28,7 +28,7 @@ fn admin_system_build_version_contract_uses_explicit_local_build_arg() {
     let deploy = read_workspace_file("deploy.sh");
     for pattern in [
         "detect_build_version()",
-        "git describe --tags --always --dirty",
+        "git describe --tags --match 'v[0-9]*' --always --dirty",
         "AETHER_BUILD_VERSION=\"${AETHER_BUILD_VERSION:-$(detect_build_version)}\"",
         "--build-arg \"AETHER_BUILD_VERSION=$AETHER_BUILD_VERSION\"",
         ">>> AETHER_BUILD_VERSION",
@@ -43,6 +43,8 @@ fn admin_system_build_version_contract_uses_explicit_local_build_arg() {
     for pattern in [
         "process.env.AETHER_BUILD_VERSION",
         "process.env.AETHER_VERSION",
+        "git describe --tags --match \"v[0-9]*\" --always --dirty",
+        "trimmed.startsWith('tunnel-v')",
     ] {
         assert!(
             vite_config.contains(pattern),
@@ -58,6 +60,18 @@ fn admin_system_build_version_contract_uses_explicit_local_build_arg() {
         assert!(
             core_api.contains(pattern),
             "api/core.rs should expose build version pattern {pattern}"
+        );
+    }
+
+    let build_rs = read_workspace_file("apps/aether-gateway/build.rs");
+    for pattern in [
+        "\"--match\"",
+        "\"v[0-9]*\"",
+        "trimmed.starts_with(\"tunnel-v\")",
+    ] {
+        assert!(
+            build_rs.contains(pattern),
+            "apps/aether-gateway/build.rs should ignore tunnel release tags for gateway version pattern {pattern}"
         );
     }
 }

@@ -88,8 +88,13 @@ pub(crate) async fn open_direct_relay_stream(
     let stream = state
         .hub
         .open_local_stream(node_id, &meta)
+        .await
         .map_err(|error| format!("connect: {error}"))?;
-    if let Err(error) = state.hub.push_local_request_body(stream.id, body, true) {
+    if let Err(error) = state
+        .hub
+        .push_local_request_body(stream.id, body, true)
+        .await
+    {
         state.hub.cancel_local_stream(stream.id, &error);
         return Err(format!("connect: {error}"));
     }
@@ -259,7 +264,7 @@ pub async fn relay_request(
                 continue;
             };
 
-            let opened_stream = match state.hub.open_local_stream(&node_id, &parsed_meta) {
+            let opened_stream = match state.hub.open_local_stream(&node_id, &parsed_meta).await {
                 Ok(stream) => stream,
                 Err(error) => {
                     return release_permit_response(
@@ -271,10 +276,10 @@ pub async fn relay_request(
 
             if envelope_buf.len() > body_offset {
                 let first_body_chunk = Bytes::copy_from_slice(&envelope_buf[body_offset..]);
-                if let Err(error) =
-                    state
-                        .hub
-                        .push_local_request_body(opened_stream.id, first_body_chunk, false)
+                if let Err(error) = state
+                    .hub
+                    .push_local_request_body(opened_stream.id, first_body_chunk, false)
+                    .await
                 {
                     state.hub.cancel_local_stream(opened_stream.id, &error);
                     return release_permit_response(
@@ -296,6 +301,7 @@ pub async fn relay_request(
         if let Err(error) = state
             .hub
             .push_local_request_body(active_stream.id, chunk, false)
+            .await
         {
             state.hub.cancel_local_stream(active_stream.id, &error);
             return release_permit_response(
@@ -322,6 +328,7 @@ pub async fn relay_request(
     if let Err(error) = state
         .hub
         .push_local_request_body(stream.id, Bytes::new(), true)
+        .await
     {
         state.hub.cancel_local_stream(stream.id, &error);
         return release_permit_response(

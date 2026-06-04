@@ -126,6 +126,7 @@ export interface BillingCheckoutResponse {
     product?: BillingPlan | null
   }
   payment_instructions: Record<string, unknown>
+  reused_pending_order?: boolean
 }
 
 export interface UserPlanEntitlement {

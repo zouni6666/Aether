@@ -1196,6 +1196,12 @@ export const MOCK_API_FORMATS = {
     { value: 'gemini:video', label: 'Gemini Video', default_path: '/v1beta/models/{model}:predictLongRunning', aliases: [] },
     { value: 'jina:embedding', label: 'Jina Embedding', default_path: '/v1/embeddings', aliases: [] },
     { value: 'jina:rerank', label: 'Jina Rerank', default_path: '/v1/rerank', aliases: [] },
-    { value: 'doubao:embedding', label: 'Doubao Embedding', default_path: '/embeddings/multimodal', aliases: [] }
+    { value: 'doubao:embedding', label: 'Doubao Embedding', default_path: '/embeddings/multimodal', aliases: [] },
+    {
+      value: 'aliyun:multimodal_embedding',
+      label: 'Aliyun Multimodal Embedding',
+      default_path: '/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding',
+      aliases: ['dashscope:multimodal_embedding'],
+    },
   ]
 }

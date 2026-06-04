@@ -151,6 +151,19 @@ export function buildDefaultModelTestRequestBody(
 ): string {
   const normalizedApiFormat = normalizeApiFormatAlias(apiFormat ?? '')
 
+  if (normalizedApiFormat === 'aliyun:multimodal_embedding') {
+    return JSON.stringify({
+      model: modelName,
+      input: [
+        { text: 'White running shoes, lightweight and breathable.' },
+        { image: 'https://dashscope.oss-cn-beijing.aliyuncs.com/images/256_1.png' },
+      ],
+      parameters: {
+        enable_fusion: true,
+      },
+    }, null, 2)
+  }
+
   if (normalizedApiFormat.endsWith(':embedding')) {
     return JSON.stringify({
       model: modelName,

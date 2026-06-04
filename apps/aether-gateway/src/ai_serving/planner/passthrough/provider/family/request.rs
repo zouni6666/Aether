@@ -56,6 +56,7 @@ pub(crate) fn resolve_same_format_provider_transport_unsupported_reason_for_trac
             "jina:embedding" => "jina:embedding",
             "jina:rerank" => "jina:rerank",
             "doubao:embedding" => "doubao:embedding",
+            "aliyun:multimodal_embedding" => "aliyun:multimodal_embedding",
             _ => return Some("transport_api_format_unsupported"),
         };
     let behavior = policy::classify_same_format_provider_request_behavior(

@@ -5,7 +5,7 @@ use serde_json::Value;
 use crate::antigravity::is_antigravity_provider_transport;
 use crate::auth::{
     build_complete_passthrough_headers, build_complete_passthrough_headers_with_auth,
-    resolve_local_gemini_auth, resolve_local_standard_auth,
+    resolve_local_gemini_auth, resolve_local_openai_bearer_auth, resolve_local_standard_auth,
 };
 use crate::claude_code::build_claude_code_passthrough_headers;
 use crate::claude_code::local_claude_code_transport_unsupported_reason_with_network;
@@ -169,6 +169,14 @@ pub fn build_same_format_provider_request_body(
         );
     }
 
+    if embedding_multimodal_input_requires_aliyun_provider(
+        input.client_api_format,
+        input.provider_api_format,
+        input.body_json,
+    ) {
+        return None;
+    }
+
     let mut provider_request_body = if aether_ai_formats::api_format_alias_matches(
         input.client_api_format,
         input.provider_api_format,
@@ -243,6 +251,31 @@ pub fn build_same_format_provider_request_body(
         require_body_stream_field,
     );
     Some(provider_request_body)
+}
+
+fn embedding_multimodal_input_requires_aliyun_provider(
+    client_api_format: &str,
+    provider_api_format: &str,
+    body_json: &Value,
+) -> bool {
+    aether_ai_formats::is_embedding_api_format(client_api_format)
+        && embedding_input_is_multimodal(body_json.get("input"))
+        && aether_ai_formats::normalize_api_format_alias(provider_api_format)
+            != "aliyun:multimodal_embedding"
+}
+
+fn embedding_input_is_multimodal(value: Option<&Value>) -> bool {
+    value
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty() && items.iter().all(embedding_content_is_multimodal))
+}
+
+fn embedding_content_is_multimodal(value: &Value) -> bool {
+    value.as_object().is_some_and(|object| {
+        ["text", "image", "video", "multi_images"]
+            .iter()
+            .any(|key| object.contains_key(*key))
+    })
 }
 
 fn strip_gemini_function_response_ids(value: &mut Value) {
@@ -438,10 +471,13 @@ pub fn should_try_same_format_provider_oauth_auth(
     behavior: &SameFormatProviderRequestBehavior,
     transport: &GatewayProviderTransportSnapshot,
     family: SameFormatProviderFamily,
+    provider_api_format: &str,
 ) -> bool {
+    let provider_api_format = aether_ai_formats::normalize_api_format_alias(provider_api_format);
     behavior.is_kiro
         || matches!(family, SameFormatProviderFamily::Standard)
-            && resolve_local_standard_auth(transport).is_none()
+            && resolve_same_format_standard_direct_auth(transport, provider_api_format.as_str())
+                .is_none()
         || matches!(family, SameFormatProviderFamily::Gemini)
             && behavior.is_vertex
             && is_vertex_service_account_transport_context(transport)
@@ -454,6 +490,7 @@ pub fn resolve_same_format_provider_direct_auth(
     behavior: &SameFormatProviderRequestBehavior,
     transport: &GatewayProviderTransportSnapshot,
     family: SameFormatProviderFamily,
+    provider_api_format: &str,
 ) -> Option<(String, String)> {
     if is_grok_provider_transport(transport) && matches!(family, SameFormatProviderFamily::Standard)
     {
@@ -463,9 +500,22 @@ pub fn resolve_same_format_provider_direct_auth(
         None
     } else {
         match family {
-            SameFormatProviderFamily::Standard => resolve_local_standard_auth(transport),
+            SameFormatProviderFamily::Standard => {
+                resolve_same_format_standard_direct_auth(transport, provider_api_format)
+            }
             SameFormatProviderFamily::Gemini => resolve_local_gemini_auth(transport),
         }
+    }
+}
+
+fn resolve_same_format_standard_direct_auth(
+    transport: &GatewayProviderTransportSnapshot,
+    provider_api_format: &str,
+) -> Option<(String, String)> {
+    if aether_ai_formats::api_format_alias_matches(provider_api_format, "openai:embedding") {
+        resolve_local_openai_bearer_auth(transport)
+    } else {
+        resolve_local_standard_auth(transport)
     }
 }
 
@@ -750,6 +800,57 @@ mod tests {
                 &behavior,
                 &transport,
                 SameFormatProviderFamily::Standard,
+                "openai:chat",
+            ),
+            Some(("x-api-key".to_string(), "secret".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolves_openai_embedding_direct_auth_with_bearer_header() {
+        let mut transport = sample_transport("custom");
+        transport.endpoint.api_format = "openai:embedding".to_string();
+        transport.key.auth_type = "api_key".to_string();
+        let behavior = classify_same_format_provider_request_behavior(
+            &transport,
+            SameFormatProviderRequestBehaviorParams {
+                require_streaming: false,
+                provider_api_format: "openai:embedding",
+                report_kind: "openai_embedding_sync_success",
+            },
+        );
+
+        assert_eq!(
+            resolve_same_format_provider_direct_auth(
+                &behavior,
+                &transport,
+                SameFormatProviderFamily::Standard,
+                "openai:embedding",
+            ),
+            Some(("authorization".to_string(), "Bearer secret".to_string()))
+        );
+    }
+
+    #[test]
+    fn keeps_claude_same_format_api_key_on_x_api_key_header() {
+        let mut transport = sample_transport("custom");
+        transport.endpoint.api_format = "claude:messages".to_string();
+        transport.key.auth_type = "api_key".to_string();
+        let behavior = classify_same_format_provider_request_behavior(
+            &transport,
+            SameFormatProviderRequestBehaviorParams {
+                require_streaming: false,
+                provider_api_format: "claude:messages",
+                report_kind: "claude_chat_sync_success",
+            },
+        );
+
+        assert_eq!(
+            resolve_same_format_provider_direct_auth(
+                &behavior,
+                &transport,
+                SameFormatProviderFamily::Standard,
+                "claude:messages",
             ),
             Some(("x-api-key".to_string(), "secret".to_string()))
         );
@@ -779,6 +880,33 @@ mod tests {
 
         assert_eq!(body.get("model"), Some(&json!("upstream-model")));
         assert_eq!(body.get("stream"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn same_format_embedding_body_rejects_multimodal_for_openai_like_provider() {
+        let body = build_same_format_provider_request_body(SameFormatProviderRequestBodyInput {
+            body_json: &json!({
+                "model": "qwen3-vl-embedding",
+                "input": [
+                    {"text": "white running shoes"},
+                    {"image": "https://example.com/shoe.png"}
+                ]
+            }),
+            mapped_model: "openai-qwen-fallback",
+            client_api_format: "openai:embedding",
+            provider_api_format: "openai:embedding",
+            source_model: Some("qwen3-vl-embedding"),
+            family: SameFormatProviderFamily::Standard,
+            body_rules: None,
+            request_headers: None,
+            upstream_is_stream: false,
+            force_body_stream_field: false,
+            kiro_auth_config: None,
+            is_claude_code: false,
+            enable_model_directives: false,
+        });
+
+        assert!(body.is_none());
     }
 
     #[test]

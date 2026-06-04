@@ -5,17 +5,24 @@ import { execSync } from 'child_process'
 
 function normalizeVersion(version: string): string {
   const trimmed = version.trim()
+  if (!trimmed || trimmed.startsWith('tunnel-v')) {
+    return ''
+  }
   return trimmed.startsWith('v') || trimmed.startsWith('V') ? trimmed.slice(1) : trimmed
 }
 
 function getGitVersion(): string {
   const envVersion = process.env.AETHER_BUILD_VERSION || process.env.AETHER_VERSION
   if (envVersion?.trim()) {
-    return normalizeVersion(envVersion)
+    const version = normalizeVersion(envVersion)
+    if (version) {
+      return version
+    }
   }
 
   try {
-    return normalizeVersion(execSync('git describe --tags --always --dirty').toString())
+    const version = normalizeVersion(execSync('git describe --tags --match "v[0-9]*" --always --dirty').toString())
+    return version || '0.0.0.dev0'
   } catch {
     return '0.0.0.dev0'
   }

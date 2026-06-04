@@ -182,7 +182,9 @@ pub async fn handle_proxy_connection(
         loop {
             tokio::time::sleep(ping_interval).await;
             let ping = protocol::encode_ping();
-            let status = ping_conn.send(Message::Binary(ping.into()));
+            let status = ping_conn
+                .send_wait(Message::Binary(ping.into()), Duration::from_millis(250))
+                .await;
             if !matches!(status, SendStatus::Queued) {
                 let snapshot = ping_conn.outbound.snapshot();
                 match status {

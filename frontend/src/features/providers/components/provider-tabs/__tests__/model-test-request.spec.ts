@@ -34,6 +34,21 @@ describe('buildDefaultModelTestRequestBody', () => {
     expect(body.stream).toBeUndefined()
   })
 
+  it('uses multimodal input and qwen3-vl defaults for Aliyun embedding tests', () => {
+    const body = JSON.parse(buildDefaultModelTestRequestBody('qwen3-vl-embedding', 'aliyun:multimodal_embedding'))
+
+    expect(body).toEqual({
+      model: 'qwen3-vl-embedding',
+      input: [
+        { text: 'White running shoes, lightweight and breathable.' },
+        { image: 'https://dashscope.oss-cn-beijing.aliyuncs.com/images/256_1.png' },
+      ],
+      parameters: {
+        enable_fusion: true,
+      },
+    })
+  })
+
   it.each([
     'openai:rerank',
     'jina:rerank',

@@ -171,6 +171,9 @@ pub async fn run(mut config: Config, servers: Vec<ServerEntry>) -> anyhow::Resul
         tunnel_connections_initial = tunnel_pool_policy.min_connections,
         tunnel_connections_max = tunnel_pool_policy.max_connections,
         tunnel_max_streams = tunnel_pool_policy.max_streams_per_tunnel,
+        tunnel_profile = %config.tunnel_profile,
+        tunnel_stream_initial_window_bytes = config.tunnel_stream_initial_window_bytes,
+        tunnel_drain_deadline_ms = config.tunnel_drain_deadline_ms,
         scale_check_interval_ms = tunnel_pool_policy.scale_check_interval.as_millis(),
         scale_up_threshold_percent = tunnel_pool_policy.scale_up_threshold_percent,
         scale_down_threshold_percent = tunnel_pool_policy.scale_down_threshold_percent,
@@ -490,6 +493,9 @@ async fn diagnostics_stats(
             "max_in_flight_streams": diagnostics.state.config.max_in_flight_streams,
             "distributed_stream_limit": diagnostics.state.config.distributed_stream_limit,
             "tunnel_max_streams": diagnostics.state.config.tunnel_max_streams,
+            "tunnel_profile": diagnostics.state.config.tunnel_profile.to_string(),
+            "tunnel_stream_initial_window_bytes": diagnostics.state.config.tunnel_stream_initial_window_bytes,
+            "tunnel_drain_deadline_ms": diagnostics.state.config.tunnel_drain_deadline_ms,
             "tunnel_connections": diagnostics.state.config.tunnel_connections,
             "tunnel_connections_max": diagnostics.state.config.tunnel_connections_max,
             "diagnostics_bind": diagnostics.state.config.diagnostics_bind.map(|addr| addr.to_string()),
@@ -1131,7 +1137,10 @@ mod tests {
             .await
             .expect("stats response should parse");
         assert_eq!(stats["status"], "ok");
-        assert_eq!(stats["protocol_version"], 2);
+        assert_eq!(
+            stats["protocol_version"],
+            aether_contracts::tunnel::CURRENT_TUNNEL_PROTOCOL_VERSION
+        );
         assert_eq!(stats["servers"][0]["node_id"], "node-diagnostics");
 
         handle.abort();
@@ -1400,6 +1409,10 @@ mod tests {
             tunnel_reconnect_max_ms: 250,
             tunnel_ping_interval_ms: 1_000,
             tunnel_max_streams: Some(8),
+            tunnel_profile: crate::config::TunnelProfileArg::Lite,
+            tunnel_stream_initial_window_bytes:
+                crate::config::DEFAULT_TUNNEL_STREAM_INITIAL_WINDOW_BYTES,
+            tunnel_drain_deadline_ms: crate::config::DEFAULT_TUNNEL_DRAIN_DEADLINE_MS,
             tunnel_connect_timeout_ms: 2_000,
             tunnel_ipv4_only: false,
             tunnel_ipv6_only: false,

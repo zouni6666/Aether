@@ -14,7 +14,7 @@ export LOCAL_APP_IMAGE
 detect_build_version() {
     if command -v git >/dev/null 2>&1; then
         local version
-        if version=$(git describe --tags --always --dirty 2>/dev/null); then
+        if version=$(git describe --tags --match 'v[0-9]*' --always --dirty 2>/dev/null); then
             if [ -n "$version" ]; then
                 printf '%s\n' "$version"
                 return 0
@@ -58,7 +58,7 @@ Options:
 
 Environment:
   LOCAL_APP_IMAGE          本地构建镜像名，默认 aether-app:latest
-  AETHER_BUILD_VERSION     应用显示版本，默认 git describe --tags --always --dirty
+  AETHER_BUILD_VERSION     应用显示版本，默认 git describe --tags --match 'v[0-9]*' --always --dirty
 EOF
 }
 

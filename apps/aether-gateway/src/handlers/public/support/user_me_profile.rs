@@ -12,8 +12,9 @@ use crate::handlers::shared::{
 };
 
 use super::{
-    auth_password_policy_level, build_auth_error_response, resolve_authenticated_local_user,
-    validate_auth_register_password, AppState, GatewayPublicRequestContext,
+    auth_password_policy_level, base_url_from_request, build_auth_error_response,
+    resolve_authenticated_local_user, validate_auth_register_password, AppState,
+    GatewayPublicRequestContext,
 };
 
 const USERS_ME_PROFILE_STORAGE_UNAVAILABLE_DETAIL: &str = "用户资料存储暂不可用";
@@ -38,6 +39,30 @@ struct UsersMeChangePasswordRequest {
 
 fn normalize_users_me_optional_non_empty_string(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.is_empty())
+}
+
+pub(super) async fn handle_users_me_client_config_get(
+    state: &AppState,
+    request_context: &GatewayPublicRequestContext,
+    headers: &http::HeaderMap,
+) -> Response<Body> {
+    if let Err(response) = resolve_authenticated_local_user(state, request_context, headers).await {
+        return response;
+    }
+
+    let site_name = state
+        .read_system_config_json_value("site_name")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| "Aether".to_string());
+
+    Json(json!({
+        "base_url": base_url_from_request(headers, request_context),
+        "site_name": site_name,
+    }))
+    .into_response()
 }
 
 pub(super) async fn handle_users_me_detail_put(

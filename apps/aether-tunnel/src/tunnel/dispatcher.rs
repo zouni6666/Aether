@@ -17,6 +17,7 @@ use crate::state::{AppState, ServerContext};
 use super::heartbeat::HeartbeatHandle;
 use super::protocol::{decompress_if_gzip, Frame, MsgType, RequestMeta};
 use super::stream_handler;
+use super::stream_handler::StreamSendWindow;
 use super::writer::FrameSender;
 use aether_contracts::tunnel_security::SecureFrameCodec;
 
@@ -25,6 +26,12 @@ enum StreamDispatchStatus {
     Delivered,
     Closed,
     TimedOut,
+}
+
+#[derive(Clone)]
+struct StreamDispatchTarget {
+    body_tx: mpsc::Sender<Frame>,
+    response_window: Arc<StreamSendWindow>,
 }
 
 /// Run the dispatcher loop, reading from the WebSocket stream.
@@ -61,10 +68,11 @@ where
         + Send
         + 'static,
 {
-    // Active streams: stream_id -> body sender
-    let mut streams: HashMap<u32, mpsc::Sender<Frame>> = HashMap::new();
+    // Active streams: stream_id -> body sender + response flow-control window.
+    let mut streams: HashMap<u32, StreamDispatchTarget> = HashMap::new();
     // Track spawned stream handlers so we can wait for them on shutdown
     let mut handler_handles: Vec<JoinHandle<()>> = Vec::new();
+    let (handler_finished_tx, mut handler_finished_rx) = mpsc::unbounded_channel::<u32>();
     let max_streams = state.config.tunnel_max_streams.unwrap_or(128) as usize;
     let mut frames_since_cleanup: u32 = 0;
     let stale_timeout = state
@@ -96,6 +104,16 @@ where
                 if *drain.borrow() {
                     info!("tunnel drain requested, waiting for in-flight streams");
                     draining = true;
+                }
+                continue;
+            }
+            finished = handler_finished_rx.recv() => {
+                if let Some(stream_id) = finished {
+                    streams.remove(&stream_id);
+                    if draining && streams.is_empty() {
+                        info!("tunnel drained after stream handler completion");
+                        break None;
+                    }
                 }
                 continue;
             }
@@ -239,14 +257,22 @@ where
 
                 // Create body channel and spawn handler
                 let (body_tx, body_rx) = mpsc::channel::<Frame>(64);
+                let response_window = Arc::new(StreamSendWindow::new(
+                    state.config.tunnel_stream_initial_window_bytes,
+                ));
+                streams.insert(
+                    frame.stream_id,
+                    StreamDispatchTarget {
+                        body_tx,
+                        response_window: Arc::clone(&response_window),
+                    },
+                );
                 let request_headers_end_stream = frame.is_end_stream();
-                if !request_headers_end_stream {
-                    streams.insert(frame.stream_id, body_tx);
-                }
 
                 let state_clone = Arc::clone(&state);
                 let server_clone = Arc::clone(&server);
                 let tx_clone = frame_tx.clone();
+                let finished_tx = handler_finished_tx.clone();
                 let sid = frame.stream_id;
                 let handle = tokio::spawn(async move {
                     stream_handler::handle_stream(
@@ -256,20 +282,33 @@ where
                         meta,
                         body_rx,
                         tx_clone,
+                        response_window,
                     )
                     .await;
+                    let _ = finished_tx.send(sid);
                 });
                 handler_handles.push(handle);
+
+                if request_headers_end_stream {
+                    if let Some(target) = streams.get(&sid) {
+                        let _ = target.body_tx.try_send(Frame::new(
+                            sid,
+                            MsgType::StreamEnd,
+                            0,
+                            Bytes::new(),
+                        ));
+                    }
+                }
 
                 debug!(stream_id = frame.stream_id, "new stream started");
             }
 
             MsgType::RequestBody => {
-                if let Some(tx) = streams.get(&frame.stream_id).cloned() {
+                if let Some(target) = streams.get(&frame.stream_id).cloned() {
                     let is_end = frame.is_end_stream();
                     let sid = frame.stream_id;
-                    let dispatch = dispatch_stream_frame(&tx, frame).await;
-                    if is_end || dispatch != StreamDispatchStatus::Delivered {
+                    let dispatch = dispatch_stream_frame(&target.body_tx, frame).await;
+                    if dispatch != StreamDispatchStatus::Delivered {
                         streams.remove(&sid);
                         if dispatch == StreamDispatchStatus::TimedOut {
                             server.tunnel_metrics.record_error(
@@ -282,7 +321,7 @@ where
                                 "tunnel request body dispatch stalled",
                             );
                         }
-                        if draining && streams.is_empty() {
+                        if is_end && draining && streams.is_empty() {
                             info!("tunnel drained after request body completion");
                             break None;
                         }
@@ -290,10 +329,10 @@ where
                 }
             }
 
-            MsgType::StreamEnd | MsgType::StreamError => {
+            MsgType::StreamEnd | MsgType::StreamError | MsgType::ResetStream => {
                 // Client-side cancellation or end
-                if let Some(tx) = streams.remove(&frame.stream_id) {
-                    let _ = dispatch_stream_frame(&tx, frame).await;
+                if let Some(target) = streams.remove(&frame.stream_id) {
+                    let _ = dispatch_stream_frame(&target.body_tx, frame).await;
                     if draining && streams.is_empty() {
                         info!("tunnel drained after stream termination");
                         break None;
@@ -320,6 +359,35 @@ where
                 break None;
             }
 
+            MsgType::WindowUpdate => {
+                if let Ok(payload) = serde_json::from_slice::<
+                    aether_contracts::tunnel::WindowUpdatePayload,
+                >(&frame.payload)
+                {
+                    if let Some(target) = streams.get(&frame.stream_id) {
+                        target.response_window.add_credit(payload.delta_bytes);
+                    }
+                }
+                debug!(
+                    msg_type = ?frame.msg_type,
+                    stream_id = frame.stream_id,
+                    "received tunnel protocol v3 WINDOW_UPDATE frame"
+                );
+            }
+
+            MsgType::Hello | MsgType::Settings | MsgType::LoadReport => {
+                debug!(
+                    msg_type = ?frame.msg_type,
+                    stream_id = frame.stream_id,
+                    "received tunnel protocol v3 control frame"
+                );
+            }
+
+            MsgType::ConnectionClose => {
+                info!("received CONNECTION_CLOSE");
+                break None;
+            }
+
             _ => {
                 debug!(msg_type = ?frame.msg_type, "ignoring unexpected frame type");
             }
@@ -329,10 +397,6 @@ where
         // Trigger every 64 frames OR when the count exceeds max_streams.
         frames_since_cleanup += 1;
         if frames_since_cleanup >= 64 || handler_handles.len() > max_streams {
-            let closed_streams = prune_closed_stream_senders(&mut streams);
-            if closed_streams > 0 {
-                debug!(closed_streams, "removed closed request body stream senders");
-            }
             handler_handles.retain(|h| !h.is_finished());
             frames_since_cleanup = 0;
             if draining && streams.is_empty() {
@@ -408,9 +472,10 @@ fn try_send_stream_error(frame_tx: &FrameSender, stream_id: u32, message: &'stat
     }
 }
 
-fn prune_closed_stream_senders(streams: &mut HashMap<u32, mpsc::Sender<Frame>>) -> usize {
+#[cfg(test)]
+fn prune_closed_stream_senders(streams: &mut HashMap<u32, StreamDispatchTarget>) -> usize {
     let before = streams.len();
-    streams.retain(|_, tx| !tx.is_closed());
+    streams.retain(|_, target| !target.body_tx.is_closed());
     before.saturating_sub(streams.len())
 }
 
@@ -493,7 +558,22 @@ mod tests {
         let (closed_tx, closed_rx) = mpsc::channel::<Frame>(1);
         let (open_tx, _open_rx) = mpsc::channel::<Frame>(1);
         drop(closed_rx);
-        let mut streams = HashMap::from([(7, closed_tx), (9, open_tx)]);
+        let mut streams = HashMap::from([
+            (
+                7,
+                StreamDispatchTarget {
+                    body_tx: closed_tx,
+                    response_window: Arc::new(StreamSendWindow::new(1024)),
+                },
+            ),
+            (
+                9,
+                StreamDispatchTarget {
+                    body_tx: open_tx,
+                    response_window: Arc::new(StreamSendWindow::new(1024)),
+                },
+            ),
+        ]);
 
         let removed = prune_closed_stream_senders(&mut streams);
 

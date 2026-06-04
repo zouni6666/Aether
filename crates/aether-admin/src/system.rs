@@ -835,6 +835,18 @@ const ADMIN_API_FORMAT_DEFINITIONS: &[AdminApiFormatDefinition] = &[
         default_path: "/v1/embeddings",
         aliases: &["doubao_embedding"],
     },
+    AdminApiFormatDefinition {
+        value: "aliyun:multimodal_embedding",
+        label: "Aliyun Multimodal Embedding",
+        default_path: "/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding",
+        aliases: &[
+            "aliyun_embedding",
+            "aliyun_multimodal_embedding",
+            "dashscope_embedding",
+            "dashscope_multimodal_embedding",
+            "dashscope:multimodal_embedding",
+        ],
+    },
 ];
 
 pub fn build_admin_system_check_update_payload(current_version: String) -> serde_json::Value {

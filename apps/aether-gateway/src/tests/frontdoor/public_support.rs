@@ -1,7 +1,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::{
-    sample_endpoint, sample_key, sample_models_candidate_row, sample_provider,
+    hash_api_key, sample_endpoint, sample_key, sample_models_candidate_row, sample_provider,
     sample_public_catalog_model, sample_public_global_model,
     sample_public_global_model_with_capabilities, sample_request_candidate,
     InMemoryAnnouncementReadRepository, InMemoryGlobalModelReadRepository,
@@ -24,6 +24,7 @@ use aether_data::repository::auth::{
 use aether_data::repository::auth_modules::{
     InMemoryAuthModuleReadRepository, StoredLdapModuleConfig, StoredOAuthProviderModuleConfig,
 };
+use aether_data::repository::billing::InMemoryBillingReadRepository;
 use aether_data::repository::management_tokens::{
     InMemoryManagementTokenRepository, StoredManagementToken, StoredManagementTokenUserSummary,
     StoredManagementTokenWithUser,
@@ -35,6 +36,10 @@ use aether_data::repository::users::{
 };
 use aether_data::repository::wallet::{
     InMemoryWalletRepository, StoredWalletSnapshot, WalletWriteRepository,
+};
+use aether_data_contracts::repository::billing::{
+    AdminBillingMutationOutcome, BillingPlanWriteInput, BillingReadRepository,
+    PaymentGatewayConfigWriteInput,
 };
 use aether_data_contracts::repository::global_models::StoredProviderActiveGlobalModel;
 use aether_data_contracts::repository::provider_catalog::ProviderCatalogReadRepository;
@@ -2372,6 +2377,28 @@ fn sample_auth_wallet(user_id: &str, now: chrono::DateTime<chrono::Utc>) -> Stor
     .expect("wallet should build")
 }
 
+fn sample_standalone_auth_wallet(
+    api_key_id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> StoredWalletSnapshot {
+    StoredWalletSnapshot::new(
+        "wallet-standalone-1".to_string(),
+        None,
+        Some(api_key_id.to_string()),
+        2.0,
+        0.5,
+        "finite".to_string(),
+        "USD".to_string(),
+        "active".to_string(),
+        5.0,
+        2.5,
+        0.0,
+        0.0,
+        now.timestamp(),
+    )
+    .expect("standalone wallet should build")
+}
+
 fn wallet_today_usage_test_time() -> chrono::DateTime<chrono::Utc> {
     let offset =
         chrono::FixedOffset::east_opt(8 * 3600).expect("Asia/Shanghai test offset should be valid");
@@ -3880,6 +3907,209 @@ async fn gateway_creates_wallet_recharge_orders_locally_without_proxying_upstrea
 }
 
 #[tokio::test]
+async fn gateway_reuses_pending_billing_plan_checkout_order_without_proxying_upstream() {
+    let now = Utc::now();
+    let user = StoredUserAuthRecord::new(
+        "user-billing-checkout-reuse".to_string(),
+        Some("billing-checkout-reuse@example.com".to_string()),
+        true,
+        "billing_checkout_reuse_user".to_string(),
+        Some("$2y$10$.OBQfixAECpsb8V/VS3csOMf00x2E/jD/gnud20t6RG0yiQosyOZ2".to_string()),
+        "user".to_string(),
+        "local".to_string(),
+        Some(json!(["openai"])),
+        Some(json!(["openai:chat"])),
+        Some(json!(["gpt-5"])),
+        true,
+        false,
+        Some(now),
+        Some(now),
+    )
+    .expect("auth user should build");
+    let wallet = StoredWalletSnapshot::new(
+        "wallet-billing-checkout-reuse".to_string(),
+        Some(user.id.clone()),
+        None,
+        12.5,
+        3.0,
+        "finite".to_string(),
+        "USD".to_string(),
+        "active".to_string(),
+        20.0,
+        4.5,
+        0.0,
+        0.0,
+        now.timestamp(),
+    )
+    .expect("wallet should build");
+    let access_token = build_test_auth_token(
+        "access",
+        serde_json::Map::from_iter([
+            ("user_id".to_string(), json!(user.id.clone())),
+            ("role".to_string(), json!(user.role.clone())),
+            (
+                "created_at".to_string(),
+                json!(user.created_at.map(|value| value.to_rfc3339())),
+            ),
+            (
+                "session_id".to_string(),
+                json!("session-billing-checkout-reuse"),
+            ),
+        ]),
+        now + chrono::Duration::hours(1),
+    );
+    let billing_repository = Arc::new(InMemoryBillingReadRepository::seed(Vec::new()));
+    let encrypted_key = encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "epay-secret")
+        .expect("merchant key should encrypt");
+    let AdminBillingMutationOutcome::Applied(_) = billing_repository
+        .upsert_payment_gateway_config(&PaymentGatewayConfigWriteInput {
+            provider: "epay".to_string(),
+            enabled: true,
+            endpoint_url: "https://pay.example.com/".to_string(),
+            callback_base_url: Some("https://app.example.com".to_string()),
+            merchant_id: "merchant-1".to_string(),
+            merchant_key_encrypted: Some(encrypted_key),
+            preserve_existing_secret: false,
+            pay_currency: "CNY".to_string(),
+            usd_exchange_rate: 7.25,
+            min_recharge_usd: 1.0,
+            channels_json: json!([
+                {
+                    "channel": "alipay",
+                    "display_name": "支付宝"
+                }
+            ]),
+        })
+        .await
+        .expect("gateway config should create")
+    else {
+        panic!("gateway config should apply");
+    };
+    let plan = match billing_repository
+        .create_billing_plan(&BillingPlanWriteInput {
+            title: "每日额度月卡".to_string(),
+            description: Some("测试套餐".to_string()),
+            price_amount: 100.0,
+            price_currency: "CNY".to_string(),
+            duration_unit: "month".to_string(),
+            duration_value: 1,
+            enabled: true,
+            sort_order: 1,
+            max_active_per_user: 1,
+            purchase_limit_scope: "active_period".to_string(),
+            entitlements_json: json!([
+                {
+                    "type": "daily_quota",
+                    "daily_quota_usd": 50.0,
+                    "reset_timezone": "Asia/Shanghai",
+                    "allow_wallet_overage": false
+                }
+            ]),
+        })
+        .await
+        .expect("billing plan should create")
+    {
+        AdminBillingMutationOutcome::Applied(plan) => plan,
+        other => panic!("billing plan should apply, got {other:?}"),
+    };
+
+    let upstream_hits = Arc::new(Mutex::new(0usize));
+    let upstream_hits_clone = Arc::clone(&upstream_hits);
+    let upstream = Router::new().route(
+        "/{*path}",
+        any(move |_request: Request| {
+            let upstream_hits_inner = Arc::clone(&upstream_hits_clone);
+            async move {
+                *upstream_hits_inner.lock().expect("mutex should lock") += 1;
+                (StatusCode::OK, Body::from("proxied"))
+            }
+        }),
+    );
+
+    let (_upstream_url, upstream_handle) = start_server(upstream).await;
+    let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![user]));
+    let wallet_repository = Arc::new(InMemoryWalletRepository::seed(vec![wallet]));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(GatewayDataState::with_user_billing_and_wallet_for_tests(
+            user_repository,
+            billing_repository,
+            wallet_repository,
+        ))
+        .with_auth_sessions_for_tests([sample_auth_session(
+            "user-billing-checkout-reuse",
+            "session-billing-checkout-reuse",
+            "device-billing-checkout-reuse",
+            "refresh-token-placeholder",
+            now,
+        )]);
+    let gateway = build_router_with_state(state);
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let client = reqwest::Client::new();
+    let checkout_body = json!({
+        "payment_provider": "epay",
+        "payment_method": "epay",
+        "payment_channel": "alipay",
+    });
+    let first_response = client
+        .post(format!(
+            "{gateway_url}/api/billing/plans/{}/checkout",
+            plan.id
+        ))
+        .header("authorization", format!("Bearer {access_token}"))
+        .header("x-client-device-id", "device-billing-checkout-reuse")
+        .header("user-agent", "AetherTest/1.0")
+        .json(&checkout_body)
+        .send()
+        .await
+        .expect("first checkout request should succeed");
+    assert_eq!(first_response.status(), StatusCode::OK);
+    let first_payload: serde_json::Value = first_response
+        .json()
+        .await
+        .expect("first checkout json should parse");
+    let first_order_id = first_payload["order"]["id"]
+        .as_str()
+        .expect("first order id should exist")
+        .to_string();
+    assert_eq!(first_payload["order"]["status"], "pending");
+    assert_eq!(first_payload["order"]["product_id"], plan.id);
+    assert_eq!(
+        first_payload["reused_pending_order"],
+        serde_json::Value::Null
+    );
+
+    let second_response = client
+        .post(format!(
+            "{gateway_url}/api/billing/plans/{}/checkout",
+            plan.id
+        ))
+        .header("authorization", format!("Bearer {access_token}"))
+        .header("x-client-device-id", "device-billing-checkout-reuse")
+        .header("user-agent", "AetherTest/1.0")
+        .json(&checkout_body)
+        .send()
+        .await
+        .expect("second checkout request should succeed");
+    assert_eq!(second_response.status(), StatusCode::OK);
+    let second_payload: serde_json::Value = second_response
+        .json()
+        .await
+        .expect("second checkout json should parse");
+    assert_eq!(second_payload["order"]["id"], first_order_id);
+    assert_eq!(second_payload["reused_pending_order"], true);
+    assert_eq!(
+        second_payload["payment_instructions"],
+        first_payload["payment_instructions"]
+    );
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_creates_wallet_refunds_locally_without_proxying_upstream() {
     let now = Utc::now();
     let user = StoredUserAuthRecord::new(
@@ -4383,6 +4613,147 @@ async fn gateway_handles_wallet_balance_locally_without_proxying_upstream() {
     assert_eq!(payload["pending_refund_count"], 0);
     assert_eq!(payload["wallet"]["id"], "wallet-auth-1");
     assert_eq!(payload["wallet"]["status"], "active");
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_handles_ccswitch_usage_with_api_key_without_proxying_upstream() {
+    let now = wallet_today_usage_test_time();
+    let user = sample_auth_user(now);
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
+        sample_user_usage_audit(
+            "usage-ccswitch-1",
+            "req-ccswitch-1",
+            "user-auth-1",
+            "gpt-5",
+            "Aether",
+            "completed",
+            now,
+        ),
+    ]));
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-ccswitch-usage")),
+        sample_usage_auth_snapshot("api-key-user-1", "user-auth-1", "ccswitch"),
+    )]));
+    let (gateway_url, upstream_hits, gateway_handle, upstream_handle) =
+        start_auth_gateway_with_builder(|| {
+            let data_state = GatewayDataState::with_user_wallet_and_usage_for_tests(
+                Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![
+                    user.clone()
+                ])),
+                Arc::new(InMemoryWalletRepository::seed(vec![sample_auth_wallet(
+                    "user-auth-1",
+                    now,
+                )])),
+                Arc::clone(&usage_repository),
+            )
+            .with_auth_api_key_reader(auth_repository);
+            AppState::new()
+                .expect("gateway should build")
+                .with_data_state_for_tests(data_state)
+        })
+        .await;
+
+    let response = reqwest::Client::new()
+        .get(format!("{gateway_url}/api/ccswitch/usage"))
+        .header("authorization", "Bearer sk-ccswitch-usage")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["is_valid"], true);
+    assert_eq!(payload["plan_name"], "Aether");
+    assert_eq!(payload["remaining"], 15.5);
+    assert_eq!(payload["used"], 1.25);
+    assert_eq!(payload["unit"], "USD");
+    assert_eq!(payload["wallet"]["wallet_balance"], 15.5);
+    assert_eq!(payload["today"]["total_requests"], 1);
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_handles_ccswitch_usage_for_standalone_key_without_owner_usage() {
+    let now = wallet_today_usage_test_time();
+    let user = sample_auth_user(now);
+    let mut owner_usage = sample_user_usage_audit(
+        "usage-ccswitch-owner",
+        "req-ccswitch-owner",
+        "user-auth-1",
+        "gpt-5",
+        "Aether",
+        "completed",
+        now,
+    );
+    owner_usage.api_key_id = Some("api-key-user-1".to_string());
+    owner_usage.total_cost_usd = 1.25;
+    owner_usage.actual_total_cost_usd = 1.25;
+
+    let mut standalone_usage = sample_user_usage_audit(
+        "usage-ccswitch-standalone",
+        "req-ccswitch-standalone",
+        "user-auth-1",
+        "gpt-5",
+        "Aether",
+        "completed",
+        now,
+    );
+    standalone_usage.api_key_id = Some("api-key-standalone-1".to_string());
+    standalone_usage.api_key_name = Some("standalone".to_string());
+    standalone_usage.total_cost_usd = 0.5;
+    standalone_usage.actual_total_cost_usd = 0.5;
+
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
+        owner_usage,
+        standalone_usage,
+    ]));
+    let mut snapshot =
+        sample_usage_auth_snapshot("api-key-standalone-1", "user-auth-1", "standalone");
+    snapshot.api_key_is_standalone = true;
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-ccswitch-standalone")),
+        snapshot,
+    )]));
+    let (gateway_url, upstream_hits, gateway_handle, upstream_handle) =
+        start_auth_gateway_with_builder(|| {
+            let data_state = GatewayDataState::with_user_wallet_and_usage_for_tests(
+                Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![
+                    user.clone()
+                ])),
+                Arc::new(InMemoryWalletRepository::seed(vec![
+                    sample_auth_wallet("user-auth-1", now),
+                    sample_standalone_auth_wallet("api-key-standalone-1", now),
+                ])),
+                Arc::clone(&usage_repository),
+            )
+            .with_auth_api_key_reader(auth_repository);
+            AppState::new()
+                .expect("gateway should build")
+                .with_data_state_for_tests(data_state)
+        })
+        .await;
+
+    let response = reqwest::Client::new()
+        .get(format!("{gateway_url}/api/ccswitch/usage"))
+        .header("authorization", "Bearer sk-ccswitch-standalone")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["is_valid"], true);
+    assert_eq!(payload["remaining"], 2.5);
+    assert_eq!(payload["used"], 0.5);
+    assert_eq!(payload["wallet"]["wallet"]["id"], "wallet-standalone-1");
+    assert_eq!(payload["today"]["total_requests"], 1);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -6397,6 +6768,70 @@ async fn gateway_handles_users_me_api_keys_locally_without_proxying_upstream() {
         .await
         .expect("json body should parse");
     assert_eq!(detail_payload["key"], "sk-user-live-1");
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_handles_users_me_client_config_locally_without_proxying_upstream() {
+    let now = Utc::now();
+    let user = sample_auth_user(now);
+    let _public_base_url_guard =
+        set_test_env_var("AETHER_PUBLIC_BASE_URL", "https://aether.example.com/");
+    let access_token = build_test_auth_token(
+        "access",
+        serde_json::Map::from_iter([
+            ("user_id".to_string(), json!(user.id)),
+            ("role".to_string(), json!(user.role)),
+            (
+                "created_at".to_string(),
+                json!(user.created_at.map(|value| value.to_rfc3339())),
+            ),
+            (
+                "session_id".to_string(),
+                json!("session-users-me-client-config"),
+            ),
+        ]),
+        now + chrono::Duration::hours(1),
+    );
+    let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![user]));
+
+    let (gateway_url, upstream_hits, gateway_handle, upstream_handle) =
+        start_auth_gateway_with_builder(|| {
+            let data_state =
+                crate::data::GatewayDataState::with_user_reader_for_tests(user_repository)
+                    .with_system_config_values_for_tests(vec![(
+                        "site_name".to_string(),
+                        json!("Aether Local"),
+                    )]);
+            AppState::new()
+                .expect("gateway should build")
+                .with_data_state_for_tests(data_state)
+                .with_auth_sessions_for_tests([sample_auth_session(
+                    "user-auth-1",
+                    "session-users-me-client-config",
+                    "device-users-me-client-config",
+                    "refresh-token-users-me-client-config",
+                    now,
+                )])
+        })
+        .await;
+
+    let response = reqwest::Client::new()
+        .get(format!("{gateway_url}/api/users/me/client-config"))
+        .header("authorization", format!("Bearer {access_token}"))
+        .header("x-client-device-id", "device-users-me-client-config")
+        .header("user-agent", "AetherTest/1.0")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["base_url"], "https://aether.example.com");
+    assert_eq!(payload["site_name"], "Aether Local");
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

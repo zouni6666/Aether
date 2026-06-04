@@ -17,6 +17,7 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Json};
 use axum::routing::{get, post};
 use axum::Router;
+use base64::Engine as _;
 use dashmap::DashMap;
 use tracing::warn;
 
@@ -244,12 +245,7 @@ pub async fn ws_proxy(
         .trim()
         .to_string();
 
-    let node_name = headers
-        .get("x-node-name")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or(&node_id)
-        .trim()
-        .to_string();
+    let node_name = resolve_proxy_node_name(&headers, &node_id);
 
     let max_streams = resolve_proxy_max_streams(&headers, state.max_streams);
     let protocol_version = resolve_proxy_protocol_version(&headers);
@@ -349,20 +345,49 @@ fn resolve_proxy_max_streams(headers: &HeaderMap, fallback: usize) -> usize {
         .clamp(1, 2048)
 }
 
+fn resolve_proxy_node_name(headers: &HeaderMap, node_id: &str) -> String {
+    if let Some(decoded) = headers
+        .get(aether_contracts::tunnel::TUNNEL_NODE_NAME_B64_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(value.trim())
+                .ok()
+        })
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty() && value.chars().count() <= 100)
+    {
+        return decoded;
+    }
+
+    headers
+        .get("x-node-name")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(node_id)
+        .to_string()
+}
+
 fn resolve_proxy_protocol_version(headers: &HeaderMap) -> u8 {
     headers
         .get(aether_contracts::tunnel::TUNNEL_PROTOCOL_VERSION_HEADER)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u8>().ok())
         .filter(|value| *value >= 1)
+        .map(|value| value.min(aether_contracts::tunnel::CURRENT_TUNNEL_PROTOCOL_VERSION))
         .unwrap_or(1)
 }
 
 #[cfg(test)]
 mod tests {
     use axum::http::{HeaderMap, HeaderValue};
+    use base64::Engine as _;
 
-    use super::{resolve_proxy_max_streams, resolve_proxy_protocol_version};
+    use super::{
+        resolve_proxy_max_streams, resolve_proxy_node_name, resolve_proxy_protocol_version,
+    };
 
     #[test]
     fn proxy_max_streams_honors_small_advertised_capacity() {
@@ -395,5 +420,36 @@ mod tests {
         );
 
         assert_eq!(resolve_proxy_protocol_version(&headers), 2);
+    }
+
+    #[test]
+    fn proxy_node_name_reads_legacy_ascii_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-node-name", HeaderValue::from_static("edge-1"));
+
+        assert_eq!(resolve_proxy_node_name(&headers, "node-1"), "edge-1");
+    }
+
+    #[test]
+    fn proxy_node_name_decodes_base64_header() {
+        let mut headers = HeaderMap::new();
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("日本节点");
+        headers.insert(
+            aether_contracts::tunnel::TUNNEL_NODE_NAME_B64_HEADER,
+            HeaderValue::from_str(&encoded).expect("encoded header value should parse"),
+        );
+
+        assert_eq!(resolve_proxy_node_name(&headers, "node-1"), "日本节点");
+    }
+
+    #[test]
+    fn proxy_node_name_falls_back_to_node_id_for_invalid_base64() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            aether_contracts::tunnel::TUNNEL_NODE_NAME_B64_HEADER,
+            HeaderValue::from_static("not valid"),
+        );
+
+        assert_eq!(resolve_proxy_node_name(&headers, "node-1"), "node-1");
     }
 }

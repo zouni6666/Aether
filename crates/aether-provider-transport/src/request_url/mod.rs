@@ -127,6 +127,10 @@ fn build_transport_request_url_inner(
         "openai:embedding" | "jina:embedding" => {
             build_provider_embedding_v1_url(&transport.endpoint.base_url, params.request_query)
         }
+        "aliyun:multimodal_embedding" => build_aliyun_multimodal_embedding_url(
+            &transport.endpoint.base_url,
+            params.request_query,
+        ),
         "openai:rerank" | "jina:rerank" => {
             build_provider_rerank_v1_url(&transport.endpoint.base_url, params.request_query)
         }
@@ -423,6 +427,18 @@ fn normalize_gemini_embedding_action_path(path: &str, batch: bool) -> String {
 
 fn build_provider_embedding_v1_url(upstream_base_url: &str, query: Option<&str>) -> Option<String> {
     build_provider_api_root_url(upstream_base_url, "/embeddings", query)
+}
+
+fn build_aliyun_multimodal_embedding_url(
+    upstream_base_url: &str,
+    query: Option<&str>,
+) -> Option<String> {
+    build_passthrough_path_url(
+        upstream_base_url,
+        "/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding",
+        query,
+        &[],
+    )
 }
 
 fn build_provider_rerank_v1_url(upstream_base_url: &str, query: Option<&str>) -> Option<String> {
@@ -1019,6 +1035,12 @@ mod tests {
             "https://ark.volces.example/api/v3",
             None,
         );
+        let aliyun = sample_transport(
+            "aliyun",
+            "aliyun:multimodal_embedding",
+            "https://dashscope.aliyuncs.com",
+            None,
+        );
 
         assert_eq!(
             build_transport_request_url(
@@ -1077,6 +1099,20 @@ mod tests {
             )
             .as_deref(),
             Some("https://ark.volces.example/api/v3/embeddings")
+        );
+        assert_eq!(
+            build_transport_request_url(
+                &aliyun,
+                TransportRequestUrlParams {
+                    provider_api_format: "aliyun:multimodal_embedding",
+                    mapped_model: Some("qwen3-vl-embedding"),
+                    upstream_is_stream: false,
+                    request_query: None,
+                    kiro_api_region: None,
+                },
+            )
+            .as_deref(),
+            Some("https://dashscope.aliyuncs.com/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding")
         );
     }
 

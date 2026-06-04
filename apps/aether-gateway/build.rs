@@ -11,19 +11,18 @@ fn main() {
     let package_version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_string());
     let version = env::var("AETHER_BUILD_VERSION")
         .ok()
-        .filter(|value| !value.trim().is_empty())
+        .and_then(|value| normalize_gateway_version_source(&value))
         .or_else(|| {
             env::var("AETHER_VERSION")
                 .ok()
-                .filter(|value| !value.trim().is_empty())
+                .and_then(|value| normalize_gateway_version_source(&value))
         })
         .or_else(|| {
             env::var("GITHUB_REF_NAME")
                 .ok()
-                .filter(|value| value.trim().starts_with('v'))
+                .and_then(|value| normalize_gateway_version_source(&value))
         })
         .or_else(git_describe_version)
-        .map(|value| normalize_version(&value))
         .filter(|value| !value.is_empty())
         .unwrap_or(package_version);
 
@@ -38,7 +37,9 @@ fn main() {
 
 fn git_describe_version() -> Option<String> {
     let output = Command::new("git")
-        .args(["describe", "--tags", "--always", "--dirty"])
+        .args([
+            "describe", "--tags", "--match", "v[0-9]*", "--always", "--dirty",
+        ])
         .output()
         .ok()?;
     if !output.status.success() {
@@ -46,17 +47,13 @@ fn git_describe_version() -> Option<String> {
     }
     let version = String::from_utf8(output.stdout).ok()?;
     let version = version.trim();
-    if version.is_empty() {
-        None
-    } else {
-        Some(version.to_string())
-    }
+    normalize_gateway_version_source(version)
 }
 
-fn normalize_version(value: &str) -> String {
-    value
-        .trim()
-        .strip_prefix('v')
-        .unwrap_or(value.trim())
-        .to_string()
+fn normalize_gateway_version_source(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.starts_with("tunnel-v") {
+        return None;
+    }
+    Some(trimmed.strip_prefix('v').unwrap_or(trimmed).to_string())
 }

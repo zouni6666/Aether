@@ -351,7 +351,11 @@ async function checkoutPlan(plan: BillingPlan) {
       payment_channel: option.payment_channel,
     })
     latestCheckout.value = response
-    success('套餐订单已创建')
+    success(
+      response.reused_pending_order
+        ? '已有待支付订单，已打开原支付链接'
+        : '套餐订单已创建'
+    )
     submitPaymentInstructions(response.payment_instructions)
   } catch (err) {
     log.error('创建套餐订单失败:', err)

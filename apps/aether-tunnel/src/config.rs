@@ -65,6 +65,8 @@ pub const DEFAULT_TUNNEL_SCALE_CHECK_INTERVAL_MS: u64 = 1_000;
 pub const DEFAULT_TUNNEL_SCALE_UP_THRESHOLD_PERCENT: u32 = 50;
 pub const DEFAULT_TUNNEL_SCALE_DOWN_THRESHOLD_PERCENT: u32 = 35;
 pub const DEFAULT_TUNNEL_SCALE_DOWN_GRACE_SECS: u64 = 15;
+pub const DEFAULT_TUNNEL_STREAM_INITIAL_WINDOW_BYTES: u32 = 4 * 1024 * 1024;
+pub const DEFAULT_TUNNEL_DRAIN_DEADLINE_MS: u64 = 30_000;
 pub const DEFAULT_UPSTREAM_CLIENT_POOL_CAPACITY: usize = 256;
 const AUTO_TUNNEL_CONNECTIONS_REDUNDANT_FLOOR: u64 = 2;
 const AUTO_TUNNEL_CONNECTIONS_BASE_CAP: u64 = 4;
@@ -76,6 +78,9 @@ const AUTO_TUNNEL_CONNECTIONS_MAX_CAP: u64 = 32;
 const TUNNEL_PING_INTERVAL_MS_ENV: &str = "AETHER_TUNNEL_PING_INTERVAL_MS";
 const TUNNEL_CONNECT_TIMEOUT_MS_ENV: &str = "AETHER_TUNNEL_CONNECT_TIMEOUT_MS";
 const TUNNEL_STALE_TIMEOUT_MS_ENV: &str = "AETHER_TUNNEL_STALE_TIMEOUT_MS";
+const TUNNEL_PROFILE_ENV: &str = "AETHER_TUNNEL_PROFILE";
+const TUNNEL_STREAM_INITIAL_WINDOW_BYTES_ENV: &str = "AETHER_TUNNEL_STREAM_INITIAL_WINDOW_BYTES";
+const TUNNEL_DRAIN_DEADLINE_MS_ENV: &str = "AETHER_TUNNEL_DRAIN_DEADLINE_MS";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TunnelPoolSizing {
@@ -246,6 +251,24 @@ impl From<TunnelLogRotationArg> for LogRotation {
             TunnelLogRotationArg::Hourly => LogRotation::Hourly,
             TunnelLogRotationArg::Daily => LogRotation::Daily,
         }
+    }
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TunnelProfileArg {
+    Lite,
+    Standard,
+    Throughput,
+}
+
+impl fmt::Display for TunnelProfileArg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            TunnelProfileArg::Lite => "lite",
+            TunnelProfileArg::Standard => "standard",
+            TunnelProfileArg::Throughput => "throughput",
+        })
     }
 }
 
@@ -642,6 +665,31 @@ pub struct Config {
     #[arg(long, env = "AETHER_TUNNEL_MAX_STREAMS")]
     pub tunnel_max_streams: Option<u32>,
 
+    /// Tunnel connection pool profile used when connection counts are not explicit.
+    #[arg(
+        long,
+        env = TUNNEL_PROFILE_ENV,
+        value_enum,
+        default_value_t = TunnelProfileArg::Standard
+    )]
+    pub tunnel_profile: TunnelProfileArg,
+
+    /// Initial per-stream flow-control window advertised by this tunnel.
+    #[arg(
+        long,
+        env = TUNNEL_STREAM_INITIAL_WINDOW_BYTES_ENV,
+        default_value_t = DEFAULT_TUNNEL_STREAM_INITIAL_WINDOW_BYTES
+    )]
+    pub tunnel_stream_initial_window_bytes: u32,
+
+    /// Deadline for graceful tunnel drain after GOAWAY.
+    #[arg(
+        long,
+        env = TUNNEL_DRAIN_DEADLINE_MS_ENV,
+        default_value_t = DEFAULT_TUNNEL_DRAIN_DEADLINE_MS
+    )]
+    pub tunnel_drain_deadline_ms: u64,
+
     /// WebSocket tunnel TCP connect timeout in milliseconds
     #[arg(
         long,
@@ -787,6 +835,12 @@ impl Config {
         if matches!(self.tunnel_connections_max, Some(0)) {
             anyhow::bail!("tunnel_connections_max must be > 0");
         }
+        if self.tunnel_stream_initial_window_bytes == 0 {
+            anyhow::bail!("tunnel_stream_initial_window_bytes must be > 0");
+        }
+        if self.tunnel_drain_deadline_ms == 0 {
+            anyhow::bail!("tunnel_drain_deadline_ms must be > 0");
+        }
         if let (Some(min_connections), Some(max_connections)) =
             (self.tunnel_connections, self.tunnel_connections_max)
         {
@@ -908,14 +962,20 @@ impl Config {
             .and_then(|limit| u64::try_from(limit).ok())
             .unwrap_or(hw_info.estimated_max_concurrency)
             .max(per_tunnel_capacity);
+        let (profile_initial_floor, profile_initial_cap, profile_max_floor) =
+            match self.tunnel_profile {
+                TunnelProfileArg::Lite => (2, 2, 2),
+                TunnelProfileArg::Standard => (4, 4, 4),
+                TunnelProfileArg::Throughput => (8, 8, 8),
+            };
         let cpu_soft_cap = u64::from(hw_info.cpu_cores.max(1))
             .saturating_mul(AUTO_TUNNEL_CONNECTIONS_PER_CPU_CAP)
-            .clamp(
-                AUTO_TUNNEL_CONNECTIONS_BASE_CAP,
-                AUTO_TUNNEL_CONNECTIONS_MAX_CAP,
-            );
-        let auto_initial_floor = AUTO_TUNNEL_CONNECTIONS_REDUNDANT_FLOOR.min(cpu_soft_cap);
+            .clamp(profile_max_floor, AUTO_TUNNEL_CONNECTIONS_MAX_CAP);
+        let auto_initial_floor = AUTO_TUNNEL_CONNECTIONS_REDUNDANT_FLOOR
+            .max(profile_initial_floor)
+            .min(cpu_soft_cap);
         let auto_initial_cap = AUTO_TUNNEL_CONNECTIONS_BASE_CAP
+            .max(profile_initial_cap)
             .min(cpu_soft_cap)
             .max(auto_initial_floor);
 
@@ -926,7 +986,11 @@ impl Config {
             100,
         )
         .max(1);
-        let auto_max_floor = auto_initial.max(AUTO_TUNNEL_CONNECTIONS_BASE_CAP.min(cpu_soft_cap));
+        let auto_max_floor = auto_initial.max(
+            AUTO_TUNNEL_CONNECTIONS_BASE_CAP
+                .max(profile_max_floor)
+                .min(cpu_soft_cap),
+        );
         let auto_max =
             div_ceil_u64(estimated, high_water_per_tunnel).clamp(auto_max_floor, cpu_soft_cap);
 
@@ -1091,6 +1155,12 @@ pub struct ConfigFile {
     pub tunnel_ping_interval_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tunnel_max_streams: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tunnel_profile: Option<TunnelProfileArg>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tunnel_stream_initial_window_bytes: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tunnel_drain_deadline_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tunnel_connect_timeout_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1291,6 +1361,15 @@ impl ConfigFile {
         );
         set!(TUNNEL_PING_INTERVAL_MS_ENV, self.tunnel_ping_interval_ms);
         set!("AETHER_TUNNEL_MAX_STREAMS", self.tunnel_max_streams);
+        set!(
+            TUNNEL_PROFILE_ENV,
+            self.tunnel_profile.map(|value| value.to_string())
+        );
+        set!(
+            TUNNEL_STREAM_INITIAL_WINDOW_BYTES_ENV,
+            self.tunnel_stream_initial_window_bytes
+        );
+        set!(TUNNEL_DRAIN_DEADLINE_MS_ENV, self.tunnel_drain_deadline_ms);
         set!(
             TUNNEL_CONNECT_TIMEOUT_MS_ENV,
             self.tunnel_connect_timeout_ms
@@ -2056,7 +2135,7 @@ node_name = "tunnel-test"
         let sizing = config
             .resolve_tunnel_pool_sizing(&hw)
             .expect("sizing should resolve");
-        assert_eq!(sizing.initial_connections, 3);
+        assert_eq!(sizing.initial_connections, 4);
         assert_eq!(sizing.max_connections, 32);
     }
 
@@ -2084,7 +2163,7 @@ node_name = "tunnel-test"
         let sizing = config
             .resolve_tunnel_pool_sizing(&hw)
             .expect("sizing should resolve");
-        assert_eq!(sizing.initial_connections, 2);
+        assert_eq!(sizing.initial_connections, 4);
         assert_eq!(sizing.max_connections, 4);
     }
 
@@ -2112,7 +2191,7 @@ node_name = "tunnel-test"
         let sizing = config
             .resolve_tunnel_pool_sizing(&hw)
             .expect("sizing should resolve");
-        assert_eq!(sizing.initial_connections, 2);
+        assert_eq!(sizing.initial_connections, 4);
         assert_eq!(sizing.max_connections, 4);
     }
 
@@ -2142,7 +2221,7 @@ node_name = "tunnel-test"
         let sizing = config
             .resolve_tunnel_pool_sizing(&hw)
             .expect("sizing should resolve");
-        assert_eq!(sizing.initial_connections, 2);
+        assert_eq!(sizing.initial_connections, 4);
         assert_eq!(sizing.max_connections, 4);
     }
 

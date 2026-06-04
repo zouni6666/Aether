@@ -881,6 +881,17 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
     return createMockResponse(MOCK_USER_API_KEYS)
   },
 
+  'GET /api/users/me/client-config': async () => {
+    await delay()
+    const baseUrl = typeof window !== 'undefined'
+      ? window.location.origin
+      : 'https://demo.aether.local'
+    return createMockResponse({
+      base_url: baseUrl,
+      site_name: 'Aether Demo',
+    })
+  },
+
   'POST /api/users/me/api-keys': async (config) => {
     await delay()
     const body = JSON.parse(config.data || '{}')
@@ -1816,7 +1827,7 @@ function generateMockModelsForProvider(providerId: string) {
   const hasClaude = provider.api_formats.some(f => f.includes('claude'))
   const hasOpenAI = provider.api_formats.some(f => f.includes('openai'))
   const hasGemini = provider.api_formats.some(f => f.includes('gemini'))
-  const hasEmbedding = provider.api_formats.some(f => f.endsWith(':embedding'))
+  const hasEmbedding = provider.api_formats.some(f => f.endsWith(':embedding') || f === 'aliyun:multimodal_embedding')
   const hasRerank = provider.api_formats.some(f => f.endsWith(':rerank'))
 
   const models: Record<string, unknown>[] = []

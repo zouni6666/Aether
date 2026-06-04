@@ -195,6 +195,9 @@ fn select_primary_credential(
     if signature.starts_with("openai:") {
         return select_openai_credential(bundle);
     }
+    if signature.starts_with("aether:") {
+        return select_openai_credential(bundle);
+    }
 
     select_generic_credential(bundle)
 }

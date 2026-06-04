@@ -508,6 +508,19 @@ pub(super) fn classify_public_support_route(
     } else if method == http::Method::GET
         && matches!(
             normalized_path,
+            "/api/ccswitch/usage" | "/api/ccswitch/usage/"
+        )
+    {
+        Some(classified(
+            "public_support",
+            "ccswitch",
+            "usage",
+            "aether:ccswitch_usage",
+            false,
+        ))
+    } else if method == http::Method::GET
+        && matches!(
+            normalized_path,
             "/api/users/me"
                 | "/api/users/me/sessions"
                 | "/api/users/me/api-keys"
@@ -517,6 +530,7 @@ pub(super) fn classify_public_support_route(
                 | "/api/users/me/usage/heatmap"
                 | "/api/users/me/providers"
                 | "/api/users/me/available-models"
+                | "/api/users/me/client-config"
                 | "/api/users/me/endpoint-status"
                 | "/api/users/me/preferences"
                 | "/api/users/me/referral"
@@ -533,6 +547,7 @@ pub(super) fn classify_public_support_route(
             "/api/users/me/usage/heatmap" => "usage_heatmap",
             "/api/users/me/providers" => "providers",
             "/api/users/me/available-models" => "available_models",
+            "/api/users/me/client-config" => "client_config",
             "/api/users/me/endpoint-status" => "endpoint_status",
             "/api/users/me/preferences" => "preferences",
             "/api/users/me/referral" => "referral",

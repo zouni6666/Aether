@@ -535,12 +535,13 @@ impl EmbeddedTunnelState {
             http1_only: false,
             transport_profile: None,
         };
-        let stream = self.inner.hub.open_local_stream(node_id, &meta)?;
+        let stream = self.inner.hub.open_local_stream(node_id, &meta).await?;
         let stream_id = stream.id;
         let result = async {
             self.inner
                 .hub
-                .push_local_request_body(stream_id, Bytes::new(), true)?;
+                .push_local_request_body(stream_id, Bytes::new(), true)
+                .await?;
             let response = stream
                 .wait_headers(Duration::from_secs(timeout_secs))
                 .await?;

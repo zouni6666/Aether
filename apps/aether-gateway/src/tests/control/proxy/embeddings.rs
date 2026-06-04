@@ -179,12 +179,158 @@ fn vertex_gemini_embedding_success_state(execution_runtime_url: String) -> AppSt
         .with_data_state_for_tests(data_state)
 }
 
+fn aliyun_embedding_success_state(execution_runtime_url: String) -> AppState {
+    let mut snapshot = sample_currently_usable_auth_snapshot(
+        "key-aliyun-embedding-success",
+        "user-aliyun-embedding-success",
+    );
+    snapshot.user_allowed_providers = None;
+    snapshot.api_key_allowed_providers = None;
+    snapshot.user_allowed_api_formats = Some(vec!["openai:embedding".to_string()]);
+    snapshot.api_key_allowed_api_formats = Some(vec!["openai:embedding".to_string()]);
+    snapshot.user_allowed_models = Some(vec!["qwen3-vl-embedding".to_string()]);
+    snapshot.api_key_allowed_models = Some(vec!["qwen3-vl-embedding".to_string()]);
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-aliyun-embedding-success")),
+        snapshot,
+    )]));
+    let candidate_repository =
+        Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+            aliyun_embedding_candidate_row(),
+        ]));
+    let mut provider = sample_provider("provider-aliyun-embedding", "Aliyun DashScope", 1);
+    provider.provider_type = "aliyun".to_string();
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![sample_endpoint(
+            "endpoint-aliyun-embedding",
+            "provider-aliyun-embedding",
+            "aliyun:multimodal_embedding",
+            "https://dashscope.aliyuncs.com",
+        )],
+        vec![sample_key(
+            "key-upstream-aliyun-embedding",
+            "provider-aliyun-embedding",
+            "aliyun:multimodal_embedding",
+            "sk-upstream-aliyun-embedding",
+        )],
+    ));
+    let data_state =
+        GatewayDataState::with_provider_catalog_and_minimal_candidate_selection_for_tests(
+            provider_catalog_repository,
+            candidate_repository,
+        )
+        .with_auth_api_key_reader(auth_repository)
+        .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY);
+
+    build_state_with_execution_runtime_override(execution_runtime_url)
+        .with_data_state_for_tests(data_state)
+}
+
+fn mixed_embedding_success_state(execution_runtime_url: String) -> AppState {
+    let mut snapshot = sample_currently_usable_auth_snapshot(
+        "key-mixed-embedding-success",
+        "user-mixed-embedding-success",
+    );
+    snapshot.user_allowed_providers = None;
+    snapshot.api_key_allowed_providers = None;
+    snapshot.user_allowed_api_formats = Some(vec!["openai:embedding".to_string()]);
+    snapshot.api_key_allowed_api_formats = Some(vec!["openai:embedding".to_string()]);
+    snapshot.user_allowed_models = Some(vec!["qwen3-vl-embedding".to_string()]);
+    snapshot.api_key_allowed_models = Some(vec!["qwen3-vl-embedding".to_string()]);
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-mixed-embedding-success")),
+        snapshot,
+    )]));
+
+    let mut openai_candidate = embedding_candidate_row();
+    openai_candidate.model_id = "model-openai-qwen-vl-embedding".to_string();
+    openai_candidate.global_model_id = "global-qwen3-vl-embedding".to_string();
+    openai_candidate.global_model_name = "qwen3-vl-embedding".to_string();
+    openai_candidate.model_provider_model_name = "openai-qwen-fallback".to_string();
+    let candidate_repository =
+        Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+            openai_candidate,
+            aliyun_embedding_candidate_row(),
+        ]));
+
+    let mut aliyun_provider = sample_provider("provider-aliyun-embedding", "Aliyun DashScope", 1);
+    aliyun_provider.provider_type = "aliyun".to_string();
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![
+            sample_provider("provider-embedding", "OpenAI Embeddings", 1),
+            aliyun_provider,
+        ],
+        vec![
+            sample_endpoint(
+                "endpoint-embedding",
+                "provider-embedding",
+                "openai:embedding",
+                "https://api.openai.example",
+            ),
+            sample_endpoint(
+                "endpoint-aliyun-embedding",
+                "provider-aliyun-embedding",
+                "aliyun:multimodal_embedding",
+                "https://dashscope.aliyuncs.com",
+            ),
+        ],
+        vec![
+            sample_key(
+                "key-upstream-embedding",
+                "provider-embedding",
+                "openai:embedding",
+                "sk-upstream-embedding",
+            ),
+            sample_key(
+                "key-upstream-aliyun-embedding",
+                "provider-aliyun-embedding",
+                "aliyun:multimodal_embedding",
+                "sk-upstream-aliyun-embedding",
+            ),
+        ],
+    ));
+    let data_state =
+        GatewayDataState::with_provider_catalog_and_minimal_candidate_selection_for_tests(
+            provider_catalog_repository,
+            candidate_repository,
+        )
+        .with_auth_api_key_reader(auth_repository)
+        .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY);
+
+    build_state_with_execution_runtime_override(execution_runtime_url)
+        .with_data_state_for_tests(data_state)
+}
+
 fn gemini_embedding_conversion_execution_runtime() -> Router {
     Router::new().route(
         "/v1/execute/sync",
         any(|Json(plan): Json<ExecutionPlan>| async move {
             assert_openai_to_gemini_embedding_execution_plan(&plan);
             Json(gemini_embedding_execution_result(&plan))
+        }),
+    )
+}
+
+fn aliyun_embedding_conversion_execution_runtime(
+    expected_contents: serde_json::Value,
+    expected_parameters: Option<serde_json::Value>,
+) -> Router {
+    let expected_contents = Arc::new(expected_contents);
+    let expected_parameters = Arc::new(expected_parameters);
+    Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| {
+            let expected_contents = Arc::clone(&expected_contents);
+            let expected_parameters = Arc::clone(&expected_parameters);
+            async move {
+                assert_openai_to_aliyun_embedding_execution_plan(
+                    &plan,
+                    &expected_contents,
+                    expected_parameters.as_ref().as_ref(),
+                );
+                Json(aliyun_embedding_execution_result(&plan))
+            }
         }),
     )
 }
@@ -300,6 +446,40 @@ fn vertex_gemini_embedding_candidate_row() -> StoredMinimalCandidateSelectionRow
     row
 }
 
+fn aliyun_embedding_candidate_row() -> StoredMinimalCandidateSelectionRow {
+    StoredMinimalCandidateSelectionRow {
+        provider_id: "provider-aliyun-embedding".to_string(),
+        provider_name: "Aliyun DashScope".to_string(),
+        provider_type: "aliyun".to_string(),
+        provider_priority: 1,
+        provider_is_active: true,
+        endpoint_id: "endpoint-aliyun-embedding".to_string(),
+        endpoint_api_format: "aliyun:multimodal_embedding".to_string(),
+        endpoint_api_family: Some("aliyun".to_string()),
+        endpoint_kind: Some("multimodal_embedding".to_string()),
+        endpoint_is_active: true,
+        key_id: "key-upstream-aliyun-embedding".to_string(),
+        key_name: "default".to_string(),
+        key_auth_type: "api_key".to_string(),
+        key_is_active: true,
+        key_api_formats: Some(vec!["aliyun:multimodal_embedding".to_string()]),
+        key_allowed_models: None,
+        key_capabilities: None,
+        key_internal_priority: 50,
+        key_global_priority_by_format: None,
+        model_id: "model-qwen3-vl-embedding".to_string(),
+        global_model_id: "global-qwen3-vl-embedding".to_string(),
+        global_model_name: "qwen3-vl-embedding".to_string(),
+        global_model_mappings: None,
+        global_model_supports_streaming: Some(false),
+        model_provider_model_name: "qwen3-vl-embedding".to_string(),
+        model_provider_model_mappings: None,
+        model_supports_streaming: Some(false),
+        model_is_active: true,
+        model_is_available: true,
+    }
+}
+
 fn assert_embedding_execution_plan(plan: &ExecutionPlan) {
     assert_eq!(plan.client_api_format, "openai:embedding");
     assert_eq!(plan.provider_api_format, "openai:embedding");
@@ -309,6 +489,34 @@ fn assert_embedding_execution_plan(plan: &ExecutionPlan) {
     let body = plan.body.json_body.as_ref().expect("json request body");
     assert_eq!(body["model"], "upstream-embedding");
     assert!(body.get("input").is_some());
+}
+
+fn assert_openai_to_aliyun_embedding_execution_plan(
+    plan: &ExecutionPlan,
+    expected_contents: &serde_json::Value,
+    expected_parameters: Option<&serde_json::Value>,
+) {
+    assert_eq!(plan.client_api_format, "openai:embedding");
+    assert_eq!(plan.provider_api_format, "aliyun:multimodal_embedding");
+    assert_eq!(plan.method, "POST");
+    assert_eq!(
+        plan.url,
+        "https://dashscope.aliyuncs.com/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding"
+    );
+    assert_eq!(
+        plan.headers.get("authorization").map(String::as_str),
+        Some("Bearer sk-upstream-aliyun-embedding")
+    );
+    assert_eq!(plan.model_name.as_deref(), Some("qwen3-vl-embedding"));
+    assert!(!plan.stream);
+    let body = plan.body.json_body.as_ref().expect("json request body");
+    assert_eq!(body["model"], "qwen3-vl-embedding");
+    assert_eq!(&body["input"]["contents"], expected_contents);
+    match expected_parameters {
+        Some(expected) => assert_eq!(&body["parameters"], expected),
+        None => assert!(body.get("parameters").is_none()),
+    }
+    assert!(body.get("messages").is_none());
 }
 
 fn assert_openai_to_gemini_embedding_execution_plan(plan: &ExecutionPlan) {
@@ -495,6 +703,41 @@ fn gemini_batch_embedding_execution_result(plan: &ExecutionPlan) -> ExecutionRes
                     "promptTokenCount": 8,
                     "totalTokenCount": 8
                 }
+            })),
+            body_bytes_b64: None,
+        }),
+        telemetry: None,
+        error: None,
+    }
+}
+
+fn aliyun_embedding_execution_result(plan: &ExecutionPlan) -> ExecutionResult {
+    ExecutionResult {
+        request_id: plan.request_id.clone(),
+        candidate_id: plan.candidate_id.clone(),
+        status_code: 200,
+        headers: BTreeMap::from([("content-type".to_string(), "application/json".to_string())]),
+        body: Some(ResponseBody {
+            json_body: Some(json!({
+                "output": {
+                    "embeddings": [
+                        {
+                            "index": 0,
+                            "embedding": [0.1, 0.2, 0.3],
+                            "type": "fusion"
+                        }
+                    ]
+                },
+                "usage": {
+                    "input_tokens": 432,
+                    "input_tokens_details": {
+                        "image_tokens": 402,
+                        "text_tokens": 30
+                    },
+                    "output_tokens": 1,
+                    "total_tokens": 433
+                },
+                "request_id": "aliyun-request-1"
             })),
             body_bytes_b64: None,
         }),
@@ -715,6 +958,183 @@ async fn embeddings_route_converts_openai_batch_payload_to_gemini_batch_endpoint
 }
 
 #[tokio::test]
+async fn embeddings_route_converts_text_payload_to_aliyun_embedding_provider() {
+    let (execution_runtime_url, execution_runtime_handle) =
+        start_server(aliyun_embedding_conversion_execution_runtime(
+            json!([{ "text": "hello" }]),
+            Some(json!({ "dimension": 1024 })),
+        ))
+        .await;
+    let gateway = build_router_with_state(aliyun_embedding_success_state(execution_runtime_url));
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/v1/embeddings"))
+        .header(
+            http::header::AUTHORIZATION,
+            "Bearer sk-aliyun-embedding-success",
+        )
+        .json(&json!({
+            "model": "qwen3-vl-embedding",
+            "input": "hello",
+            "dimensions": 1024
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(CONTROL_ENDPOINT_SIGNATURE_HEADER)
+            .and_then(|value| value.to_str().ok()),
+        Some("openai:embedding")
+    );
+    let payload: serde_json::Value = response.json().await.expect("body should parse");
+    assert_eq!(payload["object"], "list");
+    assert_eq!(payload["request_id"], "aliyun-request-1");
+    assert_eq!(payload["model"], "qwen3-vl-embedding");
+    assert_eq!(payload["data"][0]["object"], "embedding");
+    assert_eq!(payload["data"][0]["embedding"], json!([0.1, 0.2, 0.3]));
+    assert_eq!(payload["data"][0]["type"], "fusion");
+    assert_eq!(payload["usage"]["prompt_tokens"], json!(432));
+    assert_eq!(payload["usage"]["completion_tokens"], json!(1));
+    assert_eq!(payload["usage"]["total_tokens"], json!(433));
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
+async fn embeddings_route_converts_multimodal_payload_to_aliyun_embedding_provider() {
+    let expected_contents = json!([
+        { "text": "white running shoes" },
+        { "image": "https://example.com/shoe.png" },
+        { "multi_images": ["https://example.com/a.png", "https://example.com/b.png"] }
+    ]);
+    let (execution_runtime_url, execution_runtime_handle) =
+        start_server(aliyun_embedding_conversion_execution_runtime(
+            expected_contents.clone(),
+            Some(json!({ "res_level": 2, "max_video_frames": 64 })),
+        ))
+        .await;
+    let gateway = build_router_with_state(aliyun_embedding_success_state(execution_runtime_url));
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/v1/embeddings"))
+        .header(
+            http::header::AUTHORIZATION,
+            "Bearer sk-aliyun-embedding-success",
+        )
+        .json(&json!({
+            "model": "qwen3-vl-embedding",
+            "input": expected_contents,
+            "parameters": {
+                "res_level": 2,
+                "max_video_frames": 64
+            }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("body should parse");
+    assert_eq!(payload["data"][0]["embedding"], json!([0.1, 0.2, 0.3]));
+    assert_eq!(payload["data"][0]["type"], "fusion");
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
+async fn embeddings_route_skips_openai_candidate_for_multimodal_payload() {
+    let expected_contents = json!([
+        { "text": "white running shoes" },
+        { "image": "https://example.com/shoe.png" }
+    ]);
+    let (execution_runtime_url, execution_runtime_handle) =
+        start_server(aliyun_embedding_conversion_execution_runtime(
+            expected_contents.clone(),
+            Some(json!({ "enable_fusion": true })),
+        ))
+        .await;
+    let gateway = build_router_with_state(mixed_embedding_success_state(execution_runtime_url));
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/v1/embeddings"))
+        .header(
+            http::header::AUTHORIZATION,
+            "Bearer sk-mixed-embedding-success",
+        )
+        .json(&json!({
+            "model": "qwen3-vl-embedding",
+            "input": expected_contents,
+            "parameters": {
+                "enable_fusion": true
+            }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("body should parse");
+    assert_eq!(payload["data"][0]["embedding"], json!([0.1, 0.2, 0.3]));
+    assert_eq!(payload["data"][0]["type"], "fusion");
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
+async fn embeddings_route_converts_fusion_payload_to_aliyun_embedding_provider() {
+    let expected_contents = json!([
+        {
+            "text": "white running shoes",
+            "image": "https://example.com/shoe.png"
+        },
+        { "video": "https://example.com/demo.mp4" }
+    ]);
+    let (execution_runtime_url, execution_runtime_handle) =
+        start_server(aliyun_embedding_conversion_execution_runtime(
+            expected_contents.clone(),
+            Some(json!({ "enable_fusion": true })),
+        ))
+        .await;
+    let gateway = build_router_with_state(aliyun_embedding_success_state(execution_runtime_url));
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/v1/embeddings"))
+        .header(
+            http::header::AUTHORIZATION,
+            "Bearer sk-aliyun-embedding-success",
+        )
+        .json(&json!({
+            "model": "qwen3-vl-embedding",
+            "input": expected_contents,
+            "parameters": {
+                "enable_fusion": true
+            }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("body should parse");
+    assert_eq!(payload["data"][0]["embedding"], json!([0.1, 0.2, 0.3]));
+    assert_eq!(payload["data"][0]["type"], "fusion");
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
 async fn gemini_embed_content_route_uses_native_gemini_embedding_provider() {
     let (execution_runtime_url, execution_runtime_handle) =
         start_server(gemini_embedding_native_execution_runtime()).await;
@@ -834,6 +1254,14 @@ async fn embeddings_route_rejects_invalid_local_payloads() {
         ),
         (
             r#"{"model":"text-embedding-3-small","input":[[1],[]]}"#,
+            "Embedding request input is required",
+        ),
+        (
+            r#"{"model":"text-embedding-3-small","input":[{}]}"#,
+            "Embedding request input is required",
+        ),
+        (
+            r#"{"model":"text-embedding-3-small","input":[{"image":" "} ]}"#,
             "Embedding request input is required",
         ),
         (

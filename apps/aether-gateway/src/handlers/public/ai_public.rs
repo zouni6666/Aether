@@ -522,10 +522,43 @@ fn embedding_array_input_is_non_empty(items: &[Value]) -> bool {
             item.as_array()
                 .is_some_and(|items| embedding_token_array_is_non_empty(items))
         })
+        || items.iter().all(embedding_multimodal_content_is_non_empty)
 }
 
 fn embedding_token_array_is_non_empty(items: &[Value]) -> bool {
     !items.is_empty() && items.iter().all(|item| item.as_u64().is_some())
+}
+
+fn embedding_multimodal_content_is_non_empty(value: &Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    let valid_text = object
+        .get("text")
+        .map(|value| value.as_str().is_some_and(|text| !text.trim().is_empty()));
+    let valid_image = object
+        .get("image")
+        .map(|value| value.as_str().is_some_and(|image| !image.trim().is_empty()));
+    let valid_video = object
+        .get("video")
+        .map(|value| value.as_str().is_some_and(|video| !video.trim().is_empty()));
+    let valid_multi_images = object.get("multi_images").map(|value| {
+        value.as_array().is_some_and(|items| {
+            !items.is_empty()
+                && items
+                    .iter()
+                    .all(|item| item.as_str().is_some_and(|image| !image.trim().is_empty()))
+        })
+    });
+
+    [valid_text, valid_image, valid_video, valid_multi_images]
+        .into_iter()
+        .flatten()
+        .all(|valid| valid)
+        && [valid_text, valid_image, valid_video, valid_multi_images]
+            .into_iter()
+            .flatten()
+            .any(|valid| valid)
 }
 
 fn image_request_count(value: &Value) -> Option<u64> {

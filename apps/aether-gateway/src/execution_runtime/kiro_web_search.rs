@@ -15,8 +15,8 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::execution_runtime::kiro_cache::{
-    billed_input_tokens, build_kiro_prompt_cache_profile, estimate_kiro_prompt_input_tokens,
-    kiro_prompt_cache_tracker, kiro_simulated_cache_enabled_from_provider_config,
+    billed_input_tokens, build_kiro_prompt_cache_profile, compute_kiro_prompt_cache_usage,
+    estimate_kiro_prompt_input_tokens, kiro_simulated_cache_enabled_from_provider_config,
     KiroPromptCacheProfile, KiroPromptCacheUsage,
 };
 use crate::execution_runtime::ndjson::encode_stream_frame_ndjson;
@@ -160,14 +160,17 @@ pub(crate) async fn maybe_execute_kiro_web_search_stream(
 
     let search_results = parse_mcp_search_results(&mcp_execution.result);
     let cache_usage = if kiro_simulated_cache_enabled(state, plan).await {
-        request
-            .cache_profile
-            .as_ref()
-            .map(|profile| {
-                kiro_prompt_cache_tracker()
-                    .compute_and_update(kiro_cache_credential_id(plan), profile)
-            })
-            .unwrap_or_default()
+        match request.cache_profile.as_ref() {
+            Some(profile) => {
+                compute_kiro_prompt_cache_usage(
+                    state.runtime_state(),
+                    kiro_cache_credential_id(plan),
+                    profile,
+                )
+                .await
+            }
+            None => KiroPromptCacheUsage::default(),
+        }
     } else {
         KiroPromptCacheUsage::default()
     };

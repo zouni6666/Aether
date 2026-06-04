@@ -2036,6 +2036,12 @@ FROM "usage"
             "user_id",
             query.user_id.as_deref(),
         );
+        push_sqlite_usage_optional_text_filter(
+            &mut builder,
+            &mut has_where,
+            "api_key_id",
+            query.api_key_id.as_deref(),
+        );
         push_sqlite_usage_where(&mut builder, &mut has_where);
         builder.push("billing_status = 'settled' AND COALESCE(total_cost_usd, 0) > 0");
         let row = builder.build().fetch_one(&self.pool).await.map_sql_err()?;

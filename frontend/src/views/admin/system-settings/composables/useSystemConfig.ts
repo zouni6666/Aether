@@ -35,6 +35,8 @@ export interface SystemConfig {
   enable_format_conversion: boolean
   // 同步生图心跳
   enable_openai_image_sync_heartbeat: boolean
+  // 标准文本非流式心跳
+  enable_standard_text_sync_heartbeat: boolean
   // 请求记录
   request_record_level: string
   max_request_body_size: number
@@ -89,6 +91,8 @@ const CONFIG_KEYS = [
   'enable_format_conversion',
   // 同步生图心跳
   'enable_openai_image_sync_heartbeat',
+  // 标准文本非流式心跳
+  'enable_standard_text_sync_heartbeat',
   // 请求记录
   'request_record_level',
   'max_request_body_size',
@@ -145,6 +149,8 @@ function createDefaultConfig(): SystemConfig {
     enable_format_conversion: false,
     // 同步生图心跳
     enable_openai_image_sync_heartbeat: false,
+    // 标准文本非流式心跳
+    enable_standard_text_sync_heartbeat: false,
     // 请求记录
     request_record_level: 'basic',
     max_request_body_size: 1048576,
@@ -230,7 +236,10 @@ export function useSystemConfig() {
       originalConfig.value.registration_privacy_policy_version ||
       systemConfig.value.auto_delete_expired_keys !== originalConfig.value.auto_delete_expired_keys ||
       systemConfig.value.enable_format_conversion !== originalConfig.value.enable_format_conversion ||
-      systemConfig.value.enable_openai_image_sync_heartbeat !== originalConfig.value.enable_openai_image_sync_heartbeat
+      systemConfig.value.enable_openai_image_sync_heartbeat !==
+      originalConfig.value.enable_openai_image_sync_heartbeat ||
+      systemConfig.value.enable_standard_text_sync_heartbeat !==
+      originalConfig.value.enable_standard_text_sync_heartbeat
     )
   })
 
@@ -513,6 +522,11 @@ export function useSystemConfig() {
           value: systemConfig.value.enable_openai_image_sync_heartbeat,
           description: '同步生图心跳开关：开启后外层 HTTP 状态固定为 200，上游失败写入响应体',
         },
+        {
+          key: 'enable_standard_text_sync_heartbeat',
+          value: systemConfig.value.enable_standard_text_sync_heartbeat,
+          description: '标准文本非流式心跳开关：开启后外层 HTTP 状态固定为 200，上游失败写入响应体',
+        },
       ]
       const turnstileSecret = systemConfig.value.turnstile_secret_key.trim()
       if (turnstileSecret) {
@@ -565,6 +579,8 @@ export function useSystemConfig() {
           systemConfig.value.enable_format_conversion
         originalConfig.value.enable_openai_image_sync_heartbeat =
           systemConfig.value.enable_openai_image_sync_heartbeat
+        originalConfig.value.enable_standard_text_sync_heartbeat =
+          systemConfig.value.enable_standard_text_sync_heartbeat
       }
       success('基础配置已保存')
     } catch (err) {

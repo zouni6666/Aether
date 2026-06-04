@@ -471,6 +471,26 @@ fn provider_query_compact_test_request_body_defaults_to_responses_input() {
 }
 
 #[test]
+fn provider_query_embedding_test_request_body_defaults_to_embedding_input() {
+    let payload = json!({"message": "hello from embedding"});
+
+    let client_api_format =
+        provider_query_standard_test_client_api_format("aliyun:multimodal_embedding");
+    let body = provider_query_build_test_request_body_for_api_format(
+        &payload,
+        "qwen3-vl-embedding",
+        "/api/admin/provider-query/test-model",
+        client_api_format,
+    );
+
+    assert_eq!(client_api_format, "openai:embedding");
+    assert_eq!(body["model"], json!("qwen3-vl-embedding"));
+    assert_eq!(body["input"], json!("hello from embedding"));
+    assert!(body.get("messages").is_none());
+    assert!(body.get("stream").is_none());
+}
+
+#[test]
 fn provider_query_compact_test_request_body_promotes_prompt_to_input() {
     let payload = json!({
         "request_body": {
@@ -656,6 +676,13 @@ fn provider_query_test_adapter_routes_fixed_provider_endpoint_types() {
     );
     assert_eq!(
         provider_query_test_adapter_for_provider_api_format("custom", "gemini:embedding"),
+        Some(ProviderQueryTestAdapter::Standard)
+    );
+    assert_eq!(
+        provider_query_test_adapter_for_provider_api_format(
+            "aliyun",
+            "aliyun:multimodal_embedding"
+        ),
         Some(ProviderQueryTestAdapter::Standard)
     );
     assert_eq!(

@@ -1423,6 +1423,11 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
                     continue;
                 }
             }
+            if let Some(api_key_id) = query.api_key_id.as_deref() {
+                if item.api_key_id.as_deref() != Some(api_key_id) {
+                    continue;
+                }
+            }
             if item.billing_status != "settled" || item.total_cost_usd <= 0.0 {
                 continue;
             }

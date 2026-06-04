@@ -84,6 +84,7 @@ pub enum ProviderLocalEmbeddingSupport {
     Gemini,
     Jina,
     Doubao,
+    Aliyun,
 }
 
 impl ProviderLocalEmbeddingSupport {
@@ -99,11 +100,13 @@ impl ProviderLocalEmbeddingSupport {
                     | "jina:embedding"
                     | "jina:rerank"
                     | "doubao:embedding"
+                    | "aliyun:multimodal_embedding"
             ),
             Self::OpenAi => matches!(api_format.as_str(), "openai:embedding" | "openai:rerank"),
             Self::Gemini => api_format == "gemini:embedding",
             Self::Jina => matches!(api_format.as_str(), "jina:embedding" | "jina:rerank"),
             Self::Doubao => api_format == "doubao:embedding",
+            Self::Aliyun => api_format == "aliyun:multimodal_embedding",
         }
     }
 }
@@ -190,6 +193,10 @@ const JINA_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
 };
 const DOUBAO_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
     local_embedding_support: ProviderLocalEmbeddingSupport::Doubao,
+    ..STANDARD_RUNTIME_POLICY
+};
+const ALIYUN_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
+    local_embedding_support: ProviderLocalEmbeddingSupport::Aliyun,
     ..STANDARD_RUNTIME_POLICY
 };
 
@@ -470,6 +477,7 @@ pub fn provider_runtime_policy(provider_type: &str) -> ProviderRuntimePolicy {
         "gemini" | "google" => GEMINI_RUNTIME_POLICY,
         "jina" => JINA_RUNTIME_POLICY,
         "doubao" | "volcengine" => DOUBAO_RUNTIME_POLICY,
+        "aliyun" | "dashscope" => ALIYUN_RUNTIME_POLICY,
         _ => STANDARD_RUNTIME_POLICY,
     }
 }
@@ -875,6 +883,8 @@ mod tests {
             ("jina", "jina:embedding"),
             ("doubao", "doubao:embedding"),
             ("volcengine", "doubao:embedding"),
+            ("aliyun", "aliyun:multimodal_embedding"),
+            ("dashscope", "aliyun:multimodal_embedding"),
         ] {
             assert!(
                 provider_type_supports_local_embedding_transport(provider_type, api_format),
@@ -888,6 +898,8 @@ mod tests {
             ("vertex_ai", "openai:embedding"),
             ("jina", "doubao:embedding"),
             ("doubao", "jina:embedding"),
+            ("aliyun", "openai:embedding"),
+            ("openai", "aliyun:multimodal_embedding"),
             ("claude_code", "openai:embedding"),
             ("openai", "openai:chat"),
         ] {

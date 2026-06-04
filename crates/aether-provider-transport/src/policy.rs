@@ -225,7 +225,7 @@ fn endpoint_kind_allows_embedding(endpoint_kind: Option<&str>) -> bool {
         .map(|value| {
             matches!(
                 value.to_ascii_lowercase().as_str(),
-                "embedding" | "embeddings"
+                "embedding" | "embeddings" | "multimodal_embedding" | "multimodal_embeddings"
             )
         })
         .unwrap_or(true)
@@ -349,10 +349,13 @@ mod tests {
             ("jina", "jina:embedding"),
             ("doubao", "doubao:embedding"),
             ("volcengine", "doubao:embedding"),
+            ("aliyun", "aliyun:multimodal_embedding"),
+            ("dashscope", "aliyun:multimodal_embedding"),
             ("custom", "openai:embedding"),
             ("custom", "gemini:embedding"),
             ("custom", "jina:embedding"),
             ("custom", "doubao:embedding"),
+            ("custom", "aliyun:multimodal_embedding"),
         ] {
             let transport = sample_transport(provider_type, api_format, Some("embedding"));
             assert_eq!(

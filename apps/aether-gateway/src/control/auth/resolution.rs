@@ -826,8 +826,9 @@ async fn build_data_backed_auth_context(
         .map(|(provider, _)| provider)
         .unwrap_or(auth_endpoint_signature)
         .trim();
-    let requested_provider_allowed =
-        auth_snapshot_allows_requested_provider(state, &snapshot, auth_endpoint_signature).await;
+    let identity_only = auth_gate_identity_only(auth_endpoint_signature);
+    let requested_provider_allowed = identity_only
+        || auth_snapshot_allows_requested_provider(state, &snapshot, auth_endpoint_signature).await;
     let local_rejection = if invalid_api_key {
         Some(GatewayLocalAuthRejection::InvalidApiKey)
     } else if locked_api_key {
@@ -845,14 +846,15 @@ async fn build_data_backed_auth_context(
         Some(GatewayLocalAuthRejection::ProviderNotAllowed {
             provider: requested_provider.to_string(),
         })
-    } else if snapshot
-        .effective_allowed_api_formats()
-        .is_some_and(|allowed| {
-            !contains_api_format_or_alias(
-                allowed,
-                auth_gate_api_format(auth_endpoint_signature).as_str(),
-            )
-        })
+    } else if !identity_only
+        && snapshot
+            .effective_allowed_api_formats()
+            .is_some_and(|allowed| {
+                !contains_api_format_or_alias(
+                    allowed,
+                    auth_gate_api_format(auth_endpoint_signature).as_str(),
+                )
+            })
     {
         Some(GatewayLocalAuthRejection::ApiFormatNotAllowed {
             api_format: auth_endpoint_signature.to_string(),
@@ -894,6 +896,13 @@ fn auth_gate_api_format(auth_endpoint_signature: &str) -> String {
     } else {
         normalized
     }
+}
+
+fn auth_gate_identity_only(auth_endpoint_signature: &str) -> bool {
+    matches!(
+        auth_endpoint_signature.trim().to_ascii_lowercase().as_str(),
+        "aether:ccswitch_usage"
+    )
 }
 
 fn api_format_matches(left: &str, right: &str) -> bool {

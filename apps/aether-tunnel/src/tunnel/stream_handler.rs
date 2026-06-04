@@ -25,7 +25,7 @@ use crate::upstream_client;
 
 use super::protocol::{
     compress_payload, decompress_if_gzip, flags, raw_payload, Frame as TunnelFrame, MsgType,
-    RequestMeta, ResponseMeta,
+    RequestMeta, ResetStreamPayload, ResponseMeta,
 };
 use super::writer::FrameSender;
 
@@ -35,9 +35,100 @@ const MAX_CHUNK_SIZE: usize = 32 * 1024;
 /// Timeout for sending a single frame to the writer channel.
 /// Control frames are allowed a short wait; body frames fail fast.
 const CONTROL_FRAME_SEND_TIMEOUT: Duration = Duration::from_millis(250);
+const FLOW_CONTROL_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const SLOW_STREAM_LOG_THRESHOLD: Duration = Duration::from_secs(2);
 const SUCCESS_LOG_SAMPLE_MODULO: u32 = 256;
 const REQUEST_BODY_SPOOL_QUEUE_CAPACITY: usize = 64;
+
+#[derive(Debug)]
+pub(crate) struct StreamSendWindow {
+    available: Mutex<u64>,
+    notify: Notify,
+}
+
+impl StreamSendWindow {
+    pub(crate) fn new(initial_window_bytes: u32) -> Self {
+        Self {
+            available: Mutex::new(u64::from(initial_window_bytes.max(1))),
+            notify: Notify::new(),
+        }
+    }
+
+    pub(crate) fn add_credit(&self, delta_bytes: u32) {
+        if delta_bytes == 0 {
+            return;
+        }
+        let mut available = self.available.lock().expect("stream window lock poisoned");
+        *available = available.saturating_add(u64::from(delta_bytes));
+        drop(available);
+        self.notify.notify_waiters();
+    }
+
+    async fn acquire(&self, bytes: usize, timeout: Duration) -> Result<Duration, ()> {
+        if bytes == 0 {
+            return Ok(Duration::ZERO);
+        }
+
+        let requested = bytes as u64;
+        let started_at = Instant::now();
+        loop {
+            {
+                let mut available = self.available.lock().expect("stream window lock poisoned");
+                if *available >= requested {
+                    *available -= requested;
+                    return Ok(started_at.elapsed());
+                }
+            }
+
+            let Some(remaining) = timeout.checked_sub(started_at.elapsed()) else {
+                return Err(());
+            };
+            if tokio::time::timeout(remaining, self.notify.notified())
+                .await
+                .is_err()
+            {
+                return Err(());
+            }
+        }
+    }
+}
+
+fn stream_reset_message(frame: &TunnelFrame) -> String {
+    if frame.msg_type == MsgType::ResetStream {
+        if let Ok(payload) = serde_json::from_slice::<ResetStreamPayload>(&frame.payload) {
+            return payload.reason;
+        }
+    }
+    String::from_utf8(frame.payload.to_vec())
+        .unwrap_or_else(|_| "client cancelled request body".to_string())
+}
+
+fn try_send_window_update(frame_tx: &FrameSender, stream_id: u32, bytes: usize) {
+    if bytes == 0 {
+        return;
+    }
+    let delta = bytes.min(u32::MAX as usize) as u32;
+    if frame_tx
+        .try_send(TunnelFrame::new(
+            stream_id,
+            MsgType::WindowUpdate,
+            0,
+            Bytes::from(
+                serde_json::to_vec(&aether_contracts::tunnel::WindowUpdatePayload {
+                    delta_bytes: delta,
+                })
+                .expect("window update payload should serialize"),
+            ),
+        ))
+        .is_err()
+    {
+        warn!(
+            stream_id,
+            delta_bytes = delta,
+            "writer channel full, WINDOW_UPDATE dropped"
+        );
+    }
+}
 
 /// Minimum allowed upstream request timeout (milliseconds).
 const MIN_TIMEOUT_MS: u64 = 1;
@@ -491,10 +582,12 @@ fn buffered_request_body(body: Bytes) -> upstream_client::UpstreamRequestBody {
 // longer coupled to upstream body polling. Redirect replay still reuses a full
 // in-memory copy when the request body completes within budget.
 fn prepare_request_body(
+    stream_id: u32,
     body_rx: mpsc::Receiver<TunnelFrame>,
     body_size: Arc<AtomicUsize>,
     deadline: Instant,
     replay_budget_bytes: usize,
+    frame_tx: FrameSender,
 ) -> PreparedRequestBody {
     let (spool_tx, spool_rx) = mpsc::channel(REQUEST_BODY_SPOOL_QUEUE_CAPACITY);
     let replay_state = if replay_budget_bytes == 0 {
@@ -508,11 +601,13 @@ fn prepare_request_body(
     };
 
     tokio::spawn(spool_request_body(
+        stream_id,
         body_rx,
         spool_tx,
         replay_state,
         body_size,
         deadline,
+        frame_tx,
     ));
 
     PreparedRequestBody {
@@ -537,10 +632,12 @@ fn prepare_bodyless_request_body(
 }
 
 async fn collect_request_body_for_replay(
+    stream_id: u32,
     mut body_rx: mpsc::Receiver<TunnelFrame>,
     body_size: Arc<AtomicUsize>,
     deadline: Instant,
     replay_budget_bytes: usize,
+    frame_tx: &FrameSender,
 ) -> Result<Bytes, String> {
     let mut body = BytesMut::new();
 
@@ -565,6 +662,7 @@ async fn collect_request_body_for_replay(
                         ));
                     }
                     body_size.fetch_add(payload.len(), Ordering::Relaxed);
+                    try_send_window_update(frame_tx, stream_id, payload.len());
                     body.extend_from_slice(&payload);
                 }
 
@@ -572,9 +670,8 @@ async fn collect_request_body_for_replay(
                     return Ok(body.freeze());
                 }
             }
-            MsgType::StreamError => {
-                return Err(String::from_utf8(frame.payload.to_vec())
-                    .unwrap_or_else(|_| "client cancelled request body".to_string()));
+            MsgType::StreamError | MsgType::ResetStream => {
+                return Err(stream_reset_message(&frame));
             }
             MsgType::StreamEnd => return Ok(body.freeze()),
             _ => continue,
@@ -648,11 +745,13 @@ fn timeout_duration_from_legacy_secs(secs: u64) -> Duration {
 }
 
 async fn spool_request_body(
+    stream_id: u32,
     mut body_rx: mpsc::Receiver<TunnelFrame>,
     mut spool_tx: mpsc::Sender<SpoolBodyEvent>,
     replay_state: Option<Arc<RequestBodyReplayState>>,
     body_size: Arc<AtomicUsize>,
     deadline: Instant,
+    frame_tx: FrameSender,
 ) {
     loop {
         let frame = match recv_body_frame_with_deadline(&mut body_rx, deadline).await {
@@ -692,6 +791,7 @@ async fn spool_request_body(
 
                 if !payload.is_empty() {
                     body_size.fetch_add(payload.len(), Ordering::Relaxed);
+                    try_send_window_update(&frame_tx, stream_id, payload.len());
                     if let Some(state) = &replay_state {
                         state.push_chunk(payload.clone());
                     }
@@ -714,9 +814,8 @@ async fn spool_request_body(
                     return;
                 }
             }
-            MsgType::StreamError => {
-                let message = String::from_utf8(frame.payload.to_vec())
-                    .unwrap_or_else(|_| "client cancelled request body".to_string());
+            MsgType::StreamError | MsgType::ResetStream => {
+                let message = stream_reset_message(&frame);
                 if let Some(state) = &replay_state {
                     state.fail(message.clone());
                 }
@@ -932,6 +1031,40 @@ async fn execute_upstream_request(
     })
 }
 
+async fn acquire_response_credit(
+    response_window: &StreamSendWindow,
+    frame_tx: &FrameSender,
+    stream_id: u32,
+    bytes: usize,
+) -> bool {
+    match response_window
+        .acquire(bytes, FLOW_CONTROL_WAIT_TIMEOUT)
+        .await
+    {
+        Ok(waited) => {
+            if waited > Duration::from_millis(1) {
+                debug!(
+                    stream_id,
+                    bytes,
+                    waited_ms = waited.as_millis() as u64,
+                    "waited for tunnel response flow-control credit"
+                );
+            }
+            true
+        }
+        Err(()) => {
+            warn!(
+                stream_id,
+                bytes,
+                timeout_ms = FLOW_CONTROL_WAIT_TIMEOUT.as_millis() as u64,
+                "response flow-control window timeout"
+            );
+            send_reset_stream(frame_tx, stream_id, "response_flow_control_timeout").await;
+            false
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn relay_upstream_response<B>(
     server: &ServerContext,
@@ -939,6 +1072,7 @@ async fn relay_upstream_response<B>(
     method: &hyper::Method,
     request_url: &url::Url,
     frame_tx: &FrameSender,
+    response_window: &StreamSendWindow,
     response: hyper::Response<B>,
     total_dns_ms: u64,
     total_elapsed: Duration,
@@ -1068,6 +1202,11 @@ where
             Ok(chunk) => {
                 if chunk.len() <= MAX_CHUNK_SIZE {
                     let (payload, extra_flags) = raw_payload(chunk);
+                    if !acquire_response_credit(response_window, frame_tx, stream_id, payload.len())
+                        .await
+                    {
+                        return Some(total_elapsed);
+                    }
                     if !send_frame(
                         frame_tx,
                         TunnelFrame::new(stream_id, MsgType::ResponseBody, extra_flags, payload),
@@ -1094,6 +1233,16 @@ where
                         let end = (offset + MAX_CHUNK_SIZE).min(chunk.len());
                         let slice = chunk.slice(offset..end);
                         let (payload, extra_flags) = raw_payload(slice);
+                        if !acquire_response_credit(
+                            response_window,
+                            frame_tx,
+                            stream_id,
+                            payload.len(),
+                        )
+                        .await
+                        {
+                            return Some(total_elapsed);
+                        }
                         if !send_frame(
                             frame_tx,
                             TunnelFrame::new(
@@ -1213,6 +1362,7 @@ pub async fn handle_stream(
     meta: RequestMeta,
     body_rx: mpsc::Receiver<TunnelFrame>,
     frame_tx: FrameSender,
+    response_window: Arc<StreamSendWindow>,
 ) {
     let request_method = parse_request_method(&meta.method);
     let request_url = url::Url::parse(&meta.url).ok();
@@ -1244,8 +1394,14 @@ pub async fn handle_stream(
 
     server.active_connections.fetch_add(1, Ordering::Release);
 
-    let connect_elapsed =
-        handle_stream_inner(&state, &server, stream_id, meta, body_rx, &frame_tx, permit).await;
+    let stream_io = StreamIo {
+        body_rx,
+        frame_tx: &frame_tx,
+        response_window: response_window.as_ref(),
+        admission_permit: permit,
+    };
+
+    let connect_elapsed = handle_stream_inner(&state, &server, stream_id, meta, stream_io).await;
 
     server.active_connections.fetch_sub(1, Ordering::Release);
     if let Some(d) = connect_elapsed {
@@ -1264,18 +1420,21 @@ async fn send_frame(tx: &FrameSender, frame: TunnelFrame) -> bool {
     );
 
     if is_body_frame {
-        match tx.try_send(frame) {
-            Ok(()) => true,
-            Err(QueueSendError::Full(_)) => {
+        match tokio::time::timeout(FLOW_CONTROL_WAIT_TIMEOUT, tx.send(frame)).await {
+            Ok(Ok(())) => true,
+            Ok(Err(QueueSendError::Closed(_))) | Err(_) => {
                 warn!(
                     stream_id,
                     msg_type = ?msg_type,
                     flags = flags,
-                    "writer channel full for body frame, abandoning stream"
+                    timeout_ms = FLOW_CONTROL_WAIT_TIMEOUT.as_millis() as u64,
+                    "writer channel stalled for body frame, abandoning stream"
                 );
                 false
             }
-            Err(QueueSendError::Closed(_)) => false,
+            Ok(Err(QueueSendError::Full(_))) => {
+                unreachable!("bounded queue send should not report full")
+            }
         }
     } else {
         match tokio::time::timeout(CONTROL_FRAME_SEND_TIMEOUT, tx.send(frame)).await {
@@ -1297,15 +1456,27 @@ async fn send_frame(tx: &FrameSender, frame: TunnelFrame) -> bool {
 /// Returns the connection-establishment duration (DNS + TCP/TLS + TTFB) if the
 /// upstream request succeeded, or `None` if the request never reached the
 /// response-headers stage.
+struct StreamIo<'a> {
+    body_rx: mpsc::Receiver<TunnelFrame>,
+    frame_tx: &'a FrameSender,
+    response_window: &'a StreamSendWindow,
+    admission_permit: Option<AdmissionPermit>,
+}
+
 async fn handle_stream_inner(
     state: &AppState,
     server: &ServerContext,
     stream_id: u32,
     meta: RequestMeta,
-    body_rx: mpsc::Receiver<TunnelFrame>,
-    frame_tx: &FrameSender,
-    mut admission_permit: Option<AdmissionPermit>,
+    stream_io: StreamIo<'_>,
 ) -> Option<Duration> {
+    let StreamIo {
+        body_rx,
+        frame_tx,
+        response_window,
+        mut admission_permit,
+    } = stream_io;
+
     let mut current_method: hyper::Method = parse_request_method(&meta.method);
     let mut current_url = match url::Url::parse(&meta.url) {
         Ok(u) => u,
@@ -1357,10 +1528,12 @@ async fn handle_stream_inner(
     };
     let mut prepared_body = if can_buffer_redirect_body {
         let buffered_body = match collect_request_body_for_replay(
+            stream_id,
             body_rx,
             Arc::clone(&request_body_size),
             first_byte_deadline,
             replay_budget_bytes,
+            frame_tx,
         )
         .await
         {
@@ -1388,10 +1561,12 @@ async fn handle_stream_inner(
         }
     } else if request_has_body {
         prepare_request_body(
+            stream_id,
             body_rx,
             Arc::clone(&request_body_size),
             first_byte_deadline,
             0,
+            frame_tx.clone(),
         )
     } else {
         prepare_bodyless_request_body(body_rx, follow_redirects)
@@ -1472,6 +1647,7 @@ async fn handle_stream_inner(
                         &current_method,
                         &current_url,
                         frame_tx,
+                        response_window,
                         response_ctx.response,
                         total_dns_ms,
                         overall_start.elapsed(),
@@ -1512,6 +1688,7 @@ async fn handle_stream_inner(
                             &current_method,
                             &current_url,
                             frame_tx,
+                            response_window,
                             response_ctx.response,
                             total_dns_ms,
                             overall_start.elapsed(),
@@ -1568,6 +1745,7 @@ async fn handle_stream_inner(
             &current_method,
             &current_url,
             frame_tx,
+            response_window,
             response_ctx.response,
             total_dns_ms,
             overall_start.elapsed(),
@@ -1592,6 +1770,18 @@ async fn send_error(tx: &FrameSender, stream_id: u32, msg: &str) {
             0,
             Bytes::from(msg.to_string()),
         ),
+    )
+    .await;
+}
+
+async fn send_reset_stream(tx: &FrameSender, stream_id: u32, reason: &str) {
+    let payload = serde_json::to_vec(&ResetStreamPayload {
+        reason: reason.to_string(),
+    })
+    .expect("reset stream payload should serialize");
+    let _ = send_frame(
+        tx,
+        TunnelFrame::new(stream_id, MsgType::ResetStream, 0, Bytes::from(payload)),
     )
     .await;
 }
@@ -1676,9 +1866,8 @@ fn build_prefixed_request_body(
                             (body_rx, body_size, end_stream),
                         ));
                     }
-                    MsgType::StreamError => {
-                        let message = String::from_utf8(frame.payload.to_vec())
-                            .unwrap_or_else(|_| "client cancelled request body".to_string());
+                    MsgType::StreamError | MsgType::ResetStream => {
+                        let message = stream_reset_message(&frame);
                         return Some((Err(io::Error::other(message)), (body_rx, body_size, true)));
                     }
                     MsgType::StreamEnd => return None,
@@ -1820,12 +2009,15 @@ mod tests {
     #[tokio::test]
     async fn prepare_request_body_streams_immediately_and_replays_after_completion() {
         let (tx, rx) = mpsc::channel(4);
+        let (frame_tx, sent, writer_handle) = spawn_test_writer();
         let body_size = Arc::new(AtomicUsize::new(0));
         let prepared = prepare_request_body(
+            1,
             rx,
             Arc::clone(&body_size),
             Instant::now() + Duration::from_secs(1),
             1024,
+            frame_tx.clone(),
         );
         let mut body = prepared
             .first_request_body
@@ -1888,6 +2080,19 @@ mod tests {
         );
         assert!(replay.frame().await.is_none());
         assert_eq!(body_size.load(Ordering::Relaxed), 11);
+        let window_update_bytes = collect_emitted_frames(frame_tx, sent, writer_handle)
+            .await
+            .into_iter()
+            .filter(|frame| frame.msg_type == MsgType::WindowUpdate)
+            .filter_map(|frame| {
+                serde_json::from_slice::<aether_contracts::tunnel::WindowUpdatePayload>(
+                    &frame.payload,
+                )
+                .ok()
+            })
+            .map(|payload| payload.delta_bytes as usize)
+            .sum::<usize>();
+        assert_eq!(window_update_bytes, 11);
     }
 
     #[test]
@@ -2084,6 +2289,7 @@ mod tests {
             meta,
             body_rx,
             frame_tx.clone(),
+            test_response_window(),
         )
         .await;
         let result = collect_stream_result(frame_tx, sent, writer_handle).await;
@@ -2145,6 +2351,7 @@ mod tests {
             meta,
             body_rx,
             frame_tx.clone(),
+            test_response_window(),
         )
         .await;
         let result = collect_stream_result(frame_tx, sent, writer_handle).await;
@@ -2179,6 +2386,7 @@ mod tests {
             .status(StatusCode::OK)
             .body(body)
             .expect("response");
+        let response_window = test_response_window();
 
         relay_upstream_response(
             &server,
@@ -2186,6 +2394,7 @@ mod tests {
             &hyper::Method::GET,
             &request_url,
             &frame_tx,
+            response_window.as_ref(),
             response,
             0,
             Duration::ZERO,
@@ -2222,6 +2431,7 @@ mod tests {
             .status(StatusCode::OK)
             .body(body)
             .expect("response");
+        let response_window = test_response_window();
 
         relay_upstream_response(
             &server,
@@ -2229,6 +2439,7 @@ mod tests {
             &hyper::Method::GET,
             &request_url,
             &frame_tx,
+            response_window.as_ref(),
             response,
             0,
             Duration::ZERO,
@@ -2329,6 +2540,7 @@ mod tests {
             meta,
             body_rx,
             frame_tx.clone(),
+            test_response_window(),
         )
         .await;
         let result = collect_stream_result(frame_tx, sent, writer_handle).await;
@@ -2393,6 +2605,7 @@ mod tests {
             meta,
             body_rx,
             frame_tx.clone(),
+            test_response_window(),
         )
         .await;
         let result = collect_stream_result(frame_tx, sent, writer_handle).await;
@@ -2477,6 +2690,7 @@ mod tests {
             meta,
             body_rx,
             frame_tx.clone(),
+            test_response_window(),
         )
         .await;
         let result = collect_stream_result(frame_tx, sent, writer_handle).await;
@@ -2515,6 +2729,7 @@ mod tests {
             sample_request_meta(),
             body_rx,
             frame_tx.clone(),
+            test_response_window(),
         )
         .await;
 
@@ -2561,6 +2776,7 @@ mod tests {
             sample_request_meta(),
             body_rx,
             frame_tx.clone(),
+            test_response_window(),
         )
         .await;
 
@@ -2729,6 +2945,10 @@ mod tests {
             tunnel_reconnect_max_ms: 30_000,
             tunnel_ping_interval_ms: 15_000,
             tunnel_max_streams: Some(8),
+            tunnel_profile: crate::config::TunnelProfileArg::Lite,
+            tunnel_stream_initial_window_bytes:
+                crate::config::DEFAULT_TUNNEL_STREAM_INITIAL_WINDOW_BYTES,
+            tunnel_drain_deadline_ms: crate::config::DEFAULT_TUNNEL_DRAIN_DEADLINE_MS,
             tunnel_connect_timeout_ms: 15_000,
             tunnel_ipv4_only: false,
             tunnel_ipv6_only: false,
@@ -2791,6 +3011,10 @@ mod tests {
         let sent = Arc::clone(&sink.sent);
         let (frame_tx, handle) = crate::tunnel::writer::spawn_writer(sink, Duration::from_secs(60));
         (frame_tx, sent, handle)
+    }
+
+    fn test_response_window() -> Arc<StreamSendWindow> {
+        Arc::new(StreamSendWindow::new(u32::MAX))
     }
 
     struct StreamResult {
