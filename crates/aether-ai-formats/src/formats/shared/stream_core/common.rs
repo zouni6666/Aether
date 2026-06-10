@@ -111,10 +111,10 @@ pub fn canonical_usage_from_openai_usage(value: Option<&Value>) -> Option<Canoni
 
 pub fn openai_stream_payload_is_terminal_error(payload: &Value) -> bool {
     let response = payload.get("response").and_then(Value::as_object);
-    if payload.get("error").is_some()
+    if payload.get("error").is_some_and(|error| !error.is_null())
         || response
             .and_then(|response| response.get("error"))
-            .is_some()
+            .is_some_and(|error| !error.is_null())
     {
         return true;
     }
@@ -698,5 +698,40 @@ fn inclusive_total_tokens_from_usage(usage: &CanonicalUsage, input_tokens: u64) 
         usage.total_tokens
     } else {
         input_tokens.saturating_add(usage.output_tokens)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{
+        openai_stream_payload_is_terminal_error, openai_stream_terminal_error_body,
+        openai_stream_terminal_error_message,
+    };
+
+    #[test]
+    fn completed_openai_responses_payload_with_null_error_is_not_terminal_error() {
+        let payload = json!({
+            "type": "response.completed",
+            "response": {
+                "id": "resp_123",
+                "object": "response",
+                "status": "completed",
+                "error": null,
+                "incomplete_details": null,
+                "output": [],
+                "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "total_tokens": 3
+                }
+            },
+            "error": null
+        });
+
+        assert!(!openai_stream_payload_is_terminal_error(&payload));
+        assert!(openai_stream_terminal_error_body(&payload).is_none());
+        assert!(openai_stream_terminal_error_message(&payload).is_none());
     }
 }

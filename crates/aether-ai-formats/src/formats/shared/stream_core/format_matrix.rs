@@ -1500,6 +1500,8 @@ mod tests {
                         "object": "response",
                         "model": "gpt-5.5",
                         "status": "completed",
+                        "error": null,
+                        "incomplete_details": null,
                         "output": [],
                         "usage": {
                             "input_tokens": 26,
@@ -1522,6 +1524,8 @@ mod tests {
             .latest_summary()
             .cloned()
             .expect("summary should exist");
+        assert!(summary.observed_finish);
+        assert_eq!(summary.parser_error, None);
         let usage = summary
             .standardized_usage
             .expect("standardized usage should exist");
