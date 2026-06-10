@@ -1727,7 +1727,7 @@ const loadTrace = async (silent = false) => {
     error.value = null
 
     try {
-      internalTrace.value = await requestTraceApi.getRequestTrace(props.requestId)
+      internalTrace.value = await requestTraceApi.getRequestTrace(props.requestId, { attemptedOnly: true })
     } catch (err: unknown) {
       if (isAxiosError(err) && err.response?.status === 404) {
         internalTrace.value = null

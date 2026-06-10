@@ -470,16 +470,15 @@ fn validate_cross_format_generation_target(
 ) -> Result<(), FormatError> {
     let generation = &request.generation;
     match target {
-        FormatId::OpenAiChat => {
-            if generation.top_k.is_some() {
-                return lossy_generation_field(
-                    source,
-                    target,
-                    "top_k",
-                    "OpenAI Chat Completions has no official top_k request field",
-                );
-            }
+        FormatId::OpenAiChat if generation.top_k.is_some() => {
+            return lossy_generation_field(
+                source,
+                target,
+                "top_k",
+                "OpenAI Chat Completions has no official top_k request field",
+            );
         }
+        FormatId::OpenAiChat => {}
         FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact => {
             for (field, present, reason) in [
                 (
@@ -756,65 +755,72 @@ fn request_extension_key_is_cross_format_safe(
     if location == "response_format" {
         return response_format_extension_key_is_cross_format_safe(namespace, key);
     }
-    match (source, target, namespace, key) {
+    matches!(
+        (source, target, namespace, key),
         (
             FormatId::OpenAiChat,
             FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact,
             "openai",
             "stream"
-            | "store"
-            | "service_tier"
-            | "safety_identifier"
-            | "prompt_cache_key"
-            | "prompt_cache_retention"
-            | "verbosity",
-        ) => true,
-        (
+                | "store"
+                | "service_tier"
+                | "safety_identifier"
+                | "prompt_cache_key"
+                | "prompt_cache_retention"
+                | "verbosity",
+        ) | (
             FormatId::OpenAiChat,
             FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact,
             "openai_responses",
             "verbosity",
-        ) => true,
-        (FormatId::OpenAiChat, FormatId::GeminiGenerateContent, "openai", "web_search_options") => {
-            true
-        }
-        (
+        ) | (
+            FormatId::OpenAiChat,
+            FormatId::GeminiGenerateContent,
+            "openai",
+            "web_search_options",
+        ) | (
             FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact,
             FormatId::OpenAiChat,
             "openai_responses" | "openai_cli",
             "stream"
-            | "store"
-            | "service_tier"
-            | "safety_identifier"
-            | "prompt_cache_key"
-            | "prompt_cache_retention"
-            | "verbosity",
-        ) => true,
-        (FormatId::ClaudeMessages, _, "claude", "output_config") => true,
-        (
-            FormatId::ClaudeMessages,
-            FormatId::OpenAiChat | FormatId::GeminiGenerateContent,
-            "openai",
-            "web_search_options",
-        ) => true,
-        (
-            FormatId::GeminiGenerateContent,
-            _,
-            "gemini",
-            "thinking_config" | "raw_tools" | "raw_tool_config",
-        ) => true,
-        (
-            FormatId::GeminiGenerateContent,
-            FormatId::OpenAiChat,
-            "gemini",
-            "builtin_tools" | "grounding",
-        ) => true,
-        (FormatId::GeminiGenerateContent, FormatId::GeminiGenerateContent, "gemini", _) => true,
-        (FormatId::GeminiGenerateContent, FormatId::OpenAiChat, "openai", "web_search_options") => {
-            true
-        }
-        _ => false,
-    }
+                | "store"
+                | "service_tier"
+                | "safety_identifier"
+                | "prompt_cache_key"
+                | "prompt_cache_retention"
+                | "verbosity",
+        ) | (FormatId::ClaudeMessages, _, "claude", "output_config")
+            | (
+                FormatId::ClaudeMessages,
+                FormatId::OpenAiChat | FormatId::GeminiGenerateContent,
+                "openai",
+                "web_search_options",
+            )
+            | (
+                FormatId::GeminiGenerateContent,
+                _,
+                "gemini",
+                "thinking_config" | "raw_tools" | "raw_tool_config",
+            )
+            | (
+                FormatId::GeminiGenerateContent,
+                FormatId::OpenAiChat,
+                "gemini",
+                "builtin_tools" | "grounding",
+            )
+            | (
+                FormatId::GeminiGenerateContent,
+                FormatId::GeminiGenerateContent,
+                "gemini",
+                _
+            )
+            | (
+                FormatId::GeminiGenerateContent,
+                FormatId::OpenAiChat,
+                "openai",
+                "web_search_options",
+            )
+    )
 }
 
 fn tool_extension_key_is_cross_format_safe(
@@ -823,17 +829,17 @@ fn tool_extension_key_is_cross_format_safe(
     namespace: &str,
     key: &str,
 ) -> bool {
-    match (source, target, namespace, key) {
-        (_, _, "claude", "raw_input_schema") => true,
-        (_, _, "gemini", "raw_parameters") => true,
-        (
-            FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact,
-            FormatId::GeminiGenerateContent,
-            "openai_responses" | "openai_cli",
-            "type",
-        ) => true,
-        _ => false,
-    }
+    matches!(
+        (source, target, namespace, key),
+        (_, _, "claude", "raw_input_schema")
+            | (_, _, "gemini", "raw_parameters")
+            | (
+                FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact,
+                FormatId::GeminiGenerateContent,
+                "openai_responses" | "openai_cli",
+                "type",
+            )
+    )
 }
 
 fn thinking_extension_key_is_cross_format_safe(
@@ -842,43 +848,43 @@ fn thinking_extension_key_is_cross_format_safe(
     namespace: &str,
     key: &str,
 ) -> bool {
-    match (source, target, namespace, key) {
+    matches!(
+        (source, target, namespace, key),
         (
             FormatId::OpenAiChat,
             FormatId::OpenAiResponses
-            | FormatId::OpenAiResponsesCompact
-            | FormatId::ClaudeMessages
-            | FormatId::GeminiGenerateContent,
+                | FormatId::OpenAiResponsesCompact
+                | FormatId::ClaudeMessages
+                | FormatId::GeminiGenerateContent,
             "openai",
             "reasoning_effort",
-        ) => true,
-        (
+        ) | (
             FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact,
             FormatId::OpenAiChat | FormatId::ClaudeMessages | FormatId::GeminiGenerateContent,
             "openai_responses" | "openai_cli",
             "effort",
-        ) => true,
-        (FormatId::ClaudeMessages, _, "claude", "type" | "budget_tokens" | "output_config") => true,
-        (
+        ) | (
+            FormatId::ClaudeMessages,
+            _,
+            "claude",
+            "type" | "budget_tokens" | "output_config",
+        ) | (
             FormatId::ClaudeMessages,
             FormatId::OpenAiChat | FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact,
             "openai",
             "reasoning_effort",
-        ) => true,
-        (
+        ) | (
             FormatId::GeminiGenerateContent,
             _,
             "gemini",
             "thinking_config" | "includeThoughts" | "thinkingBudget" | "thinkingLevel",
-        ) => true,
-        (
+        ) | (
             FormatId::GeminiGenerateContent,
             FormatId::OpenAiChat | FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact,
             "openai",
             "reasoning_effort",
-        ) => true,
-        _ => false,
-    }
+        )
+    )
 }
 
 fn response_format_extension_key_is_cross_format_safe(namespace: &str, key: &str) -> bool {
@@ -1674,16 +1680,15 @@ fn validate_claude_cross_format_request(body: &Value, target: FormatId) -> Resul
     }
 
     match target {
-        FormatId::OpenAiChat => {
-            if claude_request_contains_tool_result_content_array(body) {
-                return Err(FormatError::LossyConversionBlocked {
-                    source_format: FormatId::ClaudeMessages.as_str().to_string(),
-                    target_format: target.as_str().to_string(),
-                    field: "messages[].content[].tool_result.content".to_string(),
-                    reason: "OpenAI Chat tool messages cannot losslessly preserve Claude multi-block tool_result content".to_string(),
-                });
-            }
+        FormatId::OpenAiChat if claude_request_contains_tool_result_content_array(body) => {
+            return Err(FormatError::LossyConversionBlocked {
+                source_format: FormatId::ClaudeMessages.as_str().to_string(),
+                target_format: target.as_str().to_string(),
+                field: "messages[].content[].tool_result.content".to_string(),
+                reason: "OpenAI Chat tool messages cannot losslessly preserve Claude multi-block tool_result content".to_string(),
+            });
         }
+        FormatId::OpenAiChat => {}
         FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact => {
             if claude_request_contains_message_thinking_blocks(body) {
                 return Err(FormatError::LossyConversionBlocked {
@@ -1702,16 +1707,17 @@ fn validate_claude_cross_format_request(body: &Value, target: FormatId) -> Resul
                 });
             }
         }
-        FormatId::GeminiGenerateContent => {
-            if claude_request_contains_redacted_thinking_blocks(body) {
-                return Err(FormatError::LossyConversionBlocked {
-                    source_format: FormatId::ClaudeMessages.as_str().to_string(),
-                    target_format: target.as_str().to_string(),
-                    field: "messages[].content[].type".to_string(),
-                    reason: "Gemini request parts cannot losslessly preserve Claude redacted thinking blocks".to_string(),
-                });
-            }
+        FormatId::GeminiGenerateContent
+            if claude_request_contains_redacted_thinking_blocks(body) =>
+        {
+            return Err(FormatError::LossyConversionBlocked {
+                source_format: FormatId::ClaudeMessages.as_str().to_string(),
+                target_format: target.as_str().to_string(),
+                field: "messages[].content[].type".to_string(),
+                reason: "Gemini request parts cannot losslessly preserve Claude redacted thinking blocks".to_string(),
+            });
         }
+        FormatId::GeminiGenerateContent => {}
         _ => {}
     }
     Ok(())

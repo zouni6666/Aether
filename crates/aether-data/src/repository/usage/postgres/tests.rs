@@ -725,7 +725,8 @@ fn usage_sql_uses_json_null_placeholders_for_usage_payload_columns() {
         super::LIST_RECENT_USAGE_AUDITS_PREFIX,
     ] {
         assert!(sql.contains("jsonb_strip_nulls(jsonb_build_object("));
-        assert!(sql.contains("jsonb_typeof(\"usage\".provider_request_body::jsonb)"));
+        assert!(!sql.contains("jsonb_typeof(\"usage\".provider_request_body::jsonb)"));
+        assert!(!sql.contains("\"usage\".provider_request_body->"));
         assert!(!sql.contains("jsonb_typeof(\"usage\".provider_request_body)"));
         assert!(sql.contains("'client_ip'"));
         assert!(sql.contains("request_metadata->>'client_ip'"));
@@ -745,6 +746,33 @@ fn usage_sql_uses_json_null_placeholders_for_usage_payload_columns() {
     }
     assert!(!super::LIST_USAGE_AUDITS_PREFIX.contains("NULL::jsonb"));
     assert!(!super::LIST_RECENT_USAGE_AUDITS_PREFIX.contains("NULL::jsonb"));
+}
+
+#[test]
+fn usage_sql_admin_record_filters_are_pushed_into_postgres_queries() {
+    let source = include_str!("mod.rs");
+    assert!(source.contains("push_postgres_usage_client_family_filter"));
+    assert!(source.contains("request_metadata->'client_session_affinity'->>'client_family'"));
+    assert!(source.contains("request_metadata->>'client_family'"));
+    assert!(source.contains("exclude_unknown_model_or_provider"));
+    assert!(source.contains("NOT IN ('unknown', 'unknow')"));
+}
+
+#[test]
+fn usage_sql_keyword_search_error_filter_keeps_where_state_before_keywords() {
+    let source = include_str!("mod.rs");
+    let function = source
+        .split("pub async fn list_usage_audits_by_keyword_search")
+        .nth(1)
+        .and_then(|tail| tail.split("pub async fn count_usage_audits").next())
+        .expect("keyword search function should be present");
+    let error_filter = function
+        .split("if query.error_only")
+        .nth(1)
+        .and_then(|tail| tail.split("for (index, keyword)").next())
+        .expect("error filter should precede keyword loop");
+
+    assert!(error_filter.contains("has_where = true;"));
 }
 
 #[test]
@@ -880,13 +908,13 @@ fn usage_sql_clears_legacy_header_columns_on_upsert() {
 #[test]
 fn usage_sql_detached_body_flags_clear_inline_and_compressed_columns() {
     assert!(super::UPSERT_SQL
-        .contains("WHEN EXCLUDED.request_body_compressed IS NOT NULL OR $56 THEN NULL"));
+        .contains("WHEN EXCLUDED.request_body_compressed IS NOT NULL OR $57 THEN NULL"));
     assert!(super::UPSERT_SQL
-        .contains("WHEN EXCLUDED.provider_request_body_compressed IS NOT NULL OR $57 THEN NULL"));
+        .contains("WHEN EXCLUDED.provider_request_body_compressed IS NOT NULL OR $58 THEN NULL"));
     assert!(super::UPSERT_SQL
-        .contains("WHEN EXCLUDED.response_body_compressed IS NOT NULL OR $58 THEN NULL"));
+        .contains("WHEN EXCLUDED.response_body_compressed IS NOT NULL OR $59 THEN NULL"));
     assert!(super::UPSERT_SQL
-        .contains("WHEN EXCLUDED.client_response_body_compressed IS NOT NULL OR $59 THEN NULL"));
+        .contains("WHEN EXCLUDED.client_response_body_compressed IS NOT NULL OR $60 THEN NULL"));
 }
 
 #[test]

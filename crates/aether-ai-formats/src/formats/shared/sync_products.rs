@@ -3566,9 +3566,7 @@ mod tests {
 
     #[test]
     fn gemini_stream_aggregation_rejects_unknown_parts() {
-        let body = concat!(
-            "data: {\"responseId\":\"resp_gem_unknown_123\",\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"futurePart\":{\"kept\":true}}]}}]}\n\n",
-        );
+        let body = "data: {\"responseId\":\"resp_gem_unknown_123\",\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"futurePart\":{\"kept\":true}}]}}]}\n\n";
 
         assert!(
             aggregate_gemini_stream_sync_response(body.as_bytes()).is_none(),
@@ -3582,9 +3580,7 @@ mod tests {
             "provider_api_format": "gemini:generate_content",
             "client_api_format": "openai:chat",
         });
-        let stream_body = concat!(
-            "data: {\"responseId\":\"resp_gem_unknown_456\",\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"futurePart\":{\"kept\":true}}]}}]}\n\n",
-        );
+        let stream_body = "data: {\"responseId\":\"resp_gem_unknown_456\",\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"futurePart\":{\"kept\":true}}]}}]}\n\n";
         let provider_body_json = json!({
             "responseId": "resp_gem_unknown_456",
             "modelVersion": "gemini-2.5-pro",
@@ -5079,9 +5075,7 @@ mod tests {
             "model": "claude-sonnet-4-5",
             "mapped_model": "gpt-5",
         });
-        let stream_body = concat!(
-            "data: {\"id\":\"chatcmpl_unknown_stream\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-5\",\"choices\":[{\"index\":0,\"delta\":{\"future_delta\":\"x\"}}]}\n\n",
-        );
+        let stream_body = "data: {\"id\":\"chatcmpl_unknown_stream\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-5\",\"choices\":[{\"index\":0,\"delta\":{\"future_delta\":\"x\"}}]}\n\n";
         let fallback_body = json!({
             "id": "chatcmpl_fallback",
             "object": "chat.completion",

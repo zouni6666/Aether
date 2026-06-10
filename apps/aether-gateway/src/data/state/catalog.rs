@@ -19,6 +19,16 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn list_attempted_request_candidates_by_request_id(
+        &self,
+        request_id: &str,
+    ) -> Result<Vec<StoredRequestCandidate>, DataLayerError> {
+        match &self.request_candidate_reader {
+            Some(repository) => repository.list_attempted_by_request_id(request_id).await,
+            None => Ok(Vec::new()),
+        }
+    }
+
     pub(crate) async fn list_request_candidates_by_provider_id(
         &self,
         provider_id: &str,
