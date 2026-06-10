@@ -23,6 +23,7 @@ use crate::ai_serving::planner::spec_metadata::local_standard_spec_metadata;
 use crate::ai_serving::planner::standard::{
     apply_codex_openai_responses_special_headers, apply_deepseek_tool_call_thinking_compat,
     is_deepseek_provider, request_body_build_failure_extra_data,
+    request_conversion_failure_extra_data,
 };
 use crate::ai_serving::transport::kiro::{
     build_kiro_provider_headers, build_kiro_provider_request_body,
@@ -599,10 +600,14 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
                     attempt.candidate_index,
                     &attempt.candidate_id,
                     "provider_request_body_build_failed",
-                    request_body_build_failure_extra_data(
+                    request_conversion_failure_extra_data(
                         body_json,
                         spec_metadata.api_format,
                         provider_api_format,
+                        Some(prepared_candidate.mapped_model.as_str()),
+                        Some(parts.uri.path()),
+                        upstream_is_stream,
+                        "standard_family_request_conversion",
                     ),
                 )
                 .await;

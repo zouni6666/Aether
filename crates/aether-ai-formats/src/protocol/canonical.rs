@@ -16,6 +16,7 @@ const CLAUDE_MESSAGES_REQUEST_SOURCE_MARKER: &str = "claude_messages_request";
 const CLAUDE_SYSTEM_SOURCE_MARKER: &str = "claude_system";
 const CLAUDE_THINKING_SOURCE_MARKER: &str = "claude_thinking";
 const CLAUDE_TOOL_RESULT_SOURCE_MARKER: &str = "claude_tool_result";
+const OPENAI_THINKING_SOURCE_MARKER: &str = "openai_thinking";
 const OPENAI_CHAT_TOOL_RESULT_SOURCE_MARKER: &str = "openai_chat_tool_result";
 const OPENAI_RESPONSES_TOOL_RESULT_SOURCE_MARKER: &str = "openai_responses_tool_result";
 const OPENAI_CHAT_TOOL_ERROR_PREFIX: &str = "[tool error]";
@@ -1451,6 +1452,7 @@ pub(crate) fn openai_message_content_blocks(
             let mut extensions = BTreeMap::new();
             canonical_extension_object_mut(&mut extensions, "openai")
                 .insert("omit_reasoning_parts".to_string(), Value::Bool(true));
+            let extensions = openai_thinking_extensions(extensions);
             blocks.insert(
                 0,
                 CanonicalContentBlock::Thinking {
@@ -1571,6 +1573,7 @@ pub(crate) fn openai_reasoning_blocks(message: &Map<String, Value>) -> Vec<Canon
                     canonical_extension_object_mut(&mut extensions, "openai")
                         .insert("omit_reasoning_content".to_string(), Value::Bool(true));
                 }
+                let extensions = openai_thinking_extensions(extensions);
                 blocks.push(CanonicalContentBlock::Thinking {
                     text: text.to_string(),
                     signature: part_object
@@ -1588,11 +1591,15 @@ pub(crate) fn openai_reasoning_blocks(message: &Map<String, Value>) -> Vec<Canon
                     .and_then(Value::as_str)
                     .filter(|value| !value.is_empty())
                 {
+                    let extensions = openai_thinking_extensions(openai_extensions(
+                        part_object,
+                        &["type", "data"],
+                    ));
                     blocks.push(CanonicalContentBlock::Thinking {
                         text: String::new(),
                         signature: None,
                         encrypted_content: Some(data.to_string()),
-                        extensions: openai_extensions(part_object, &["type", "data"]),
+                        extensions,
                     });
                 }
             }
@@ -1840,6 +1847,7 @@ fn openai_responses_reasoning_block(text: String) -> CanonicalContentBlock {
     let mut extensions = BTreeMap::new();
     canonical_extension_object_mut(&mut extensions, "openai")
         .insert("omit_reasoning_parts".to_string(), Value::Bool(true));
+    let extensions = openai_thinking_extensions(extensions);
     CanonicalContentBlock::Thinking {
         text,
         signature: None,
@@ -1942,6 +1950,11 @@ pub(crate) fn openai_responses_output_to_canonical_blocks(
             }
             "reasoning" => {
                 let mut emitted = false;
+                let encrypted_content = item_object
+                    .get("encrypted_content")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned);
                 if let Some(summary_items) = item_object.get("summary").and_then(Value::as_array) {
                     for summary in summary_items {
                         let Some(summary_object) = summary.as_object() else {
@@ -1960,17 +1973,31 @@ pub(crate) fn openai_responses_output_to_canonical_blocks(
                         );
                         canonical_extension_object_mut(&mut extensions, "openai")
                             .insert("omit_reasoning_parts".to_string(), Value::Bool(true));
+                        let extensions = openai_thinking_extensions(extensions);
                         blocks.push(CanonicalContentBlock::Thinking {
                             text: text.to_string(),
                             signature: None,
-                            encrypted_content: item_object
-                                .get("encrypted_content")
-                                .and_then(Value::as_str)
-                                .map(ToOwned::to_owned),
+                            encrypted_content: encrypted_content.clone(),
                             extensions,
                         });
                         emitted = true;
                     }
+                }
+                if !emitted && encrypted_content.is_some() {
+                    let mut extensions = openai_responses_extensions(
+                        item_object,
+                        &["type", "id", "status", "summary", "encrypted_content"],
+                    );
+                    canonical_extension_object_mut(&mut extensions, "openai")
+                        .insert("omit_reasoning_parts".to_string(), Value::Bool(true));
+                    let extensions = openai_thinking_extensions(extensions);
+                    blocks.push(CanonicalContentBlock::Thinking {
+                        text: String::new(),
+                        signature: None,
+                        encrypted_content,
+                        extensions,
+                    });
+                    emitted = true;
                 }
                 if !emitted {
                     blocks.push(CanonicalContentBlock::Unknown {
@@ -2198,7 +2225,7 @@ pub(crate) fn openai_responses_part_to_canonical_block(
                 );
                 canonical_extension_object_mut(&mut extensions, "openai")
                     .insert("omit_reasoning_parts".to_string(), Value::Bool(true));
-                extensions
+                openai_thinking_extensions(extensions)
             },
         }),
         "input_image" | "output_image" | "image_url" => {
@@ -2659,12 +2686,28 @@ fn claude_thinking_extensions(mut extensions: BTreeMap<String, Value>) -> BTreeM
     extensions
 }
 
+fn openai_thinking_extensions(mut extensions: BTreeMap<String, Value>) -> BTreeMap<String, Value> {
+    canonical_extension_object_mut(&mut extensions, AETHER_EXTENSION_NAMESPACE).insert(
+        "source".to_string(),
+        Value::String(OPENAI_THINKING_SOURCE_MARKER.to_string()),
+    );
+    extensions
+}
+
 pub(crate) fn is_claude_thinking_block(extensions: &BTreeMap<String, Value>) -> bool {
     extensions
         .get(AETHER_EXTENSION_NAMESPACE)
         .and_then(|value| value.get("source"))
         .and_then(Value::as_str)
         == Some(CLAUDE_THINKING_SOURCE_MARKER)
+}
+
+pub(crate) fn is_openai_thinking_block(extensions: &BTreeMap<String, Value>) -> bool {
+    extensions
+        .get(AETHER_EXTENSION_NAMESPACE)
+        .and_then(|value| value.get("source"))
+        .and_then(Value::as_str)
+        == Some(OPENAI_THINKING_SOURCE_MARKER)
 }
 
 pub(crate) fn is_claude_tool_result(extensions: &BTreeMap<String, Value>) -> bool {
@@ -4115,7 +4158,11 @@ pub(crate) fn canonical_block_to_claude(
             encrypted_content,
             extensions,
         } => {
-            if let Some(data) = encrypted_content.as_ref().filter(|value| !value.is_empty()) {
+            if let Some(data) = encrypted_content
+                .as_ref()
+                .filter(|value| !value.is_empty())
+                .filter(|_| is_claude_thinking_block(extensions))
+            {
                 let mut out = Map::new();
                 out.insert(
                     "type".to_string(),

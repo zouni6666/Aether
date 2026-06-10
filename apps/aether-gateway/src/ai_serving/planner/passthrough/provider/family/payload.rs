@@ -17,7 +17,8 @@ use crate::ai_serving::planner::report_context::{
 use crate::ai_serving::planner::spec_metadata::local_same_format_provider_spec_metadata;
 use crate::ai_serving::planner::CandidateFailureDiagnostic;
 use crate::ai_serving::planner::{
-    build_ai_execution_decision_response, AiExecutionDecisionResponseParts,
+    build_ai_execution_decision_response, resolve_transport_request_gzip_policy,
+    AiExecutionDecisionResponseParts,
 };
 use crate::ai_serving::transport::{
     resolve_transport_execution_timeouts, resolve_transport_profile,
@@ -183,6 +184,7 @@ pub(crate) async fn maybe_build_local_same_format_provider_decision_payload_for_
         compatibility_edits: _,
         request_redacted: _,
     } = resolved;
+    let request_gzip = resolve_transport_request_gzip_policy(&transport);
 
     let mut decision = build_ai_execution_decision_response(AiExecutionDecisionResponseParts {
         decision_is_stream: spec_metadata.require_streaming,
@@ -209,6 +211,8 @@ pub(crate) async fn maybe_build_local_same_format_provider_decision_payload_for_
         provider_request_body: Some(provider_request_body),
         provider_request_body_base64: None,
         content_type: Some("application/json".to_string()),
+        content_encoding: None,
+        request_gzip,
         proxy,
         transport_profile,
         timeouts: resolve_transport_execution_timeouts(&transport),
