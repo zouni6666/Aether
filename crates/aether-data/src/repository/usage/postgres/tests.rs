@@ -833,6 +833,37 @@ fn usage_sql_writes_usage_settlement_pricing_snapshots() {
 }
 
 #[test]
+fn usage_sql_settlement_pricing_snapshot_billing_values_use_authoritative_incoming_values() {
+    let sql = super::UPSERT_USAGE_SETTLEMENT_PRICING_SNAPSHOT_SQL;
+    for field in [
+        "billing_input_tokens",
+        "billing_effective_input_tokens",
+        "billing_output_tokens",
+        "billing_cache_creation_tokens",
+        "billing_cache_creation_5m_tokens",
+        "billing_cache_creation_1h_tokens",
+        "billing_cache_read_tokens",
+        "billing_total_input_context",
+        "billing_cache_creation_cost_usd",
+        "billing_cache_read_cost_usd",
+        "billing_total_cost_usd",
+        "billing_actual_total_cost_usd",
+    ] {
+        let assignment = format!(
+            "{field} = COALESCE(\n    EXCLUDED.{field},\n    usage_settlement_snapshots.{field}\n  )"
+        );
+        assert!(
+            sql.contains(assignment.as_str()),
+            "missing authoritative billing snapshot assignment: {assignment}"
+        );
+        assert!(
+            !sql.contains(format!("{field} = GREATEST(").as_str()),
+            "billing snapshot field should not use max-only conflict resolution: {field}"
+        );
+    }
+}
+
+#[test]
 fn usage_sql_upsert_recovers_missing_provider_links_after_billing_finalizes() {
     for assignment in [
         "provider_id = CASE WHEN \"usage\".billing_status = 'pending' OR (\"usage\".provider_id IS NULL AND (\"usage\".provider_endpoint_id IS NULL OR \"usage\".provider_endpoint_id = EXCLUDED.provider_endpoint_id) AND (\"usage\".provider_api_key_id IS NULL OR \"usage\".provider_api_key_id = EXCLUDED.provider_api_key_id)) THEN COALESCE(EXCLUDED.provider_id, \"usage\".provider_id) ELSE \"usage\".provider_id END",
@@ -848,24 +879,31 @@ fn usage_sql_upsert_recovers_missing_provider_links_after_billing_finalizes() {
 
 #[test]
 fn usage_sql_updates_usage_mirror_columns_from_terminal_events_only() {
-    for assignment in [
-        "input_tokens = CASE WHEN \"usage\".billing_status = 'pending' AND EXCLUDED.status IN ('completed', 'failed', 'cancelled') THEN GREATEST(\"usage\".input_tokens, EXCLUDED.input_tokens) ELSE \"usage\".input_tokens END",
-        "output_tokens = CASE WHEN \"usage\".billing_status = 'pending' AND EXCLUDED.status IN ('completed', 'failed', 'cancelled') THEN GREATEST(\"usage\".output_tokens, EXCLUDED.output_tokens) ELSE \"usage\".output_tokens END",
-        "total_tokens = CASE WHEN \"usage\".billing_status = 'pending' AND EXCLUDED.status IN ('completed', 'failed', 'cancelled') THEN GREATEST(\"usage\".total_tokens, EXCLUDED.total_tokens) ELSE \"usage\".total_tokens END",
-        "input_output_total_tokens = CASE WHEN \"usage\".billing_status = 'pending' AND EXCLUDED.status IN ('completed', 'failed', 'cancelled') THEN GREATEST(\"usage\".input_output_total_tokens, EXCLUDED.input_output_total_tokens) ELSE \"usage\".input_output_total_tokens END",
-        "input_context_tokens = CASE WHEN \"usage\".billing_status = 'pending' AND EXCLUDED.status IN ('completed', 'failed', 'cancelled') THEN GREATEST(\"usage\".input_context_tokens, EXCLUDED.input_context_tokens) ELSE \"usage\".input_context_tokens END",
-        "cache_creation_input_tokens = CASE WHEN \"usage\".billing_status = 'pending' AND EXCLUDED.status IN ('completed', 'failed', 'cancelled') THEN GREATEST(\"usage\".cache_creation_input_tokens, EXCLUDED.cache_creation_input_tokens) ELSE \"usage\".cache_creation_input_tokens END",
-        "cache_creation_input_tokens_5m = CASE WHEN \"usage\".billing_status = 'pending' AND EXCLUDED.status IN ('completed', 'failed', 'cancelled') THEN GREATEST(\"usage\".cache_creation_input_tokens_5m, EXCLUDED.cache_creation_input_tokens_5m) ELSE \"usage\".cache_creation_input_tokens_5m END",
-        "cache_creation_input_tokens_1h = CASE WHEN \"usage\".billing_status = 'pending' AND EXCLUDED.status IN ('completed', 'failed', 'cancelled') THEN GREATEST(\"usage\".cache_creation_input_tokens_1h, EXCLUDED.cache_creation_input_tokens_1h) ELSE \"usage\".cache_creation_input_tokens_1h END",
-        "cache_read_input_tokens = CASE WHEN \"usage\".billing_status = 'pending' AND EXCLUDED.status IN ('completed', 'failed', 'cancelled') THEN GREATEST(\"usage\".cache_read_input_tokens, EXCLUDED.cache_read_input_tokens) ELSE \"usage\".cache_read_input_tokens END",
-        "cache_creation_cost_usd = CASE WHEN \"usage\".billing_status = 'pending' AND EXCLUDED.status IN ('completed', 'failed', 'cancelled') THEN GREATEST(\"usage\".cache_creation_cost_usd, EXCLUDED.cache_creation_cost_usd) ELSE \"usage\".cache_creation_cost_usd END",
-        "cache_read_cost_usd = CASE WHEN \"usage\".billing_status = 'pending' AND EXCLUDED.status IN ('completed', 'failed', 'cancelled') THEN GREATEST(\"usage\".cache_read_cost_usd, EXCLUDED.cache_read_cost_usd) ELSE \"usage\".cache_read_cost_usd END",
-        "total_cost_usd = CASE WHEN \"usage\".billing_status = 'pending' AND EXCLUDED.status IN ('completed', 'failed', 'cancelled') THEN GREATEST(\"usage\".total_cost_usd, EXCLUDED.total_cost_usd) ELSE \"usage\".total_cost_usd END",
-        "actual_total_cost_usd = CASE WHEN \"usage\".billing_status = 'pending' AND EXCLUDED.status IN ('completed', 'failed', 'cancelled') THEN GREATEST(\"usage\".actual_total_cost_usd, EXCLUDED.actual_total_cost_usd) ELSE \"usage\".actual_total_cost_usd END",
+    for field in [
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "input_output_total_tokens",
+        "input_context_tokens",
+        "cache_creation_input_tokens",
+        "cache_creation_input_tokens_5m",
+        "cache_creation_input_tokens_1h",
+        "cache_read_input_tokens",
+        "cache_creation_cost_usd",
+        "cache_read_cost_usd",
+        "total_cost_usd",
+        "actual_total_cost_usd",
     ] {
+        let assignment = format!(
+            "{field} = CASE WHEN \"usage\".billing_status = 'pending' AND EXCLUDED.status IN ('completed', 'failed', 'cancelled') THEN GREATEST(\"usage\".{field}, EXCLUDED.{field}) ELSE \"usage\".{field} END"
+        );
         assert!(
-            super::UPSERT_SQL.contains(assignment),
+            super::UPSERT_SQL.contains(assignment.as_str()),
             "missing terminal mirror assignment: {assignment}"
+        );
+        assert!(
+            !super::UPSERT_SQL.contains(format!("{field} = CASE WHEN EXCLUDED.status IN").as_str()),
+            "terminal mirror assignment must keep pending billing guard: {field}"
         );
     }
 }
