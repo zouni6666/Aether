@@ -11,14 +11,15 @@ use crate::{
         canonical_response_format_to_openai_responses, canonical_tool_is_openai_custom,
         canonical_tool_use_to_openai_responses_item, is_claude_messages_request,
         is_claude_system_instruction, is_claude_thinking_block, is_claude_tool_result,
-        is_openai_thinking_block, media_data_or_url, namespace_extension_object,
-        openai_content_text, openai_extensions, openai_response_format_to_canonical,
-        openai_responses_extension, openai_responses_generation_config,
-        openai_responses_input_to_canonical_messages, openai_responses_tool_choice_to_canonical,
-        openai_responses_tools_to_canonical, openai_tool_choice_raw_to_responses,
-        CanonicalContentBlock, CanonicalInstruction, CanonicalRequest, CanonicalRole,
-        CanonicalThinkingConfig, CanonicalToolChoice, CanonicalToolDefinition,
-        OPENAI_RESPONSES_EXTENSION_NAMESPACE, OPENAI_RESPONSES_LEGACY_EXTENSION_NAMESPACE,
+        is_openai_responses_input_message, is_openai_thinking_block, media_data_or_url,
+        namespace_extension_object, openai_content_text, openai_extensions,
+        openai_response_format_to_canonical, openai_responses_extension,
+        openai_responses_generation_config, openai_responses_input_to_canonical_messages,
+        openai_responses_tool_choice_to_canonical, openai_responses_tools_to_canonical,
+        openai_tool_choice_raw_to_responses, CanonicalContentBlock, CanonicalInstruction,
+        CanonicalRequest, CanonicalRole, CanonicalThinkingConfig, CanonicalToolChoice,
+        CanonicalToolDefinition, OPENAI_RESPONSES_EXTENSION_NAMESPACE,
+        OPENAI_RESPONSES_LEGACY_EXTENSION_NAMESPACE,
     },
 };
 
@@ -307,6 +308,12 @@ fn canonical_messages_to_responses_input(canonical: &CanonicalRequest) -> Option
         let role = match message.role {
             CanonicalRole::Assistant => "assistant",
             CanonicalRole::Tool | CanonicalRole::User | CanonicalRole::Unknown => "user",
+            CanonicalRole::System if is_openai_responses_input_message(&message.extensions) => {
+                "system"
+            }
+            CanonicalRole::Developer if is_openai_responses_input_message(&message.extensions) => {
+                "developer"
+            }
             CanonicalRole::System | CanonicalRole::Developer => continue,
         };
         let mut content = Vec::new();
@@ -805,14 +812,6 @@ fn canonical_tool_to_responses(tool: &CanonicalToolDefinition) -> Value {
         .or_else(|| {
             tool.extensions
                 .get(OPENAI_RESPONSES_LEGACY_EXTENSION_NAMESPACE)
-        })
-        .filter(|value| {
-            value
-                .get("type")
-                .and_then(Value::as_str)
-                .is_some_and(|tool_type| {
-                    tool_type == "custom" || tool_type.starts_with("web_search")
-                })
         })
     {
         return raw.clone();

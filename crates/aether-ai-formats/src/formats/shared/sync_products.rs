@@ -1974,7 +1974,7 @@ pub fn aggregate_openai_responses_stream_sync_response(body: &[u8]) -> Option<Va
                         reasoning_states.entry(output_index).or_default(),
                         item,
                     ),
-                    "function_call" => {
+                    "function_call" | "custom_tool_call" => {
                         merge_openai_responses_tool_item(
                             tool_states.entry(output_index).or_default(),
                             item,
@@ -1991,7 +1991,7 @@ pub fn aggregate_openai_responses_stream_sync_response(body: &[u8]) -> Option<Va
                     _ => {}
                 }
             }
-            "response.function_call_arguments.delta" => {
+            "response.function_call_arguments.delta" | "response.custom_tool_call_input.delta" => {
                 let Some(output_index) =
                     resolve_openai_responses_tool_output_index(event_object, &item_output_indexes)
                 else {
@@ -2004,18 +2004,43 @@ pub fn aggregate_openai_responses_stream_sync_response(body: &[u8]) -> Option<Va
                 if delta.is_empty() {
                     continue;
                 }
-                tool_states
-                    .entry(output_index)
-                    .or_default()
-                    .arguments
-                    .push_str(delta);
+                let state = tool_states.entry(output_index).or_default();
+                if event_object
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| value.starts_with("response.custom_tool_call_input."))
+                {
+                    state
+                        .item
+                        .entry("type".to_string())
+                        .or_insert_with(|| Value::String("custom_tool_call".to_string()));
+                    if let Some(name) = event_object.get("name").and_then(Value::as_str) {
+                        state
+                            .item
+                            .entry("name".to_string())
+                            .or_insert_with(|| Value::String(name.to_string()));
+                    }
+                    if let Some(item_id) = event_object.get("item_id").and_then(Value::as_str) {
+                        state
+                            .item
+                            .entry("id".to_string())
+                            .or_insert_with(|| Value::String(item_id.to_string()));
+                    }
+                    if let Some(call_id) = event_object.get("call_id").and_then(Value::as_str) {
+                        state
+                            .item
+                            .entry("call_id".to_string())
+                            .or_insert_with(|| Value::String(call_id.to_string()));
+                    }
+                }
+                state.arguments.push_str(delta);
                 register_openai_responses_tool_event_aliases(
                     &mut item_output_indexes,
                     event_object,
                     output_index,
                 );
             }
-            "response.function_call_arguments.done" => {
+            "response.function_call_arguments.done" | "response.custom_tool_call_input.done" => {
                 let Some(output_index) =
                     resolve_openai_responses_tool_output_index(event_object, &item_output_indexes)
                 else {
@@ -2032,14 +2057,44 @@ pub fn aggregate_openai_responses_stream_sync_response(body: &[u8]) -> Option<Va
                         item,
                     );
                 }
+                if event_object
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| value.starts_with("response.custom_tool_call_input."))
+                {
+                    let state = tool_states.entry(output_index).or_default();
+                    state
+                        .item
+                        .entry("type".to_string())
+                        .or_insert_with(|| Value::String("custom_tool_call".to_string()));
+                    if let Some(name) = event_object.get("name").and_then(Value::as_str) {
+                        state
+                            .item
+                            .entry("name".to_string())
+                            .or_insert_with(|| Value::String(name.to_string()));
+                    }
+                    if let Some(item_id) = event_object.get("item_id").and_then(Value::as_str) {
+                        state
+                            .item
+                            .entry("id".to_string())
+                            .or_insert_with(|| Value::String(item_id.to_string()));
+                    }
+                    if let Some(call_id) = event_object.get("call_id").and_then(Value::as_str) {
+                        state
+                            .item
+                            .entry("call_id".to_string())
+                            .or_insert_with(|| Value::String(call_id.to_string()));
+                    }
+                }
                 let arguments = event_object
                     .get("arguments")
+                    .or_else(|| event_object.get("input"))
                     .and_then(Value::as_str)
                     .or_else(|| {
                         event_object
                             .get("item")
                             .and_then(Value::as_object)
-                            .and_then(|item| item.get("arguments"))
+                            .and_then(|item| item.get("arguments").or_else(|| item.get("input")))
                             .and_then(Value::as_str)
                     })
                     .unwrap_or_default();
@@ -2076,7 +2131,7 @@ pub fn aggregate_openai_responses_stream_sync_response(body: &[u8]) -> Option<Va
                                 reasoning_states.entry(output_index).or_default(),
                                 item,
                             ),
-                            "function_call" => {
+                            "function_call" | "custom_tool_call" => {
                                 merge_openai_responses_tool_item(
                                     tool_states.entry(output_index).or_default(),
                                     item,
@@ -2644,6 +2699,12 @@ fn materialize_openai_responses_tool_item(
     state: OpenAIResponsesSyncToolState,
 ) -> Value {
     let mut item = state.item;
+    let item_type = item
+        .get("type")
+        .and_then(Value::as_str)
+        .filter(|value| *value == "custom_tool_call")
+        .unwrap_or("function_call")
+        .to_string();
     let generated_id = format!("call_auto_{output_index}");
     let call_id = item
         .get("call_id")
@@ -2660,10 +2721,7 @@ fn materialize_openai_responses_tool_item(
         })
         .unwrap_or(generated_id.clone());
 
-    item.insert(
-        "type".to_string(),
-        Value::String("function_call".to_string()),
-    );
+    item.insert("type".to_string(), Value::String(item_type.clone()));
     item.entry("id".to_string())
         .or_insert_with(|| Value::String(call_id.clone()));
     item.insert("call_id".to_string(), Value::String(call_id));
@@ -2672,9 +2730,19 @@ fn materialize_openai_responses_tool_item(
     item.entry("status".to_string())
         .or_insert_with(|| Value::String("completed".to_string()));
     if !state.arguments.is_empty() {
-        item.insert("arguments".to_string(), Value::String(state.arguments));
+        let argument_key = if item_type == "custom_tool_call" {
+            "input"
+        } else {
+            "arguments"
+        };
+        item.insert(argument_key.to_string(), Value::String(state.arguments));
     } else {
-        item.entry("arguments".to_string())
+        let argument_key = if item_type == "custom_tool_call" {
+            "input"
+        } else {
+            "arguments"
+        };
+        item.entry(argument_key.to_string())
             .or_insert_with(|| Value::String(String::new()));
     }
     Value::Object(item)
@@ -4287,6 +4355,27 @@ mod tests {
         assert_eq!(result["output"][0]["call_id"], "call_done_weather");
         assert_eq!(result["output"][0]["name"], "get_weather");
         assert_eq!(result["output"][0]["arguments"], r#"{"location": "Tokyo"}"#);
+    }
+
+    #[test]
+    fn custom_tool_call_input_events_materialize_custom_tool_call() {
+        let body = concat!(
+            "event: response.custom_tool_call_input.delta\n",
+            "data: {\"type\":\"response.custom_tool_call_input.delta\",\"output_index\":0,\"item_id\":\"ctc_123\",\"name\":\"code_exec\",\"delta\":\"print\"}\n\n",
+            "event: response.custom_tool_call_input.done\n",
+            "data: {\"type\":\"response.custom_tool_call_input.done\",\"output_index\":0,\"item_id\":\"ctc_123\",\"call_id\":\"call_custom_123\",\"name\":\"code_exec\",\"input\":\"print('hi')\"}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_custom_123\",\"object\":\"response\",\"model\":\"gpt-5\",\"status\":\"completed\",\"output\":[]}}\n\n",
+        );
+
+        let result = aggregate_openai_responses_stream_sync_response(body.as_bytes())
+            .expect("custom tool stream should aggregate into a sync body");
+
+        assert_eq!(result["output"][0]["type"], "custom_tool_call");
+        assert_eq!(result["output"][0]["call_id"], "call_custom_123");
+        assert_eq!(result["output"][0]["name"], "code_exec");
+        assert_eq!(result["output"][0]["input"], "print('hi')");
+        assert!(result["output"][0].get("arguments").is_none());
     }
 
     #[test]

@@ -10,11 +10,12 @@ use crate::{
     protocol::canonical::{
         canonical_content_block_to_openai_responses_part, canonical_extension_object_mut,
         canonical_tool_use_to_openai_responses_item, canonical_usage_to_openai_responses_usage,
-        flush_openai_responses_message_item, is_openai_thinking_block, namespace_extension_object,
-        openai_responses_extensions, openai_responses_output_to_canonical_blocks,
-        openai_usage_to_canonical, CanonicalContentBlock, CanonicalResponse,
-        CanonicalResponseOutput, CanonicalRole, CanonicalStopReason,
-        OPENAI_RESPONSES_EXTENSION_NAMESPACE, OPENAI_RESPONSES_LEGACY_EXTENSION_NAMESPACE,
+        flush_openai_responses_message_item, is_openai_responses_raw_block,
+        is_openai_thinking_block, namespace_extension_object, openai_responses_extensions,
+        openai_responses_output_to_canonical_blocks, openai_usage_to_canonical,
+        CanonicalContentBlock, CanonicalResponse, CanonicalResponseOutput, CanonicalRole,
+        CanonicalStopReason, OPENAI_RESPONSES_EXTENSION_NAMESPACE,
+        OPENAI_RESPONSES_LEGACY_EXTENSION_NAMESPACE,
     },
 };
 
@@ -272,6 +273,19 @@ pub fn to_raw(canonical: &CanonicalResponse, report_context: &Value, _compact: b
                         }));
                     }
                 }
+            }
+            CanonicalContentBlock::Unknown {
+                payload,
+                extensions,
+                ..
+            } if is_openai_responses_raw_block(extensions) => {
+                flush_openai_responses_message_item(
+                    &mut output,
+                    &mut message_content,
+                    &response_id,
+                    &mut message_index,
+                );
+                output.push(payload.clone());
             }
             CanonicalContentBlock::Unknown { .. } => {}
         }

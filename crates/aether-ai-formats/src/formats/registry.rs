@@ -356,7 +356,36 @@ fn validate_response_conversion(
     }
 
     validate_source_response_stop_enums(source, target, body)?;
+    validate_response_content_has_no_unknown_blocks(source, target, response)?;
     validate_canonical_response_stop_reasons(source, target, response)
+}
+
+fn validate_response_content_has_no_unknown_blocks(
+    source: FormatId,
+    target: FormatId,
+    response: &CanonicalResponse,
+) -> Result<(), FormatError> {
+    for block in response.content.iter().chain(
+        response
+            .outputs
+            .iter()
+            .flat_map(|output| output.content.iter()),
+    ) {
+        if let CanonicalContentBlock::Unknown { raw_type, .. } = block {
+            if raw_type == "refusal" {
+                continue;
+            }
+            return Err(FormatError::LossyConversionBlocked {
+                source_format: source.as_str().to_string(),
+                target_format: target.as_str().to_string(),
+                field: "output[].type".to_string(),
+                reason: format!(
+                    "target format has no lossless mapping for unknown source output item type {raw_type:?}"
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn validate_known_standard_request_root_fields(
@@ -3131,6 +3160,44 @@ mod tests {
     }
 
     #[test]
+    fn pure_openai_responses_request_same_format_preserves_raw_tools_and_roles() {
+        let body = json!({
+            "model": "gpt-source",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": "Use policy"}]
+                },
+                {"role": "user", "content": "hello"}
+            ],
+            "tools": [
+                {
+                    "type": "file_search",
+                    "vector_store_ids": ["vs_123"],
+                    "max_num_results": 3
+                },
+                {
+                    "type": "mcp",
+                    "server_label": "docs",
+                    "server_url": "https://example.com/mcp"
+                }
+            ]
+        });
+
+        let converted = convert_request_pure("openai:responses", "openai:responses", &body)
+            .expect("same-format Responses request should preserve official raw fields")
+            .value;
+
+        assert_eq!(converted["input"][0]["role"], "developer");
+        assert_eq!(converted["input"][0]["content"][0]["text"], "Use policy");
+        assert_eq!(converted["tools"][0]["type"], "file_search");
+        assert_eq!(converted["tools"][0]["vector_store_ids"][0], "vs_123");
+        assert_eq!(converted["tools"][1]["type"], "mcp");
+        assert_eq!(converted["tools"][1]["server_label"], "docs");
+    }
+
+    #[test]
     fn pure_openai_chat_to_claude_blocks_target_unsupported_generation_field() {
         let body = json!({
             "model": "gpt-source",
@@ -3451,6 +3518,72 @@ mod tests {
             converted["incomplete_details"]["reason"],
             "max_output_tokens"
         );
+    }
+
+    #[test]
+    fn pure_openai_responses_response_same_format_preserves_raw_output_items() {
+        let body = json!({
+            "id": "resp_raw_items",
+            "object": "response",
+            "model": "gpt-source",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "file_search_call",
+                    "id": "fs_123",
+                    "status": "completed",
+                    "queries": ["rust"],
+                    "results": [{"file_id": "file_123", "text": "Rust"}]
+                },
+                {
+                    "type": "code_interpreter_call",
+                    "id": "ci_123",
+                    "status": "completed",
+                    "code": "print('hi')",
+                    "outputs": []
+                },
+                {
+                    "type": "message",
+                    "id": "msg_123",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "done"}]
+                }
+            ]
+        });
+
+        let converted = convert_response_pure("openai:responses", "openai:responses", &body)
+            .expect("same-format Responses response should preserve raw output items")
+            .value;
+
+        assert_eq!(converted["output"][0]["type"], "file_search_call");
+        assert_eq!(converted["output"][0]["results"][0]["file_id"], "file_123");
+        assert_eq!(converted["output"][1]["type"], "code_interpreter_call");
+        assert_eq!(converted["output"][2]["content"][0]["text"], "done");
+    }
+
+    #[test]
+    fn pure_openai_responses_response_cross_format_blocks_raw_output_items() {
+        let body = json!({
+            "id": "resp_raw_items",
+            "object": "response",
+            "model": "gpt-source",
+            "status": "completed",
+            "output": [{
+                "type": "mcp_call",
+                "id": "mcp_123",
+                "status": "completed",
+                "name": "lookup"
+            }]
+        });
+
+        let error = convert_response_pure("openai:responses", "openai:chat", &body)
+            .expect_err("cross-format raw Responses output items should fail closed");
+
+        assert!(matches!(
+            error,
+            super::FormatError::LossyConversionBlocked { ref field, .. }
+                if field == "output[].type"
+        ));
     }
 
     #[test]

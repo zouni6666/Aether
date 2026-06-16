@@ -22,6 +22,8 @@ const OPENAI_CUSTOM_TOOL_CALL_SOURCE_MARKER: &str = "openai_custom_tool_call";
 const OPENAI_OUTPUT_AUDIO_SOURCE_MARKER: &str = "openai_output_audio";
 const OPENAI_CHAT_TOOL_RESULT_SOURCE_MARKER: &str = "openai_chat_tool_result";
 const OPENAI_RESPONSES_TOOL_RESULT_SOURCE_MARKER: &str = "openai_responses_tool_result";
+const OPENAI_RESPONSES_INPUT_MESSAGE_SOURCE_MARKER: &str = "openai_responses_input_message";
+const OPENAI_RESPONSES_RAW_SOURCE_MARKER: &str = "openai_responses_raw";
 const OPENAI_CHAT_TOOL_ERROR_PREFIX: &str = "[tool error]";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1879,16 +1881,18 @@ pub(crate) fn openai_responses_input_to_canonical_messages(
                         if matches!(role, CanonicalRole::System | CanonicalRole::Developer) {
                             let text = openai_content_text(item_object.get("content"));
                             if !text.trim().is_empty() {
+                                let mut extensions = openai_responses_extensions(
+                                    item_object,
+                                    &["type", "role", "content"],
+                                );
+                                mark_openai_responses_input_message(&mut extensions);
                                 messages.push(CanonicalMessage {
                                     role,
                                     content: vec![CanonicalContentBlock::Text {
                                         text,
                                         extensions: BTreeMap::new(),
                                     }],
-                                    extensions: openai_responses_extensions(
-                                        item_object,
-                                        &["type", "role", "content"],
-                                    ),
+                                    extensions,
                                 });
                             }
                             pending_reasoning = None;
@@ -2235,7 +2239,7 @@ pub(crate) fn openai_responses_output_to_canonical_blocks(
             blocks.push(CanonicalContentBlock::Unknown {
                 raw_type: String::new(),
                 payload: item.clone(),
-                extensions: BTreeMap::new(),
+                extensions: openai_responses_raw_extensions(BTreeMap::new()),
             });
             continue;
         };
@@ -2306,7 +2310,7 @@ pub(crate) fn openai_responses_output_to_canonical_blocks(
                     blocks.push(CanonicalContentBlock::Unknown {
                         raw_type: item_type,
                         payload: item.clone(),
-                        extensions: BTreeMap::new(),
+                        extensions: openai_responses_raw_extensions(BTreeMap::new()),
                     });
                 }
             }
@@ -2466,7 +2470,7 @@ pub(crate) fn openai_responses_output_to_canonical_blocks(
             _ => blocks.push(CanonicalContentBlock::Unknown {
                 raw_type: item_type,
                 payload: item.clone(),
-                extensions: BTreeMap::new(),
+                extensions: openai_responses_raw_extensions(BTreeMap::new()),
             }),
         }
     }
@@ -3207,6 +3211,16 @@ fn claude_raw_extensions(mut extensions: BTreeMap<String, Value>) -> BTreeMap<St
     extensions
 }
 
+fn openai_responses_raw_extensions(
+    mut extensions: BTreeMap<String, Value>,
+) -> BTreeMap<String, Value> {
+    canonical_extension_object_mut(&mut extensions, AETHER_EXTENSION_NAMESPACE).insert(
+        "source".to_string(),
+        Value::String(OPENAI_RESPONSES_RAW_SOURCE_MARKER.to_string()),
+    );
+    extensions
+}
+
 fn openai_thinking_extensions(mut extensions: BTreeMap<String, Value>) -> BTreeMap<String, Value> {
     canonical_extension_object_mut(&mut extensions, AETHER_EXTENSION_NAMESPACE).insert(
         "source".to_string(),
@@ -3229,6 +3243,13 @@ fn mark_openai_output_audio(extensions: &mut BTreeMap<String, Value>) {
     );
 }
 
+fn mark_openai_responses_input_message(extensions: &mut BTreeMap<String, Value>) {
+    canonical_extension_object_mut(extensions, AETHER_EXTENSION_NAMESPACE).insert(
+        "source".to_string(),
+        Value::String(OPENAI_RESPONSES_INPUT_MESSAGE_SOURCE_MARKER.to_string()),
+    );
+}
+
 pub(crate) fn is_claude_thinking_block(extensions: &BTreeMap<String, Value>) -> bool {
     extensions
         .get(AETHER_EXTENSION_NAMESPACE)
@@ -3243,6 +3264,22 @@ fn is_claude_raw_block(extensions: &BTreeMap<String, Value>) -> bool {
         .and_then(|value| value.get("source"))
         .and_then(Value::as_str)
         == Some(CLAUDE_RAW_SOURCE_MARKER)
+}
+
+pub(crate) fn is_openai_responses_raw_block(extensions: &BTreeMap<String, Value>) -> bool {
+    extensions
+        .get(AETHER_EXTENSION_NAMESPACE)
+        .and_then(|value| value.get("source"))
+        .and_then(Value::as_str)
+        == Some(OPENAI_RESPONSES_RAW_SOURCE_MARKER)
+}
+
+pub(crate) fn is_openai_responses_input_message(extensions: &BTreeMap<String, Value>) -> bool {
+    extensions
+        .get(AETHER_EXTENSION_NAMESPACE)
+        .and_then(|value| value.get("source"))
+        .and_then(Value::as_str)
+        == Some(OPENAI_RESPONSES_INPUT_MESSAGE_SOURCE_MARKER)
 }
 
 pub(crate) fn is_openai_thinking_block(extensions: &BTreeMap<String, Value>) -> bool {
@@ -4535,6 +4572,26 @@ pub(crate) fn openai_responses_tools_to_canonical(
             canonical.push(CanonicalToolDefinition {
                 name: tool_type,
                 description: None,
+                parameters: None,
+                strict: None,
+                extensions: BTreeMap::from([(
+                    OPENAI_RESPONSES_EXTENSION_NAMESPACE.to_string(),
+                    tool.clone(),
+                )]),
+            });
+        } else {
+            let name = tool_object
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(tool_type.as_str());
+            canonical.push(CanonicalToolDefinition {
+                name: name.to_string(),
+                description: tool_object
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
                 parameters: None,
                 strict: None,
                 extensions: BTreeMap::from([(
