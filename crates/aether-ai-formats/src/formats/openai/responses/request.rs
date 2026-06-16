@@ -8,12 +8,14 @@ use crate::{
         map_thinking_budget_to_openai_reasoning_effort, OpenAiResponsesReasoningEffort,
     },
     protocol::canonical::{
-        canonical_response_format_to_openai, canonicalize_tool_arguments,
-        is_claude_messages_request, is_claude_system_instruction, is_claude_thinking_block,
-        is_claude_tool_result, media_data_or_url, namespace_extension_object, openai_content_text,
-        openai_extensions, openai_response_format_to_canonical, openai_responses_extension,
-        openai_responses_generation_config, openai_responses_input_to_canonical_messages,
-        openai_responses_tool_choice_to_canonical, openai_responses_tools_to_canonical,
+        canonical_response_format_to_openai_responses, canonical_tool_is_openai_custom,
+        canonical_tool_use_to_openai_responses_item, is_claude_messages_request,
+        is_claude_system_instruction, is_claude_thinking_block, is_claude_tool_result,
+        is_openai_thinking_block, media_data_or_url, namespace_extension_object,
+        openai_content_text, openai_extensions, openai_response_format_to_canonical,
+        openai_responses_extension, openai_responses_generation_config,
+        openai_responses_input_to_canonical_messages, openai_responses_tool_choice_to_canonical,
+        openai_responses_tools_to_canonical, openai_tool_choice_raw_to_responses,
         CanonicalContentBlock, CanonicalInstruction, CanonicalRequest, CanonicalRole,
         CanonicalThinkingConfig, CanonicalToolChoice, CanonicalToolDefinition,
         OPENAI_RESPONSES_EXTENSION_NAMESPACE, OPENAI_RESPONSES_LEGACY_EXTENSION_NAMESPACE,
@@ -98,7 +100,6 @@ pub fn from_raw(body_json: &Value) -> Option<CanonicalRequest> {
             "top_p",
             "metadata",
             "tools",
-            "tool_choice",
             "parallel_tool_calls",
             "text",
             "reasoning",
@@ -108,6 +109,12 @@ pub fn from_raw(body_json: &Value) -> Option<CanonicalRequest> {
         canonical
             .extensions
             .insert(OPENAI_RESPONSES_EXTENSION_NAMESPACE.to_string(), raw);
+    }
+    if canonical.tool_choice.is_some() {
+        remove_tool_choice_extension(
+            &mut canonical.extensions,
+            OPENAI_RESPONSES_EXTENSION_NAMESPACE,
+        );
     }
     if let Some(verbosity) = request
         .get("text")
@@ -174,11 +181,8 @@ pub fn to_raw(
             Value::Array(canonical_tools_to_responses(canonical)),
         );
     }
-    if let Some(tool_choice) = canonical.tool_choice.as_ref() {
-        output.insert(
-            "tool_choice".to_string(),
-            canonical_tool_choice_to_responses(tool_choice),
-        );
+    if let Some(tool_choice) = canonical_tool_choice_to_responses_for_request(canonical) {
+        output.insert("tool_choice".to_string(), tool_choice);
     }
     if let Some(reasoning) = canonical_reasoning_config_to_responses(canonical) {
         output.insert("reasoning".to_string(), reasoning);
@@ -313,19 +317,16 @@ fn canonical_messages_to_responses_input(canonical: &CanonicalRequest) -> Option
                     id,
                     name,
                     input: arguments,
-                    ..
+                    extensions,
                 } => {
                     flush_responses_message(&mut input, role, &mut content);
                     saw_tool_item = true;
                     let call_id = responses_tool_call_id(id, &mut next_generated_tool_call_index);
                     let tool_name = responses_tool_name(name);
                     pending_tool_call_ids.push_back(call_id.clone());
-                    input.push(json!({
-                        "type": "function_call",
-                        "call_id": call_id,
-                        "name": tool_name,
-                        "arguments": canonicalize_tool_arguments(arguments),
-                    }));
+                    input.push(canonical_tool_use_to_openai_responses_item(
+                        &call_id, &tool_name, arguments, extensions,
+                    ));
                 }
                 CanonicalContentBlock::ToolResult {
                     tool_use_id,
@@ -344,7 +345,8 @@ fn canonical_messages_to_responses_input(canonical: &CanonicalRequest) -> Option
                     let call_id =
                         responses_tool_result_call_id(tool_use_id, &mut pending_tool_call_ids)?;
                     input.push(json!({
-                        "type": "function_call_output",
+                        "type": responses_tool_result_item_type(extensions)
+                            .unwrap_or("function_call_output"),
                         "call_id": call_id,
                         "output": tool_output,
                     }));
@@ -357,9 +359,26 @@ fn canonical_messages_to_responses_input(canonical: &CanonicalRequest) -> Option
                     }
                 }
                 CanonicalContentBlock::Thinking {
-                    text, extensions, ..
+                    text,
+                    encrypted_content,
+                    extensions,
+                    ..
                 } => {
                     if is_claude_thinking_block(extensions) {
+                        continue;
+                    }
+                    if role == "assistant"
+                        && is_openai_responses_reasoning_history_block(extensions)
+                    {
+                        flush_responses_message(&mut input, role, &mut content);
+                        if let Some(reasoning_item) = canonical_thinking_to_responses_reasoning_item(
+                            text,
+                            encrypted_content.as_deref(),
+                            extensions,
+                        ) {
+                            input.push(reasoning_item);
+                            saw_tool_item = true;
+                        }
                         continue;
                     }
                     if role == "assistant" && !text.trim().is_empty() {
@@ -526,6 +545,43 @@ fn flush_responses_message(input: &mut Vec<Value>, role: &str, content: &mut Vec
     }));
 }
 
+fn canonical_thinking_to_responses_reasoning_item(
+    text: &str,
+    encrypted_content: Option<&str>,
+    extensions: &BTreeMap<String, Value>,
+) -> Option<Value> {
+    let mut item = openai_responses_extension(extensions)
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    item.remove("item_type");
+    item.insert("type".to_string(), Value::String("reasoning".to_string()));
+    if !text.trim().is_empty() {
+        item.entry("summary".to_string()).or_insert_with(|| {
+            json!([{
+                "type": "summary_text",
+                "text": text,
+            }])
+        });
+    }
+    if let Some(value) = encrypted_content.filter(|value| !value.is_empty()) {
+        item.insert(
+            "encrypted_content".to_string(),
+            Value::String(value.to_string()),
+        );
+    }
+    (item.len() > 1).then_some(Value::Object(item))
+}
+
+fn is_openai_responses_reasoning_history_block(extensions: &BTreeMap<String, Value>) -> bool {
+    is_openai_thinking_block(extensions)
+        && openai_responses_extension(extensions)
+            .and_then(Value::as_object)
+            .and_then(|object| object.get("item_type"))
+            .and_then(Value::as_str)
+            == Some("reasoning")
+}
+
 fn canonical_block_to_responses_input_part(
     block: &CanonicalContentBlock,
     role: &str,
@@ -579,10 +635,14 @@ fn canonical_block_to_responses_input_part(
                 item.insert("file_id".to_string(), Value::String(value.clone()));
             }
             if data.is_some() || file_url.is_some() {
-                item.insert(
-                    "file_data".to_string(),
-                    Value::String(media_data_or_url(media_type, data, file_url)),
-                );
+                if data.is_some() {
+                    item.insert(
+                        "file_data".to_string(),
+                        Value::String(media_data_or_url(media_type, data, file_url)),
+                    );
+                } else if let Some(value) = file_url {
+                    item.insert("file_url".to_string(), Value::String(value.clone()));
+                }
             }
             if let Some(value) = filename {
                 item.insert("filename".to_string(), Value::String(value.clone()));
@@ -714,7 +774,7 @@ fn canonical_text_config_to_responses(canonical: &CanonicalRequest) -> Option<Va
     if let Some(response_format) = &canonical.response_format {
         text.insert(
             "format".to_string(),
-            canonical_response_format_to_openai(response_format),
+            canonical_response_format_to_openai_responses(response_format),
         );
     }
     if let Some(verbosity) = canonical
@@ -757,6 +817,14 @@ fn canonical_tool_to_responses(tool: &CanonicalToolDefinition) -> Value {
     {
         return raw.clone();
     }
+    if let Some(raw) = tool.extensions.get("openai").filter(|value| {
+        value
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|tool_type| tool_type.eq_ignore_ascii_case("custom"))
+    }) {
+        return openai_chat_custom_tool_to_responses_tool(tool, raw);
+    }
     let mut out = Map::new();
     out.insert("type".to_string(), Value::String("function".to_string()));
     out.insert("name".to_string(), Value::String(tool.name.clone()));
@@ -781,6 +849,22 @@ fn canonical_tool_to_responses(tool: &CanonicalToolDefinition) -> Value {
     Value::Object(out)
 }
 
+fn openai_chat_custom_tool_to_responses_tool(tool: &CanonicalToolDefinition, raw: &Value) -> Value {
+    let mut out = raw
+        .get("custom")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    out.insert("type".to_string(), Value::String("custom".to_string()));
+    out.entry("name".to_string())
+        .or_insert_with(|| Value::String(tool.name.clone()));
+    if let Some(description) = &tool.description {
+        out.entry("description".to_string())
+            .or_insert_with(|| Value::String(description.clone()));
+    }
+    Value::Object(out)
+}
+
 fn responses_tool_parameters_schema(parameters: Option<&Value>) -> Value {
     match parameters {
         Some(Value::Object(schema)) => {
@@ -800,11 +884,59 @@ fn responses_tool_parameters_schema(parameters: Option<&Value>) -> Value {
     }
 }
 
-fn canonical_tool_choice_to_responses(choice: &CanonicalToolChoice) -> Value {
+fn canonical_tool_choice_to_responses_for_request(canonical: &CanonicalRequest) -> Option<Value> {
+    canonical
+        .tool_choice
+        .as_ref()
+        .map(|tool_choice| canonical_tool_choice_to_responses(tool_choice, &canonical.tools))
+        .or_else(|| raw_tool_choice_extension(canonical).map(openai_tool_choice_raw_to_responses))
+}
+
+fn raw_tool_choice_extension(canonical: &CanonicalRequest) -> Option<&Value> {
+    canonical
+        .extensions
+        .get("openai")
+        .and_then(|value| value.get("tool_choice"))
+        .or_else(|| {
+            openai_responses_extension(&canonical.extensions)
+                .and_then(|value| value.get("tool_choice"))
+        })
+}
+
+fn remove_tool_choice_extension(
+    extensions: &mut std::collections::BTreeMap<String, Value>,
+    namespace: &str,
+) {
+    let should_remove_namespace = extensions
+        .get_mut(namespace)
+        .and_then(Value::as_object_mut)
+        .is_some_and(|object| {
+            object.remove("tool_choice");
+            object.is_empty()
+        });
+    if should_remove_namespace {
+        extensions.remove(namespace);
+    }
+}
+
+fn canonical_tool_choice_to_responses(
+    choice: &CanonicalToolChoice,
+    tools: &[CanonicalToolDefinition],
+) -> Value {
     match choice {
         CanonicalToolChoice::Auto => Value::String("auto".to_string()),
         CanonicalToolChoice::None => Value::String("none".to_string()),
         CanonicalToolChoice::Required => Value::String("required".to_string()),
+        CanonicalToolChoice::Tool { name }
+            if tools
+                .iter()
+                .any(|tool| tool.name == *name && canonical_tool_is_openai_custom(tool)) =>
+        {
+            json!({
+                "type": "custom",
+                "name": name,
+            })
+        }
         CanonicalToolChoice::Tool { name } => json!({
             "type": "function",
             "name": name,
@@ -817,15 +949,129 @@ fn responses_tool_result_payload(
     content_text: Option<&str>,
     extensions: &BTreeMap<String, Value>,
 ) -> Option<(Value, Vec<Value>)> {
-    if is_claude_tool_result(extensions) {
-        if let Some(Value::Array(parts)) = output {
+    if let Some(Value::Array(parts)) = output {
+        if is_claude_tool_result(extensions) {
             return claude_tool_result_parts_to_responses_payload(parts);
+        }
+        if let Some(output) = openai_chat_tool_result_parts_to_responses_output(parts) {
+            return Some((output, Vec::new()));
         }
     }
     Some((
         responses_tool_result_output(output, content_text),
         Vec::new(),
     ))
+}
+
+fn responses_tool_result_item_type(extensions: &BTreeMap<String, Value>) -> Option<&str> {
+    let item_type = extensions
+        .get(OPENAI_RESPONSES_EXTENSION_NAMESPACE)
+        .or_else(|| extensions.get(OPENAI_RESPONSES_LEGACY_EXTENSION_NAMESPACE))
+        .and_then(|value| value.get("item_type"))
+        .and_then(Value::as_str)?;
+    matches!(
+        item_type,
+        "custom_tool_call_output"
+            | "local_shell_call_output"
+            | "shell_call_output"
+            | "apply_patch_call_output"
+            | "computer_call_output"
+    )
+    .then_some(item_type)
+}
+
+fn openai_chat_tool_result_parts_to_responses_output(parts: &[Value]) -> Option<Value> {
+    if parts.is_empty()
+        || !parts.iter().all(|part| {
+            part.as_object()
+                .and_then(|object| object.get("type"))
+                .and_then(Value::as_str)
+                .is_some()
+        })
+    {
+        return None;
+    }
+    parts
+        .iter()
+        .map(openai_chat_tool_result_part_to_responses_output_part)
+        .collect::<Option<Vec<_>>>()
+        .map(Value::Array)
+}
+
+fn openai_chat_tool_result_part_to_responses_output_part(part: &Value) -> Option<Value> {
+    let part_object = part.as_object()?;
+    match part_object
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "input_text" | "input_image" | "input_file" => Some(part.clone()),
+        "text" => part_object
+            .get("text")
+            .and_then(Value::as_str)
+            .map(|text| json!({ "type": "input_text", "text": text }))
+            .or_else(|| Some(openai_chat_tool_result_fallback_part(part))),
+        "image_url" => openai_chat_tool_result_image_part(part_object)
+            .or_else(|| Some(openai_chat_tool_result_fallback_part(part))),
+        "file" => openai_chat_tool_result_file_part(part_object)
+            .or_else(|| Some(openai_chat_tool_result_fallback_part(part))),
+        _ => Some(openai_chat_tool_result_fallback_part(part)),
+    }
+}
+
+fn openai_chat_tool_result_image_part(part_object: &Map<String, Value>) -> Option<Value> {
+    let image_value = part_object.get("image_url")?;
+    let image_object = image_value.as_object();
+    let image_url = image_value.as_str().or_else(|| {
+        image_object
+            .and_then(|image| image.get("url"))
+            .and_then(Value::as_str)
+    });
+    let file_id = image_object
+        .and_then(|image| image.get("file_id"))
+        .and_then(Value::as_str)
+        .or_else(|| part_object.get("file_id").and_then(Value::as_str));
+    if image_url.is_none() && file_id.is_none() {
+        return None;
+    }
+    let mut part = Map::new();
+    part.insert("type".to_string(), Value::String("input_image".to_string()));
+    if let Some(value) = image_url {
+        part.insert("image_url".to_string(), Value::String(value.to_string()));
+    }
+    if let Some(value) = file_id {
+        part.insert("file_id".to_string(), Value::String(value.to_string()));
+    }
+    if let Some(detail) = image_object
+        .and_then(|image| image.get("detail"))
+        .and_then(Value::as_str)
+        .or_else(|| part_object.get("detail").and_then(Value::as_str))
+    {
+        part.insert("detail".to_string(), Value::String(detail.to_string()));
+    }
+    Some(Value::Object(part))
+}
+
+fn openai_chat_tool_result_file_part(part_object: &Map<String, Value>) -> Option<Value> {
+    let file_object = part_object
+        .get("file")
+        .and_then(Value::as_object)
+        .unwrap_or(part_object);
+    let mut part = Map::new();
+    part.insert("type".to_string(), Value::String("input_file".to_string()));
+    for field in ["file_id", "file_data", "file_url", "filename"] {
+        if let Some(value) = file_object.get(field).and_then(Value::as_str) {
+            part.insert(field.to_string(), Value::String(value.to_string()));
+        }
+    }
+    (part.len() > 1).then_some(Value::Object(part))
+}
+
+fn openai_chat_tool_result_fallback_part(part: &Value) -> Value {
+    json!({
+        "type": "input_text",
+        "text": serde_json::to_string(part).unwrap_or_else(|_| part.to_string()),
+    })
 }
 
 fn responses_tool_result_output(output: Option<&Value>, content_text: Option<&str>) -> Value {

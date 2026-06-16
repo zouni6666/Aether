@@ -1528,6 +1528,48 @@ impl OpenAIResponsesProviderState {
                     &content,
                 );
             }
+            event_type if openai_responses_hosted_tool_output_item_type(event_type).is_some() => {
+                let item_type = openai_responses_hosted_tool_output_item_type(event_type)
+                    .expect("guarded by is_some");
+                let tool_use_id = value
+                    .get("call_id")
+                    .or_else(|| value.get("tool_call_id"))
+                    .or_else(|| value.get("item_id"))
+                    .or_else(|| value.get("id"))
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or("call_auto_0")
+                    .to_string();
+                let output_index = value
+                    .get("output_index")
+                    .and_then(Value::as_u64)
+                    .map(|value| value as usize);
+                let index = self
+                    .tool_index_for_key(Some(format!("{item_type}:{tool_use_id}")), output_index);
+                let content = openai_tool_result_content_from_value(
+                    value
+                        .get("delta")
+                        .or_else(|| value.get("output"))
+                        .or_else(|| value.get("content")),
+                );
+                let name = openai_responses_hosted_tool_output_name(item_type)
+                    .map(ToOwned::to_owned)
+                    .or_else(|| {
+                        value
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .filter(|value| !value.trim().is_empty())
+                            .map(ToOwned::to_owned)
+                    });
+                self.emit_missing_tool_result(
+                    report_context,
+                    &mut out,
+                    index,
+                    tool_use_id,
+                    name,
+                    &content,
+                );
+            }
             "response.output_item.done" => {
                 let Some(item) = value.get("item").and_then(Value::as_object) else {
                     return Ok(out);
@@ -3114,7 +3156,54 @@ fn openai_responses_stream_event_is_known_noop(event_type: &str) -> bool {
             | "response.web_search_call.in_progress"
             | "response.web_search_call.searching"
             | "response.web_search_call.completed"
+            | "response.local_shell_call.in_progress"
+            | "response.local_shell_call.running"
+            | "response.local_shell_call.completed"
+            | "response.local_shell_call.failed"
+            | "response.shell_call.in_progress"
+            | "response.shell_call.running"
+            | "response.shell_call.completed"
+            | "response.shell_call.failed"
+            | "response.apply_patch_call.in_progress"
+            | "response.apply_patch_call.running"
+            | "response.apply_patch_call.completed"
+            | "response.apply_patch_call.failed"
+            | "response.computer_call.in_progress"
+            | "response.computer_call.running"
+            | "response.computer_call.completed"
+            | "response.computer_call.failed"
     )
+}
+
+fn openai_responses_hosted_tool_output_item_type(event_type: &str) -> Option<&'static str> {
+    match event_type {
+        "response.custom_tool_call_output.delta" | "response.custom_tool_call_output.done" => {
+            Some("custom_tool_call_output")
+        }
+        "response.local_shell_call_output.delta" | "response.local_shell_call_output.done" => {
+            Some("local_shell_call_output")
+        }
+        "response.shell_call_output.delta" | "response.shell_call_output.done" => {
+            Some("shell_call_output")
+        }
+        "response.apply_patch_call_output.delta" | "response.apply_patch_call_output.done" => {
+            Some("apply_patch_call_output")
+        }
+        "response.computer_call_output.delta" | "response.computer_call_output.done" => {
+            Some("computer_call_output")
+        }
+        _ => None,
+    }
+}
+
+fn openai_responses_hosted_tool_output_name(item_type: &str) -> Option<&'static str> {
+    match item_type {
+        "local_shell_call_output" => Some("local_shell"),
+        "shell_call_output" => Some("shell"),
+        "apply_patch_call_output" => Some("apply_patch"),
+        "computer_call_output" => Some("computer"),
+        _ => None,
+    }
 }
 
 fn openai_responses_incomplete_finish_reason(payload: &Value) -> String {
@@ -4008,6 +4097,78 @@ mod tests {
                 name: Some(ref name),
                 ref content,
             } if tool_use_id == "call_123" && name == "lookup" && content == "{\"ok\":true}"
+        )));
+    }
+
+    #[test]
+    fn openai_responses_provider_state_ignores_hosted_tool_progress_events() {
+        let mut state = OpenAIResponsesProviderState::default();
+        let report_context = json!({});
+        let mut frames = Vec::new();
+
+        for event_type in [
+            "response.local_shell_call.in_progress",
+            "response.local_shell_call.running",
+            "response.local_shell_call.completed",
+            "response.apply_patch_call.in_progress",
+            "response.apply_patch_call.completed",
+            "response.computer_call.in_progress",
+            "response.computer_call.completed",
+        ] {
+            frames.extend(
+                state
+                    .push_line(
+                        &report_context,
+                        data_line(json!({
+                            "type": event_type,
+                            "response_id": "resp_123",
+                            "output_index": 0,
+                            "item_id": "call_123",
+                        })),
+                    )
+                    .expect("hosted tool progress event should parse"),
+            );
+        }
+
+        assert!(frames
+            .iter()
+            .any(|frame| matches!(frame.event, CanonicalStreamEvent::Start)));
+        assert!(!frames
+            .iter()
+            .any(|frame| matches!(frame.event, CanonicalStreamEvent::UnknownEvent { .. })));
+    }
+
+    #[test]
+    fn openai_responses_provider_state_parses_hosted_tool_output_as_tool_result() {
+        let mut state = OpenAIResponsesProviderState::default();
+        let report_context = json!({});
+        let frames = state
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "type": "response.local_shell_call_output.done",
+                    "response_id": "resp_123",
+                    "output_index": 3,
+                    "call_id": "call_shell_123",
+                    "output": {
+                        "stdout": "ok\n",
+                        "stderr": "",
+                        "outcome": "success"
+                    },
+                })),
+            )
+            .expect("hosted tool result should parse");
+
+        assert!(frames.iter().any(|frame| matches!(
+            frame.event,
+            CanonicalStreamEvent::ToolResultDelta {
+                index: 3,
+                ref tool_use_id,
+                name: Some(ref name),
+                ref content,
+            } if tool_use_id == "call_shell_123"
+                && name == "local_shell"
+                && content.contains("\"stdout\":\"ok\\n\"")
         )));
     }
 

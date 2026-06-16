@@ -33,6 +33,7 @@ pub(crate) enum LocalFailoverClassification {
     StopStatusCode,
     StopErrorPattern,
     StopExecutionError,
+    StopCyberPolicy,
     RetrySuccessPattern,
     RetryStatusCode,
     RetryUpstreamFailure,
@@ -45,6 +46,7 @@ impl LocalFailoverClassification {
             Self::StopStatusCode => "stop_status_code",
             Self::StopErrorPattern => "stop_error_pattern",
             Self::StopExecutionError => "stop_execution_error",
+            Self::StopCyberPolicy => "stop_cyber_policy",
             Self::RetrySuccessPattern => "retry_success_pattern",
             Self::RetryStatusCode => "retry_status_code",
             Self::RetryUpstreamFailure => "retry_upstream_failure",
@@ -58,6 +60,13 @@ pub(crate) fn classify_local_failover(
 ) -> LocalFailoverClassification {
     if policy.stop_status_codes.contains(&input.status_code) {
         return LocalFailoverClassification::StopStatusCode;
+    }
+
+    if policy.stop_cyber_policy_errors
+        && input.status_code >= 400
+        && local_error_response_has_cyber_policy_code(input.response_text)
+    {
+        return LocalFailoverClassification::StopCyberPolicy;
     }
 
     if input.status_code >= 400
@@ -102,6 +111,44 @@ pub(crate) fn local_failover_error_message(response_text: Option<&str>) -> Optio
 
 fn should_failover_local_upstream_status(status_code: u16) -> bool {
     status_code >= 400
+}
+
+fn local_error_response_has_cyber_policy_code(response_text: Option<&str>) -> bool {
+    let Some(response_text) = response_text else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(response_text) else {
+        return false;
+    };
+    json_value_has_cyber_policy_code(&value, 0)
+}
+
+fn json_value_has_cyber_policy_code(value: &Value, depth: usize) -> bool {
+    if depth > 16 {
+        return false;
+    }
+    match value {
+        Value::Object(object) => object.iter().any(|(key, value)| {
+            (key == "code"
+                && value
+                    .as_str()
+                    .is_some_and(|code| code.eq_ignore_ascii_case("cyber_policy")))
+                || json_value_has_cyber_policy_code(value, depth + 1)
+        }),
+        Value::Array(values) => values
+            .iter()
+            .any(|value| json_value_has_cyber_policy_code(value, depth + 1)),
+        Value::String(text) => {
+            let text = text.trim_start();
+            if !text.starts_with('{') && !text.starts_with('[') {
+                return false;
+            }
+            serde_json::from_str::<Value>(text)
+                .ok()
+                .is_some_and(|value| json_value_has_cyber_policy_code(&value, depth + 1))
+        }
+        _ => false,
+    }
 }
 
 fn parse_local_error_response(response_text: Option<&str>) -> ParsedLocalErrorResponse {
@@ -306,6 +353,58 @@ mod tests {
         );
         assert_eq!(
             classify_local_failover(&policy, LocalFailoverInput::new(503, None)),
+            LocalFailoverClassification::RetryUpstreamFailure
+        );
+    }
+
+    #[test]
+    fn classifier_stops_cyber_policy_when_policy_enabled() {
+        let policy = LocalFailoverPolicy {
+            stop_cyber_policy_errors: true,
+            ..LocalFailoverPolicy::default()
+        };
+
+        assert_eq!(
+            classify_local_failover(
+                &policy,
+                LocalFailoverInput::new(
+                    400,
+                    Some(
+                        r#"{"type":"error","error":{"type":"invalid_request","code":"cyber_policy","message":"flagged"}}"#,
+                    )
+                )
+            ),
+            LocalFailoverClassification::StopCyberPolicy
+        );
+        assert_eq!(
+            classify_local_failover(
+                &policy,
+                LocalFailoverInput::new(
+                    400,
+                    Some(r#"{"outer":{"error":{"code":"cyber_policy"}}}"#)
+                )
+            ),
+            LocalFailoverClassification::StopCyberPolicy
+        );
+        assert_eq!(
+            classify_local_failover(
+                &policy,
+                LocalFailoverInput::new(400, Some(r#"{"error":{"code":"other"}}"#))
+            ),
+            LocalFailoverClassification::RetryUpstreamFailure
+        );
+    }
+
+    #[test]
+    fn classifier_retries_cyber_policy_when_policy_disabled() {
+        assert_eq!(
+            classify_local_failover(
+                &LocalFailoverPolicy::default(),
+                LocalFailoverInput::new(
+                    400,
+                    Some(r#"{"error":{"code":"cyber_policy","message":"flagged"}}"#)
+                )
+            ),
             LocalFailoverClassification::RetryUpstreamFailure
         );
     }

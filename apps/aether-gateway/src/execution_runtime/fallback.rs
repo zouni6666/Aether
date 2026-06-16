@@ -937,6 +937,7 @@ mod tests {
                 continue_status_codes: [409, 429].into_iter().collect(),
                 success_failover_patterns: Vec::new(),
                 error_stop_patterns: Vec::new(),
+                stop_cyber_policy_errors: false,
             }
         );
     }

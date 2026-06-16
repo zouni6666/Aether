@@ -221,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_request_to_chat_clamps_max_reasoning_effort_to_high() {
+    fn claude_request_to_chat_maps_max_reasoning_effort_to_xhigh() {
         let body = json!({
             "model": "claude-sonnet",
             "messages": [{"role": "user", "content": "hello"}],
@@ -233,11 +233,11 @@ mod tests {
         let converted =
             normalize_claude_request_to_openai_chat_request(&body).expect("openai chat request");
 
-        assert_eq!(converted["reasoning_effort"], "high");
+        assert_eq!(converted["reasoning_effort"], "xhigh");
     }
 
     #[test]
-    fn gemini_request_to_chat_clamps_xhigh_reasoning_effort_to_high() {
+    fn gemini_request_to_chat_preserves_xhigh_reasoning_effort() {
         let body = json!({
             "contents": [{
                 "role": "user",
@@ -254,7 +254,7 @@ mod tests {
         )
         .expect("openai chat request");
 
-        assert_eq!(converted["reasoning_effort"], "high");
+        assert_eq!(converted["reasoning_effort"], "xhigh");
     }
 
     #[test]
@@ -372,7 +372,8 @@ mod tests {
     }
 
     #[test]
-    fn responses_request_normalizer_clamps_chat_reasoning_effort_and_filters_extensions() {
+    fn responses_request_normalizer_preserves_official_chat_reasoning_effort_and_filters_extensions(
+    ) {
         let body = json!({
             "model": "gpt-5.1",
             "input": "hello",
@@ -388,7 +389,7 @@ mod tests {
         let converted = normalize_openai_responses_request_to_openai_chat_request(&body)
             .expect("openai chat request");
 
-        assert_eq!(converted["reasoning_effort"], "high");
+        assert_eq!(converted["reasoning_effort"], "xhigh");
         assert_eq!(converted["verbosity"], "high");
         assert_eq!(converted["service_tier"], "priority");
         assert_eq!(converted["prompt_cache_key"], "cache_123");
@@ -397,6 +398,22 @@ mod tests {
         assert!(converted.get("store").is_none());
         assert!(converted.get("text").is_none());
         assert!(converted.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn responses_request_normalizer_preserves_none_and_minimal_chat_reasoning_effort() {
+        for effort in ["none", "minimal"] {
+            let body = json!({
+                "model": "gpt-5.1",
+                "input": "hello",
+                "reasoning": {"effort": effort},
+            });
+
+            let converted = normalize_openai_responses_request_to_openai_chat_request(&body)
+                .expect("openai chat request");
+
+            assert_eq!(converted["reasoning_effort"], effort);
+        }
     }
 
     #[test]

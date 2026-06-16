@@ -14,6 +14,7 @@ pub(crate) struct LocalFailoverPolicy {
     pub(crate) continue_status_codes: BTreeSet<u16>,
     pub(crate) success_failover_patterns: Vec<LocalFailoverRegexRule>,
     pub(crate) error_stop_patterns: Vec<LocalFailoverRegexRule>,
+    pub(crate) stop_cyber_policy_errors: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +81,10 @@ pub(crate) fn local_failover_policy_from_transport(
 
     LocalFailoverPolicy {
         max_retries,
+        stop_cyber_policy_errors: codex_cyber_flag_passthrough_enabled(
+            &transport.provider.provider_type,
+            transport.provider.config.as_ref(),
+        ),
         stop_status_codes: rules
             .map(|value| {
                 parse_status_code_set(
@@ -135,6 +140,10 @@ pub(crate) fn local_failover_policy_from_report_context(
             .unwrap_or_default(),
         success_failover_patterns: parse_regex_rules(object, "success_failover_patterns"),
         error_stop_patterns: parse_regex_rules(object, "error_stop_patterns"),
+        stop_cyber_policy_errors: object
+            .get("stop_cyber_policy_errors")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     })
 }
 
@@ -168,7 +177,27 @@ fn local_failover_policy_to_value(policy: &LocalFailoverPolicy) -> Value {
         "continue_status_codes": policy.continue_status_codes.iter().copied().collect::<Vec<_>>(),
         "success_failover_patterns": policy.success_failover_patterns.iter().map(local_failover_regex_rule_to_value).collect::<Vec<_>>(),
         "error_stop_patterns": policy.error_stop_patterns.iter().map(local_failover_regex_rule_to_value).collect::<Vec<_>>(),
+        "stop_cyber_policy_errors": policy.stop_cyber_policy_errors,
     })
+}
+
+pub(crate) fn codex_cyber_flag_passthrough_enabled(
+    provider_type: &str,
+    provider_config: Option<&Value>,
+) -> bool {
+    if !provider_type.trim().eq_ignore_ascii_case("codex") {
+        return false;
+    }
+    provider_config
+        .and_then(|config| config.get("codex"))
+        .and_then(Value::as_object)
+        .and_then(|codex| {
+            codex
+                .get("pass_through_cyber_flag_interrupt")
+                .or_else(|| codex.get("passthrough_cyber_flag_interrupt"))
+                .and_then(Value::as_bool)
+        })
+        .unwrap_or(true)
 }
 
 fn local_failover_regex_rule_to_value(rule: &LocalFailoverRegexRule) -> Value {
@@ -345,7 +374,28 @@ mod tests {
                     pattern: "validation".to_string(),
                     status_codes: [422].into_iter().collect(),
                 }],
+                stop_cyber_policy_errors: false,
             })
         );
+    }
+
+    #[test]
+    fn codex_cyber_policy_passthrough_defaults_on_and_can_be_disabled() {
+        let mut transport = sample_transport(None, None, None);
+        transport.provider.provider_type = "codex".to_string();
+        assert!(local_failover_policy_from_transport(&transport).stop_cyber_policy_errors);
+
+        transport.provider.config = Some(json!({
+            "codex": {"pass_through_cyber_flag_interrupt": false}
+        }));
+        assert!(!local_failover_policy_from_transport(&transport).stop_cyber_policy_errors);
+
+        transport.provider.config = Some(json!({
+            "codex": {"passthrough_cyber_flag_interrupt": true}
+        }));
+        assert!(local_failover_policy_from_transport(&transport).stop_cyber_policy_errors);
+
+        transport.provider.provider_type = "llm".to_string();
+        assert!(!local_failover_policy_from_transport(&transport).stop_cyber_policy_errors);
     }
 }

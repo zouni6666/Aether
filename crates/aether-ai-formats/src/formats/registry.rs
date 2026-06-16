@@ -2681,7 +2681,7 @@ mod tests {
             .expect("pure conversion should succeed")
             .value;
 
-        assert_eq!(converted["reasoning_effort"], "high");
+        assert_eq!(converted["reasoning_effort"], "xhigh");
     }
 
     #[test]

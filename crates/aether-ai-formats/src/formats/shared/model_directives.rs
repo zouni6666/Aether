@@ -44,7 +44,7 @@ impl ReasoningEffort {
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
-            Self::XHigh | Self::Max => "high",
+            Self::XHigh | Self::Max => "xhigh",
         }
     }
 
@@ -534,7 +534,7 @@ mod tests {
             "gpt-5.4-xhigh",
         )
         .expect("directive should apply");
-        assert_eq!(openai_chat["reasoning_effort"], "high");
+        assert_eq!(openai_chat["reasoning_effort"], "xhigh");
 
         let mut responses = json!({
             "model": "gpt-5-upstream",
@@ -607,7 +607,7 @@ mod tests {
             "gpt-5.4-fast-xhigh",
         )
         .expect("directive should apply");
-        assert_eq!(openai_chat["reasoning_effort"], "high");
+        assert_eq!(openai_chat["reasoning_effort"], "xhigh");
         assert_eq!(openai_chat["service_tier"], "priority");
 
         let mut reversed = json!({"model": "gpt-5-upstream", "reasoning_effort": "low"});
