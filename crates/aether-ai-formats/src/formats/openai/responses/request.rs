@@ -1431,6 +1431,7 @@ mod tests {
 
         assert_eq!(body["input"].as_array().expect("input").len(), 2);
         assert_eq!(body["input"][0]["type"], "function_call");
+        assert_eq!(body["input"][0]["id"], "fc_call_auto_0");
         assert_eq!(body["input"][0]["call_id"], "call_auto_0");
         assert_eq!(body["input"][0]["name"], "unknown");
         assert_eq!(body["input"][0]["arguments"], "{\"q\":\"rust\"}");

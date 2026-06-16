@@ -2580,6 +2580,7 @@ mod tests {
             .value;
 
         assert_eq!(converted["input"][0]["type"], "function_call");
+        assert_eq!(converted["input"][0]["id"], "fc_call_lookup_1");
         assert_eq!(converted["input"][0]["call_id"], "call_lookup_1");
         assert_eq!(converted["input"][1]["type"], "function_call_output");
         assert_eq!(converted["input"][1]["call_id"], "call_lookup_1");

@@ -766,10 +766,11 @@ pub(crate) fn canonical_tool_use_to_openai_responses_item(
     input: &Value,
     extensions: &BTreeMap<String, Value>,
 ) -> Value {
+    let item_id = openai_responses_tool_call_item_id(id);
     if let Some(item_type) = openai_responses_hosted_tool_call_item_type(extensions) {
         let mut item = Map::new();
         item.insert("type".to_string(), Value::String(item_type.to_string()));
-        item.insert("id".to_string(), Value::String(id.to_string()));
+        item.insert("id".to_string(), Value::String(item_id));
         item.insert("call_id".to_string(), Value::String(id.to_string()));
         item.insert("status".to_string(), Value::String("completed".to_string()));
         if let Some(input_object) = input.as_object() {
@@ -788,7 +789,7 @@ pub(crate) fn canonical_tool_use_to_openai_responses_item(
     if is_openai_custom_tool_call(extensions) {
         return json!({
             "type": "custom_tool_call",
-            "id": id,
+            "id": item_id,
             "call_id": id,
             "status": "completed",
             "name": name,
@@ -797,11 +798,22 @@ pub(crate) fn canonical_tool_use_to_openai_responses_item(
     }
     json!({
         "type": "function_call",
-        "id": id,
+        "id": item_id,
         "call_id": id,
         "name": name,
         "arguments": canonicalize_tool_arguments(input),
     })
+}
+
+fn openai_responses_tool_call_item_id(call_id: &str) -> String {
+    let trimmed = call_id.trim();
+    if trimmed.starts_with("fc") {
+        trimmed.to_string()
+    } else if trimmed.is_empty() {
+        "fc_auto".to_string()
+    } else {
+        format!("fc_{trimmed}")
+    }
 }
 
 fn openai_responses_hosted_tool_call_item_type(
