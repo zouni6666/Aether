@@ -788,16 +788,17 @@ pub(crate) fn canonical_tool_use_to_openai_responses_item(
         return Value::Object(item);
     }
     if is_openai_custom_tool_call(extensions) {
+        let item_id = openai_responses_tool_call_item_id(id, extensions);
         return json!({
             "type": "custom_tool_call",
-            "id": id,
+            "id": item_id,
             "call_id": id,
             "status": "completed",
             "name": name,
             "input": openai_custom_tool_input_text(input),
         });
     }
-    let item_id = openai_responses_function_call_item_id(id);
+    let item_id = openai_responses_tool_call_item_id(id, extensions);
     json!({
         "type": "function_call",
         "id": item_id,
@@ -807,14 +808,23 @@ pub(crate) fn canonical_tool_use_to_openai_responses_item(
     })
 }
 
-fn openai_responses_function_call_item_id(call_id: &str) -> String {
+fn openai_responses_tool_call_item_id(
+    call_id: &str,
+    extensions: &BTreeMap<String, Value>,
+) -> String {
+    if let Some(item_id) = openai_responses_extension(extensions)
+        .and_then(|value| value.get("item_id").or_else(|| value.get("id")))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return item_id.to_string();
+    }
     let trimmed = call_id.trim();
-    if trimmed.starts_with("fc") {
-        trimmed.to_string()
-    } else if trimmed.is_empty() {
-        "fc_auto".to_string()
+    if trimmed.is_empty() {
+        "call_auto".to_string()
     } else {
-        format!("fc_{trimmed}")
+        trimmed.to_string()
     }
 }
 
@@ -1938,14 +1948,16 @@ pub(crate) fn openai_responses_input_to_canonical_messages(
                                 next_generated_tool_call_index += 1;
                                 generated
                             });
+                        let mut extensions = openai_responses_extensions(
+                            item_object,
+                            &["type", "call_id", "id", "name", "arguments"],
+                        );
+                        remember_openai_responses_tool_call_item_id(&mut extensions, item_object);
                         let tool_use = CanonicalContentBlock::ToolUse {
                             id,
                             name,
                             input: parse_jsonish_value(item_object.get("arguments")),
-                            extensions: openai_responses_extensions(
-                                item_object,
-                                &["type", "call_id", "id", "name", "arguments"],
-                            ),
+                            extensions,
                         };
                         append_openai_responses_tool_use(
                             &mut messages,
@@ -1986,6 +1998,7 @@ pub(crate) fn openai_responses_input_to_canonical_messages(
                                 "status",
                             ],
                         );
+                        remember_openai_responses_tool_call_item_id(&mut extensions, item_object);
                         mark_openai_custom_tool_call(&mut extensions);
                         let tool_use = CanonicalContentBlock::ToolUse {
                             id,
@@ -2328,14 +2341,16 @@ pub(crate) fn openai_responses_output_to_canonical_blocks(
                     .filter(|value| !value.is_empty())
                     .map(ToOwned::to_owned)
                     .unwrap_or_else(|| format!("call_auto_{index}"));
+                let mut extensions = openai_responses_extensions(
+                    item_object,
+                    &["type", "id", "call_id", "name", "arguments", "status"],
+                );
+                remember_openai_responses_tool_call_item_id(&mut extensions, item_object);
                 blocks.push(CanonicalContentBlock::ToolUse {
                     id,
                     name: name.to_string(),
                     input: parse_jsonish_value(item_object.get("arguments")),
-                    extensions: openai_responses_extensions(
-                        item_object,
-                        &["type", "id", "call_id", "name", "arguments", "status"],
-                    ),
+                    extensions,
                 });
             }
             "custom_tool_call" => {
@@ -2365,6 +2380,7 @@ pub(crate) fn openai_responses_output_to_canonical_blocks(
                         "status",
                     ],
                 );
+                remember_openai_responses_tool_call_item_id(&mut extensions, item_object);
                 mark_openai_custom_tool_call(&mut extensions);
                 blocks.push(CanonicalContentBlock::ToolUse {
                     id,
@@ -3234,6 +3250,21 @@ fn mark_openai_custom_tool_call(extensions: &mut BTreeMap<String, Value>) {
         "source".to_string(),
         Value::String(OPENAI_CUSTOM_TOOL_CALL_SOURCE_MARKER.to_string()),
     );
+}
+
+fn remember_openai_responses_tool_call_item_id(
+    extensions: &mut BTreeMap<String, Value>,
+    item_object: &Map<String, Value>,
+) {
+    if let Some(item_id) = item_object
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        canonical_extension_object_mut(extensions, OPENAI_RESPONSES_EXTENSION_NAMESPACE)
+            .insert("item_id".to_string(), Value::String(item_id.to_string()));
+    }
 }
 
 fn mark_openai_output_audio(extensions: &mut BTreeMap<String, Value>) {
@@ -7420,6 +7451,8 @@ mod tests {
         let rebuilt = canonical_to_openai_responses_request(&canonical, "gpt-5-upstream", false)
             .expect("openai responses request");
         assert_eq!(rebuilt["input"][0]["type"], "custom_tool_call");
+        assert_eq!(rebuilt["input"][0]["id"], "ctc_1");
+        assert_eq!(rebuilt["input"][0]["call_id"], "call_custom_1");
         assert_eq!(rebuilt["input"][0]["name"], "shell_command");
         assert_eq!(rebuilt["input"][0]["input"], "ls -la");
         assert_eq!(rebuilt["input"][1]["type"], "custom_tool_call_output");
