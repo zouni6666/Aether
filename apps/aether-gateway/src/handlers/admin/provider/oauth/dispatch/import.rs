@@ -106,6 +106,34 @@ fn import_payload_string_any(
         .map(ToOwned::to_owned)
 }
 
+fn import_payload_project_id_any(
+    payload: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Option<String> {
+    keys.iter().find_map(|key| {
+        let value = payload.get(*key)?;
+        if let Some(string) = value
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Some(string.to_string());
+        }
+        value
+            .as_object()
+            .and_then(|object| {
+                object
+                    .get("id")
+                    .or_else(|| object.get("project_id"))
+                    .or_else(|| object.get("projectId"))
+            })
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
 fn import_payload_u64_any(
     payload: &serde_json::Map<String, serde_json::Value>,
     keys: &[&str],
@@ -129,6 +157,49 @@ fn apply_single_import_hints(
     auth_config: &mut serde_json::Map<String, serde_json::Value>,
 ) {
     let provider_type = provider_type.trim().to_ascii_lowercase();
+    if provider_type == "antigravity" {
+        if let Some(project_id) = import_payload_project_id_any(
+            payload,
+            &[
+                "project_id",
+                "projectId",
+                "cloudaicompanionProject",
+                "cloudAiCompanionProject",
+            ],
+        ) {
+            auth_config
+                .entry("project_id".to_string())
+                .or_insert_with(|| json!(project_id));
+        }
+        for (target, keys) in [
+            (
+                "client_version",
+                &[
+                    "client_version",
+                    "clientVersion",
+                    "antigravityClientVersion",
+                ][..],
+            ),
+            (
+                "session_id",
+                &[
+                    "session_id",
+                    "sessionId",
+                    "vscode_session_id",
+                    "vscodeSessionId",
+                ][..],
+            ),
+            ("user_agent", &["user_agent", "userAgent"][..]),
+        ] {
+            let Some(value) = import_payload_string_any(payload, keys) else {
+                continue;
+            };
+            auth_config
+                .entry(target.to_string())
+                .or_insert_with(|| json!(value));
+        }
+        return;
+    }
     if !matches!(provider_type.as_str(), "codex" | "chatgpt_web" | "grok") {
         return;
     }
@@ -640,7 +711,8 @@ pub(super) async fn handle_admin_provider_oauth_import_refresh_token(
 #[cfg(test)]
 mod tests {
     use super::{
-        import_payload_string_any, import_payload_u64_any, sanitize_windsurf_import_error,
+        apply_single_import_hints, import_payload_string_any, import_payload_u64_any,
+        sanitize_windsurf_import_error,
     };
     use aether_oauth::core::OAuthError;
     use serde_json::json;
@@ -673,6 +745,35 @@ mod tests {
             import_payload_u64_any(&payload, &["expires_at", "expiresAt", "expired"]),
             Some(1_893_456_000)
         );
+    }
+
+    #[test]
+    fn single_import_applies_antigravity_identity_hints() {
+        let payload = json!({
+            "cloudaicompanionProject": {
+                "id": "project-antigravity-1"
+            },
+            "clientVersion": "1.99.0",
+            "sessionId": "session-antigravity-1",
+            "userAgent": "antigravity"
+        })
+        .as_object()
+        .cloned()
+        .expect("payload should be an object");
+        let mut auth_config = serde_json::Map::new();
+
+        apply_single_import_hints("antigravity", &payload, &mut auth_config);
+
+        assert_eq!(
+            auth_config.get("project_id"),
+            Some(&json!("project-antigravity-1"))
+        );
+        assert_eq!(auth_config.get("client_version"), Some(&json!("1.99.0")));
+        assert_eq!(
+            auth_config.get("session_id"),
+            Some(&json!("session-antigravity-1"))
+        );
+        assert_eq!(auth_config.get("user_agent"), Some(&json!("antigravity")));
     }
 
     #[test]

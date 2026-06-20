@@ -228,6 +228,16 @@ const routes: RouteRecordRaw[] = [
         component: () => importWithRetry(() => import('@/views/admin/RoutingProfiles.vue'))
       },
       {
+        path: 'routing/new',
+        name: 'RoutingProfileCreate',
+        component: () => importWithRetry(() => import('@/views/admin/RoutingProfiles.vue'))
+      },
+      {
+        path: 'routing/:groupId',
+        name: 'RoutingProfileDetail',
+        component: () => importWithRetry(() => import('@/views/admin/RoutingProfiles.vue'))
+      },
+      {
         path: 'health-monitor',
         name: 'HealthMonitor',
         component: () => importWithRetry(() => import('@/views/shared/HealthMonitor.vue'))

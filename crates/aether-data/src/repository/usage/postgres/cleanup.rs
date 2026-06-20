@@ -683,7 +683,7 @@ async fn cleanup_usage_raw_body_fields(
             .rows_affected();
         let cleaned = usize::try_from(cleaned).unwrap_or(usize::MAX);
         total_cleaned += cleaned;
-        if cleaned == 0 || cleaned < batch_size {
+        if rows.len() < batch_size {
             break;
         }
     }
@@ -736,7 +736,7 @@ async fn cleanup_usage_compressed_body_fields(
             .map_err(postgres_error)?;
         let cleaned = usize::try_from(cleaned).unwrap_or(usize::MAX);
         total_cleaned += cleaned;
-        if cleaned == 0 || cleaned < batch_size {
+        if rows.len() < batch_size {
             break;
         }
     }
@@ -1143,7 +1143,7 @@ async fn cleanup_usage_header_fields(
             .map_err(postgres_error)?;
         let cleaned = usize::try_from(cleaned).unwrap_or(usize::MAX);
         total_cleaned += cleaned;
-        if cleaned == 0 || cleaned < batch_size {
+        if rows.len() < batch_size {
             break;
         }
     }
@@ -1213,7 +1213,7 @@ async fn cleanup_usage_stale_body_fields(
             .map_err(postgres_error)?;
         let cleaned = usize::try_from(cleaned).unwrap_or(usize::MAX);
         total_cleaned += cleaned;
-        if cleaned == 0 || cleaned < batch_size {
+        if rows.len() < batch_size {
             break;
         }
     }

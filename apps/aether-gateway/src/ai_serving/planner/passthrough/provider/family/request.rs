@@ -13,13 +13,16 @@ use crate::ai_serving::planner::redaction::{
 use crate::ai_serving::transport::antigravity::{
     build_antigravity_safe_v1internal_request, build_antigravity_static_identity_headers,
     classify_local_antigravity_request_support, AntigravityEnvelopeRequestType,
-    AntigravityRequestEnvelopeSupport, AntigravityRequestSideSupport,
+    AntigravityRequestAuthUnsupportedReason, AntigravityRequestEnvelopeSupport,
+    AntigravityRequestSideSupport, AntigravityRequestSideUnsupportedReason,
 };
 use crate::ai_serving::transport::{
     build_gemini_cli_v1internal_request, build_grok_browser_headers, build_grok_upstream_url,
     build_same_format_provider_headers, resolve_local_gemini_cli_request_auth,
     GeminiCliRequestAuth, GeminiCliRequestAuthSupport, GeminiCliRequestEnvelopeSupport,
-    GrokHeaderInput, SameFormatProviderHeadersInput, GEMINI_CLI_USER_AGENT, GROK_CHAT_PATH,
+    GrokHeaderInput, SameFormatProviderCompatibilityEdit,
+    SameFormatProviderCompatibilityEditAction, SameFormatProviderHeadersInput,
+    GEMINI_CLI_USER_AGENT, GROK_CHAT_PATH,
 };
 use crate::ai_serving::{CandidateFailureDiagnostic, GatewayProviderTransportSnapshot};
 use crate::{AppState, GatewayError};
@@ -107,6 +110,7 @@ pub(crate) struct LocalSameFormatProviderCandidatePayloadParts {
     pub(super) provider_request_headers: BTreeMap<String, String>,
     pub(super) provider_request_body: Value,
     pub(super) transport_profile: Option<ResolvedTransportProfile>,
+    pub(super) compatibility_edits: Vec<SameFormatProviderCompatibilityEdit>,
     pub(super) request_redacted: bool,
 }
 
@@ -153,8 +157,8 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
     let body_json = redaction.body_json.as_ref();
     let mut transport = Arc::clone(&prepared.transport);
 
-    let Some(mut base_provider_request_body) =
-        super::super::request::build_same_format_provider_request_body(
+    let Some(base_provider_request) =
+        super::super::request::build_same_format_provider_request_body_with_compatibility_report(
             body_json,
             prepared.provider_api_format.as_str(),
             &prepared.mapped_model,
@@ -190,6 +194,8 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
         .await;
         return Ok(None);
     };
+    let mut base_provider_request_body = base_provider_request.body;
+    let mut compatibility_edits = base_provider_request.compatibility_edits;
     if let Some(mapping) =
         crate::system_features::reasoning_model_directive_mapping_for_api_format_and_model(
             state,
@@ -198,10 +204,18 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
         )
         .await
     {
+        let before_mapping = base_provider_request_body.clone();
         crate::ai_serving::apply_model_directive_mapping_patch(
             &mut base_provider_request_body,
             &mapping,
         );
+        if before_mapping != base_provider_request_body {
+            compatibility_edits.push(SameFormatProviderCompatibilityEdit {
+                field: "model_directive_mapping".to_string(),
+                action: SameFormatProviderCompatibilityEditAction::RuntimeRewrite,
+                detail: "applied configured model directive mapping patch".to_string(),
+            });
+        }
         // Directive mapping is a deep-merge patch and may overwrite/add `stream`;
         // re-enforce stream-field policy afterward.
         // Kiro behavior classification already hard-requires upstream streaming,
@@ -217,11 +231,32 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
     }
 
     let antigravity_auth = if prepared.is_antigravity {
-        match classify_local_antigravity_request_support(
+        let mut antigravity_support = classify_local_antigravity_request_support(
             &transport,
             &base_provider_request_body,
             AntigravityEnvelopeRequestType::Agent,
+        );
+        if matches!(
+            antigravity_support,
+            AntigravityRequestSideSupport::Unsupported(
+                AntigravityRequestSideUnsupportedReason::UnsupportedAuth(
+                    AntigravityRequestAuthUnsupportedReason::MissingProjectId
+                )
+            )
         ) {
+            if let Some(hydrated) = state
+                .hydrate_antigravity_project_metadata_for_transport(&transport)
+                .await
+            {
+                transport = Arc::new(hydrated);
+                antigravity_support = classify_local_antigravity_request_support(
+                    &transport,
+                    &base_provider_request_body,
+                    AntigravityEnvelopeRequestType::Agent,
+                );
+            }
+        }
+        match antigravity_support {
             AntigravityRequestSideSupport::Supported(spec) => Some(spec.auth),
             AntigravityRequestSideSupport::Unsupported(_) => {
                 mark_skipped_local_same_format_provider_candidate(
@@ -452,6 +487,7 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
         provider_request_headers,
         provider_request_body,
         transport_profile,
+        compatibility_edits,
         request_redacted: redaction.redacted,
     }))
 }

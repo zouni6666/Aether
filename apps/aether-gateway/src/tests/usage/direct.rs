@@ -40,8 +40,15 @@ where
     }
 }
 
-#[tokio::test]
-async fn gateway_records_usage_for_execution_runtime_sync_when_runtime_enabled() {
+#[test]
+fn gateway_records_usage_for_execution_runtime_sync_when_runtime_enabled() {
+    run_async_test_on_large_stack(
+        "gateway_records_usage_for_execution_runtime_sync_when_runtime_enabled",
+        gateway_records_usage_for_execution_runtime_sync_when_runtime_enabled_impl(),
+    );
+}
+
+async fn gateway_records_usage_for_execution_runtime_sync_when_runtime_enabled_impl() {
     let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
     let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
 
@@ -312,8 +319,15 @@ async fn gateway_records_pending_usage_before_execution_runtime_sync_result_arri
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_keeps_pending_sync_usage_lightweight_for_large_request_body() {
+#[test]
+fn gateway_keeps_pending_sync_usage_lightweight_for_large_request_body() {
+    run_async_test_on_large_stack(
+        "gateway_keeps_pending_sync_usage_lightweight_for_large_request_body",
+        gateway_keeps_pending_sync_usage_lightweight_for_large_request_body_impl(),
+    );
+}
+
+async fn gateway_keeps_pending_sync_usage_lightweight_for_large_request_body_impl() {
     let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
     let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
     let execution_request_started = Arc::new(tokio::sync::Notify::new());
@@ -576,8 +590,15 @@ async fn gateway_records_usage_for_execution_runtime_stream_when_runtime_enabled
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_records_pending_usage_before_execution_runtime_stream_headers_arrive() {
+#[test]
+fn gateway_records_pending_usage_before_execution_runtime_stream_headers_arrive() {
+    run_async_test_on_large_stack(
+        "gateway_records_pending_usage_before_execution_runtime_stream_headers_arrive",
+        gateway_records_pending_usage_before_execution_runtime_stream_headers_arrive_impl(),
+    );
+}
+
+async fn gateway_records_pending_usage_before_execution_runtime_stream_headers_arrive_impl() {
     let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
     let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
     let execution_request_started = Arc::new(tokio::sync::Notify::new());
@@ -725,8 +746,15 @@ async fn gateway_records_pending_usage_before_execution_runtime_stream_headers_a
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_keeps_pending_stream_usage_lightweight_for_large_request_body() {
+#[test]
+fn gateway_keeps_pending_stream_usage_lightweight_for_large_request_body() {
+    run_async_test_on_large_stack(
+        "gateway_keeps_pending_stream_usage_lightweight_for_large_request_body",
+        gateway_keeps_pending_stream_usage_lightweight_for_large_request_body_impl(),
+    );
+}
+
+async fn gateway_keeps_pending_stream_usage_lightweight_for_large_request_body_impl() {
     let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
     let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
     let execution_request_started = Arc::new(tokio::sync::Notify::new());

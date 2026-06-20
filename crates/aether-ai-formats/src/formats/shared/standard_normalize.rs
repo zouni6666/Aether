@@ -738,7 +738,7 @@ mod tests {
         .expect("openai chat body should build");
 
         assert_eq!(provider_request_body["model"], "gpt-5-upstream");
-        assert_eq!(provider_request_body["reasoning_effort"], "high");
+        assert_eq!(provider_request_body["reasoning_effort"], "xhigh");
     }
 
     #[test]

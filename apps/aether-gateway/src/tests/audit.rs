@@ -32,6 +32,27 @@ fn hash_api_key(value: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+fn run_async_test_on_large_stack<F>(name: &'static str, future: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime should build")
+                .block_on(future);
+        })
+        .expect("large-stack audit test thread should spawn");
+
+    if let Err(payload) = handle.join() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
 fn sample_local_openai_auth_snapshot(api_key_id: &str, user_id: &str) -> StoredAuthApiKeySnapshot {
     StoredAuthApiKeySnapshot::new(
         user_id.to_string(),
@@ -158,8 +179,15 @@ fn sample_local_openai_key() -> StoredProviderCatalogKey {
     .expect("key transport should build")
 }
 
-#[tokio::test]
-async fn gateway_exposes_request_id_header_for_local_execution_response() {
+#[test]
+fn gateway_exposes_request_id_header_for_local_execution_response() {
+    run_async_test_on_large_stack(
+        "gateway_exposes_request_id_header_for_local_execution_response",
+        gateway_exposes_request_id_header_for_local_execution_response_impl(),
+    );
+}
+
+async fn gateway_exposes_request_id_header_for_local_execution_response_impl() {
     let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
         Some(hash_api_key("sk-client-openai-audit-bundle")),
         sample_local_openai_auth_snapshot("api-key-1", "user-1"),

@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 
 use aether_contracts::{ExecutionPlan, ExecutionResult, ProxySnapshot, RequestBody};
 use aether_provider_transport::antigravity::{
-    build_antigravity_static_identity_headers, resolve_local_antigravity_request_auth,
-    AntigravityRequestAuthSupport, ANTIGRAVITY_REQUEST_USER_AGENT,
+    build_antigravity_static_client_headers, build_antigravity_static_identity_headers,
+    resolve_local_antigravity_request_auth, AntigravityRequestAuthSupport,
+    ANTIGRAVITY_REQUEST_USER_AGENT,
 };
 use aether_provider_transport::auth::{
     ensure_upstream_auth_header, resolve_local_gemini_auth, resolve_local_openai_bearer_auth,
@@ -29,6 +30,7 @@ const CLAUDE_CLI_USER_AGENT: &str = "claude-code/1.0.1";
 const GEMINI_CLI_USER_AGENT: &str = "GeminiCLI/0.1.5 (Windows; AMD64)";
 const CLAUDE_VERSION_HEADER: &str = "2023-06-01";
 const ANTIGRAVITY_FETCH_PROVIDER_API_FORMAT: &str = "antigravity:fetch_available_models";
+const ANTIGRAVITY_LOAD_CODE_ASSIST_PROVIDER_API_FORMAT: &str = "antigravity:load_code_assist";
 const GEMINI_CLI_LOAD_CODE_ASSIST_PROVIDER_API_FORMAT: &str = "gemini_cli:load_code_assist";
 const KIRO_LIST_AVAILABLE_MODELS_PROVIDER_API_FORMAT: &str = "kiro:list_available_models";
 const WINDSURF_MODEL_CONFIGS_PROVIDER_API_FORMAT: &str = "windsurf:model_configs";
@@ -210,6 +212,49 @@ pub async fn build_antigravity_fetch_available_models_plan(
             client_api_format: "gemini:generate_content".to_string(),
             provider_api_format: ANTIGRAVITY_FETCH_PROVIDER_API_FORMAT.to_string(),
             model_name: Some("fetchAvailableModels".to_string()),
+        },
+    )
+    .await
+}
+
+pub async fn build_antigravity_load_code_assist_plan(
+    runtime: &(impl ModelFetchTransportRuntime + ?Sized),
+    transport: &GatewayProviderTransportSnapshot,
+) -> Result<ExecutionPlan, String> {
+    let authorization = resolve_oauth_header_auth(runtime, transport)
+        .await?
+        .ok_or_else(|| {
+            "Antigravity loadCodeAssist requires OAuth authorization header".to_string()
+        })?;
+
+    let mut headers = build_antigravity_static_client_headers(None, None);
+    headers.insert(authorization.0.clone(), authorization.1.clone());
+    headers.insert("content-type".to_string(), "application/json".to_string());
+    headers.insert("accept".to_string(), "application/json".to_string());
+    headers
+        .entry("user-agent".to_string())
+        .or_insert_with(|| ANTIGRAVITY_REQUEST_USER_AGENT.to_string());
+    let protected_headers = vec![authorization.0];
+    headers = apply_fetch_header_rules(transport, headers, &protected_headers)?;
+
+    build_execution_plan(
+        runtime,
+        transport,
+        ModelFetchExecutionPlanRequest {
+            method: "POST".to_string(),
+            url: "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist".to_string(),
+            headers,
+            content_type: Some("application/json".to_string()),
+            body: RequestBody::from_json(json!({
+                "metadata": {
+                    "ideType": "ANTIGRAVITY",
+                    "platform": "PLATFORM_UNSPECIFIED",
+                    "pluginType": "GEMINI",
+                }
+            })),
+            client_api_format: "gemini:generate_content".to_string(),
+            provider_api_format: ANTIGRAVITY_LOAD_CODE_ASSIST_PROVIDER_API_FORMAT.to_string(),
+            model_name: Some("loadCodeAssist".to_string()),
         },
     )
     .await
@@ -678,10 +723,10 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        build_antigravity_fetch_available_models_plan, build_gemini_cli_load_code_assist_plan,
-        build_kiro_list_available_models_plan, build_models_fetch_execution_plan,
-        build_standard_models_fetch_execution_plan, build_vertex_models_fetch_execution_plan,
-        ModelFetchTransportRuntime,
+        build_antigravity_fetch_available_models_plan, build_antigravity_load_code_assist_plan,
+        build_gemini_cli_load_code_assist_plan, build_kiro_list_available_models_plan,
+        build_models_fetch_execution_plan, build_standard_models_fetch_execution_plan,
+        build_vertex_models_fetch_execution_plan, ModelFetchTransportRuntime,
     };
 
     struct TestRuntime {
@@ -1005,6 +1050,65 @@ mod tests {
                 .as_ref()
                 .and_then(|value| value.get("project")),
             Some(&json!("project-1"))
+        );
+        assert_eq!(
+            plan.headers.get("user-agent").map(String::as_str),
+            Some("antigravity")
+        );
+        assert_eq!(
+            plan.headers.get("x-client-name").map(String::as_str),
+            Some("antigravity")
+        );
+        assert_eq!(
+            plan.headers.get("x-goog-api-client").map(String::as_str),
+            Some("gl-node/18.18.2 fire/0.8.6 grpc/1.10.x")
+        );
+        assert_eq!(
+            plan.headers.get("x-client-version").map(String::as_str),
+            Some("1.2.3")
+        );
+        assert_eq!(
+            plan.headers.get("x-vscode-sessionid").map(String::as_str),
+            Some("sess-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn builds_antigravity_load_code_assist_plan_with_cli_headers() {
+        let runtime = TestRuntime {
+            oauth_auth: Some(
+                aether_provider_transport::LocalResolvedOAuthRequestAuth::Header {
+                    name: "authorization".to_string(),
+                    value: "Bearer oauth-token".to_string(),
+                },
+            ),
+            proxy: None,
+        };
+        let transport = sample_transport("antigravity", "gemini:generate_content", "oauth");
+        let plan = build_antigravity_load_code_assist_plan(&runtime, &transport)
+            .await
+            .expect("plan");
+
+        assert_eq!(plan.method, "POST");
+        assert_eq!(
+            plan.url,
+            "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
+        );
+        assert_eq!(
+            plan.headers.get("authorization").map(String::as_str),
+            Some("Bearer oauth-token")
+        );
+        assert_eq!(
+            plan.headers.get("user-agent").map(String::as_str),
+            Some("antigravity")
+        );
+        assert_eq!(
+            plan.headers.get("x-client-name").map(String::as_str),
+            Some("antigravity")
+        );
+        assert_eq!(
+            plan.headers.get("x-goog-api-client").map(String::as_str),
+            Some("gl-node/18.18.2 fire/0.8.6 grpc/1.10.x")
         );
     }
 

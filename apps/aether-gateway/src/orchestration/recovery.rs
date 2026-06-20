@@ -58,9 +58,8 @@ const fn decision_from_classification(
         LocalFailoverClassification::UseDefault => LocalFailoverDecision::UseDefault,
         LocalFailoverClassification::StopStatusCode
         | LocalFailoverClassification::StopErrorPattern
-        | LocalFailoverClassification::StopExecutionError => {
-            LocalFailoverDecision::StopLocalFailover
-        }
+        | LocalFailoverClassification::StopExecutionError
+        | LocalFailoverClassification::StopCyberPolicy => LocalFailoverDecision::StopLocalFailover,
         LocalFailoverClassification::RetrySuccessPattern
         | LocalFailoverClassification::RetryStatusCode
         | LocalFailoverClassification::RetryUpstreamFailure => {
@@ -142,6 +141,24 @@ mod tests {
         assert_eq!(
             analysis.classification,
             LocalFailoverClassification::RetryUpstreamFailure
+        );
+    }
+
+    #[test]
+    fn recovery_stops_cyber_policy_failover() {
+        let policy = LocalFailoverPolicy {
+            stop_cyber_policy_errors: true,
+            ..LocalFailoverPolicy::default()
+        };
+        let analysis = analyze_local_failover(
+            &policy,
+            LocalFailoverInput::new(400, Some(r#"{"error":{"code":"cyber_policy"}}"#)),
+        );
+
+        assert_eq!(analysis.decision, LocalFailoverDecision::StopLocalFailover);
+        assert_eq!(
+            analysis.classification,
+            LocalFailoverClassification::StopCyberPolicy
         );
     }
 }

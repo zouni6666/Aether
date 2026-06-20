@@ -38,9 +38,9 @@ pub(crate) use self::health::{
     project_local_key_circuit_failure, project_local_success_health,
 };
 pub(crate) use self::policy::{
-    append_local_failover_policy_to_value, local_failover_policy_from_report_context,
-    local_failover_policy_from_transport, resolve_local_failover_policy, LocalFailoverPolicy,
-    LocalFailoverRegexRule,
+    append_local_failover_policy_to_value, codex_cyber_flag_passthrough_enabled,
+    local_failover_policy_from_report_context, local_failover_policy_from_transport,
+    resolve_local_failover_policy, LocalFailoverPolicy, LocalFailoverRegexRule,
 };
 pub(crate) use self::recovery::{
     analyze_local_failover, recover_local_failover_decision, LocalFailoverAnalysis,
@@ -95,6 +95,7 @@ pub(crate) fn build_local_error_flow_metadata(
         LocalFailoverClassification::StopStatusCode
             | LocalFailoverClassification::StopErrorPattern
             | LocalFailoverClassification::StopExecutionError
+            | LocalFailoverClassification::StopCyberPolicy
     );
     let propagation = match analysis.decision {
         LocalFailoverDecision::RetryNextCandidate => "suppressed",

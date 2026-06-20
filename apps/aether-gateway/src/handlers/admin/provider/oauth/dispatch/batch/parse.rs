@@ -32,6 +32,8 @@ pub(super) struct AdminProviderOAuthBatchImportEntry {
     pub email: Option<String>,
     pub account_name: Option<String>,
     pub project_id: Option<String>,
+    pub client_version: Option<String>,
+    pub session_id: Option<String>,
     pub sso_rw_token: Option<String>,
     pub cf_cookies: Option<String>,
     pub cf_clearance: Option<String>,
@@ -191,6 +193,8 @@ fn extract_admin_provider_oauth_batch_import_entry(
                     email: None,
                     account_name: None,
                     project_id: None,
+                    client_version: None,
+                    session_id: None,
                     sso_rw_token: grok_cookie_value(raw_token, "sso-rw"),
                     cf_cookies: grok_cookie_profile(raw_token),
                     cf_clearance: grok_cookie_value(raw_token, "cf_clearance"),
@@ -331,6 +335,19 @@ fn extract_admin_provider_oauth_batch_import_entry(
                     .or_else(|| object.get("cloudaicompanionProject"))
                     .or_else(|| object.get("cloudAiCompanionProject")),
             );
+            let client_version = coerce_admin_provider_oauth_import_str(
+                object
+                    .get("client_version")
+                    .or_else(|| object.get("clientVersion"))
+                    .or_else(|| object.get("antigravityClientVersion")),
+            );
+            let session_id = coerce_admin_provider_oauth_import_str(
+                object
+                    .get("session_id")
+                    .or_else(|| object.get("sessionId"))
+                    .or_else(|| object.get("vscode_session_id"))
+                    .or_else(|| object.get("vscodeSessionId")),
+            );
             let sso_rw_token = coerce_admin_provider_oauth_import_str(
                 object
                     .get("sso_rw_token")
@@ -379,6 +396,8 @@ fn extract_admin_provider_oauth_batch_import_entry(
                 email,
                 account_name,
                 project_id,
+                client_version,
+                session_id,
                 sso_rw_token,
                 cf_cookies,
                 cf_clearance,
@@ -470,6 +489,8 @@ fn parse_error_entry(error: String) -> AdminProviderOAuthBatchImportEntry {
         email: None,
         account_name: None,
         project_id: None,
+        client_version: None,
+        session_id: None,
         sso_rw_token: None,
         cf_cookies: None,
         cf_clearance: None,
@@ -499,6 +520,29 @@ pub(super) fn apply_admin_provider_oauth_batch_import_hints(
             auth_config
                 .entry("plan_type".to_string())
                 .or_insert_with(|| json!(plan_type));
+        }
+        return;
+    }
+    if provider_type == "antigravity" {
+        if let Some(project_id) = entry.project_id.as_ref() {
+            auth_config
+                .entry("project_id".to_string())
+                .or_insert_with(|| json!(project_id));
+        }
+        if let Some(client_version) = entry.client_version.as_ref() {
+            auth_config
+                .entry("client_version".to_string())
+                .or_insert_with(|| json!(client_version));
+        }
+        if let Some(session_id) = entry.session_id.as_ref() {
+            auth_config
+                .entry("session_id".to_string())
+                .or_insert_with(|| json!(session_id));
+        }
+        if let Some(user_agent) = entry.user_agent.as_ref() {
+            auth_config
+                .entry("user_agent".to_string())
+                .or_insert_with(|| json!(user_agent));
         }
         return;
     }
@@ -821,6 +865,23 @@ mod tests {
             auth_config.get("project_id"),
             Some(&json!("project-gemini-cli-2"))
         );
+    }
+
+    #[test]
+    fn applies_antigravity_project_and_user_agent_hints_to_auth_config() {
+        let entries = parse_admin_provider_oauth_batch_import_entries(
+            "antigravity",
+            r#"{"refreshToken":"rt-1","cloudaicompanionProject":{"id":"project-antigravity-2"},"userAgent":"antigravity"}"#,
+        );
+        let mut auth_config = serde_json::Map::new();
+
+        apply_admin_provider_oauth_batch_import_hints("antigravity", &entries[0], &mut auth_config);
+
+        assert_eq!(
+            auth_config.get("project_id"),
+            Some(&json!("project-antigravity-2"))
+        );
+        assert_eq!(auth_config.get("user_agent"), Some(&json!("antigravity")));
     }
 
     #[test]

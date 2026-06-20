@@ -13,8 +13,9 @@ use aether_data_contracts::repository::provider_catalog::{
 };
 use aether_data_contracts::repository::quota::StoredProviderQuotaSnapshot;
 use aether_model_fetch::{
-    aggregate_models_for_cache, fetch_models_from_transports, merge_upstream_metadata,
-    model_fetch_interval_minutes, ModelFetchAssociationStore, ModelFetchTransportRuntime,
+    aggregate_models_for_cache, build_antigravity_load_code_assist_plan,
+    fetch_models_from_transports, merge_upstream_metadata, model_fetch_interval_minutes,
+    ModelFetchAssociationStore, ModelFetchTransportRuntime,
 };
 use aether_scheduler_core::SchedulerAffinityTarget;
 use async_trait::async_trait;
@@ -33,6 +34,109 @@ use crate::scheduler::state::SchedulerRuntimeState;
 use crate::{execution_runtime, provider_transport};
 
 impl AppState {
+    pub(crate) async fn hydrate_antigravity_project_metadata_for_transport(
+        &self,
+        transport: &GatewayProviderTransportSnapshot,
+    ) -> Option<GatewayProviderTransportSnapshot> {
+        if !provider_transport::antigravity::is_antigravity_provider_transport(transport) {
+            return None;
+        }
+        if matches!(
+            provider_transport::antigravity::resolve_local_antigravity_request_auth(transport),
+            provider_transport::antigravity::AntigravityRequestAuthSupport::Supported(_)
+        ) {
+            return Some(transport.clone());
+        }
+
+        let plan = match build_antigravity_load_code_assist_plan(self, transport).await {
+            Ok(plan) => plan,
+            Err(err) => {
+                warn!(
+                    provider_id = %transport.provider.id,
+                    endpoint_id = %transport.endpoint.id,
+                    key_id = %transport.key.id,
+                    error = %err,
+                    "antigravity project metadata hydration failed"
+                );
+                return None;
+            }
+        };
+        let result =
+            match execution_runtime::execute_execution_runtime_sync_plan(self, None, &plan).await {
+                Ok(result) => result,
+                Err(err) => {
+                    warn!(
+                        provider_id = %transport.provider.id,
+                        endpoint_id = %transport.endpoint.id,
+                        key_id = %transport.key.id,
+                        error = ?err,
+                        "antigravity project metadata hydration request failed"
+                    );
+                    return None;
+                }
+            };
+        if !(200..300).contains(&result.status_code) {
+            warn!(
+                provider_id = %transport.provider.id,
+                endpoint_id = %transport.endpoint.id,
+                key_id = %transport.key.id,
+                status_code = result.status_code,
+                "antigravity project metadata hydration returned non-success status"
+            );
+            return None;
+        }
+        let Some(project_id) = result
+            .body
+            .as_ref()
+            .and_then(|body| body.json_body.as_ref())
+            .and_then(extract_antigravity_load_code_assist_project_id)
+        else {
+            warn!(
+                provider_id = %transport.provider.id,
+                endpoint_id = %transport.endpoint.id,
+                key_id = %transport.key.id,
+                "antigravity project metadata hydration response missing project"
+            );
+            return None;
+        };
+        let upstream_metadata = serde_json::json!({
+            "antigravity": {
+                "project_id": project_id,
+                "updated_at": current_unix_secs(),
+            }
+        });
+        let merged_metadata =
+            merge_upstream_metadata(transport.key.upstream_metadata.as_ref(), &upstream_metadata);
+
+        let mut hydrated = transport.clone();
+        hydrated.key.upstream_metadata = Some(merged_metadata.clone());
+        if !matches!(
+            provider_transport::antigravity::resolve_local_antigravity_request_auth(&hydrated),
+            provider_transport::antigravity::AntigravityRequestAuthSupport::Supported(_)
+        ) {
+            return None;
+        }
+
+        if let Err(err) = self
+            .update_provider_catalog_key_upstream_metadata(
+                &transport.key.id,
+                Some(&merged_metadata),
+                Some(current_unix_secs()),
+            )
+            .await
+        {
+            warn!(
+                provider_id = %transport.provider.id,
+                endpoint_id = %transport.endpoint.id,
+                key_id = %transport.key.id,
+                error = ?err,
+                "antigravity project metadata hydration could not persist metadata"
+            );
+        }
+
+        Some(hydrated)
+    }
+
     pub(crate) async fn hydrate_gemini_cli_project_metadata_for_transport(
         &self,
         transport: &GatewayProviderTransportSnapshot,
@@ -87,6 +191,30 @@ impl AppState {
 
         Some(hydrated)
     }
+}
+
+fn extract_antigravity_load_code_assist_project_id(value: &Value) -> Option<String> {
+    let raw = value
+        .get("cloudaicompanionProject")
+        .or_else(|| value.get("cloudAiCompanionProject"))?;
+    if let Some(project_id) = raw
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(project_id.to_string());
+    }
+    raw.as_object()
+        .and_then(|object| {
+            object
+                .get("id")
+                .or_else(|| object.get("project_id"))
+                .or_else(|| object.get("projectId"))
+        })
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 #[async_trait]

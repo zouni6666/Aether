@@ -384,8 +384,8 @@ const VERTEX_AI_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTe
 
 const ANTIGRAVITY_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplate {
     provider_type: "antigravity",
-    version: 1,
-    base_url: "https://cloudcode-pa.googleapis.com",
+    version: 2,
+    base_url: "https://daily-cloudcode-pa.googleapis.com",
     endpoints: &[FixedProviderEndpointTemplate {
         item_key: "gemini:generate_content",
         api_format: "gemini:generate_content",
@@ -748,6 +748,24 @@ mod tests {
                 FixedProviderEndpointConfigValue::String("auto")
             )]
         );
+    }
+
+    #[test]
+    fn antigravity_fixed_provider_template_uses_daily_cloudcode_endpoint() {
+        let template =
+            fixed_provider_template("antigravity").expect("antigravity template should exist");
+        assert_eq!(
+            template.base_url,
+            "https://daily-cloudcode-pa.googleapis.com"
+        );
+        assert_eq!(template.version, 2);
+
+        let endpoint = fixed_provider_endpoint_template_by_api_format(
+            "antigravity",
+            "gemini:generate_content",
+        )
+        .expect("antigravity generateContent endpoint should exist");
+        assert_eq!(endpoint.custom_path, None);
     }
 
     #[test]

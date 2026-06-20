@@ -1254,6 +1254,19 @@ const breadcrumbs = computed((): BreadcrumbItem[] => {
     ]
   }
 
+  // Special case: routing strategy detail pages
+  if (route.path.startsWith('/admin/routing/') && route.path !== '/admin/routing') {
+    return [
+      { label: '管理' },
+      { label: '调度策略', href: '/admin/routing' },
+      {
+        label: route.name === 'RoutingProfileCreate'
+          ? '新建调度策略'
+          : '调度策略配置'
+      }
+    ]
+  }
+
   // Find section and page from navigation
   for (const group of navigation.value) {
     const activeItem = group.items.find(item => isNavActive(item.href))

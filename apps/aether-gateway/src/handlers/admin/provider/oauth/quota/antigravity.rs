@@ -68,7 +68,7 @@ pub(crate) async fn refresh_antigravity_provider_quota_locally(
     let mut auto_removed_count = 0usize;
 
     for key in keys {
-        let transport = match state
+        let mut transport = match state
             .read_provider_transport_snapshot(&provider.id, &endpoint.id, &key.id)
             .await?
         {
@@ -104,15 +104,25 @@ pub(crate) async fn refresh_antigravity_provider_quota_locally(
             }
         };
 
-        let Some((project_id, identity_headers)) =
-            state.resolve_local_antigravity_identity_headers(&transport)
-        else {
+        let identity = match state.resolve_local_antigravity_identity_headers(&transport) {
+            Some(identity) => Some(identity),
+            None => state
+                .app()
+                .hydrate_antigravity_project_metadata_for_transport(&transport)
+                .await
+                .and_then(|hydrated| {
+                    let identity = state.resolve_local_antigravity_identity_headers(&hydrated);
+                    transport = hydrated;
+                    identity
+                }),
+        };
+        let Some((project_id, identity_headers)) = identity else {
             failed_count += 1;
             results.push(json!({
                 "key_id": key.id,
                 "key_name": key.name,
                 "status": "error",
-                "message": "缺少 OAuth 认证信息，请先授权/刷新 Token",
+                "message": "缺少 Antigravity project_id，loadCodeAssist 未返回可用项目信息",
             }));
             continue;
         };

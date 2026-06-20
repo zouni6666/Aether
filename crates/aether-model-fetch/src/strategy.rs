@@ -2,6 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_contracts::{ExecutionPlan, ExecutionResult, RequestBody};
+use aether_provider_transport::antigravity::{
+    resolve_local_antigravity_request_auth, AntigravityRequestAuthSupport,
+};
 use aether_provider_transport::{
     is_vertex_api_key_transport_context, resolve_transport_execution_timeouts,
     resolve_transport_profile, GatewayProviderTransportSnapshot,
@@ -21,10 +24,10 @@ use crate::logic::{
     parse_windsurf_model_configs_response, preset_models_for_provider,
 };
 use crate::transport::{
-    build_antigravity_fetch_available_models_plan, build_gemini_cli_load_code_assist_plan,
-    build_kiro_list_available_models_plan, build_standard_models_fetch_execution_plan,
-    build_vertex_models_fetch_execution_plan, build_windsurf_model_configs_execution_plan,
-    ModelFetchTransportRuntime,
+    build_antigravity_fetch_available_models_plan, build_antigravity_load_code_assist_plan,
+    build_gemini_cli_load_code_assist_plan, build_kiro_list_available_models_plan,
+    build_standard_models_fetch_execution_plan, build_vertex_models_fetch_execution_plan,
+    build_windsurf_model_configs_execution_plan, ModelFetchTransportRuntime,
 };
 
 const ANTIGRAVITY_SANDBOX_BASE_URL: &str = "https://daily-cloudcode-pa.sandbox.googleapis.com";
@@ -261,25 +264,18 @@ async fn fetch_antigravity_models(
     runtime: &(impl ModelFetchTransportRuntime + ?Sized),
     transport: &GatewayProviderTransportSnapshot,
 ) -> Result<ModelsFetchOutcome, String> {
-    let auth_config = transport_auth_config(transport);
-    let project_id = auth_config
-        .as_ref()
-        .and_then(|value| value.get("project_id"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| "antigravity: missing auth_config.project_id (please re-auth)".to_string())?
-        .to_string();
+    let (project_id, hydrated_transport, project_metadata) =
+        resolve_or_hydrate_antigravity_project(runtime, transport).await?;
 
     let mut errors = Vec::new();
     for base_url in [
-        ANTIGRAVITY_SANDBOX_BASE_URL,
         ANTIGRAVITY_DAILY_BASE_URL,
         ANTIGRAVITY_PROD_BASE_URL,
+        ANTIGRAVITY_SANDBOX_BASE_URL,
     ] {
         let plan = match build_antigravity_fetch_available_models_plan(
             runtime,
-            transport,
+            &hydrated_transport,
             base_url,
             &project_id,
         )
@@ -300,6 +296,9 @@ async fn fetch_antigravity_models(
         if (200..300).contains(&result.status_code) {
             let body_json = execution_result_json_body_allow_empty(&result)?;
             let (models, metadata) = parse_antigravity_models_response(&body_json)?;
+            let metadata = metadata
+                .map(|metadata| attach_antigravity_project_metadata(metadata, &project_id))
+                .or(project_metadata.clone());
             return Ok(build_success_outcome(models, metadata, true));
         }
 
@@ -318,6 +317,74 @@ async fn fetch_antigravity_models(
         has_success: false,
         upstream_metadata: None,
     })
+}
+
+async fn resolve_or_hydrate_antigravity_project(
+    runtime: &(impl ModelFetchTransportRuntime + ?Sized),
+    transport: &GatewayProviderTransportSnapshot,
+) -> Result<(String, GatewayProviderTransportSnapshot, Option<Value>), String> {
+    if let Some(project_id) = resolve_antigravity_project_id_from_transport(transport) {
+        let metadata = Some(build_antigravity_project_metadata(&project_id));
+        return Ok((project_id, transport.clone(), metadata));
+    }
+
+    let plan = build_antigravity_load_code_assist_plan(runtime, transport).await?;
+    let result = runtime.execute_model_fetch_execution_plan(&plan).await?;
+    if !(200..300).contains(&result.status_code) {
+        return Err(format!(
+            "antigravity: loadCodeAssist failed: {}",
+            execution_result_error_message(&result)
+        ));
+    }
+    let body_json = execution_result_json_body_allow_empty(&result)?;
+    let project_id = extract_cloud_ai_companion_project_id(&body_json)
+        .ok_or_else(|| "antigravity: loadCodeAssist response missing project_id".to_string())?;
+    let metadata = build_antigravity_project_metadata(&project_id);
+    let mut hydrated_transport = transport.clone();
+    hydrated_transport.key.upstream_metadata = Some(metadata.clone());
+
+    Ok((project_id, hydrated_transport, Some(metadata)))
+}
+
+fn resolve_antigravity_project_id_from_transport(
+    transport: &GatewayProviderTransportSnapshot,
+) -> Option<String> {
+    match resolve_local_antigravity_request_auth(transport) {
+        AntigravityRequestAuthSupport::Supported(auth) => Some(auth.project_id),
+        AntigravityRequestAuthSupport::Unsupported(_) => None,
+    }
+}
+
+fn build_antigravity_project_metadata(project_id: &str) -> Value {
+    json!({
+        "antigravity": {
+            "project_id": project_id,
+            "updated_at": now_unix_secs(),
+        }
+    })
+}
+
+fn attach_antigravity_project_metadata(mut metadata: Value, project_id: &str) -> Value {
+    let Value::Object(root) = &mut metadata else {
+        return build_antigravity_project_metadata(project_id);
+    };
+    let antigravity = root
+        .entry("antigravity".to_string())
+        .or_insert_with(|| json!({}));
+    let Some(object) = antigravity.as_object_mut() else {
+        *antigravity = json!({
+            "project_id": project_id,
+            "updated_at": now_unix_secs(),
+        });
+        return metadata;
+    };
+    object
+        .entry("project_id".to_string())
+        .or_insert_with(|| Value::String(project_id.to_string()));
+    object
+        .entry("updated_at".to_string())
+        .or_insert_with(|| Value::from(now_unix_secs()));
+    metadata
 }
 
 async fn fetch_gemini_cli_models(
@@ -340,8 +407,8 @@ async fn fetch_gemini_cli_models(
                             provider_meta.insert(key.to_string(), value);
                         }
                     }
-                    if let Some(project_id) =
-                        extract_gemini_cli_project_id(&body_json).or_else(|| {
+                    if let Some(project_id) = extract_cloud_ai_companion_project_id(&body_json)
+                        .or_else(|| {
                             transport_auth_config(transport)
                                 .and_then(|value| value.get("project_id").cloned())
                                 .and_then(|value| value.as_str().map(ToOwned::to_owned))
@@ -1300,8 +1367,10 @@ fn extract_gemini_cli_tier_metadata(body: &Value, key: &str) -> Option<Value> {
     (!out.is_empty()).then_some(Value::Object(out))
 }
 
-fn extract_gemini_cli_project_id(body: &Value) -> Option<String> {
-    let raw = body.get("cloudaicompanionProject")?;
+fn extract_cloud_ai_companion_project_id(body: &Value) -> Option<String> {
+    let raw = body
+        .get("cloudaicompanionProject")
+        .or_else(|| body.get("cloudAiCompanionProject"))?;
     if let Some(value) = raw.as_str() {
         let value = value.trim();
         if !value.is_empty() {
@@ -1368,6 +1437,11 @@ mod tests {
         routes: Vec<ModelFetchRoute>,
     }
 
+    struct OAuthRoutingTestRuntime {
+        executed_urls: Arc<Mutex<Vec<String>>>,
+        routes: Vec<ModelFetchRoute>,
+    }
+
     #[async_trait]
     impl ModelFetchTransportRuntime for TestRuntime {
         async fn resolve_local_oauth_request_auth(
@@ -1416,6 +1490,62 @@ mod tests {
         ) -> Result<Option<aether_provider_transport::LocalResolvedOAuthRequestAuth>, String>
         {
             Ok(None)
+        }
+
+        async fn resolve_model_fetch_proxy(
+            &self,
+            _transport: &GatewayProviderTransportSnapshot,
+        ) -> Option<aether_contracts::ProxySnapshot> {
+            None
+        }
+
+        async fn execute_model_fetch_execution_plan(
+            &self,
+            plan: &aether_contracts::ExecutionPlan,
+        ) -> Result<ExecutionResult, String> {
+            self.executed_urls
+                .lock()
+                .expect("executed_urls lock")
+                .push(plan.url.clone());
+            let Some((_, route_result)) = self
+                .routes
+                .iter()
+                .find(|(url_part, _)| plan.url.contains(url_part))
+            else {
+                return Err(format!("unexpected models fetch URL {}", plan.url));
+            };
+            let (status_code, response_body) = match route_result {
+                Ok((status_code, response_body)) => (*status_code, response_body.clone()),
+                Err(err) => return Err(err.clone()),
+            };
+            Ok(ExecutionResult {
+                request_id: plan.request_id.clone(),
+                candidate_id: plan.candidate_id.clone(),
+                status_code,
+                headers: BTreeMap::new(),
+                body: Some(ResponseBody {
+                    json_body: Some(response_body),
+                    body_bytes_b64: None,
+                }),
+                telemetry: None,
+                error: None,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl ModelFetchTransportRuntime for OAuthRoutingTestRuntime {
+        async fn resolve_local_oauth_request_auth(
+            &self,
+            _transport: &GatewayProviderTransportSnapshot,
+        ) -> Result<Option<aether_provider_transport::LocalResolvedOAuthRequestAuth>, String>
+        {
+            Ok(Some(
+                aether_provider_transport::LocalResolvedOAuthRequestAuth::Header {
+                    name: "authorization".to_string(),
+                    value: "Bearer oauth-token".to_string(),
+                },
+            ))
         }
 
         async fn resolve_model_fetch_proxy(
@@ -1562,6 +1692,18 @@ mod tests {
         transport.endpoint.base_url = "https://cloudcode-pa.googleapis.com".to_string();
         transport.key.auth_type = "bearer".to_string();
         transport.key.decrypted_api_key = "gemini-cli-access-token".to_string();
+        transport
+    }
+
+    fn sample_antigravity_transport_without_project() -> GatewayProviderTransportSnapshot {
+        let mut transport = sample_custom_aiplatform_transport();
+        transport.provider.provider_type = "antigravity".to_string();
+        transport.provider.name = "Antigravity".to_string();
+        transport.endpoint.base_url = "https://daily-cloudcode-pa.googleapis.com".to_string();
+        transport.key.auth_type = "oauth".to_string();
+        transport.key.decrypted_api_key = "__placeholder__".to_string();
+        transport.key.decrypted_auth_config =
+            Some(r#"{"provider_type":"antigravity","refresh_token":"rt"}"#.to_string());
         transport
     }
 
@@ -1931,6 +2073,77 @@ mod tests {
             .as_ref()
             .and_then(|value| value.pointer("/gemini_cli/paidTier/privateField"))
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn antigravity_model_fetch_hydrates_project_from_daily_load_code_assist() {
+        let executed_urls = Arc::new(Mutex::new(Vec::new()));
+        let runtime = OAuthRoutingTestRuntime {
+            executed_urls: Arc::clone(&executed_urls),
+            routes: vec![
+                (
+                    "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
+                        .to_string(),
+                    Ok((
+                        200,
+                        json!({
+                            "cloudaicompanionProject": {
+                                "id": "project-from-antigravity-load"
+                            }
+                        }),
+                    )),
+                ),
+                (
+                    "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels"
+                        .to_string(),
+                    Ok((
+                        200,
+                        json!({
+                            "models": {
+                                "chat_12345": {
+                                    "displayName": "Antigravity Chat",
+                                    "quotaInfo": {
+                                        "remainingFraction": 0.75
+                                    }
+                                }
+                            }
+                        }),
+                    )),
+                ),
+            ],
+        };
+
+        let outcome = fetch_models_from_transports(
+            &runtime,
+            &[sample_antigravity_transport_without_project()],
+        )
+        .await
+        .expect("antigravity models fetch should hydrate project and succeed");
+
+        let urls = executed_urls.lock().expect("executed_urls lock");
+        assert_eq!(
+            urls.as_slice(),
+            &[
+                "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
+                "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels",
+            ]
+        );
+        assert_eq!(outcome.fetched_model_ids, vec!["chat_12345"]);
+        assert_eq!(
+            outcome
+                .upstream_metadata
+                .as_ref()
+                .and_then(|value| value.pointer("/antigravity/project_id")),
+            Some(&json!("project-from-antigravity-load"))
+        );
+        assert_eq!(
+            outcome
+                .upstream_metadata
+                .as_ref()
+                .and_then(|value| value
+                    .pointer("/antigravity/quota_by_model/chat_12345/remaining_fraction")),
+            Some(&json!(0.75))
+        );
     }
 
     #[tokio::test]

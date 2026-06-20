@@ -14,6 +14,7 @@ pub(crate) struct LocalFailoverPolicy {
     pub(crate) continue_status_codes: BTreeSet<u16>,
     pub(crate) success_failover_patterns: Vec<LocalFailoverRegexRule>,
     pub(crate) error_stop_patterns: Vec<LocalFailoverRegexRule>,
+    pub(crate) stop_cyber_policy_errors: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,27 +26,8 @@ pub(crate) struct LocalFailoverRegexRule {
 pub(crate) async fn resolve_local_failover_policy(
     state: &AppState,
     plan: &ExecutionPlan,
-    report_context: Option<&serde_json::Value>,
+    _report_context: Option<&serde_json::Value>,
 ) -> LocalFailoverPolicy {
-    if let Some(policy) = local_failover_policy_from_report_context(report_context) {
-        debug!(
-            event_name = "local_failover_policy_loaded",
-            log_type = "debug",
-            request_id = %plan.request_id,
-            provider_id = %plan.provider_id,
-            endpoint_id = %plan.endpoint_id,
-            key_id = %plan.key_id,
-            source = "report_context",
-            max_retries = ?policy.max_retries,
-            stop_status_code_count = policy.stop_status_codes.len(),
-            continue_status_code_count = policy.continue_status_codes.len(),
-            success_failover_pattern_count = policy.success_failover_patterns.len(),
-            error_stop_pattern_count = policy.error_stop_patterns.len(),
-            "gateway loaded local failover policy from report context"
-        );
-        return policy;
-    }
-
     let transport = match state
         .read_provider_transport_snapshot(&plan.provider_id, &plan.endpoint_id, &plan.key_id)
         .await
@@ -99,6 +81,10 @@ pub(crate) fn local_failover_policy_from_transport(
 
     LocalFailoverPolicy {
         max_retries,
+        stop_cyber_policy_errors: codex_cyber_flag_passthrough_enabled(
+            &transport.provider.provider_type,
+            transport.provider.config.as_ref(),
+        ),
         stop_status_codes: rules
             .map(|value| {
                 parse_status_code_set(
@@ -154,6 +140,10 @@ pub(crate) fn local_failover_policy_from_report_context(
             .unwrap_or_default(),
         success_failover_patterns: parse_regex_rules(object, "success_failover_patterns"),
         error_stop_patterns: parse_regex_rules(object, "error_stop_patterns"),
+        stop_cyber_policy_errors: object
+            .get("stop_cyber_policy_errors")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     })
 }
 
@@ -187,7 +177,27 @@ fn local_failover_policy_to_value(policy: &LocalFailoverPolicy) -> Value {
         "continue_status_codes": policy.continue_status_codes.iter().copied().collect::<Vec<_>>(),
         "success_failover_patterns": policy.success_failover_patterns.iter().map(local_failover_regex_rule_to_value).collect::<Vec<_>>(),
         "error_stop_patterns": policy.error_stop_patterns.iter().map(local_failover_regex_rule_to_value).collect::<Vec<_>>(),
+        "stop_cyber_policy_errors": policy.stop_cyber_policy_errors,
     })
+}
+
+pub(crate) fn codex_cyber_flag_passthrough_enabled(
+    provider_type: &str,
+    provider_config: Option<&Value>,
+) -> bool {
+    if !provider_type.trim().eq_ignore_ascii_case("codex") {
+        return false;
+    }
+    provider_config
+        .and_then(|config| config.get("codex"))
+        .and_then(Value::as_object)
+        .and_then(|codex| {
+            codex
+                .get("pass_through_cyber_flag_interrupt")
+                .or_else(|| codex.get("passthrough_cyber_flag_interrupt"))
+                .and_then(Value::as_bool)
+        })
+        .unwrap_or(true)
 }
 
 fn local_failover_regex_rule_to_value(rule: &LocalFailoverRegexRule) -> Value {
@@ -201,31 +211,39 @@ fn parse_regex_rules(
     rules: &serde_json::Map<String, serde_json::Value>,
     key: &str,
 ) -> Vec<LocalFailoverRegexRule> {
+    let allow_status_only = key == "error_stop_patterns";
     rules
         .get(key)
         .and_then(Value::as_array)
         .into_iter()
         .flat_map(|items| items.iter())
-        .filter_map(parse_regex_rule)
+        .filter_map(|value| parse_regex_rule(value, allow_status_only))
         .collect()
 }
 
-fn parse_regex_rule(value: &serde_json::Value) -> Option<LocalFailoverRegexRule> {
+fn parse_regex_rule(
+    value: &serde_json::Value,
+    allow_status_only: bool,
+) -> Option<LocalFailoverRegexRule> {
     let object = value.as_object()?;
     let pattern = object
         .get("pattern")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty())?;
+        .unwrap_or_default();
+    let status_codes: BTreeSet<u16> = object
+        .get("status_codes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flat_map(|values| values.iter())
+        .filter_map(|value| parse_u64_value(value).and_then(|value| u16::try_from(value).ok()))
+        .collect();
+    if pattern.is_empty() && (!allow_status_only || status_codes.is_empty()) {
+        return None;
+    }
     Some(LocalFailoverRegexRule {
         pattern: pattern.to_string(),
-        status_codes: object
-            .get("status_codes")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flat_map(|values| values.iter())
-            .filter_map(|value| parse_u64_value(value).and_then(|value| u16::try_from(value).ok()))
-            .collect(),
+        status_codes,
     })
 }
 
@@ -253,7 +271,7 @@ mod tests {
 
     use super::{
         append_local_failover_policy_to_value, local_failover_policy_from_report_context,
-        LocalFailoverPolicy, LocalFailoverRegexRule,
+        local_failover_policy_from_transport, LocalFailoverPolicy, LocalFailoverRegexRule,
     };
     use crate::provider_transport::snapshot::{
         GatewayProviderTransportEndpoint, GatewayProviderTransportKey,
@@ -356,7 +374,28 @@ mod tests {
                     pattern: "validation".to_string(),
                     status_codes: [422].into_iter().collect(),
                 }],
+                stop_cyber_policy_errors: false,
             })
         );
+    }
+
+    #[test]
+    fn codex_cyber_policy_passthrough_defaults_on_and_can_be_disabled() {
+        let mut transport = sample_transport(None, None, None);
+        transport.provider.provider_type = "codex".to_string();
+        assert!(local_failover_policy_from_transport(&transport).stop_cyber_policy_errors);
+
+        transport.provider.config = Some(json!({
+            "codex": {"pass_through_cyber_flag_interrupt": false}
+        }));
+        assert!(!local_failover_policy_from_transport(&transport).stop_cyber_policy_errors);
+
+        transport.provider.config = Some(json!({
+            "codex": {"passthrough_cyber_flag_interrupt": true}
+        }));
+        assert!(local_failover_policy_from_transport(&transport).stop_cyber_policy_errors);
+
+        transport.provider.provider_type = "llm".to_string();
+        assert!(!local_failover_policy_from_transport(&transport).stop_cyber_policy_errors);
     }
 }

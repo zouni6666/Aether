@@ -1,14 +1,12 @@
 <template>
   <PageContainer>
-    <PageHeader
-      title="调度策略"
-      description="管理调度分组、模型范围、默认调度模式和规则配置"
-    />
-
-    <div class="mt-6 grid gap-5 xl:grid-cols-[320px_minmax(0,1fr)]">
-      <Card class="overflow-hidden">
-        <div class="border-b border-border/60 px-5 py-4">
-          <div class="flex items-center justify-between gap-3">
+    <section
+      v-if="!isDetailView"
+      class="mt-6"
+    >
+      <TableCard class="overflow-hidden">
+        <template #header>
+          <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <h2 class="text-sm font-semibold">
                 策略分组
@@ -20,133 +18,172 @@
             <Button
               variant="ghost"
               size="icon"
-              class="h-8 w-8 text-muted-foreground/70 hover:text-foreground"
+              class="h-8 w-8"
               :disabled="loading"
-              aria-label="添加策略"
-              title="添加策略"
-              @click="startCreate"
+              aria-label="新建策略"
+              title="新建策略"
+              @click="goToCreate"
             >
               <Plus class="h-4 w-4" />
             </Button>
           </div>
-        </div>
+        </template>
+        <div>
+          <Table class="hidden lg:table">
+            <TableHeader>
+              <TableRow>
+                <TableHead class="w-[28%]">
+                  策略分组
+                </TableHead>
+                <TableHead class="w-[120px]">
+                  状态
+                </TableHead>
+                <TableHead class="w-[120px]">
+                  维度
+                </TableHead>
+                <TableHead class="w-[140px]">
+                  模型范围
+                </TableHead>
+                <TableHead class="w-[140px]">
+                  默认策略
+                </TableHead>
+                <TableHead class="w-[180px]">
+                  更新时间
+                </TableHead>
+                <TableHead class="w-[80px] text-right">
+                  操作
+                </TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              <TableRow v-if="loading">
+                <TableCell
+                  colspan="7"
+                  class="py-10 text-center text-sm text-muted-foreground"
+                >
+                  正在加载调度策略
+                </TableCell>
+              </TableRow>
+              <TableRow v-else-if="groups.length === 0">
+                <TableCell
+                  colspan="7"
+                  class="py-10 text-center text-sm text-muted-foreground"
+                >
+                  暂无调度策略，可以先创建一个默认分组
+                </TableCell>
+              </TableRow>
+              <TableRow
+                v-for="group in groups"
+                v-else
+                :key="group.id"
+                class="cursor-pointer hover:bg-muted/50"
+                @click="openGroup(group)"
+              >
+                <TableCell>
+                  <div class="min-w-0">
+                    <div class="flex items-center gap-2">
+                      <span class="truncate font-medium">{{ group.name }}</span>
+                      <Badge
+                        v-if="group.is_system_default"
+                        variant="secondary"
+                        class="shrink-0"
+                      >
+                        系统默认
+                      </Badge>
+                    </div>
+                    <p class="mt-1 line-clamp-1 text-xs text-muted-foreground">
+                      {{ group.description || '未填写描述' }}
+                    </p>
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <Badge :variant="group.enabled ? 'default' : 'secondary'">
+                    {{ group.enabled ? '启用' : '停用' }}
+                  </Badge>
+                </TableCell>
+                <TableCell>
+                  {{ groupSortingScopeLabel(group) }}
+                </TableCell>
+                <TableCell>
+                  {{ groupModelScopeLabel(group) }}
+                </TableCell>
+                <TableCell>
+                  {{ groupSchedulingSummary(group) }}
+                </TableCell>
+                <TableCell class="text-muted-foreground">
+                  {{ formatUnixSeconds(group.updated_at) }}
+                </TableCell>
+                <TableCell class="text-right">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    class="h-8 w-8"
+                    title="配置策略"
+                    @click.stop="openGroup(group)"
+                  >
+                    <ChevronRight class="h-4 w-4" />
+                  </Button>
+                </TableCell>
+              </TableRow>
+            </TableBody>
+          </Table>
 
-        <div class="max-h-[calc(100vh-18rem)] overflow-y-auto p-3">
           <div
             v-if="loading"
-            class="py-10 text-center text-sm text-muted-foreground"
+            class="py-10 text-center text-sm text-muted-foreground lg:hidden"
           >
             正在加载调度策略
           </div>
           <div
-            v-else
-            class="space-y-2"
+            v-else-if="groups.length === 0"
+            class="px-4 py-10 text-center text-sm text-muted-foreground lg:hidden"
           >
-            <div
-              v-if="groups.length === 0 && !isCreating"
-              class="rounded-lg border border-dashed border-border/70 px-4 py-8 text-center"
-            >
-              <p class="text-sm font-medium">
-                暂无调度策略
-              </p>
-              <p class="mt-1 text-xs text-muted-foreground">
-                可以先创建一个默认分组
-              </p>
-            </div>
-
-            <div
-              v-if="isCreating && draft"
-              class="rounded-lg border border-primary/60 bg-primary/10 px-4 py-2.5 text-left"
-            >
-              <div class="flex items-start justify-between gap-3">
-                <div class="min-w-0">
-                  <p class="truncate text-sm font-medium">
-                    {{ draft.name || '新调度策略' }}
-                  </p>
-                  <p class="mt-1 line-clamp-2 text-xs text-muted-foreground">
-                    {{ draft.description || '未填写描述' }}
-                  </p>
-                </div>
-                <div class="shrink-0">
-                  <Badge :variant="draft.enabled ? 'default' : 'secondary'">
-                    {{ draft.enabled ? '启用' : '停用' }}
-                  </Badge>
-                </div>
-              </div>
-              <div class="mt-1.5 flex items-end justify-between gap-3">
-                <div class="flex min-w-0 flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                  <span v-if="draft.is_system_default">系统默认</span>
-                  <span>{{ draft.config_json.allowed_models.length || '全部' }} 模型范围</span>
-                </div>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  class="h-8 w-8 shrink-0"
-                  :class="draft.enabled
-                    ? 'text-primary hover:text-primary'
-                    : 'text-muted-foreground/70 hover:text-foreground'"
-                  :aria-label="draft.enabled ? '停用策略' : '启用策略'"
-                  :title="draft.enabled ? '已启用，点击停用' : '已停用，点击启用'"
-                  @click="setDraftEnabled(!draft.enabled)"
-                >
-                  <Power class="h-4 w-4" />
-                </Button>
-              </div>
-            </div>
-
-            <div
+            暂无调度策略，可以先创建一个默认分组
+          </div>
+          <div
+            v-else
+            class="divide-y divide-border/40 lg:hidden"
+          >
+            <button
               v-for="group in groups"
               :key="group.id"
-              role="button"
-              tabindex="0"
-              class="w-full rounded-lg border px-4 py-2.5 text-left transition-colors"
-              :class="group.id === selectedGroupId
-                ? 'border-primary/60 bg-primary/10'
-                : 'border-border/60 bg-background hover:border-primary/40 hover:bg-muted/50'"
-              @click="selectGroup(group)"
-              @keydown.enter.prevent="selectGroup(group)"
-              @keydown.space.prevent="selectGroup(group)"
+              type="button"
+              class="flex w-full items-start justify-between gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/50"
+              @click="openGroup(group)"
             >
-              <div class="flex items-start justify-between gap-3">
-                <div class="min-w-0">
-                  <p class="truncate text-sm font-medium">
-                    {{ group.name }}
-                  </p>
-                  <p class="mt-1 line-clamp-2 text-xs text-muted-foreground">
-                    {{ group.description || '未填写描述' }}
-                  </p>
-                </div>
-                <div class="shrink-0">
-                  <Badge :variant="displayGroupEnabled(group) ? 'default' : 'secondary'">
-                    {{ displayGroupEnabled(group) ? '启用' : '停用' }}
+              <div class="min-w-0 flex-1">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="truncate text-sm font-medium">{{ group.name }}</span>
+                  <Badge :variant="group.enabled ? 'default' : 'secondary'">
+                    {{ group.enabled ? '启用' : '停用' }}
+                  </Badge>
+                  <Badge
+                    v-if="group.is_system_default"
+                    variant="secondary"
+                  >
+                    系统默认
                   </Badge>
                 </div>
-              </div>
-              <div class="mt-1.5 flex items-end justify-between gap-3">
-                <div class="flex min-w-0 flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                  <span v-if="group.is_system_default">系统默认</span>
-                  <span>{{ group.config_json.allowed_models.length || '全部' }} 模型范围</span>
+                <p class="mt-1 line-clamp-2 text-xs text-muted-foreground">
+                  {{ group.description || '未填写描述' }}
+                </p>
+                <div class="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                  <span>{{ groupSortingScopeLabel(group) }}</span>
+                  <span>{{ groupModelScopeLabel(group) }}</span>
+                  <span>{{ groupSchedulingSummary(group) }}</span>
                 </div>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  class="h-8 w-8 shrink-0"
-                  :class="displayGroupEnabled(group)
-                    ? 'text-primary hover:text-primary'
-                    : 'text-muted-foreground/70 hover:text-foreground'"
-                  :aria-label="displayGroupEnabled(group) ? '停用策略' : '启用策略'"
-                  :title="displayGroupEnabled(group) ? '已启用，点击停用' : '已停用，点击启用'"
-                  @keydown.stop
-                  @click.stop="updateGroupEnabled(group, !displayGroupEnabled(group))"
-                >
-                  <Power class="h-4 w-4" />
-                </Button>
               </div>
-            </div>
+              <ChevronRight class="mt-1 h-4 w-4 shrink-0 text-muted-foreground" />
+            </button>
           </div>
         </div>
-      </Card>
+      </TableCard>
+    </section>
 
+    <section
+      v-else
+      class="mt-6"
+    >
       <Card
         v-if="draft"
         class="overflow-hidden"
@@ -163,6 +200,9 @@
                   variant="secondary"
                 >
                   系统默认
+                </Badge>
+                <Badge :variant="draft.enabled ? 'default' : 'secondary'">
+                  {{ draft.enabled ? '启用' : '停用' }}
                 </Badge>
               </div>
               <p class="mt-1 text-xs text-muted-foreground">
@@ -214,7 +254,7 @@
         </div>
 
         <div class="space-y-6 p-5">
-          <div class="grid gap-3 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.2fr)_320px]">
+          <div class="grid gap-3 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.2fr)_180px_320px]">
             <label class="space-y-1 text-sm">
               <span class="text-muted-foreground">名称</span>
               <Input
@@ -229,6 +269,31 @@
                 placeholder="例如：默认策略 / 高推理策略 / 号池优先策略"
               />
             </label>
+            <div class="space-y-1 text-sm">
+              <span class="text-muted-foreground">状态</span>
+              <div class="grid grid-cols-2 gap-1 rounded-lg bg-muted/40 p-1">
+                <button
+                  type="button"
+                  class="h-9 rounded-md px-3 text-sm font-medium transition-colors"
+                  :class="draft.enabled
+                    ? 'bg-primary/10 text-primary shadow-sm ring-1 ring-border'
+                    : 'text-muted-foreground hover:bg-background/60 hover:text-foreground'"
+                  @click="setDraftEnabled(true)"
+                >
+                  启用
+                </button>
+                <button
+                  type="button"
+                  class="h-9 rounded-md px-3 text-sm font-medium transition-colors"
+                  :class="!draft.enabled
+                    ? 'bg-primary/10 text-primary shadow-sm ring-1 ring-border'
+                    : 'text-muted-foreground hover:bg-background/60 hover:text-foreground'"
+                  @click="setDraftEnabled(false)"
+                >
+                  停用
+                </button>
+              </div>
+            </div>
             <div class="space-y-1 text-sm">
               <span class="text-muted-foreground">
                 维度
@@ -555,11 +620,19 @@
         <div>
           <SlidersHorizontal class="mx-auto h-8 w-8 text-muted-foreground" />
           <p class="mt-3 text-sm font-medium">
-            请选择或新建调度策略
+            {{ loading ? '正在加载调度策略' : '未找到调度策略' }}
           </p>
+          <Button
+            v-if="!loading"
+            variant="outline"
+            class="mt-4"
+            @click="goToList"
+          >
+            返回分组
+          </Button>
         </div>
       </Card>
-    </div>
+    </section>
 
     <AlertDialog
       v-model="switchModelDialogOpen"
@@ -584,11 +657,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
-import { ChevronDown, Copy, Key, Layers, Plus, Power, Save, Star, Trash2 } from 'lucide-vue-next'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { ChevronDown, ChevronRight, Copy, Key, Layers, Plus, Save, Star, Trash2 } from 'lucide-vue-next'
 
-import { PageContainer, PageHeader } from '@/components/layout'
-import { Badge, Button, Card, Input } from '@/components/ui'
+import { PageContainer } from '@/components/layout'
+import { Badge, Button, Card, Input, Table, TableBody, TableCell, TableHead, TableHeader, TableRow, TableCard } from '@/components/ui'
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from '@/components/ui/dropdown-menu'
 import { AlertDialog } from '@/components/common'
 import {
@@ -642,6 +716,8 @@ const modelFilters: Array<{ value: ModelFilter; label: string }> = [
 ]
 
 const { success, error: showError } = useToast()
+const route = useRoute()
+const router = useRouter()
 
 const schedulingModes: Array<{ value: RoutingSchedulingMode; label: string }> = [
   { value: 'cache_affinity', label: '缓存亲和' },
@@ -671,7 +747,9 @@ const switchModelTarget = ref<string | null>(null)
 const switchModelDialogOpen = ref(false)
 const deleteDialogOpen = ref(false)
 
-const selectedGroup = computed(() => groups.value.find(group => group.id === selectedGroupId.value) ?? null)
+const isCreateRoute = computed(() => route.name === 'RoutingProfileCreate')
+const routeGroupId = computed(() => paramToString(route.params.groupId))
+const isDetailView = computed(() => isCreateRoute.value || route.name === 'RoutingProfileDetail')
 const perModelPolicies = computed(() => {
   return draft.value?.config_json.model_policies
     .filter(policy => policy.model !== DEFAULT_ROUTING_POLICY_MODEL)
@@ -779,6 +857,23 @@ function buildDraft(group: RoutingGroupRecord): RoutingGroupDraft {
   }
 }
 
+function paramToString(value: unknown): string | null {
+  if (Array.isArray(value)) return value[0] ?? null
+  return typeof value === 'string' ? value : null
+}
+
+function clearDraftState(): void {
+  isCreating.value = false
+  selectedGroupId.value = null
+  draft.value = null
+  savedDraftSnapshot.value = null
+  selectedPerModelName.value = null
+  editingConfig.value = null
+  switchModelTarget.value = null
+  switchModelDialogOpen.value = false
+  deleteDialogOpen.value = false
+}
+
 function selectGroup(group: RoutingGroupRecord): void {
   const normalized = normalizeRecord(group)
   isCreating.value = false
@@ -789,23 +884,9 @@ function selectGroup(group: RoutingGroupRecord): void {
   resetEditingConfig()
 }
 
-function displayGroupEnabled(group: RoutingGroupRecord): boolean {
-  if (!isCreating.value && group.id === selectedGroupId.value && draft.value) {
-    return draft.value.enabled
-  }
-  return group.enabled
-}
-
 function setDraftEnabled(value: boolean): void {
   if (!draft.value) return
   draft.value.enabled = value
-}
-
-function updateGroupEnabled(group: RoutingGroupRecord, value: boolean): void {
-  if (isCreating.value || group.id !== selectedGroupId.value || !draft.value) {
-    selectGroup(group)
-  }
-  setDraftEnabled(value)
 }
 
 function startCreate(): void {
@@ -823,6 +904,73 @@ function startCreate(): void {
   savedDraftSnapshot.value = null
   syncEditorStateFromConfig(draft.value.config_json)
   resetEditingConfig()
+}
+
+function syncRouteState(): void {
+  if (!isDetailView.value) {
+    clearDraftState()
+    return
+  }
+
+  if (isCreateRoute.value) {
+    if (!isCreating.value || !draft.value || draft.value.id) {
+      startCreate()
+    }
+    return
+  }
+
+  const groupId = routeGroupId.value
+  if (!groupId) {
+    clearDraftState()
+    return
+  }
+
+  const group = groups.value.find(item => item.id === groupId)
+  if (!group) {
+    clearDraftState()
+    selectedGroupId.value = groupId
+    return
+  }
+
+  if (isCreating.value || selectedGroupId.value !== group.id || !draft.value) {
+    selectGroup(group)
+  }
+}
+
+function goToList(): void {
+  void router.push({ name: 'RoutingProfiles' })
+}
+
+function goToCreate(): void {
+  void router.push({ name: 'RoutingProfileCreate' })
+}
+
+function openGroup(group: RoutingGroupRecord): void {
+  void router.push({ name: 'RoutingProfileDetail', params: { groupId: group.id } })
+}
+
+function schedulingModeLabel(mode: RoutingSchedulingMode): string {
+  return schedulingModes.find(item => item.value === mode)?.label ?? mode
+}
+
+function groupSortingScopeLabel(group: RoutingGroupRecord): string {
+  return hasPerModelSorting(normalizeRoutingGroupConfig(group.config_json)) ? '区分模型' : '统一调度'
+}
+
+function groupModelScopeLabel(group: RoutingGroupRecord): string {
+  const config = normalizeRoutingGroupConfig(group.config_json)
+  if (hasPerModelSorting(config)) {
+    const count = config.model_policies.filter(policy => policy.model !== DEFAULT_ROUTING_POLICY_MODEL).length
+      || config.allowed_models.length
+    return count ? `${count} 个模型` : '未选择模型'
+  }
+  return config.allowed_models.length ? `${config.allowed_models.length} 个模型` : '全部模型'
+}
+
+function groupSchedulingSummary(group: RoutingGroupRecord): string {
+  const config = normalizeRoutingGroupConfig(group.config_json)
+  if (hasPerModelSorting(config)) return '按模型配置'
+  return schedulingModeLabel(config.default_policy.scheduling_mode)
 }
 
 function updateDraftConfig(value: RoutingGroupConfig): void {
@@ -1104,17 +1252,12 @@ async function fetchGroups(): Promise<void> {
   try {
     const response = await listRoutingGroups()
     groups.value = response.items.map(normalizeRecord)
-    const nextSelected = selectedGroup.value ?? groups.value[0] ?? null
-    if (nextSelected) {
-      selectGroup(nextSelected)
-    } else if (!draft.value) {
-      startCreate()
-    }
   } catch (err) {
     showError(parseApiError(err, '加载调度策略失败'))
     log.error('加载调度策略失败:', err)
   } finally {
     loading.value = false
+    syncRouteState()
   }
 }
 
@@ -1158,11 +1301,15 @@ async function saveDraft(): Promise<void> {
       is_system_default: draft.value.is_system_default,
       config_json: config,
     }
-    const saved = isCreating.value || !draft.value.id
+    const wasCreating = isCreating.value || !draft.value.id
+    const saved = wasCreating
       ? await createRoutingGroup(payload)
       : await updateRoutingGroup(draft.value.id, payload)
     isCreating.value = false
     replaceGroup(saved)
+    if (wasCreating) {
+      await router.replace({ name: 'RoutingProfileDetail', params: { groupId: saved.id } })
+    }
     success('调度策略已保存')
   } catch (err) {
     showError(parseApiError(err, '保存调度策略失败'))
@@ -1205,13 +1352,8 @@ async function confirmDeleteDraft(): Promise<void> {
     const deletedId = draft.value.id
     await deleteRoutingGroup(deletedId)
     groups.value = groups.value.filter(group => group.id !== deletedId)
-    selectedGroupId.value = null
-    draft.value = null
-    if (groups.value.length > 0) {
-      selectGroup(groups.value[0])
-    } else {
-      startCreate()
-    }
+    clearDraftState()
+    await router.replace({ name: 'RoutingProfiles' })
     success('调度策略已删除')
     deleteDialogOpen.value = false
   } catch (err) {
@@ -1231,4 +1373,9 @@ onMounted(() => {
   void fetchGroups()
   void loadGlobalModels({ cacheTtlMs: 60_000 })
 })
+
+watch(
+  () => [route.name, route.params.groupId],
+  () => syncRouteState(),
+)
 </script>

@@ -69,46 +69,26 @@ pub fn resolve_local_antigravity_request_auth(
         );
     }
 
-    let Some(project_id) = find_string_by_paths(
+    let upstream_metadata = transport.key.upstream_metadata.as_ref();
+    let Some(project_id) = find_antigravity_string(
+        upstream_metadata,
         &auth_config,
-        &[
-            &["project_id"],
-            &["projectId"],
-            &["project", "id"],
-            &["project", "project_id"],
-            &["project", "projectId"],
-            &["antigravity", "project_id"],
-            &["antigravity", "projectId"],
-            &["metadata", "project_id"],
-            &["metadata", "projectId"],
-        ],
+        ANTIGRAVITY_PROJECT_ID_PATHS,
     ) else {
         return AntigravityRequestAuthSupport::Unsupported(
             AntigravityRequestAuthUnsupportedReason::MissingProjectId,
         );
     };
 
-    let client_version = find_string_by_paths(
+    let client_version = find_antigravity_string(
+        upstream_metadata,
         &auth_config,
-        &[
-            &["client_version"],
-            &["clientVersion"],
-            &["antigravity", "client_version"],
-            &["antigravity", "clientVersion"],
-            &["metadata", "client_version"],
-            &["metadata", "clientVersion"],
-        ],
+        ANTIGRAVITY_CLIENT_VERSION_PATHS,
     );
-    let session_id = find_string_by_paths(
+    let session_id = find_antigravity_string(
+        upstream_metadata,
         &auth_config,
-        &[
-            &["session_id"],
-            &["sessionId"],
-            &["antigravity", "session_id"],
-            &["antigravity", "sessionId"],
-            &["metadata", "session_id"],
-            &["metadata", "sessionId"],
-        ],
+        ANTIGRAVITY_SESSION_ID_PATHS,
     );
 
     AntigravityRequestAuthSupport::Supported(AntigravityRequestAuth {
@@ -121,6 +101,16 @@ pub fn resolve_local_antigravity_request_auth(
 pub fn build_antigravity_static_identity_headers(
     auth: &AntigravityRequestAuth,
 ) -> BTreeMap<String, String> {
+    build_antigravity_static_client_headers(
+        auth.client_version.as_deref(),
+        auth.session_id.as_deref(),
+    )
+}
+
+pub fn build_antigravity_static_client_headers(
+    client_version: Option<&str>,
+    session_id: Option<&str>,
+) -> BTreeMap<String, String> {
     let mut headers = BTreeMap::from([
         (
             String::from("x-client-name"),
@@ -132,24 +122,70 @@ pub fn build_antigravity_static_identity_headers(
         ),
     ]);
 
-    if let Some(client_version) = auth
-        .client_version
-        .as_deref()
+    if let Some(client_version) = client_version
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
         headers.insert(String::from("x-client-version"), client_version.to_string());
     }
-    if let Some(session_id) = auth
-        .session_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
+    if let Some(session_id) = session_id.map(str::trim).filter(|value| !value.is_empty()) {
         headers.insert(String::from("x-vscode-sessionid"), session_id.to_string());
     }
 
     headers
+}
+
+const ANTIGRAVITY_PROJECT_ID_PATHS: &[&[&str]] = &[
+    &["project_id"],
+    &["projectId"],
+    &["project", "id"],
+    &["project", "project_id"],
+    &["project", "projectId"],
+    &["cloudaicompanionProject"],
+    &["cloudaicompanionProject", "id"],
+    &["cloudAiCompanionProject"],
+    &["cloudAiCompanionProject", "id"],
+    &["antigravity", "project_id"],
+    &["antigravity", "projectId"],
+    &["antigravity", "project", "id"],
+    &["antigravity", "cloudaicompanionProject"],
+    &["antigravity", "cloudaicompanionProject", "id"],
+    &["antigravity", "cloudAiCompanionProject"],
+    &["antigravity", "cloudAiCompanionProject", "id"],
+    &["metadata", "project_id"],
+    &["metadata", "projectId"],
+    &["metadata", "cloudaicompanionProject"],
+    &["metadata", "cloudaicompanionProject", "id"],
+    &["metadata", "cloudAiCompanionProject"],
+    &["metadata", "cloudAiCompanionProject", "id"],
+];
+
+const ANTIGRAVITY_CLIENT_VERSION_PATHS: &[&[&str]] = &[
+    &["client_version"],
+    &["clientVersion"],
+    &["antigravity", "client_version"],
+    &["antigravity", "clientVersion"],
+    &["metadata", "client_version"],
+    &["metadata", "clientVersion"],
+];
+
+const ANTIGRAVITY_SESSION_ID_PATHS: &[&[&str]] = &[
+    &["session_id"],
+    &["sessionId"],
+    &["antigravity", "session_id"],
+    &["antigravity", "sessionId"],
+    &["metadata", "session_id"],
+    &["metadata", "sessionId"],
+];
+
+fn find_antigravity_string(
+    upstream_metadata: Option<&Value>,
+    auth_config: &Value,
+    paths: &[&[&str]],
+) -> Option<String> {
+    upstream_metadata
+        .and_then(|metadata| find_string_by_paths(metadata, paths))
+        .or_else(|| find_string_by_paths(auth_config, paths))
 }
 
 fn find_string_by_paths(value: &Value, paths: &[&[&str]]) -> Option<String> {
@@ -168,6 +204,20 @@ fn find_string_by_paths(value: &Value, paths: &[&[&str]]) -> Option<String> {
         }
         if let Some(string) = current
             .as_str()
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+        {
+            return Some(string.to_string());
+        }
+        if let Some(string) = current
+            .as_object()
+            .and_then(|object| {
+                object
+                    .get("id")
+                    .or_else(|| object.get("project_id"))
+                    .or_else(|| object.get("projectId"))
+            })
+            .and_then(Value::as_str)
             .map(str::trim)
             .filter(|item| !item.is_empty())
         {
@@ -210,4 +260,120 @@ fn is_blocked_auth_key(key: &str) -> bool {
             | "subject"
             | "audience"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{
+        resolve_local_antigravity_request_auth, AntigravityRequestAuth,
+        AntigravityRequestAuthSupport,
+    };
+    use crate::snapshot::{
+        GatewayProviderTransportEndpoint, GatewayProviderTransportKey,
+        GatewayProviderTransportProvider, GatewayProviderTransportSnapshot,
+    };
+
+    fn sample_transport(auth_config: &str) -> GatewayProviderTransportSnapshot {
+        GatewayProviderTransportSnapshot {
+            provider: GatewayProviderTransportProvider {
+                id: "provider-1".to_string(),
+                name: "Antigravity".to_string(),
+                provider_type: "antigravity".to_string(),
+                website: None,
+                is_active: true,
+                keep_priority_on_conversion: false,
+                enable_format_conversion: true,
+                concurrent_limit: None,
+                max_retries: None,
+                proxy: None,
+                request_timeout_secs: None,
+                stream_first_byte_timeout_secs: None,
+                config: None,
+            },
+            endpoint: GatewayProviderTransportEndpoint {
+                id: "endpoint-1".to_string(),
+                provider_id: "provider-1".to_string(),
+                api_format: "gemini:generate_content".to_string(),
+                api_family: Some("gemini".to_string()),
+                endpoint_kind: Some("generate_content".to_string()),
+                is_active: true,
+                base_url: "https://daily-cloudcode-pa.googleapis.com".to_string(),
+                header_rules: None,
+                body_rules: None,
+                max_retries: None,
+                custom_path: None,
+                config: None,
+                format_acceptance_config: None,
+                proxy: None,
+            },
+            key: GatewayProviderTransportKey {
+                id: "key-1".to_string(),
+                provider_id: "provider-1".to_string(),
+                name: "key".to_string(),
+                auth_type: "oauth".to_string(),
+                is_active: true,
+                api_formats: Some(vec!["gemini:generate_content".to_string()]),
+                auth_type_by_format: None,
+                allow_auth_channel_mismatch_formats: None,
+                allowed_models: None,
+                capabilities: None,
+                rate_multipliers: None,
+                global_priority_by_format: None,
+                expires_at_unix_secs: None,
+                proxy: None,
+                fingerprint: None,
+                upstream_metadata: None,
+                decrypted_api_key: "__placeholder__".to_string(),
+                decrypted_auth_config: Some(auth_config.to_string()),
+            },
+        }
+    }
+
+    #[test]
+    fn resolves_cloudaicompanion_project_object_from_auth_config() {
+        let transport = sample_transport(
+            r#"{
+                "provider_type":"antigravity",
+                "refresh_token":"rt",
+                "cloudaicompanionProject":{"id":"project-from-auth-config"}
+            }"#,
+        );
+
+        assert_eq!(
+            resolve_local_antigravity_request_auth(&transport),
+            AntigravityRequestAuthSupport::Supported(AntigravityRequestAuth {
+                project_id: "project-from-auth-config".to_string(),
+                client_version: None,
+                session_id: None,
+            })
+        );
+    }
+
+    #[test]
+    fn resolves_identity_from_antigravity_upstream_metadata() {
+        let mut transport = sample_transport(
+            r#"{
+                "provider_type":"antigravity",
+                "refresh_token":"rt"
+            }"#,
+        );
+        transport.key.upstream_metadata = Some(json!({
+            "antigravity": {
+                "project_id": "project-from-metadata",
+                "client_version": "1.99.0",
+                "session_id": "session-from-metadata"
+            }
+        }));
+
+        assert_eq!(
+            resolve_local_antigravity_request_auth(&transport),
+            AntigravityRequestAuthSupport::Supported(AntigravityRequestAuth {
+                project_id: "project-from-metadata".to_string(),
+                client_version: Some("1.99.0".to_string()),
+                session_id: Some("session-from-metadata".to_string()),
+            })
+        );
+    }
 }

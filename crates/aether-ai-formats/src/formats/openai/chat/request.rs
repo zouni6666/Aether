@@ -2,15 +2,19 @@ use serde_json::{json, Map, Value};
 
 use crate::{
     formats::context::FormatContext,
+    formats::openai::shared::OpenAiChatReasoningEffort,
     protocol::canonical::{
         canonical_extension_object_mut, canonical_message_to_openai_chat_messages,
         canonical_response_format_to_openai, canonical_tool_choice_to_openai,
-        canonical_tool_to_openai, namespace_extension_object, openai_content_text,
-        openai_extensions, openai_generation_config, openai_message_content_blocks,
+        canonical_tool_is_openai_custom, canonical_tool_to_openai, is_claude_tool_result,
+        namespace_extension_object, openai_content_text, openai_extensions,
+        openai_generation_config, openai_message_content_blocks,
         openai_response_format_to_canonical, openai_responses_extension, openai_role_to_canonical,
-        openai_tool_choice_to_canonical, openai_tools_to_canonical, write_openai_generation_config,
-        CanonicalInstruction, CanonicalRequest, CanonicalRole, CanonicalThinkingConfig,
-        OPENAI_RESPONSES_EXTENSION_NAMESPACE, OPENAI_RESPONSES_LEGACY_EXTENSION_NAMESPACE,
+        openai_tool_choice_raw_to_chat, openai_tool_choice_to_canonical, openai_tools_to_canonical,
+        write_openai_generation_config, CanonicalContentBlock, CanonicalInstruction,
+        CanonicalRequest, CanonicalRole, CanonicalThinkingConfig, CanonicalToolChoice,
+        CanonicalToolDefinition, OPENAI_RESPONSES_EXTENSION_NAMESPACE,
+        OPENAI_RESPONSES_LEGACY_EXTENSION_NAMESPACE,
     },
 };
 
@@ -19,6 +23,9 @@ pub fn from(body: &Value, _ctx: &FormatContext) -> Option<CanonicalRequest> {
 }
 
 pub fn to(request: &CanonicalRequest, ctx: &FormatContext) -> Option<Value> {
+    if canonical_request_has_unrepresentable_claude_tool_result_for_openai_chat(request) {
+        return None;
+    }
     let mut body = to_raw(request);
     force_stream_options(&mut body, ctx.upstream_is_stream);
     Some(body)
@@ -103,9 +110,7 @@ pub fn from_raw(body_json: &Value) -> Option<CanonicalRequest> {
             "top_p",
             "top_k",
             "stop",
-            "stream",
             "tools",
-            "tool_choice",
             "parallel_tool_calls",
             "metadata",
             "response_format",
@@ -118,6 +123,9 @@ pub fn from_raw(body_json: &Value) -> Option<CanonicalRequest> {
             "top_logprobs",
         ],
     );
+    if canonical.tool_choice.is_some() {
+        remove_tool_choice_extension(&mut canonical.extensions, "openai");
+    }
     if let Some(verbosity) = request.get("verbosity").cloned() {
         canonical_extension_object_mut(
             &mut canonical.extensions,
@@ -165,11 +173,8 @@ pub fn to_raw(canonical: &CanonicalRequest) -> Value {
             ),
         );
     }
-    if let Some(tool_choice) = &canonical.tool_choice {
-        output.insert(
-            "tool_choice".to_string(),
-            canonical_tool_choice_to_openai(tool_choice),
-        );
+    if let Some(tool_choice) = canonical_tool_choice_to_openai_for_request(canonical) {
+        output.insert("tool_choice".to_string(), tool_choice);
     }
     if let Some(value) = canonical.parallel_tool_calls {
         output.insert("parallel_tool_calls".to_string(), Value::Bool(value));
@@ -220,13 +225,153 @@ pub fn to_raw(canonical: &CanonicalRequest) -> Value {
     Value::Object(output)
 }
 
-fn openai_chat_reasoning_effort(value: &str) -> Option<&'static str> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "low" => Some("low"),
-        "medium" => Some("medium"),
-        "high" | "xhigh" | "max" => Some("high"),
-        _ => None,
+fn canonical_tool_choice_to_openai_for_request(canonical: &CanonicalRequest) -> Option<Value> {
+    canonical
+        .tool_choice
+        .as_ref()
+        .map(|tool_choice| canonical_tool_choice_to_openai_for_tools(tool_choice, &canonical.tools))
+        .or_else(|| raw_tool_choice_extension(canonical).map(openai_tool_choice_raw_to_chat))
+}
+
+fn canonical_tool_choice_to_openai_for_tools(
+    choice: &CanonicalToolChoice,
+    tools: &[CanonicalToolDefinition],
+) -> Value {
+    match choice {
+        CanonicalToolChoice::Tool { name }
+            if tools
+                .iter()
+                .any(|tool| tool.name == *name && canonical_tool_is_openai_custom(tool)) =>
+        {
+            json!({
+                "type": "custom",
+                "custom": { "name": name },
+            })
+        }
+        _ => canonical_tool_choice_to_openai(choice),
     }
+}
+
+fn raw_tool_choice_extension(canonical: &CanonicalRequest) -> Option<&Value> {
+    canonical
+        .extensions
+        .get("openai")
+        .and_then(|value| value.get("tool_choice"))
+        .or_else(|| {
+            openai_responses_extension(&canonical.extensions)
+                .and_then(|value| value.get("tool_choice"))
+        })
+}
+
+fn remove_tool_choice_extension(
+    extensions: &mut std::collections::BTreeMap<String, Value>,
+    namespace: &str,
+) {
+    let should_remove_namespace = extensions
+        .get_mut(namespace)
+        .and_then(Value::as_object_mut)
+        .is_some_and(|object| {
+            object.remove("tool_choice");
+            object.is_empty()
+        });
+    if should_remove_namespace {
+        extensions.remove(namespace);
+    }
+}
+
+fn canonical_request_has_unrepresentable_claude_tool_result_for_openai_chat(
+    request: &CanonicalRequest,
+) -> bool {
+    request.messages.iter().any(|message| {
+        message.content.iter().any(|block| {
+            let CanonicalContentBlock::ToolResult {
+                output, extensions, ..
+            } = block
+            else {
+                return false;
+            };
+            is_claude_tool_result(extensions)
+                && output
+                    .as_ref()
+                    .and_then(Value::as_array)
+                    .is_some_and(|parts| {
+                        !claude_tool_result_parts_are_openai_chat_representable(parts)
+                    })
+        })
+    })
+}
+
+pub(crate) fn claude_tool_result_parts_are_openai_chat_representable(parts: &[Value]) -> bool {
+    parts
+        .iter()
+        .all(claude_tool_result_part_is_openai_chat_representable)
+}
+
+fn claude_tool_result_part_is_openai_chat_representable(part: &Value) -> bool {
+    let Some(part_object) = part.as_object() else {
+        return false;
+    };
+    match part_object
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "text" => true,
+        "image" => claude_image_block_is_openai_chat_representable(part_object),
+        "document" | "file" => claude_document_block_is_openai_chat_representable(part_object),
+        _ => false,
+    }
+}
+
+fn claude_image_block_is_openai_chat_representable(block: &Map<String, Value>) -> bool {
+    let Some(source) = block.get("source").and_then(Value::as_object) else {
+        return false;
+    };
+    match source
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "base64" => {
+            non_empty_source_str(source, "media_type").is_some()
+                && non_empty_source_str(source, "data").is_some()
+        }
+        "url" => non_empty_source_str(source, "url").is_some(),
+        _ => false,
+    }
+}
+
+fn claude_document_block_is_openai_chat_representable(block: &Map<String, Value>) -> bool {
+    let Some(source) = block.get("source").and_then(Value::as_object) else {
+        return false;
+    };
+    match source
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "base64" => {
+            non_empty_source_str(source, "media_type").is_some()
+                && non_empty_source_str(source, "data").is_some()
+        }
+        "url" => non_empty_source_str(source, "url").is_some(),
+        "text" => non_empty_source_str(source, "data").is_some(),
+        _ => false,
+    }
+}
+
+fn non_empty_source_str<'a>(source: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
+    source
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn openai_chat_reasoning_effort(value: &str) -> Option<&'static str> {
+    if value.trim().eq_ignore_ascii_case("max") {
+        return Some("xhigh");
+    }
+    OpenAiChatReasoningEffort::parse(value).map(OpenAiChatReasoningEffort::as_str)
 }
 
 fn chat_compatible_openai_responses_extension_object(
