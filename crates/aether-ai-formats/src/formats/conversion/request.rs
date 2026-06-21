@@ -830,6 +830,56 @@ mod tests {
     }
 
     #[test]
+    fn claude_request_to_responses_preserves_in_message_system_guidance_as_developer_item() {
+        let body = json!({
+            "model": "claude-sonnet",
+            "system": [{
+                "type": "text",
+                "text": "Be exact."
+            }],
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {
+                    "role": "system",
+                    "content": "x-anthropic-billing-header: internal-billing-marker\nSessionStart hook additional context: follow the house style."
+                },
+                {"role": "assistant", "content": "visible answer"},
+                {"role": "user", "content": "continue"}
+            ],
+            "max_tokens": 128
+        });
+
+        let converted = registry::convert_request(
+            "claude:messages",
+            "openai:responses",
+            &body,
+            &FormatContext::default().with_mapped_model("gpt-5.1"),
+        )
+        .expect("responses request");
+
+        let input = converted["input"].as_array().expect("responses input");
+        assert_eq!(input.len(), 5);
+        assert_eq!(input[0]["role"], "developer");
+        assert_eq!(input[0]["content"][0]["text"], "Be exact.");
+        assert_eq!(input[1]["role"], "user");
+        assert_eq!(input[1]["content"][0]["text"], "hello");
+        assert_eq!(input[2]["role"], "developer");
+        assert_eq!(
+            input[2]["content"][0]["text"],
+            "SessionStart hook additional context: follow the house style."
+        );
+        assert!(!input[2]["content"][0]["text"]
+            .as_str()
+            .expect("developer guidance text")
+            .contains("x-anthropic-billing-header:"));
+        assert_eq!(input[3]["role"], "assistant");
+        assert_eq!(input[3]["content"][0]["text"], "visible answer");
+        assert_eq!(input[4]["role"], "user");
+        assert_eq!(input[4]["content"][0]["text"], "continue");
+        assert!(converted.get("instructions").is_none());
+    }
+
+    #[test]
     fn openai_responses_request_normalizer_strips_content_cache_control() {
         let body = json!({
             "model": "gpt-5.1",

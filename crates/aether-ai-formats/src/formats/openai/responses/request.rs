@@ -16,9 +16,9 @@ use crate::{
         openai_response_format_to_canonical, openai_responses_extension,
         openai_responses_generation_config, openai_responses_input_to_canonical_messages,
         openai_responses_tool_choice_to_canonical, openai_responses_tools_to_canonical,
-        openai_tool_choice_raw_to_responses, CanonicalContentBlock, CanonicalInstruction,
-        CanonicalRequest, CanonicalRole, CanonicalThinkingConfig, CanonicalToolChoice,
-        CanonicalToolDefinition, OPENAI_RESPONSES_EXTENSION_NAMESPACE,
+        openai_tool_choice_raw_to_responses, strip_claude_billing_header, CanonicalContentBlock,
+        CanonicalInstruction, CanonicalRequest, CanonicalRole, CanonicalThinkingConfig,
+        CanonicalToolChoice, CanonicalToolDefinition, OPENAI_RESPONSES_EXTENSION_NAMESPACE,
         OPENAI_RESPONSES_LEGACY_EXTENSION_NAMESPACE,
     },
 };
@@ -305,6 +305,12 @@ fn canonical_messages_to_responses_input(canonical: &CanonicalRequest) -> Option
     let mut next_generated_tool_call_index = 0usize;
     let mut pending_tool_call_ids = VecDeque::new();
     for message in &canonical.messages {
+        let strip_claude_billing_header_from_text =
+            is_claude_messages_request(&canonical.extensions)
+                && matches!(
+                    message.role,
+                    CanonicalRole::System | CanonicalRole::Developer
+                );
         let role = match message.role {
             CanonicalRole::Assistant => "assistant",
             CanonicalRole::Tool | CanonicalRole::User | CanonicalRole::Unknown => "user",
@@ -312,6 +318,11 @@ fn canonical_messages_to_responses_input(canonical: &CanonicalRequest) -> Option
                 "system"
             }
             CanonicalRole::Developer if is_openai_responses_input_message(&message.extensions) => {
+                "developer"
+            }
+            CanonicalRole::System | CanonicalRole::Developer
+                if is_claude_messages_request(&canonical.extensions) =>
+            {
                 "developer"
             }
             CanonicalRole::System | CanonicalRole::Developer => continue,
@@ -396,7 +407,11 @@ fn canonical_messages_to_responses_input(canonical: &CanonicalRequest) -> Option
                     }
                 }
                 other => {
-                    if let Some(part) = canonical_block_to_responses_input_part(other, role) {
+                    if let Some(part) = canonical_block_to_responses_input_part(
+                        other,
+                        role,
+                        strip_claude_billing_header_from_text,
+                    ) {
                         content.push(part);
                     }
                 }
@@ -592,9 +607,15 @@ fn is_openai_responses_reasoning_history_block(extensions: &BTreeMap<String, Val
 fn canonical_block_to_responses_input_part(
     block: &CanonicalContentBlock,
     role: &str,
+    strip_claude_billing_header_from_text: bool,
 ) -> Option<Value> {
     match block {
         CanonicalContentBlock::Text { text, .. } => {
+            let text = if strip_claude_billing_header_from_text {
+                strip_claude_billing_header(text)
+            } else {
+                text.clone()
+            };
             if text.is_empty() {
                 return None;
             }
