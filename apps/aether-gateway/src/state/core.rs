@@ -20,6 +20,7 @@ use aether_runtime_state::{
     RuntimeSemaphoreSnapshot, RuntimeState,
 };
 use aether_scheduler_core::PROVIDER_KEY_RPM_WINDOW_SECS;
+use tracing::warn;
 
 use super::{
     AppState, FrontdoorCorsConfig, FrontdoorRuntimeGuardConfig, LocalExecutionRuntimeMissDiagnostic,
@@ -38,6 +39,9 @@ use super::super::fallback_metrics;
 use super::super::fallback_metrics::{GatewayFallbackMetricKind, GatewayFallbackReason};
 use super::super::model_fetch::spawn_model_fetch_worker;
 use super::super::rate_limit::{FrontdoorUserRpmConfig, FrontdoorUserRpmLimiter};
+use super::super::request_candidate_queue::{
+    RequestCandidateQueueConfig, RequestCandidateQueueRuntime,
+};
 use super::super::router::RequestAdmissionError;
 use super::super::{control::GatewayControlDecision, error::GatewayError};
 use super::super::{provider_transport, usage};
@@ -180,6 +184,7 @@ impl AppState {
             self.runtime_state.clone(),
         );
         self.data = data;
+        self.configure_request_candidate_queue_from_env();
     }
 
     pub fn force_close_all_tunnel_proxies(&self) -> usize {
@@ -251,6 +256,7 @@ impl AppState {
             dashboard_response_cache: Arc::new(DashboardResponseCache::default()),
             system_config_cache: Arc::new(SystemConfigCache::default()),
             fallback_metrics: Arc::new(fallback_metrics::GatewayFallbackMetrics::default()),
+            request_candidate_queue: None,
             frontdoor_cors: None,
             frontdoor_user_rpm: Arc::new(FrontdoorUserRpmLimiter::new(
                 FrontdoorUserRpmConfig::default(),
@@ -421,6 +427,26 @@ impl AppState {
             self.runtime_state.clone(),
         );
         self
+    }
+
+    fn configure_request_candidate_queue_from_env(&mut self) {
+        let config = RequestCandidateQueueConfig::from_env();
+        self.request_candidate_queue = if config.async_enabled() {
+            if tokio::runtime::Handle::try_current().is_err() {
+                warn!(
+                    event_name = "request_candidate_async_queue_unavailable",
+                    log_type = "ops",
+                    "request candidate async queue requested outside a Tokio runtime; falling back to sync persistence"
+                );
+                None
+            } else {
+                self.data
+                    .request_candidate_writer()
+                    .map(|writer| RequestCandidateQueueRuntime::spawn(writer, config))
+            }
+        } else {
+            None
+        };
     }
 
     pub fn with_distributed_request_concurrency_gate(mut self, gate: RuntimeSemaphore) -> Self {
@@ -917,6 +943,9 @@ impl AppState {
         }
         if let Some(summary) = self.data.database_pool_summary() {
             samples.extend(database_pool_metric_samples(&summary));
+        }
+        if let Some(queue) = self.request_candidate_queue.as_ref() {
+            samples.extend(queue.metric_samples());
         }
         samples.extend(self.tunnel.metric_samples());
         samples.extend(self.fallback_metrics.metric_samples());

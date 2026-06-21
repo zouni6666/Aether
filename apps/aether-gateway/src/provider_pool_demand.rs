@@ -15,6 +15,9 @@ const PROVIDER_POOL_DEMAND_SNAPSHOT_PREFIX: &str = "ap:provider_pool:demand";
 const PROVIDER_POOL_BURST_PENDING_PREFIX: &str = "ap:quota_probe:burst_pending";
 const PROVIDER_POOL_IN_FLIGHT_TOKEN_TTL_MS: u64 = 120_000;
 const PROVIDER_POOL_IN_FLIGHT_RENEW_MS: u64 = 30_000;
+const PROVIDER_POOL_IN_FLIGHT_ACQUIRE_TIMEOUT_ENV: &str =
+    "AETHER_GATEWAY_PROVIDER_POOL_IN_FLIGHT_ACQUIRE_TIMEOUT_MS";
+const DEFAULT_PROVIDER_POOL_IN_FLIGHT_ACQUIRE_TIMEOUT_MS: u64 = 10;
 const PROVIDER_POOL_DEMAND_SNAPSHOT_TTL_SECONDS: u64 = 6 * 60 * 60;
 const PROVIDER_POOL_DEMAND_ALPHA: f64 = 0.2;
 const PROVIDER_POOL_DEMAND_HEADROOM: f64 = 1.2;
@@ -131,6 +134,17 @@ fn token_expiry_score(now_ms: u64) -> f64 {
     now_ms.saturating_add(PROVIDER_POOL_IN_FLIGHT_TOKEN_TTL_MS) as f64
 }
 
+fn provider_pool_in_flight_acquire_timeout() -> Duration {
+    static TIMEOUT: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    *TIMEOUT.get_or_init(|| {
+        let millis = std::env::var(PROVIDER_POOL_IN_FLIGHT_ACQUIRE_TIMEOUT_ENV)
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .unwrap_or(DEFAULT_PROVIDER_POOL_IN_FLIGHT_ACQUIRE_TIMEOUT_MS);
+        Duration::from_millis(millis)
+    })
+}
+
 fn spawn_in_flight_renewal(
     runtime: Arc<RuntimeState>,
     tokens_key: String,
@@ -173,16 +187,29 @@ pub(crate) async fn acquire_provider_pool_in_flight_guard(
 
     let tokens_key = in_flight_tokens_key(provider_id);
     let token = build_in_flight_token(request_id, candidate_id, key_id);
-    if let Err(err) = runtime
-        .score_set(&tokens_key, &token, token_expiry_score(current_unix_ms()))
-        .await
+    match tokio::time::timeout(
+        provider_pool_in_flight_acquire_timeout(),
+        runtime.score_set(&tokens_key, &token, token_expiry_score(current_unix_ms())),
+    )
+    .await
     {
-        debug!(
-            provider_id,
-            error = ?err,
-            "gateway provider pool demand: failed to acquire in-flight token"
-        );
-        return None;
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            debug!(
+                provider_id,
+                error = ?err,
+                "gateway provider pool demand: failed to acquire in-flight token"
+            );
+            return None;
+        }
+        Err(_) => {
+            debug!(
+                provider_id,
+                timeout_ms = provider_pool_in_flight_acquire_timeout().as_millis() as u64,
+                "gateway provider pool demand: skipped in-flight token after acquire timeout"
+            );
+            return None;
+        }
     }
 
     let stop_renewal = Arc::new(AtomicBool::new(false));

@@ -18,6 +18,7 @@ use super::super::cache::{
 use super::super::data::GatewayDataState;
 use super::super::fallback_metrics;
 use super::super::rate_limit::FrontdoorUserRpmLimiter;
+use super::super::request_candidate_queue::RequestCandidateQueueRuntime;
 use super::super::{provider_transport, usage};
 use super::{
     AdminBillingCollectorRecord, AdminBillingRuleRecord, AdminPaymentCallbackRecord,
@@ -135,6 +136,7 @@ pub struct AppState {
     pub(crate) dashboard_response_cache: Arc<DashboardResponseCache>,
     pub(crate) system_config_cache: Arc<SystemConfigCache>,
     pub(crate) fallback_metrics: Arc<fallback_metrics::GatewayFallbackMetrics>,
+    pub(crate) request_candidate_queue: Option<Arc<RequestCandidateQueueRuntime>>,
     pub(crate) frontdoor_cors: Option<Arc<FrontdoorCorsConfig>>,
     pub(crate) frontdoor_user_rpm: Arc<FrontdoorUserRpmLimiter>,
     pub(crate) tunnel: crate::tunnel::EmbeddedTunnelState,

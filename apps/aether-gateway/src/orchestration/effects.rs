@@ -38,7 +38,9 @@ use crate::handlers::shared::provider_pool::{
 use crate::orchestration::local_execution_candidate_metadata_from_report_context;
 use crate::scheduler::affinity::SCHEDULER_AFFINITY_TTL;
 use crate::scheduler::config::{read_scheduler_ordering_config, SchedulerSchedulingMode};
-use crate::AppState;
+use crate::{
+    provider_transport::snapshot::GatewayProviderTransportProvider, AppState, GatewayError,
+};
 
 const POOL_SCORE_FEEDBACK_GATE_MAX_ENTRIES: usize = 50_000;
 const POOL_SCORE_SUCCESS_FEEDBACK_MIN_INTERVAL_ENV: &str =
@@ -900,11 +902,88 @@ async fn record_oauth_invalidation_effect(
             "last_request_feedback": {
                 "source": "oauth_invalidation",
                 "status_code": effect.status_code,
-                "reason": invalid_reason
+                "reason": invalid_reason.as_str()
             }
         }),
     )
     .await;
+
+    match auto_remove_runtime_oauth_invalid_key(
+        state,
+        &transport.provider,
+        &plan.key_id,
+        invalid_reason.as_str(),
+    )
+    .await
+    {
+        Ok(true) => {
+            tracing::info!(
+                provider_id = %plan.provider_id,
+                endpoint_id = %plan.endpoint_id,
+                key_id = %plan.key_id,
+                provider_type = %transport.provider.provider_type,
+                event_name = "auto_removed_oauth_runtime_invalid",
+                "gateway auto-removed runtime invalid oauth key"
+            );
+        }
+        Ok(false) => {}
+        Err(err) => {
+            warn!(
+                "gateway orchestration effects: failed to auto-remove oauth invalid key for provider {} endpoint {} key {}: {:?}",
+                plan.provider_id, plan.endpoint_id, plan.key_id, err
+            );
+        }
+    }
+}
+
+async fn auto_remove_runtime_oauth_invalid_key(
+    state: &AppState,
+    provider: &GatewayProviderTransportProvider,
+    key_id: &str,
+    invalid_reason: &str,
+) -> Result<bool, GatewayError> {
+    if !admin_provider_quota_pure::provider_auto_remove_banned_keys(provider.config.as_ref()) {
+        return Ok(false);
+    }
+
+    let key_ids = [key_id.to_string()];
+    let Some(key) = state
+        .read_provider_catalog_keys_by_ids(&key_ids)
+        .await?
+        .into_iter()
+        .next()
+    else {
+        return Ok(false);
+    };
+    if key.provider_id != provider.id {
+        return Ok(false);
+    }
+
+    if !admin_provider_quota_pure::should_auto_remove_oauth_invalid_key(
+        &key,
+        Some(invalid_reason),
+        true,
+        current_unix_secs(),
+    ) {
+        return Ok(false);
+    }
+
+    let deleted_key_id = key.id.clone();
+    if !state.delete_provider_catalog_key(&deleted_key_id).await? {
+        return Ok(false);
+    }
+    state
+        .cleanup_deleted_provider_catalog_refs(
+            &provider.id,
+            false,
+            &[],
+            std::slice::from_ref(&deleted_key_id),
+        )
+        .await?;
+    let _ = state
+        .invalidate_local_oauth_refresh_entry(&deleted_key_id)
+        .await;
+    Ok(true)
 }
 
 fn resolve_local_oauth_invalid_reason(
@@ -1309,6 +1388,16 @@ mod tests {
         )
     }
 
+    fn sample_codex_provider_with_auto_remove() -> StoredProviderCatalogProvider {
+        let mut provider = sample_codex_provider();
+        provider.config = Some(json!({
+            "pool_advanced": {
+                "auto_remove_banned_keys": true
+            }
+        }));
+        provider
+    }
+
     fn sample_codex_endpoint() -> StoredProviderCatalogEndpoint {
         StoredProviderCatalogEndpoint::new(
             "endpoint-codex-cli-local-1".to_string(),
@@ -1363,8 +1452,16 @@ mod tests {
     }
 
     fn codex_state() -> AppState {
+        codex_state_with_provider(sample_codex_provider())
+    }
+
+    fn codex_state_with_auto_remove() -> AppState {
+        codex_state_with_provider(sample_codex_provider_with_auto_remove())
+    }
+
+    fn codex_state_with_provider(provider: StoredProviderCatalogProvider) -> AppState {
         let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
-            vec![sample_codex_provider()],
+            vec![provider],
             vec![sample_codex_endpoint()],
             vec![sample_codex_key()],
         ));
@@ -2276,6 +2373,69 @@ mod tests {
                 .and_then(|value| value.get("code"))
                 .and_then(Value::as_str),
             Some("invalid")
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth_invalidation_auto_removes_inactive_pat_owner_when_enabled() {
+        let state = codex_state_with_auto_remove();
+        let plan = sample_codex_plan();
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: None,
+            },
+            LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
+                status_code: 403,
+                response_text: Some(
+                    r#"{"error":{"code":"biscuit_baker_service_auth_credential_error_status","message":"Personal access token owner is inactive."},"status":403}"#,
+                ),
+            }),
+        )
+        .await;
+
+        let keys = state
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
+            .await
+            .expect("provider catalog keys should load");
+        assert!(
+            keys.is_empty(),
+            "hard-invalid PAT owner should be auto removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth_invalidation_auto_remove_keeps_recoverable_expired_token() {
+        let state = codex_state_with_auto_remove();
+        let plan = sample_codex_plan();
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: None,
+            },
+            LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
+                status_code: 401,
+                response_text: Some(
+                    r#"{"error":{"message":"session expired","type":"invalid_request_error"}}"#,
+                ),
+            }),
+        )
+        .await;
+
+        let stored_key = state
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
+            .await
+            .expect("provider catalog keys should load")
+            .into_iter()
+            .next()
+            .expect("recoverable expired token should be retained");
+        assert_eq!(
+            stored_key.oauth_invalid_reason.as_deref(),
+            Some("[OAUTH_EXPIRED] session expired")
         );
     }
 

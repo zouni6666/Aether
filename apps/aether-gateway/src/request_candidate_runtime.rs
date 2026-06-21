@@ -15,6 +15,7 @@ use aether_usage_runtime::build_locally_actionable_report_context_from_request_c
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::OnceLock;
+use std::time::Duration;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -23,6 +24,9 @@ use crate::log_ids::short_request_id;
 use crate::GatewayError;
 
 const REQUEST_CANDIDATE_PERSISTENCE_ENV: &str = "AETHER_GATEWAY_REQUEST_CANDIDATE_PERSISTENCE";
+const REQUEST_CANDIDATE_SEED_WRITE_TIMEOUT_ENV: &str =
+    "AETHER_GATEWAY_REQUEST_CANDIDATE_SEED_WRITE_TIMEOUT_MS";
+const DEFAULT_REQUEST_CANDIDATE_SEED_WRITE_TIMEOUT_MS: u64 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RequestCandidatePersistenceMode {
@@ -65,6 +69,17 @@ fn should_persist_request_candidate_status(status: RequestCandidateStatus) -> bo
         RequestCandidatePersistenceMode::Terminal => request_candidate_status_is_terminal(status),
         RequestCandidatePersistenceMode::None => false,
     }
+}
+
+fn request_candidate_seed_write_timeout() -> Duration {
+    static TIMEOUT: OnceLock<Duration> = OnceLock::new();
+    *TIMEOUT.get_or_init(|| {
+        let millis = std::env::var(REQUEST_CANDIDATE_SEED_WRITE_TIMEOUT_ENV)
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .unwrap_or(DEFAULT_REQUEST_CANDIDATE_SEED_WRITE_TIMEOUT_MS);
+        Duration::from_millis(millis)
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -573,8 +588,15 @@ pub(crate) async fn ensure_execution_request_candidate_slot(
         return;
     }
 
-    let candidate_id = match state.upsert_request_candidate(seed.upsert_record).await {
-        Ok(Some(stored)) => {
+    let seed_upsert_record = seed.upsert_record;
+    let generated_candidate_id = generated_candidate_id.clone();
+    let candidate_id = match tokio::time::timeout(
+        request_candidate_seed_write_timeout(),
+        state.upsert_request_candidate(seed_upsert_record),
+    )
+    .await
+    {
+        Ok(Ok(Some(stored))) => {
             info!(
                 event_name = "request_candidate_slot_seeded",
                 log_type = "event",
@@ -588,7 +610,7 @@ pub(crate) async fn ensure_execution_request_candidate_slot(
             );
             stored.id
         }
-        Ok(None) => {
+        Ok(Ok(None)) => {
             warn!(
                 event_name = "request_candidate_writer_unavailable",
                 log_type = "event",
@@ -602,7 +624,7 @@ pub(crate) async fn ensure_execution_request_candidate_slot(
             );
             generated_candidate_id
         }
-        Err(err) => {
+        Ok(Err(err)) => {
             warn!(
                 event_name = "request_candidate_slot_seed_failed",
                 log_type = "event",
@@ -610,7 +632,23 @@ pub(crate) async fn ensure_execution_request_candidate_slot(
                 error = ?err,
                 "gateway failed to seed execution request candidate slot"
             );
-            return;
+            generated_candidate_id
+        }
+        Err(_) => {
+            let timeout_ms = request_candidate_seed_write_timeout().as_millis() as u64;
+            warn!(
+                event_name = "request_candidate_slot_seed_timed_out",
+                log_type = "event",
+                request_id = %request_id,
+                candidate_id = %generated_candidate_id,
+                provider_id = %plan.provider_id,
+                endpoint_id = %plan.endpoint_id,
+                key_id = %plan.key_id,
+                source = "seed",
+                timeout_ms,
+                "gateway skipped blocking request candidate seed after timeout"
+            );
+            generated_candidate_id
         }
     };
 

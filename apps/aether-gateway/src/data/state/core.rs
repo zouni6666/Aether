@@ -322,6 +322,14 @@ impl GatewayDataState {
         self.request_candidate_writer.is_some()
     }
 
+    pub(crate) fn request_candidate_writer(
+        &self,
+    ) -> Option<
+        Arc<dyn aether_data_contracts::repository::candidates::RequestCandidateWriteRepository>,
+    > {
+        self.request_candidate_writer.clone()
+    }
+
     pub(crate) fn has_routing_group_reader(&self) -> bool {
         self.routing_group_reader.is_some()
     }

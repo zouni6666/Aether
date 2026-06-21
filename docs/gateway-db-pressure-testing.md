@@ -130,9 +130,13 @@ cargo run --release -p aether-testkit --bin http_load_probe -- \
 | 场景 | 结果 | throughput | p50 | p95 | p99 | DB pool | mock in-flight |
 | --- | --- | ---: | ---: | ---: | ---: | --- | ---: |
 | 1000 req / 100 conc | 1000x 200 / 0 fail | 211 rps | 209ms | 729ms | 1171ms | max checked out 33/48 | - |
-| 6000 req / 6000 conc | 6000x 200 / 0 fail, `error_counts={}` | 262 rps | 20198ms | 22496ms | 22748ms | max checked out 48/48, pressure samples 7 | 396 |
+| 6000 req / 6000 conc, sync terminal candidate | 6000x 200 / 0 fail, `error_counts={}` | 262 rps | 20198ms | 22496ms | 22748ms | max checked out 48/48, pressure samples 7 | 396 |
+| 6000 req / 6000 conc, async candidate queue | 6000x 200 / 0 fail, `error_counts={}` | 367 rps | 13678ms | 16060ms | 16245ms | max checked out 48/48, pressure samples 3 | - |
+| 6000 req / 6000 conc, async queue + slot compaction | 6000x 200 / 0 fail, `error_counts={}` | 344 rps | 14613ms | 17143ms | 17315ms | max checked out 48/48, pressure samples 3 | - |
 
-6000/6000 下实际打开约 6k FD，说明客户端长连接链路有效。剩余主要同步 DB 写入为每成功请求 1 条 terminal `request_candidates`；如需测纯转发极限，可临时把 `AETHER_GATEWAY_REQUEST_CANDIDATE_PERSISTENCE=none` 与 terminal 模式对照。
+6000/6000 下实际打开约 6k FD，说明客户端长连接链路有效。terminal 模式下同一请求可能产生 2 条 candidate 状态写入；
+async queue 会把这部分从前台请求路径移出，slot compaction 会把同 slot/同状态的重复记录合并后再落库。
+如需测纯转发极限，可临时把 `AETHER_GATEWAY_REQUEST_CANDIDATE_PERSISTENCE=none` 与 terminal 模式对照。
 
 常用本地命令（不要打印 API key）：
 
@@ -165,6 +169,52 @@ FROM pg_stat_statements
 ORDER BY calls DESC
 LIMIT 60;"
 ```
+
+
+### Request candidate async persistence
+
+`request_candidates` 是当前 6k 全链路下最明显的同步 DB 写入点。生产/压测可以先保留
+`AETHER_GATEWAY_REQUEST_CANDIDATE_PERSISTENCE=terminal`，再把 terminal 写入从前台 await 改为异步队列：
+
+```bash
+export AETHER_GATEWAY_REQUEST_CANDIDATE_PERSISTENCE=terminal
+export AETHER_GATEWAY_REQUEST_CANDIDATE_WRITE_MODE=async
+export AETHER_GATEWAY_REQUEST_CANDIDATE_QUEUE_CAPACITY=65536
+export AETHER_GATEWAY_REQUEST_CANDIDATE_QUEUE_BATCH_SIZE=512
+export AETHER_GATEWAY_REQUEST_CANDIDATE_QUEUE_FLUSH_INTERVAL_MS=50
+export AETHER_GATEWAY_REQUEST_CANDIDATE_QUEUE_WORKERS=2
+# 队列满时默认 drop trace，保护前台请求；需要强一致审计时可设 sync。
+export AETHER_GATEWAY_REQUEST_CANDIDATE_QUEUE_FULL=drop
+```
+
+新增 metrics：
+
+- `request_candidate_queue_depth`
+- `request_candidate_queue_pending_depth`
+- `request_candidate_queue_capacity`
+- `request_candidate_queue_enqueued_total`
+- `request_candidate_queue_dropped_total`
+- `request_candidate_queue_flushed_total`
+- `request_candidate_queue_flush_failed_total`
+- `request_candidate_queue_flush_batches_total`
+- `request_candidate_queue_flush_sql_ops_total`
+- `request_candidate_queue_compacted_total`
+- `request_candidate_queue_sync_fallback_total`
+
+判定：6k/6k 下 `dropped_total=0`、`flush_failed_total=0`，压测结束后
+`queue_depth` 和 `pending_depth` 应回到 0。
+`flush_sql_ops_total` 应低于 `flushed_total`；差值体现在 `compacted_total`，
+用于确认 terminal candidate 的重复状态写入已在队列侧合并。
+
+当前本地 6000/6000 合并版观测：
+
+- `enqueued_total=12000`
+- `flushed_total=12000`
+- `flush_sql_ops_total=6406`
+- `compacted_total=5594`
+- `dropped_total=0`
+- `flush_failed_total=0`
+- `request_candidates` 最终 `6000 rows / 6000 request_id`
 
 ## 4. 判定标准
 
