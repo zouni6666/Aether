@@ -2645,12 +2645,39 @@ fn is_sensitive_body_key(key: &str) -> bool {
         .filter(|ch| ch.is_ascii_alphanumeric())
         .collect::<String>()
         .to_ascii_lowercase();
-    normalized.contains("token")
+    is_sensitive_token_body_key(&normalized)
         || normalized.contains("apikey")
         || normalized.contains("password")
         || normalized.contains("authorization")
         || normalized.contains("secret")
         || normalized == "cookie"
+}
+
+fn is_sensitive_token_body_key(normalized: &str) -> bool {
+    if !normalized.contains("token") || is_token_quantity_body_key(normalized) {
+        return false;
+    }
+
+    normalized == "token" || normalized.ends_with("token")
+}
+
+fn is_token_quantity_body_key(normalized: &str) -> bool {
+    normalized.ends_with("tokens")
+        || normalized.ends_with("tokencount")
+        || normalized.ends_with("tokenlimit")
+        || matches!(
+            normalized,
+            "maxtoken"
+                | "maxcompletiontoken"
+                | "maxoutputtoken"
+                | "inputtoken"
+                | "outputtoken"
+                | "completiontoken"
+                | "prompttoken"
+                | "totaltoken"
+                | "reasoningtoken"
+                | "cachedtoken"
+        )
 }
 
 fn resolve_error_category(
@@ -3919,6 +3946,69 @@ mod tests {
                 .pointer("/messages/0/content")
                 .and_then(Value::as_str),
             Some("safe text")
+        );
+    }
+
+    #[test]
+    fn usage_body_capture_preserves_token_limits_and_counts() {
+        let masked = mask_sensitive_body_fields(json!({
+            "max_token": 4096,
+            "max_tokens": 128000,
+            "max_completion_tokens": 128000,
+            "max_output_tokens": 64000,
+            "usage": {
+                "prompt_tokens": 1,
+                "completion_tokens": 2,
+                "total_tokens": 3,
+                "promptTokenCount": 4,
+                "candidatesTokenCount": 5
+            },
+            "generationConfig": {
+                "maxOutputTokens": 8192,
+                "maxOutputToken": 4096
+            },
+            "metadata": {
+                "access_token": "secret-access-token-value",
+                "authToken": "secret-auth-token-value",
+                "token": "secret-token-value"
+            }
+        }));
+
+        assert_eq!(masked.get("max_token"), Some(&json!(4096)));
+        assert_eq!(masked.get("max_tokens"), Some(&json!(128000)));
+        assert_eq!(masked.get("max_completion_tokens"), Some(&json!(128000)));
+        assert_eq!(masked.get("max_output_tokens"), Some(&json!(64000)));
+        assert_eq!(masked.pointer("/usage/prompt_tokens"), Some(&json!(1)));
+        assert_eq!(masked.pointer("/usage/completion_tokens"), Some(&json!(2)));
+        assert_eq!(masked.pointer("/usage/total_tokens"), Some(&json!(3)));
+        assert_eq!(masked.pointer("/usage/promptTokenCount"), Some(&json!(4)));
+        assert_eq!(
+            masked.pointer("/usage/candidatesTokenCount"),
+            Some(&json!(5))
+        );
+        assert_eq!(
+            masked.pointer("/generationConfig/maxOutputTokens"),
+            Some(&json!(8192))
+        );
+        assert_eq!(
+            masked.pointer("/generationConfig/maxOutputToken"),
+            Some(&json!(4096))
+        );
+        assert_ne!(
+            masked
+                .pointer("/metadata/access_token")
+                .and_then(Value::as_str),
+            Some("secret-access-token-value")
+        );
+        assert_ne!(
+            masked
+                .pointer("/metadata/authToken")
+                .and_then(Value::as_str),
+            Some("secret-auth-token-value")
+        );
+        assert_ne!(
+            masked.pointer("/metadata/token").and_then(Value::as_str),
+            Some("secret-token-value")
         );
     }
 

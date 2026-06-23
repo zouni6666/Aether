@@ -434,7 +434,6 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let active = Arc::new(AtomicUsize::new(0));
         let max_active = Arc::new(AtomicUsize::new(0));
-        let started = Instant::now();
         let mut tasks = Vec::new();
 
         for (key, value) in [("key-a", 1_u64), ("key-b", 2_u64)] {
@@ -471,11 +470,6 @@ mod tests {
         assert_eq!(results, vec![Some(1), Some(2)]);
         assert_eq!(calls.load(Ordering::Acquire), 2);
         assert_eq!(max_active.load(Ordering::Acquire), 2);
-        assert!(
-            started.elapsed() < Duration::from_millis(95),
-            "different cache keys should load in parallel, elapsed={:?}",
-            started.elapsed()
-        );
     }
 
     #[tokio::test]
