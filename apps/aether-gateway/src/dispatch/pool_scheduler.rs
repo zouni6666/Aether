@@ -47,6 +47,7 @@ use crate::handlers::shared::provider_pool::{
 use crate::handlers::shared::{parse_catalog_auth_config_json, provider_key_health_summary};
 use crate::maintenance::spawn_pool_quota_probe_replenish_for_request;
 use crate::orchestration::LocalExecutionCandidateMetadata;
+use crate::stage_metrics::observe_gateway_stage_ms;
 
 static LOAD_BALANCE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static POOL_SCORE_SCHEDULE_INTEREST_SEMAPHORE: LazyLock<Arc<Semaphore>> =
@@ -133,14 +134,20 @@ async fn schedule_pool_page_candidates(
         let runtime = if key_ids.is_empty() {
             AdminProviderPoolRuntimeState::default()
         } else {
-            read_admin_provider_pool_runtime_state(
+            let runtime_started_at = std::time::Instant::now();
+            let runtime = read_admin_provider_pool_runtime_state(
                 state.app().runtime_state.as_ref(),
                 provider_id.as_str(),
                 &key_ids,
                 &pool_config,
                 sticky_session_token,
             )
-            .await
+            .await;
+            observe_gateway_stage_ms(
+                "pool_runtime_state",
+                runtime_started_at.elapsed().as_millis() as u64,
+            );
+            runtime
         };
         pool_config_by_provider.insert(provider_id.clone(), pool_config);
         runtime_by_provider.insert(provider_id, runtime);
@@ -449,9 +456,17 @@ impl<'a> PoolKeyCursor<'a> {
     }
 
     pub(crate) async fn next_key(&mut self) -> Option<EligibleLocalExecutionCandidate> {
+        let started_at = std::time::Instant::now();
+        let mut observed = false;
         loop {
             if let Some(candidate) = self.next_queued_candidate().await {
                 self.returned_key_count = self.returned_key_count.saturating_add(1);
+                if !observed {
+                    observe_gateway_stage_ms(
+                        "pool_cursor_next_key",
+                        started_at.elapsed().as_millis() as u64,
+                    );
+                }
                 return Some(candidate);
             }
 
@@ -464,6 +479,13 @@ impl<'a> PoolKeyCursor<'a> {
             }
 
             if !self.refill_queued_candidates().await {
+                if !observed {
+                    observe_gateway_stage_ms(
+                        "pool_cursor_next_key",
+                        started_at.elapsed().as_millis() as u64,
+                    );
+                    observed = true;
+                }
                 return None;
             }
         }
@@ -634,9 +656,14 @@ impl<'a> PoolKeyCursor<'a> {
             offset: 0,
             limit: limit as usize,
         };
+        let score_started_at = std::time::Instant::now();
         let scores = match self.state.app().data.list_ranked_pool_members(&query).await {
             Ok(scores) => scores,
             Err(err) => {
+                observe_gateway_stage_ms(
+                    "pool_score_load",
+                    score_started_at.elapsed().as_millis() as u64,
+                );
                 warn!(
                     event_name = "pool_group_score_load_failed",
                     log_type = "event",
@@ -650,6 +677,10 @@ impl<'a> PoolKeyCursor<'a> {
                 return None;
             }
         };
+        observe_gateway_stage_ms(
+            "pool_score_load",
+            score_started_at.elapsed().as_millis() as u64,
+        );
         if scores.is_empty() {
             return None;
         }
@@ -668,6 +699,7 @@ impl<'a> PoolKeyCursor<'a> {
             selected_provider_model_name: self.group.candidate.selected_provider_model_name.clone(),
             key_ids,
         };
+        let rows_started_at = std::time::Instant::now();
         let rows = match self
             .state
             .app()
@@ -676,6 +708,10 @@ impl<'a> PoolKeyCursor<'a> {
         {
             Ok(rows) => rows,
             Err(err) => {
+                observe_gateway_stage_ms(
+                    "pool_score_key_rows",
+                    rows_started_at.elapsed().as_millis() as u64,
+                );
                 warn!(
                     event_name = "pool_group_score_key_load_failed",
                     log_type = "event",
@@ -690,6 +726,10 @@ impl<'a> PoolKeyCursor<'a> {
                 return None;
             }
         };
+        observe_gateway_stage_ms(
+            "pool_score_key_rows",
+            rows_started_at.elapsed().as_millis() as u64,
+        );
         let materialized_row_count = rows.len() as u32;
         let missing_score_count = scores.len().saturating_sub(rows.len());
         if missing_score_count > 0 {
@@ -1012,11 +1052,20 @@ impl<'a> PoolKeyCursor<'a> {
             return None;
         }
 
+        let transport_started_at = std::time::Instant::now();
         let Some(transport) = read_candidate_transport_snapshot(self.state, &candidate).await
         else {
+            observe_gateway_stage_ms(
+                "candidate_transport_snapshot",
+                transport_started_at.elapsed().as_millis() as u64,
+            );
             self.record_skip_reason("transport_snapshot_missing");
             return None;
         };
+        observe_gateway_stage_ms(
+            "candidate_transport_snapshot",
+            transport_started_at.elapsed().as_millis() as u64,
+        );
         if let Some(skip_reason) =
             candidate_auth_channel_skip_reason(&transport, self.request_auth_channel.as_deref())
         {

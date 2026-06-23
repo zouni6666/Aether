@@ -3,6 +3,7 @@ use std::error::Error as _;
 use std::future::Future;
 use std::io::Read;
 use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -11,10 +12,11 @@ use aether_contracts::{
     ResponseBody, EXECUTION_REQUEST_ACCEPT_INVALID_CERTS_HEADER,
     EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER, EXECUTION_REQUEST_HTTP1_ONLY_HEADER,
     TRANSPORT_BACKEND_BROWSER_WREQ, TRANSPORT_BACKEND_REQWEST_RUSTLS,
-    TRANSPORT_HTTP_MODE_HTTP1_ONLY,
+    TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE, TRANSPORT_HTTP_MODE_HTTP1_ONLY,
 };
 use aether_data::repository::proxy_nodes::ProxyNodeTrafficMutation;
 use aether_http::{apply_http_client_config, HttpClientConfig};
+use aether_runtime::{MetricKind, MetricSample};
 use axum::body::Bytes;
 use base64::Engine as _;
 use flate2::read::{DeflateDecoder, GzDecoder};
@@ -35,7 +37,9 @@ use crate::execution_runtime::windsurf::maybe_execute_windsurf_sync;
 use crate::frontdoor_loop_guard::{
     configured_gateway_frontdoor_base_url, gateway_frontdoor_self_loop_guard_error,
 };
+use crate::stage_metrics::observe_gateway_stage_ms;
 use crate::tunnel::{self, tunnel_protocol};
+use crate::upstream_admission::UpstreamTargetAdmissionPermit;
 use crate::{AppState, GatewayError};
 
 const HUB_RELAY_CONTENT_TYPE: &str = "application/vnd.aether.tunnel-envelope";
@@ -46,18 +50,88 @@ const DEFAULT_STREAM_FIRST_BYTE_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_NON_STREAM_TOTAL_TIMEOUT_MS: u64 = 300_000;
 const MIN_TUNNEL_TIMEOUT_SECS: u64 = 1;
 const MAX_TUNNEL_TIMEOUT_SECS: u64 = 300;
+const DIRECT_REQWEST_H2_CLIENT_SHARDS_ENV: &str = "AETHER_GATEWAY_DIRECT_REQWEST_H2_CLIENT_SHARDS";
+const DIRECT_REQWEST_H2_TARGET_STREAMS_PER_CLIENT_ENV: &str =
+    "AETHER_GATEWAY_DIRECT_REQWEST_H2_TARGET_STREAMS_PER_CLIENT";
+const DIRECT_REQWEST_SYNC_WARM_CLIENTS_ENV: &str =
+    "AETHER_GATEWAY_DIRECT_REQWEST_SYNC_WARM_CLIENTS";
+const UPSTREAM_TARGET_GATE_LIMIT_ENV: &str = "AETHER_GATEWAY_UPSTREAM_TARGET_GATE_LIMIT";
+const DEFAULT_UPSTREAM_TARGET_GATE_LIMIT: usize = 2_000;
+const DEFAULT_H2_TARGET_STREAMS_PER_CLIENT: usize = 200;
+const DEFAULT_DIRECT_REQWEST_SYNC_WARM_CLIENTS: usize = 4;
+const MAX_DIRECT_REQWEST_H2_CLIENT_SHARDS: usize = 128;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct DirectReqwestClientCacheKey {
     connect_timeout_ms: Option<u64>,
+    proxy_url: Option<String>,
     follow_redirects: bool,
     http1_only: bool,
     accept_invalid_certs: bool,
+    transport_profile: Option<DirectReqwestTransportProfileCacheKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct DirectReqwestTransportProfileCacheKey {
+    profile_id: String,
+    backend: String,
+    http_mode: String,
+    pool_scope: String,
+    header_fingerprint: Option<String>,
+    extra: Option<String>,
+}
+
+struct DirectReqwestClientCacheEntry {
+    clients: Vec<reqwest::Client>,
+    next: AtomicU64,
+    target_len: usize,
+    warming: bool,
+}
+
+impl DirectReqwestClientCacheEntry {
+    fn new(clients: Vec<reqwest::Client>, target_len: usize, warming: bool) -> Self {
+        Self {
+            clients,
+            next: AtomicU64::new(0),
+            target_len: target_len.max(1),
+            warming,
+        }
+    }
+
+    fn select(&self) -> reqwest::Client {
+        if self.clients.len() <= 1 {
+            return self
+                .clients
+                .first()
+                .expect("direct reqwest client cache entry should contain a client")
+                .clone();
+        }
+        let index = self.next.fetch_add(1, Ordering::Relaxed) as usize % self.clients.len();
+        self.clients[index].clone()
+    }
+
+    fn len(&self) -> usize {
+        self.clients.len()
+    }
+
+    fn should_warm(&self) -> bool {
+        self.clients.len() < self.target_len && !self.warming
+    }
 }
 
 static DIRECT_REQWEST_CLIENT_CACHE: LazyLock<
-    StdMutex<HashMap<DirectReqwestClientCacheKey, reqwest::Client>>,
+    StdMutex<HashMap<DirectReqwestClientCacheKey, DirectReqwestClientCacheEntry>>,
 > = LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+#[derive(Debug, Default)]
+struct DirectReqwestClientCacheMetrics {
+    hits: AtomicU64,
+    misses: AtomicU64,
+    builds: AtomicU64,
+}
+
+static DIRECT_REQWEST_CLIENT_CACHE_METRICS: LazyLock<DirectReqwestClientCacheMetrics> =
+    LazyLock::new(DirectReqwestClientCacheMetrics::default);
 pub(crate) fn format_upstream_request_error(err: &reqwest::Error) -> String {
     let mut kinds = Vec::new();
     if err.is_connect() {
@@ -244,6 +318,7 @@ pub(crate) struct DirectUpstreamStreamExecution {
     pub(crate) response: DirectUpstreamResponse,
     pub(crate) started_at: Instant,
     pub(crate) stream_first_byte_timeout: Option<Duration>,
+    pub(crate) upstream_target_permit: Option<UpstreamTargetAdmissionPermit>,
 }
 
 impl DirectSyncExecutionRuntime {
@@ -302,10 +377,19 @@ impl DirectSyncExecutionRuntime {
             return Err(ExecutionRuntimeTransportError::StreamUnsupported);
         }
 
+        let build_body_started_at = Instant::now();
         let body_bytes = build_request_body(plan)?;
+        observe_gateway_stage_ms(
+            "direct_build_body",
+            build_body_started_at.elapsed().as_millis() as u64,
+        );
 
         let started_at = Instant::now();
         let response = send_request(plan, body_bytes).await?;
+        observe_gateway_stage_ms(
+            "direct_send_headers",
+            started_at.elapsed().as_millis() as u64,
+        );
         let status_code = response.status_code();
         let headers = response.headers();
 
@@ -321,6 +405,7 @@ impl DirectSyncExecutionRuntime {
             response: response.into_direct_upstream_response(),
             started_at,
             stream_first_byte_timeout: resolve_stream_first_byte_timeout(plan),
+            upstream_target_permit: None,
         })
     }
 }
@@ -433,6 +518,7 @@ pub(crate) async fn execute_stream_plan_via_local_tunnel(
         response: DirectUpstreamResponse::LocalTunnel(response),
         started_at,
         stream_first_byte_timeout: resolve_stream_first_byte_timeout(plan),
+        upstream_target_permit: None,
     }))
 }
 
@@ -1366,64 +1452,367 @@ fn build_client(
 ) -> Result<reqwest::Client, ExecutionRuntimeTransportError> {
     validate_reqwest_transport_profile(transport_profile)?;
     let resolved_proxy_url = resolve_proxy_url(proxy)?;
-    if resolved_proxy_url.is_none() && transport_profile.is_none() {
-        let cache_key = DirectReqwestClientCacheKey {
-            connect_timeout_ms: timeouts.and_then(|timeouts| timeouts.connect_ms),
-            follow_redirects: transport_controls.follow_redirects == Some(true),
-            http1_only: transport_controls.http1_only,
-            accept_invalid_certs: transport_controls.accept_invalid_certs,
-        };
-        if let Ok(cache) = DIRECT_REQWEST_CLIENT_CACHE.lock() {
-            if let Some(client) = cache.get(&cache_key) {
-                return Ok(client.clone());
+    let cache_key = direct_reqwest_client_cache_key(
+        timeouts,
+        resolved_proxy_url,
+        transport_profile,
+        transport_controls,
+    );
+    cached_direct_reqwest_client(cache_key)
+}
+
+pub(crate) fn prewarm_direct_reqwest_client_cache_for_plan(plan: &ExecutionPlan) {
+    match try_prewarm_direct_reqwest_client_cache_for_plan(plan) {
+        Ok(true) => {}
+        Ok(false) => {}
+        Err(err) => {
+            tracing::debug!(
+                error = ?err,
+                request_id = %plan.request_id,
+                candidate_id = ?plan.candidate_id,
+                provider_id = %plan.provider_id,
+                endpoint_id = %plan.endpoint_id,
+                key_id = %plan.key_id,
+                "gateway direct reqwest client prewarm skipped"
+            );
+        }
+    }
+}
+
+fn try_prewarm_direct_reqwest_client_cache_for_plan(
+    plan: &ExecutionPlan,
+) -> Result<bool, ExecutionRuntimeTransportError> {
+    if transport_profile_uses_browser_wreq(plan.transport_profile.as_ref()) {
+        return Ok(false);
+    }
+    if resolve_tunnel_node_id(plan.proxy.as_ref()).is_some() {
+        return Ok(false);
+    }
+
+    let transport_controls = resolve_execution_transport_controls(&plan.headers);
+    validate_reqwest_transport_profile(plan.transport_profile.as_ref())?;
+    let resolved_proxy_url = resolve_proxy_url(plan.proxy.as_ref())?;
+    let cache_key = direct_reqwest_client_cache_key(
+        plan.timeouts.as_ref(),
+        resolved_proxy_url,
+        plan.transport_profile.as_ref(),
+        transport_controls,
+    );
+    prewarm_direct_reqwest_client_cache(cache_key)?;
+    Ok(true)
+}
+
+fn prewarm_direct_reqwest_client_cache(
+    cache_key: DirectReqwestClientCacheKey,
+) -> Result<(), ExecutionRuntimeTransportError> {
+    let mut warm_after_unlock = None;
+    if let Ok(mut cache) = DIRECT_REQWEST_CLIENT_CACHE.lock() {
+        if let Some(entry) = cache.get_mut(&cache_key) {
+            if entry.should_warm() {
+                entry.warming = true;
+                warm_after_unlock = Some((cache_key.clone(), entry.len(), entry.target_len));
             }
+            drop(cache);
+            if let Some((cache_key, existing_len, target_len)) = warm_after_unlock {
+                let spawned = spawn_direct_reqwest_client_cache_warm(
+                    cache_key.clone(),
+                    existing_len,
+                    target_len,
+                );
+                if !spawned {
+                    mark_direct_reqwest_client_cache_not_warming(&cache_key);
+                }
+            }
+            return Ok(());
         }
 
-        let client = build_plain_direct_reqwest_client(cache_key)?;
-        if let Ok(mut cache) = DIRECT_REQWEST_CLIENT_CACHE.lock() {
-            let client = cache.entry(cache_key).or_insert_with(|| client.clone());
-            return Ok(client.clone());
+        let target_len = direct_reqwest_client_shard_count(&cache_key);
+        let initial_len = direct_reqwest_initial_client_shard_count(target_len);
+        let mut clients = Vec::with_capacity(initial_len);
+        for _ in 0..initial_len {
+            clients.push(build_direct_reqwest_client_from_cache_key(&cache_key)?);
+            DIRECT_REQWEST_CLIENT_CACHE_METRICS
+                .builds
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        let entry =
+            DirectReqwestClientCacheEntry::new(clients, target_len, target_len > initial_len);
+        let warm_key = (target_len > initial_len).then(|| cache_key.clone());
+        cache.insert(cache_key, entry);
+        if let Some(warm_key) = warm_key {
+            warm_after_unlock = Some((warm_key, initial_len, target_len));
+        }
+        drop(cache);
+        if let Some((cache_key, existing_len, target_len)) = warm_after_unlock {
+            let spawned =
+                spawn_direct_reqwest_client_cache_warm(cache_key.clone(), existing_len, target_len);
+            if !spawned {
+                mark_direct_reqwest_client_cache_not_warming(&cache_key);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cached_direct_reqwest_client(
+    cache_key: DirectReqwestClientCacheKey,
+) -> Result<reqwest::Client, ExecutionRuntimeTransportError> {
+    let mut warm_after_unlock = None;
+    if let Ok(mut cache) = DIRECT_REQWEST_CLIENT_CACHE.lock() {
+        if let Some(entry) = cache.get_mut(&cache_key) {
+            DIRECT_REQWEST_CLIENT_CACHE_METRICS
+                .hits
+                .fetch_add(1, Ordering::Relaxed);
+            let client = entry.select();
+            if entry.should_warm() {
+                entry.warming = true;
+                warm_after_unlock = Some((cache_key.clone(), entry.len(), entry.target_len));
+            }
+            drop(cache);
+            if let Some((cache_key, existing_len, target_len)) = warm_after_unlock {
+                let spawned = spawn_direct_reqwest_client_cache_warm(
+                    cache_key.clone(),
+                    existing_len,
+                    target_len,
+                );
+                if !spawned {
+                    mark_direct_reqwest_client_cache_not_warming(&cache_key);
+                }
+            }
+            return Ok(client);
+        }
+        DIRECT_REQWEST_CLIENT_CACHE_METRICS
+            .misses
+            .fetch_add(1, Ordering::Relaxed);
+        let target_len = direct_reqwest_client_shard_count(&cache_key);
+        let initial_len = direct_reqwest_initial_client_shard_count(target_len);
+        let mut clients = Vec::with_capacity(initial_len);
+        for _ in 0..initial_len {
+            clients.push(build_direct_reqwest_client_from_cache_key(&cache_key)?);
+            DIRECT_REQWEST_CLIENT_CACHE_METRICS
+                .builds
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        let entry =
+            DirectReqwestClientCacheEntry::new(clients, target_len, target_len > initial_len);
+        let client = entry.select();
+        let warm_key = (target_len > initial_len).then(|| cache_key.clone());
+        cache.insert(cache_key, entry);
+        if let Some(warm_key) = warm_key {
+            warm_after_unlock = Some((warm_key, initial_len, target_len));
+        }
+        drop(cache);
+        if let Some((cache_key, existing_len, target_len)) = warm_after_unlock {
+            let spawned =
+                spawn_direct_reqwest_client_cache_warm(cache_key.clone(), existing_len, target_len);
+            if !spawned {
+                mark_direct_reqwest_client_cache_not_warming(&cache_key);
+            }
         }
         return Ok(client);
     }
 
-    let mut builder = reqwest::Client::builder();
-    if transport_controls.follow_redirects != Some(true) {
-        builder = builder.redirect(Policy::none());
-    }
-    if transport_controls.http1_only || transport_profile_http1_only(transport_profile) {
-        builder = builder.http1_only();
-    }
-    let mut builder = apply_http_client_config(
-        builder,
-        &HttpClientConfig {
-            connect_timeout_ms: timeouts.and_then(|timeouts| timeouts.connect_ms),
-            ..HttpClientConfig::default()
-        },
-    );
-    builder = apply_transport_profile(builder, transport_profile);
-    if transport_controls.accept_invalid_certs {
-        builder = builder.danger_accept_invalid_certs(true);
-    }
-    if let Some(proxy_url) = resolved_proxy_url {
-        let proxy = reqwest::Proxy::all(&proxy_url)
-            .map_err(ExecutionRuntimeTransportError::InvalidProxy)?;
-        builder = builder.proxy(proxy);
-    }
-    builder
-        .build()
-        .map_err(ExecutionRuntimeTransportError::ClientBuild)
+    DIRECT_REQWEST_CLIENT_CACHE_METRICS
+        .misses
+        .fetch_add(1, Ordering::Relaxed);
+    let client = build_direct_reqwest_client_from_cache_key(&cache_key)?;
+    DIRECT_REQWEST_CLIENT_CACHE_METRICS
+        .builds
+        .fetch_add(1, Ordering::Relaxed);
+    Ok(client)
 }
 
-fn build_plain_direct_reqwest_client(
+fn spawn_direct_reqwest_client_cache_warm(
     cache_key: DirectReqwestClientCacheKey,
+    existing_len: usize,
+    target_len: usize,
+) -> bool {
+    if target_len <= existing_len {
+        return false;
+    }
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return false;
+    };
+    handle.spawn_blocking(move || {
+        for _ in existing_len..target_len {
+            match build_direct_reqwest_client_from_cache_key(&cache_key) {
+                Ok(client) => {
+                    DIRECT_REQWEST_CLIENT_CACHE_METRICS
+                        .builds
+                        .fetch_add(1, Ordering::Relaxed);
+                    let Ok(mut cache) = DIRECT_REQWEST_CLIENT_CACHE.lock() else {
+                        return;
+                    };
+                    let Some(entry) = cache.get_mut(&cache_key) else {
+                        return;
+                    };
+                    if entry.clients.len() >= entry.target_len {
+                        entry.warming = false;
+                        return;
+                    }
+                    entry.clients.push(client);
+                    if entry.clients.len() >= entry.target_len {
+                        entry.warming = false;
+                        return;
+                    }
+                }
+                Err(err) => {
+                    tracing::debug!(
+                        error = ?err,
+                        "gateway direct reqwest client cache warm failed"
+                    );
+                    mark_direct_reqwest_client_cache_not_warming(&cache_key);
+                    break;
+                }
+            }
+        }
+
+        let Ok(mut cache) = DIRECT_REQWEST_CLIENT_CACHE.lock() else {
+            return;
+        };
+        let Some(entry) = cache.get_mut(&cache_key) else {
+            return;
+        };
+        entry.warming = false;
+    });
+    true
+}
+
+fn mark_direct_reqwest_client_cache_warming(cache_key: &DirectReqwestClientCacheKey) {
+    if let Ok(mut cache) = DIRECT_REQWEST_CLIENT_CACHE.lock() {
+        if let Some(entry) = cache.get_mut(cache_key) {
+            entry.warming = true;
+        }
+    }
+}
+
+fn mark_direct_reqwest_client_cache_not_warming(cache_key: &DirectReqwestClientCacheKey) {
+    if let Ok(mut cache) = DIRECT_REQWEST_CLIENT_CACHE.lock() {
+        if let Some(entry) = cache.get_mut(cache_key) {
+            entry.warming = false;
+        }
+    }
+}
+
+fn direct_reqwest_client_cache_key(
+    timeouts: Option<&aether_contracts::ExecutionTimeouts>,
+    proxy_url: Option<String>,
+    transport_profile: Option<&ResolvedTransportProfile>,
+    transport_controls: ExecutionTransportControls,
+) -> DirectReqwestClientCacheKey {
+    DirectReqwestClientCacheKey {
+        connect_timeout_ms: timeouts.and_then(|timeouts| timeouts.connect_ms),
+        proxy_url,
+        follow_redirects: transport_controls.follow_redirects == Some(true),
+        http1_only: transport_controls.http1_only,
+        accept_invalid_certs: transport_controls.accept_invalid_certs,
+        transport_profile: transport_profile.map(direct_reqwest_transport_profile_cache_key),
+    }
+}
+
+fn direct_reqwest_transport_profile_cache_key(
+    profile: &ResolvedTransportProfile,
+) -> DirectReqwestTransportProfileCacheKey {
+    DirectReqwestTransportProfileCacheKey {
+        profile_id: profile.profile_id.trim().to_string(),
+        backend: profile.backend.trim().to_ascii_lowercase(),
+        http_mode: profile.http_mode.trim().to_ascii_lowercase(),
+        pool_scope: profile.pool_scope.trim().to_ascii_lowercase(),
+        header_fingerprint: stable_json_cache_key(profile.header_fingerprint.as_ref()),
+        extra: stable_json_cache_key(profile.extra.as_ref()),
+    }
+}
+
+fn stable_json_cache_key(value: Option<&Value>) -> Option<String> {
+    value.and_then(|value| serde_json::to_string(value).ok())
+}
+
+fn build_direct_reqwest_client_cache_entry_from_cache_key(
+    cache_key: &DirectReqwestClientCacheKey,
+) -> Result<DirectReqwestClientCacheEntry, ExecutionRuntimeTransportError> {
+    let shard_count = direct_reqwest_client_shard_count(cache_key);
+    let mut clients = Vec::with_capacity(shard_count);
+    for _ in 0..shard_count {
+        clients.push(build_direct_reqwest_client_from_cache_key(cache_key)?);
+    }
+    Ok(DirectReqwestClientCacheEntry::new(
+        clients,
+        shard_count,
+        false,
+    ))
+}
+
+fn direct_reqwest_client_shard_count(cache_key: &DirectReqwestClientCacheKey) -> usize {
+    if !direct_reqwest_client_cache_key_uses_http2(cache_key) {
+        return 1;
+    }
+    direct_reqwest_h2_client_shards_from_config(
+        env_positive_usize(DIRECT_REQWEST_H2_CLIENT_SHARDS_ENV),
+        env_positive_usize(UPSTREAM_TARGET_GATE_LIMIT_ENV)
+            .unwrap_or(DEFAULT_UPSTREAM_TARGET_GATE_LIMIT),
+        env_positive_usize(DIRECT_REQWEST_H2_TARGET_STREAMS_PER_CLIENT_ENV)
+            .unwrap_or(DEFAULT_H2_TARGET_STREAMS_PER_CLIENT),
+    )
+}
+
+fn direct_reqwest_client_cache_key_uses_http2(cache_key: &DirectReqwestClientCacheKey) -> bool {
+    if cache_key.http1_only {
+        return false;
+    }
+    let Some(profile) = cache_key.transport_profile.as_ref() else {
+        return false;
+    };
+    profile.http_mode != TRANSPORT_HTTP_MODE_HTTP1_ONLY
+}
+
+fn direct_reqwest_h2_client_shards_from_config(
+    explicit_shards: Option<usize>,
+    target_gate_limit: usize,
+    target_streams_per_client: usize,
+) -> usize {
+    if let Some(shards) = explicit_shards {
+        return shards.clamp(1, MAX_DIRECT_REQWEST_H2_CLIENT_SHARDS);
+    }
+    let streams_per_client = target_streams_per_client.max(1);
+    target_gate_limit
+        .max(1)
+        .div_ceil(streams_per_client)
+        .clamp(1, MAX_DIRECT_REQWEST_H2_CLIENT_SHARDS)
+}
+
+fn direct_reqwest_initial_client_shard_count(target_len: usize) -> usize {
+    env_positive_usize(DIRECT_REQWEST_SYNC_WARM_CLIENTS_ENV)
+        .unwrap_or(DEFAULT_DIRECT_REQWEST_SYNC_WARM_CLIENTS)
+        .clamp(1, target_len.max(1))
+}
+
+fn env_positive_usize(name: &str) -> Option<usize> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+}
+
+fn build_direct_reqwest_client_from_cache_key(
+    cache_key: &DirectReqwestClientCacheKey,
 ) -> Result<reqwest::Client, ExecutionRuntimeTransportError> {
     let mut builder = reqwest::Client::builder();
     if !cache_key.follow_redirects {
         builder = builder.redirect(Policy::none());
     }
-    if cache_key.http1_only {
+    if cache_key.http1_only
+        || cache_key
+            .transport_profile
+            .as_ref()
+            .is_some_and(|profile| profile.http_mode == TRANSPORT_HTTP_MODE_HTTP1_ONLY)
+    {
         builder = builder.http1_only();
+    } else if cache_key
+        .transport_profile
+        .as_ref()
+        .is_some_and(|profile| profile.http_mode == TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE)
+    {
+        builder = builder.http2_prior_knowledge();
     }
     let mut builder = apply_http_client_config(
         builder,
@@ -1433,8 +1822,14 @@ fn build_plain_direct_reqwest_client(
             ..HttpClientConfig::default()
         },
     );
+    builder = apply_transport_profile_cache_key(builder, cache_key.transport_profile.as_ref());
     if cache_key.accept_invalid_certs {
         builder = builder.danger_accept_invalid_certs(true);
+    }
+    if let Some(proxy_url) = cache_key.proxy_url.as_deref() {
+        let proxy =
+            reqwest::Proxy::all(proxy_url).map_err(ExecutionRuntimeTransportError::InvalidProxy)?;
+        builder = builder.proxy(proxy);
     }
     builder
         .build()
@@ -1448,6 +1843,55 @@ fn direct_reqwest_pool_max_idle_per_host() -> usize {
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_MAX_IDLE_PER_HOST)
+}
+
+pub(crate) fn direct_reqwest_client_cache_metric_samples() -> Vec<MetricSample> {
+    let (entries, clients) = DIRECT_REQWEST_CLIENT_CACHE
+        .lock()
+        .map(|cache| {
+            let entries = cache.len() as u64;
+            let clients = cache.values().map(|entry| entry.len() as u64).sum();
+            (entries, clients)
+        })
+        .unwrap_or((0, 0));
+    vec![
+        MetricSample::new(
+            "direct_reqwest_client_cache_entries",
+            "Number of cached direct reqwest clients.",
+            MetricKind::Gauge,
+            entries,
+        ),
+        MetricSample::new(
+            "direct_reqwest_client_cache_clients",
+            "Number of direct reqwest clients across all cache entries.",
+            MetricKind::Gauge,
+            clients,
+        ),
+        MetricSample::new(
+            "direct_reqwest_client_cache_hits_total",
+            "Number of direct reqwest client cache hits.",
+            MetricKind::Counter,
+            DIRECT_REQWEST_CLIENT_CACHE_METRICS
+                .hits
+                .load(Ordering::Relaxed),
+        ),
+        MetricSample::new(
+            "direct_reqwest_client_cache_misses_total",
+            "Number of direct reqwest client cache misses.",
+            MetricKind::Counter,
+            DIRECT_REQWEST_CLIENT_CACHE_METRICS
+                .misses
+                .load(Ordering::Relaxed),
+        ),
+        MetricSample::new(
+            "direct_reqwest_client_cache_builds_total",
+            "Number of direct reqwest clients built after cache misses.",
+            MetricKind::Counter,
+            DIRECT_REQWEST_CLIENT_CACHE_METRICS
+                .builds
+                .load(Ordering::Relaxed),
+        ),
+    ]
 }
 
 pub(crate) fn build_browser_wreq_client(
@@ -1622,6 +2066,19 @@ fn transport_profile_http1_only(transport_profile: Option<&ResolvedTransportProf
         .unwrap_or(false)
 }
 
+fn transport_profile_h2c_prior_knowledge(
+    transport_profile: Option<&ResolvedTransportProfile>,
+) -> bool {
+    transport_profile
+        .map(|profile| {
+            profile
+                .http_mode
+                .trim()
+                .eq_ignore_ascii_case(TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE)
+        })
+        .unwrap_or(false)
+}
+
 fn apply_transport_profile(
     builder: reqwest::ClientBuilder,
     transport_profile: Option<&ResolvedTransportProfile>,
@@ -1630,7 +2087,24 @@ fn apply_transport_profile(
         return builder;
     };
     let profile_id = profile.profile_id.trim();
-    if profile_id.is_empty() {
+    if profile_id.is_empty() || transport_profile_h2c_prior_knowledge(Some(profile)) {
+        return builder;
+    }
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    builder.use_preconfigured_tls(build_best_effort_transport_tls_config())
+}
+
+fn apply_transport_profile_cache_key(
+    builder: reqwest::ClientBuilder,
+    transport_profile: Option<&DirectReqwestTransportProfileCacheKey>,
+) -> reqwest::ClientBuilder {
+    let Some(profile) = transport_profile else {
+        return builder;
+    };
+    if profile.profile_id.is_empty() || profile.http_mode == TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE
+    {
         return builder;
     }
 
@@ -1915,6 +2389,7 @@ mod tests {
         ExecutionPlan, ExecutionTimeouts, ProxySnapshot, RequestBody, ResolvedTransportProfile,
         EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER, EXECUTION_REQUEST_HTTP1_ONLY_HEADER,
         TRANSPORT_BACKEND_BROWSER_WREQ, TRANSPORT_BACKEND_REQWEST_RUSTLS,
+        TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE, TRANSPORT_HTTP_MODE_HTTP1_ONLY,
     };
     use aether_data::repository::proxy_nodes::{
         InMemoryProxyNodeRepository, ProxyNodeReadRepository, StoredProxyNode,
@@ -2022,6 +2497,186 @@ mod tests {
             )
             .unwrap_or_else(|err| panic!("client should build for {proxy_url}: {err}"));
         }
+    }
+
+    #[test]
+    fn direct_reqwest_client_cache_key_includes_transport_profile() {
+        let timeouts = ExecutionTimeouts {
+            connect_ms: Some(5_000),
+            ..ExecutionTimeouts::default()
+        };
+        let h2c_profile = ResolvedTransportProfile {
+            profile_id: "mock-h2c".into(),
+            backend: TRANSPORT_BACKEND_REQWEST_RUSTLS.into(),
+            http_mode: TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE.into(),
+            pool_scope: "key".into(),
+            header_fingerprint: None,
+            extra: Some(json!({"pool": "a"})),
+        };
+        let same_h2c_profile = ResolvedTransportProfile {
+            extra: Some(json!({"pool": "a"})),
+            ..h2c_profile.clone()
+        };
+        let http1_profile = ResolvedTransportProfile {
+            http_mode: TRANSPORT_HTTP_MODE_HTTP1_ONLY.into(),
+            ..h2c_profile.clone()
+        };
+
+        let left = super::direct_reqwest_client_cache_key(
+            Some(&timeouts),
+            None,
+            Some(&h2c_profile),
+            ExecutionTransportControls::default(),
+        );
+        let right = super::direct_reqwest_client_cache_key(
+            Some(&timeouts),
+            None,
+            Some(&same_h2c_profile),
+            ExecutionTransportControls::default(),
+        );
+        let different_mode = super::direct_reqwest_client_cache_key(
+            Some(&timeouts),
+            None,
+            Some(&http1_profile),
+            ExecutionTransportControls::default(),
+        );
+        let different_proxy = super::direct_reqwest_client_cache_key(
+            Some(&timeouts),
+            Some("http://127.0.0.1:8080".into()),
+            Some(&h2c_profile),
+            ExecutionTransportControls::default(),
+        );
+
+        assert_eq!(left, right);
+        assert_ne!(left, different_mode);
+        assert_ne!(left, different_proxy);
+        assert!(super::direct_reqwest_client_cache_key_uses_http2(&left));
+        assert!(!super::direct_reqwest_client_cache_key_uses_http2(
+            &different_mode
+        ));
+    }
+
+    #[test]
+    fn direct_reqwest_h2_client_shards_scale_from_target_gate() {
+        assert_eq!(
+            super::direct_reqwest_h2_client_shards_from_config(None, 12_000, 200),
+            60
+        );
+        assert_eq!(
+            super::direct_reqwest_h2_client_shards_from_config(None, 2_000, 200),
+            10
+        );
+        assert_eq!(
+            super::direct_reqwest_h2_client_shards_from_config(Some(4), 12_000, 200),
+            4
+        );
+        assert_eq!(
+            super::direct_reqwest_h2_client_shards_from_config(None, 100_000, 100),
+            super::MAX_DIRECT_REQWEST_H2_CLIENT_SHARDS
+        );
+    }
+
+    #[test]
+    fn direct_reqwest_initial_client_shards_are_bounded_by_target() {
+        assert_eq!(super::direct_reqwest_initial_client_shard_count(1), 1);
+        assert_eq!(super::direct_reqwest_initial_client_shard_count(2), 2);
+        assert_eq!(
+            super::direct_reqwest_initial_client_shard_count(21),
+            super::DEFAULT_DIRECT_REQWEST_SYNC_WARM_CLIENTS
+        );
+    }
+
+    #[test]
+    fn direct_reqwest_prewarm_populates_cache_for_plan() {
+        let profile = ResolvedTransportProfile {
+            profile_id: "mock-h2c-prewarm".into(),
+            backend: TRANSPORT_BACKEND_REQWEST_RUSTLS.into(),
+            http_mode: TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE.into(),
+            pool_scope: "key".into(),
+            header_fingerprint: None,
+            extra: None,
+        };
+        let plan = ExecutionPlan {
+            request_id: "req-prewarm".into(),
+            candidate_id: Some("candidate-prewarm".into()),
+            provider_name: Some("mock".into()),
+            provider_id: "provider-1".into(),
+            endpoint_id: "endpoint-1".into(),
+            key_id: "key-1".into(),
+            method: "POST".into(),
+            url: "http://127.0.0.1:18184/v1/chat/completions".into(),
+            headers: BTreeMap::new(),
+            content_type: Some("application/json".into()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({"stream": true})),
+            stream: true,
+            client_api_format: "openai:chat".into(),
+            provider_api_format: "openai:chat".into(),
+            model_name: Some("mock-model".into()),
+            proxy: None,
+            transport_profile: Some(profile.clone()),
+            timeouts: Some(ExecutionTimeouts {
+                connect_ms: Some(5_000),
+                ..ExecutionTimeouts::default()
+            }),
+        };
+
+        assert!(
+            super::try_prewarm_direct_reqwest_client_cache_for_plan(&plan)
+                .expect("prewarm should succeed")
+        );
+
+        let cache_key = super::direct_reqwest_client_cache_key(
+            plan.timeouts.as_ref(),
+            None,
+            Some(&profile),
+            super::ExecutionTransportControls::default(),
+        );
+        let target_len = super::direct_reqwest_client_shard_count(&cache_key);
+        let expected_initial_len = super::direct_reqwest_initial_client_shard_count(target_len);
+        let cache = super::DIRECT_REQWEST_CLIENT_CACHE
+            .lock()
+            .expect("cache lock");
+        let entry = cache.get(&cache_key).expect("cache entry");
+        assert_eq!(entry.len(), expected_initial_len);
+        assert_eq!(entry.target_len, target_len);
+    }
+
+    #[test]
+    fn direct_reqwest_prewarm_skips_browser_transport() {
+        let plan = ExecutionPlan {
+            request_id: "req-browser".into(),
+            candidate_id: None,
+            provider_name: Some("browser".into()),
+            provider_id: "provider-1".into(),
+            endpoint_id: "endpoint-1".into(),
+            key_id: "key-1".into(),
+            method: "POST".into(),
+            url: "https://example.com/v1/chat/completions".into(),
+            headers: BTreeMap::new(),
+            content_type: Some("application/json".into()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({"stream": true})),
+            stream: true,
+            client_api_format: "openai:chat".into(),
+            provider_api_format: "openai:chat".into(),
+            model_name: Some("mock-model".into()),
+            proxy: None,
+            transport_profile: Some(ResolvedTransportProfile {
+                profile_id: "chrome_136".into(),
+                backend: TRANSPORT_BACKEND_BROWSER_WREQ.into(),
+                http_mode: "auto".into(),
+                pool_scope: "key".into(),
+                header_fingerprint: None,
+                extra: None,
+            }),
+            timeouts: None,
+        };
+
+        assert!(
+            !super::try_prewarm_direct_reqwest_client_cache_for_plan(&plan)
+                .expect("browser transport should skip prewarm")
+        );
     }
 
     #[test]
@@ -3664,6 +4319,73 @@ mod tests {
         assert_eq!(
             result.body.and_then(|body| body.json_body),
             Some(json!({"transport_profile": true}))
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_sync_execution_runtime_supports_h2c_prior_knowledge_profile() {
+        let listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr should resolve");
+        let app = Router::new().route(
+            "/chat",
+            post(|| async {
+                (
+                    axum::http::StatusCode::OK,
+                    Json(json!({"transport_profile": "h2c"})),
+                )
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("test server should run");
+        });
+
+        let execution_runtime = DirectSyncExecutionRuntime::new();
+        let result = execution_runtime
+            .execute_sync(&ExecutionPlan {
+                request_id: "req-h2c-1".into(),
+                candidate_id: Some("cand-h2c-1".into()),
+                provider_name: Some("mock".into()),
+                provider_id: "prov-1".into(),
+                endpoint_id: "ep-1".into(),
+                key_id: "key-1".into(),
+                method: "POST".into(),
+                url: format!("http://{addr}/chat"),
+                headers: BTreeMap::from([("content-type".into(), "application/json".into())]),
+                content_type: Some("application/json".into()),
+                content_encoding: None,
+                body: RequestBody::from_json(json!({"model": "mock-model"})),
+                stream: false,
+                client_api_format: "openai:chat".into(),
+                provider_api_format: "openai:chat".into(),
+                model_name: Some("mock-model".into()),
+                proxy: None,
+                transport_profile: Some(ResolvedTransportProfile {
+                    profile_id: "mock-h2c".into(),
+                    backend: TRANSPORT_BACKEND_REQWEST_RUSTLS.into(),
+                    http_mode: TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE.into(),
+                    pool_scope: "key".into(),
+                    header_fingerprint: None,
+                    extra: None,
+                }),
+                timeouts: Some(ExecutionTimeouts {
+                    connect_ms: Some(5_000),
+                    total_ms: Some(LOCAL_HTTP_SUCCESS_TIMEOUT_MS),
+                    ..ExecutionTimeouts::default()
+                }),
+            })
+            .await
+            .expect("h2c prior-knowledge execution should succeed");
+
+        server.abort();
+
+        assert_eq!(result.status_code, 200);
+        assert_eq!(
+            result.body.and_then(|body| body.json_body),
+            Some(json!({"transport_profile": "h2c"}))
         );
     }
 

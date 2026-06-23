@@ -236,6 +236,11 @@ const AUTO_SERVER_SQL_POOL_MIN_CONNECTIONS_FLOOR: u32 = 4;
 const AUTO_SERVER_SQL_POOL_MIN_CONNECTIONS_CAP: u32 = 16;
 const AUTO_SERVER_SQL_POOL_MAX_CONNECTIONS_FLOOR: u32 = 20;
 const AUTO_SERVER_SQL_POOL_MAX_CONNECTIONS_CAP: u32 = 100;
+const DEFAULT_GATEWAY_LISTEN_BACKLOG: i32 = 8192;
+const MIN_GATEWAY_LISTEN_BACKLOG: i32 = 128;
+const MAX_GATEWAY_LISTEN_BACKLOG: i32 = 65_535;
+const DEFAULT_GATEWAY_LISTENER_SHARDS: usize = 1;
+const MAX_GATEWAY_LISTENER_SHARDS: usize = 64;
 fn env_var_trimmed(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -570,6 +575,34 @@ struct GatewayUsageArgs {
         default_value_t = 5_000
     )]
     queue_reclaim_interval_ms: u64,
+
+    #[arg(
+        long,
+        env = "AETHER_GATEWAY_USAGE_ENQUEUE_RETRY_BUFFER_CAPACITY",
+        default_value_t = 131_072
+    )]
+    enqueue_retry_buffer_capacity: usize,
+
+    #[arg(
+        long,
+        env = "AETHER_GATEWAY_USAGE_ENQUEUE_RETRY_WORKERS",
+        default_value_t = 4
+    )]
+    enqueue_retry_workers: usize,
+
+    #[arg(
+        long,
+        env = "AETHER_GATEWAY_USAGE_ENQUEUE_RETRY_INITIAL_BACKOFF_MS",
+        default_value_t = 10
+    )]
+    enqueue_retry_initial_backoff_ms: u64,
+
+    #[arg(
+        long,
+        env = "AETHER_GATEWAY_USAGE_ENQUEUE_RETRY_MAX_BACKOFF_MS",
+        default_value_t = 1_000
+    )]
+    enqueue_retry_max_backoff_ms: u64,
 }
 
 impl GatewayUsageArgs {
@@ -587,6 +620,12 @@ impl GatewayUsageArgs {
             reclaim_idle_ms: self.queue_reclaim_idle_ms.max(1),
             reclaim_count: self.queue_reclaim_count.max(1),
             reclaim_interval_ms: self.queue_reclaim_interval_ms.max(1),
+            enqueue_retry_buffer_capacity: self.enqueue_retry_buffer_capacity.max(1),
+            enqueue_retry_workers: self.enqueue_retry_workers.clamp(1, 64),
+            enqueue_retry_initial_backoff_ms: self.enqueue_retry_initial_backoff_ms.max(1),
+            enqueue_retry_max_backoff_ms: self
+                .enqueue_retry_max_backoff_ms
+                .max(self.enqueue_retry_initial_backoff_ms.max(1)),
         }
     }
 }
@@ -754,6 +793,20 @@ struct Args {
 
     #[arg(long, env = "APP_PORT", default_value_t = 8084)]
     app_port: u16,
+
+    #[arg(
+        long,
+        env = "AETHER_GATEWAY_LISTEN_BACKLOG",
+        default_value_t = DEFAULT_GATEWAY_LISTEN_BACKLOG
+    )]
+    listen_backlog: i32,
+
+    #[arg(
+        long,
+        env = "AETHER_GATEWAY_LISTENER_SHARDS",
+        default_value_t = DEFAULT_GATEWAY_LISTENER_SHARDS
+    )]
+    listener_shards: usize,
 
     /// 容器内健康检查入口：根据当前 bind 端口探测本地 /health。
     #[arg(long, hide = true, default_value_t = false)]
@@ -1002,6 +1055,98 @@ fn gateway_bind_addr(app_port: u16) -> Result<std::net::SocketAddr, std::io::Err
         [0, 0, 0, 0],
         validate_app_port(app_port)?,
     )))
+}
+
+fn gateway_listen_backlog(backlog: i32) -> i32 {
+    backlog.clamp(MIN_GATEWAY_LISTEN_BACKLOG, MAX_GATEWAY_LISTEN_BACKLOG)
+}
+
+fn gateway_listener_shards(shards: usize) -> usize {
+    shards.clamp(1, MAX_GATEWAY_LISTENER_SHARDS)
+}
+
+fn gateway_listener(
+    bind_addr: std::net::SocketAddr,
+    backlog: i32,
+    reuse_port: bool,
+) -> Result<tokio::net::TcpListener, std::io::Error> {
+    let domain = match bind_addr {
+        std::net::SocketAddr::V4(_) => socket2::Domain::IPV4,
+        std::net::SocketAddr::V6(_) => socket2::Domain::IPV6,
+    };
+    let socket = socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
+    socket.set_reuse_address(true)?;
+    if reuse_port {
+        set_gateway_listener_reuse_port(&socket)?;
+    }
+    socket.set_nonblocking(true)?;
+    socket.set_tcp_nodelay(true)?;
+    socket.bind(&bind_addr.into())?;
+    socket.listen(gateway_listen_backlog(backlog))?;
+    tokio::net::TcpListener::from_std(socket.into())
+}
+
+#[cfg(unix)]
+fn set_gateway_listener_reuse_port(socket: &socket2::Socket) -> Result<(), std::io::Error> {
+    socket.set_reuse_port(true)
+}
+
+#[cfg(not(unix))]
+fn set_gateway_listener_reuse_port(_socket: &socket2::Socket) -> Result<(), std::io::Error> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "AETHER_GATEWAY_LISTENER_SHARDS > 1 requires SO_REUSEPORT support",
+    ))
+}
+
+fn gateway_listeners(
+    bind_addr: std::net::SocketAddr,
+    backlog: i32,
+    shards: usize,
+) -> Result<Vec<tokio::net::TcpListener>, std::io::Error> {
+    let shards = gateway_listener_shards(shards);
+    let mut listeners = Vec::with_capacity(shards);
+    for _ in 0..shards {
+        listeners.push(gateway_listener(bind_addr, backlog, shards > 1)?);
+    }
+    Ok(listeners)
+}
+
+async fn serve_gateway_router(
+    listeners: Vec<tokio::net::TcpListener>,
+    router: axum::Router,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if listeners.len() == 1 {
+        let listener = listeners
+            .into_iter()
+            .next()
+            .ok_or_else(|| std::io::Error::other("gateway listener set is empty"))?;
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let mut servers = tokio::task::JoinSet::new();
+    for listener in listeners {
+        let router = router.clone();
+        servers.spawn(async move {
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+        });
+    }
+    if let Some(result) = servers.join_next().await {
+        servers.abort_all();
+        let serve_result = result
+            .map_err(|err| std::io::Error::other(format!("gateway listener task failed: {err}")))?;
+        serve_result?;
+    }
+    Ok(())
 }
 
 fn resolve_local_http_base_url(app_port: u16) -> Result<String, std::io::Error> {
@@ -1323,6 +1468,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     state.bootstrap_admin_from_env().await?;
+    match state.prewarm_chat_pii_redaction_runtime_config().await {
+        Ok(enabled) => {
+            info!(
+                chat_pii_redaction_enabled = enabled,
+                "prewarmed chat pii redaction runtime config"
+            );
+        }
+        Err(err) => {
+            warn!(
+                error = %err,
+                "failed to prewarm chat pii redaction runtime config"
+            );
+        }
+    }
 
     let background_tasks = if args.node_role.spawns_background_tasks() {
         Some(state.spawn_background_tasks())
@@ -1333,7 +1492,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         );
         None
     };
-    let listener = tokio::net::TcpListener::bind(bind_addr).await?;
+    let listen_backlog = gateway_listen_backlog(args.listen_backlog);
+    let listener_shards = gateway_listener_shards(args.listener_shards);
+    let listeners = gateway_listeners(bind_addr, listen_backlog, listener_shards)?;
     let public_base_url = resolve_local_http_base_url(app_port)?;
     let frontdoor_health_url = format!("{public_base_url}/_gateway/health");
     let api_router = build_router_with_state(state);
@@ -1353,17 +1514,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         log_type = "ops",
         bind = %bind_addr,
         app_port,
+        listen_backlog,
+        listener_shards,
         public_url = %public_base_url,
         healthcheck_url = %frontdoor_health_url,
         legacy_route_policy = "fail_closed",
         "aether-gateway ready"
     );
 
-    axum::serve(
-        listener,
-        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .await?;
+    serve_gateway_router(listeners, router).await?;
     if let Some(background_tasks) = background_tasks {
         background_tasks.shutdown().await;
     }
@@ -1730,7 +1889,8 @@ mod tests {
         DatabaseDriverArg, DeploymentTopologyArg, GatewayDataArgs, GatewayFrontdoorArgs,
         GatewayLogDestinationArg, GatewayLogFormatArg, GatewayLogRotationArg, GatewayLoggingArgs,
         GatewayRateLimitArgs, GatewayUsageArgs, NodeRoleArg, RuntimeBackendArg,
-        VideoTaskTruthSourceArg,
+        VideoTaskTruthSourceArg, DEFAULT_GATEWAY_LISTENER_SHARDS, DEFAULT_GATEWAY_LISTEN_BACKLOG,
+        MAX_GATEWAY_LISTENER_SHARDS, MAX_GATEWAY_LISTEN_BACKLOG, MIN_GATEWAY_LISTEN_BACKLOG,
     };
     use aether_data::{DatabaseDriver, SqlDatabaseConfig, SqlPoolConfig};
     use aether_gateway::AppState;
@@ -1739,6 +1899,8 @@ mod tests {
         Args {
             command: None,
             app_port: 8084,
+            listen_backlog: DEFAULT_GATEWAY_LISTEN_BACKLOG,
+            listener_shards: DEFAULT_GATEWAY_LISTENER_SHARDS,
             healthcheck: false,
             healthcheck_timeout_ms: 3_000,
             deployment_topology: DeploymentTopologyArg::SingleNode,
@@ -1789,6 +1951,10 @@ mod tests {
                 queue_reclaim_idle_ms: 30_000,
                 queue_reclaim_count: 500,
                 queue_reclaim_interval_ms: 5_000,
+                enqueue_retry_buffer_capacity: 131_072,
+                enqueue_retry_workers: 4,
+                enqueue_retry_initial_backoff_ms: 10,
+                enqueue_retry_max_backoff_ms: 1_000,
             },
             frontdoor: GatewayFrontdoorArgs {
                 environment: "development".to_string(),
@@ -1823,6 +1989,35 @@ mod tests {
     fn rejects_zero_app_port() {
         let error = resolve_healthcheck_url(0).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn clamps_gateway_listen_backlog() {
+        assert_eq!(
+            super::gateway_listen_backlog(MIN_GATEWAY_LISTEN_BACKLOG - 1),
+            MIN_GATEWAY_LISTEN_BACKLOG
+        );
+        assert_eq!(
+            super::gateway_listen_backlog(DEFAULT_GATEWAY_LISTEN_BACKLOG),
+            DEFAULT_GATEWAY_LISTEN_BACKLOG
+        );
+        assert_eq!(
+            super::gateway_listen_backlog(MAX_GATEWAY_LISTEN_BACKLOG + 1),
+            MAX_GATEWAY_LISTEN_BACKLOG
+        );
+    }
+
+    #[test]
+    fn clamps_gateway_listener_shards() {
+        assert_eq!(super::gateway_listener_shards(0), 1);
+        assert_eq!(
+            super::gateway_listener_shards(DEFAULT_GATEWAY_LISTENER_SHARDS),
+            DEFAULT_GATEWAY_LISTENER_SHARDS
+        );
+        assert_eq!(
+            super::gateway_listener_shards(MAX_GATEWAY_LISTENER_SHARDS + 1),
+            MAX_GATEWAY_LISTENER_SHARDS
+        );
     }
 
     #[test]

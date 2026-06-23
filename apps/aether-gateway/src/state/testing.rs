@@ -21,6 +21,11 @@ impl AppState {
         self
     }
 
+    pub(crate) fn without_request_candidate_queue_for_tests(mut self) -> Self {
+        self.request_candidate_queue = None;
+        self
+    }
+
     pub(crate) fn with_turnstile_siteverify_url_for_tests(mut self, url: &str) -> Self {
         self.turnstile_siteverify_url_override = Some(url.trim().to_string());
         self

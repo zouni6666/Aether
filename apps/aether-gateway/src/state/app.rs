@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::RwLock as StdRwLock;
 use std::time::Duration;
 
 use aether_data::repository::users::StoredUserGroup;
@@ -37,6 +38,15 @@ const MIN_LOCAL_EXECUTION_PLANNING_TIMEOUT_MS: u64 = 500;
 const MAX_LOCAL_EXECUTION_PLANNING_TIMEOUT_MS: u64 = 120_000;
 const LOCAL_EXECUTION_PLANNING_TIMEOUT_MS_ENV: &str =
     "AETHER_GATEWAY_LOCAL_EXECUTION_PLANNING_TIMEOUT_MS";
+const DEFAULT_CANDIDATE_PLANNING_GATE_LIMIT: usize = 1024;
+const DEFAULT_UPSTREAM_EXECUTION_GATE_LIMIT: usize = 2000;
+const DEFAULT_UPSTREAM_TARGET_GATE_LIMIT: usize = 2000;
+const DEFAULT_INTERNAL_GATE_QUEUE_BUDGET_MS: u64 = 250;
+const MAX_INTERNAL_GATE_QUEUE_BUDGET_MS: u64 = 5_000;
+const CANDIDATE_PLANNING_GATE_LIMIT_ENV: &str = "AETHER_GATEWAY_CANDIDATE_PLANNING_GATE_LIMIT";
+const UPSTREAM_EXECUTION_GATE_LIMIT_ENV: &str = "AETHER_GATEWAY_UPSTREAM_EXECUTION_GATE_LIMIT";
+const UPSTREAM_TARGET_GATE_LIMIT_ENV: &str = "AETHER_GATEWAY_UPSTREAM_TARGET_GATE_LIMIT";
+const INTERNAL_GATE_QUEUE_BUDGET_MS_ENV: &str = "AETHER_GATEWAY_INTERNAL_GATE_QUEUE_BUDGET_MS";
 
 #[cfg(test)]
 type TestExecutionRuntimeSyncOverrideFn = dyn Fn(
@@ -62,6 +72,10 @@ impl std::fmt::Debug for TestExecutionRuntimeSyncOverride {
 pub(crate) struct FrontdoorRuntimeGuardConfig {
     pub(crate) request_body_read_timeout: Duration,
     pub(crate) local_execution_planning_timeout: Duration,
+    pub(crate) internal_gate_queue_budget: Duration,
+    pub(crate) candidate_planning_gate_limit: Option<usize>,
+    pub(crate) upstream_execution_gate_limit: Option<usize>,
+    pub(crate) upstream_target_gate_limit: Option<usize>,
 }
 
 impl FrontdoorRuntimeGuardConfig {
@@ -79,6 +93,24 @@ impl FrontdoorRuntimeGuardConfig {
                 MIN_LOCAL_EXECUTION_PLANNING_TIMEOUT_MS,
                 MAX_LOCAL_EXECUTION_PLANNING_TIMEOUT_MS,
             ),
+            internal_gate_queue_budget: env_duration_ms(
+                INTERNAL_GATE_QUEUE_BUDGET_MS_ENV,
+                DEFAULT_INTERNAL_GATE_QUEUE_BUDGET_MS,
+                1,
+                MAX_INTERNAL_GATE_QUEUE_BUDGET_MS,
+            ),
+            candidate_planning_gate_limit: env_optional_usize(
+                CANDIDATE_PLANNING_GATE_LIMIT_ENV,
+                DEFAULT_CANDIDATE_PLANNING_GATE_LIMIT,
+            ),
+            upstream_execution_gate_limit: env_optional_usize(
+                UPSTREAM_EXECUTION_GATE_LIMIT_ENV,
+                DEFAULT_UPSTREAM_EXECUTION_GATE_LIMIT,
+            ),
+            upstream_target_gate_limit: env_optional_usize(
+                UPSTREAM_TARGET_GATE_LIMIT_ENV,
+                DEFAULT_UPSTREAM_TARGET_GATE_LIMIT,
+            ),
         }
     }
 
@@ -90,6 +122,12 @@ impl FrontdoorRuntimeGuardConfig {
         Self {
             request_body_read_timeout,
             local_execution_planning_timeout,
+            internal_gate_queue_budget: Duration::from_millis(
+                DEFAULT_INTERNAL_GATE_QUEUE_BUDGET_MS,
+            ),
+            candidate_planning_gate_limit: Some(DEFAULT_CANDIDATE_PLANNING_GATE_LIMIT),
+            upstream_execution_gate_limit: Some(DEFAULT_UPSTREAM_EXECUTION_GATE_LIMIT),
+            upstream_target_gate_limit: Some(DEFAULT_UPSTREAM_TARGET_GATE_LIMIT),
         }
     }
 }
@@ -102,6 +140,17 @@ fn env_duration_ms(key: &str, default_ms: u64, min_ms: u64, max_ms: u64) -> Dura
         .unwrap_or(default_ms)
         .clamp(min_ms, max_ms);
     Duration::from_millis(ms)
+}
+
+fn env_optional_usize(key: &str, default_value: usize) -> Option<usize> {
+    match std::env::var(key)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+    {
+        Some(0) => None,
+        Some(value) => Some(value.max(1)),
+        None => Some(default_value.max(1)),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -117,6 +166,9 @@ pub struct AppState {
     pub(crate) video_task_poller: Option<VideoTaskPollerConfig>,
     pub(crate) frontdoor_runtime_guards: Arc<FrontdoorRuntimeGuardConfig>,
     pub(crate) request_gate: Option<Arc<ConcurrencyGate>>,
+    pub(crate) candidate_planning_gate: Option<Arc<ConcurrencyGate>>,
+    pub(crate) upstream_execution_gate: Option<Arc<ConcurrencyGate>>,
+    pub(crate) upstream_target_admission: Arc<crate::upstream_admission::UpstreamTargetAdmission>,
     pub(crate) distributed_request_gate: Option<Arc<RuntimeSemaphore>>,
     pub(crate) client: reqwest::Client,
     pub(crate) auth_context_cache: Arc<AuthContextCache>,
@@ -135,13 +187,17 @@ pub struct AppState {
     pub(crate) scheduler_affinity_epoch: Arc<AtomicU64>,
     pub(crate) dashboard_response_cache: Arc<DashboardResponseCache>,
     pub(crate) system_config_cache: Arc<SystemConfigCache>,
+    pub(crate) candidate_page_cache: Arc<super::super::cache::CandidatePageCache>,
+    pub(crate) candidate_resolved_page_cache: Arc<super::super::cache::CandidateResolvedPageCache>,
+    pub(crate) chat_pii_redaction_runtime_config_cache:
+        crate::privacy::ChatPiiRedactionRuntimeConfigCacheHandle,
     pub(crate) fallback_metrics: Arc<fallback_metrics::GatewayFallbackMetrics>,
     pub(crate) request_candidate_queue: Option<Arc<RequestCandidateQueueRuntime>>,
     pub(crate) frontdoor_cors: Option<Arc<FrontdoorCorsConfig>>,
     pub(crate) frontdoor_user_rpm: Arc<FrontdoorUserRpmLimiter>,
     pub(crate) tunnel: crate::tunnel::EmbeddedTunnelState,
     pub(crate) provider_transport_snapshot_cache:
-        Arc<StdMutex<HashMap<ProviderTransportSnapshotCacheKey, CachedProviderTransportSnapshot>>>,
+        Arc<StdRwLock<HashMap<ProviderTransportSnapshotCacheKey, CachedProviderTransportSnapshot>>>,
     pub(crate) provider_key_rpm_resets: Arc<StdMutex<HashMap<String, u64>>>,
     pub(crate) local_execution_runtime_miss_diagnostics:
         Arc<StdMutex<HashMap<String, LocalExecutionRuntimeMissDiagnostic>>>,

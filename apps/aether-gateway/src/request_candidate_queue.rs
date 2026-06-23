@@ -22,6 +22,7 @@ const DEFAULT_QUEUE_CAPACITY: usize = 65_536;
 const DEFAULT_BATCH_SIZE: usize = 512;
 const DEFAULT_FLUSH_INTERVAL_MS: u64 = 50;
 const DEFAULT_WORKERS: usize = 2;
+const FAILED_FLUSH_RETRY_DELAY_MS: u64 = 25;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RequestCandidateWriteMode {
@@ -53,7 +54,7 @@ impl Default for RequestCandidateQueueConfig {
             batch_size: DEFAULT_BATCH_SIZE,
             flush_interval: Duration::from_millis(DEFAULT_FLUSH_INTERVAL_MS),
             workers: DEFAULT_WORKERS,
-            full_policy: RequestCandidateQueueFullPolicy::Drop,
+            full_policy: RequestCandidateQueueFullPolicy::Sync,
         }
     }
 }
@@ -62,8 +63,9 @@ impl RequestCandidateQueueConfig {
     pub(crate) fn from_env() -> Self {
         let mut config = Self::default();
         config.mode = match env_string(MODE_ENV).as_deref() {
+            Some("sync") | Some("inline") => RequestCandidateWriteMode::Sync,
             Some("async") | Some("queued") | Some("queue") => RequestCandidateWriteMode::Async,
-            _ => RequestCandidateWriteMode::Sync,
+            _ => RequestCandidateWriteMode::Async,
         };
         config.capacity = env_usize(QUEUE_CAPACITY_ENV, DEFAULT_QUEUE_CAPACITY).max(1);
         config.batch_size = env_usize(BATCH_SIZE_ENV, DEFAULT_BATCH_SIZE).max(1);
@@ -71,10 +73,13 @@ impl RequestCandidateQueueConfig {
             Duration::from_millis(env_u64(FLUSH_INTERVAL_MS_ENV, DEFAULT_FLUSH_INTERVAL_MS).max(1));
         config.workers = env_usize(WORKERS_ENV, DEFAULT_WORKERS).clamp(1, 32);
         config.full_policy = match env_string(QUEUE_FULL_ENV).as_deref() {
+            Some("drop") | Some("best_effort") | Some("best-effort") => {
+                RequestCandidateQueueFullPolicy::Drop
+            }
             Some("sync") | Some("fallback_sync") | Some("fallback-sync") => {
                 RequestCandidateQueueFullPolicy::Sync
             }
-            _ => RequestCandidateQueueFullPolicy::Drop,
+            _ => RequestCandidateQueueFullPolicy::Sync,
         };
         config
     }
@@ -94,6 +99,7 @@ struct RequestCandidateQueueMetrics {
     flush_failed_total: AtomicU64,
     flush_batches_total: AtomicU64,
     flush_sql_ops_total: AtomicU64,
+    flush_sql_records_total: AtomicU64,
     compacted_total: AtomicU64,
     sync_fallback_total: AtomicU64,
 }
@@ -248,13 +254,19 @@ impl RequestCandidateQueueRuntime {
             ),
             MetricSample::new(
                 "request_candidate_queue_flush_sql_ops_total",
-                "Total repository upsert operations issued by async request candidate persistence workers after compaction.",
+                "Total repository batch upsert operations issued by async request candidate persistence workers after compaction.",
                 MetricKind::Counter,
                 self.metrics.flush_sql_ops_total.load(Ordering::Acquire),
             ),
             MetricSample::new(
+                "request_candidate_queue_flush_sql_records_total",
+                "Total request candidate records submitted to repository batch upsert operations after compaction.",
+                MetricKind::Counter,
+                self.metrics.flush_sql_records_total.load(Ordering::Acquire),
+            ),
+            MetricSample::new(
                 "request_candidate_queue_compacted_total",
-                "Total request candidate records compacted before async persistence because a later queued record covered the same slot and status.",
+                "Total request candidate records compacted before async persistence because a later queued record covered the same request candidate slot.",
                 MetricKind::Counter,
                 self.metrics.compacted_total.load(Ordering::Acquire),
             ),
@@ -340,7 +352,7 @@ async fn flush_batch(
         return;
     }
     let source_count = records.len();
-    let records = compact_same_status_records(records);
+    let records = compact_records_for_flush(records);
     let compacted = source_count.saturating_sub(records.len());
     if compacted > 0 {
         metrics
@@ -348,30 +360,51 @@ async fn flush_batch(
             .fetch_add(compacted as u64, Ordering::AcqRel);
     }
     metrics.flush_batches_total.fetch_add(1, Ordering::AcqRel);
+    let source_count = records
+        .iter()
+        .map(|record| record.source_count)
+        .sum::<usize>();
+    let record_count = records.len();
+    let upsert_records = records
+        .into_iter()
+        .map(|record| record.record)
+        .collect::<Vec<_>>();
+    metrics.flush_sql_ops_total.fetch_add(1, Ordering::AcqRel);
+    metrics
+        .flush_sql_records_total
+        .fetch_add(record_count as u64, Ordering::AcqRel);
     let mut failed = 0_u64;
-    for record in records {
-        metrics.flush_sql_ops_total.fetch_add(1, Ordering::AcqRel);
-        if let Err(err) = repository.upsert(record.record).await {
-            failed = failed.saturating_add(record.source_count as u64);
-            decrement_atomic_usize_by(&metrics.pending_current, record.source_count);
-            warn!(
-                event_name = "request_candidate_async_flush_failed",
-                log_type = "event",
-                worker_index,
-                error = ?err,
-                "gateway failed to asynchronously persist request candidate"
-            );
-        } else {
-            metrics
-                .flushed_total
-                .fetch_add(record.source_count as u64, Ordering::AcqRel);
-            decrement_atomic_usize_by(&metrics.pending_current, record.source_count);
-        }
+    let mut retry_records = Vec::new();
+    if let Err(err) = repository.upsert_many(upsert_records.clone()).await {
+        failed = source_count as u64;
+        decrement_atomic_usize_by(
+            &metrics.pending_current,
+            source_count.saturating_sub(record_count),
+        );
+        warn!(
+            event_name = "request_candidate_async_flush_failed",
+            log_type = "event",
+            worker_index,
+            record_count,
+            source_count,
+            error = ?err,
+            "gateway failed to asynchronously persist request candidate batch"
+        );
+        retry_records = upsert_records;
+    } else {
+        metrics
+            .flushed_total
+            .fetch_add(source_count as u64, Ordering::AcqRel);
+        decrement_atomic_usize_by(&metrics.pending_current, source_count);
     }
     if failed > 0 {
         metrics
             .flush_failed_total
             .fetch_add(failed, Ordering::AcqRel);
+        tokio::time::sleep(Duration::from_millis(FAILED_FLUSH_RETRY_DELAY_MS)).await;
+        for record in retry_records {
+            batch.push(record);
+        }
     }
     debug!(
         event_name = "request_candidate_async_flush_completed",
@@ -388,10 +421,10 @@ struct CompactedRequestCandidateRecord {
     source_count: usize,
 }
 
-fn compact_same_status_records(
+fn compact_records_for_flush(
     records: Vec<UpsertRequestCandidateRecord>,
 ) -> Vec<CompactedRequestCandidateRecord> {
-    let mut latest_slot_status = HashMap::<(String, u32, u32), (u8, usize)>::new();
+    let mut latest_slot = HashMap::<(String, u32, u32), usize>::new();
     let mut compacted = Vec::<CompactedRequestCandidateRecord>::with_capacity(records.len());
     for record in records {
         let slot = (
@@ -399,14 +432,13 @@ fn compact_same_status_records(
             record.candidate_index,
             record.retry_index,
         );
-        let status = request_candidate_status_discriminant(record.status);
-        match latest_slot_status.get(&slot).copied() {
-            Some((latest_status, index)) if latest_status == status => {
-                merge_request_candidate_record(&mut compacted[index].record, record);
+        match latest_slot.get(&slot).copied() {
+            Some(index) => {
+                merge_request_candidate_record_for_flush(&mut compacted[index].record, record);
                 compacted[index].source_count = compacted[index].source_count.saturating_add(1);
             }
             _ => {
-                latest_slot_status.insert(slot, (status, compacted.len()));
+                latest_slot.insert(slot, compacted.len());
                 compacted.push(CompactedRequestCandidateRecord {
                     record,
                     source_count: 1,
@@ -489,6 +521,41 @@ fn merge_request_candidate_record(
     );
 }
 
+fn merge_request_candidate_record_for_flush(
+    target: &mut UpsertRequestCandidateRecord,
+    incoming: UpsertRequestCandidateRecord,
+) {
+    let target_status = target.status;
+    let incoming_status = incoming.status;
+    let next_status = merged_request_candidate_status(target_status, incoming_status);
+    merge_request_candidate_record(target, incoming);
+    target.status = next_status;
+}
+
+fn merged_request_candidate_status(
+    current: RequestCandidateStatus,
+    incoming: RequestCandidateStatus,
+) -> RequestCandidateStatus {
+    match (
+        request_candidate_status_is_terminal(current),
+        request_candidate_status_is_terminal(incoming),
+    ) {
+        (_, true) => incoming,
+        (true, false) => current,
+        (false, false) => incoming,
+    }
+}
+
+fn request_candidate_status_is_terminal(status: RequestCandidateStatus) -> bool {
+    matches!(
+        status,
+        RequestCandidateStatus::Success
+            | RequestCandidateStatus::Failed
+            | RequestCandidateStatus::Cancelled
+    )
+}
+
+#[cfg(test)]
 fn request_candidate_status_discriminant(status: RequestCandidateStatus) -> u8 {
     match status {
         RequestCandidateStatus::Available => 0,
@@ -554,7 +621,7 @@ fn decrement_atomic_usize_by(value: &AtomicUsize, amount: usize) {
 #[cfg(test)]
 mod tests {
     use super::{
-        compact_same_status_records, RequestCandidateQueueConfig, RequestCandidateQueueRuntime,
+        compact_records_for_flush, RequestCandidateQueueConfig, RequestCandidateQueueRuntime,
     };
     use aether_data::repository::candidates::InMemoryRequestCandidateRepository;
     use aether_data::DataLayerError;
@@ -562,7 +629,7 @@ mod tests {
         RequestCandidateReadRepository, RequestCandidateStatus, RequestCandidateWriteRepository,
         StoredRequestCandidate, UpsertRequestCandidateRecord,
     };
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -581,6 +648,46 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(40)).await;
             }
             self.inner.upsert(candidate).await
+        }
+
+        async fn delete_created_before(
+            &self,
+            created_before_unix_secs: u64,
+            limit: usize,
+        ) -> Result<usize, DataLayerError> {
+            self.inner
+                .delete_created_before(created_before_unix_secs, limit)
+                .await
+        }
+    }
+
+    #[derive(Default)]
+    struct CountingBatchRequestCandidateRepository {
+        inner: InMemoryRequestCandidateRepository,
+        upsert_calls: AtomicUsize,
+        upsert_many_calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl RequestCandidateWriteRepository for CountingBatchRequestCandidateRepository {
+        async fn upsert(
+            &self,
+            candidate: UpsertRequestCandidateRecord,
+        ) -> Result<StoredRequestCandidate, DataLayerError> {
+            self.upsert_calls.fetch_add(1, Ordering::AcqRel);
+            self.inner.upsert(candidate).await
+        }
+
+        async fn upsert_many(
+            &self,
+            candidates: Vec<UpsertRequestCandidateRecord>,
+        ) -> Result<usize, DataLayerError> {
+            self.upsert_many_calls.fetch_add(1, Ordering::AcqRel);
+            let count = candidates.len();
+            for candidate in candidates {
+                self.inner.upsert(candidate).await?;
+            }
+            Ok(count)
         }
 
         async fn delete_created_before(
@@ -628,8 +735,45 @@ mod tests {
         }
     }
 
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn unset(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.as_ref() {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
     #[test]
-    fn compact_merges_same_slot_and_status_without_dropping_state_transitions() {
+    fn from_env_defaults_to_async_with_sync_full_fallback() {
+        let _mode = EnvGuard::unset(super::MODE_ENV);
+        let _full = EnvGuard::unset(super::QUEUE_FULL_ENV);
+
+        let config = RequestCandidateQueueConfig::from_env();
+
+        assert_eq!(config.mode, super::RequestCandidateWriteMode::Async);
+        assert_eq!(
+            config.full_policy,
+            super::RequestCandidateQueueFullPolicy::Sync
+        );
+    }
+
+    #[test]
+    fn compact_merges_same_slot_without_losing_terminal_fields() {
         let mut first_success = record("req", 0, 0, RequestCandidateStatus::Success);
         first_success.provider_id = Some("provider-a".to_string());
         first_success.extra_data = Some(serde_json::json!({"first": true}));
@@ -637,43 +781,40 @@ mod tests {
         second_success.latency_ms = Some(123);
         second_success.extra_data = Some(serde_json::json!({"second": true}));
 
-        let compacted = compact_same_status_records(vec![
+        let compacted = compact_records_for_flush(vec![
             record("req", 0, 0, RequestCandidateStatus::Pending),
             first_success,
             record("req", 0, 1, RequestCandidateStatus::Failed),
             second_success,
         ]);
 
-        assert_eq!(compacted.len(), 3);
-        assert_eq!(compacted[0].record.status, RequestCandidateStatus::Pending);
-        assert_eq!(compacted[0].source_count, 1);
-        assert_eq!(compacted[1].record.status, RequestCandidateStatus::Success);
-        assert_eq!(compacted[1].source_count, 2);
+        assert_eq!(compacted.len(), 2);
+        assert_eq!(compacted[0].record.status, RequestCandidateStatus::Success);
+        assert_eq!(compacted[0].source_count, 3);
         assert_eq!(
-            compacted[1].record.provider_id.as_deref(),
+            compacted[0].record.provider_id.as_deref(),
             Some("provider-a")
         );
-        assert_eq!(compacted[1].record.latency_ms, Some(123));
+        assert_eq!(compacted[0].record.latency_ms, Some(123));
         assert_eq!(
-            compacted[1].record.extra_data,
+            compacted[0].record.extra_data,
             Some(serde_json::json!({"first": true, "second": true}))
         );
-        assert_eq!(compacted[2].record.status, RequestCandidateStatus::Failed);
-        assert_eq!(compacted[2].source_count, 1);
+        assert_eq!(compacted[1].record.status, RequestCandidateStatus::Failed);
+        assert_eq!(compacted[1].source_count, 1);
     }
 
     #[test]
-    fn compact_preserves_same_slot_status_order_across_transitions() {
-        let compacted = compact_same_status_records(vec![
+    fn compact_keeps_terminal_status_when_later_intermediate_status_arrives() {
+        let compacted = compact_records_for_flush(vec![
             record("req", 0, 0, RequestCandidateStatus::Success),
-            record("req", 0, 0, RequestCandidateStatus::Failed),
-            record("req", 0, 0, RequestCandidateStatus::Success),
+            record("req", 0, 0, RequestCandidateStatus::Streaming),
+            record("req", 0, 0, RequestCandidateStatus::Unused),
         ]);
 
-        assert_eq!(compacted.len(), 3);
+        assert_eq!(compacted.len(), 1);
         assert_eq!(compacted[0].record.status, RequestCandidateStatus::Success);
-        assert_eq!(compacted[1].record.status, RequestCandidateStatus::Failed);
-        assert_eq!(compacted[2].record.status, RequestCandidateStatus::Success);
+        assert_eq!(compacted[0].source_count, 3);
     }
 
     #[tokio::test]
@@ -706,6 +847,56 @@ mod tests {
         }
 
         panic!("async request candidate queue did not flush record in time");
+    }
+
+    #[tokio::test]
+    async fn async_queue_flushes_records_with_batch_repository_call() {
+        let repository = Arc::new(CountingBatchRequestCandidateRepository::default());
+        let runtime = RequestCandidateQueueRuntime::spawn(
+            repository.clone(),
+            RequestCandidateQueueConfig {
+                mode: super::RequestCandidateWriteMode::Async,
+                capacity: 16,
+                batch_size: 4,
+                flush_interval: Duration::from_millis(100),
+                workers: 1,
+                full_policy: super::RequestCandidateQueueFullPolicy::Drop,
+            },
+        );
+
+        for index in 0..4 {
+            runtime
+                .enqueue_or_fallback(record(
+                    "req-batch",
+                    index,
+                    0,
+                    RequestCandidateStatus::Success,
+                ))
+                .await
+                .unwrap();
+        }
+
+        for _ in 0..50 {
+            if runtime.metrics.pending_current.load(Ordering::Acquire) == 0 {
+                assert_eq!(repository.upsert_many_calls.load(Ordering::Acquire), 1);
+                assert_eq!(repository.upsert_calls.load(Ordering::Acquire), 0);
+                assert_eq!(
+                    runtime.metrics.flush_sql_ops_total.load(Ordering::Acquire),
+                    1
+                );
+                assert_eq!(
+                    runtime
+                        .metrics
+                        .flush_sql_records_total
+                        .load(Ordering::Acquire),
+                    4
+                );
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        panic!("async request candidate queue did not finish batch flush in time");
     }
 
     #[tokio::test]

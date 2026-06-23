@@ -1,7 +1,7 @@
 use super::{
     provider_transport_snapshot_looks_refreshed, AppState, CachedProviderTransportSnapshot,
     GatewayError, ProviderTransportSnapshotCacheKey, PROVIDER_TRANSPORT_SNAPSHOT_CACHE_MAX_ENTRIES,
-    PROVIDER_TRANSPORT_SNAPSHOT_CACHE_TTL,
+    PROVIDER_TRANSPORT_SNAPSHOT_CACHE_STALE_TTL,
 };
 use crate::handlers::shared::default_provider_key_status_snapshot;
 use crate::provider_transport::LocalOAuthHttpExecutor;
@@ -20,6 +20,7 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::Read;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aether_crypto::encrypt_python_fernet_plaintext;
@@ -479,39 +480,49 @@ impl<'a> provider_transport::LocalOAuthHttpExecutor for GatewayLocalOAuthHttpExe
 impl AppState {
     pub(crate) fn clear_provider_transport_snapshot_cache(&self) {
         self.provider_transport_snapshot_cache
-            .lock()
+            .write()
             .expect("provider transport snapshot cache should lock")
             .clear();
     }
 
-    fn get_cached_provider_transport_snapshot(
+    fn get_cached_provider_transport_snapshot_arc(
         &self,
         cache_key: &ProviderTransportSnapshotCacheKey,
-    ) -> Option<provider_transport::GatewayProviderTransportSnapshot> {
-        let mut cache = self
-            .provider_transport_snapshot_cache
-            .lock()
-            .expect("provider transport snapshot cache should lock");
-        let cached = cache.get(cache_key).cloned()?;
-        if cached.loaded_at.elapsed() <= PROVIDER_TRANSPORT_SNAPSHOT_CACHE_TTL {
+    ) -> Option<Arc<provider_transport::GatewayProviderTransportSnapshot>> {
+        let cached = {
+            let cache = self
+                .provider_transport_snapshot_cache
+                .read()
+                .expect("provider transport snapshot cache should lock");
+            cache.get(cache_key).cloned()
+        }?;
+        if cached.loaded_at.elapsed() <= PROVIDER_TRANSPORT_SNAPSHOT_CACHE_STALE_TTL {
             return Some(cached.snapshot);
         }
-        cache.remove(cache_key);
+        let mut cache = self
+            .provider_transport_snapshot_cache
+            .write()
+            .expect("provider transport snapshot cache should lock");
+        if cache.get(cache_key).is_some_and(|entry| {
+            entry.loaded_at.elapsed() > PROVIDER_TRANSPORT_SNAPSHOT_CACHE_STALE_TTL
+        }) {
+            cache.remove(cache_key);
+        }
         None
     }
 
     fn put_cached_provider_transport_snapshot(
         &self,
         cache_key: ProviderTransportSnapshotCacheKey,
-        snapshot: provider_transport::GatewayProviderTransportSnapshot,
+        snapshot: Arc<provider_transport::GatewayProviderTransportSnapshot>,
     ) {
         let mut cache = self
             .provider_transport_snapshot_cache
-            .lock()
+            .write()
             .expect("provider transport snapshot cache should lock");
         if cache.len() >= PROVIDER_TRANSPORT_SNAPSHOT_CACHE_MAX_ENTRIES {
             cache.retain(|_, entry| {
-                entry.loaded_at.elapsed() <= PROVIDER_TRANSPORT_SNAPSHOT_CACHE_TTL
+                entry.loaded_at.elapsed() <= PROVIDER_TRANSPORT_SNAPSHOT_CACHE_STALE_TTL
             });
             if cache.len() >= PROVIDER_TRANSPORT_SNAPSHOT_CACHE_MAX_ENTRIES {
                 cache.clear();
@@ -796,6 +807,41 @@ impl AppState {
         None
     }
 
+    pub(crate) async fn read_provider_transport_snapshot_arc(
+        &self,
+        provider_id: &str,
+        endpoint_id: &str,
+        key_id: &str,
+    ) -> Result<
+        Option<Arc<crate::provider_transport::GatewayProviderTransportSnapshot>>,
+        GatewayError,
+    > {
+        let Some(cache_key) =
+            ProviderTransportSnapshotCacheKey::new(provider_id, endpoint_id, key_id)
+        else {
+            return Ok(self
+                .read_provider_transport_snapshot_uncached(provider_id, endpoint_id, key_id)
+                .await?
+                .map(Arc::new));
+        };
+        if let Some(snapshot) = self.get_cached_provider_transport_snapshot_arc(&cache_key) {
+            return Ok(Some(snapshot));
+        }
+
+        let snapshot = self
+            .read_provider_transport_snapshot_uncached(provider_id, endpoint_id, key_id)
+            .await?;
+        match snapshot {
+            Some(snapshot) => {
+                let snapshot = self.apply_global_format_conversion_override(snapshot).await;
+                let snapshot = Arc::new(snapshot);
+                self.put_cached_provider_transport_snapshot(cache_key, Arc::clone(&snapshot));
+                Ok(Some(snapshot))
+            }
+            None => Ok(None),
+        }
+    }
+
     pub(crate) async fn read_provider_transport_snapshot(
         &self,
         provider_id: &str,
@@ -803,31 +849,10 @@ impl AppState {
         key_id: &str,
     ) -> Result<Option<crate::provider_transport::GatewayProviderTransportSnapshot>, GatewayError>
     {
-        let Some(cache_key) =
-            ProviderTransportSnapshotCacheKey::new(provider_id, endpoint_id, key_id)
-        else {
-            return self
-                .read_provider_transport_snapshot_uncached(provider_id, endpoint_id, key_id)
-                .await;
-        };
-        if let Some(snapshot) = self.get_cached_provider_transport_snapshot(&cache_key) {
-            return Ok(Some(
-                self.apply_global_format_conversion_override(snapshot).await,
-            ));
-        }
-
-        let snapshot = self
-            .read_provider_transport_snapshot_uncached(provider_id, endpoint_id, key_id)
-            .await?;
-        if let Some(snapshot) = snapshot.as_ref() {
-            self.put_cached_provider_transport_snapshot(cache_key, snapshot.clone());
-        }
-        match snapshot {
-            Some(snapshot) => Ok(Some(
-                self.apply_global_format_conversion_override(snapshot).await,
-            )),
-            None => Ok(None),
-        }
+        Ok(self
+            .read_provider_transport_snapshot_arc(provider_id, endpoint_id, key_id)
+            .await?
+            .map(|snapshot| (*snapshot).clone()))
     }
 
     pub(crate) async fn update_provider_catalog_key_oauth_credentials(

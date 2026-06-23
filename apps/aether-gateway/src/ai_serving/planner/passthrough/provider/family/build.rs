@@ -66,7 +66,7 @@ pub(crate) async fn maybe_build_sync_local_same_format_provider_decision_payload
         candidate_count,
     );
 
-    while let Some(attempt) = source.next_attempt().await {
+    while let Some(attempt) = source.next_attempt().await? {
         if let Some(payload) =
             maybe_build_local_same_format_provider_decision_payload_for_candidate(
                 state, parts, trace_id, body_json, &input, attempt, spec,
@@ -134,7 +134,7 @@ pub(crate) async fn maybe_build_stream_local_same_format_provider_decision_paylo
         candidate_count,
     );
 
-    while let Some(attempt) = source.next_attempt().await {
+    while let Some(attempt) = source.next_attempt().await? {
         if let Some(payload) =
             maybe_build_local_same_format_provider_decision_payload_for_candidate(
                 state, parts, trace_id, body_json, &input, attempt, spec,

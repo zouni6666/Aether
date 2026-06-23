@@ -106,24 +106,28 @@ impl RedisConnectionRouter {
             &client,
             connection_manager_config(command_timeout_ms),
             RedisConnectionLane::Fast,
+            command_timeout_ms,
         )
         .await?;
         let stream = connect_lane(
             &client,
             connection_manager_config(command_timeout_ms),
             RedisConnectionLane::Stream,
+            command_timeout_ms,
         )
         .await?;
         let blocking_stream = connect_lane(
             &client,
             connection_manager_config(command_timeout_ms),
             RedisConnectionLane::BlockingStream,
+            command_timeout_ms,
         )
         .await?;
         let admin = connect_lane(
             &client,
             connection_manager_config(command_timeout_ms),
             RedisConnectionLane::Admin,
+            command_timeout_ms,
         )
         .await?;
         info!(
@@ -228,16 +232,29 @@ async fn connect_lane(
     client: &RedisClient,
     config: redis::aio::ConnectionManagerConfig,
     lane: RedisConnectionLane,
+    command_timeout_ms: Option<u64>,
 ) -> Result<RedisManagedConnection, DataLayerError> {
-    client
-        .get_connection_manager_with_config(config)
-        .await
-        .map_err(|err| {
-            DataLayerError::Redis(format!(
-                "failed to initialize runtime redis {} lane: {err}",
-                lane.as_str()
-            ))
-        })
+    let connect = client.get_connection_manager_with_config(config);
+    let result = if let Some(timeout_ms) = command_timeout_ms {
+        match tokio::time::timeout(Duration::from_millis(timeout_ms), connect).await {
+            Ok(result) => result,
+            Err(_) => {
+                return Err(DataLayerError::TimedOut(format!(
+                    "runtime redis {} lane connection exceeded {}ms timeout",
+                    lane.as_str(),
+                    timeout_ms
+                )));
+            }
+        }
+    } else {
+        connect.await
+    };
+    result.map_err(|err| {
+        DataLayerError::Redis(format!(
+            "failed to initialize runtime redis {} lane: {err}",
+            lane.as_str()
+        ))
+    })
 }
 
 #[cfg(test)]

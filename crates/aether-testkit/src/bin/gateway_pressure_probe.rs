@@ -176,25 +176,56 @@ fn spawn_metrics_sampler(
 
 fn parse_args(args: Vec<String>) -> Result<Config, Box<dyn std::error::Error>> {
     let mut target_url: Option<String> = None;
+    let mut warmup_url: Option<String> = None;
     let mut metrics_url: Option<String> = None;
     let mut total_requests: Option<usize> = None;
     let mut concurrency: Option<usize> = None;
+    let mut warmup_connections: usize = 0;
     let mut timeout_ms: Option<u64> = None;
+    let mut connect_timeout_ms: Option<u64> = None;
+    let mut client_shards: Option<usize> = None;
+    let mut pool_max_idle_per_host: Option<usize> = None;
+    let mut start_ramp_ms: u64 = 0;
+    let mut first_body_hold_ms: u64 = 0;
     let mut sample_interval_ms: u64 = 500;
     let mut method = Method::GET;
     let mut headers = BTreeMap::new();
     let mut body: Option<Vec<u8>> = None;
     let mut response_mode = HttpLoadProbeResponseMode::HeadersOnly;
+    let mut http1_only = false;
+    let mut http2_prior_knowledge = false;
     let mut output_path = None;
 
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--url" => target_url = Some(next_value(&mut iter, "--url")?),
+            "--warmup-url" => warmup_url = Some(next_value(&mut iter, "--warmup-url")?),
             "--metrics-url" => metrics_url = Some(next_value(&mut iter, "--metrics-url")?),
             "--requests" => total_requests = Some(next_value(&mut iter, "--requests")?.parse()?),
             "--concurrency" => concurrency = Some(next_value(&mut iter, "--concurrency")?.parse()?),
+            "--warmup-connections" => {
+                warmup_connections = next_value(&mut iter, "--warmup-connections")?.parse()?
+            }
             "--timeout-ms" => timeout_ms = Some(next_value(&mut iter, "--timeout-ms")?.parse()?),
+            "--connect-timeout-ms" => {
+                connect_timeout_ms = Some(next_value(&mut iter, "--connect-timeout-ms")?.parse()?)
+            }
+            "--client-shards" => {
+                client_shards = Some(next_value(&mut iter, "--client-shards")?.parse()?)
+            }
+            "--pool-max-idle-per-host" => {
+                pool_max_idle_per_host =
+                    Some(next_value(&mut iter, "--pool-max-idle-per-host")?.parse()?)
+            }
+            "--start-ramp-ms" => {
+                start_ramp_ms = next_value(&mut iter, "--start-ramp-ms")?.parse()?
+            }
+            "--first-body-hold-ms" => {
+                first_body_hold_ms = next_value(&mut iter, "--first-body-hold-ms")?.parse()?
+            }
+            "--http1-only" => http1_only = true,
+            "--http2-prior-knowledge" => http2_prior_knowledge = true,
             "--sample-interval-ms" => {
                 sample_interval_ms = next_value(&mut iter, "--sample-interval-ms")?.parse()?
             }
@@ -247,9 +278,20 @@ fn parse_args(args: Vec<String>) -> Result<Config, Box<dyn std::error::Error>> {
         response_mode,
         ..HttpLoadProbeConfig::default()
     };
+    load.warmup_url = warmup_url;
+    load.warmup_connections = warmup_connections;
     if let Some(timeout_ms) = timeout_ms {
         load.timeout = Duration::from_millis(timeout_ms);
     }
+    load.connect_timeout = connect_timeout_ms.map(Duration::from_millis);
+    if let Some(client_shards) = client_shards {
+        load.client_shards = client_shards;
+    }
+    load.pool_max_idle_per_host = pool_max_idle_per_host;
+    load.start_ramp = Duration::from_millis(start_ramp_ms);
+    load.first_body_hold = Duration::from_millis(first_body_hold_ms);
+    load.http1_only = http1_only;
+    load.http2_prior_knowledge = http2_prior_knowledge;
     load.validate()
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
     if sample_interval_ms == 0 {
@@ -298,10 +340,15 @@ fn parse_response_mode(
 ) -> Result<HttpLoadProbeResponseMode, Box<dyn std::error::Error>> {
     match value.trim().to_ascii_lowercase().as_str() {
         "headers" | "headers-only" | "header" => Ok(HttpLoadProbeResponseMode::HeadersOnly),
+        "first-body-byte" | "first-body" | "first-byte" | "first-chunk" => {
+            Ok(HttpLoadProbeResponseMode::FirstBodyByte)
+        }
         "full" | "full-body" | "body" => Ok(HttpLoadProbeResponseMode::FullBody),
         other => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            format!("unsupported --response-mode {other}; expected headers or full"),
+            format!(
+                "unsupported --response-mode {other}; expected headers, first-body-byte, or full"
+            ),
         )
         .into()),
     }
@@ -348,6 +395,6 @@ fn metric_name_matches(actual: &str, expected: &str) -> bool {
 
 fn print_usage() {
     eprintln!(
-        "usage: cargo run -p aether-testkit --bin gateway_pressure_probe -- --url <URL> --metrics-url <URL> --requests <N> --concurrency <N> [--method GET] [--timeout-ms 30000] [--sample-interval-ms 500] [-H 'Name: value'] [--body JSON | --body-file path] [--response-mode headers|full] [--output /tmp/gateway_pressure.json]"
+        "usage: cargo run -p aether-testkit --bin gateway_pressure_probe -- --url <URL> --metrics-url <URL> --requests <N> --concurrency <N> [--warmup-url <URL>] [--warmup-connections N] [--method GET] [--timeout-ms 30000] [--connect-timeout-ms 10000] [--client-shards 1] [--pool-max-idle-per-host N] [--start-ramp-ms 0] [--first-body-hold-ms 0] [--http1-only | --http2-prior-knowledge] [--sample-interval-ms 500] [-H 'Name: value'] [--body JSON | --body-file path] [--response-mode headers|first-body-byte|full] [--output /tmp/gateway_pressure.json]"
     );
 }

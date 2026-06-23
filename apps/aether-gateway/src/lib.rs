@@ -63,15 +63,18 @@ pub(crate) use aether_provider_transport as provider_transport;
 mod rate_limit;
 mod request_candidate_queue;
 mod request_candidate_runtime;
+mod request_diagnostics;
 mod roles;
 mod router;
 mod routing;
 mod scheduler;
 mod server_chan_push;
+mod stage_metrics;
 mod state;
 mod system_features;
 mod task_runtime;
 mod tunnel;
+mod upstream_admission;
 mod usage;
 mod video_tasks;
 mod wallet_runtime;
@@ -126,7 +129,8 @@ fn insert_header_if_missing(
     if headers.contains_key(key) {
         return Ok(());
     }
-    let name = HeaderName::from_static(key);
+    let name = HeaderName::from_bytes(key.as_bytes())
+        .map_err(|err| GatewayError::Internal(err.to_string()))?;
     let value =
         HeaderValue::from_str(value).map_err(|err| GatewayError::Internal(err.to_string()))?;
     headers.insert(name, value);

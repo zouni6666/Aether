@@ -147,7 +147,7 @@ pub(crate) async fn maybe_build_sync_local_decision_payload(
     )
     .await;
 
-    while let Some(attempt) = source.next_attempt().await {
+    while let Some(attempt) = source.next_attempt().await? {
         let upstream_is_stream = self::plans::openai_chat_upstream_is_stream_for_candidate(
             &attempt.eligible.transport,
             attempt.eligible.provider_api_format.as_str(),
@@ -199,7 +199,7 @@ pub(crate) async fn maybe_build_stream_local_decision_payload(
     )
     .await;
 
-    while let Some(attempt) = source.next_attempt().await {
+    while let Some(attempt) = source.next_attempt().await? {
         let upstream_is_stream = self::plans::openai_chat_upstream_is_stream_for_candidate(
             &attempt.eligible.transport,
             attempt.eligible.provider_api_format.as_str(),

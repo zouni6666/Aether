@@ -8,9 +8,10 @@ use async_trait::async_trait;
 use tracing::warn;
 
 use crate::executor::spawn_on_usage_background_runtime;
+use crate::runtime::UsageBillingEventEnricher;
 use crate::{
-    build_upsert_usage_record_from_event, settle_usage_if_needed, UsageEvent, UsageQueue,
-    UsageRuntimeConfig, UsageSettlementWriter,
+    build_upsert_usage_record_from_event, settle_usage_if_needed, UsageEvent, UsageEventType,
+    UsageQueue, UsageRuntimeConfig, UsageSettlementWriter,
 };
 
 #[async_trait]
@@ -50,10 +51,17 @@ impl<T> UsageDataEventRecorder<T> {
 #[async_trait]
 impl<T> UsageEventRecorder for UsageDataEventRecorder<T>
 where
-    T: UsageRecordWriter + UsageSettlementWriter + ManualProxyNodeCounter + Send + Sync,
+    T: UsageRecordWriter
+        + UsageSettlementWriter
+        + UsageBillingEventEnricher
+        + ManualProxyNodeCounter
+        + Send
+        + Sync,
 {
     async fn record_usage_event(&self, event: &UsageEvent) -> Result<(), DataLayerError> {
-        write_event_record(self.data.as_ref(), event).await
+        let mut event = event.clone();
+        enrich_terminal_event(self.data.as_ref(), &mut event).await;
+        write_event_record(self.data.as_ref(), &event).await
     }
 }
 
@@ -276,7 +284,13 @@ pub fn build_usage_queue_worker<T>(
     config: UsageRuntimeConfig,
 ) -> Result<UsageQueueWorker, DataLayerError>
 where
-    T: UsageRecordWriter + UsageSettlementWriter + ManualProxyNodeCounter + Send + Sync + 'static,
+    T: UsageRecordWriter
+        + UsageSettlementWriter
+        + UsageBillingEventEnricher
+        + ManualProxyNodeCounter
+        + Send
+        + Sync
+        + 'static,
 {
     UsageQueueWorker::new(runner, Arc::new(UsageDataEventRecorder::new(data)), config)
 }
@@ -291,6 +305,29 @@ where
     }
     increment_manual_proxy_node_from_event(data, event).await;
     Ok(())
+}
+
+async fn enrich_terminal_event<T>(data: &T, event: &mut UsageEvent)
+where
+    T: UsageBillingEventEnricher + Send + Sync,
+{
+    if !matches!(
+        event.event_type,
+        UsageEventType::Completed | UsageEventType::Failed | UsageEventType::Cancelled
+    ) {
+        return;
+    }
+
+    if let Err(err) = data.enrich_usage_event(event).await {
+        warn!(
+            event_name = "usage_worker_billing_enrichment_failed",
+            log_type = "event",
+            request_id = %event.request_id,
+            event_type = ?event.event_type,
+            error = %err,
+            "usage worker failed to enrich terminal usage event with billing"
+        );
+    }
 }
 
 async fn increment_manual_proxy_node_from_event<T>(data: &T, event: &UsageEvent)
@@ -368,6 +405,7 @@ mod tests {
         usage_event_record_error_is_permanent, write_event_record, ManualProxyNodeCounter,
         UsageEventRecorder, UsageQueueWorker, UsageRecordWriter,
     };
+    use crate::UsageBillingEventEnricher;
     use crate::{
         UsageEvent, UsageEventData, UsageEventType, UsageRuntimeConfig, UsageSettlementWriter,
     };
@@ -376,6 +414,7 @@ mod tests {
     struct TestUsageStore {
         records: Mutex<Vec<UpsertUsageRecord>>,
         settlements: Mutex<Vec<UsageSettlementInput>>,
+        enrich_calls: Mutex<Vec<String>>,
     }
 
     #[derive(Default)]
@@ -472,6 +511,18 @@ mod tests {
     }
 
     #[async_trait]
+    impl UsageBillingEventEnricher for TestUsageStore {
+        async fn enrich_usage_event(&self, event: &mut UsageEvent) -> Result<(), DataLayerError> {
+            self.enrich_calls
+                .lock()
+                .expect("enrich calls lock")
+                .push(event.request_id.clone());
+            event.data.total_cost_usd = Some(0.456);
+            Ok(())
+        }
+    }
+
+    #[async_trait]
     impl UsageEventRecorder for SelectiveFailingRecorder {
         async fn record_usage_event(&self, event: &UsageEvent) -> Result<(), DataLayerError> {
             self.calls
@@ -530,6 +581,52 @@ mod tests {
         let settlements = store.settlements.lock().expect("settlements lock");
         assert_eq!(settlements.len(), 1);
         assert_eq!(settlements[0].request_id, "req-worker-123");
+    }
+
+    #[tokio::test]
+    async fn data_event_recorder_enriches_terminal_event_before_write() {
+        let store = Arc::new(TestUsageStore::default());
+        let recorder = super::UsageDataEventRecorder::new(Arc::clone(&store));
+        let event = sample_event();
+
+        recorder
+            .record_usage_event(&event)
+            .await
+            .expect("recorder should enrich and write usage");
+
+        assert_eq!(
+            store
+                .enrich_calls
+                .lock()
+                .expect("enrich calls lock")
+                .as_slice(),
+            ["req-worker-123"]
+        );
+        let records = store.records.lock().expect("records lock");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].total_cost_usd, Some(0.456));
+    }
+
+    #[tokio::test]
+    async fn data_event_recorder_skips_enrichment_for_lifecycle_event() {
+        let store = Arc::new(TestUsageStore::default());
+        let recorder = super::UsageDataEventRecorder::new(Arc::clone(&store));
+        let mut event = sample_event();
+        event.event_type = UsageEventType::Pending;
+
+        recorder
+            .record_usage_event(&event)
+            .await
+            .expect("recorder should write lifecycle usage");
+
+        assert!(store
+            .enrich_calls
+            .lock()
+            .expect("enrich calls lock")
+            .is_empty());
+        let records = store.records.lock().expect("records lock");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].total_cost_usd, None);
     }
 
     #[test]

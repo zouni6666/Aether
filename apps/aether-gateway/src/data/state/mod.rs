@@ -197,9 +197,7 @@ pub(crate) struct GatewayDataState {
     settlement_writer: Option<Arc<dyn SettlementWriteRepository>>,
     system_config_values: Option<Arc<RwLock<BTreeMap<String, StoredSystemConfigEntry>>>>,
     system_config_value_cache: Arc<RwLock<BTreeMap<String, (Instant, Option<serde_json::Value>)>>>,
-    billing_model_context_cache: Arc<
-        RwLock<HashMap<BillingModelContextCacheKey, (Instant, Option<StoredBillingModelContext>)>>,
-    >,
+    billing_model_context_cache: Arc<BillingModelContextCacheState>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -214,6 +212,15 @@ pub(super) enum BillingModelContextCacheKey {
         provider_api_key_id: Option<String>,
         global_model_name: String,
     },
+}
+
+#[derive(Default)]
+pub(super) struct BillingModelContextCacheState {
+    pub(super) entries:
+        RwLock<HashMap<BillingModelContextCacheKey, (Instant, Option<StoredBillingModelContext>)>>,
+    pub(super) inflight: std::sync::Mutex<HashMap<BillingModelContextCacheKey, u64>>,
+    pub(super) inflight_notify: tokio::sync::Notify,
+    pub(super) next_inflight_token: std::sync::atomic::AtomicU64,
 }
 
 impl fmt::Debug for GatewayDataState {

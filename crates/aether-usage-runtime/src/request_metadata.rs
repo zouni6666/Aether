@@ -146,6 +146,8 @@ fn copy_allowed_metadata_fields(source: &Map<String, Value>, target: &mut Map<St
     copy_number(source, target, "cache_read_price_per_1m");
     copy_number(source, target, "price_per_request");
     copy_non_null_value(source, target, "proxy");
+    copy_non_null_value(source, target, "stage_timings_ms");
+    copy_non_null_value(source, target, "db_timings_ms");
     sanitize_request_path_metadata_fields(target);
 }
 
@@ -189,6 +191,8 @@ fn move_allowed_metadata_fields(mut source: Map<String, Value>, target: &mut Map
     remove_number(&mut source, target, "cache_read_price_per_1m");
     remove_number(&mut source, target, "price_per_request");
     remove_non_null_value(&mut source, target, "proxy");
+    remove_non_null_value(&mut source, target, "stage_timings_ms");
+    remove_non_null_value(&mut source, target, "db_timings_ms");
     sanitize_request_path_metadata_fields(target);
 }
 
@@ -476,8 +480,38 @@ mod tests {
         }
     }
 
+    fn sample_stage_timings_metadata() -> Value {
+        json!({
+            "stream_candidate_slot": 1,
+            "stream_provider_in_flight": 2,
+            "stream_upstream_headers": 180,
+            "stream_first_data": 8210
+        })
+    }
+
+    fn sample_db_timings_metadata() -> Value {
+        json!({
+            "query_count": 2,
+            "query_total": 950,
+            "query_max": 650,
+            "operations": {
+                "request_candidate_upsert": {"count": 1, "sum": 650, "max": 650},
+                "usage_upsert": {"count": 1, "sum": 300, "max": 300}
+            },
+            "pool": {
+                "max_checked_out": 20,
+                "max_pool_size": 20,
+                "min_idle": 0,
+                "max_connections": 20,
+                "max_usage_rate": 100.0
+            }
+        })
+    }
+
     #[test]
     fn sanitizes_request_metadata_to_allowlist() {
+        let stage_timings_ms = sample_stage_timings_metadata();
+        let db_timings_ms = sample_db_timings_metadata();
         let metadata = sanitize_usage_request_metadata(Some(json!({
             "request_id": "req-1",
             "provider_id": "provider-1",
@@ -512,6 +546,8 @@ mod tests {
             "cache_creation_price_per_1m": 3.75,
             "cache_read_price_per_1m": 0.3,
             "price_per_request": 0.02,
+            "stage_timings_ms": stage_timings_ms.clone(),
+            "db_timings_ms": db_timings_ms.clone(),
             "original_headers": {"authorization": "Bearer secret"},
             "original_request_body": {"messages": []},
             "provider_request_headers": {"authorization": "Bearer secret"},
@@ -549,7 +585,9 @@ mod tests {
                 "output_price_per_1m": 15.0,
                 "cache_creation_price_per_1m": 3.75,
                 "cache_read_price_per_1m": 0.3,
-                "price_per_request": 0.02
+                "price_per_request": 0.02,
+                "stage_timings_ms": stage_timings_ms,
+                "db_timings_ms": db_timings_ms
             })
         );
     }
@@ -657,7 +695,20 @@ mod tests {
                     "global_model_name": "gpt-5",
                     "client_ip": "203.0.113.8",
                     "user_agent": "Claude-Code/1.0",
-                    "billing_snapshot": {"status": "complete"}
+                    "billing_snapshot": {"status": "complete"},
+                    "stage_timings_ms": {
+                        "stream_candidate_slot": 0,
+                        "stream_upstream_headers": 180,
+                        "stream_first_data": 8210
+                    },
+                    "db_timings_ms": {
+                        "query_count": 1,
+                        "query_total": 42,
+                        "query_max": 42,
+                        "operations": {
+                            "auth_api_key_snapshot": {"count": 1, "sum": 42, "max": 42}
+                        }
+                    }
                 })
                 .as_object()
                 .expect("object"),
@@ -676,7 +727,20 @@ mod tests {
                 "global_model_name": "gpt-5",
                 "client_ip": "203.0.113.8",
                 "user_agent": "Claude-Code/1.0",
-                "billing_snapshot": {"status": "complete"}
+                "billing_snapshot": {"status": "complete"},
+                "stage_timings_ms": {
+                    "stream_candidate_slot": 0,
+                    "stream_upstream_headers": 180,
+                    "stream_first_data": 8210
+                },
+                "db_timings_ms": {
+                    "query_count": 1,
+                    "query_total": 42,
+                    "query_max": 42,
+                    "operations": {
+                        "auth_api_key_snapshot": {"count": 1, "sum": 42, "max": 42}
+                    }
+                }
             })
         );
     }

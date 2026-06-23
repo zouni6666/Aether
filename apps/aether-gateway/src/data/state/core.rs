@@ -3,17 +3,77 @@ use aether_data_contracts::repository::candidate_selection::MinimalCandidateSele
 use aether_data_contracts::repository::candidates::RequestCandidateReadRepository;
 use aether_data_contracts::repository::provider_catalog::ProviderCatalogReadRepository;
 use aether_runtime_state::RuntimeQueueStore;
-use std::sync::{Arc, OnceLock};
+use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
+use tokio::sync::Notify;
 
 use super::{GatewayDataConfig, GatewayDataState, StoredSystemConfigEntry};
 
 const SYSTEM_CONFIG_VALUE_CACHE_TTL: Duration = Duration::from_secs(30);
 
-fn system_config_value_load_guard() -> &'static Mutex<()> {
-    static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
-    GUARD.get_or_init(|| Mutex::new(()))
+fn system_config_value_load_state() -> &'static SystemConfigValueLoadState {
+    static STATE: std::sync::OnceLock<SystemConfigValueLoadState> = std::sync::OnceLock::new();
+    STATE.get_or_init(SystemConfigValueLoadState::default)
+}
+
+#[derive(Debug, Default)]
+struct SystemConfigValueLoadState {
+    inflight: std::sync::Mutex<HashSet<String>>,
+    notify: Notify,
+}
+
+enum SystemConfigValueLoadRegistration<'a> {
+    Leader(SystemConfigValueLoadGuard<'a>),
+    Follower,
+    Bypass,
+}
+
+struct SystemConfigValueLoadGuard<'a> {
+    state: &'a SystemConfigValueLoadState,
+    key: Option<String>,
+}
+
+impl Drop for SystemConfigValueLoadGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(key) = self.key.take() {
+            self.state.finish(&key);
+        }
+    }
+}
+
+impl SystemConfigValueLoadState {
+    fn register(&self, key: &str) -> SystemConfigValueLoadRegistration<'_> {
+        match self.inflight.lock() {
+            Ok(mut inflight) => {
+                if inflight.contains(key) {
+                    SystemConfigValueLoadRegistration::Follower
+                } else {
+                    inflight.insert(key.to_string());
+                    SystemConfigValueLoadRegistration::Leader(SystemConfigValueLoadGuard {
+                        state: self,
+                        key: Some(key.to_string()),
+                    })
+                }
+            }
+            Err(_) => SystemConfigValueLoadRegistration::Bypass,
+        }
+    }
+
+    fn notified(&self) -> tokio::sync::futures::Notified<'_> {
+        self.notify.notified()
+    }
+
+    fn finish(&self, key: &str) {
+        let removed = self
+            .inflight
+            .lock()
+            .map(|mut inflight| inflight.remove(key))
+            .unwrap_or(false);
+        if removed {
+            self.notify.notify_waiters();
+        }
+    }
 }
 
 fn current_system_config_updated_at_unix_secs() -> u64 {
@@ -447,27 +507,69 @@ impl GatewayDataState {
                 return Ok(value);
             }
         }
-        let _guard = system_config_value_load_guard().lock().await;
-        let cached_value = self
-            .system_config_value_cache
-            .read()
-            .expect("system config value cache lock")
-            .get(key)
-            .cloned();
-        if let Some((cached_at, value)) = cached_value {
-            if cached_at.elapsed() <= SYSTEM_CONFIG_VALUE_CACHE_TTL {
-                return Ok(value);
+        let load_state = system_config_value_load_state();
+        loop {
+            let notified = load_state.notified();
+            match load_state.register(key) {
+                SystemConfigValueLoadRegistration::Bypass => {
+                    let Some(backends) = self.backends.as_ref() else {
+                        return Ok(None);
+                    };
+                    let value = crate::request_diagnostics::observe_db_operation(
+                        "system_config_value",
+                        self.database_pool_summary(),
+                        backends.find_system_config_value(key),
+                    )
+                    .await?;
+                    self.system_config_value_cache
+                        .write()
+                        .expect("system config value cache lock")
+                        .insert(key.to_string(), (Instant::now(), value.clone()));
+                    return Ok(value);
+                }
+                SystemConfigValueLoadRegistration::Follower => {
+                    notified.await;
+                    let cached_value = self
+                        .system_config_value_cache
+                        .read()
+                        .expect("system config value cache lock")
+                        .get(key)
+                        .cloned();
+                    if let Some((cached_at, value)) = cached_value {
+                        if cached_at.elapsed() <= SYSTEM_CONFIG_VALUE_CACHE_TTL {
+                            return Ok(value);
+                        }
+                    }
+                }
+                SystemConfigValueLoadRegistration::Leader(_guard) => {
+                    let cached_value = self
+                        .system_config_value_cache
+                        .read()
+                        .expect("system config value cache lock")
+                        .get(key)
+                        .cloned();
+                    if let Some((cached_at, value)) = cached_value {
+                        if cached_at.elapsed() <= SYSTEM_CONFIG_VALUE_CACHE_TTL {
+                            return Ok(value);
+                        }
+                    }
+                    let Some(backends) = self.backends.as_ref() else {
+                        return Ok(None);
+                    };
+                    let value = crate::request_diagnostics::observe_db_operation(
+                        "system_config_value",
+                        self.database_pool_summary(),
+                        backends.find_system_config_value(key),
+                    )
+                    .await?;
+                    self.system_config_value_cache
+                        .write()
+                        .expect("system config value cache lock")
+                        .insert(key.to_string(), (Instant::now(), value.clone()));
+                    return Ok(value);
+                }
             }
         }
-        let Some(backends) = self.backends.as_ref() else {
-            return Ok(None);
-        };
-        let value = backends.find_system_config_value(key).await?;
-        self.system_config_value_cache
-            .write()
-            .expect("system config value cache lock")
-            .insert(key.to_string(), (Instant::now(), value.clone()));
-        Ok(value)
     }
 
     pub(crate) async fn upsert_system_config_value(

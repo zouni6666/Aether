@@ -538,6 +538,18 @@ pub trait RequestCandidateWriteRepository: Send + Sync {
         candidate: UpsertRequestCandidateRecord,
     ) -> Result<StoredRequestCandidate, crate::DataLayerError>;
 
+    async fn upsert_many(
+        &self,
+        candidates: Vec<UpsertRequestCandidateRecord>,
+    ) -> Result<usize, crate::DataLayerError> {
+        let mut persisted = 0usize;
+        for candidate in candidates {
+            self.upsert(candidate).await?;
+            persisted = persisted.saturating_add(1);
+        }
+        Ok(persisted)
+    }
+
     async fn delete_created_before(
         &self,
         created_before_unix_secs: u64,

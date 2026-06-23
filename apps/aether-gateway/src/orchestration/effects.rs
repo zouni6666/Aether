@@ -43,15 +43,21 @@ use crate::{
 };
 
 const POOL_SCORE_FEEDBACK_GATE_MAX_ENTRIES: usize = 50_000;
+const HEALTH_SUCCESS_PERSIST_GATE_MAX_ENTRIES: usize = 50_000;
 const POOL_SCORE_SUCCESS_FEEDBACK_MIN_INTERVAL_ENV: &str =
     "AETHER_GATEWAY_POOL_SCORE_SUCCESS_FEEDBACK_MIN_INTERVAL_SECS";
 const POOL_SCORE_FAILURE_FEEDBACK_MIN_INTERVAL_ENV: &str =
     "AETHER_GATEWAY_POOL_SCORE_FAILURE_FEEDBACK_MIN_INTERVAL_SECS";
+const HEALTH_SUCCESS_PERSIST_MIN_INTERVAL_ENV: &str =
+    "AETHER_GATEWAY_PROVIDER_KEY_HEALTH_SUCCESS_PERSIST_MIN_INTERVAL_SECS";
 const DEFAULT_POOL_SCORE_SUCCESS_FEEDBACK_MIN_INTERVAL_SECS: u64 = 5;
 const DEFAULT_POOL_SCORE_FAILURE_FEEDBACK_MIN_INTERVAL_SECS: u64 = 1;
+const DEFAULT_HEALTH_SUCCESS_PERSIST_MIN_INTERVAL_SECS: u64 = 5;
 const MAX_POOL_SCORE_FEEDBACK_MIN_INTERVAL_SECS: u64 = 300;
 
 static POOL_SCORE_FEEDBACK_GATE: LazyLock<ExpiringMap<String, ()>> =
+    LazyLock::new(ExpiringMap::new);
+static HEALTH_SUCCESS_PERSIST_GATE: LazyLock<ExpiringMap<String, ()>> =
     LazyLock::new(ExpiringMap::new);
 static POOL_SCORE_SUCCESS_FEEDBACK_MIN_INTERVAL: LazyLock<Duration> = LazyLock::new(|| {
     pool_score_feedback_interval_from_env(
@@ -63,6 +69,12 @@ static POOL_SCORE_FAILURE_FEEDBACK_MIN_INTERVAL: LazyLock<Duration> = LazyLock::
     pool_score_feedback_interval_from_env(
         POOL_SCORE_FAILURE_FEEDBACK_MIN_INTERVAL_ENV,
         DEFAULT_POOL_SCORE_FAILURE_FEEDBACK_MIN_INTERVAL_SECS,
+    )
+});
+static HEALTH_SUCCESS_PERSIST_MIN_INTERVAL: LazyLock<Duration> = LazyLock::new(|| {
+    pool_score_feedback_interval_from_env(
+        HEALTH_SUCCESS_PERSIST_MIN_INTERVAL_ENV,
+        DEFAULT_HEALTH_SUCCESS_PERSIST_MIN_INTERVAL_SECS,
     )
 });
 
@@ -645,6 +657,14 @@ async fn record_health_failure_effect(
             .or(current_key.circuit_breaker_by_format.as_ref())
     };
 
+    if !provider_key_health_success_persist_gate_allows(
+        &context.plan.key_id,
+        api_format,
+        circuit_breaker_update_owned.is_some(),
+    ) {
+        return;
+    }
+
     if let Err(err) = state
         .update_provider_catalog_key_health_state(
             &context.plan.key_id,
@@ -711,6 +731,8 @@ async fn record_health_success_effect(
             .or(current_key.circuit_breaker_by_format.as_ref())
     };
 
+    clear_provider_key_health_success_persist_gate(&context.plan.key_id, api_format);
+
     if let Err(err) = state
         .update_provider_catalog_key_health_state(
             &context.plan.key_id,
@@ -725,6 +747,36 @@ async fn record_health_success_effect(
             context.plan.provider_id, context.plan.endpoint_id, context.plan.key_id, err
         );
     }
+}
+
+fn provider_key_health_success_persist_gate_allows(
+    key_id: &str,
+    api_format: &str,
+    closes_circuit: bool,
+) -> bool {
+    if closes_circuit {
+        return true;
+    }
+    let min_interval = *HEALTH_SUCCESS_PERSIST_MIN_INTERVAL;
+    if min_interval.is_zero() {
+        return true;
+    }
+    let key = provider_key_health_success_persist_gate_key(key_id, api_format);
+    HEALTH_SUCCESS_PERSIST_GATE.insert_if_absent_fresh(
+        key,
+        (),
+        min_interval,
+        HEALTH_SUCCESS_PERSIST_GATE_MAX_ENTRIES,
+    )
+}
+
+fn clear_provider_key_health_success_persist_gate(key_id: &str, api_format: &str) {
+    let key = provider_key_health_success_persist_gate_key(key_id, api_format);
+    HEALTH_SUCCESS_PERSIST_GATE.remove(&key);
+}
+
+fn provider_key_health_success_persist_gate_key(key_id: &str, api_format: &str) -> String {
+    format!("success:{key_id}:{api_format}")
 }
 
 async fn record_stream_pool_success_effect(
@@ -2609,6 +2661,88 @@ mod tests {
                     "last_failure_at": Value::Null
                 }
             }))
+        );
+    }
+
+    #[tokio::test]
+    async fn health_success_projection_is_rate_limited_until_failure_resets_gate() {
+        let state = health_state();
+        let plan = sample_plan();
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: None,
+            },
+            LocalExecutionEffect::HealthSuccess(LocalHealthSuccessEffect),
+        )
+        .await;
+        let first_updated_at = state
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
+            .await
+            .expect("provider catalog keys should load")
+            .into_iter()
+            .next()
+            .expect("stored key should exist")
+            .updated_at_unix_secs;
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: None,
+            },
+            LocalExecutionEffect::HealthSuccess(LocalHealthSuccessEffect),
+        )
+        .await;
+        let second_updated_at = state
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
+            .await
+            .expect("provider catalog keys should load")
+            .into_iter()
+            .next()
+            .expect("stored key should exist")
+            .updated_at_unix_secs;
+        assert_eq!(second_updated_at, first_updated_at);
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: None,
+            },
+            LocalExecutionEffect::HealthFailure(LocalHealthFailureEffect {
+                status_code: 503,
+                classification: LocalFailoverClassification::RetryUpstreamFailure,
+            }),
+        )
+        .await;
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: None,
+            },
+            LocalExecutionEffect::HealthSuccess(LocalHealthSuccessEffect),
+        )
+        .await;
+
+        let stored_key = state
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
+            .await
+            .expect("provider catalog keys should load")
+            .into_iter()
+            .next()
+            .expect("stored key should exist");
+        assert_eq!(
+            stored_key
+                .health_by_format
+                .as_ref()
+                .and_then(|value| value.get("openai:chat"))
+                .and_then(|value| value.get("consecutive_failures"))
+                .and_then(Value::as_u64),
+            Some(0)
         );
     }
 

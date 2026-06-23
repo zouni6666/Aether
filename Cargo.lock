@@ -270,6 +270,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2",
+ "socket2 0.6.3",
  "sqlx",
  "tar",
  "thiserror 2.0.18",

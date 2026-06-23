@@ -39,7 +39,9 @@ pub(crate) fn build_direct_execution_frame_stream(
             response,
             started_at,
             stream_first_byte_timeout,
+            upstream_target_permit,
         } = execution;
+        let _upstream_target_permit = upstream_target_permit;
 
         let mut observer_context = stream_summary_report_context;
         if observer_context

@@ -8,6 +8,12 @@ use crate::scheduler::affinity::SCHEDULER_AFFINITY_TTL;
 
 const PLANNER_SCHEDULER_AFFINITY_MAX_ENTRIES: usize = 10_000;
 
+pub(crate) fn has_explicit_session_affinity(
+    client_session_affinity: Option<&ClientSessionAffinity>,
+) -> bool {
+    client_session_affinity.is_some_and(ClientSessionAffinity::has_session_key)
+}
+
 pub(crate) fn read_cached_scheduler_affinity_target(
     state: PlannerAppState<'_>,
     auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
@@ -15,6 +21,9 @@ pub(crate) fn read_cached_scheduler_affinity_target(
     client_api_format: &str,
     requested_model: Option<&str>,
 ) -> Option<SchedulerAffinityTarget> {
+    if !has_explicit_session_affinity(client_session_affinity) {
+        return None;
+    }
     let requested_model = requested_model
         .map(str::trim)
         .filter(|value| !value.is_empty())?;
@@ -41,6 +50,9 @@ pub(crate) fn remember_scheduler_affinity_for_candidate(
     requested_model: &str,
     candidate: &SchedulerMinimalCandidateSelectionCandidate,
 ) {
+    if !has_explicit_session_affinity(client_session_affinity) {
+        return;
+    }
     remember_scheduler_affinity_for_candidate_at_epoch(
         state,
         auth_snapshot,
@@ -61,6 +73,9 @@ pub(crate) fn remember_scheduler_affinity_for_candidate_at_epoch(
     candidate: &SchedulerMinimalCandidateSelectionCandidate,
     expected_epoch: Option<u64>,
 ) {
+    if !has_explicit_session_affinity(client_session_affinity) {
+        return;
+    }
     let Some(api_key_id) = auth_snapshot
         .map(|snapshot| snapshot.api_key_id.trim())
         .filter(|value| !value.is_empty())

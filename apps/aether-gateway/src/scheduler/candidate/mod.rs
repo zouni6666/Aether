@@ -138,8 +138,11 @@ pub(crate) async fn list_selectable_enumerated_candidates_with_skip_reasons(
     GatewayError,
 > {
     let ordering_config = runtime_state.read_scheduler_ordering_config().await?;
-    let priority_affinity_key =
-        selection::scheduling_priority_affinity_key(auth_snapshot, ordering_config.scheduling_mode);
+    let priority_affinity_key = selection::scheduling_priority_affinity_key(
+        auth_snapshot,
+        client_session_affinity,
+        ordering_config.scheduling_mode,
+    );
     collect_selectable_enumerated_candidates_with_skip_reasons(
         runtime_state,
         api_format,

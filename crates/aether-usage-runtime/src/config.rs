@@ -14,6 +14,10 @@ pub struct UsageRuntimeConfig {
     pub reclaim_idle_ms: u64,
     pub reclaim_count: usize,
     pub reclaim_interval_ms: u64,
+    pub enqueue_retry_buffer_capacity: usize,
+    pub enqueue_retry_workers: usize,
+    pub enqueue_retry_initial_backoff_ms: u64,
+    pub enqueue_retry_max_backoff_ms: u64,
 }
 
 impl Default for UsageRuntimeConfig {
@@ -31,6 +35,10 @@ impl Default for UsageRuntimeConfig {
             reclaim_idle_ms: 30_000,
             reclaim_count: 500,
             reclaim_interval_ms: 5_000,
+            enqueue_retry_buffer_capacity: 131_072,
+            enqueue_retry_workers: 4,
+            enqueue_retry_initial_backoff_ms: 10,
+            enqueue_retry_max_backoff_ms: 1_000,
         }
     }
 }
@@ -88,6 +96,31 @@ impl UsageRuntimeConfig {
         if self.reclaim_interval_ms == 0 {
             return Err(DataLayerError::InvalidConfiguration(
                 "usage runtime reclaim_interval_ms must be positive".to_string(),
+            ));
+        }
+        if self.enqueue_retry_buffer_capacity == 0 {
+            return Err(DataLayerError::InvalidConfiguration(
+                "usage runtime enqueue_retry_buffer_capacity must be positive".to_string(),
+            ));
+        }
+        if self.enqueue_retry_workers == 0 {
+            return Err(DataLayerError::InvalidConfiguration(
+                "usage runtime enqueue_retry_workers must be positive".to_string(),
+            ));
+        }
+        if self.enqueue_retry_initial_backoff_ms == 0 {
+            return Err(DataLayerError::InvalidConfiguration(
+                "usage runtime enqueue_retry_initial_backoff_ms must be positive".to_string(),
+            ));
+        }
+        if self.enqueue_retry_max_backoff_ms == 0 {
+            return Err(DataLayerError::InvalidConfiguration(
+                "usage runtime enqueue_retry_max_backoff_ms must be positive".to_string(),
+            ));
+        }
+        if self.enqueue_retry_initial_backoff_ms > self.enqueue_retry_max_backoff_ms {
+            return Err(DataLayerError::InvalidConfiguration(
+                "usage runtime enqueue retry initial backoff cannot exceed max backoff".to_string(),
             ));
         }
 

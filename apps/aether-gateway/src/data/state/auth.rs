@@ -1748,11 +1748,15 @@ impl GatewayDataState {
         api_key_id: &str,
         now_unix_secs: u64,
     ) -> Result<Option<GatewayAuthApiKeySnapshot>, DataLayerError> {
-        let snapshot = read_resolved_auth_api_key_snapshot_by_user_api_key_ids(
-            self,
-            user_id,
-            api_key_id,
-            now_unix_secs,
+        let snapshot = crate::request_diagnostics::observe_db_operation(
+            "auth_api_key_snapshot",
+            self.database_pool_summary(),
+            read_resolved_auth_api_key_snapshot_by_user_api_key_ids(
+                self,
+                user_id,
+                api_key_id,
+                now_unix_secs,
+            ),
         )
         .await?;
         self.apply_user_group_effective_policies(snapshot).await
@@ -1763,8 +1767,12 @@ impl GatewayDataState {
         key_hash: &str,
         now_unix_secs: u64,
     ) -> Result<Option<GatewayAuthApiKeySnapshot>, DataLayerError> {
-        let snapshot =
-            read_resolved_auth_api_key_snapshot_by_key_hash(self, key_hash, now_unix_secs).await?;
+        let snapshot = crate::request_diagnostics::observe_db_operation(
+            "auth_api_key_snapshot_by_hash",
+            self.database_pool_summary(),
+            read_resolved_auth_api_key_snapshot_by_key_hash(self, key_hash, now_unix_secs),
+        )
+        .await?;
         self.apply_user_group_effective_policies(snapshot).await
     }
 
@@ -1782,7 +1790,13 @@ impl GatewayDataState {
         let Some(repository) = self.user_reader.as_ref() else {
             return Ok(Some(snapshot));
         };
-        let Some(user) = repository.find_user_auth_by_id(&snapshot.user_id).await? else {
+        let Some(user) = crate::request_diagnostics::observe_db_operation(
+            "auth_user_policy",
+            self.database_pool_summary(),
+            repository.find_user_auth_by_id(&snapshot.user_id),
+        )
+        .await?
+        else {
             return Ok(Some(snapshot));
         };
         if user.role.eq_ignore_ascii_case("admin") && !snapshot.api_key_is_standalone {

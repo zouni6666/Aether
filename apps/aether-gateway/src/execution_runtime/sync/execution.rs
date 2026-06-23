@@ -79,6 +79,7 @@ use crate::request_candidate_runtime::{
     ensure_execution_request_candidate_slot, record_local_request_candidate_extra_data,
     record_local_request_candidate_status,
 };
+use crate::request_diagnostics::attach_current_request_diagnostics_to_report_context;
 use crate::usage::{spawn_sync_report, submit_sync_report};
 use crate::video_tasks::VideoTaskSyncReportMode;
 use crate::{usage::GatewaySyncReportRequest, AppState, GatewayError};
@@ -296,7 +297,12 @@ fn record_sync_terminal_usage(
     report_context: Option<&serde_json::Value>,
     payload: &GatewaySyncReportRequest,
 ) {
-    let context_seed = build_terminal_usage_context_seed(plan, report_context);
+    let report_context_with_diagnostics =
+        attach_current_request_diagnostics_to_report_context(report_context);
+    let context_seed = build_terminal_usage_context_seed(
+        plan,
+        report_context_with_diagnostics.as_ref().or(report_context),
+    );
     let payload_seed = build_sync_terminal_usage_payload_seed(payload);
     state
         .usage_runtime

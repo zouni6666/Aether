@@ -18,6 +18,7 @@ use crate::ai_serving::planner::plan_builders::{
     build_openai_chat_stream_plan_from_decision, AiStreamAttempt,
 };
 use crate::ai_serving::planner::runtime_miss::apply_local_runtime_candidate_terminal_reason;
+use crate::stage_metrics::observe_gateway_stage_ms;
 
 pub(crate) struct LocalOpenAiChatStreamAttemptSource<'a> {
     state: &'a AppState,
@@ -93,10 +94,36 @@ pub(crate) async fn build_local_openai_chat_stream_attempt_source<'a>(
 #[async_trait]
 impl LocalExecutionAttemptSource<AiStreamAttempt> for LocalOpenAiChatStreamAttemptSource<'_> {
     async fn next_execution_attempt(&mut self) -> Result<Option<AiStreamAttempt>, GatewayError> {
-        while let Some(attempt) = self.candidates.next_attempt().await {
+        loop {
+            let source_started_at = std::time::Instant::now();
+            let Some(attempt) = self.candidates.next_attempt().await? else {
+                observe_gateway_stage_ms(
+                    "stream_candidate_source_next",
+                    source_started_at.elapsed().as_millis() as u64,
+                );
+                break;
+            };
+            observe_gateway_stage_ms(
+                "stream_candidate_source_next",
+                source_started_at.elapsed().as_millis() as u64,
+            );
+
+            let plan_started_at = std::time::Instant::now();
             match self.build_stream_attempt(attempt).await? {
-                Some(attempt) => return Ok(Some(attempt)),
-                None => continue,
+                Some(attempt) => {
+                    observe_gateway_stage_ms(
+                        "stream_candidate_plan_build",
+                        plan_started_at.elapsed().as_millis() as u64,
+                    );
+                    return Ok(Some(attempt));
+                }
+                None => {
+                    observe_gateway_stage_ms(
+                        "stream_candidate_plan_build",
+                        plan_started_at.elapsed().as_millis() as u64,
+                    );
+                    continue;
+                }
             }
         }
         apply_local_runtime_candidate_terminal_reason(

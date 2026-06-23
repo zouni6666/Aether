@@ -14,7 +14,7 @@ use serde_json::json;
 
 #[derive(Debug, Clone)]
 struct Config {
-    bind: SocketAddr,
+    binds: Vec<SocketAddr>,
     chunks: u64,
     first_byte_delay: Duration,
     chunk_delay: Duration,
@@ -25,9 +25,9 @@ struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            bind: "127.0.0.1:18181"
+            binds: vec!["127.0.0.1:18181"
                 .parse()
-                .expect("default bind address should parse"),
+                .expect("default bind address should parse")],
             chunks: 8,
             first_byte_delay: Duration::from_millis(0),
             chunk_delay: Duration::from_millis(20),
@@ -68,9 +68,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/responses", post(responses))
         .with_state(app_state);
 
-    let listener = tokio::net::TcpListener::bind(config.bind).await?;
-    eprintln!("mock OpenAI upstream listening on http://{}", config.bind);
-    axum::serve(listener, app).await?;
+    serve_listeners(&config.binds, app).await?;
+    Ok(())
+}
+
+async fn serve_listeners(
+    binds: &[SocketAddr],
+    app: Router,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut listeners = Vec::with_capacity(binds.len());
+    for bind in binds {
+        listeners.push((*bind, tokio::net::TcpListener::bind(bind).await?));
+    }
+    if listeners.len() == 1 {
+        let (bind, listener) = listeners
+            .into_iter()
+            .next()
+            .ok_or_else(|| std::io::Error::other("mock upstream listener set is empty"))?;
+        eprintln!("mock OpenAI upstream listening on http://{bind}");
+        axum::serve(listener, app).await?;
+        return Ok(());
+    }
+
+    let mut servers = tokio::task::JoinSet::new();
+    for (bind, listener) in listeners {
+        let app = app.clone();
+        eprintln!("mock OpenAI upstream listening on http://{bind}");
+        servers.spawn(async move { axum::serve(listener, app).await });
+    }
+    if let Some(result) = servers.join_next().await {
+        servers.abort_all();
+        let serve_result = result
+            .map_err(|err| std::io::Error::other(format!("mock listener task failed: {err}")))?;
+        serve_result?;
+    }
     Ok(())
 }
 
@@ -292,10 +323,17 @@ fn current_unix_secs() -> u64 {
 
 fn parse_args(args: Vec<String>) -> Result<Config, Box<dyn std::error::Error>> {
     let mut config = Config::default();
+    let mut binds_overridden = false;
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
-            "--bind" => config.bind = next_value(&mut iter, "--bind")?.parse()?,
+            "--bind" => {
+                if !binds_overridden {
+                    config.binds.clear();
+                    binds_overridden = true;
+                }
+                config.binds.push(next_value(&mut iter, "--bind")?.parse()?);
+            }
             "--chunks" => config.chunks = next_value(&mut iter, "--chunks")?.parse()?,
             "--first-byte-delay-ms" => {
                 config.first_byte_delay =
@@ -325,6 +363,13 @@ fn parse_args(args: Vec<String>) -> Result<Config, Box<dyn std::error::Error>> {
             }
         }
     }
+    if config.binds.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "at least one --bind is required",
+        )
+        .into());
+    }
     Ok(config)
 }
 
@@ -343,6 +388,6 @@ fn next_value(
 
 fn print_usage() {
     eprintln!(
-        "usage: cargo run -p aether-testkit --bin mock_openai_upstream -- [--bind 127.0.0.1:18181] [--chunks 8] [--first-byte-delay-ms 0] [--chunk-delay-ms 20] [--payload-bytes 32] [--status 200]"
+        "usage: cargo run -p aether-testkit --bin mock_openai_upstream -- [--bind 127.0.0.1:18181]... [--chunks 8] [--first-byte-delay-ms 0] [--chunk-delay-ms 20] [--payload-bytes 32] [--status 200]"
     );
 }

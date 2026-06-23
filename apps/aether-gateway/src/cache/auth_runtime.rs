@@ -198,10 +198,10 @@ impl AuthSnapshotCache {
         &self,
         key: AuthSnapshotCacheKey,
         ttl: Duration,
-        load: F,
+        mut load: F,
     ) -> Result<Option<GatewayAuthApiKeySnapshot>, E>
     where
-        F: Fn() -> Fut,
+        F: FnMut() -> Fut,
         Fut: Future<Output = Result<Option<GatewayAuthApiKeySnapshot>, E>>,
     {
         if let Some(value) = self.get(&key, ttl) {
@@ -269,10 +269,10 @@ where
         &self,
         key: K,
         ttl: Duration,
-        load: F,
+        mut load: F,
     ) -> Result<Option<Value>, E>
     where
-        F: Fn() -> Fut,
+        F: FnMut() -> Fut,
         Fut: Future<Output = Result<Option<Value>, E>>,
     {
         if let Some(value) = self.get(&key, ttl) {
@@ -341,10 +341,10 @@ where
         &self,
         key: K,
         ttl: Duration,
-        load: F,
+        mut load: F,
     ) -> Result<Option<V>, E>
     where
-        F: Fn() -> Fut,
+        F: FnMut() -> Fut,
         Fut: Future<Output = Result<Option<V>, E>>,
     {
         if let Some(value) = self.get(&key, ttl) {
@@ -374,15 +374,200 @@ where
         }
     }
 
+    pub(crate) async fn get_or_load_once<E, F, Fut>(
+        &self,
+        key: K,
+        ttl: Duration,
+        load: F,
+    ) -> Result<Option<V>, E>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Option<V>, E>>,
+    {
+        self.get_or_load_once_with_observer(key, ttl, load, CacheLoadObserver::default())
+            .await
+    }
+
+    pub(crate) async fn get_or_load_once_with_observer<E, F, Fut>(
+        &self,
+        key: K,
+        ttl: Duration,
+        load: F,
+        observer: CacheLoadObserver,
+    ) -> Result<Option<V>, E>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Option<V>, E>>,
+    {
+        if let Some(value) = self.get(&key, ttl) {
+            observer.hit();
+            return Ok(value);
+        }
+        observer.miss();
+
+        let mut load = Some(load);
+        loop {
+            let notified = self.singleflight.notified();
+            match self.singleflight.register(&key) {
+                CacheInflightRegistration::Bypass => {
+                    observer.load();
+                    let value =
+                        load.take().expect("cache load closure should be available")().await?;
+                    self.insert(key, value.clone(), ttl);
+                    return Ok(value);
+                }
+                CacheInflightRegistration::Follower => {
+                    observer.follower_wait();
+                    notified.await;
+                    if let Some(value) = self.get(&key, ttl) {
+                        observer.hit();
+                        return Ok(value);
+                    }
+                }
+                CacheInflightRegistration::Leader(_guard) => {
+                    observer.load();
+                    let value =
+                        load.take().expect("cache load closure should be available")().await?;
+                    self.insert(key, value.clone(), ttl);
+                    return Ok(value);
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn get_or_load_once_stale_while_refreshing<E, F, Fut>(
+        &self,
+        key: K,
+        ttl: Duration,
+        stale_ttl: Duration,
+        load: F,
+        observer: CacheLoadObserver,
+    ) -> Result<Option<V>, E>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Option<V>, E>>,
+    {
+        if let Some((value, age)) = self.entries.get_with_age(&key, stale_ttl) {
+            if age <= ttl {
+                observer.hit();
+                return Ok(value);
+            }
+
+            // Keep stale snapshots off the request critical path. The caller's
+            // invalidation path clears entries when provider/catalog/routing
+            // state changes, and the bounded stale TTL limits passive drift.
+            observer.hit();
+            return Ok(value);
+        }
+
+        observer.miss();
+        let mut load = Some(load);
+        loop {
+            let notified = self.singleflight.notified();
+            match self.singleflight.register(&key) {
+                CacheInflightRegistration::Bypass => {
+                    observer.load();
+                    let value =
+                        load.take().expect("cache load closure should be available")().await?;
+                    self.entries.insert(
+                        key,
+                        value.clone(),
+                        stale_ttl,
+                        AUTH_RUNTIME_CACHE_MAX_ENTRIES,
+                    );
+                    return Ok(value);
+                }
+                CacheInflightRegistration::Follower => {
+                    observer.follower_wait();
+                    notified.await;
+                    if let Some((value, _age)) = self.entries.get_with_age(&key, stale_ttl) {
+                        observer.hit();
+                        return Ok(value);
+                    }
+                }
+                CacheInflightRegistration::Leader(_guard) => {
+                    observer.load();
+                    let value =
+                        load.take().expect("cache load closure should be available")().await?;
+                    self.entries.insert(
+                        key,
+                        value.clone(),
+                        stale_ttl,
+                        AUTH_RUNTIME_CACHE_MAX_ENTRIES,
+                    );
+                    return Ok(value);
+                }
+            }
+        }
+    }
+
     pub(crate) fn clear(&self) {
         self.entries.clear();
         self.singleflight.clear();
     }
 }
 
+#[derive(Clone, Copy, Default)]
+pub(crate) struct CacheLoadObserver {
+    on_hit: Option<fn()>,
+    on_miss: Option<fn()>,
+    on_load: Option<fn()>,
+    on_follower_wait: Option<fn()>,
+}
+
+impl CacheLoadObserver {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn on_hit(mut self, callback: fn()) -> Self {
+        self.on_hit = Some(callback);
+        self
+    }
+
+    pub(crate) fn on_miss(mut self, callback: fn()) -> Self {
+        self.on_miss = Some(callback);
+        self
+    }
+
+    pub(crate) fn on_load(mut self, callback: fn()) -> Self {
+        self.on_load = Some(callback);
+        self
+    }
+
+    pub(crate) fn on_follower_wait(mut self, callback: fn()) -> Self {
+        self.on_follower_wait = Some(callback);
+        self
+    }
+
+    fn hit(self) {
+        if let Some(callback) = self.on_hit {
+            callback();
+        }
+    }
+
+    fn miss(self) {
+        if let Some(callback) = self.on_miss {
+            callback();
+        }
+    }
+
+    fn load(self) {
+        if let Some(callback) = self.on_load {
+            callback();
+        }
+    }
+
+    fn follower_wait(self) {
+        if let Some(callback) = self.on_follower_wait {
+            callback();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::ValueCache;
+    use super::{CacheLoadObserver, ValueCache};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -470,6 +655,117 @@ mod tests {
         assert_eq!(results, vec![Some(1), Some(2)]);
         assert_eq!(calls.load(Ordering::Acquire), 2);
         assert_eq!(max_active.load(Ordering::Acquire), 2);
+    }
+
+    #[tokio::test]
+    async fn value_cache_returns_stale_without_refreshing_on_request_path() {
+        let cache = Arc::new(ValueCache::<String, u64>::default());
+        let key = "hot-key".to_string();
+        let calls = Arc::new(AtomicUsize::new(0));
+        cache.insert(key.clone(), Some(1), Duration::from_millis(10));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let first_cache = Arc::clone(&cache);
+        let first_key = key.clone();
+        let first_calls = Arc::clone(&calls);
+        let first_started = Instant::now();
+        let first = tokio::spawn(async move {
+            first_cache
+                .get_or_load_once_stale_while_refreshing::<(), _, _>(
+                    first_key,
+                    Duration::from_millis(10),
+                    Duration::from_secs(1),
+                    || async move {
+                        first_calls.fetch_add(1, Ordering::AcqRel);
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        Ok(Some(2))
+                    },
+                    CacheLoadObserver::default(),
+                )
+                .await
+        });
+
+        let follower_cache = Arc::clone(&cache);
+        let follower_started = Instant::now();
+        let follower_calls = Arc::clone(&calls);
+        let follower = tokio::spawn(async move {
+            follower_cache
+                .get_or_load_once_stale_while_refreshing::<(), _, _>(
+                    key,
+                    Duration::from_millis(10),
+                    Duration::from_secs(1),
+                    || async move {
+                        follower_calls.fetch_add(1, Ordering::AcqRel);
+                        Ok(Some(3))
+                    },
+                    CacheLoadObserver::default(),
+                )
+                .await
+        });
+
+        assert_eq!(first.await.unwrap().unwrap(), Some(1));
+        assert!(
+            first_started.elapsed() < Duration::from_millis(80),
+            "stale value should not wait for request-path refresh"
+        );
+        assert_eq!(follower.await.unwrap().unwrap(), Some(1));
+        assert!(
+            follower_started.elapsed() < Duration::from_millis(80),
+            "follower should return stale value without waiting for refresh"
+        );
+        assert_eq!(calls.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn value_cache_cold_stale_followers_do_not_reload_after_fresh_ttl() {
+        let cache = Arc::new(ValueCache::<String, u64>::default());
+        let key = "cold-hot-key".to_string();
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let leader_cache = Arc::clone(&cache);
+        let leader_key = key.clone();
+        let leader_calls = Arc::clone(&calls);
+        let leader = tokio::spawn(async move {
+            leader_cache
+                .get_or_load_once_stale_while_refreshing::<(), _, _>(
+                    leader_key,
+                    Duration::from_millis(10),
+                    Duration::from_secs(1),
+                    || async move {
+                        leader_calls.fetch_add(1, Ordering::AcqRel);
+                        Ok(Some(1))
+                    },
+                    CacheLoadObserver::default(),
+                )
+                .await
+        });
+        assert_eq!(leader.await.unwrap().unwrap(), Some(1));
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        let follower_started = Instant::now();
+        let follower_cache = Arc::clone(&cache);
+        let follower_calls = Arc::clone(&calls);
+        let follower = tokio::spawn(async move {
+            follower_cache
+                .get_or_load_once_stale_while_refreshing::<(), _, _>(
+                    key,
+                    Duration::from_millis(10),
+                    Duration::from_secs(1),
+                    || async move {
+                        follower_calls.fetch_add(1, Ordering::AcqRel);
+                        Ok(Some(2))
+                    },
+                    CacheLoadObserver::default(),
+                )
+                .await
+        });
+
+        assert_eq!(follower.await.unwrap().unwrap(), Some(1));
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        assert!(
+            follower_started.elapsed() < Duration::from_millis(50),
+            "follower should reuse cold-loaded stale value without reloading"
+        );
     }
 
     #[tokio::test]

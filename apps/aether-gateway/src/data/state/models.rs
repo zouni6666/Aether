@@ -15,14 +15,24 @@ impl GatewayDataState {
         api_format: &str,
         global_model_name: &str,
     ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
-        match &self.minimal_candidate_selection_reader {
-            Some(repository) => {
-                repository
-                    .list_for_exact_api_format_and_global_model(api_format, global_model_name)
-                    .await
-            }
-            None => Ok(Vec::new()),
-        }
+        crate::request_diagnostics::observe_db_operation(
+            "candidate_selection",
+            self.database_pool_summary(),
+            async {
+                match &self.minimal_candidate_selection_reader {
+                    Some(repository) => {
+                        repository
+                            .list_for_exact_api_format_and_global_model(
+                                api_format,
+                                global_model_name,
+                            )
+                            .await
+                    }
+                    None => Ok(Vec::new()),
+                }
+            },
+        )
+        .await
     }
 
     pub(crate) async fn list_minimal_candidate_selection_rows_for_requested_model(
@@ -30,38 +40,62 @@ impl GatewayDataState {
         api_format: &str,
         requested_model_name: &str,
     ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
-        match &self.minimal_candidate_selection_reader {
-            Some(repository) => {
-                repository
-                    .list_for_exact_api_format_and_requested_model(api_format, requested_model_name)
-                    .await
-            }
-            None => Ok(Vec::new()),
-        }
+        crate::request_diagnostics::observe_db_operation(
+            "candidate_selection",
+            self.database_pool_summary(),
+            async {
+                match &self.minimal_candidate_selection_reader {
+                    Some(repository) => {
+                        repository
+                            .list_for_exact_api_format_and_requested_model(
+                                api_format,
+                                requested_model_name,
+                            )
+                            .await
+                    }
+                    None => Ok(Vec::new()),
+                }
+            },
+        )
+        .await
     }
 
     pub(crate) async fn list_minimal_candidate_selection_rows_for_requested_model_page(
         &self,
         query: &StoredRequestedModelCandidateRowsQuery,
     ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
-        match &self.minimal_candidate_selection_reader {
-            Some(repository) => {
-                repository
-                    .list_for_exact_api_format_and_requested_model_page(query)
-                    .await
-            }
-            None => Ok(Vec::new()),
-        }
+        crate::request_diagnostics::observe_db_operation(
+            "candidate_selection",
+            self.database_pool_summary(),
+            async {
+                match &self.minimal_candidate_selection_reader {
+                    Some(repository) => {
+                        repository
+                            .list_for_exact_api_format_and_requested_model_page(query)
+                            .await
+                    }
+                    None => Ok(Vec::new()),
+                }
+            },
+        )
+        .await
     }
 
     pub(crate) async fn list_minimal_candidate_selection_rows_for_api_format(
         &self,
         api_format: &str,
     ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
-        match &self.minimal_candidate_selection_reader {
-            Some(repository) => repository.list_for_exact_api_format(api_format).await,
-            None => Ok(Vec::new()),
-        }
+        crate::request_diagnostics::observe_db_operation(
+            "candidate_selection",
+            self.database_pool_summary(),
+            async {
+                match &self.minimal_candidate_selection_reader {
+                    Some(repository) => repository.list_for_exact_api_format(api_format).await,
+                    None => Ok(Vec::new()),
+                }
+            },
+        )
+        .await
     }
 
     pub(crate) async fn list_pool_key_candidate_rows_for_group(

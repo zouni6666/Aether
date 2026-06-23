@@ -7,6 +7,7 @@ use aether_ai_serving::{
 use aether_routing_core::ResolvedRoutingPolicy;
 use async_trait::async_trait;
 use std::convert::Infallible;
+use std::time::Instant;
 use tracing::warn;
 
 use aether_scheduler_core::{
@@ -20,6 +21,7 @@ use crate::ai_serving::{
     PlannerAppState,
 };
 use crate::orchestration::LocalExecutionCandidateMetadata;
+use crate::stage_metrics::observe_gateway_stage_ms;
 
 use super::candidate_ranking::rank_eligible_local_execution_candidates;
 
@@ -68,7 +70,7 @@ struct GatewayLocalCandidateResolutionPort<'a> {
 #[async_trait]
 impl AiCandidateResolutionPort for GatewayLocalCandidateResolutionPort<'_> {
     type Candidate = SchedulerMinimalCandidateSelectionCandidate;
-    type Transport = GatewayProviderTransportSnapshot;
+    type Transport = Arc<GatewayProviderTransportSnapshot>;
     type Eligible = EligibleLocalExecutionCandidate;
     type Skipped = SkippedLocalExecutionCandidate;
     type Error = Infallible;
@@ -77,7 +79,12 @@ impl AiCandidateResolutionPort for GatewayLocalCandidateResolutionPort<'_> {
         &self,
         candidate: &Self::Candidate,
     ) -> Result<Option<Self::Transport>, Self::Error> {
-        Ok(read_candidate_transport_snapshot(self.state, candidate).await)
+        let started_at = Instant::now();
+        let transport = read_candidate_transport_snapshot_arc(self.state, candidate).await;
+        let elapsed_ms = started_at.elapsed().as_millis() as u64;
+        observe_gateway_stage_ms("candidate_transport_snapshot", elapsed_ms);
+        observe_gateway_stage_ms("candidate_resolution_transport_read", elapsed_ms);
+        Ok(transport)
     }
 
     fn build_missing_transport_skipped_candidate(
@@ -139,7 +146,7 @@ impl AiCandidateResolutionPort for GatewayLocalCandidateResolutionPort<'_> {
         SkippedLocalExecutionCandidate {
             candidate,
             skip_reason,
-            transport: Some(Arc::new(transport)),
+            transport: Some(transport),
             ranking: None,
             extra_data: None,
         }
@@ -159,7 +166,7 @@ impl AiCandidateResolutionPort for GatewayLocalCandidateResolutionPort<'_> {
         EligibleLocalExecutionCandidate {
             kind,
             candidate,
-            transport: Arc::new(transport),
+            transport,
             provider_api_format,
             orchestration: LocalExecutionCandidateMetadata::default(),
             ranking: None,
@@ -171,7 +178,8 @@ impl AiCandidateResolutionPort for GatewayLocalCandidateResolutionPort<'_> {
         candidates: Vec<Self::Eligible>,
         normalized_client_api_format: &str,
     ) -> Result<Vec<Self::Eligible>, Self::Error> {
-        Ok(rank_eligible_local_execution_candidates(
+        let started_at = Instant::now();
+        let ranked = rank_eligible_local_execution_candidates(
             self.state,
             candidates,
             normalized_client_api_format,
@@ -181,7 +189,12 @@ impl AiCandidateResolutionPort for GatewayLocalCandidateResolutionPort<'_> {
             self.required_capabilities,
             self.routing_policy,
         )
-        .await)
+        .await;
+        observe_gateway_stage_ms(
+            "candidate_resolution_rank",
+            started_at.elapsed().as_millis() as u64,
+        );
+        Ok(ranked)
     }
 
     async fn apply_pool_scheduler(
@@ -358,8 +371,13 @@ async fn resolve_and_rank_local_execution_candidates_with_pool_expansion(
         expand_pool_groups,
     };
 
+    let started_at = Instant::now();
     match run_ai_candidate_resolution(&port, candidates, request).await {
         Ok(mut outcome) => {
+            observe_gateway_stage_ms(
+                "candidate_resolution_core",
+                started_at.elapsed().as_millis() as u64,
+            );
             for candidate in &mut outcome.eligible_candidates {
                 candidate.orchestration.scheduler_affinity_epoch = Some(scheduler_affinity_epoch);
             }
@@ -506,8 +524,17 @@ pub(crate) async fn read_candidate_transport_snapshot(
     state: PlannerAppState<'_>,
     candidate: &SchedulerMinimalCandidateSelectionCandidate,
 ) -> Option<GatewayProviderTransportSnapshot> {
+    read_candidate_transport_snapshot_arc(state, candidate)
+        .await
+        .map(|transport| (*transport).clone())
+}
+
+pub(crate) async fn read_candidate_transport_snapshot_arc(
+    state: PlannerAppState<'_>,
+    candidate: &SchedulerMinimalCandidateSelectionCandidate,
+) -> Option<Arc<GatewayProviderTransportSnapshot>> {
     match state
-        .read_provider_transport_snapshot(
+        .read_provider_transport_snapshot_arc(
             &candidate.provider_id,
             &candidate.endpoint_id,
             &candidate.key_id,

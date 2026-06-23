@@ -3,6 +3,7 @@ use aether_ai_serving::{
 };
 use aether_data_contracts::repository::candidate_selection::StoredMinimalCandidateSelectionRow;
 use aether_routing_core::ResolvedRoutingPolicy;
+use aether_runtime::ConcurrencyPermit;
 use aether_scheduler_core::{
     enumerate_minimal_candidate_selection_with_model_directives, normalize_api_format,
     resolve_requested_global_model_name_with_model_directives,
@@ -12,22 +13,32 @@ use aether_scheduler_core::{
 use async_trait::async_trait;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use crate::ai_serving::planner::candidate_affinity_cache::has_explicit_session_affinity;
 use crate::ai_serving::planner::candidate_resolution::SkippedLocalExecutionCandidate;
 use crate::ai_serving::{GatewayAuthApiKeySnapshot, PlannerAppState};
-use crate::clock::current_unix_secs;
+use crate::clock::request_distribution_seed;
 use crate::data::candidate_selection::{
     read_requested_model_rows_fast_path_page, requested_model_candidate_names,
     MinimalCandidateSelectionRowSource, REQUESTED_MODEL_CANDIDATE_PAGE_SIZE,
     REQUESTED_MODEL_MAX_SCANNED_ROWS,
 };
 use crate::scheduler::candidate::SchedulerSkippedCandidate;
-use crate::scheduler::config::SchedulerOrderingConfig;
+use crate::scheduler::config::{SchedulerOrderingConfig, SchedulerSchedulingMode};
 use crate::GatewayError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LocalCandidatePreselectionKeyMode {
     ProviderEndpointKeyModel,
     ProviderEndpointKeyModelAndApiFormat,
+}
+
+impl LocalCandidatePreselectionKeyMode {
+    pub(crate) fn cache_key_name(self) -> &'static str {
+        match self {
+            Self::ProviderEndpointKeyModel => "provider_endpoint_key_model",
+            Self::ProviderEndpointKeyModelAndApiFormat => "provider_endpoint_key_model_api_format",
+        }
+    }
 }
 
 struct GatewayLocalCandidatePreselectionPort<'a> {
@@ -43,6 +54,7 @@ struct GatewayLocalCandidatePreselectionPort<'a> {
     key_mode: LocalCandidatePreselectionKeyMode,
     candidate_api_formats: Vec<String>,
     model_directive_enabled_api_formats: BTreeSet<String>,
+    ranking_seed: u64,
 }
 
 #[async_trait]
@@ -81,7 +93,7 @@ impl AiCandidatePreselectionPort for GatewayLocalCandidatePreselectionPort<'_> {
                 self.required_capabilities,
                 auth_snapshot,
                 self.client_session_affinity,
-                current_unix_secs(),
+                self.ranking_seed,
             )
             .await?;
 
@@ -227,6 +239,7 @@ pub(crate) async fn preselect_local_execution_candidates_for_api_formats_with_se
         key_mode,
         candidate_api_formats,
         model_directive_enabled_api_formats,
+        ranking_seed: request_distribution_seed(),
     };
 
     run_ai_candidate_preselection(&port).await
@@ -234,6 +247,7 @@ pub(crate) async fn preselect_local_execution_candidates_for_api_formats_with_se
 
 pub(crate) struct LocalCandidatePreselectionPageCursor<'a> {
     state: PlannerAppState<'a>,
+    trace_id: String,
     client_api_format: String,
     requested_model: String,
     require_streaming: bool,
@@ -241,11 +255,13 @@ pub(crate) struct LocalCandidatePreselectionPageCursor<'a> {
     auth_snapshot: GatewayAuthApiKeySnapshot,
     routing_policy: Option<ResolvedRoutingPolicy>,
     client_session_affinity: Option<ClientSessionAffinity>,
+    request_auth_channel: Option<String>,
     use_api_format_alias_match: bool,
     key_mode: LocalCandidatePreselectionKeyMode,
     candidate_api_formats: Vec<String>,
     model_directive_enabled_api_formats: BTreeSet<String>,
     ordering_config: SchedulerOrderingConfig,
+    ranking_seed: u64,
     priority_page_emitted: bool,
     deferred_pages_by_format: BTreeMap<
         String,
@@ -276,8 +292,10 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
         auth_snapshot: &GatewayAuthApiKeySnapshot,
         routing_policy: Option<&ResolvedRoutingPolicy>,
         client_session_affinity: Option<&ClientSessionAffinity>,
+        request_auth_channel: Option<&str>,
         use_api_format_alias_match: bool,
         key_mode: LocalCandidatePreselectionKeyMode,
+        trace_id: Option<&str>,
     ) -> Self {
         let candidate_api_formats =
             crate::ai_serving::request_candidate_api_formats(client_api_format, require_streaming)
@@ -307,6 +325,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
 
         Self {
             state,
+            trace_id: trace_id.unwrap_or_default().to_string(),
             client_api_format: client_api_format.to_string(),
             requested_model: requested_model.to_string(),
             require_streaming,
@@ -314,11 +333,13 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
             auth_snapshot: auth_snapshot.clone(),
             routing_policy: routing_policy.cloned(),
             client_session_affinity: client_session_affinity.cloned(),
+            request_auth_channel: request_auth_channel.map(str::to_string),
             use_api_format_alias_match,
             key_mode,
             candidate_api_formats,
             model_directive_enabled_api_formats,
             ordering_config,
+            ranking_seed: request_distribution_seed(),
             priority_page_emitted: false,
             deferred_pages_by_format: BTreeMap::new(),
             format_index: 0,
@@ -344,7 +365,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
     > {
         if !self.priority_page_emitted {
             self.priority_page_emitted = true;
-            let priority_page = self.next_priority_page().await?;
+            let priority_page = self.cached_next_priority_page().await?;
             if !priority_page.candidates.is_empty() || !priority_page.skipped_candidates.is_empty()
             {
                 return Ok(Some(priority_page));
@@ -356,7 +377,10 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
             if let Some(outcome) = self.pop_deferred_page(&candidate_api_format) {
                 return Ok(Some(outcome));
             }
-            let Some(outcome) = self.next_page_for_api_format(&candidate_api_format).await? else {
+            let Some(outcome) = self
+                .next_page_for_api_format_with_planning_gate(&candidate_api_format)
+                .await?
+            else {
                 self.format_index += 1;
                 continue;
             };
@@ -378,6 +402,70 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
         self.seen_candidate_keys.clear();
         self.priority_page_emitted = false;
         self.deferred_pages_by_format.clear();
+    }
+
+    pub(crate) fn resolved_page_cache_preselection_mode(&self) -> &'static str {
+        self.key_mode.cache_key_name()
+    }
+
+    pub(crate) fn resolved_page_cache_use_api_format_alias_match(&self) -> bool {
+        self.use_api_format_alias_match
+    }
+
+    pub(crate) fn should_cache_current_priority_resolved_page(&self) -> bool {
+        if !(self.priority_page_emitted
+            && self.format_index == 0
+            && self.deferred_pages_by_format.is_empty())
+        {
+            return false;
+        }
+
+        match self.ordering_config.scheduling_mode {
+            SchedulerSchedulingMode::FixedOrder => true,
+            SchedulerSchedulingMode::CacheAffinity => {
+                has_explicit_session_affinity(self.client_session_affinity.as_ref())
+            }
+            SchedulerSchedulingMode::LoadBalance => false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mark_priority_page_emitted_for_tests(&mut self) {
+        self.priority_page_emitted = true;
+    }
+
+    async fn cached_next_priority_page(
+        &mut self,
+    ) -> Result<
+        AiCandidatePreselectionOutcome<
+            SchedulerMinimalCandidateSelectionCandidate,
+            SkippedLocalExecutionCandidate,
+        >,
+        GatewayError,
+    > {
+        let page = self.next_priority_page_with_planning_gate().await?;
+        self.remember_seen_candidates_from_page(&page);
+        Ok(page)
+    }
+
+    fn remember_seen_candidates_from_page(
+        &mut self,
+        page: &AiCandidatePreselectionOutcome<
+            SchedulerMinimalCandidateSelectionCandidate,
+            SkippedLocalExecutionCandidate,
+        >,
+    ) {
+        for candidate in &page.candidates {
+            self.seen_candidate_keys
+                .insert(local_candidate_preselection_key(candidate, self.key_mode));
+        }
+        for skipped_candidate in &page.skipped_candidates {
+            self.seen_candidate_keys
+                .insert(local_candidate_preselection_key(
+                    &skipped_candidate.candidate,
+                    self.key_mode,
+                ));
+        }
     }
 
     async fn next_priority_page(
@@ -421,6 +509,35 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
         }
 
         Ok(priority_page)
+    }
+
+    async fn next_priority_page_with_planning_gate(
+        &mut self,
+    ) -> Result<
+        AiCandidatePreselectionOutcome<
+            SchedulerMinimalCandidateSelectionCandidate,
+            SkippedLocalExecutionCandidate,
+        >,
+        GatewayError,
+    > {
+        let _permit = acquire_candidate_planning_gate(self.state, &self.trace_id).await?;
+        self.next_priority_page().await
+    }
+
+    async fn next_page_for_api_format_with_planning_gate(
+        &mut self,
+        candidate_api_format: &str,
+    ) -> Result<
+        Option<
+            AiCandidatePreselectionOutcome<
+                SchedulerMinimalCandidateSelectionCandidate,
+                SkippedLocalExecutionCandidate,
+            >,
+        >,
+        GatewayError,
+    > {
+        let _permit = acquire_candidate_planning_gate(self.state, &self.trace_id).await?;
+        self.next_page_for_api_format(candidate_api_format).await
     }
 
     async fn split_priority_conversion_page(
@@ -797,7 +914,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
                 self.required_capabilities.as_ref(),
                 auth_snapshot,
                 self.client_session_affinity.as_ref(),
-                current_unix_secs(),
+                self.ranking_seed,
             )
             .await?;
         let skipped_candidates = skipped_candidates
@@ -891,6 +1008,28 @@ fn local_candidate_preselection_key(
             candidate.selected_provider_model_name,
             candidate.endpoint_api_format,
         ),
+    }
+}
+
+async fn acquire_candidate_planning_gate(
+    state: PlannerAppState<'_>,
+    trace_id: &str,
+) -> Result<Option<ConcurrencyPermit>, GatewayError> {
+    let Some(gate) = state.app().candidate_planning_gate.as_ref() else {
+        return Ok(None);
+    };
+    let budget = state
+        .app()
+        .frontdoor_runtime_guards
+        .internal_gate_queue_budget;
+    match tokio::time::timeout(budget, gate.acquire()).await {
+        Ok(Ok(permit)) => Ok(Some(permit)),
+        Ok(Err(err)) => Err(GatewayError::Internal(err.to_string())),
+        Err(_) => Err(GatewayError::AdmissionTimeout {
+            trace_id: trace_id.to_string(),
+            gate: "gateway_candidate_planning",
+            queue_budget_ms: budget.as_millis() as u64,
+        }),
     }
 }
 
@@ -1220,8 +1359,10 @@ mod tests {
             &auth_snapshot,
             None,
             None,
+            None,
             true,
             LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModelAndApiFormat,
+            None,
         )
         .await;
 
@@ -1277,8 +1418,10 @@ mod tests {
             &auth_snapshot,
             None,
             None,
+            None,
             true,
             LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModelAndApiFormat,
+            None,
         )
         .await;
 
@@ -1349,8 +1492,10 @@ mod tests {
             &auth_snapshot,
             None,
             None,
+            None,
             true,
             LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModelAndApiFormat,
+            None,
         )
         .await;
 

@@ -43,6 +43,7 @@ use aether_data_contracts::repository::usage::{
 use aether_runtime_state::RuntimeQueueStore;
 use aether_video_tasks_core::read_data_backed_video_task_response;
 use std::time::{Duration, Instant};
+use tokio::time::timeout;
 
 fn normalize_billing_context_cache_part(value: &str) -> String {
     value.trim().to_string()
@@ -55,12 +56,51 @@ fn normalize_optional_billing_context_cache_part(value: Option<&str>) -> Option<
         .map(ToOwned::to_owned)
 }
 
+enum BillingModelContextInflightRegistration {
+    Leader(u64),
+    Follower,
+    Bypass,
+}
+
+struct BillingModelContextInflightGuard<'a> {
+    state: &'a GatewayDataState,
+    key: Option<BillingModelContextCacheKey>,
+    token: u64,
+}
+
+impl<'a> BillingModelContextInflightGuard<'a> {
+    fn new(state: &'a GatewayDataState, key: BillingModelContextCacheKey, token: u64) -> Self {
+        Self {
+            state,
+            key: Some(key),
+            token,
+        }
+    }
+
+    fn finish(&mut self) {
+        if let Some(key) = self.key.take() {
+            self.state
+                .finish_billing_model_context_inflight(&key, self.token);
+        }
+    }
+}
+
+impl Drop for BillingModelContextInflightGuard<'_> {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
 impl GatewayDataState {
     const MAINTENANCE_POOL_IDLE_RESERVE_ENV: &'static str =
         "AETHER_GATEWAY_MAINTENANCE_POOL_IDLE_RESERVE";
     const MAINTENANCE_POOL_PRESSURE_MAX_DEFER: Duration = Duration::from_secs(30);
     const BILLING_MODEL_CONTEXT_CACHE_TTL: Duration = Duration::from_secs(30);
     const BILLING_MODEL_CONTEXT_CACHE_MAX_ENTRIES: usize = 4096;
+    #[cfg(not(test))]
+    const BILLING_MODEL_CONTEXT_CACHE_INFLIGHT_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+    #[cfg(test)]
+    const BILLING_MODEL_CONTEXT_CACHE_INFLIGHT_WAIT_TIMEOUT: Duration = Duration::from_millis(100);
 
     pub(crate) async fn run_database_maintenance(
         &self,
@@ -1041,10 +1081,17 @@ impl GatewayDataState {
         &self,
         usage: UpsertUsageRecord,
     ) -> Result<Option<StoredRequestUsageAudit>, DataLayerError> {
-        match &self.usage_writer {
-            Some(repository) => repository.upsert(usage).await.map(Some),
-            None => Ok(None),
-        }
+        crate::request_diagnostics::observe_db_operation(
+            "usage_upsert",
+            self.database_pool_summary(),
+            async {
+                match &self.usage_writer {
+                    Some(repository) => repository.upsert(usage).await.map(Some),
+                    None => Ok(None),
+                }
+            },
+        )
+        .await
     }
 
     #[allow(dead_code)]
@@ -1710,17 +1757,47 @@ impl GatewayDataState {
         if let Some(value) = self.cached_billing_model_context(&key) {
             return Ok(value);
         }
-        match &self.billing_reader {
-            Some(repository) => {
-                let value = repository
-                    .find_model_context(provider_id, provider_api_key_id, global_model_name)
-                    .await?;
-                self.remember_billing_model_context(key, value.clone());
-                Ok(value)
-            }
-            None => {
-                self.remember_billing_model_context(key, None);
-                Ok(None)
+        loop {
+            let notified = self.billing_model_context_cache.inflight_notify.notified();
+            match self.register_billing_model_context_inflight(&key) {
+                BillingModelContextInflightRegistration::Bypass => {
+                    return self
+                        .load_billing_model_context_by_name(
+                            key,
+                            provider_id,
+                            provider_api_key_id,
+                            global_model_name,
+                        )
+                        .await;
+                }
+                BillingModelContextInflightRegistration::Follower => {
+                    if timeout(
+                        Self::BILLING_MODEL_CONTEXT_CACHE_INFLIGHT_WAIT_TIMEOUT,
+                        notified,
+                    )
+                    .await
+                    .is_err()
+                    {
+                        self.expire_billing_model_context_inflight(&key);
+                    }
+                    if let Some(value) = self.cached_billing_model_context(&key) {
+                        return Ok(value);
+                    }
+                    continue;
+                }
+                BillingModelContextInflightRegistration::Leader(token) => {
+                    let mut guard = BillingModelContextInflightGuard::new(self, key.clone(), token);
+                    let result = self
+                        .load_billing_model_context_by_name(
+                            key,
+                            provider_id,
+                            provider_api_key_id,
+                            global_model_name,
+                        )
+                        .await;
+                    guard.finish();
+                    return result;
+                }
             }
         }
     }
@@ -1739,18 +1816,164 @@ impl GatewayDataState {
         if let Some(value) = self.cached_billing_model_context(&key) {
             return Ok(value);
         }
-        match &self.billing_reader {
-            Some(repository) => {
-                let value = repository
-                    .find_model_context_by_model_id(provider_id, provider_api_key_id, model_id)
-                    .await?;
-                self.remember_billing_model_context(key, value.clone());
-                Ok(value)
+        loop {
+            let notified = self.billing_model_context_cache.inflight_notify.notified();
+            match self.register_billing_model_context_inflight(&key) {
+                BillingModelContextInflightRegistration::Bypass => {
+                    return self
+                        .load_billing_model_context_by_model_id(
+                            key,
+                            provider_id,
+                            provider_api_key_id,
+                            model_id,
+                        )
+                        .await;
+                }
+                BillingModelContextInflightRegistration::Follower => {
+                    if timeout(
+                        Self::BILLING_MODEL_CONTEXT_CACHE_INFLIGHT_WAIT_TIMEOUT,
+                        notified,
+                    )
+                    .await
+                    .is_err()
+                    {
+                        self.expire_billing_model_context_inflight(&key);
+                    }
+                    if let Some(value) = self.cached_billing_model_context(&key) {
+                        return Ok(value);
+                    }
+                    continue;
+                }
+                BillingModelContextInflightRegistration::Leader(token) => {
+                    let mut guard = BillingModelContextInflightGuard::new(self, key.clone(), token);
+                    let result = self
+                        .load_billing_model_context_by_model_id(
+                            key,
+                            provider_id,
+                            provider_api_key_id,
+                            model_id,
+                        )
+                        .await;
+                    guard.finish();
+                    return result;
+                }
             }
-            None => {
-                self.remember_billing_model_context(key, None);
-                Ok(None)
+        }
+    }
+
+    async fn load_billing_model_context_by_name(
+        &self,
+        key: BillingModelContextCacheKey,
+        provider_id: &str,
+        provider_api_key_id: Option<&str>,
+        global_model_name: &str,
+    ) -> Result<Option<StoredBillingModelContext>, DataLayerError> {
+        crate::request_diagnostics::observe_db_operation(
+            "billing_model_context",
+            self.database_pool_summary(),
+            async {
+                match &self.billing_reader {
+                    Some(repository) => {
+                        let value = repository
+                            .find_model_context(provider_id, provider_api_key_id, global_model_name)
+                            .await?;
+                        self.remember_billing_model_context(key, value.clone());
+                        Ok(value)
+                    }
+                    None => {
+                        self.remember_billing_model_context(key, None);
+                        Ok(None)
+                    }
+                }
+            },
+        )
+        .await
+    }
+
+    async fn load_billing_model_context_by_model_id(
+        &self,
+        key: BillingModelContextCacheKey,
+        provider_id: &str,
+        provider_api_key_id: Option<&str>,
+        model_id: &str,
+    ) -> Result<Option<StoredBillingModelContext>, DataLayerError> {
+        crate::request_diagnostics::observe_db_operation(
+            "billing_model_context",
+            self.database_pool_summary(),
+            async {
+                match &self.billing_reader {
+                    Some(repository) => {
+                        let value = repository
+                            .find_model_context_by_model_id(
+                                provider_id,
+                                provider_api_key_id,
+                                model_id,
+                            )
+                            .await?;
+                        self.remember_billing_model_context(key, value.clone());
+                        Ok(value)
+                    }
+                    None => {
+                        self.remember_billing_model_context(key, None);
+                        Ok(None)
+                    }
+                }
+            },
+        )
+        .await
+    }
+
+    fn register_billing_model_context_inflight(
+        &self,
+        key: &BillingModelContextCacheKey,
+    ) -> BillingModelContextInflightRegistration {
+        match self.billing_model_context_cache.inflight.lock() {
+            Ok(mut inflight) => {
+                if inflight.contains_key(key) {
+                    return BillingModelContextInflightRegistration::Follower;
+                }
+                let token = self
+                    .billing_model_context_cache
+                    .next_inflight_token
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                inflight.insert(key.clone(), token);
+                BillingModelContextInflightRegistration::Leader(token)
             }
+            Err(_) => BillingModelContextInflightRegistration::Bypass,
+        }
+    }
+
+    fn finish_billing_model_context_inflight(&self, key: &BillingModelContextCacheKey, token: u64) {
+        let mut removed = false;
+        if let Ok(mut inflight) = self.billing_model_context_cache.inflight.lock() {
+            if inflight.get(key).copied() == Some(token) {
+                inflight.remove(key);
+                removed = true;
+            }
+        }
+        if removed {
+            self.billing_model_context_cache
+                .inflight_notify
+                .notify_waiters();
+        }
+    }
+
+    fn expire_billing_model_context_inflight(&self, key: &BillingModelContextCacheKey) {
+        let mut removed = false;
+        if let Ok(mut inflight) = self.billing_model_context_cache.inflight.lock() {
+            removed = inflight.remove(key).is_some();
+        }
+        if removed {
+            tracing::warn!(
+                event_name = "billing_model_context_cache_inflight_expired",
+                log_type = "ops",
+                cache_key = ?key,
+                wait_timeout_ms = Self::BILLING_MODEL_CONTEXT_CACHE_INFLIGHT_WAIT_TIMEOUT.as_millis() as u64,
+                "gateway billing model context cache expired stale inflight load"
+            );
+            self.billing_model_context_cache
+                .inflight_notify
+                .notify_waiters();
         }
     }
 
@@ -1759,6 +1982,7 @@ impl GatewayDataState {
         key: &BillingModelContextCacheKey,
     ) -> Option<Option<StoredBillingModelContext>> {
         self.billing_model_context_cache
+            .entries
             .read()
             .expect("billing model context cache lock")
             .get(key)
@@ -1775,6 +1999,7 @@ impl GatewayDataState {
     ) {
         let mut cache = self
             .billing_model_context_cache
+            .entries
             .write()
             .expect("billing model context cache lock");
         cache.retain(|_, (cached_at, _)| {
@@ -1794,9 +2019,25 @@ impl GatewayDataState {
 
     fn clear_billing_model_context_cache(&self) {
         self.billing_model_context_cache
+            .entries
             .write()
             .expect("billing model context cache lock")
             .clear();
+        let mut cleared_inflight = false;
+        if let Ok(mut inflight) = self.billing_model_context_cache.inflight.lock() {
+            cleared_inflight = !inflight.is_empty();
+            inflight.clear();
+        }
+        if cleared_inflight {
+            tracing::warn!(
+                event_name = "billing_model_context_cache_inflight_cleared",
+                log_type = "ops",
+                "gateway billing model context cache cleared in-flight loads"
+            );
+            self.billing_model_context_cache
+                .inflight_notify
+                .notify_waiters();
+        }
     }
 
     pub(crate) async fn admin_billing_enabled_default_value_exists(
@@ -2211,11 +2452,88 @@ impl GatewayDataState {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::time::Duration;
 
     use aether_data::repository::users::{InMemoryUserReadRepository, StoredUserExportRow};
+    use aether_data_contracts::repository::billing::{
+        BillingReadRepository, StoredBillingModelContext,
+    };
+    use async_trait::async_trait;
+    use serde_json::json;
 
     use super::GatewayDataState;
+
+    struct SlowBillingContextRepository {
+        calls: AtomicUsize,
+        context: StoredBillingModelContext,
+    }
+
+    #[async_trait]
+    impl BillingReadRepository for SlowBillingContextRepository {
+        async fn find_model_context(
+            &self,
+            _provider_id: &str,
+            _provider_api_key_id: Option<&str>,
+            _global_model_name: &str,
+        ) -> Result<Option<StoredBillingModelContext>, aether_data_contracts::DataLayerError>
+        {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            Ok(Some(self.context.clone()))
+        }
+    }
+
+    fn billing_context() -> StoredBillingModelContext {
+        StoredBillingModelContext::new(
+            "provider-1".to_string(),
+            Some("pay_as_you_go".to_string()),
+            Some("key-1".to_string()),
+            None,
+            None,
+            "global-model-1".to_string(),
+            "gpt-5".to_string(),
+            None,
+            Some(0.02),
+            Some(json!({"tiers":[{"up_to":null,"input_price_per_1m":3.0,"output_price_per_1m":15.0}]})),
+            Some("model-1".to_string()),
+            Some("gpt-5-upstream".to_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("billing context should build")
+    }
+
+    #[tokio::test]
+    async fn billing_model_context_cache_coalesces_concurrent_loads() {
+        let repository = Arc::new(SlowBillingContextRepository {
+            calls: AtomicUsize::new(0),
+            context: billing_context(),
+        });
+        let state = Arc::new(GatewayDataState::with_billing_reader_for_tests(
+            repository.clone(),
+        ));
+        let mut tasks = Vec::new();
+
+        for _ in 0..16 {
+            let state = Arc::clone(&state);
+            tasks.push(tokio::spawn(async move {
+                state
+                    .find_billing_model_context("provider-1", Some("key-1"), "gpt-5")
+                    .await
+                    .expect("billing context lookup should succeed")
+                    .expect("billing context should exist");
+            }));
+        }
+
+        for task in tasks {
+            task.await.expect("lookup task should complete");
+        }
+
+        assert_eq!(repository.calls.load(Ordering::Acquire), 1);
+    }
 
     #[tokio::test]
     async fn lists_non_admin_export_users_from_user_reader() {

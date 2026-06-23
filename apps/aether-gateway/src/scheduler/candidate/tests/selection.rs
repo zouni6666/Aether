@@ -13,7 +13,7 @@ use aether_data_contracts::repository::candidates::{
 };
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
 use aether_data_contracts::repository::quota::StoredProviderQuotaSnapshot;
-use aether_scheduler_core::SchedulerMinimalCandidateSelectionCandidate;
+use aether_scheduler_core::{ClientSessionAffinity, SchedulerMinimalCandidateSelectionCandidate};
 use serde_json::json;
 
 use crate::cache::SchedulerAffinityTarget;
@@ -559,9 +559,85 @@ async fn cache_affinity_promotes_cached_scheduler_affinity_candidate_when_enable
     second.endpoint_id = "endpoint-b".to_string();
     second.key_id = "key-b".to_string();
     second.key_name = "beta".to_string();
-    second.provider_priority = 0;
-    second.key_internal_priority = 0;
-    second.key_global_priority_by_format = Some(json!({"openai:chat": 0}));
+    second.provider_priority = 10;
+    second.key_internal_priority = 10;
+    second.key_global_priority_by_format = Some(json!({"openai:chat": 10}));
+
+    let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+        first, second,
+    ]));
+    let quotas = Arc::new(InMemoryProviderQuotaRepository::seed(vec![]));
+    let state = AppState::new()
+        .expect("state should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_candidate_selection_and_quota_for_tests(candidates, quotas)
+                .with_system_config_values_for_tests(vec![(
+                    "scheduling_mode".to_string(),
+                    json!("cache_affinity"),
+                )]),
+        );
+
+    let auth_snapshot = sample_auth_snapshot("affinity-key-1");
+    let client_session_affinity = ClientSessionAffinity::from_session_key("session-1");
+    let cache_key = build_scheduler_affinity_cache_key(
+        Some(&auth_snapshot),
+        "openai:chat",
+        "gpt-4.1",
+        Some(&client_session_affinity),
+    )
+    .expect("scheduler affinity cache key should build");
+    state.remember_scheduler_affinity_target(
+        &cache_key,
+        SchedulerAffinityTarget {
+            provider_id: "provider-b".to_string(),
+            endpoint_id: "endpoint-b".to_string(),
+            key_id: "key-b".to_string(),
+        },
+        Duration::from_secs(300),
+        100,
+    );
+
+    let selected = select_candidate_impl(
+        state.data.as_ref(),
+        &state,
+        "openai:chat",
+        "gpt-4.1",
+        false,
+        None,
+        Some(&auth_snapshot),
+        Some(&client_session_affinity),
+        100,
+        false,
+    )
+    .await
+    .expect("selection should succeed")
+    .expect("candidate should exist");
+
+    assert_eq!(selected.provider_id, "provider-b");
+    assert_eq!(selected.key_id, "key-b");
+}
+
+#[tokio::test]
+async fn cache_affinity_ignores_cached_scheduler_affinity_without_client_session() {
+    let mut first = sample_row();
+    first.provider_id = "provider-a".to_string();
+    first.provider_name = "provider-a".to_string();
+    first.endpoint_id = "endpoint-a".to_string();
+    first.key_id = "key-a".to_string();
+    first.key_name = "alpha".to_string();
+    first.provider_priority = 0;
+    first.key_internal_priority = 0;
+    first.key_global_priority_by_format = Some(json!({"openai:chat": 0}));
+
+    let mut second = sample_row();
+    second.provider_id = "provider-b".to_string();
+    second.provider_name = "provider-b".to_string();
+    second.endpoint_id = "endpoint-b".to_string();
+    second.key_id = "key-b".to_string();
+    second.key_name = "beta".to_string();
+    second.provider_priority = 10;
+    second.key_internal_priority = 10;
+    second.key_global_priority_by_format = Some(json!({"openai:chat": 10}));
 
     let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
         first, second,
@@ -602,8 +678,8 @@ async fn cache_affinity_promotes_cached_scheduler_affinity_candidate_when_enable
     .expect("selection should succeed")
     .expect("candidate should exist");
 
-    assert_eq!(selected.provider_id, "provider-b");
-    assert_eq!(selected.key_id, "key-b");
+    assert_eq!(selected.provider_id, "provider-a");
+    assert_eq!(selected.key_id, "key-a");
 }
 
 #[tokio::test]
@@ -623,18 +699,26 @@ async fn load_balance_selection_does_not_remember_scheduler_affinity() {
                 )]),
         );
     let auth_snapshot = sample_auth_snapshot("affinity-key-1");
-    let cache_key =
-        build_scheduler_affinity_cache_key(Some(&auth_snapshot), "openai:chat", "gpt-4.1", None)
-            .expect("scheduler affinity cache key should build");
+    let client_session_affinity = ClientSessionAffinity::from_session_key("session-1");
+    let cache_key = build_scheduler_affinity_cache_key(
+        Some(&auth_snapshot),
+        "openai:chat",
+        "gpt-4.1",
+        Some(&client_session_affinity),
+    )
+    .expect("scheduler affinity cache key should build");
 
-    let selected = select_candidate(
+    let selected = select_candidate_impl(
         state.data.as_ref(),
         &state,
         "openai:chat",
         "gpt-4.1",
         false,
+        None,
         Some(&auth_snapshot),
+        Some(&client_session_affinity),
         100,
+        false,
     )
     .await
     .expect("selection should succeed")

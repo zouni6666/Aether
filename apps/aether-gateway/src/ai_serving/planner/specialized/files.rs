@@ -175,7 +175,7 @@ pub(crate) async fn build_local_gemini_files_stream_attempt_source_for_kind<'a>(
 #[async_trait]
 impl LocalExecutionAttemptSource<AiSyncAttempt> for LocalGeminiFilesSyncAttemptSource<'_> {
     async fn next_execution_attempt(&mut self) -> Result<Option<AiSyncAttempt>, GatewayError> {
-        while let Some(attempt) = self.candidates.next_attempt().await {
+        while let Some(attempt) = self.candidates.next_attempt().await? {
             match self.build_sync_attempt(attempt).await? {
                 Some(attempt) => return Ok(Some(attempt)),
                 None => continue,
@@ -198,7 +198,7 @@ impl LocalExecutionAttemptSource<AiSyncAttempt> for LocalGeminiFilesSyncAttemptS
 #[async_trait]
 impl LocalExecutionAttemptSource<AiStreamAttempt> for LocalGeminiFilesStreamAttemptSource<'_> {
     async fn next_execution_attempt(&mut self) -> Result<Option<AiStreamAttempt>, GatewayError> {
-        while let Some(attempt) = self.candidates.next_attempt().await {
+        while let Some(attempt) = self.candidates.next_attempt().await? {
             match self.build_stream_attempt(attempt).await? {
                 Some(attempt) => return Ok(Some(attempt)),
                 None => continue,
@@ -323,7 +323,7 @@ pub(crate) async fn maybe_build_sync_local_gemini_files_decision_payload(
     let (mut source, _) =
         build_local_gemini_files_candidate_attempt_source(state, trace_id, &input).await?;
 
-    while let Some(attempt) = source.next_attempt().await {
+    while let Some(attempt) = source.next_attempt().await? {
         if let Some(payload) = maybe_build_local_gemini_files_decision_payload_for_candidate(
             state,
             parts,
@@ -365,7 +365,7 @@ pub(crate) async fn maybe_build_stream_local_gemini_files_decision_payload(
         build_local_gemini_files_candidate_attempt_source(state, trace_id, &input).await?;
 
     let empty_body_json = serde_json::Value::Null;
-    while let Some(attempt) = source.next_attempt().await {
+    while let Some(attempt) = source.next_attempt().await? {
         if let Some(payload) = maybe_build_local_gemini_files_decision_payload_for_candidate(
             state,
             parts,
@@ -414,7 +414,7 @@ async fn build_local_sync_plan_and_reports(
         build_local_gemini_files_candidate_attempt_source(state, trace_id, &input).await?;
 
     let mut plans = Vec::new();
-    while let Some(attempt) = source.next_attempt().await {
+    while let Some(attempt) = source.next_attempt().await? {
         let Some(payload) = maybe_build_local_gemini_files_decision_payload_for_candidate(
             state,
             parts,
@@ -467,7 +467,7 @@ async fn build_local_stream_plan_and_reports(
 
     let mut plans = Vec::new();
     let empty_body_json = serde_json::Value::Null;
-    while let Some(attempt) = source.next_attempt().await {
+    while let Some(attempt) = source.next_attempt().await? {
         let Some(payload) = maybe_build_local_gemini_files_decision_payload_for_candidate(
             state,
             parts,

@@ -66,6 +66,7 @@ pub const TRANSPORT_BACKEND_HYPER_RUSTLS: &str = "hyper_rustls";
 pub const TRANSPORT_BACKEND_BROWSER_WREQ: &str = "browser_wreq";
 pub const TRANSPORT_HTTP_MODE_AUTO: &str = "auto";
 pub const TRANSPORT_HTTP_MODE_HTTP1_ONLY: &str = "http1_only";
+pub const TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE: &str = "h2c_prior_knowledge";
 pub const TRANSPORT_POOL_SCOPE_KEY: &str = "key";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

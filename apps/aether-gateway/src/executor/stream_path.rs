@@ -13,6 +13,7 @@ use crate::ai_serving::api::{
 };
 use crate::api::response::build_client_response_from_parts;
 use crate::control::GatewayControlDecision;
+use crate::stage_metrics::observe_gateway_stage_ms;
 use crate::{AppState, GatewayError, GatewayFallbackReason};
 
 use super::{
@@ -94,6 +95,7 @@ impl AiStreamExecutionPathPort for GatewayStreamExecutionPathPort<'_> {
         &self,
         step: AiStreamExecutionStep,
     ) -> Result<AiServingExecutionOutcome<Self::Response, Self::Exhaustion>, Self::Error> {
+        let step_started_at = std::time::Instant::now();
         let outcome = match step {
             AiStreamExecutionStep::LocalVideoContent => {
                 maybe_execute_local_video_task_content_stream(
@@ -188,6 +190,10 @@ impl AiStreamExecutionPathPort for GatewayStreamExecutionPathPort<'_> {
                 }
             }
         };
+        observe_gateway_stage_ms(
+            "stream_path_step",
+            step_started_at.elapsed().as_millis() as u64,
+        );
         Ok(to_ai_serving_outcome(outcome))
     }
 

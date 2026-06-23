@@ -32,7 +32,7 @@ use super::super::async_task::{
 use super::super::cache::{
     AuthApiKeyLastUsedCache, AuthContextCache, AuthSnapshotCache, DashboardResponseCache,
     DirectPlanBypassCache, JsonValueCache, SchedulerAffinityCache, SchedulerAffinitySnapshotEntry,
-    SchedulerAffinityTarget, SystemConfigCache, ValueCache,
+    SchedulerAffinityTarget, SystemConfigCache, SystemConfigInflightRegistration, ValueCache,
 };
 use super::super::data::{GatewayDataConfig, GatewayDataState};
 use super::super::fallback_metrics;
@@ -78,6 +78,7 @@ const AUTH_AFFECTING_SYSTEM_CONFIG_KEYS: &[&str] = &[
     crate::constants::ANTIGRAVITY_BEARER_BRIDGE_CONFIG_KEY,
 ];
 const FRONTDOOR_RPM_AFFECTING_SYSTEM_CONFIG_KEYS: &[&str] = &["rate_limit_per_minute"];
+const CHAT_PII_REDACTION_SYSTEM_CONFIG_PREFIX: &str = "module.chat_pii_redaction.";
 
 fn system_config_key_affects_scheduler(key: &str) -> bool {
     let key = key.trim();
@@ -94,7 +95,19 @@ fn system_config_key_affects_frontdoor_rpm(key: &str) -> bool {
     FRONTDOOR_RPM_AFFECTING_SYSTEM_CONFIG_KEYS.contains(&key)
 }
 
+fn system_config_key_affects_chat_pii_redaction(key: &str) -> bool {
+    key.trim()
+        .starts_with(CHAT_PII_REDACTION_SYSTEM_CONFIG_PREFIX)
+}
+
 impl AppState {
+    pub async fn prewarm_chat_pii_redaction_runtime_config(&self) -> Result<bool, String> {
+        crate::privacy::read_chat_pii_redaction_runtime_config(self)
+            .await
+            .map(|config| config.enabled)
+            .map_err(|err| format!("{err:?}"))
+    }
+
     fn usage_worker_queue_for(
         runtime_state: &Arc<RuntimeState>,
     ) -> Option<Arc<dyn RuntimeQueueStore>> {
@@ -172,6 +185,7 @@ impl AppState {
         self.clear_provider_transport_snapshot_cache();
         self.invalidate_scheduler_affinity_cache();
         self.invalidate_auth_context_cache();
+        self.candidate_resolved_page_cache.clear();
         self.system_config_cache.clear();
         self.frontdoor_user_rpm.clear_system_default_cache();
         let data = Arc::new(
@@ -179,6 +193,8 @@ impl AppState {
                 .clone()
                 .with_usage_worker_queue(Self::usage_worker_queue_for(&self.runtime_state)),
         );
+        self.candidate_page_cache.clear();
+        self.candidate_resolved_page_cache.clear();
         self.tunnel = crate::tunnel::EmbeddedTunnelState::with_data_and_runtime_state(
             Arc::clone(&data),
             self.runtime_state.clone(),
@@ -222,6 +238,7 @@ impl AppState {
             http2_adaptive_window: true,
             ..HttpClientConfig::default()
         })?;
+        let frontdoor_runtime_guards = Arc::new(FrontdoorRuntimeGuardConfig::from_env());
         Ok(Self {
             #[cfg(test)]
             execution_runtime_override_base_url: execution_runtime_override_base_url
@@ -236,8 +253,20 @@ impl AppState {
                 VideoTaskTruthSourceMode::PythonSyncReport,
             )),
             video_task_poller: None,
-            frontdoor_runtime_guards: Arc::new(FrontdoorRuntimeGuardConfig::from_env()),
+            frontdoor_runtime_guards: Arc::clone(&frontdoor_runtime_guards),
             request_gate: None,
+            candidate_planning_gate: frontdoor_runtime_guards
+                .candidate_planning_gate_limit
+                .map(|limit| Arc::new(ConcurrencyGate::new("gateway_candidate_planning", limit))),
+            upstream_execution_gate: frontdoor_runtime_guards
+                .upstream_execution_gate_limit
+                .map(|limit| Arc::new(ConcurrencyGate::new("gateway_upstream_execution", limit))),
+            upstream_target_admission: Arc::new(
+                crate::upstream_admission::UpstreamTargetAdmission::new(
+                    frontdoor_runtime_guards.upstream_target_gate_limit,
+                    frontdoor_runtime_guards.internal_gate_queue_budget,
+                ),
+            ),
             distributed_request_gate: None,
             client,
             auth_context_cache: Arc::new(AuthContextCache::default()),
@@ -255,6 +284,12 @@ impl AppState {
             scheduler_affinity_epoch: Arc::new(AtomicU64::new(0)),
             dashboard_response_cache: Arc::new(DashboardResponseCache::default()),
             system_config_cache: Arc::new(SystemConfigCache::default()),
+            candidate_page_cache: Arc::new(crate::cache::CandidatePageCache::default()),
+            candidate_resolved_page_cache: Arc::new(
+                crate::cache::CandidateResolvedPageCache::default(),
+            ),
+            chat_pii_redaction_runtime_config_cache:
+                crate::privacy::new_chat_pii_redaction_runtime_config_cache(),
             fallback_metrics: Arc::new(fallback_metrics::GatewayFallbackMetrics::default()),
             request_candidate_queue: None,
             frontdoor_cors: None,
@@ -265,7 +300,7 @@ impl AppState {
                 data,
                 runtime_state.clone(),
             ),
-            provider_transport_snapshot_cache: Arc::new(StdMutex::new(HashMap::new())),
+            provider_transport_snapshot_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
             provider_key_rpm_resets: Arc::new(StdMutex::new(HashMap::new())),
             local_execution_runtime_miss_diagnostics: Arc::new(StdMutex::new(HashMap::new())),
             admin_monitoring_error_stats_reset_at: Arc::new(StdMutex::new(None)),
@@ -535,19 +570,44 @@ impl AppState {
             return Ok(value);
         }
 
-        let _guard = self.system_config_cache.load_guard().await;
-        if let Some(value) = self.system_config_cache.get(key, SYSTEM_CONFIG_CACHE_TTL) {
-            return Ok(value);
+        loop {
+            let notified = self.system_config_cache.notified();
+            match self.system_config_cache.register_load(key) {
+                SystemConfigInflightRegistration::Bypass => {
+                    let value = self
+                        .data
+                        .find_system_config_value(key)
+                        .await
+                        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+                    self.system_config_cache.insert(
+                        key.to_string(),
+                        value.clone(),
+                        SYSTEM_CONFIG_CACHE_TTL,
+                    );
+                    return Ok(value);
+                }
+                SystemConfigInflightRegistration::Follower => {
+                    notified.await;
+                    if let Some(value) = self.system_config_cache.get(key, SYSTEM_CONFIG_CACHE_TTL)
+                    {
+                        return Ok(value);
+                    }
+                }
+                SystemConfigInflightRegistration::Leader(_guard) => {
+                    let value = self
+                        .data
+                        .find_system_config_value(key)
+                        .await
+                        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+                    self.system_config_cache.insert(
+                        key.to_string(),
+                        value.clone(),
+                        SYSTEM_CONFIG_CACHE_TTL,
+                    );
+                    return Ok(value);
+                }
+            }
         }
-
-        let value = self
-            .data
-            .find_system_config_value(key)
-            .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?;
-        self.system_config_cache
-            .insert(key.to_string(), value.clone(), SYSTEM_CONFIG_CACHE_TTL);
-        Ok(value)
     }
 
     pub(crate) async fn upsert_system_config_json_value(
@@ -606,12 +666,19 @@ impl AppState {
         if deleted && system_config_key_affects_frontdoor_rpm(key) {
             self.frontdoor_user_rpm.clear_system_default_cache();
         }
+        if deleted && system_config_key_affects_chat_pii_redaction(key) {
+            crate::privacy::clear_chat_pii_redaction_runtime_config_cache(
+                &self.chat_pii_redaction_runtime_config_cache,
+            );
+        }
         Ok(deleted)
     }
 
     pub(crate) fn invalidate_provider_routing_caches(&self) {
         self.data.clear_minimal_candidate_selection_cache();
         self.data.clear_provider_catalog_cache();
+        self.candidate_page_cache.clear();
+        self.candidate_resolved_page_cache.clear();
         self.clear_provider_transport_snapshot_cache();
         self.invalidate_scheduler_affinity_cache();
     }
@@ -619,6 +686,8 @@ impl AppState {
     pub(crate) fn invalidate_provider_health_routing_caches(&self) {
         self.data.clear_minimal_candidate_selection_cache();
         self.data.clear_provider_catalog_cache();
+        self.candidate_page_cache.clear();
+        self.candidate_resolved_page_cache.clear();
         self.clear_provider_transport_snapshot_cache();
     }
 
@@ -631,6 +700,8 @@ impl AppState {
         self.auth_api_key_feature_settings_cache.clear();
         self.provider_quota_snapshot_cache.clear();
         self.user_groups_for_user_cache.clear();
+        self.candidate_page_cache.clear();
+        self.candidate_resolved_page_cache.clear();
     }
 
     fn remember_system_config_write(&self, key: &str, value: Option<serde_json::Value>) {
@@ -644,6 +715,11 @@ impl AppState {
         }
         if system_config_key_affects_frontdoor_rpm(key) {
             self.frontdoor_user_rpm.clear_system_default_cache();
+        }
+        if system_config_key_affects_chat_pii_redaction(key) {
+            crate::privacy::clear_chat_pii_redaction_runtime_config_cache(
+                &self.chat_pii_redaction_runtime_config_cache,
+            );
         }
     }
 
@@ -908,6 +984,18 @@ impl AppState {
         self.request_gate.as_ref().map(|gate| gate.snapshot())
     }
 
+    pub(crate) fn candidate_planning_concurrency_snapshot(&self) -> Option<ConcurrencySnapshot> {
+        self.candidate_planning_gate
+            .as_ref()
+            .map(|gate| gate.snapshot())
+    }
+
+    pub(crate) fn upstream_execution_concurrency_snapshot(&self) -> Option<ConcurrencySnapshot> {
+        self.upstream_execution_gate
+            .as_ref()
+            .map(|gate| gate.snapshot())
+    }
+
     pub(crate) async fn distributed_request_concurrency_snapshot(
         &self,
     ) -> Result<Option<RuntimeSemaphoreSnapshot>, RuntimeSemaphoreError> {
@@ -921,6 +1009,12 @@ impl AppState {
         let mut samples = vec![service_up_sample("aether-gateway")];
         if let Some(snapshot) = self.request_concurrency_snapshot() {
             samples.extend(snapshot.to_metric_samples("gateway_requests"));
+        }
+        if let Some(snapshot) = self.candidate_planning_concurrency_snapshot() {
+            samples.extend(snapshot.to_metric_samples("gateway_candidate_planning"));
+        }
+        if let Some(snapshot) = self.upstream_execution_concurrency_snapshot() {
+            samples.extend(snapshot.to_metric_samples("gateway_upstream_execution"));
         }
         if let Some(gate) = self.distributed_request_gate.as_ref() {
             match gate.snapshot().await {
@@ -947,6 +1041,12 @@ impl AppState {
         if let Some(queue) = self.request_candidate_queue.as_ref() {
             samples.extend(queue.metric_samples());
         }
+        samples.extend(
+            crate::execution_runtime::transport::direct_reqwest_client_cache_metric_samples(),
+        );
+        samples.extend(self.upstream_target_admission.metric_samples());
+        samples.extend(crate::cache::candidate_page_cache_metric_samples());
+        samples.extend(crate::stage_metrics::gateway_stage_metric_samples());
         samples.extend(self.tunnel.metric_samples());
         samples.extend(self.fallback_metrics.metric_samples());
         samples
@@ -1131,6 +1231,8 @@ impl AppState {
             .fetch_add(1, Ordering::AcqRel)
             .saturating_add(1);
         self.scheduler_affinity_cache.clear();
+        self.candidate_page_cache.clear();
+        self.candidate_resolved_page_cache.clear();
         next_epoch
     }
 

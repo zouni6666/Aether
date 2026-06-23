@@ -2,12 +2,14 @@ use aether_ai_serving::{
     run_ai_attempt_loop, AiAttemptLoopOutcome, AiAttemptLoopPort, AiExecutionAttempt,
 };
 use aether_data_contracts::repository::candidates::RequestCandidateStatus;
+use aether_runtime::ConcurrencyPermit;
 use aether_scheduler_core::{
     parse_request_candidate_report_context, SchedulerRequestCandidateStatusUpdate,
 };
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::Response;
+use futures_util::StreamExt;
 use tokio::time::{timeout, Duration};
 use tracing::{debug, warn, Instrument};
 
@@ -23,6 +25,7 @@ use crate::privacy::RedactionExecutionCandidateId;
 use crate::request_candidate_runtime::{
     record_local_request_candidate_status, RequestCandidateRuntimeWriter,
 };
+use crate::stage_metrics::observe_gateway_stage_ms;
 use crate::{AppState, GatewayError};
 
 const DEFAULT_STREAM_FIRST_BYTE_WATCHDOG_TIMEOUT_MS: u64 = 30_000;
@@ -157,6 +160,8 @@ where
     type Error = GatewayError;
 
     async fn execute_attempt(&self, attempt: &T) -> Result<Option<Self::Response>, Self::Error> {
+        prewarm_direct_reqwest_candidate_client(attempt.execution_plan());
+        let _permit = acquire_upstream_execution_gate(self.state, self.trace_id).await?;
         let mut response = execute_execution_runtime_sync(
             self.state,
             self.parts.uri.path(),
@@ -323,13 +328,33 @@ where
 {
     let mut last_attempted = None;
 
-    while let Some(attempt) =
-        next_execution_attempt_with_timeout(source, trace_id, plan_kind, planning_timeout).await?
-    {
+    loop {
+        let next_started_at = std::time::Instant::now();
+        let next_attempt =
+            next_execution_attempt_with_timeout(source, trace_id, plan_kind, planning_timeout)
+                .await?;
+        observe_gateway_stage_ms(
+            "stream_candidate_next",
+            next_started_at.elapsed().as_millis() as u64,
+        );
+        let Some(attempt) = next_attempt else {
+            break;
+        };
         last_attempted = Some((attempt.execution_plan().clone(), attempt.report_context()));
-        if let Some(response) = port.execute_attempt(&attempt).await? {
+        let execute_started_at = std::time::Instant::now();
+        let response = port.execute_attempt(&attempt).await?;
+        observe_gateway_stage_ms(
+            "stream_candidate_execute",
+            execute_started_at.elapsed().as_millis() as u64,
+        );
+        if let Some(response) = response {
             let remaining = source.drain_execution_attempts().await?;
+            let unused_started_at = std::time::Instant::now();
             port.mark_unused_attempts(remaining).await?;
+            observe_gateway_stage_ms(
+                "stream_candidate_unused",
+                unused_started_at.elapsed().as_millis() as u64,
+            );
             return Ok(LocalExecutionRequestOutcome::responded(response));
         }
     }
@@ -412,6 +437,7 @@ where
             candidate_index = candidate_index.as_str(),
             "candidate loop attempting stream execution candidate"
         );
+        prewarm_direct_reqwest_candidate_client(&plan);
         let watchdog_plan = plan.clone();
         let watchdog_report_context = report_context.clone();
         let execution_state = self.state.clone();
@@ -473,6 +499,15 @@ where
                 .await,
         )
     }
+}
+
+fn prewarm_direct_reqwest_candidate_client(plan: &aether_contracts::ExecutionPlan) {
+    let started_at = std::time::Instant::now();
+    crate::execution_runtime::transport::prewarm_direct_reqwest_client_cache_for_plan(plan);
+    observe_gateway_stage_ms(
+        "direct_reqwest_client_prewarm",
+        started_at.elapsed().as_millis() as u64,
+    );
 }
 
 pub(crate) async fn mark_unused_local_candidates<T>(state: &AppState, remaining: Vec<T>)
@@ -543,7 +578,7 @@ fn stream_candidate_watchdog_timeout_message() -> &'static str {
 }
 
 async fn execute_stream_candidate_with_watchdog<Fut>(
-    state: &(impl RequestCandidateRuntimeWriter + ?Sized),
+    state: &(impl RequestCandidateRuntimeWriter + UpstreamExecutionGateProvider + ?Sized),
     trace_id: &str,
     plan_kind: &str,
     plan: &aether_contracts::ExecutionPlan,
@@ -556,9 +591,12 @@ where
 {
     let timeout_duration = resolve_stream_candidate_watchdog_timeout(plan, report_context);
     let candidate_started_unix_ms = current_unix_ms();
+    let permit = acquire_upstream_execution_gate(state, trace_id).await?;
     let mut join_handle = tokio::spawn(execute());
     match timeout(timeout_duration, &mut join_handle).await {
-        Ok(Ok(result)) => result,
+        Ok(Ok(result)) => {
+            result.map(|response| maybe_hold_upstream_execution_permit(response, permit))
+        }
         Ok(Err(join_error)) => Err(GatewayError::Internal(format!(
             "local stream candidate task join failed: {join_error}"
         ))),
@@ -605,6 +643,67 @@ where
             );
             Ok(None)
         }
+    }
+}
+
+fn maybe_hold_upstream_execution_permit(
+    response: Option<Response<Body>>,
+    permit: Option<ConcurrencyPermit>,
+) -> Option<Response<Body>> {
+    match (response, permit) {
+        (Some(response), Some(permit)) => {
+            Some(hold_response_upstream_execution_permit(response, permit))
+        }
+        (response, _) => response,
+    }
+}
+
+fn hold_response_upstream_execution_permit(
+    response: Response<Body>,
+    permit: ConcurrencyPermit,
+) -> Response<Body> {
+    let (parts, body) = response.into_parts();
+    let stream = async_stream::stream! {
+        let _permit = permit;
+        let mut body_stream = body.into_data_stream();
+        while let Some(item) = body_stream.next().await {
+            yield item;
+        }
+    };
+    Response::from_parts(parts, Body::from_stream(stream))
+}
+
+trait UpstreamExecutionGateProvider {
+    fn upstream_execution_gate(&self) -> Option<&aether_runtime::ConcurrencyGate>;
+    fn upstream_execution_gate_queue_budget(&self) -> Duration;
+}
+
+impl UpstreamExecutionGateProvider for AppState {
+    fn upstream_execution_gate(&self) -> Option<&aether_runtime::ConcurrencyGate> {
+        self.upstream_execution_gate.as_deref()
+    }
+
+    fn upstream_execution_gate_queue_budget(&self) -> Duration {
+        self.frontdoor_runtime_guards.internal_gate_queue_budget
+    }
+}
+
+async fn acquire_upstream_execution_gate(
+    state: &(impl UpstreamExecutionGateProvider + ?Sized),
+    trace_id: &str,
+) -> Result<Option<ConcurrencyPermit>, GatewayError> {
+    let Some(gate) = state.upstream_execution_gate() else {
+        return Ok(None);
+    };
+    let budget = state.upstream_execution_gate_queue_budget();
+    match timeout(budget, gate.acquire()).await {
+        Ok(Ok(permit)) => Ok(Some(permit)),
+        Ok(Err(err)) => Err(GatewayError::Internal(err.to_string())),
+        Err(_) => Err(GatewayError::AdmissionTimeout {
+            trace_id: trace_id.to_string(),
+            gate: "gateway_upstream_execution",
+            queue_budget_ms: budget.as_millis() as u64,
+        }),
     }
 }
 
@@ -674,6 +773,16 @@ mod tests {
         > {
             self.records.lock().await.push(candidate);
             Ok(None)
+        }
+    }
+
+    impl UpstreamExecutionGateProvider for TestRequestCandidateWriter {
+        fn upstream_execution_gate(&self) -> Option<&aether_runtime::ConcurrencyGate> {
+            None
+        }
+
+        fn upstream_execution_gate_queue_budget(&self) -> Duration {
+            Duration::from_millis(250)
         }
     }
 
