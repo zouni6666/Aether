@@ -1,11 +1,19 @@
-#[cfg(not(target_env = "msvc"))]
+#[cfg(all(not(target_env = "msvc"), feature = "jemalloc"))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use axum::{body::Body, extract::Request};
 use clap::{Args as ClapArgs, Parser, Subcommand, ValueEnum};
+use hyper::body::Incoming;
+use hyper_util::{
+    rt::{TokioExecutor, TokioIo},
+    server::conn::auto::Builder as HyperServerBuilder,
+    service::TowerToHyperService,
+};
+use tower::{Service as _, ServiceExt as _};
 use tracing::{debug, info, warn};
 
 use aether_crypto::warm_python_fernet_secret;
@@ -15,7 +23,8 @@ use aether_data::lifecycle::export::{
 };
 use aether_data::{DatabaseDriver, SqlDatabaseConfig, SqlPoolConfig, DEFAULT_SQLITE_DATABASE_URL};
 use aether_gateway::{
-    attach_static_frontend, build_router_with_state, set_gateway_frontdoor_app_port, AppState,
+    attach_static_frontend, build_router_with_state,
+    prewarm_direct_h2c_sender_cache_from_env_for_startup, set_gateway_frontdoor_app_port, AppState,
     FrontdoorCorsConfig, FrontdoorUserRpmConfig, GatewayDataConfig, UsageRuntimeConfig,
     VideoTaskTruthSourceMode,
 };
@@ -236,11 +245,14 @@ const AUTO_SERVER_SQL_POOL_MIN_CONNECTIONS_FLOOR: u32 = 4;
 const AUTO_SERVER_SQL_POOL_MIN_CONNECTIONS_CAP: u32 = 16;
 const AUTO_SERVER_SQL_POOL_MAX_CONNECTIONS_FLOOR: u32 = 20;
 const AUTO_SERVER_SQL_POOL_MAX_CONNECTIONS_CAP: u32 = 100;
-const DEFAULT_GATEWAY_LISTEN_BACKLOG: i32 = 8192;
+const DEFAULT_GATEWAY_LISTEN_BACKLOG: i32 = 65_535;
 const MIN_GATEWAY_LISTEN_BACKLOG: i32 = 128;
 const MAX_GATEWAY_LISTEN_BACKLOG: i32 = 65_535;
-const DEFAULT_GATEWAY_LISTENER_SHARDS: usize = 1;
+const DEFAULT_GATEWAY_LISTENER_SHARDS: usize = 0;
 const MAX_GATEWAY_LISTENER_SHARDS: usize = 64;
+const DEFAULT_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS: u32 = 16_384;
+const MIN_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS: u32 = 200;
+const MAX_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS: u32 = 1_000_000;
 fn env_var_trimmed(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -578,6 +590,27 @@ struct GatewayUsageArgs {
 
     #[arg(
         long,
+        env = "AETHER_GATEWAY_USAGE_TERMINAL_ENQUEUE_MAX_IN_FLIGHT",
+        default_value_t = 256
+    )]
+    terminal_enqueue_max_in_flight: u64,
+
+    #[arg(
+        long,
+        env = "AETHER_GATEWAY_USAGE_LIFECYCLE_ENQUEUE_MAX_IN_FLIGHT",
+        default_value_t = 128
+    )]
+    lifecycle_enqueue_max_in_flight: u64,
+
+    #[arg(
+        long,
+        env = "AETHER_GATEWAY_USAGE_RETRY_DEFERRED_LIFECYCLE_EVENTS",
+        default_value_t = false
+    )]
+    retry_deferred_lifecycle_events: bool,
+
+    #[arg(
+        long,
         env = "AETHER_GATEWAY_USAGE_ENQUEUE_RETRY_BUFFER_CAPACITY",
         default_value_t = 131_072
     )]
@@ -593,14 +626,14 @@ struct GatewayUsageArgs {
     #[arg(
         long,
         env = "AETHER_GATEWAY_USAGE_ENQUEUE_RETRY_INITIAL_BACKOFF_MS",
-        default_value_t = 10
+        default_value_t = 3_000
     )]
     enqueue_retry_initial_backoff_ms: u64,
 
     #[arg(
         long,
         env = "AETHER_GATEWAY_USAGE_ENQUEUE_RETRY_MAX_BACKOFF_MS",
-        default_value_t = 1_000
+        default_value_t = 10_000
     )]
     enqueue_retry_max_backoff_ms: u64,
 }
@@ -620,6 +653,9 @@ impl GatewayUsageArgs {
             reclaim_idle_ms: self.queue_reclaim_idle_ms.max(1),
             reclaim_count: self.queue_reclaim_count.max(1),
             reclaim_interval_ms: self.queue_reclaim_interval_ms.max(1),
+            terminal_enqueue_max_in_flight: self.terminal_enqueue_max_in_flight.max(1),
+            lifecycle_enqueue_max_in_flight: self.lifecycle_enqueue_max_in_flight.max(1),
+            retry_deferred_lifecycle_events: self.retry_deferred_lifecycle_events,
             enqueue_retry_buffer_capacity: self.enqueue_retry_buffer_capacity.max(1),
             enqueue_retry_workers: self.enqueue_retry_workers.clamp(1, 64),
             enqueue_retry_initial_backoff_ms: self.enqueue_retry_initial_backoff_ms.max(1),
@@ -806,7 +842,15 @@ struct Args {
         env = "AETHER_GATEWAY_LISTENER_SHARDS",
         default_value_t = DEFAULT_GATEWAY_LISTENER_SHARDS
     )]
+    /// Number of SO_REUSEPORT listener shards. 0 selects a high-concurrency default.
     listener_shards: usize,
+
+    #[arg(
+        long,
+        env = "AETHER_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS",
+        default_value_t = DEFAULT_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS
+    )]
+    http2_max_concurrent_streams: u32,
 
     /// 容器内健康检查入口：根据当前 bind 端口探测本地 /health。
     #[arg(long, hide = true, default_value_t = false)]
@@ -1061,8 +1105,34 @@ fn gateway_listen_backlog(backlog: i32) -> i32 {
     backlog.clamp(MIN_GATEWAY_LISTEN_BACKLOG, MAX_GATEWAY_LISTEN_BACKLOG)
 }
 
+fn gateway_auto_listener_shards() -> usize {
+    #[cfg(unix)]
+    {
+        std::thread::available_parallelism()
+            .map(|parallelism| parallelism.get().saturating_mul(2))
+            .unwrap_or(16)
+            .clamp(8, 16)
+            .min(MAX_GATEWAY_LISTENER_SHARDS)
+    }
+
+    #[cfg(not(unix))]
+    {
+        1
+    }
+}
+
 fn gateway_listener_shards(shards: usize) -> usize {
+    if shards == 0 {
+        return gateway_auto_listener_shards();
+    }
     shards.clamp(1, MAX_GATEWAY_LISTENER_SHARDS)
+}
+
+fn gateway_http2_max_concurrent_streams(streams: u32) -> u32 {
+    streams.clamp(
+        MIN_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS,
+        MAX_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS,
+    )
 }
 
 fn gateway_listener(
@@ -1115,29 +1185,15 @@ fn gateway_listeners(
 async fn serve_gateway_router(
     listeners: Vec<tokio::net::TcpListener>,
     router: axum::Router,
+    http2_max_concurrent_streams: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if listeners.len() == 1 {
-        let listener = listeners
-            .into_iter()
-            .next()
-            .ok_or_else(|| std::io::Error::other("gateway listener set is empty"))?;
-        axum::serve(
-            listener,
-            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await?;
-        return Ok(());
-    }
-
+    let http2_max_concurrent_streams =
+        gateway_http2_max_concurrent_streams(http2_max_concurrent_streams);
     let mut servers = tokio::task::JoinSet::new();
     for listener in listeners {
         let router = router.clone();
         servers.spawn(async move {
-            axum::serve(
-                listener,
-                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-            )
-            .await
+            serve_gateway_listener(listener, router, http2_max_concurrent_streams).await
         });
     }
     if let Some(result) = servers.join_next().await {
@@ -1147,6 +1203,38 @@ async fn serve_gateway_router(
         serve_result?;
     }
     Ok(())
+}
+
+async fn serve_gateway_listener(
+    listener: tokio::net::TcpListener,
+    router: axum::Router,
+    http2_max_concurrent_streams: u32,
+) -> Result<(), std::io::Error> {
+    let mut make_service = router.into_make_service_with_connect_info::<std::net::SocketAddr>();
+    loop {
+        let (io, remote_addr) = listener.accept().await?;
+        let tower_service = make_service
+            .call(remote_addr)
+            .await
+            .unwrap_or_else(|err| match err {})
+            .map_request(|req: Request<Incoming>| req.map(Body::new));
+        let hyper_service = TowerToHyperService::new(tower_service);
+        let io = TokioIo::new(io);
+
+        tokio::spawn(async move {
+            let mut builder = HyperServerBuilder::new(TokioExecutor::new());
+            builder.http2().enable_connect_protocol();
+            builder
+                .http2()
+                .max_concurrent_streams(http2_max_concurrent_streams);
+            if let Err(err) = builder
+                .serve_connection_with_upgrades(io, hyper_service)
+                .await
+            {
+                tracing::trace!(error = ?err, "gateway connection closed with error");
+            }
+        });
+    }
 }
 
 fn resolve_local_http_base_url(app_port: u16) -> Result<String, std::io::Error> {
@@ -1482,6 +1570,33 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
+    match prewarm_direct_h2c_sender_cache_from_env_for_startup().await {
+        Ok(Some(report)) => {
+            if report.failed_targets > 0 {
+                warn!(
+                    requested_urls = report.requested_urls,
+                    unique_targets = report.unique_targets,
+                    warmed_targets = report.warmed_targets,
+                    failed_targets = report.failed_targets,
+                    ready_required = report.ready_required,
+                    first_error = ?report.first_error,
+                    "direct h2c sender cache prewarm completed with failures"
+                );
+            } else {
+                info!(
+                    requested_urls = report.requested_urls,
+                    unique_targets = report.unique_targets,
+                    warmed_targets = report.warmed_targets,
+                    ready_required = report.ready_required,
+                    "direct h2c sender cache prewarmed"
+                );
+            }
+        }
+        Ok(None) => {}
+        Err(err) => {
+            return Err(std::io::Error::other(err).into());
+        }
+    }
 
     let background_tasks = if args.node_role.spawns_background_tasks() {
         Some(state.spawn_background_tasks())
@@ -1516,13 +1631,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         app_port,
         listen_backlog,
         listener_shards,
+        http2_max_concurrent_streams = gateway_http2_max_concurrent_streams(args.http2_max_concurrent_streams),
         public_url = %public_base_url,
         healthcheck_url = %frontdoor_health_url,
         legacy_route_policy = "fail_closed",
         "aether-gateway ready"
     );
 
-    serve_gateway_router(listeners, router).await?;
+    serve_gateway_router(listeners, router, args.http2_max_concurrent_streams).await?;
     if let Some(background_tasks) = background_tasks {
         background_tasks.shutdown().await;
     }
@@ -1889,8 +2005,11 @@ mod tests {
         DatabaseDriverArg, DeploymentTopologyArg, GatewayDataArgs, GatewayFrontdoorArgs,
         GatewayLogDestinationArg, GatewayLogFormatArg, GatewayLogRotationArg, GatewayLoggingArgs,
         GatewayRateLimitArgs, GatewayUsageArgs, NodeRoleArg, RuntimeBackendArg,
-        VideoTaskTruthSourceArg, DEFAULT_GATEWAY_LISTENER_SHARDS, DEFAULT_GATEWAY_LISTEN_BACKLOG,
-        MAX_GATEWAY_LISTENER_SHARDS, MAX_GATEWAY_LISTEN_BACKLOG, MIN_GATEWAY_LISTEN_BACKLOG,
+        VideoTaskTruthSourceArg, DEFAULT_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS,
+        DEFAULT_GATEWAY_LISTENER_SHARDS, DEFAULT_GATEWAY_LISTEN_BACKLOG,
+        MAX_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS, MAX_GATEWAY_LISTENER_SHARDS,
+        MAX_GATEWAY_LISTEN_BACKLOG, MIN_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS,
+        MIN_GATEWAY_LISTEN_BACKLOG,
     };
     use aether_data::{DatabaseDriver, SqlDatabaseConfig, SqlPoolConfig};
     use aether_gateway::AppState;
@@ -1901,6 +2020,7 @@ mod tests {
             app_port: 8084,
             listen_backlog: DEFAULT_GATEWAY_LISTEN_BACKLOG,
             listener_shards: DEFAULT_GATEWAY_LISTENER_SHARDS,
+            http2_max_concurrent_streams: DEFAULT_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS,
             healthcheck: false,
             healthcheck_timeout_ms: 3_000,
             deployment_topology: DeploymentTopologyArg::SingleNode,
@@ -1951,10 +2071,13 @@ mod tests {
                 queue_reclaim_idle_ms: 30_000,
                 queue_reclaim_count: 500,
                 queue_reclaim_interval_ms: 5_000,
+                terminal_enqueue_max_in_flight: 256,
+                lifecycle_enqueue_max_in_flight: 128,
+                retry_deferred_lifecycle_events: false,
                 enqueue_retry_buffer_capacity: 131_072,
                 enqueue_retry_workers: 4,
-                enqueue_retry_initial_backoff_ms: 10,
-                enqueue_retry_max_backoff_ms: 1_000,
+                enqueue_retry_initial_backoff_ms: 3_000,
+                enqueue_retry_max_backoff_ms: 10_000,
             },
             frontdoor: GatewayFrontdoorArgs {
                 environment: "development".to_string(),
@@ -2009,14 +2132,38 @@ mod tests {
 
     #[test]
     fn clamps_gateway_listener_shards() {
-        assert_eq!(super::gateway_listener_shards(0), 1);
+        let auto_shards = super::gateway_listener_shards(0);
+        assert!((1..=MAX_GATEWAY_LISTENER_SHARDS).contains(&auto_shards));
+        assert_eq!(super::gateway_listener_shards(1), 1);
         assert_eq!(
             super::gateway_listener_shards(DEFAULT_GATEWAY_LISTENER_SHARDS),
-            DEFAULT_GATEWAY_LISTENER_SHARDS
+            auto_shards
         );
         assert_eq!(
             super::gateway_listener_shards(MAX_GATEWAY_LISTENER_SHARDS + 1),
             MAX_GATEWAY_LISTENER_SHARDS
+        );
+    }
+
+    #[test]
+    fn clamps_gateway_http2_max_concurrent_streams() {
+        assert_eq!(
+            super::gateway_http2_max_concurrent_streams(
+                MIN_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS - 1
+            ),
+            MIN_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS
+        );
+        assert_eq!(
+            super::gateway_http2_max_concurrent_streams(
+                DEFAULT_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS
+            ),
+            DEFAULT_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS
+        );
+        assert_eq!(
+            super::gateway_http2_max_concurrent_streams(
+                MAX_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS + 1
+            ),
+            MAX_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS
         );
     }
 

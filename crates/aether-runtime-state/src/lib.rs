@@ -438,6 +438,18 @@ impl RuntimeState {
         }
     }
 
+    pub async fn rate_limit_count(&self, key: &str, bucket: u64) -> Result<u32, DataLayerError> {
+        match self.backend.as_ref() {
+            RuntimeStateBackend::Memory(memory) => memory.rate_limit_count(key, bucket),
+            RuntimeStateBackend::Redis(redis) => Ok(redis
+                .kv
+                .get(key)
+                .await?
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or_default()),
+        }
+    }
+
     pub async fn set_add(&self, key: &str, member: &str) -> Result<bool, DataLayerError> {
         match self.backend.as_ref() {
             RuntimeStateBackend::Memory(memory) => Ok(memory.set_add(key, member).await),
@@ -1447,6 +1459,13 @@ mod tests {
         ));
         assert_eq!(
             runtime
+                .rate_limit_count(input.user_key, input.bucket)
+                .await
+                .expect("count after first"),
+            1
+        );
+        assert_eq!(
+            runtime
                 .check_and_consume_rate_limit(input)
                 .await
                 .expect("second"),
@@ -1454,6 +1473,13 @@ mod tests {
                 scope: RateLimitScope::User,
                 limit: 1
             }
+        );
+        assert_eq!(
+            runtime
+                .rate_limit_count(input.user_key, input.bucket)
+                .await
+                .expect("count after reject"),
+            1
         );
     }
 

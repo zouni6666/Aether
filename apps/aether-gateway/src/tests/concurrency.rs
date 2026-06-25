@@ -23,6 +23,30 @@ use aether_runtime_state::{
 
 use crate::data::GatewayDataState;
 
+const CONCURRENCY_TEST_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+fn run_concurrency_test<F, Fut>(test_name: &'static str, make_future: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(test_name.to_string())
+        .stack_size(CONCURRENCY_TEST_STACK_BYTES)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime should build");
+            runtime.block_on(make_future());
+        })
+        .expect("concurrency test thread should spawn");
+
+    if let Err(payload) = handle.join() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
 fn memory_runtime_semaphore(gate: &'static str, limit: usize) -> RuntimeSemaphore {
     RuntimeState::memory(MemoryRuntimeStateConfig::default())
         .semaphore(gate, limit, RuntimeSemaphoreConfig::default())
@@ -80,8 +104,15 @@ fn build_local_openai_gateway_state(
         )
 }
 
-#[tokio::test]
-async fn gateway_rejects_second_in_flight_stream_request_with_distributed_overload() {
+#[test]
+fn gateway_rejects_second_in_flight_stream_request_with_distributed_overload() {
+    run_concurrency_test(
+        "gateway_rejects_second_in_flight_stream_request_with_distributed_overload",
+        gateway_rejects_second_in_flight_stream_request_with_distributed_overload_impl,
+    );
+}
+
+async fn gateway_rejects_second_in_flight_stream_request_with_distributed_overload_impl() {
     let execution_runtime_hits = Arc::new(AtomicUsize::new(0));
     let execution_runtime_hits_clone = Arc::clone(&execution_runtime_hits);
     let execution_runtime = Router::new().route(
@@ -175,8 +206,15 @@ async fn gateway_rejects_second_in_flight_stream_request_with_distributed_overlo
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_rejects_second_in_flight_stream_request_with_local_overload() {
+#[test]
+fn gateway_rejects_second_in_flight_stream_request_with_local_overload() {
+    run_concurrency_test(
+        "gateway_rejects_second_in_flight_stream_request_with_local_overload",
+        gateway_rejects_second_in_flight_stream_request_with_local_overload_impl,
+    );
+}
+
+async fn gateway_rejects_second_in_flight_stream_request_with_local_overload_impl() {
     let execution_runtime_hits = Arc::new(AtomicUsize::new(0));
     let execution_runtime_hits_clone = Arc::clone(&execution_runtime_hits);
     let execution_runtime = Router::new().route(
@@ -262,8 +300,15 @@ async fn gateway_rejects_second_in_flight_stream_request_with_local_overload() {
     execution_runtime_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_exposes_request_concurrency_metrics() {
+#[test]
+fn gateway_exposes_request_concurrency_metrics() {
+    run_concurrency_test(
+        "gateway_exposes_request_concurrency_metrics",
+        gateway_exposes_request_concurrency_metrics_impl,
+    );
+}
+
+async fn gateway_exposes_request_concurrency_metrics_impl() {
     let gateway = build_router_with_state(
         AppState::new()
             .expect("gateway state should build")
@@ -302,8 +347,15 @@ async fn gateway_exposes_request_concurrency_metrics() {
     gateway_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_exposes_fallback_metrics() {
+#[test]
+fn gateway_exposes_fallback_metrics() {
+    run_concurrency_test(
+        "gateway_exposes_fallback_metrics",
+        gateway_exposes_fallback_metrics_impl,
+    );
+}
+
+async fn gateway_exposes_fallback_metrics_impl() {
     let state = AppState::new().expect("gateway state should build");
     let decision = sample_decision();
     state.record_fallback_metric(

@@ -22,6 +22,7 @@ use axum::body::{to_bytes, Body, Bytes};
 use axum::http::header::{CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE};
 use axum::http::{HeaderName, HeaderValue, Response, StatusCode};
 use futures_util::StreamExt;
+use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
@@ -55,9 +56,9 @@ use crate::execution_runtime::submission::{
 };
 use crate::execution_runtime::transport::{
     build_execution_response_body, build_request_body, collect_response_headers,
-    decode_response_body_bytes, format_upstream_request_error, format_wreq_upstream_request_error,
-    response_body_is_json, send_request, DirectHttpResponse, DirectSyncExecutionRuntime,
-    ExecutionRuntimeTransportError,
+    decode_response_body_bytes, format_hyper_error_chain, format_upstream_request_error,
+    format_wreq_upstream_request_error, response_body_is_json, send_request, DirectHttpResponse,
+    DirectSyncExecutionRuntime, ExecutionRuntimeTransportError,
 };
 use crate::execution_runtime::windsurf::maybe_execute_windsurf_sync;
 use crate::execution_runtime::{
@@ -1165,6 +1166,23 @@ async fn execute_openai_image_sync_upstream_sse_candidate(
                 body_bytes.extend_from_slice(&chunk);
             }
         }
+        DirectHttpResponse::HyperH2c(response) => {
+            let mut upstream_stream = response.into_body().into_data_stream();
+            while let Some(chunk) = upstream_stream.next().await {
+                let chunk = chunk.map_err(|err| {
+                    SyncExecutionFailure::from_transport(
+                        ExecutionRuntimeTransportError::UpstreamRequest(format_hyper_error_chain(
+                            &err,
+                        )),
+                    )
+                })?;
+                let elapsed_ms = started_at.elapsed().as_millis() as u64;
+                progress
+                    .observe_chunk(&chunk, status_code, elapsed_ms)
+                    .await;
+                body_bytes.extend_from_slice(&chunk);
+            }
+        }
         DirectHttpResponse::BrowserWreq(response) => {
             let mut upstream_stream = response.bytes_stream();
             while let Some(chunk) = upstream_stream.next().await {
@@ -1522,7 +1540,8 @@ async fn execute_execution_runtime_sync_impl(
     let lifecycle_seed = build_lifecycle_usage_seed(&plan, report_context.as_ref());
     state
         .usage_runtime
-        .record_pending(state.data.as_ref(), lifecycle_seed);
+        .record_pending_direct(state.data.as_ref(), lifecycle_seed)
+        .await;
     record_local_request_candidate_status(
         state,
         &plan,

@@ -80,12 +80,30 @@ pub struct UsageRuntime {
     config: UsageRuntimeConfig,
     body_policy_cache: Arc<tokio::sync::Mutex<Option<UsageBodyCapturePolicyCacheEntry>>>,
     enqueue_retry: Arc<UsageEnqueueRetryDispatcher>,
+    terminal_enqueue_state: Arc<LifecycleEnqueueState>,
     lifecycle_enqueue_state: Arc<LifecycleEnqueueState>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UsageRuntimeMetricsSnapshot {
+    pub enabled: bool,
+    pub queue_terminal_events: bool,
+    pub queue_lifecycle_events: bool,
+    pub retry_deferred_lifecycle_events: bool,
+    pub terminal_enqueue_in_flight: u64,
+    pub terminal_enqueue_deferred_total: u64,
+    pub terminal_enqueue_deferred_retry_total: u64,
+    pub terminal_enqueue_failed_total: u64,
+    pub lifecycle_enqueue_in_flight: u64,
+    pub lifecycle_enqueue_deferred_total: u64,
+    pub lifecycle_enqueue_deferred_dropped_total: u64,
+    pub lifecycle_enqueue_deferred_retry_total: u64,
+    pub lifecycle_enqueue_failed_total: u64,
+    pub enqueue_retry_scheduled_total: u64,
 }
 
 const USAGE_BODY_CAPTURE_POLICY_CACHE_TTL: Duration = Duration::from_secs(30);
 const USAGE_BODY_CAPTURE_POLICY_ERROR_CACHE_TTL: Duration = Duration::from_secs(1);
-const LIFECYCLE_ENQUEUE_MAX_IN_FLIGHT: u64 = 128;
 const LIFECYCLE_ENQUEUE_CIRCUIT_OPEN_MS: u64 = 1_000;
 
 impl Default for UsageRuntime {
@@ -100,6 +118,7 @@ impl UsageRuntime {
             config: UsageRuntimeConfig::disabled(),
             body_policy_cache: Arc::new(tokio::sync::Mutex::new(None)),
             enqueue_retry: UsageEnqueueRetryDispatcher::disabled(),
+            terminal_enqueue_state: Arc::new(LifecycleEnqueueState::default()),
             lifecycle_enqueue_state: Arc::new(LifecycleEnqueueState::default()),
         }
     }
@@ -111,12 +130,38 @@ impl UsageRuntime {
             config,
             body_policy_cache: Arc::new(tokio::sync::Mutex::new(None)),
             enqueue_retry,
+            terminal_enqueue_state: Arc::new(LifecycleEnqueueState::default()),
             lifecycle_enqueue_state: Arc::new(LifecycleEnqueueState::default()),
         })
     }
 
     pub fn is_enabled(&self) -> bool {
         self.config.enabled
+    }
+
+    pub fn metrics_snapshot(&self) -> UsageRuntimeMetricsSnapshot {
+        UsageRuntimeMetricsSnapshot {
+            enabled: self.config.enabled,
+            queue_terminal_events: self.config.queue_terminal_events,
+            queue_lifecycle_events: self.config.queue_lifecycle_events,
+            retry_deferred_lifecycle_events: self.config.retry_deferred_lifecycle_events,
+            terminal_enqueue_in_flight: self.terminal_enqueue_state.in_flight(),
+            terminal_enqueue_deferred_total: self.terminal_enqueue_state.deferred_total(),
+            terminal_enqueue_deferred_retry_total: self
+                .terminal_enqueue_state
+                .deferred_retry_total(),
+            terminal_enqueue_failed_total: self.terminal_enqueue_state.failed_total(),
+            lifecycle_enqueue_in_flight: self.lifecycle_enqueue_state.in_flight(),
+            lifecycle_enqueue_deferred_total: self.lifecycle_enqueue_state.deferred_total(),
+            lifecycle_enqueue_deferred_dropped_total: self
+                .lifecycle_enqueue_state
+                .deferred_dropped_total(),
+            lifecycle_enqueue_deferred_retry_total: self
+                .lifecycle_enqueue_state
+                .deferred_retry_total(),
+            lifecycle_enqueue_failed_total: self.lifecycle_enqueue_state.failed_total(),
+            enqueue_retry_scheduled_total: self.enqueue_retry.scheduled_total(),
+        }
     }
 
     pub fn can_spawn_worker<T>(&self, data: &T) -> bool
@@ -150,27 +195,36 @@ impl UsageRuntime {
         }
         let runtime = self.clone();
         let data = T::clone(data);
-        let request_id = seed.request_id.clone();
         spawn_on_usage_background_runtime(boxed_usage_task(async move {
-            let now_unix_secs = now_unix_secs();
-            match build_pending_usage_event_offthread(seed, now_unix_secs).await {
-                Ok(mut event) => {
-                    runtime
-                        .apply_body_capture_policy_from_data(&data, &mut event)
-                        .await;
-                    runtime.enqueue_or_write_lifecycle(&data, event).await;
-                }
-                Err(err) => {
-                    warn!(
-                        event_name = "usage_pending_event_build_failed",
-                        log_type = "event",
-                        request_id = %request_id,
-                        error = %err,
-                        "usage runtime failed to build sync pending usage event"
-                    )
-                }
-            }
+            runtime.record_pending_direct(&data, seed).await;
         }));
+    }
+
+    pub async fn record_pending_direct<T>(&self, data: &T, seed: LifecycleUsageSeed)
+    where
+        T: UsageRuntimeAccess,
+    {
+        if !self.is_enabled() {
+            return;
+        }
+        let request_id = seed.request_id.clone();
+        let now_unix_secs = now_unix_secs();
+        match build_pending_usage_event_offthread(seed, now_unix_secs).await {
+            Ok(mut event) => {
+                self.apply_body_capture_policy_from_data(data, &mut event)
+                    .await;
+                self.enqueue_or_write_lifecycle(data, event).await;
+            }
+            Err(err) => {
+                warn!(
+                    event_name = "usage_pending_event_build_failed",
+                    log_type = "event",
+                    request_id = %request_id,
+                    error = %err,
+                    "usage runtime failed to build sync pending usage event"
+                )
+            }
+        }
     }
 
     pub fn record_stream_started<T>(
@@ -212,6 +266,42 @@ impl UsageRuntime {
                 }
             }
         }));
+    }
+
+    pub async fn record_stream_started_direct<T>(
+        &self,
+        data: &T,
+        seed: &LifecycleUsageSeed,
+        status_code: u16,
+        telemetry: Option<&ExecutionTelemetry>,
+    ) where
+        T: UsageRuntimeAccess,
+    {
+        if !self.is_enabled() {
+            return;
+        }
+        let seed = seed.clone();
+        let telemetry = telemetry.cloned();
+        let request_id = seed.request_id.clone();
+        let now_unix_secs = now_unix_secs();
+        match build_streaming_usage_event_offthread(seed, status_code, telemetry, now_unix_secs)
+            .await
+        {
+            Ok(mut event) => {
+                self.apply_body_capture_policy_from_data(data, &mut event)
+                    .await;
+                self.write_event_direct(data, &event).await;
+            }
+            Err(err) => {
+                warn!(
+                    event_name = "usage_stream_event_build_failed",
+                    log_type = "event",
+                    request_id = %request_id,
+                    error = %err,
+                    "usage runtime failed to build stream usage event"
+                )
+            }
+        }
     }
 
     pub fn record_sync_terminal<T>(
@@ -406,7 +496,11 @@ impl UsageRuntime {
     where
         T: UsageRuntimeAccess,
     {
-        self.enqueue_lifecycle_event(data, event).await;
+        if self.config.queue_lifecycle_events {
+            self.enqueue_lifecycle_event(data, event).await;
+        } else {
+            self.write_event_direct(data, &event).await;
+        }
     }
 
     async fn enqueue_lifecycle_event<T>(&self, data: &T, event: UsageEvent)
@@ -424,17 +518,6 @@ impl UsageRuntime {
             );
             return;
         }
-
-        let now_ms = now_unix_ms();
-        if self.lifecycle_enqueue_state.is_circuit_open(now_ms) {
-            self.lifecycle_enqueue_state
-                .record_skip("circuit_open", &event);
-            return;
-        }
-
-        let Some(_guard) = self.lifecycle_enqueue_state.try_acquire_in_flight(&event) else {
-            return;
-        };
 
         let Some(runner) = data.usage_worker_queue() else {
             warn!(
@@ -464,14 +547,56 @@ impl UsageRuntime {
             }
         };
 
+        let now_ms = now_unix_ms();
+        if self.lifecycle_enqueue_state.is_circuit_open(now_ms) {
+            let retry_enabled = self.config.retry_deferred_lifecycle_events;
+            self.lifecycle_enqueue_state.record_deferred(
+                "usage_lifecycle_event_enqueue_deferred",
+                "circuit_open",
+                &event,
+                retry_enabled,
+            );
+            if retry_enabled {
+                self.enqueue_retry
+                    .schedule(
+                        queue,
+                        event,
+                        "lifecycle",
+                        DataLayerError::TimedOut("lifecycle enqueue circuit is open".to_string()),
+                    )
+                    .await;
+            }
+            return;
+        }
+
+        let Some(_guard) = self
+            .lifecycle_enqueue_state
+            .try_acquire_in_flight(self.config.lifecycle_enqueue_max_in_flight)
+        else {
+            let retry_enabled = self.config.retry_deferred_lifecycle_events;
+            self.lifecycle_enqueue_state.record_deferred(
+                "usage_lifecycle_event_enqueue_deferred",
+                "in_flight_limit",
+                &event,
+                retry_enabled,
+            );
+            if retry_enabled {
+                self.enqueue_retry
+                    .schedule(
+                        queue,
+                        event,
+                        "lifecycle",
+                        DataLayerError::TimedOut("lifecycle enqueue in-flight limit".to_string()),
+                    )
+                    .await;
+            }
+            return;
+        };
+
         if let Err(err) = queue.enqueue(&event).await {
             self.lifecycle_enqueue_state
                 .open_circuit(now_unix_ms().saturating_add(LIFECYCLE_ENQUEUE_CIRCUIT_OPEN_MS));
-            let failures = self
-                .lifecycle_enqueue_state
-                .failed_total
-                .fetch_add(1, Ordering::AcqRel)
-                + 1;
+            let failures = self.lifecycle_enqueue_state.increment_failed_total();
             if should_log_usage_retry_counter(failures) {
                 warn!(
                     event_name = "usage_lifecycle_event_enqueue_failed",
@@ -500,15 +625,22 @@ impl UsageRuntime {
         if queue_enabled {
             if let Some(runner) = data.usage_worker_queue() {
                 match UsageQueue::new(runner, self.config.clone()) {
-                    Ok(queue) => match queue.enqueue(&event).await {
-                        Ok(_) => return,
-                        Err(err) => {
-                            self.enqueue_retry
-                                .schedule(queue, event, event_phase, err)
+                    Ok(queue) => {
+                        if event_phase == "terminal" {
+                            self.enqueue_terminal_event_or_schedule_retry(queue, event)
                                 .await;
                             return;
                         }
-                    },
+                        match queue.enqueue(&event).await {
+                            Ok(_) => return,
+                            Err(err) => {
+                                self.enqueue_retry
+                                    .schedule(queue, event, event_phase, err)
+                                    .await;
+                                return;
+                            }
+                        }
+                    }
                     Err(err) => {
                         warn!(
                             event_name = "usage_event_queue_init_failed",
@@ -529,6 +661,70 @@ impl UsageRuntime {
             enrich_terminal_event(data, &mut event).await;
         }
         self.write_event_direct(data, &event).await;
+    }
+
+    async fn enqueue_terminal_event_or_schedule_retry(&self, queue: UsageQueue, event: UsageEvent) {
+        let now_ms = now_unix_ms();
+        if self.terminal_enqueue_state.is_circuit_open(now_ms) {
+            self.terminal_enqueue_state.record_deferred(
+                "usage_terminal_event_enqueue_deferred",
+                "circuit_open",
+                &event,
+                true,
+            );
+            self.enqueue_retry
+                .schedule(
+                    queue,
+                    event,
+                    "terminal",
+                    DataLayerError::TimedOut("terminal enqueue circuit is open".to_string()),
+                )
+                .await;
+            return;
+        }
+
+        let Some(_guard) = self
+            .terminal_enqueue_state
+            .try_acquire_in_flight(self.config.terminal_enqueue_max_in_flight)
+        else {
+            self.terminal_enqueue_state.record_deferred(
+                "usage_terminal_event_enqueue_deferred",
+                "in_flight_limit",
+                &event,
+                true,
+            );
+            self.enqueue_retry
+                .schedule(
+                    queue,
+                    event,
+                    "terminal",
+                    DataLayerError::TimedOut("terminal enqueue in-flight limit".to_string()),
+                )
+                .await;
+            return;
+        };
+
+        if let Err(err) = queue.enqueue(&event).await {
+            self.terminal_enqueue_state
+                .open_circuit(now_unix_ms().saturating_add(LIFECYCLE_ENQUEUE_CIRCUIT_OPEN_MS));
+            let failures = self.terminal_enqueue_state.increment_failed_total();
+            if should_log_usage_retry_counter(failures) {
+                warn!(
+                    event_name = "usage_terminal_event_enqueue_failed",
+                    log_type = "event",
+                    usage_event_type = ?event.event_type,
+                    request_id = %event.request_id,
+                    fallback = "local_enqueue_retry",
+                    failure_total = failures,
+                    circuit_open_ms = LIFECYCLE_ENQUEUE_CIRCUIT_OPEN_MS,
+                    error = %err,
+                    "usage runtime failed to enqueue terminal event; terminal enqueue circuit opened"
+                );
+            }
+            self.enqueue_retry
+                .schedule(queue, event, "terminal", err)
+                .await;
+        }
     }
 
     async fn write_event_direct<T>(&self, data: &T, event: &UsageEvent)
@@ -628,10 +824,36 @@ struct LifecycleEnqueueState {
     in_flight: AtomicU64,
     circuit_open_until_unix_ms: AtomicU64,
     skipped_total: AtomicU64,
+    dropped_total: AtomicU64,
+    retry_total: AtomicU64,
     failed_total: AtomicU64,
 }
 
 impl LifecycleEnqueueState {
+    fn in_flight(&self) -> u64 {
+        self.in_flight.load(Ordering::Acquire)
+    }
+
+    fn deferred_total(&self) -> u64 {
+        self.skipped_total.load(Ordering::Acquire)
+    }
+
+    fn deferred_dropped_total(&self) -> u64 {
+        self.dropped_total.load(Ordering::Acquire)
+    }
+
+    fn deferred_retry_total(&self) -> u64 {
+        self.retry_total.load(Ordering::Acquire)
+    }
+
+    fn failed_total(&self) -> u64 {
+        self.failed_total.load(Ordering::Acquire)
+    }
+
+    fn increment_failed_total(&self) -> u64 {
+        self.failed_total.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
     fn is_circuit_open(&self, now_unix_ms: u64) -> bool {
         self.circuit_open_until_unix_ms.load(Ordering::Acquire) > now_unix_ms
     }
@@ -653,12 +875,11 @@ impl LifecycleEnqueueState {
 
     fn try_acquire_in_flight<'a>(
         &'a self,
-        event: &UsageEvent,
+        max_in_flight: u64,
     ) -> Option<LifecycleEnqueueInFlightGuard<'a>> {
         let mut current = self.in_flight.load(Ordering::Acquire);
         loop {
-            if current >= LIFECYCLE_ENQUEUE_MAX_IN_FLIGHT {
-                self.record_skip("in_flight_limit", event);
+            if current >= max_in_flight {
                 return None;
             }
             match self.in_flight.compare_exchange_weak(
@@ -675,18 +896,31 @@ impl LifecycleEnqueueState {
         }
     }
 
-    fn record_skip(&self, reason: &'static str, event: &UsageEvent) {
+    fn record_deferred(
+        &self,
+        event_name: &'static str,
+        reason: &'static str,
+        event: &UsageEvent,
+        retry_enabled: bool,
+    ) {
         let skipped = self.skipped_total.fetch_add(1, Ordering::AcqRel) + 1;
+        let fallback = if retry_enabled {
+            self.retry_total.fetch_add(1, Ordering::AcqRel);
+            "local_enqueue_retry"
+        } else {
+            self.dropped_total.fetch_add(1, Ordering::AcqRel);
+            "drop"
+        };
         if should_log_usage_retry_counter(skipped) {
             warn!(
-                event_name = "usage_lifecycle_event_enqueue_skipped",
+                event_name,
                 log_type = "event",
                 usage_event_type = ?event.event_type,
                 request_id = %event.request_id,
                 reason,
-                skipped_total = skipped,
-                fallback = "none",
-                "usage runtime skipped lifecycle enqueue"
+                deferred_total = skipped,
+                fallback,
+                "usage runtime deferred usage enqueue"
             );
         }
     }
@@ -724,7 +958,9 @@ impl UsageEnqueueRetryDispatcher {
     }
 
     fn spawn(config: UsageRuntimeConfig) -> Arc<Self> {
-        if !config.enabled || !(config.queue_terminal_events || config.queue_lifecycle_events) {
+        let lifecycle_retry_enabled =
+            config.queue_lifecycle_events && config.retry_deferred_lifecycle_events;
+        if !config.enabled || !(config.queue_terminal_events || lifecycle_retry_enabled) {
             return Self::disabled();
         }
 
@@ -839,6 +1075,10 @@ impl UsageEnqueueRetryDispatcher {
             }
         }
     }
+
+    fn scheduled_total(&self) -> u64 {
+        self.scheduled_total.load(Ordering::Acquire)
+    }
 }
 
 async fn run_usage_enqueue_retry_worker(
@@ -847,7 +1087,12 @@ async fn run_usage_enqueue_retry_worker(
     mut receiver: mpsc::Receiver<UsageEnqueueRetryItem>,
     recovered_total: Arc<AtomicU64>,
 ) {
+    let mut initial_retry_delay_applied = false;
     while let Some(mut item) = receiver.recv().await {
+        if !initial_retry_delay_applied {
+            initial_retry_delay_applied = true;
+            tokio::time::sleep(usage_enqueue_retry_delay(&config, 1)).await;
+        }
         loop {
             match item.queue.enqueue(&item.event).await {
                 Ok(_) => {
@@ -928,7 +1173,7 @@ fn fnv_hash(bytes: &[u8]) -> u64 {
 }
 
 fn should_log_usage_retry_counter(value: u64) -> bool {
-    value <= 8 || value.is_power_of_two() || value % 1_000 == 0
+    value <= 8 || value.is_power_of_two() || value.is_multiple_of(1_000)
 }
 
 async fn build_pending_usage_event_offthread(
@@ -1683,6 +1928,19 @@ mod tests {
             1,
             "lifecycle enqueue circuit should prevent repeated Redis appends after a failure"
         );
+        let snapshot = runtime.metrics_snapshot();
+        assert_eq!(
+            snapshot.lifecycle_enqueue_failed_total, 1,
+            "first append failure should open the lifecycle enqueue circuit"
+        );
+        assert_eq!(
+            snapshot.lifecycle_enqueue_deferred_dropped_total, 9,
+            "deferred lifecycle events should be dropped by default instead of entering retry"
+        );
+        assert_eq!(
+            snapshot.enqueue_retry_scheduled_total, 0,
+            "default lifecycle overload policy must not schedule local enqueue retries"
+        );
         assert!(
             store.records.lock().expect("records lock").is_empty(),
             "lifecycle enqueue circuit must not fall back to direct DB writes"
@@ -1690,7 +1948,70 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disabled_lifecycle_queue_does_not_write_directly() {
+    async fn lifecycle_deferred_retry_can_be_enabled() {
+        let config = UsageRuntimeConfig {
+            enabled: true,
+            queue_lifecycle_events: true,
+            retry_deferred_lifecycle_events: true,
+            stream_key: "usage:events:test:lifecycle-deferred-retry".to_string(),
+            consumer_group: "usage_consumers_test_lifecycle_deferred_retry".to_string(),
+            consumer_block_ms: 1,
+            enqueue_retry_initial_backoff_ms: 1,
+            enqueue_retry_max_backoff_ms: 5,
+            enqueue_retry_buffer_capacity: 16,
+            enqueue_retry_workers: 1,
+            ..UsageRuntimeConfig::default()
+        };
+        let inner_queue: Arc<dyn RuntimeQueueStore> =
+            Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+        let flaky_queue = Arc::new(FlakyAppendQueueStore {
+            inner: Arc::clone(&inner_queue),
+            remaining_failures: AtomicUsize::new(1),
+            append_attempts: AtomicUsize::new(0),
+        });
+        let store = CloneQueueConfiguredUsageStore {
+            records: Arc::new(Mutex::new(Vec::new())),
+            queue: flaky_queue,
+        };
+        let runtime = UsageRuntime::new(config).expect("usage runtime should build");
+
+        runtime
+            .enqueue_lifecycle_event(
+                &store,
+                UsageEvent::new(
+                    UsageEventType::Pending,
+                    "req-lifecycle-deferred-retry-open",
+                    UsageEventData {
+                        provider_name: "openai".to_string(),
+                        model: "gpt-5".to_string(),
+                        ..UsageEventData::default()
+                    },
+                ),
+            )
+            .await;
+        runtime
+            .enqueue_lifecycle_event(
+                &store,
+                UsageEvent::new(
+                    UsageEventType::Pending,
+                    "req-lifecycle-deferred-retry-scheduled",
+                    UsageEventData {
+                        provider_name: "openai".to_string(),
+                        model: "gpt-5".to_string(),
+                        ..UsageEventData::default()
+                    },
+                ),
+            )
+            .await;
+
+        let snapshot = runtime.metrics_snapshot();
+        assert_eq!(snapshot.lifecycle_enqueue_deferred_retry_total, 1);
+        assert_eq!(snapshot.lifecycle_enqueue_deferred_dropped_total, 0);
+        assert_eq!(snapshot.enqueue_retry_scheduled_total, 1);
+    }
+
+    #[tokio::test]
+    async fn disabled_lifecycle_queue_writes_pending_directly() {
         let config = UsageRuntimeConfig {
             enabled: true,
             queue_lifecycle_events: false,
@@ -1731,10 +2052,13 @@ mod tests {
         runtime.record_pending(&store, build_lifecycle_usage_seed(&plan, None));
         sleep(Duration::from_millis(50)).await;
 
-        assert!(
-            store.records.lock().expect("records lock").is_empty(),
-            "disabled lifecycle queue must not fall back to direct DB writes"
-        );
+        let records = store.records.lock().expect("records lock");
+        let record = records
+            .first()
+            .expect("disabled lifecycle queue should direct-write pending usage");
+        assert_eq!(record.request_id, "req-lifecycle-disabled-1");
+        assert_eq!(record.status, "pending");
+        assert_eq!(record.billing_status, "pending");
     }
 
     #[tokio::test]
@@ -1790,6 +2114,71 @@ mod tests {
         assert_eq!(queued.request_id, "req-terminal-queue-1");
         assert_eq!(queued.event_type, UsageEventType::Completed);
         assert_eq!(queued.data.total_cost_usd, None);
+    }
+
+    #[tokio::test]
+    async fn terminal_enqueue_failure_opens_short_circuit_and_retries() {
+        let config = UsageRuntimeConfig {
+            enabled: true,
+            queue_terminal_events: true,
+            stream_key: "usage:events:test:terminal-circuit".to_string(),
+            consumer_group: "usage_consumers_test_terminal_circuit".to_string(),
+            consumer_block_ms: 1,
+            enqueue_retry_initial_backoff_ms: 1,
+            enqueue_retry_max_backoff_ms: 5,
+            enqueue_retry_buffer_capacity: 16,
+            enqueue_retry_workers: 1,
+            ..UsageRuntimeConfig::default()
+        };
+        let inner_queue: Arc<dyn RuntimeQueueStore> =
+            Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+        let flaky_queue: Arc<dyn RuntimeQueueStore> = Arc::new(FlakyAppendQueueStore {
+            inner: Arc::clone(&inner_queue),
+            remaining_failures: AtomicUsize::new(usize::MAX),
+            append_attempts: AtomicUsize::new(0),
+        });
+        let store = CloneQueueConfiguredUsageStore {
+            records: Arc::new(Mutex::new(Vec::new())),
+            queue: flaky_queue,
+        };
+        let runtime = UsageRuntime::new(config).expect("usage runtime should build");
+
+        for index in 0..2 {
+            runtime
+                .record_terminal_event(
+                    &store,
+                    UsageEvent::new(
+                        UsageEventType::Completed,
+                        format!("req-terminal-circuit-{index}"),
+                        UsageEventData {
+                            provider_name: "openai".to_string(),
+                            model: "gpt-5".to_string(),
+                            total_tokens: Some(12),
+                            status_code: Some(200),
+                            ..UsageEventData::default()
+                        },
+                    ),
+                )
+                .await;
+        }
+
+        let snapshot = runtime.metrics_snapshot();
+        assert_eq!(
+            snapshot.terminal_enqueue_failed_total, 1,
+            "only the first terminal event should attempt Redis before opening the circuit"
+        );
+        assert_eq!(
+            snapshot.terminal_enqueue_deferred_retry_total, 1,
+            "second terminal event should be scheduled for retry through the open circuit"
+        );
+        assert_eq!(
+            snapshot.enqueue_retry_scheduled_total, 2,
+            "both terminal events should remain reliable via local retry"
+        );
+        assert!(
+            store.records.lock().expect("records lock").is_empty(),
+            "terminal queue failure must not fall back to direct writes"
+        );
     }
 
     #[tokio::test]

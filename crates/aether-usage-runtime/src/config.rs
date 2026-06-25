@@ -14,6 +14,9 @@ pub struct UsageRuntimeConfig {
     pub reclaim_idle_ms: u64,
     pub reclaim_count: usize,
     pub reclaim_interval_ms: u64,
+    pub terminal_enqueue_max_in_flight: u64,
+    pub lifecycle_enqueue_max_in_flight: u64,
+    pub retry_deferred_lifecycle_events: bool,
     pub enqueue_retry_buffer_capacity: usize,
     pub enqueue_retry_workers: usize,
     pub enqueue_retry_initial_backoff_ms: u64,
@@ -35,10 +38,13 @@ impl Default for UsageRuntimeConfig {
             reclaim_idle_ms: 30_000,
             reclaim_count: 500,
             reclaim_interval_ms: 5_000,
+            terminal_enqueue_max_in_flight: 256,
+            lifecycle_enqueue_max_in_flight: 128,
+            retry_deferred_lifecycle_events: false,
             enqueue_retry_buffer_capacity: 131_072,
             enqueue_retry_workers: 4,
-            enqueue_retry_initial_backoff_ms: 10,
-            enqueue_retry_max_backoff_ms: 1_000,
+            enqueue_retry_initial_backoff_ms: 3_000,
+            enqueue_retry_max_backoff_ms: 10_000,
         }
     }
 }
@@ -96,6 +102,16 @@ impl UsageRuntimeConfig {
         if self.reclaim_interval_ms == 0 {
             return Err(DataLayerError::InvalidConfiguration(
                 "usage runtime reclaim_interval_ms must be positive".to_string(),
+            ));
+        }
+        if self.terminal_enqueue_max_in_flight == 0 {
+            return Err(DataLayerError::InvalidConfiguration(
+                "usage runtime terminal_enqueue_max_in_flight must be positive".to_string(),
+            ));
+        }
+        if self.lifecycle_enqueue_max_in_flight == 0 {
+            return Err(DataLayerError::InvalidConfiguration(
+                "usage runtime lifecycle_enqueue_max_in_flight must be positive".to_string(),
             ));
         }
         if self.enqueue_retry_buffer_capacity == 0 {

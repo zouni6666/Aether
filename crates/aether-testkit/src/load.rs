@@ -11,6 +11,14 @@ use tokio::sync::Mutex;
 use crate::runtime::{BenchmarkRuntimeSampler, BenchmarkRuntimeSnapshot};
 
 const MAX_ERROR_SAMPLES: usize = 32;
+const FIRST_BODY_BACKGROUND_DRAIN_CHUNKS_ENV: &str =
+    "AETHER_TESTKIT_FIRST_BODY_BACKGROUND_DRAIN_CHUNKS";
+const FIRST_BODY_BACKGROUND_DRAIN_MS_ENV: &str = "AETHER_TESTKIT_FIRST_BODY_BACKGROUND_DRAIN_MS";
+const FIRST_BODY_AUTO_CLIENT_SHARDS_MAX_ENV: &str =
+    "AETHER_TESTKIT_FIRST_BODY_AUTO_CLIENT_SHARDS_MAX";
+const DEFAULT_FIRST_BODY_BACKGROUND_DRAIN_CHUNKS: usize = 64;
+const DEFAULT_FIRST_BODY_BACKGROUND_DRAIN_MS: u64 = 100;
+const DEFAULT_FIRST_BODY_AUTO_CLIENT_SHARDS_MAX: usize = 512;
 
 #[derive(Debug, Clone, Copy, Default, serde::Serialize, PartialEq, Eq)]
 pub enum HttpLoadProbeResponseMode {
@@ -263,7 +271,8 @@ async fn run_http_load_probe_against_urls(
     config: &HttpLoadProbeConfig,
     urls: &[String],
 ) -> Result<MultiUrlHttpLoadProbeResult, String> {
-    let clients = Arc::new(build_probe_clients(config)?);
+    let effective_client_shards = effective_probe_client_shards(config);
+    let clients = Arc::new(build_probe_clients(config, effective_client_shards)?);
     let total_requests = config.total_requests;
     let request_headers = build_headers(&config.headers)?;
     let request_body = config.body.clone().map(Arc::new);
@@ -423,7 +432,7 @@ async fn run_http_load_probe_against_urls(
         concurrency: config.concurrency,
         warmup_connections: config.warmup_connections,
         warmup_url: config.warmup_url.clone(),
-        client_shards: config.client_shards,
+        client_shards: effective_client_shards,
         start_ramp_ms: config.start_ramp.as_millis() as u64,
         pool_max_idle_per_host: config.pool_max_idle_per_host,
         http1_only: config.http1_only,
@@ -454,9 +463,29 @@ async fn run_http_load_probe_against_urls(
     })
 }
 
-fn build_probe_clients(config: &HttpLoadProbeConfig) -> Result<Vec<Client>, String> {
-    let mut clients = Vec::with_capacity(config.client_shards);
-    for _ in 0..config.client_shards {
+fn effective_probe_client_shards(config: &HttpLoadProbeConfig) -> usize {
+    let configured = config.client_shards.max(1);
+    if configured != 1
+        || config.http1_only
+        || !config.http2_prior_knowledge
+        || config.response_mode != HttpLoadProbeResponseMode::FirstBodyByte
+    {
+        return configured;
+    }
+    let max_auto = env_usize(
+        FIRST_BODY_AUTO_CLIENT_SHARDS_MAX_ENV,
+        DEFAULT_FIRST_BODY_AUTO_CLIENT_SHARDS_MAX,
+    )
+    .max(1);
+    config.concurrency.max(1).min(max_auto)
+}
+
+fn build_probe_clients(
+    config: &HttpLoadProbeConfig,
+    client_shards: usize,
+) -> Result<Vec<Client>, String> {
+    let mut clients = Vec::with_capacity(client_shards);
+    for _ in 0..client_shards {
         let mut builder = Client::builder().timeout(config.timeout);
         if let Some(connect_timeout) = config.connect_timeout {
             builder = builder.connect_timeout(connect_timeout);
@@ -664,6 +693,7 @@ async fn observe_response_body(
             if !first_body_hold.is_zero() {
                 tokio::time::sleep(first_body_hold).await;
             }
+            drain_first_body_response_tail(response).await?;
             Ok(BodyObservation {
                 first_body_latency_ms: Some(first_body_latency_ms),
             })
@@ -691,6 +721,56 @@ async fn observe_response_body(
             })
         }
     }
+}
+
+async fn drain_first_body_response_tail(
+    mut response: reqwest::Response,
+) -> Result<(), ClassifiedLoadError> {
+    let max_chunks = env_usize(
+        FIRST_BODY_BACKGROUND_DRAIN_CHUNKS_ENV,
+        DEFAULT_FIRST_BODY_BACKGROUND_DRAIN_CHUNKS,
+    );
+    if max_chunks == 0 {
+        return Ok(());
+    }
+    let timeout = Duration::from_millis(env_u64(
+        FIRST_BODY_BACKGROUND_DRAIN_MS_ENV,
+        DEFAULT_FIRST_BODY_BACKGROUND_DRAIN_MS,
+    ));
+    let drain = async {
+        for _ in 0..max_chunks {
+            let Some(chunk) = response
+                .chunk()
+                .await
+                .map_err(|err| classify_reqwest_error("body", &err))?
+            else {
+                break;
+            };
+            drop(chunk);
+        }
+        Ok(())
+    };
+    if timeout.is_zero() {
+        return drain.await;
+    }
+    match tokio::time::timeout(timeout, drain).await {
+        Ok(result) => result,
+        Err(_) => Ok(()),
+    }
+}
+
+fn env_usize(key: &str, default_value: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(default_value)
+}
+
+fn env_u64(key: &str, default_value: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(default_value)
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

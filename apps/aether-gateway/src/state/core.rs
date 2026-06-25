@@ -20,6 +20,7 @@ use aether_runtime_state::{
     RuntimeSemaphoreSnapshot, RuntimeState,
 };
 use aether_scheduler_core::PROVIDER_KEY_RPM_WINDOW_SECS;
+use dashmap::DashMap;
 use tracing::warn;
 
 use super::{
@@ -98,6 +99,10 @@ fn system_config_key_affects_frontdoor_rpm(key: &str) -> bool {
 fn system_config_key_affects_chat_pii_redaction(key: &str) -> bool {
     key.trim()
         .starts_with(CHAT_PII_REDACTION_SYSTEM_CONFIG_PREFIX)
+}
+
+fn system_config_key_affects_provider_transport_snapshot(key: &str) -> bool {
+    key.trim() == "enable_format_conversion"
 }
 
 impl AppState {
@@ -185,6 +190,7 @@ impl AppState {
         self.clear_provider_transport_snapshot_cache();
         self.invalidate_scheduler_affinity_cache();
         self.invalidate_auth_context_cache();
+        self.candidate_row_page_cache.clear();
         self.candidate_resolved_page_cache.clear();
         self.system_config_cache.clear();
         self.frontdoor_user_rpm.clear_system_default_cache();
@@ -193,6 +199,7 @@ impl AppState {
                 .clone()
                 .with_usage_worker_queue(Self::usage_worker_queue_for(&self.runtime_state)),
         );
+        self.candidate_row_page_cache.clear();
         self.candidate_page_cache.clear();
         self.candidate_resolved_page_cache.clear();
         self.tunnel = crate::tunnel::EmbeddedTunnelState::with_data_and_runtime_state(
@@ -275,8 +282,12 @@ impl AppState {
             user_feature_settings_cache: Arc::new(JsonValueCache::default()),
             auth_api_key_force_capabilities_cache: Arc::new(JsonValueCache::default()),
             auth_api_key_feature_settings_cache: Arc::new(JsonValueCache::default()),
+            auth_daily_quota_availability_cache: Arc::new(ValueCache::default()),
+            auth_wallet_snapshot_cache: Arc::new(ValueCache::default()),
+            auth_request_cost_upper_bound_cache: Arc::new(ValueCache::default()),
             provider_quota_snapshot_cache: Arc::new(ValueCache::default()),
             user_groups_for_user_cache: Arc::new(ValueCache::default()),
+            routing_group_selection_cache: Arc::new(ValueCache::default()),
             auth_api_key_last_used_cache: Arc::new(AuthApiKeyLastUsedCache::default()),
             oauth_refresh: Arc::new(provider_transport::LocalOAuthRefreshCoordinator::new()),
             direct_plan_bypass_cache: Arc::new(DirectPlanBypassCache::default()),
@@ -284,6 +295,7 @@ impl AppState {
             scheduler_affinity_epoch: Arc::new(AtomicU64::new(0)),
             dashboard_response_cache: Arc::new(DashboardResponseCache::default()),
             system_config_cache: Arc::new(SystemConfigCache::default()),
+            candidate_row_page_cache: Arc::new(crate::cache::CandidateRowPageCache::default()),
             candidate_page_cache: Arc::new(crate::cache::CandidatePageCache::default()),
             candidate_resolved_page_cache: Arc::new(
                 crate::cache::CandidateResolvedPageCache::default(),
@@ -300,9 +312,10 @@ impl AppState {
                 data,
                 runtime_state.clone(),
             ),
-            provider_transport_snapshot_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            provider_transport_snapshot_cache: Arc::new(DashMap::new()),
+            provider_transport_snapshot_inflight: Arc::new(DashMap::new()),
             provider_key_rpm_resets: Arc::new(StdMutex::new(HashMap::new())),
-            local_execution_runtime_miss_diagnostics: Arc::new(StdMutex::new(HashMap::new())),
+            local_execution_runtime_miss_diagnostics: Arc::new(DashMap::new()),
             admin_monitoring_error_stats_reset_at: Arc::new(StdMutex::new(None)),
             provider_delete_tasks: Arc::new(StdMutex::new(HashMap::new())),
             #[cfg(test)]
@@ -671,12 +684,18 @@ impl AppState {
                 &self.chat_pii_redaction_runtime_config_cache,
             );
         }
+        if deleted && system_config_key_affects_provider_transport_snapshot(key) {
+            self.clear_provider_transport_snapshot_cache();
+        }
         Ok(deleted)
     }
 
     pub(crate) fn invalidate_provider_routing_caches(&self) {
         self.data.clear_minimal_candidate_selection_cache();
+        self.data.clear_routing_group_cache();
         self.data.clear_provider_catalog_cache();
+        self.routing_group_selection_cache.clear();
+        self.candidate_row_page_cache.clear();
         self.candidate_page_cache.clear();
         self.candidate_resolved_page_cache.clear();
         self.clear_provider_transport_snapshot_cache();
@@ -686,8 +705,15 @@ impl AppState {
     pub(crate) fn invalidate_provider_health_routing_caches(&self) {
         self.data.clear_minimal_candidate_selection_cache();
         self.data.clear_provider_catalog_cache();
+        self.candidate_row_page_cache.clear();
         self.candidate_page_cache.clear();
         self.candidate_resolved_page_cache.clear();
+        self.clear_provider_transport_snapshot_cache();
+    }
+
+    pub(crate) fn invalidate_provider_runtime_state_caches(&self) {
+        self.data.clear_minimal_candidate_selection_cache();
+        self.data.clear_provider_catalog_cache();
         self.clear_provider_transport_snapshot_cache();
     }
 
@@ -698,8 +724,13 @@ impl AppState {
         self.user_feature_settings_cache.clear();
         self.auth_api_key_force_capabilities_cache.clear();
         self.auth_api_key_feature_settings_cache.clear();
+        self.auth_daily_quota_availability_cache.clear();
+        self.auth_wallet_snapshot_cache.clear();
+        self.auth_request_cost_upper_bound_cache.clear();
         self.provider_quota_snapshot_cache.clear();
         self.user_groups_for_user_cache.clear();
+        self.routing_group_selection_cache.clear();
+        self.candidate_row_page_cache.clear();
         self.candidate_page_cache.clear();
         self.candidate_resolved_page_cache.clear();
     }
@@ -720,6 +751,9 @@ impl AppState {
             crate::privacy::clear_chat_pii_redaction_runtime_config_cache(
                 &self.chat_pii_redaction_runtime_config_cache,
             );
+        }
+        if system_config_key_affects_provider_transport_snapshot(key) {
+            self.clear_provider_transport_snapshot_cache();
         }
     }
 
@@ -1041,6 +1075,9 @@ impl AppState {
         if let Some(queue) = self.request_candidate_queue.as_ref() {
             samples.extend(queue.metric_samples());
         }
+        samples.extend(usage_runtime_metric_samples(
+            &self.usage_runtime.metrics_snapshot(),
+        ));
         samples.extend(
             crate::execution_runtime::transport::direct_reqwest_client_cache_metric_samples(),
         );
@@ -1066,8 +1103,6 @@ impl AppState {
 
     pub(crate) fn clear_local_execution_runtime_miss_diagnostic(&self, trace_id: &str) {
         self.local_execution_runtime_miss_diagnostics
-            .lock()
-            .expect("local execution runtime miss diagnostics should lock")
             .remove(trace_id);
     }
 
@@ -1076,17 +1111,17 @@ impl AppState {
         trace_id: &str,
         diagnostic: LocalExecutionRuntimeMissDiagnostic,
     ) {
-        let mut diagnostics = self
+        if self
             .local_execution_runtime_miss_diagnostics
-            .lock()
-            .expect("local execution runtime miss diagnostics should lock");
-        if diagnostics
             .get(trace_id)
-            .is_some_and(|existing| should_preserve_runtime_miss_diagnostic(existing, &diagnostic))
+            .is_some_and(|existing| {
+                should_preserve_runtime_miss_diagnostic(existing.value(), &diagnostic)
+            })
         {
             return;
         }
-        diagnostics.insert(trace_id.to_string(), diagnostic);
+        self.local_execution_runtime_miss_diagnostics
+            .insert(trace_id.to_string(), diagnostic);
     }
 
     pub(crate) fn mutate_local_execution_runtime_miss_diagnostic<F>(
@@ -1096,12 +1131,11 @@ impl AppState {
     ) where
         F: FnOnce(&mut LocalExecutionRuntimeMissDiagnostic),
     {
-        let mut diagnostics = self
+        if let Some(mut diagnostic) = self
             .local_execution_runtime_miss_diagnostics
-            .lock()
-            .expect("local execution runtime miss diagnostics should lock");
-        if let Some(diagnostic) = diagnostics.get_mut(trace_id) {
-            mutate(diagnostic);
+            .get_mut(trace_id)
+        {
+            mutate(&mut diagnostic);
         }
     }
 
@@ -1110,10 +1144,10 @@ impl AppState {
         trace_id: &str,
     ) -> bool {
         self.local_execution_runtime_miss_diagnostics
-            .lock()
-            .expect("local execution runtime miss diagnostics should lock")
             .get(trace_id)
-            .is_some_and(runtime_miss_diagnostic_has_candidate_signal)
+            .is_some_and(|diagnostic| {
+                runtime_miss_diagnostic_has_candidate_signal(diagnostic.value())
+            })
     }
 
     pub(crate) fn take_local_execution_runtime_miss_diagnostic(
@@ -1121,9 +1155,8 @@ impl AppState {
         trace_id: &str,
     ) -> Option<LocalExecutionRuntimeMissDiagnostic> {
         self.local_execution_runtime_miss_diagnostics
-            .lock()
-            .expect("local execution runtime miss diagnostics should lock")
             .remove(trace_id)
+            .map(|(_, diagnostic)| diagnostic)
     }
 
     pub(crate) async fn try_acquire_request_permit(
@@ -1231,6 +1264,7 @@ impl AppState {
             .fetch_add(1, Ordering::AcqRel)
             .saturating_add(1);
         self.scheduler_affinity_cache.clear();
+        self.candidate_row_page_cache.clear();
         self.candidate_page_cache.clear();
         self.candidate_resolved_page_cache.clear();
         next_epoch
@@ -1492,6 +1526,97 @@ fn database_pool_metric_samples(summary: &aether_data::DatabasePoolSummary) -> V
             u64::from(under_maintenance_pressure),
         )
         .with_labels(labels),
+    ]
+}
+
+fn usage_runtime_metric_samples(
+    snapshot: &usage::UsageRuntimeMetricsSnapshot,
+) -> Vec<MetricSample> {
+    vec![
+        MetricSample::new(
+            "usage_runtime_enabled",
+            "Whether the gateway usage runtime is enabled.",
+            MetricKind::Gauge,
+            u64::from(snapshot.enabled),
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_terminal_events_enabled",
+            "Whether terminal usage events are queued before settlement.",
+            MetricKind::Gauge,
+            u64::from(snapshot.queue_terminal_events),
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_lifecycle_events_enabled",
+            "Whether lifecycle usage events are queued.",
+            MetricKind::Gauge,
+            u64::from(snapshot.queue_lifecycle_events),
+        ),
+        MetricSample::new(
+            "usage_runtime_retry_deferred_lifecycle_events_enabled",
+            "Whether deferred lifecycle usage events are scheduled for local enqueue retry.",
+            MetricKind::Gauge,
+            u64::from(snapshot.retry_deferred_lifecycle_events),
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_enqueue_in_flight",
+            "Current terminal usage enqueue operations in flight.",
+            MetricKind::Gauge,
+            snapshot.terminal_enqueue_in_flight,
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_enqueue_deferred_total",
+            "Total terminal usage enqueue operations deferred by circuit or in-flight limits.",
+            MetricKind::Counter,
+            snapshot.terminal_enqueue_deferred_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_enqueue_deferred_retry_total",
+            "Total deferred terminal usage events scheduled for local retry.",
+            MetricKind::Counter,
+            snapshot.terminal_enqueue_deferred_retry_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_enqueue_failed_total",
+            "Total terminal usage enqueue failures that opened the terminal enqueue circuit.",
+            MetricKind::Counter,
+            snapshot.terminal_enqueue_failed_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_lifecycle_enqueue_in_flight",
+            "Current lifecycle usage enqueue operations in flight.",
+            MetricKind::Gauge,
+            snapshot.lifecycle_enqueue_in_flight,
+        ),
+        MetricSample::new(
+            "usage_runtime_lifecycle_enqueue_deferred_total",
+            "Total lifecycle usage enqueue operations deferred by circuit or in-flight limits.",
+            MetricKind::Counter,
+            snapshot.lifecycle_enqueue_deferred_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_lifecycle_enqueue_deferred_dropped_total",
+            "Total deferred lifecycle usage events dropped instead of retrying.",
+            MetricKind::Counter,
+            snapshot.lifecycle_enqueue_deferred_dropped_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_lifecycle_enqueue_deferred_retry_total",
+            "Total deferred lifecycle usage events scheduled for local retry.",
+            MetricKind::Counter,
+            snapshot.lifecycle_enqueue_deferred_retry_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_lifecycle_enqueue_failed_total",
+            "Total lifecycle usage enqueue failures that opened the lifecycle enqueue circuit.",
+            MetricKind::Counter,
+            snapshot.lifecycle_enqueue_failed_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_enqueue_retry_scheduled_total",
+            "Total usage events scheduled into the local enqueue retry dispatcher.",
+            MetricKind::Counter,
+            snapshot.enqueue_retry_scheduled_total,
+        ),
     ]
 }
 

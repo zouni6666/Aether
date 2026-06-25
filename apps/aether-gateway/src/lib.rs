@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 #![allow(
     dead_code,
     unused_assignments,
@@ -73,6 +74,8 @@ mod stage_metrics;
 mod state;
 mod system_features;
 mod task_runtime;
+#[cfg(feature = "testkit")]
+pub mod testkit;
 mod tunnel;
 mod upstream_admission;
 mod usage;
@@ -96,7 +99,8 @@ pub(crate) use self::execution_runtime::{
 };
 pub use self::execution_runtime::{
     build_execution_runtime_router, build_execution_runtime_router_with_request_concurrency_limit,
-    build_execution_runtime_router_with_request_gates, serve_execution_runtime_tcp,
+    build_execution_runtime_router_with_request_gates,
+    prewarm_direct_h2c_sender_cache_from_env_for_startup, serve_execution_runtime_tcp,
     serve_execution_runtime_unix,
 };
 pub(crate) use self::fallback_metrics::{GatewayFallbackMetricKind, GatewayFallbackReason};
