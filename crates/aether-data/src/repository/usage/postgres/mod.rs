@@ -1444,13 +1444,26 @@ ORDER BY delta.created_at ASC, delta.id ASC
 
 const READ_USAGE_COUNTER_HEALTH_SQL: &str = r#"
 SELECT
-  COUNT(*) FILTER (WHERE processed_at IS NULL)::BIGINT AS pending_rows,
-  COUNT(*) FILTER (WHERE processed_at IS NOT NULL)::BIGINT AS processed_rows,
-  CAST(EXTRACT(EPOCH FROM MIN(created_at) FILTER (WHERE processed_at IS NULL)) AS BIGINT)
-    AS oldest_pending_created_at_unix_secs,
-  CAST(EXTRACT(EPOCH FROM MAX(processed_at)) AS BIGINT)
-    AS latest_processed_at_unix_secs
-FROM usage_counter_deltas
+  (
+    SELECT COUNT(*)::BIGINT
+    FROM usage_counter_deltas
+    WHERE processed_at IS NULL
+  ) AS pending_rows,
+  (
+    SELECT COUNT(*)::BIGINT
+    FROM usage_counter_deltas
+    WHERE processed_at IS NOT NULL
+  ) AS processed_rows,
+  (
+    SELECT CAST(EXTRACT(EPOCH FROM MIN(created_at)) AS BIGINT)
+    FROM usage_counter_deltas
+    WHERE processed_at IS NULL
+  ) AS oldest_pending_created_at_unix_secs,
+  (
+    SELECT CAST(EXTRACT(EPOCH FROM MAX(processed_at)) AS BIGINT)
+    FROM usage_counter_deltas
+    WHERE processed_at IS NOT NULL
+  ) AS latest_processed_at_unix_secs
 "#;
 
 const READ_PENDING_USAGE_COUNTER_DELTAS_BY_KIND_SQL: &str = r#"
