@@ -481,6 +481,7 @@ AND LOWER(TRIM(COALESCE(provider_name, ''))) NOT IN ('unknown', 'unknow'))",
             separated.push_unseparated(")");
         }
     }
+    push_sqlite_usage_excluded_status_codes(builder, has_where, &query.exclude_status_codes);
     if let Some(is_stream) = query.is_stream {
         push_sqlite_usage_where(builder, has_where);
         builder
@@ -495,6 +496,23 @@ OR COALESCE(status_code, 0) >= 400 \
 OR (error_message IS NOT NULL AND TRIM(error_message) <> ''))",
         );
     }
+}
+
+fn push_sqlite_usage_excluded_status_codes(
+    builder: &mut QueryBuilder<'_, Sqlite>,
+    has_where: &mut bool,
+    status_codes: &[u16],
+) {
+    if status_codes.is_empty() {
+        return;
+    }
+    push_sqlite_usage_where(builder, has_where);
+    builder.push("(status_code IS NULL OR status_code NOT IN (");
+    let mut separated = builder.separated(", ");
+    for status_code in status_codes {
+        separated.push_bind(i64::from(*status_code));
+    }
+    separated.push_unseparated("))");
 }
 
 fn push_sqlite_usage_keyword_filters(
@@ -514,6 +532,7 @@ fn push_sqlite_usage_keyword_filters(
             client_family: query.client_family.clone(),
             exclude_unknown_model_or_provider: query.exclude_unknown_model_or_provider,
             statuses: query.statuses.clone(),
+            exclude_status_codes: query.exclude_status_codes.clone(),
             is_stream: query.is_stream,
             error_only: query.error_only,
             limit: None,
@@ -2487,6 +2506,23 @@ FROM "usage"
             &mut has_where,
             "provider_name",
             query.provider_name.as_deref(),
+        );
+        push_sqlite_usage_optional_text_filter(
+            &mut builder,
+            &mut has_where,
+            "model",
+            query.model.as_deref(),
+        );
+        push_sqlite_usage_optional_text_filter(
+            &mut builder,
+            &mut has_where,
+            "api_format",
+            query.api_format.as_deref(),
+        );
+        push_sqlite_usage_excluded_status_codes(
+            &mut builder,
+            &mut has_where,
+            &query.exclude_status_codes,
         );
         if matches!(query.group_by, UsageBreakdownGroupBy::ApiFormat) {
             push_sqlite_usage_where(&mut builder, &mut has_where);

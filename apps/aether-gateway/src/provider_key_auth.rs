@@ -95,6 +95,23 @@ pub(crate) fn provider_key_can_refresh_oauth(
             .is_some_and(|value| !value.is_empty())
 }
 
+pub(crate) fn provider_key_auth_config_uses_header_authorization(
+    auth_config: Option<&Map<String, Value>>,
+) -> bool {
+    auth_config
+        .and_then(|config| config.get("headers"))
+        .and_then(Value::as_object)
+        .is_some_and(|headers| {
+            headers.iter().any(|(key, value)| {
+                key.trim().eq_ignore_ascii_case("authorization")
+                    && value
+                        .as_str()
+                        .map(str::trim)
+                        .is_some_and(|value| !value.is_empty())
+            })
+        })
+}
+
 fn normalized_auth_type(key: &StoredProviderCatalogKey) -> String {
     key.auth_type.trim().to_ascii_lowercase()
 }
@@ -255,7 +272,8 @@ pub(crate) fn provider_key_effective_api_formats(
 #[cfg(test)]
 mod tests {
     use super::{
-        provider_active_api_formats, provider_key_auth_semantics, provider_key_can_refresh_oauth,
+        provider_active_api_formats, provider_key_auth_config_uses_header_authorization,
+        provider_key_auth_semantics, provider_key_can_refresh_oauth,
         provider_key_configured_api_formats, provider_key_effective_api_formats,
         provider_key_inherits_provider_api_formats, ProviderKeyCredentialKind,
         ProviderKeyRuntimeAuthKind,
@@ -374,6 +392,26 @@ mod tests {
         assert!(provider_key_can_refresh_oauth(
             semantics,
             json!({ "refresh_token": "refresh-token" }).as_object()
+        ));
+    }
+
+    #[test]
+    fn detects_oauth_header_authorization_in_auth_config() {
+        assert!(provider_key_auth_config_uses_header_authorization(
+            json!({
+                "headers": {
+                    "Authorization": "Bearer imported-session"
+                }
+            })
+            .as_object()
+        ));
+        assert!(!provider_key_auth_config_uses_header_authorization(
+            json!({
+                "headers": {
+                    "authorization": "   "
+                }
+            })
+            .as_object()
         ));
     }
 

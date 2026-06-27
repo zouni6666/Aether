@@ -580,13 +580,23 @@ impl UserReadRepository for InMemoryUserReadRepository {
         &self,
         user_id: &str,
     ) -> Result<Option<StoredUserExportRow>, DataLayerError> {
-        Ok(self
+        if let Some(row) = self
             .export_rows
             .read()
             .expect("user repository lock")
             .iter()
             .find(|row| row.id == user_id)
-            .cloned())
+            .cloned()
+        {
+            return Ok(Some(row));
+        }
+
+        self.auth_by_id
+            .read()
+            .expect("user repository lock")
+            .get(user_id)
+            .map(|user| memory_export_row_from_auth_user(self, user))
+            .transpose()
     }
 
     async fn list_user_groups(&self) -> Result<Vec<StoredUserGroup>, DataLayerError> {

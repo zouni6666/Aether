@@ -76,8 +76,22 @@ pub fn build_codex_pool_quota_request(
 ) -> Result<ProviderPoolQuotaRequestSpec, String> {
     let mut headers = BTreeMap::new();
     headers.insert("accept".to_string(), "application/json".to_string());
+    let auth_config_headers = auth_config
+        .and_then(|value| value.get("headers"))
+        .and_then(Value::as_object);
+    let auth_config_authorization = auth_config_headers
+        .and_then(|headers| {
+            headers
+                .get("authorization")
+                .or_else(|| headers.get("Authorization"))
+        })
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
 
-    if let Some((name, value)) = resolved_oauth_auth {
+    if let Some(authorization) = auth_config_authorization {
+        headers.insert("authorization".to_string(), authorization.to_string());
+    } else if let Some((name, value)) = resolved_oauth_auth {
         headers.insert(name.to_ascii_lowercase(), value);
     } else {
         let decrypted_key = decrypted_api_key.unwrap_or_default().trim();

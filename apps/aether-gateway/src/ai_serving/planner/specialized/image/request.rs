@@ -210,6 +210,7 @@ pub(super) async fn resolve_local_openai_image_candidate_payload_parts(
         })
     } else {
         build_openai_image_headers(ProviderOpenAiImageHeadersInput {
+            transport,
             headers: effective_headers,
             auth_header: &auth_header,
             auth_value: &auth_value,

@@ -4,7 +4,8 @@ use crate::handlers::admin::provider::shared::support::{
 use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::{provider_key_status_snapshot_payload, unix_secs_to_rfc3339};
 use crate::provider_key_auth::{
-    provider_key_auth_semantics, provider_key_can_refresh_oauth, provider_key_effective_api_formats,
+    provider_key_auth_config_uses_header_authorization, provider_key_auth_semantics,
+    provider_key_can_refresh_oauth, provider_key_effective_api_formats,
 };
 use aether_admin::provider::pool as admin_provider_pool_pure;
 use aether_admin::provider::quota as admin_provider_quota_pure;
@@ -1114,6 +1115,8 @@ pub(super) fn build_admin_pool_key_payload(
             .and_then(|config| config.get("access_token_import_temporary"))
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
+    let oauth_header_auth = auth_semantics.oauth_managed()
+        && provider_key_auth_config_uses_header_authorization(auth_config.as_ref());
     let account_status_code = admin_pool_trimmed_string_from_map(account_snapshot, "code");
     let account_status_label =
         admin_pool_trimmed_string(account_snapshot.and_then(|item| item.get("label")));
@@ -1193,6 +1196,7 @@ pub(super) fn build_admin_pool_key_payload(
         "can_edit_oauth".to_string(),
         json!(auth_semantics.can_edit_oauth()),
     );
+    payload.insert("oauth_header_auth".to_string(), json!(oauth_header_auth));
     payload.insert("oauth_expires_at".to_string(), json!(oauth_expires_at));
     payload.insert("oauth_invalid_at".to_string(), json!(oauth_invalid_at));
     payload.insert(

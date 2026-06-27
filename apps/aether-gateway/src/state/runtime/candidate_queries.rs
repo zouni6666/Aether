@@ -1,5 +1,8 @@
 use crate::{AppState, GatewayError};
 use aether_data_contracts::repository::{candidate_selection, candidates, quota};
+use std::time::Duration;
+
+const PROVIDER_QUOTA_RUNTIME_CACHE_TTL: Duration = Duration::from_secs(5);
 
 impl AppState {
     pub(crate) async fn list_minimal_candidate_selection_rows_for_api_format(
@@ -71,10 +74,19 @@ impl AppState {
         &self,
         provider_id: &str,
     ) -> Result<Option<quota::StoredProviderQuotaSnapshot>, GatewayError> {
-        self.data
-            .find_provider_quota_by_provider_id(provider_id)
+        let provider_id = provider_id.trim();
+        if provider_id.is_empty() {
+            return Ok(None);
+        }
+        let cache_key = provider_id.to_string();
+        self.provider_quota_snapshot_cache
+            .get_or_load(cache_key, PROVIDER_QUOTA_RUNTIME_CACHE_TTL, || async move {
+                self.data
+                    .find_provider_quota_by_provider_id(provider_id)
+                    .await
+                    .map_err(|err| GatewayError::Internal(err.to_string()))
+            })
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
     pub(crate) async fn read_provider_quota_snapshots(
@@ -101,9 +113,67 @@ impl AppState {
         &self,
         candidate: candidates::UpsertRequestCandidateRecord,
     ) -> Result<Option<candidates::StoredRequestCandidate>, GatewayError> {
+        if let Some(queue) = self.request_candidate_queue.as_ref() {
+            let stored = stored_request_candidate_from_upsert(&candidate)?;
+            queue
+                .enqueue_or_fallback(candidate)
+                .await
+                .map_err(|err| GatewayError::Internal(err.to_string()))?;
+            return Ok(Some(stored));
+        }
+
         self.data
             .upsert_request_candidate(candidate)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
+}
+
+fn stored_request_candidate_from_upsert(
+    candidate: &candidates::UpsertRequestCandidateRecord,
+) -> Result<candidates::StoredRequestCandidate, GatewayError> {
+    candidate
+        .validate()
+        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    candidates::StoredRequestCandidate::new(
+        candidate.id.clone(),
+        candidate.request_id.clone(),
+        candidate.user_id.clone(),
+        candidate.api_key_id.clone(),
+        candidate.username.clone(),
+        candidate.api_key_name.clone(),
+        candidate.candidate_index.try_into().unwrap_or(i32::MAX),
+        candidate.retry_index.try_into().unwrap_or(i32::MAX),
+        candidate.provider_id.clone(),
+        candidate.endpoint_id.clone(),
+        candidate.key_id.clone(),
+        candidate.status,
+        candidate.skip_reason.clone(),
+        candidate.is_cached.unwrap_or(false),
+        candidate.status_code.map(i32::from),
+        candidate.error_type.clone(),
+        candidate.error_message.clone(),
+        candidate
+            .latency_ms
+            .map(|value| i32::try_from(value).unwrap_or(i32::MAX)),
+        candidate
+            .concurrent_requests
+            .map(|value| i32::try_from(value).unwrap_or(i32::MAX)),
+        candidate.extra_data.clone(),
+        candidate.required_capabilities.clone(),
+        candidate
+            .created_at_unix_ms
+            .or(candidate.started_at_unix_ms)
+            .or(candidate.finished_at_unix_ms)
+            .unwrap_or_else(crate::clock::current_unix_ms)
+            .try_into()
+            .unwrap_or(i64::MAX),
+        candidate
+            .started_at_unix_ms
+            .map(|value| value.try_into().unwrap_or(i64::MAX)),
+        candidate
+            .finished_at_unix_ms
+            .map(|value| value.try_into().unwrap_or(i64::MAX)),
+    )
+    .map_err(|err| GatewayError::Internal(err.to_string()))
 }

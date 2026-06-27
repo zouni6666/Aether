@@ -1227,6 +1227,7 @@ async fn resolve_local_gemini_image_to_openai_image_candidate_payload_parts(
     let effective_headers = input.effective_headers(&parts.headers);
     let Some(mut provider_request_headers) =
         build_openai_image_headers(ProviderOpenAiImageHeadersInput {
+            transport,
             headers: effective_headers,
             auth_header: &prepared_candidate.auth_header,
             auth_value: &prepared_candidate.auth_value,

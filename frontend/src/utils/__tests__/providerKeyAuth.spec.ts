@@ -39,4 +39,14 @@ describe('providerKeyAuth', () => {
     expect(shouldShowOAuthRefreshControl(input)).toBe(true)
     expect(getProviderMaskedSecretLabel(input, 'codex')).toBe('[OAuth Token]')
   })
+
+  it('renders OAuth-managed authorization header credentials as OAuth Header', () => {
+    const input = {
+      auth_type: 'oauth',
+      oauth_managed: true,
+      oauth_header_auth: true,
+    }
+
+    expect(getProviderMaskedSecretLabel(input, 'codex')).toBe('[OAuth Header]')
+  })
 })

@@ -28,6 +28,12 @@ pub(super) fn build_scheduler_affinity_cache_key(
     )
 }
 
+pub(super) fn has_explicit_session_affinity(
+    client_session_affinity: Option<&ClientSessionAffinity>,
+) -> bool {
+    client_session_affinity.is_some_and(ClientSessionAffinity::has_session_key)
+}
+
 pub(super) fn scheduler_candidate_affinity_hash(
     affinity_key: &str,
     candidate: &SchedulerMinimalCandidateSelectionCandidate,

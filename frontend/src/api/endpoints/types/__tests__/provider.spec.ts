@@ -5,7 +5,7 @@ import { normalizeChatPiiRedactionProviderConfig, normalizePoolAdvancedConfig } 
 describe('normalizePoolAdvancedConfig', () => {
   it('keeps object payloads, including empty objects', () => {
     expect(normalizePoolAdvancedConfig({})).toEqual({})
-    expect(normalizePoolAdvancedConfig({ global_priority: 5 })).toEqual({ global_priority: 5 })
+    expect(normalizePoolAdvancedConfig({ rate_limit_cooldown_seconds: 300 })).toEqual({ rate_limit_cooldown_seconds: 300 })
   })
 
   it('maps legacy boolean payloads to the current object semantics', () => {

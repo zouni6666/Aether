@@ -1181,6 +1181,7 @@ const navigation = computed(() => {
       title: '概览',
       items: [
         { name: '仪表盘', href: '/admin/dashboard', icon: Home },
+        { name: '运维总览', href: '/admin/operations', icon: Activity },
         { name: '健康监控', href: '/admin/health-monitor', icon: Activity },
         { name: '用户统计', href: '/admin/user-stats', icon: BarChart3 },
         { name: '成本分析', href: '/admin/cost-analysis', icon: Gauge },

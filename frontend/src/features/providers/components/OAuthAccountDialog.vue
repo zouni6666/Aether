@@ -681,10 +681,10 @@
               <span>成功 {{ importTask.success }} · 失败 {{ importTask.failed }}</span>
             </div>
             <p
-              v-if="importTask.message"
+              v-if="importTaskMessageText"
               class="text-[11px] text-muted-foreground"
             >
-              {{ importTask.message }}
+              {{ importTaskMessageText }}
             </p>
             <div
               v-if="importTask.error_samples.length > 0"
@@ -926,6 +926,7 @@ const importInputResetKey = ref(0)
 const importTask = ref<OAuthBatchImportTaskStatusResponse | null>(null)
 let importPollTimer: ReturnType<typeof setTimeout> | null = null
 const importPolling = ref(false)
+const redundantImportTaskMessagePattern = /^处理中(?:\s+\d+\s*\/\s*\d+)?$/
 const windsurfImportMethod = ref<WindsurfImportMethod>('email_password')
 const windsurfEmail = ref('')
 const windsurfPassword = ref('')
@@ -1034,6 +1035,13 @@ const importButtonText = computed(() => {
       : '导入中...'
   }
   return isWindsurfEmailPasswordImport.value ? '登录并导入' : importButtonLabel.value
+})
+
+const importTaskMessageText = computed(() => {
+  const message = importTask.value?.message?.trim()
+  if (!message) return ''
+  // 后端进度 message 已由“进度 x/y”展示，避免在导入中重复显示“处理中 x/y”。
+  return redundantImportTaskMessagePattern.test(message) ? '' : message
 })
 
 function stopImportPolling() {
@@ -1352,6 +1360,7 @@ function parseImportText(text: string): {
   browser_profile?: string
   user_id?: string
   account_name?: string
+  headers?: Record<string, string>
 } | null {
   const trimmed = text.trim()
   if (!trimmed) return null
@@ -1422,7 +1431,14 @@ function parseImportText(text: string): {
       const normalizedSessionToken = typeof sessionToken === 'string' && sessionToken.trim()
         ? sessionToken.trim()
         : (typeof sessionTokenCamel === 'string' && sessionTokenCamel.trim() ? sessionTokenCamel.trim() : undefined)
-      const importedAccessToken = normalizedAccessToken ?? grokSsoToken ?? normalizedSessionToken
+      const normalizedHeaders = normalizeHeadersField(obj.headers)
+        ?? normalizeHeadersField(obj.request_headers)
+        ?? normalizeHeadersField(obj.requestHeaders)
+        ?? normalizeHeadersField(obj.header_overrides)
+        ?? normalizeHeadersField(obj.headerOverrides)
+        ?? normalizeHeadersField(obj.extra_headers)
+        ?? normalizeHeadersField(obj.extraHeaders)
+      const importedAccessToken = normalizedAccessToken ?? grokSsoToken ?? normalizedSessionToken ?? bearerTokenFromHeaders(normalizedHeaders)
       if (normalizedRefreshToken || importedAccessToken) {
         return {
           refresh_token: normalizedRefreshToken,
@@ -1441,6 +1457,7 @@ function parseImportText(text: string): {
           browser_profile: isGrokProvider.value ? normalizeStringField(obj.browser_profile) ?? normalizeStringField(obj.browserProfile) ?? normalizeStringField(obj.browser) ?? normalizeStringField(obj.impersonate) ?? grokCookieImport?.browser_profile : undefined,
           user_id: normalizeStringField(obj.user_id) ?? normalizeStringField(obj.userId) ?? normalizeStringField(obj.chatgpt_user_id) ?? normalizeStringField(obj.chatgptUserId),
           account_name: normalizeStringField(obj.account_name) ?? normalizeStringField(obj.accountName),
+          headers: normalizedHeaders,
         }
       }
       return null
@@ -1524,6 +1541,34 @@ function parseCookieHeader(text: string): Map<string, string> {
 
 function normalizeStringField(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function normalizeHeadersField(value: unknown): Record<string, string> | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const headers: Record<string, string> = {}
+  for (const [rawKey, rawValue] of Object.entries(value as Record<string, unknown>)) {
+    const key = rawKey.trim().toLowerCase()
+    if (!key || ['host', 'content-length', 'connection', 'transfer-encoding', 'proxy-authorization'].includes(key)) {
+      continue
+    }
+    let headerValue: string | undefined
+    if (typeof rawValue === 'string') {
+      headerValue = rawValue.trim()
+    } else if (typeof rawValue === 'number' || typeof rawValue === 'boolean') {
+      headerValue = String(rawValue)
+    }
+    if (headerValue) {
+      headers[key] = headerValue
+    }
+  }
+  return Object.keys(headers).length > 0 ? headers : undefined
+}
+
+function bearerTokenFromHeaders(headers: Record<string, string> | undefined): string | undefined {
+  const authorization = headers?.authorization?.trim()
+  if (!authorization) return undefined
+  const match = authorization.match(/^bearer\s+(.+)$/i)
+  return match?.[1]?.trim() || undefined
 }
 
 function normalizeNumberField(value: unknown): number | undefined {

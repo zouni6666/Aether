@@ -965,6 +965,9 @@ pub(super) async fn handle_users_me_usage_get(
                 created_until_unix_secs,
                 user_id: Some(auth.user.id.clone()),
                 provider_name: None,
+                model: None,
+                api_format: None,
+                exclude_status_codes: Vec::new(),
                 group_by: UsageBreakdownGroupBy::Model,
             })
             .await
@@ -985,6 +988,9 @@ pub(super) async fn handle_users_me_usage_get(
                     created_until_unix_secs,
                     user_id: Some(auth.user.id.clone()),
                     provider_name: None,
+                    model: None,
+                    api_format: None,
+                    exclude_status_codes: Vec::new(),
                     group_by: UsageBreakdownGroupBy::Provider,
                 })
                 .await
@@ -1005,6 +1011,9 @@ pub(super) async fn handle_users_me_usage_get(
                 created_until_unix_secs,
                 user_id: Some(auth.user.id.clone()),
                 provider_name: None,
+                model: None,
+                api_format: None,
+                exclude_status_codes: Vec::new(),
                 group_by: UsageBreakdownGroupBy::ApiFormat,
             })
             .await
@@ -1045,6 +1054,7 @@ pub(super) async fn handle_users_me_usage_get(
                 client_family: None,
                 exclude_unknown_model_or_provider: false,
                 statuses: None,
+                exclude_status_codes: Vec::new(),
                 is_stream: None,
                 error_only: false,
                 keywords,
@@ -1100,6 +1110,7 @@ pub(super) async fn handle_users_me_usage_get(
                     client_family: None,
                     exclude_unknown_model_or_provider: false,
                     statuses: None,
+                    exclude_status_codes: Vec::new(),
                     is_stream: None,
                     error_only: false,
                     limit: None,
@@ -1128,6 +1139,7 @@ pub(super) async fn handle_users_me_usage_get(
                     client_family: None,
                     exclude_unknown_model_or_provider: false,
                     statuses: None,
+                    exclude_status_codes: Vec::new(),
                     is_stream: None,
                     error_only: false,
                     limit: Some(limit),
@@ -1266,6 +1278,7 @@ pub(super) async fn handle_users_me_usage_active_get(
                 client_family: None,
                 exclude_unknown_model_or_provider: false,
                 statuses: Some(vec!["pending".to_string(), "streaming".to_string()]),
+                exclude_status_codes: Vec::new(),
                 is_stream: None,
                 error_only: false,
                 limit: Some(50),

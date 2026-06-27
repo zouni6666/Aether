@@ -4,6 +4,12 @@ use aether_data_contracts::DataLayerError;
 pub struct UsageRuntimeConfig {
     pub enabled: bool,
     pub queue_terminal_events: bool,
+    pub queue_lifecycle_events: bool,
+    pub worker_count: usize,
+    pub worker_autoscale_enabled: bool,
+    pub worker_max_count: usize,
+    pub worker_scale_interval_ms: u64,
+    pub worker_idle_scale_down_ticks: u64,
     pub stream_key: String,
     pub consumer_group: String,
     pub dlq_stream_key: String,
@@ -13,6 +19,13 @@ pub struct UsageRuntimeConfig {
     pub reclaim_idle_ms: u64,
     pub reclaim_count: usize,
     pub reclaim_interval_ms: u64,
+    pub terminal_enqueue_max_in_flight: u64,
+    pub lifecycle_enqueue_max_in_flight: u64,
+    pub retry_deferred_lifecycle_events: bool,
+    pub enqueue_retry_buffer_capacity: usize,
+    pub enqueue_retry_workers: usize,
+    pub enqueue_retry_initial_backoff_ms: u64,
+    pub enqueue_retry_max_backoff_ms: u64,
 }
 
 impl Default for UsageRuntimeConfig {
@@ -20,15 +33,28 @@ impl Default for UsageRuntimeConfig {
         Self {
             enabled: false,
             queue_terminal_events: false,
+            queue_lifecycle_events: false,
+            worker_count: 4,
+            worker_autoscale_enabled: true,
+            worker_max_count: 64,
+            worker_scale_interval_ms: 1_000,
+            worker_idle_scale_down_ticks: 30,
             stream_key: "usage:events".to_string(),
             consumer_group: "usage_consumers".to_string(),
             dlq_stream_key: "usage:events:dlq".to_string(),
-            stream_maxlen: 2_000,
-            consumer_batch_size: 200,
+            stream_maxlen: 200_000,
+            consumer_batch_size: 500,
             consumer_block_ms: 500,
             reclaim_idle_ms: 30_000,
-            reclaim_count: 200,
+            reclaim_count: 500,
             reclaim_interval_ms: 5_000,
+            terminal_enqueue_max_in_flight: 256,
+            lifecycle_enqueue_max_in_flight: 128,
+            retry_deferred_lifecycle_events: false,
+            enqueue_retry_buffer_capacity: 131_072,
+            enqueue_retry_workers: 4,
+            enqueue_retry_initial_backoff_ms: 3_000,
+            enqueue_retry_max_backoff_ms: 10_000,
         }
     }
 }
@@ -56,6 +82,26 @@ impl UsageRuntimeConfig {
         if self.dlq_stream_key.trim().is_empty() {
             return Err(DataLayerError::InvalidConfiguration(
                 "usage runtime dlq_stream_key cannot be empty".to_string(),
+            ));
+        }
+        if self.worker_count == 0 {
+            return Err(DataLayerError::InvalidConfiguration(
+                "usage runtime worker_count must be positive".to_string(),
+            ));
+        }
+        if self.worker_max_count == 0 {
+            return Err(DataLayerError::InvalidConfiguration(
+                "usage runtime worker_max_count must be positive".to_string(),
+            ));
+        }
+        if self.worker_scale_interval_ms == 0 {
+            return Err(DataLayerError::InvalidConfiguration(
+                "usage runtime worker_scale_interval_ms must be positive".to_string(),
+            ));
+        }
+        if self.worker_idle_scale_down_ticks == 0 {
+            return Err(DataLayerError::InvalidConfiguration(
+                "usage runtime worker_idle_scale_down_ticks must be positive".to_string(),
             ));
         }
         if self.stream_maxlen == 0 {
@@ -86,6 +132,41 @@ impl UsageRuntimeConfig {
         if self.reclaim_interval_ms == 0 {
             return Err(DataLayerError::InvalidConfiguration(
                 "usage runtime reclaim_interval_ms must be positive".to_string(),
+            ));
+        }
+        if self.terminal_enqueue_max_in_flight == 0 {
+            return Err(DataLayerError::InvalidConfiguration(
+                "usage runtime terminal_enqueue_max_in_flight must be positive".to_string(),
+            ));
+        }
+        if self.lifecycle_enqueue_max_in_flight == 0 {
+            return Err(DataLayerError::InvalidConfiguration(
+                "usage runtime lifecycle_enqueue_max_in_flight must be positive".to_string(),
+            ));
+        }
+        if self.enqueue_retry_buffer_capacity == 0 {
+            return Err(DataLayerError::InvalidConfiguration(
+                "usage runtime enqueue_retry_buffer_capacity must be positive".to_string(),
+            ));
+        }
+        if self.enqueue_retry_workers == 0 {
+            return Err(DataLayerError::InvalidConfiguration(
+                "usage runtime enqueue_retry_workers must be positive".to_string(),
+            ));
+        }
+        if self.enqueue_retry_initial_backoff_ms == 0 {
+            return Err(DataLayerError::InvalidConfiguration(
+                "usage runtime enqueue_retry_initial_backoff_ms must be positive".to_string(),
+            ));
+        }
+        if self.enqueue_retry_max_backoff_ms == 0 {
+            return Err(DataLayerError::InvalidConfiguration(
+                "usage runtime enqueue_retry_max_backoff_ms must be positive".to_string(),
+            ));
+        }
+        if self.enqueue_retry_initial_backoff_ms > self.enqueue_retry_max_backoff_ms {
+            return Err(DataLayerError::InvalidConfiguration(
+                "usage runtime enqueue retry initial backoff cannot exceed max backoff".to_string(),
             ));
         }
 

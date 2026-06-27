@@ -2180,6 +2180,7 @@ async fn provider_query_execute_openai_image_test_candidate(
     } else {
         crate::provider_transport::build_openai_image_headers(
             crate::provider_transport::ProviderOpenAiImageHeadersInput {
+                transport: &transport,
                 headers: &parts.headers,
                 auth_header: &auth_header,
                 auth_value: &auth_value,
@@ -3189,6 +3190,10 @@ async fn provider_query_execute_standard_test_candidate(
             ),
         },
     };
+    crate::provider_transport::apply_local_auth_config_header_overrides(
+        &mut request_headers,
+        transport.key.decrypted_auth_config.as_deref(),
+    );
     if uses_vertex_query_auth {
         request_headers.remove("x-goog-api-key");
     }
@@ -3236,6 +3241,10 @@ async fn provider_query_execute_standard_test_candidate(
             transport.provider.provider_type.as_str(),
             provider_api_format,
             Some(trace_id),
+            transport.key.decrypted_auth_config.as_deref(),
+        );
+        crate::provider_transport::apply_local_auth_config_header_overrides(
+            &mut request_headers,
             transport.key.decrypted_auth_config.as_deref(),
         );
     }

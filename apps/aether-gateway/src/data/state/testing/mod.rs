@@ -89,6 +89,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -144,6 +146,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -195,6 +199,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -346,6 +352,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -425,6 +433,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -485,6 +495,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -554,6 +566,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -605,6 +619,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -657,6 +673,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -720,6 +738,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -785,6 +805,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -834,6 +856,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -898,6 +922,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -955,6 +981,8 @@ impl GatewayDataState {
             wallet_writer: Some(wallet_writer),
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -1013,6 +1041,8 @@ impl GatewayDataState {
             wallet_writer: Some(wallet_writer),
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -1075,6 +1105,8 @@ impl GatewayDataState {
             wallet_writer: Some(wallet_writer),
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -1138,6 +1170,8 @@ impl GatewayDataState {
             wallet_writer: Some(wallet_writer),
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -1200,6 +1234,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -1251,6 +1287,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -1302,6 +1340,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -1365,6 +1405,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -1433,6 +1475,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -1484,6 +1528,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -1540,6 +1586,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -1613,6 +1661,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -1681,6 +1731,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -1733,6 +1785,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -1785,6 +1839,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -1839,6 +1895,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -1891,6 +1949,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -1943,6 +2003,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -1995,6 +2057,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -2055,6 +2119,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -2116,6 +2182,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -2180,6 +2248,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -2250,6 +2320,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -2321,6 +2393,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -2396,6 +2470,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -2478,6 +2554,8 @@ impl GatewayDataState {
             wallet_writer: Some(wallet_writer),
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -2542,6 +2620,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -2597,6 +2677,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -2648,6 +2730,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -2705,6 +2789,8 @@ impl GatewayDataState {
             wallet_writer: Some(wallet_writer),
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -2766,6 +2852,8 @@ impl GatewayDataState {
             wallet_writer: Some(wallet_writer),
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -2828,6 +2916,8 @@ impl GatewayDataState {
             wallet_writer: Some(wallet_writer),
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 
@@ -2883,6 +2973,8 @@ impl GatewayDataState {
             wallet_writer: None,
             settlement_writer: None,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         }
     }
 }

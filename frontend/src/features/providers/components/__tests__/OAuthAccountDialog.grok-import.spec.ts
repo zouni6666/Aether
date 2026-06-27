@@ -260,6 +260,11 @@ function getButton(root: HTMLElement, text: string) {
     .find(button => button.textContent?.includes(text))
 }
 
+function getExactButton(root: HTMLElement, text: string) {
+  return Array.from(root.querySelectorAll('button'))
+    .find(button => button.textContent?.trim() === text)
+}
+
 function getImportTextarea(root: HTMLElement) {
   const textarea = root.querySelector('textarea')
   if (!(textarea instanceof HTMLTextAreaElement)) {
@@ -350,7 +355,38 @@ describe('OAuthAccountDialog Grok import', () => {
       account_id: undefined,
       account_user_id: undefined,
       user_id: undefined,
+      headers: undefined,
     })
+  })
+
+  it('keeps Codex imported request headers on single JSON import', async () => {
+    const root = mountDialog('codex')
+    await settle()
+
+    getButton(root, '导入授权')?.click()
+    await settle()
+
+    const textarea = getImportTextarea(root)
+    textarea.value = JSON.stringify({
+      access_token: 'jwt-access-token',
+      headers: {
+        authorization: 'Bearer session-token',
+      },
+      accountId: 'acct-1',
+    })
+    textarea.dispatchEvent(new Event('input'))
+    await settle()
+
+    getExactButton(root, '导入')?.click()
+    await settle()
+
+    expect(endpointMocks.importProviderRefreshToken).toHaveBeenCalledWith('provider-1', expect.objectContaining({
+      access_token: 'jwt-access-token',
+      headers: {
+        authorization: 'Bearer session-token',
+      },
+      account_id: 'acct-1',
+    }))
   })
 
   it('keeps Grok multiline token import on the batch task path', async () => {

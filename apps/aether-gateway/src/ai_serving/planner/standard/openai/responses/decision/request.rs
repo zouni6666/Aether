@@ -46,12 +46,12 @@ use crate::ai_serving::transport::kiro::{
     KiroRequestAuth, KIRO_ENVELOPE_NAME,
 };
 use crate::ai_serving::transport::{
-    build_grok_browser_headers, build_grok_upstream_url, build_kiro_cross_format_upstream_url,
-    build_openai_image_headers, build_openai_image_upstream_url,
-    build_standard_provider_request_headers, build_windsurf_cascade_headers,
-    build_windsurf_cascade_request_body, build_windsurf_cascade_upstream_url,
-    is_gemini_cli_provider_transport, is_windsurf_provider_transport,
-    local_standard_transport_unsupported_reason_with_network,
+    apply_local_auth_config_header_overrides, build_grok_browser_headers, build_grok_upstream_url,
+    build_kiro_cross_format_upstream_url, build_openai_image_headers,
+    build_openai_image_upstream_url, build_standard_provider_request_headers,
+    build_windsurf_cascade_headers, build_windsurf_cascade_request_body,
+    build_windsurf_cascade_upstream_url, is_gemini_cli_provider_transport,
+    is_windsurf_provider_transport, local_standard_transport_unsupported_reason_with_network,
     local_windsurf_request_transport_unsupported_reason_with_network,
     openai_image_transport_unsupported_reason, resolve_openai_image_auth, GrokHeaderInput,
     ProviderOpenAiImageHeadersInput, StandardProviderRequestHeadersInput,
@@ -681,6 +681,10 @@ pub(crate) async fn resolve_local_openai_responses_candidate_payload_parts(
             Some(trace_id),
             transport.key.decrypted_auth_config.as_deref(),
         );
+        apply_local_auth_config_header_overrides(
+            &mut provider_request_headers,
+            transport.key.decrypted_auth_config.as_deref(),
+        );
     }
     request_identity_response_encoding_when_redacted(
         &mut provider_request_headers,
@@ -855,6 +859,10 @@ async fn build_gemini_cli_openai_responses_payload_parts(
         resolved.transport.provider.provider_type.as_str(),
         provider_api_format,
         Some(trace_id),
+        resolved.transport.key.decrypted_auth_config.as_deref(),
+    );
+    apply_local_auth_config_header_overrides(
+        &mut provider_request_headers,
         resolved.transport.key.decrypted_auth_config.as_deref(),
     );
     request_identity_response_encoding_when_redacted(
@@ -1143,6 +1151,7 @@ async fn resolve_openai_responses_to_openai_image_payload_parts(
     };
     let Some(mut provider_request_headers) =
         build_openai_image_headers(ProviderOpenAiImageHeadersInput {
+            transport,
             headers: &parts.headers,
             auth_header: &prepared_candidate.auth_header,
             auth_value: &prepared_candidate.auth_value,
@@ -1179,6 +1188,10 @@ async fn resolve_openai_responses_to_openai_image_payload_parts(
             transport.provider.provider_type.as_str(),
             provider_api_format,
             Some(trace_id),
+            transport.key.decrypted_auth_config.as_deref(),
+        );
+        apply_local_auth_config_header_overrides(
+            &mut provider_request_headers,
             transport.key.decrypted_auth_config.as_deref(),
         );
     }

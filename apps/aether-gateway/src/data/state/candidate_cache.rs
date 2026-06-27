@@ -406,6 +406,7 @@ mod tests {
     struct StubCandidateSelectionRepository {
         calls: AtomicUsize,
         delay: Duration,
+        rows: Vec<StoredMinimalCandidateSelectionRow>,
     }
 
     impl StubCandidateSelectionRepository {
@@ -413,6 +414,7 @@ mod tests {
             Self {
                 calls: AtomicUsize::new(0),
                 delay,
+                rows: Vec::new(),
             }
         }
 
@@ -425,7 +427,7 @@ mod tests {
             if !self.delay.is_zero() {
                 tokio::time::sleep(self.delay).await;
             }
-            Ok(Vec::new())
+            Ok(self.rows.clone())
         }
     }
 
@@ -696,5 +698,85 @@ mod tests {
         assert_eq!(inner.calls(), 2);
         leader.abort();
         let _ = leader.await;
+    }
+
+    #[tokio::test]
+    async fn candidate_selection_load_balance_cache_keeps_seed_specific_entries() {
+        let inner = Arc::new(StubCandidateSelectionRepository {
+            calls: AtomicUsize::new(0),
+            delay: Duration::ZERO,
+            rows: vec![
+                sample_row("key-a", 1),
+                sample_row("key-b", 2),
+                sample_row("key-c", 3),
+            ],
+        });
+        let cache = CachedMinimalCandidateSelectionReadRepository::new(inner.clone());
+        let query = |seed: &str| StoredPoolKeyCandidateRowsQuery {
+            api_format: "openai:chat".to_string(),
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            model_id: "model-1".to_string(),
+            selected_provider_model_name: "mock-model".to_string(),
+            order: StoredPoolKeyCandidateOrder::LoadBalance {
+                seed: seed.to_string(),
+            },
+            offset: 0,
+            limit: 2,
+        };
+
+        let first = cache
+            .list_pool_key_rows_for_group(&query("seed-a"))
+            .await
+            .unwrap();
+        let second = cache
+            .list_pool_key_rows_for_group(&query("seed-b"))
+            .await
+            .unwrap();
+
+        assert_eq!(inner.calls(), 2);
+        assert_eq!(first.len(), 3);
+        assert_eq!(second.len(), 3);
+
+        let third = cache
+            .list_pool_key_rows_for_group(&query("seed-a"))
+            .await
+            .unwrap();
+        assert_eq!(inner.calls(), 2);
+        assert_eq!(third.len(), 3);
+    }
+
+    fn sample_row(key_id: &str, key_internal_priority: i32) -> StoredMinimalCandidateSelectionRow {
+        StoredMinimalCandidateSelectionRow {
+            provider_id: "provider-1".to_string(),
+            provider_name: "provider".to_string(),
+            provider_type: "custom".to_string(),
+            provider_priority: 1,
+            provider_is_active: true,
+            endpoint_id: "endpoint-1".to_string(),
+            endpoint_api_format: "openai:chat".to_string(),
+            endpoint_api_family: Some("openai".to_string()),
+            endpoint_kind: Some("chat".to_string()),
+            endpoint_is_active: true,
+            key_id: key_id.to_string(),
+            key_name: key_id.to_string(),
+            key_auth_type: "api_key".to_string(),
+            key_is_active: true,
+            key_api_formats: Some(vec!["openai:chat".to_string()]),
+            key_allowed_models: None,
+            key_capabilities: None,
+            key_internal_priority,
+            key_global_priority_by_format: None,
+            model_id: "model-1".to_string(),
+            global_model_id: "global-model-1".to_string(),
+            global_model_name: "mock-model".to_string(),
+            global_model_mappings: None,
+            global_model_supports_streaming: Some(true),
+            model_provider_model_name: "mock-model".to_string(),
+            model_provider_model_mappings: None,
+            model_supports_streaming: Some(true),
+            model_is_active: true,
+            model_is_available: true,
+        }
     }
 }

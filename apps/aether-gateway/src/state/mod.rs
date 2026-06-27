@@ -27,11 +27,14 @@ pub(crate) use self::admin_types::{
     UserDailyQuotaAvailabilityRecord, UserPlanEntitlementRecord,
 };
 pub use self::app::AppState;
-pub(crate) use self::app::FrontdoorRuntimeGuardConfig;
+pub(crate) use self::app::{
+    upstream_target_gate_auto_limit, upstream_target_gate_limit_from_env,
+    FrontdoorRuntimeGuardConfig,
+};
 pub(crate) use self::cache::{
     CachedProviderTransportSnapshot, AUTH_API_KEY_LAST_USED_MAX_ENTRIES,
     AUTH_API_KEY_LAST_USED_TTL, PROVIDER_TRANSPORT_SNAPSHOT_CACHE_MAX_ENTRIES,
-    PROVIDER_TRANSPORT_SNAPSHOT_CACHE_TTL,
+    PROVIDER_TRANSPORT_SNAPSHOT_CACHE_STALE_TTL, PROVIDER_TRANSPORT_SNAPSHOT_CACHE_TTL,
 };
 pub use self::cors::FrontdoorCorsConfig;
 pub(crate) use self::types::{

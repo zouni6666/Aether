@@ -1455,7 +1455,10 @@ const defaultBodyRulesByFormat = ref<Record<string, BodyRule[]>>({})
 const defaultBodyRulesLoaded = ref<Record<string, boolean>>({})
 const loadingDefaultBodyRulesByFormat = ref<Record<string, boolean>>({})
 
-// 系统保留的 header 名称（不允许用户设置）
+// Endpoint 规则会经过通用 header/body rule 引擎执行。认证头、协议控制头和
+// 响应长度这类字段在后端同样是 protected keys；前端也保持同一语义，避免用户
+// 以为普通 endpoint rules 能改认证。OAuth/账号导入保留 headers 走 auth_config，
+// 不走这里的 endpoint header_rules。
 const RESERVED_HEADERS = new Set([
   'authorization',
   'x-api-key',
@@ -1463,6 +1466,7 @@ const RESERVED_HEADERS = new Set([
   'content-type',
   'content-length',
   'host',
+  'proxy-authorization',
 ])
 
 const RESERVED_RESPONSE_HEADERS = new Set([
@@ -1472,7 +1476,6 @@ const RESERVED_RESPONSE_HEADERS = new Set([
 const RESPONSE_HEADER_RULES_CONFIG_KEY = 'response_header_rules'
 const RESPONSE_HEADER_RULES_CAMEL_CONFIG_KEY = 'responseHeaderRules'
 
-// 系统保留的 body 字段名（不允许用户设置）
 const RESERVED_BODY_FIELDS = new Set([
   'stream',
 ])
@@ -1539,7 +1542,41 @@ function requireJsonString(rule: Record<string, unknown>, key: string, label: st
   return typeof rule[key] === 'string' ? null : `${label}第 ${index + 1} 条：${key} 必须是字符串`
 }
 
-function validateHeaderRuleJson(rule: unknown, label: string, index: number): string | null {
+function normalizeHeaderRuleName(raw: string): string {
+  return raw.trim().toLowerCase()
+}
+
+function reservedHeaderRuleError(raw: string): string | null {
+  const name = normalizeHeaderRuleName(raw)
+  return name && RESERVED_HEADERS.has(name) ? `"${raw}" 是系统保留的请求头` : null
+}
+
+function reservedResponseHeaderRuleError(raw: string): string | null {
+  const name = normalizeHeaderRuleName(raw)
+  return name && RESERVED_RESPONSE_HEADERS.has(name) ? `"${raw}" 是系统保留的响应头` : null
+}
+
+function bodyRuleTopLevelField(rawPath: string): string | null {
+  const raw = rawPath.trim()
+  if (!raw) return null
+  const dotPart = raw.includes('[') ? raw.slice(0, raw.indexOf('[')) : raw
+  const parts = dotPart ? parseBodyRulePathParts(dotPart) : [raw.split('[')[0] || raw]
+  return parts?.[0]?.trim().toLowerCase() || null
+}
+
+function reservedBodyRuleFieldError(rawPath: string): string | null {
+  const topField = bodyRuleTopLevelField(rawPath)
+  return topField && RESERVED_BODY_FIELDS.has(topField)
+    ? `"${topField}" 是系统保留的顶层字段`
+    : null
+}
+
+function validateHeaderRuleJson(
+  rule: unknown,
+  label: string,
+  index: number,
+  reservedNameError: (raw: string) => string | null = reservedHeaderRuleError
+): string | null {
   if (!isJsonObject(rule)) return `${label}第 ${index + 1} 条必须是对象`
   if (rule.enabled !== undefined && typeof rule.enabled !== 'boolean') {
     return `${label}第 ${index + 1} 条：enabled 必须是布尔值`
@@ -1550,15 +1587,19 @@ function validateHeaderRuleJson(rule: unknown, label: string, index: number): st
   }
   if (action === 'set') {
     return requireJsonString(rule, 'key', label, index)
+      || reservedNameError(rule.key as string)
       || requireJsonString(rule, 'value', label, index)
       || validateJsonCondition(rule, label, index)
   }
   if (action === 'drop') {
     return requireJsonString(rule, 'key', label, index)
+      || reservedNameError(rule.key as string)
       || validateJsonCondition(rule, label, index)
   }
   return requireJsonString(rule, 'from', label, index)
     || requireJsonString(rule, 'to', label, index)
+    || reservedNameError(rule.from as string)
+    || reservedNameError(rule.to as string)
     || validateJsonCondition(rule, label, index)
 }
 
@@ -1574,26 +1615,32 @@ function validateBodyRuleJson(rule: unknown, label: string, index: number): stri
 
   if (action === 'set' || action === 'append') {
     return requireJsonString(rule, 'path', label, index)
+      || reservedBodyRuleFieldError(rule.path as string)
       || (Object.prototype.hasOwnProperty.call(rule, 'value') ? null : `${label}第 ${index + 1} 条：value 不能为空`)
       || validateJsonCondition(rule, label, index)
   }
   if (action === 'drop') {
     return requireJsonString(rule, 'path', label, index)
+      || reservedBodyRuleFieldError(rule.path as string)
       || validateJsonCondition(rule, label, index)
   }
   if (action === 'rename') {
     return requireJsonString(rule, 'from', label, index)
       || requireJsonString(rule, 'to', label, index)
+      || reservedBodyRuleFieldError(rule.from as string)
+      || reservedBodyRuleFieldError(rule.to as string)
       || validateJsonCondition(rule, label, index)
   }
   if (action === 'insert') {
     if (requireJsonString(rule, 'path', label, index)) return requireJsonString(rule, 'path', label, index)
+    if (reservedBodyRuleFieldError(rule.path as string)) return reservedBodyRuleFieldError(rule.path as string)
     if (!Number.isInteger(rule.index)) return `${label}第 ${index + 1} 条：index 必须是整数`
     if (!Object.prototype.hasOwnProperty.call(rule, 'value')) return `${label}第 ${index + 1} 条：value 不能为空`
     return validateJsonCondition(rule, label, index)
   }
   if (action === 'regex_replace') {
     if (requireJsonString(rule, 'path', label, index)) return requireJsonString(rule, 'path', label, index)
+    if (reservedBodyRuleFieldError(rule.path as string)) return reservedBodyRuleFieldError(rule.path as string)
     if (requireJsonString(rule, 'pattern', label, index)) return requireJsonString(rule, 'pattern', label, index)
     if (typeof rule.replacement !== 'string') return `${label}第 ${index + 1} 条：replacement 必须是字符串`
     if (rule.flags !== undefined && typeof rule.flags !== 'string') return `${label}第 ${index + 1} 条：flags 必须是字符串`
@@ -1633,7 +1680,12 @@ function parseEndpointRulesJsonDraft(draft: string): { value: EndpointRulesJsonP
     if (error) return { value: null, error }
   }
   for (let i = 0; i < response.value.length; i++) {
-    const error = validateHeaderRuleJson(response.value[i], 'response_header_rules ', i)
+    const error = validateHeaderRuleJson(
+      response.value[i],
+      'response_header_rules ',
+      i,
+      reservedResponseHeaderRuleError,
+    )
     if (error) return { value: null, error }
   }
 
@@ -2334,9 +2386,8 @@ function validateRuleKeyForEndpoint(endpointId: string, key: string, index: numb
   const trimmedKey = key.trim().toLowerCase()
   if (!trimmedKey) return null
 
-  if (RESERVED_HEADERS.has(trimmedKey)) {
-    return `"${key}" 是系统保留的请求头`
-  }
+  const reservedErr = reservedHeaderRuleError(key)
+  if (reservedErr) return reservedErr
 
   const rules = getEndpointEditRules(endpointId)
   const currentRule = rules[index]
@@ -2359,6 +2410,9 @@ function validateRenameFromForEndpoint(endpointId: string, from: string, index: 
   const trimmedFrom = from.trim().toLowerCase()
   if (!trimmedFrom) return null
 
+  const reservedErr = reservedHeaderRuleError(from)
+  if (reservedErr) return reservedErr
+
   const rules = getEndpointEditRules(endpointId)
   const currentRule = rules[index]
   if (currentRule && !currentRule.enabled) return null
@@ -2380,9 +2434,8 @@ function validateRenameToForEndpoint(endpointId: string, to: string, index: numb
   const trimmedTo = to.trim().toLowerCase()
   if (!trimmedTo) return null
 
-  if (RESERVED_HEADERS.has(trimmedTo)) {
-    return `"${to}" 是系统保留的请求头`
-  }
+  const reservedErr = reservedHeaderRuleError(to)
+  if (reservedErr) return reservedErr
 
   const rules = getEndpointEditRules(endpointId)
   const currentRule = rules[index]
@@ -2525,11 +2578,8 @@ function validateBodyRulePathForEndpoint(endpointId: string, path: string, index
     return '路径格式无效'
   }
 
-  // 提取顶层 key（去除数组索引部分）
-  const topKey = (parts[0] || '').trim().toLowerCase()
-  if (RESERVED_BODY_FIELDS.has(topKey)) {
-    return `"${parts[0]}" 是系统保留的顶层字段`
-  }
+  const reservedErr = reservedBodyRuleFieldError(raw)
+  if (reservedErr) return reservedErr
 
   const normalizedPath = raw.toLowerCase()
 
@@ -2560,10 +2610,8 @@ function validateBodyRenameFromForEndpoint(endpointId: string, from: string, ind
     return '路径格式无效（不允许 .a / a. / a..b）'
   }
 
-  const topKey = (parts[0] || '').trim().toLowerCase()
-  if (RESERVED_BODY_FIELDS.has(topKey)) {
-    return `"${parts[0]}" 是系统保留的顶层字段`
-  }
+  const reservedErr = reservedBodyRuleFieldError(raw)
+  if (reservedErr) return reservedErr
 
   const normalizedFrom = raw.toLowerCase()
 
@@ -2593,10 +2641,8 @@ function validateBodyRenameToForEndpoint(endpointId: string, to: string, index: 
     return '路径格式无效（不允许 .a / a. / a..b）'
   }
 
-  const topKey = (parts[0] || '').trim().toLowerCase()
-  if (RESERVED_BODY_FIELDS.has(topKey)) {
-    return `"${parts[0]}" 是系统保留的顶层字段`
-  }
+  const reservedErr = reservedBodyRuleFieldError(raw)
+  if (reservedErr) return reservedErr
 
   const normalizedTo = raw.toLowerCase()
 
@@ -3095,9 +3141,8 @@ function validateResponseHeaderNameForEndpoint(endpointId: string, name: string,
   const trimmedName = name.trim().toLowerCase()
   if (!trimmedName) return null
 
-  if ((field === 'key' || field === 'to') && RESERVED_RESPONSE_HEADERS.has(trimmedName)) {
-    return `"${name}" 是系统保留的响应头`
-  }
+  const reservedErr = reservedResponseHeaderRuleError(name)
+  if (reservedErr) return reservedErr
 
   const rules = getEndpointEditResponseRules(endpointId)
   const currentRule = rules[index]

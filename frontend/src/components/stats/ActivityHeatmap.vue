@@ -410,17 +410,10 @@ function buildTooltip(day: ActivityHeatmapDay): string {
   return parts.join(' · ')
 }
 
-// 生成完全随机的动画延迟，每个格子独立随机弹出
-const cellDelayMap = new Map<string, number>()
-
 function getCellAnimationDelay(weekIndex: number, dayIndex: number) {
-  const key = `${weekIndex}-${dayIndex}`
-  if (!cellDelayMap.has(key)) {
-    // 完全随机延迟，范围 0-800ms
-    cellDelayMap.set(key, Math.random() * 800)
-  }
+  const delay = Math.min(120, weekIndex * 2 + dayIndex * 4)
   return {
-    animationDelay: `${cellDelayMap.get(key)}ms`
+    animationDelay: `${delay}ms`
   }
 }
 </script>
@@ -428,7 +421,7 @@ function getCellAnimationDelay(weekIndex: number, dayIndex: number) {
 <style scoped>
 .cell-emerge {
   opacity: 0;
-  animation: cellEmerge 0.35s ease-out forwards;
+  animation: cellEmerge 0.18s ease-out forwards;
 }
 
 @keyframes cellEmerge {

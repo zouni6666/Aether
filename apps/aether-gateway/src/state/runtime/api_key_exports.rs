@@ -1,4 +1,9 @@
+use std::time::Duration;
+
+use crate::cache::{AuthApiKeyFeatureCacheKey, AuthApiKeyIdentityCacheKey};
 use crate::{AppState, GatewayError};
+
+const AUTH_API_KEY_RUNTIME_JSON_CACHE_TTL: Duration = Duration::from_secs(30);
 
 impl AppState {
     pub(crate) async fn read_auth_api_key_force_capabilities(
@@ -6,12 +11,25 @@ impl AppState {
         user_id: &str,
         api_key_id: &str,
     ) -> Result<Option<serde_json::Value>, GatewayError> {
-        Ok(self
-            .list_auth_api_key_export_records_by_ids(&[api_key_id.to_string()])
-            .await?
-            .into_iter()
-            .find(|record| record.api_key_id == api_key_id && record.user_id == user_id)
-            .and_then(|record| record.force_capabilities))
+        let cache_key = AuthApiKeyIdentityCacheKey::new(user_id, api_key_id);
+        if cache_key.is_empty() {
+            return Ok(None);
+        }
+        self.auth_api_key_force_capabilities_cache
+            .get_or_load(
+                cache_key,
+                AUTH_API_KEY_RUNTIME_JSON_CACHE_TTL,
+                || async move {
+                    let value = self
+                        .list_auth_api_key_export_records_by_ids(&[api_key_id.to_string()])
+                        .await?
+                        .into_iter()
+                        .find(|record| record.api_key_id == api_key_id && record.user_id == user_id)
+                        .and_then(|record| record.force_capabilities);
+                    Ok(value)
+                },
+            )
+            .await
     }
 
     pub(crate) async fn read_auth_api_key_feature_settings(
@@ -20,10 +38,22 @@ impl AppState {
         api_key_id: &str,
         is_standalone: bool,
     ) -> Result<Option<serde_json::Value>, GatewayError> {
-        self.data
-            .read_auth_api_key_feature_settings(user_id, api_key_id, is_standalone)
+        let cache_key = AuthApiKeyFeatureCacheKey::new(user_id, api_key_id, is_standalone);
+        if cache_key.is_empty() {
+            return Ok(None);
+        }
+        self.auth_api_key_feature_settings_cache
+            .get_or_load(
+                cache_key,
+                AUTH_API_KEY_RUNTIME_JSON_CACHE_TTL,
+                || async move {
+                    self.data
+                        .read_auth_api_key_feature_settings(user_id, api_key_id, is_standalone)
+                        .await
+                        .map_err(|err| GatewayError::Internal(err.to_string()))
+                },
+            )
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
     pub(crate) async fn list_auth_api_key_export_records_by_user_ids(

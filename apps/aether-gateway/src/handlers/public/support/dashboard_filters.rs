@@ -19,6 +19,10 @@ use chrono::Datelike;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
+const DASHBOARD_SITE_RATE_WINDOW_SECS: u64 = 60;
+const DASHBOARD_ONLINE_USER_WINDOW_SECS: u64 = 300;
+const DASHBOARD_ONLINE_USER_AGGREGATION_LIMIT: usize = 100_000;
+
 #[derive(Debug, Clone, Copy)]
 struct DashboardDateRange {
     start_date: chrono::NaiveDate,
@@ -822,6 +826,22 @@ async fn dashboard_load_user_counts(
     Ok((count, count))
 }
 
+async fn dashboard_load_online_user_count(
+    state: &AppState,
+    now_unix_secs: u64,
+) -> Result<u64, GatewayError> {
+    let rows = state
+        .aggregate_usage_audits(&UsageAuditAggregationQuery {
+            created_from_unix_secs: now_unix_secs.saturating_sub(DASHBOARD_ONLINE_USER_WINDOW_SECS),
+            created_until_unix_secs: now_unix_secs.saturating_add(1),
+            group_by: UsageAuditAggregationGroupBy::User,
+            limit: DASHBOARD_ONLINE_USER_AGGREGATION_LIMIT,
+            exclude_reserved_provider_labels: false,
+        })
+        .await?;
+    Ok(rows.len() as u64)
+}
+
 fn dashboard_cache_savings_usd(summary: &StoredUsageCostSavingsSummary) -> f64 {
     let estimated_full_cost =
         if summary.estimated_full_cost_usd <= 0.0 && summary.cache_read_cost_usd > 0.0 {
@@ -966,6 +986,30 @@ pub(super) async fn handle_dashboard_stats_get(
     });
 
     if is_admin {
+        let now_unix_secs = chrono::Utc::now().timestamp().max(0) as u64;
+        let site_rate_summary = match dashboard_summary_for_unix_range_raw(
+            state,
+            now_unix_secs.saturating_sub(DASHBOARD_SITE_RATE_WINDOW_SECS),
+            now_unix_secs.saturating_add(1),
+            None,
+            "dashboard realtime site stats lookup failed",
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(response) => return response,
+        };
+        let site_rate_totals = dashboard_usage_totals_from_summary(&site_rate_summary);
+        let online_users = match dashboard_load_online_user_count(state, now_unix_secs).await {
+            Ok(value) => value,
+            Err(err) => {
+                return build_auth_error_response(
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("dashboard online user stats lookup failed: {err:?}"),
+                    false,
+                );
+            }
+        };
         let (total_users, active_users) =
             match dashboard_load_user_counts(state, summary_range).await {
                 Ok(value) => value,
@@ -1010,9 +1054,17 @@ pub(super) async fn handle_dashboard_stats_get(
             };
         let stats = json!([
             {
-                "name": "今日请求",
-                "value": dashboard_format_integer(today_totals.requests),
-                "subValue": format!("成功率 {}", dashboard_format_percentage(success_rate)),
+                "name": "今日请求 / 费用",
+                "value": format!(
+                    "{} / {}",
+                    dashboard_format_integer(today_totals.requests),
+                    dashboard_format_usd(today_totals.total_cost_usd)
+                ),
+                "subValue": format!(
+                    "成功率 {} / 节省 {}",
+                    dashboard_format_percentage(success_rate),
+                    dashboard_format_usd(today_cost_savings.max(0.0))
+                ),
                 "icon": "Activity",
             },
             {
@@ -1022,15 +1074,26 @@ pub(super) async fn handle_dashboard_stats_get(
                 "icon": "Zap",
             },
             {
-                "name": "今日费用",
-                "value": dashboard_format_usd(today_totals.total_cost_usd),
-                "subValue": format!("节省 {}", dashboard_format_usd(today_cost_savings.max(0.0))),
-                "icon": "DollarSign",
+                "name": "全站 RPM / TPM",
+                "value": format!(
+                    "{} / {}",
+                    dashboard_format_integer(site_rate_totals.requests),
+                    dashboard_format_token_compact(site_rate_totals.total_tokens)
+                ),
+                "subValue": "最近 60 秒",
+                "icon": "Activity",
             },
             {
-                "name": "活跃用户",
-                "value": dashboard_format_integer(active_users),
-                "subValue": format!("总用户 {}", dashboard_format_integer(total_users)),
+                "name": "在线 / 启用用户",
+                "value": format!(
+                    "{} / {}",
+                    dashboard_format_integer(online_users),
+                    dashboard_format_integer(active_users)
+                ),
+                "subValue": format!(
+                    "最近 5 分钟 / 总用户 {}",
+                    dashboard_format_integer(total_users)
+                ),
                 "icon": "Users",
             }
         ]);
@@ -1060,6 +1123,7 @@ pub(super) async fn handle_dashboard_stats_get(
             "users": {
                 "total": total_users,
                 "active": active_users,
+                "online": online_users,
             },
             "token_breakdown": token_breakdown,
         });

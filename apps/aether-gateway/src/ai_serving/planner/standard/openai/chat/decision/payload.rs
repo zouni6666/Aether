@@ -12,12 +12,15 @@ use crate::ai_serving::planner::{
 use crate::ai_serving::transport::{
     resolve_transport_execution_timeouts, resolve_transport_profile,
 };
+use crate::stage_metrics::observe_gateway_stage_ms;
 use crate::{
     append_execution_contract_fields_to_value, append_local_failover_policy_to_value,
     AiExecutionDecision, AppState, GatewayError,
 };
 
-use super::request::resolve_local_openai_chat_candidate_payload_parts;
+use super::request::{
+    resolve_local_openai_chat_candidate_payload_parts, LocalOpenAiChatRequestPreparation,
+};
 use super::support::{LocalOpenAiChatCandidateAttempt, LocalOpenAiChatDecisionInput};
 
 #[allow(clippy::too_many_arguments)]
@@ -27,6 +30,7 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
     trace_id: &str,
     body_json: &serde_json::Value,
     input: &LocalOpenAiChatDecisionInput,
+    preparation: Option<&mut LocalOpenAiChatRequestPreparation>,
     attempt: LocalOpenAiChatCandidateAttempt,
     decision_kind: &str,
     report_kind: &str,
@@ -40,12 +44,14 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
         candidate_id,
         ..
     } = attempt;
+    let payload_started_at = std::time::Instant::now();
     let Some(resolved) = resolve_local_openai_chat_candidate_payload_parts(
         state,
         parts,
         trace_id,
         body_json,
         input,
+        preparation,
         &eligible,
         candidate_index,
         &candidate_id,
@@ -55,8 +61,16 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
     )
     .await?
     else {
+        observe_gateway_stage_ms(
+            "stream_candidate_payload_parts",
+            payload_started_at.elapsed().as_millis() as u64,
+        );
         return Ok(None);
     };
+    observe_gateway_stage_ms(
+        "stream_candidate_payload_parts",
+        payload_started_at.elapsed().as_millis() as u64,
+    );
     let candidate = &eligible.candidate;
 
     let prompt_cache_key = resolved
@@ -66,9 +80,14 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
+    let proxy_started_at = std::time::Instant::now();
     let proxy = state
         .resolve_transport_proxy_snapshot_with_tunnel_affinity(&resolved.transport)
         .await;
+    observe_gateway_stage_ms(
+        "stream_candidate_proxy",
+        proxy_started_at.elapsed().as_millis() as u64,
+    );
     let transport_profile = resolved
         .transport_profile
         .clone()
@@ -130,6 +149,7 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
         Some(body_json)
     };
     let effective_headers = input.effective_headers(&parts.headers);
+    let report_context_started_at = std::time::Instant::now();
     let report_context = append_local_failover_policy_to_value(
         append_execution_contract_fields_to_value(
             build_local_execution_report_context(LocalExecutionReportContextParts {
@@ -184,8 +204,13 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
         ),
         &transport,
     );
+    observe_gateway_stage_ms(
+        "stream_candidate_report_context",
+        report_context_started_at.elapsed().as_millis() as u64,
+    );
     let request_gzip = resolve_transport_request_gzip_policy(&transport);
 
+    let decision_started_at = std::time::Instant::now();
     let mut decision = build_ai_execution_decision_response(AiExecutionDecisionResponseParts {
         decision_is_stream,
         decision_kind: decision_kind.to_string(),
@@ -222,5 +247,9 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
         auth_context: input.auth_context.clone(),
     });
     apply_provider_request_routing_policy_to_decision(input, &mut decision)?;
+    observe_gateway_stage_ms(
+        "stream_candidate_decision_build",
+        decision_started_at.elapsed().as_millis() as u64,
+    );
     Ok(Some(decision))
 }

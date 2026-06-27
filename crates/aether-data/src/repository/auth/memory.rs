@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::RwLock;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 
@@ -26,11 +26,14 @@ struct MemoryAuthApiKeyIndex {
     export_by_api_key_id: BTreeMap<String, StoredAuthApiKeyExportRecord>,
     by_key_hash: BTreeMap<String, String>,
     touch_counts: BTreeMap<String, usize>,
+    snapshot_lookup_counts: BTreeMap<String, usize>,
+    key_hash_lookup_counts: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Default)]
 pub struct InMemoryAuthApiKeySnapshotRepository {
     index: RwLock<MemoryAuthApiKeyIndex>,
+    lookup_delay: Option<Duration>,
 }
 
 impl InMemoryAuthApiKeySnapshotRepository {
@@ -99,8 +102,16 @@ impl InMemoryAuthApiKeySnapshotRepository {
                 export_by_api_key_id,
                 by_key_hash,
                 touch_counts: BTreeMap::new(),
+                snapshot_lookup_counts: BTreeMap::new(),
+                key_hash_lookup_counts: BTreeMap::new(),
             }),
+            lookup_delay: None,
         }
+    }
+
+    pub fn with_lookup_delay_for_tests(mut self, delay: Duration) -> Self {
+        self.lookup_delay = Some(delay);
+        self
     }
 
     pub fn with_export_records<I>(mut self, items: I) -> Self
@@ -125,6 +136,26 @@ impl InMemoryAuthApiKeySnapshotRepository {
             .expect("auth api key snapshot repository lock")
             .touch_counts
             .get(api_key_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub fn snapshot_lookup_count(&self, api_key_id: &str) -> usize {
+        self.index
+            .read()
+            .expect("auth api key snapshot repository lock")
+            .snapshot_lookup_counts
+            .get(api_key_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub fn key_hash_lookup_count(&self, key_hash: &str) -> usize {
+        self.index
+            .read()
+            .expect("auth api key snapshot repository lock")
+            .key_hash_lookup_counts
+            .get(key_hash)
             .copied()
             .unwrap_or(0)
     }
@@ -200,27 +231,46 @@ impl AuthApiKeyReadRepository for InMemoryAuthApiKeySnapshotRepository {
         &self,
         key: AuthApiKeyLookupKey<'_>,
     ) -> Result<Option<StoredAuthApiKeySnapshot>, DataLayerError> {
-        let index = self
+        if let Some(delay) = self.lookup_delay {
+            tokio::time::sleep(delay).await;
+        }
+        let mut index = self
             .index
-            .read()
+            .write()
             .expect("auth api key snapshot repository lock");
         Ok(match key {
-            AuthApiKeyLookupKey::KeyHash(key_hash) => index
-                .by_key_hash
-                .get(key_hash)
-                .and_then(|api_key_id| index.by_api_key_id.get(api_key_id))
-                .cloned(),
+            AuthApiKeyLookupKey::KeyHash(key_hash) => {
+                *index
+                    .key_hash_lookup_counts
+                    .entry(key_hash.to_string())
+                    .or_insert(0) += 1;
+                index
+                    .by_key_hash
+                    .get(key_hash)
+                    .and_then(|api_key_id| index.by_api_key_id.get(api_key_id))
+                    .cloned()
+            }
             AuthApiKeyLookupKey::ApiKeyId(api_key_id) => {
+                *index
+                    .snapshot_lookup_counts
+                    .entry(api_key_id.to_string())
+                    .or_insert(0) += 1;
                 index.by_api_key_id.get(api_key_id).cloned()
             }
             AuthApiKeyLookupKey::UserApiKeyIds {
                 user_id,
                 api_key_id,
-            } => index
-                .by_api_key_id
-                .get(api_key_id)
-                .filter(|snapshot| snapshot.user_id == user_id)
-                .cloned(),
+            } => {
+                *index
+                    .snapshot_lookup_counts
+                    .entry(api_key_id.to_string())
+                    .or_insert(0) += 1;
+                index
+                    .by_api_key_id
+                    .get(api_key_id)
+                    .filter(|snapshot| snapshot.user_id == user_id)
+                    .cloned()
+            }
         })
     }
 

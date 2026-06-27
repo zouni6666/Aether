@@ -931,7 +931,28 @@ const emit = defineEmits<{
     requestId?: string | null
     status?: RequestStateStatus
     statusCode?: number | null
+    inputTokens?: number | null
+    effectiveInputTokens?: number | null
+    outputTokens?: number | null
+    totalTokens?: number | null
+    cacheCreationInputTokens?: number | null
+    cacheCreationEphemeral5mInputTokens?: number | null
+    cacheCreationEphemeral1hInputTokens?: number | null
+    cacheReadInputTokens?: number | null
+    cost?: number | null
+    actualCost?: number | null
     responseTimeMs?: number | null
+    firstByteTimeMs?: number | null
+    isStream?: boolean | null
+    upstreamIsStream?: boolean | null
+    clientRequestedStream?: boolean | null
+    clientIsStream?: boolean | null
+    apiFormat?: string | null
+    endpointApiFormat?: string | null
+    hasFormatConversion?: boolean | null
+    targetModel?: string | null
+    reasoningEffort?: string | null
+    serviceTier?: string | null
     imageProgress?: ImageProgress | null
     errorMessage?: string | null
   }]
@@ -1092,6 +1113,28 @@ function resolveRequestStateStatusFromDetail(nextDetail: Pick<RequestDetail, 'st
   return resolveRequestStateStatus(nextDetail.status, nextDetail.status_code, nextDetail.error_message)
 }
 
+function detailTotalCost(nextDetail: RequestDetail): number | null {
+  const structuredCost = typeof nextDetail.cost === 'object' ? nextDetail.cost?.total : null
+  const totalCost = toNumber(nextDetail.total_cost)
+  const legacyCost = toNumber(nextDetail.cost)
+  return [structuredCost, totalCost, legacyCost]
+    .map(value => toNumber(value))
+    .find((value): value is number => value != null && value > 0)
+    ?? toNumber(structuredCost)
+    ?? totalCost
+    ?? legacyCost
+}
+
+function detailCacheCreation5mTokens(nextDetail: RequestDetail): number | null {
+  return toNumber(nextDetail.cache_creation_input_tokens_5m)
+    ?? toNumber(nextDetail.cache_creation_ephemeral_5m_input_tokens)
+}
+
+function detailCacheCreation1hTokens(nextDetail: RequestDetail): number | null {
+  return toNumber(nextDetail.cache_creation_input_tokens_1h)
+    ?? toNumber(nextDetail.cache_creation_ephemeral_1h_input_tokens)
+}
+
 function emitDetailRequestState(nextDetail: RequestDetail) {
   const id = props.requestId
   if (!id) return
@@ -1101,7 +1144,28 @@ function emitDetailRequestState(nextDetail: RequestDetail) {
     requestId: nextDetail.request_id || nextDetail.id || null,
     status: resolveRequestStateStatusFromDetail(nextDetail),
     statusCode: nextDetail.status_code ?? undefined,
+    inputTokens: nextDetail.input_tokens ?? nextDetail.tokens?.input ?? null,
+    effectiveInputTokens: displayInputTokens.value,
+    outputTokens: nextDetail.output_tokens ?? nextDetail.tokens?.output ?? null,
+    totalTokens: nextDetail.total_tokens ?? nextDetail.tokens?.total ?? null,
+    cacheCreationInputTokens: nextDetail.cache_creation_input_tokens ?? null,
+    cacheCreationEphemeral5mInputTokens: detailCacheCreation5mTokens(nextDetail),
+    cacheCreationEphemeral1hInputTokens: detailCacheCreation1hTokens(nextDetail),
+    cacheReadInputTokens: nextDetail.cache_read_input_tokens ?? null,
+    cost: detailTotalCost(nextDetail),
+    actualCost: nextDetail.actual_cost ?? null,
     responseTimeMs: nextDetail.response_time_ms ?? undefined,
+    firstByteTimeMs: nextDetail.first_byte_time_ms ?? null,
+    isStream: nextDetail.is_stream ?? null,
+    upstreamIsStream: nextDetail.upstream_is_stream ?? null,
+    clientRequestedStream: nextDetail.client_requested_stream ?? null,
+    clientIsStream: nextDetail.client_is_stream ?? null,
+    apiFormat: nextDetail.api_format ?? null,
+    endpointApiFormat: nextDetail.endpoint_api_format ?? null,
+    hasFormatConversion: nextDetail.has_format_conversion ?? null,
+    targetModel: nextDetail.target_model ?? null,
+    reasoningEffort: nextDetail.reasoning_effort ?? null,
+    serviceTier: nextDetail.service_tier ?? null,
     errorMessage: nextDetail.error_message ?? undefined,
   })
 }
@@ -2368,9 +2432,12 @@ async function loadDetail(id: string, silent = false) {
       timelineRef.value?.refresh()
     }
 
-    // 已完成请求需要停止自动刷新；进行中的请求只在用户手动开启后才保持刷新
-    if (props.isOpen && isRequestCompleted()) {
-      stopAutoRefresh()
+    if (props.isOpen) {
+      if (isRequestCompleted()) {
+        stopAutoRefresh()
+      } else if (!silent) {
+        startAutoRefresh()
+      }
     }
   } catch (err) {
     if (requestId !== loadDetailRequestId) return

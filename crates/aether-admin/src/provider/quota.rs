@@ -20,6 +20,15 @@ pub fn provider_auto_remove_banned_keys(config: Option<&serde_json::Value>) -> b
         .unwrap_or(false)
 }
 
+pub fn provider_auto_remove_quota_exhausted_keys(config: Option<&serde_json::Value>) -> bool {
+    config
+        .and_then(|value| value.get("pool_advanced"))
+        .and_then(serde_json::Value::as_object)
+        .and_then(|object| object.get("auto_remove_quota_exhausted_keys"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
 pub fn should_auto_remove_structured_reason(reason: Option<&str>) -> bool {
     provider_status::should_auto_remove_account_state(&provider_status::resolve_pool_account_state(
         None, None, reason,
@@ -952,6 +961,9 @@ pub fn codex_looks_like_token_invalidated(message: Option<&str>) -> bool {
         || lowered.contains("authentication token has been invalidated")
         || lowered.contains("token has been invalidated")
         || lowered.contains("token invalidated")
+        || lowered.contains("personal access token owner is inactive")
+        || lowered.contains("biscuit_baker_service_auth_credential_error_status")
+        || lowered.contains("auth_credential")
         || lowered.contains("invalidated")
         || lowered.contains("revoked")
         || lowered.contains("已撤销")
@@ -1053,8 +1065,20 @@ pub fn codex_runtime_invalid_reason(
         {
             Some(codex_structured_invalid_reason(403, upstream_message))
         }
+        403 => Some(codex_generic_forbidden_runtime_invalid_reason(
+            upstream_message,
+        )),
         _ => None,
     }
+}
+
+fn codex_generic_forbidden_runtime_invalid_reason(upstream_message: Option<&str>) -> String {
+    let detail = upstream_message
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|message| format!("Codex Token 已失效 (403): {message}"))
+        .unwrap_or_else(|| "Codex Token 已失效 (403)".to_string());
+    format!("{OAUTH_EXPIRED_PREFIX}{detail}")
 }
 
 pub fn codex_soft_request_failure_reason(
@@ -1752,12 +1776,29 @@ mod tests {
         parse_codex_wham_usage_response, parse_gemini_cli_retrieve_user_quota_response,
         parse_gemini_cli_v1internal_credits_response, parse_windsurf_model_configs_response,
         parse_windsurf_rate_limit_response, parse_windsurf_user_status_response,
-        quota_refresh_success_invalid_state, should_auto_remove_structured_reason,
-        OAUTH_ACCOUNT_BLOCK_PREFIX, OAUTH_EXPIRED_PREFIX, OAUTH_REFRESH_FAILED_PREFIX,
-        OAUTH_REQUEST_FAILED_PREFIX,
+        provider_auto_remove_quota_exhausted_keys, quota_refresh_success_invalid_state,
+        should_auto_remove_structured_reason, OAUTH_ACCOUNT_BLOCK_PREFIX, OAUTH_EXPIRED_PREFIX,
+        OAUTH_REFRESH_FAILED_PREFIX, OAUTH_REQUEST_FAILED_PREFIX,
     };
     use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
     use serde_json::json;
+
+    #[test]
+    fn provider_auto_remove_quota_exhausted_keys_defaults_to_false() {
+        assert!(!provider_auto_remove_quota_exhausted_keys(None));
+        assert!(!provider_auto_remove_quota_exhausted_keys(Some(&json!({
+            "pool_advanced": {}
+        }))));
+    }
+
+    #[test]
+    fn provider_auto_remove_quota_exhausted_keys_reads_pool_advanced_flag() {
+        assert!(provider_auto_remove_quota_exhausted_keys(Some(&json!({
+            "pool_advanced": {
+                "auto_remove_quota_exhausted_keys": true
+            }
+        }))));
+    }
 
     #[test]
     fn codex_runtime_invalid_reason_marks_401_as_expired() {
@@ -1778,6 +1819,25 @@ mod tests {
     }
 
     #[test]
+    fn codex_runtime_invalid_reason_marks_inactive_pat_owner_403_as_token_invalid() {
+        assert_eq!(
+            codex_runtime_invalid_reason(403, Some("Personal access token owner is inactive.")),
+            Some(format!(
+                "{OAUTH_EXPIRED_PREFIX}Personal access token owner is inactive."
+            ))
+        );
+        assert_eq!(
+            codex_runtime_invalid_reason(
+                403,
+                Some("biscuit_baker_service_auth_credential_error_status")
+            ),
+            Some(format!(
+                "{OAUTH_EXPIRED_PREFIX}biscuit_baker_service_auth_credential_error_status"
+            ))
+        );
+    }
+
+    #[test]
     fn codex_runtime_invalid_reason_marks_402_as_account_blocked() {
         assert_eq!(
             codex_runtime_invalid_reason(402, Some("payment required")),
@@ -1786,8 +1846,13 @@ mod tests {
     }
 
     #[test]
-    fn codex_runtime_invalid_reason_ignores_generic_403() {
-        assert_eq!(codex_runtime_invalid_reason(403, Some("forbidden")), None);
+    fn codex_runtime_invalid_reason_marks_generic_403_as_token_invalid() {
+        assert_eq!(
+            codex_runtime_invalid_reason(403, Some("forbidden")),
+            Some(format!(
+                "{OAUTH_EXPIRED_PREFIX}Codex Token 已失效 (403): forbidden"
+            ))
+        );
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
@@ -36,7 +37,7 @@ impl MemoryKvEntry {
 pub(crate) struct MemoryRuntimeBackend {
     config: MemoryRuntimeStateConfig,
     kv: Mutex<HashMap<String, MemoryKvEntry>>,
-    counters: Mutex<HashMap<String, MemoryCounterEntry>>,
+    counters: StdMutex<HashMap<String, MemoryCounterEntry>>,
     sets: Mutex<HashMap<String, MemorySetEntry>>,
     scores: Mutex<HashMap<String, MemoryScoreEntry>>,
     queues: Mutex<HashMap<String, MemoryQueueStream>>,
@@ -383,9 +384,12 @@ impl MemoryRuntimeBackend {
         key_limit: u32,
         ttl: Duration,
     ) -> Result<crate::RateLimitCheck, crate::DataLayerError> {
-        let mut counters = self.counters.lock().await;
+        let mut counters = self.counters.lock().map_err(|_| {
+            DataLayerError::UnexpectedValue("memory rate-limit counter lock poisoned".to_string())
+        })?;
         let now = Instant::now();
-        counters.retain(|_, entry| entry.expires_at > now && entry.bucket >= bucket);
+        prune_rate_limit_counter(&mut counters, user_key, bucket, now);
+        prune_rate_limit_counter(&mut counters, key_key, bucket, now);
 
         if user_limit > 0 {
             let user_count = counters
@@ -416,8 +420,6 @@ impl MemoryRuntimeBackend {
         }
 
         let mut remaining = None::<u32>;
-        let mut user_next = None::<u32>;
-        let mut key_next = None::<u32>;
         let expires_at = now + ttl;
         if user_limit > 0 {
             let next = counters
@@ -434,7 +436,6 @@ impl MemoryRuntimeBackend {
                 })
                 .value;
             remaining = Some(user_limit.saturating_sub(next));
-            user_next = Some(next);
         }
         if key_limit > 0 {
             let next = counters
@@ -452,19 +453,22 @@ impl MemoryRuntimeBackend {
                 .value;
             let key_remaining = key_limit.saturating_sub(next);
             remaining = Some(remaining.map_or(key_remaining, |value| value.min(key_remaining)));
-            key_next = Some(next);
-        }
-        drop(counters);
-
-        if let Some(next) = user_next {
-            self.kv_set(user_key, next.to_string(), Some(ttl)).await;
-        }
-        if let Some(next) = key_next {
-            self.kv_set(key_key, next.to_string(), Some(ttl)).await;
         }
         Ok(crate::RateLimitCheck::Allowed {
             remaining: remaining.unwrap_or(0),
         })
+    }
+
+    pub(crate) fn rate_limit_count(&self, key: &str, bucket: u64) -> Result<u32, DataLayerError> {
+        let mut counters = self.counters.lock().map_err(|_| {
+            DataLayerError::UnexpectedValue("memory rate-limit counter lock poisoned".to_string())
+        })?;
+        prune_rate_limit_counter(&mut counters, key, bucket, Instant::now());
+        Ok(counters
+            .get(key)
+            .filter(|entry| entry.bucket == bucket)
+            .map(|entry| entry.value)
+            .unwrap_or_default())
     }
 
     pub(crate) async fn set_add(&self, key: &str, member: &str) -> bool {
@@ -911,6 +915,20 @@ fn get_fresh_locked(
 
 fn prune_kv(kv: &mut HashMap<String, MemoryKvEntry>, now: Instant) {
     kv.retain(|_, entry| !entry.is_expired(now));
+}
+
+fn prune_rate_limit_counter(
+    counters: &mut HashMap<String, MemoryCounterEntry>,
+    key: &str,
+    bucket: u64,
+    now: Instant,
+) {
+    if counters
+        .get(key)
+        .is_some_and(|entry| entry.expires_at <= now || entry.bucket < bucket)
+    {
+        counters.remove(key);
+    }
 }
 
 fn prune_memory_key<T>(values: &mut HashMap<String, T>, key: &str, now: Instant)

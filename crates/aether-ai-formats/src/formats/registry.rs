@@ -486,6 +486,7 @@ fn standard_request_root_field_is_audited(source: FormatId, key: &str) -> bool {
             key,
             "cache_control"
                 | "container"
+                | "context_management"
                 | "inference_geo"
                 | "max_tokens"
                 | "messages"
@@ -858,37 +859,37 @@ fn request_extension_key_is_cross_format_safe(
                 | "prompt_cache_key"
                 | "prompt_cache_retention"
                 | "verbosity",
-        ) | (FormatId::ClaudeMessages, _, "claude", "output_config")
-            | (
-                FormatId::ClaudeMessages,
-                FormatId::OpenAiChat | FormatId::GeminiGenerateContent,
-                "openai",
-                "web_search_options",
-            )
-            | (
-                FormatId::GeminiGenerateContent,
-                _,
-                "gemini",
-                "thinking_config" | "raw_tools" | "raw_tool_config",
-            )
-            | (
-                FormatId::GeminiGenerateContent,
-                FormatId::OpenAiChat,
-                "gemini",
-                "builtin_tools" | "grounding",
-            )
-            | (
-                FormatId::GeminiGenerateContent,
-                FormatId::GeminiGenerateContent,
-                "gemini",
-                _
-            )
-            | (
-                FormatId::GeminiGenerateContent,
-                FormatId::OpenAiChat,
-                "openai",
-                "web_search_options",
-            )
+        ) | (
+            FormatId::ClaudeMessages,
+            _,
+            "claude",
+            "context_management" | "output_config",
+        ) | (
+            FormatId::ClaudeMessages,
+            FormatId::OpenAiChat | FormatId::GeminiGenerateContent,
+            "openai",
+            "web_search_options",
+        ) | (
+            FormatId::GeminiGenerateContent,
+            _,
+            "gemini",
+            "thinking_config" | "raw_tools" | "raw_tool_config",
+        ) | (
+            FormatId::GeminiGenerateContent,
+            FormatId::OpenAiChat,
+            "gemini",
+            "builtin_tools" | "grounding",
+        ) | (
+            FormatId::GeminiGenerateContent,
+            FormatId::GeminiGenerateContent,
+            "gemini",
+            _
+        ) | (
+            FormatId::GeminiGenerateContent,
+            FormatId::OpenAiChat,
+            "openai",
+            "web_search_options",
+        )
     )
 }
 
@@ -2515,6 +2516,25 @@ mod tests {
         assert_eq!(converted["model"], "gpt-target");
         assert_eq!(converted["input"][0]["type"], "message");
         assert_eq!(converted["input"][0]["content"][0]["type"], "input_text");
+    }
+
+    #[test]
+    fn claude_request_to_responses_accepts_context_management() {
+        let body = json!({
+            "model": "claude-sonnet",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 128,
+            "context_management": {
+                "edits": [{"type": "clear_tool_uses_20250919"}]
+            }
+        });
+
+        let converted = convert_request_pure("claude:messages", "openai:responses", &body)
+            .expect("context_management is audited for Claude cross-format requests")
+            .value;
+
+        assert_eq!(converted["model"], "claude-sonnet");
+        assert!(converted.get("context_management").is_none());
     }
 
     #[test]

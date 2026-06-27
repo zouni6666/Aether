@@ -38,12 +38,19 @@ use crate::ai_serving::planner::pool_scheduler::PoolKeyCursor;
 use crate::ai_serving::planner::runtime_miss::record_local_runtime_candidate_skip_reason;
 use crate::ai_serving::planner::CandidateFailureDiagnostic;
 use crate::ai_serving::{GatewayAuthApiKeySnapshot, PlannerAppState};
+use crate::cache::{
+    candidate_page_cache_stale_ttl, candidate_page_cache_ttl_from_env,
+    record_candidate_page_resolve_cache_follower_wait, record_candidate_page_resolve_cache_hit,
+    record_candidate_page_resolve_cache_load, record_candidate_page_resolve_cache_miss,
+    CacheLoadObserver, CandidateResolvedPageCacheKey, CandidateResolvedPageSnapshot,
+};
 use crate::clock::current_unix_ms;
 use crate::dispatch::refs::dispatch_ref_for_local_candidate;
 use crate::handlers::shared::provider_pool::admin_provider_pool_config_from_config_value;
 use crate::orchestration::{local_attempt_slot_count, ExecutionAttemptIdentity};
 use crate::scheduler::candidate::is_auth_api_key_concurrency_limit_skip_reason;
 use crate::scheduler::config::SchedulerSchedulingMode;
+use crate::stage_metrics::observe_gateway_stage_ms;
 use crate::{AppState, GatewayError};
 
 const POOL_KEY_RETRY_INDEX_STRIDE: u32 = 100;
@@ -101,16 +108,20 @@ impl<'a> LocalExecutionCandidateAttemptSource<'a> {
         Self { items }
     }
 
-    pub(crate) async fn next_attempt(&mut self) -> Option<LocalExecutionCandidateAttempt> {
+    pub(crate) async fn next_attempt(
+        &mut self,
+    ) -> Result<Option<LocalExecutionCandidateAttempt>, GatewayError> {
         loop {
-            let front = self.items.front_mut()?;
+            let Some(front) = self.items.front_mut() else {
+                return Ok(None);
+            };
             match front {
                 LocalExecutionCandidateAttemptSourceItem::Static { attempts } => {
                     if let Some(attempt) = next_attempt_from_dispatch_sequence(attempts) {
                         if dispatch_sequence_exhausted(attempts) {
                             self.items.pop_front();
                         }
-                        return Some(attempt);
+                        return Ok(Some(attempt));
                     }
                     self.items.pop_front();
                 }
@@ -121,7 +132,7 @@ impl<'a> LocalExecutionCandidateAttemptSource<'a> {
                     pool_exhaustion_persistence,
                 } => {
                     if let Some(attempt) = next_attempt_from_dispatch_sequence(pending_attempts) {
-                        return Some(attempt);
+                        return Ok(Some(attempt));
                     }
                     let Some(candidate) = cursor.next_key().await else {
                         if let Some(skipped) = cursor.exhausted_group_skipped_candidate() {
@@ -146,11 +157,11 @@ impl<'a> LocalExecutionCandidateAttemptSource<'a> {
                     );
                 }
                 LocalExecutionCandidateAttemptSourceItem::RequestedModelPage { cursor } => {
-                    let Some(attempt) = cursor.next_attempt().await else {
+                    let Some(attempt) = cursor.next_attempt().await? else {
                         self.items.pop_front();
                         continue;
                     };
-                    return Some(attempt);
+                    return Ok(Some(attempt));
                 }
             }
         }
@@ -726,8 +737,11 @@ where
         auth_snapshot,
         routing_policy,
         client_session_affinity,
+        request_auth_channel,
         use_api_format_alias_match,
         key_mode,
+        sticky_session_token.is_none(),
+        Some(trace_id),
     )
     .await;
     let mut cursor = RequestedModelAttemptPageCursor {
@@ -755,11 +769,14 @@ where
         remembered_affinity: false,
         scheduler_cache_affinity_enabled,
         auth_api_key_concurrency_wait_deadline: None,
+        deferred_error: None,
     };
-    cursor.load_next_page().await;
+    if let Err(error) = cursor.load_next_page().await {
+        cursor.deferred_error = Some(error);
+    }
     let candidate_count = cursor.candidate_count;
     let mut items = VecDeque::new();
-    if !cursor.pending_items.is_empty() {
+    if !cursor.pending_items.is_empty() || cursor.deferred_error.is_some() {
         items.push_back(
             LocalExecutionCandidateAttemptSourceItem::RequestedModelPage {
                 cursor: Box::new(cursor),
@@ -797,34 +814,58 @@ struct RequestedModelAttemptPageCursor<'a> {
     remembered_affinity: bool,
     scheduler_cache_affinity_enabled: bool,
     auth_api_key_concurrency_wait_deadline: Option<Instant>,
+    deferred_error: Option<GatewayError>,
 }
 
 impl<'a> RequestedModelAttemptPageCursor<'a> {
-    async fn next_attempt(&mut self) -> Option<LocalExecutionCandidateAttempt> {
+    async fn next_attempt(
+        &mut self,
+    ) -> Result<Option<LocalExecutionCandidateAttempt>, GatewayError> {
+        if let Some(error) = self.deferred_error.take() {
+            return Err(error);
+        }
         loop {
             if let Some(attempt) = pop_attempt_from_items(&mut self.pending_items).await {
-                return Some(attempt);
+                return Ok(Some(attempt));
             }
-            if !self.load_next_page().await {
-                return None;
+            if !self.load_next_page().await? {
+                return Ok(None);
             }
         }
     }
 
-    async fn load_next_page(&mut self) -> bool {
+    async fn load_next_page(&mut self) -> Result<bool, GatewayError> {
         loop {
+            let page_started_at = std::time::Instant::now();
             let page = match self.page_cursor.next_page().await {
                 Ok(Some(page)) => page,
-                Ok(None) => return false,
+                Ok(None) => {
+                    observe_gateway_stage_ms(
+                        "candidate_page_load",
+                        page_started_at.elapsed().as_millis() as u64,
+                    );
+                    return Ok(false);
+                }
                 Err(error) => {
+                    observe_gateway_stage_ms(
+                        "candidate_page_load",
+                        page_started_at.elapsed().as_millis() as u64,
+                    );
+                    if matches!(error, GatewayError::AdmissionTimeout { .. }) {
+                        return Err(error);
+                    }
                     warn!(
                         trace_id = %self.trace_id,
                         error = ?error,
                         "gateway lazy requested-model candidate page read failed"
                     );
-                    return false;
+                    return Ok(false);
                 }
             };
+            observe_gateway_stage_ms(
+                "candidate_page_load",
+                page_started_at.elapsed().as_millis() as u64,
+            );
 
             if page_is_exact_auth_api_key_concurrency_limited(&page) {
                 if self.wait_for_auth_api_key_concurrency_retry().await {
@@ -832,24 +873,16 @@ impl<'a> RequestedModelAttemptPageCursor<'a> {
                 }
                 self.persist_final_auth_api_key_concurrency_skips(page.skipped_candidates)
                     .await;
-                return false;
+                return Ok(false);
             }
 
+            let resolve_started_at = std::time::Instant::now();
             let (candidates, resolved_skipped) =
-                resolve_and_rank_logical_local_execution_candidates(
-                    self.state,
-                    page.candidates,
-                    &self.client_api_format,
-                    Some(&self.requested_model),
-                    Some(&self.auth_snapshot),
-                    self.client_session_affinity.as_ref(),
-                    self.required_capabilities.as_ref(),
-                    self.routing_policy.as_ref(),
-                    self.sticky_session_token.as_deref(),
-                    self.request_auth_channel.as_deref(),
-                    self.resolution_mode,
-                )
-                .await;
+                resolve_priority_candidate_page_with_cache(self, page.candidates).await;
+            observe_gateway_stage_ms(
+                "candidate_page_resolve",
+                resolve_started_at.elapsed().as_millis() as u64,
+            );
             let skipped_candidates = page
                 .skipped_candidates
                 .into_iter()
@@ -899,7 +932,7 @@ impl<'a> RequestedModelAttemptPageCursor<'a> {
                 .saturating_add(u32::try_from(skipped_candidate_count).unwrap_or(u32::MAX));
             if !items.is_empty() {
                 self.pending_items = items;
-                return true;
+                return Ok(true);
             }
             let skipped_starting_candidate_index = next_candidate_index;
             let skipped_persistence = LocalSkippedCandidatePersistenceContext {
@@ -1078,6 +1111,120 @@ pub(crate) fn remember_first_local_candidate_affinity(
         &first_candidate.candidate,
         first_candidate.orchestration.scheduler_affinity_epoch,
     );
+}
+
+async fn resolve_priority_candidate_page_with_cache(
+    cursor: &RequestedModelAttemptPageCursor<'_>,
+    page_candidates: Vec<SchedulerMinimalCandidateSelectionCandidate>,
+) -> (
+    Vec<EligibleLocalExecutionCandidate>,
+    Vec<SkippedLocalExecutionCandidate>,
+) {
+    if !should_cache_resolved_candidate_page(cursor) {
+        return resolve_and_rank_logical_local_execution_candidates(
+            cursor.state,
+            page_candidates,
+            &cursor.client_api_format,
+            Some(&cursor.requested_model),
+            Some(&cursor.auth_snapshot),
+            cursor.client_session_affinity.as_ref(),
+            cursor.required_capabilities.as_ref(),
+            cursor.routing_policy.as_ref(),
+            cursor.sticky_session_token.as_deref(),
+            cursor.request_auth_channel.as_deref(),
+            cursor.resolution_mode,
+        )
+        .await;
+    }
+
+    let key = CandidateResolvedPageCacheKey::new(
+        &cursor.requested_model,
+        &cursor.client_api_format,
+        true,
+        &cursor.auth_snapshot,
+        cursor.required_capabilities.as_ref(),
+        cursor.routing_policy.as_ref(),
+        cursor.request_auth_channel.as_deref(),
+        cursor.state.app().scheduler_affinity_epoch(),
+        cursor.page_cursor.resolved_page_cache_preselection_mode(),
+        cursor
+            .page_cursor
+            .resolved_page_cache_use_api_format_alias_match(),
+        cursor.client_session_affinity.as_ref(),
+        cursor.resolution_mode,
+    );
+    let page_candidates_for_fallback = page_candidates.clone();
+    let page_candidates_for_load = page_candidates;
+    let cache = cursor.state.app().candidate_resolved_page_cache.clone();
+    let ttl = candidate_page_cache_ttl_from_env();
+    let stale_ttl = candidate_page_cache_stale_ttl(ttl);
+    let cached = cache
+        .get_or_load_once_stale_while_refreshing(
+            key,
+            ttl,
+            stale_ttl,
+            || async move {
+                let (candidates, resolved_skipped) =
+                    resolve_and_rank_logical_local_execution_candidates(
+                        cursor.state,
+                        page_candidates_for_load,
+                        &cursor.client_api_format,
+                        Some(&cursor.requested_model),
+                        Some(&cursor.auth_snapshot),
+                        cursor.client_session_affinity.as_ref(),
+                        cursor.required_capabilities.as_ref(),
+                        cursor.routing_policy.as_ref(),
+                        cursor.sticky_session_token.as_deref(),
+                        cursor.request_auth_channel.as_deref(),
+                        cursor.resolution_mode,
+                    )
+                    .await;
+                Ok::<_, GatewayError>(Some(Arc::new(CandidateResolvedPageSnapshot {
+                    candidates,
+                    resolved_skipped,
+                })))
+            },
+            CacheLoadObserver::new()
+                .on_hit(record_candidate_page_resolve_cache_hit)
+                .on_miss(record_candidate_page_resolve_cache_miss)
+                .on_load(record_candidate_page_resolve_cache_load)
+                .on_follower_wait(record_candidate_page_resolve_cache_follower_wait),
+        )
+        .await
+        .unwrap_or(None);
+
+    match cached {
+        Some(snapshot) => (
+            snapshot.candidates.clone(),
+            snapshot.resolved_skipped.clone(),
+        ),
+        None => {
+            if page_candidates_for_fallback.is_empty() {
+                return (Vec::new(), Vec::new());
+            }
+            resolve_and_rank_logical_local_execution_candidates(
+                cursor.state,
+                page_candidates_for_fallback,
+                &cursor.client_api_format,
+                Some(&cursor.requested_model),
+                Some(&cursor.auth_snapshot),
+                cursor.client_session_affinity.as_ref(),
+                cursor.required_capabilities.as_ref(),
+                cursor.routing_policy.as_ref(),
+                cursor.sticky_session_token.as_deref(),
+                cursor.request_auth_channel.as_deref(),
+                cursor.resolution_mode,
+            )
+            .await
+        }
+    }
+}
+
+fn should_cache_resolved_candidate_page(cursor: &RequestedModelAttemptPageCursor<'_>) -> bool {
+    cursor.sticky_session_token.is_none()
+        && cursor
+            .page_cursor
+            .should_cache_current_priority_resolved_page()
 }
 
 fn should_persist_available_local_candidate(eligible: &EligibleLocalExecutionCandidate) -> bool {
@@ -1937,7 +2084,8 @@ mod tests {
                 GatewayDataState::with_request_candidate_repository_for_tests(Arc::clone(
                     &repository,
                 )),
-            );
+            )
+            .without_request_candidate_queue_for_tests();
 
         let attempts = persist_available_local_execution_candidates(
             PlannerAppState::new(&app),
@@ -2026,6 +2174,148 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolved_candidate_page_cache_requires_fixed_order_or_explicit_affinity() {
+        let app = AppState::new().expect("state should build");
+        let auth_snapshot = sample_auth_snapshot();
+        let mut page_cursor = LocalCandidatePreselectionPageCursor::new(
+            PlannerAppState::new(&app),
+            "openai:chat",
+            "gpt-5",
+            true,
+            None,
+            &auth_snapshot,
+            None,
+            None,
+            None,
+            false,
+            LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModel,
+            true,
+            Some("trace-no-session-affinity"),
+        )
+        .await;
+        page_cursor.mark_priority_page_emitted_for_tests();
+        let cursor = RequestedModelAttemptPageCursor {
+            state: PlannerAppState::new(&app),
+            trace_id: "trace-no-session-affinity".to_string(),
+            client_api_format: "openai:chat".to_string(),
+            requested_model: "gpt-5".to_string(),
+            auth_snapshot: auth_snapshot.clone(),
+            client_session_affinity: None,
+            required_capabilities: None,
+            routing_policy: None,
+            sticky_session_token: None,
+            request_auth_channel: None,
+            skipped_user_id: "user-1".to_string(),
+            skipped_api_key_id: "api-key-1".to_string(),
+            skipped_required_capabilities: None,
+            skipped_error_context: "test skipped",
+            record_runtime_miss_diagnostic: false,
+            resolution_mode: LocalCandidateResolutionMode::Standard,
+            decorate_skipped_candidate: Arc::new(identity_skipped_candidate),
+            page_cursor,
+            pending_items: VecDeque::new(),
+            candidate_count: 0,
+            next_candidate_index: 0,
+            remembered_affinity: false,
+            scheduler_cache_affinity_enabled: false,
+            auth_api_key_concurrency_wait_deadline: None,
+            deferred_error: None,
+        };
+
+        assert!(!should_cache_resolved_candidate_page(&cursor));
+
+        let sticky_cursor = RequestedModelAttemptPageCursor {
+            sticky_session_token: Some("sticky-token".to_string()),
+            ..cursor
+        };
+
+        assert!(!should_cache_resolved_candidate_page(&sticky_cursor));
+
+        let mut page_cursor = LocalCandidatePreselectionPageCursor::new(
+            PlannerAppState::new(&app),
+            "openai:chat",
+            "gpt-5",
+            true,
+            None,
+            &auth_snapshot,
+            None,
+            Some(&ClientSessionAffinity::from_session_key("chat-session-1")),
+            None,
+            false,
+            LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModel,
+            true,
+            Some("trace-session-affinity"),
+        )
+        .await;
+        page_cursor.mark_priority_page_emitted_for_tests();
+        let cursor = RequestedModelAttemptPageCursor {
+            client_session_affinity: Some(ClientSessionAffinity::from_session_key(
+                "chat-session-1",
+            )),
+            page_cursor,
+            sticky_session_token: None,
+            ..sticky_cursor
+        };
+
+        assert!(should_cache_resolved_candidate_page(&cursor));
+
+        let fixed_order_app = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::disabled().with_system_config_values_for_tests([(
+                    "scheduling_mode".to_string(),
+                    json!("fixed_order"),
+                )]),
+            );
+        let mut page_cursor = LocalCandidatePreselectionPageCursor::new(
+            PlannerAppState::new(&fixed_order_app),
+            "openai:chat",
+            "gpt-5",
+            true,
+            None,
+            &auth_snapshot,
+            None,
+            None,
+            None,
+            false,
+            LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModel,
+            true,
+            Some("trace-fixed-order"),
+        )
+        .await;
+        page_cursor.mark_priority_page_emitted_for_tests();
+        let cursor = RequestedModelAttemptPageCursor {
+            state: PlannerAppState::new(&fixed_order_app),
+            trace_id: "trace-fixed-order".to_string(),
+            client_api_format: "openai:chat".to_string(),
+            requested_model: "gpt-5".to_string(),
+            auth_snapshot,
+            client_session_affinity: None,
+            required_capabilities: None,
+            routing_policy: None,
+            sticky_session_token: None,
+            request_auth_channel: None,
+            skipped_user_id: "user-1".to_string(),
+            skipped_api_key_id: "api-key-1".to_string(),
+            skipped_required_capabilities: None,
+            skipped_error_context: "test skipped",
+            record_runtime_miss_diagnostic: false,
+            resolution_mode: LocalCandidateResolutionMode::Standard,
+            decorate_skipped_candidate: Arc::new(identity_skipped_candidate),
+            page_cursor,
+            pending_items: VecDeque::new(),
+            candidate_count: 0,
+            next_candidate_index: 0,
+            remembered_affinity: false,
+            scheduler_cache_affinity_enabled: false,
+            auth_api_key_concurrency_wait_deadline: None,
+            deferred_error: None,
+        };
+
+        assert!(should_cache_resolved_candidate_page(&cursor));
+    }
+
+    #[tokio::test]
     async fn logical_materialization_does_not_persist_pool_group_representative() {
         let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
         let app = AppState::new()
@@ -2042,7 +2332,8 @@ mod tests {
                     Arc::clone(&request_candidate_repository),
                     "test-encryption-key",
                 ),
-            );
+            )
+            .without_request_candidate_queue_for_tests();
         let mut pool_group = sample_eligible("pool-group", None);
         pool_group.kind = LocalExecutionCandidateKind::PoolGroup;
         pool_group.transport = sample_transport(
@@ -2140,7 +2431,8 @@ mod tests {
                 GatewayDataState::with_request_candidate_repository_for_tests(Arc::clone(
                     &repository,
                 )),
-            );
+            )
+            .without_request_candidate_queue_for_tests();
         let mut eligible = sample_eligible("ranked-key", None);
         eligible.ranking = Some(SchedulerRankingOutcome {
             original_index: 1,
@@ -2214,12 +2506,17 @@ mod tests {
         let first = source
             .next_attempt()
             .await
+            .expect("first attempt read should succeed")
             .expect("first attempt should be available");
         assert_eq!(first.eligible.candidate.key_id, "normal-key");
 
         let remaining = source.drain_static_attempts();
         assert!(remaining.is_empty());
-        assert!(source.next_attempt().await.is_none());
+        assert!(source
+            .next_attempt()
+            .await
+            .expect("remaining attempt read should succeed")
+            .is_none());
     }
 
     #[tokio::test]
@@ -2239,7 +2536,8 @@ mod tests {
                     Arc::clone(&request_candidate_repository),
                     "test-encryption-key",
                 ),
-            );
+            )
+            .without_request_candidate_queue_for_tests();
         let mut pool_group = sample_eligible("pool-group", None);
         pool_group.kind = LocalExecutionCandidateKind::PoolGroup;
         pool_group.transport = sample_transport(
@@ -2275,7 +2573,11 @@ mod tests {
             }]),
         };
 
-        assert!(source.next_attempt().await.is_none());
+        assert!(source
+            .next_attempt()
+            .await
+            .expect("pool attempt read should succeed")
+            .is_none());
 
         let stored = app
             .read_request_candidates_by_request_id("trace-dynamic-pool")
@@ -2308,7 +2610,8 @@ mod tests {
                 GatewayDataState::with_request_candidate_repository_for_tests(Arc::clone(
                     &repository,
                 )),
-            );
+            )
+            .without_request_candidate_queue_for_tests();
 
         persist_skipped_local_execution_candidates(
             &app,

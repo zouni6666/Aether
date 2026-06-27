@@ -20,6 +20,8 @@ use aether_runtime_state::{
     RuntimeSemaphoreSnapshot, RuntimeState,
 };
 use aether_scheduler_core::PROVIDER_KEY_RPM_WINDOW_SECS;
+use dashmap::DashMap;
+use tracing::warn;
 
 use super::{
     AppState, FrontdoorCorsConfig, FrontdoorRuntimeGuardConfig, LocalExecutionRuntimeMissDiagnostic,
@@ -29,15 +31,18 @@ use super::super::async_task::{
     spawn_video_task_poller, VideoTaskPollerConfig, VideoTaskService, VideoTaskTruthSourceMode,
 };
 use super::super::cache::{
-    AuthApiKeyLastUsedCache, AuthContextCache, DashboardResponseCache, DirectPlanBypassCache,
-    SchedulerAffinityCache, SchedulerAffinitySnapshotEntry, SchedulerAffinityTarget,
-    SystemConfigCache,
+    AuthApiKeyLastUsedCache, AuthContextCache, AuthSnapshotCache, DashboardResponseCache,
+    DirectPlanBypassCache, JsonValueCache, SchedulerAffinityCache, SchedulerAffinitySnapshotEntry,
+    SchedulerAffinityTarget, SystemConfigCache, SystemConfigInflightRegistration, ValueCache,
 };
 use super::super::data::{GatewayDataConfig, GatewayDataState};
 use super::super::fallback_metrics;
 use super::super::fallback_metrics::{GatewayFallbackMetricKind, GatewayFallbackReason};
 use super::super::model_fetch::spawn_model_fetch_worker;
 use super::super::rate_limit::{FrontdoorUserRpmConfig, FrontdoorUserRpmLimiter};
+use super::super::request_candidate_queue::{
+    RequestCandidateQueueConfig, RequestCandidateQueueRuntime,
+};
 use super::super::router::RequestAdmissionError;
 use super::super::{control::GatewayControlDecision, error::GatewayError};
 use super::super::{provider_transport, usage};
@@ -62,7 +67,7 @@ use crate::maintenance::spawn_usage_cleanup_worker;
 use crate::maintenance::spawn_usage_counter_flush_worker;
 use crate::maintenance::spawn_wallet_daily_usage_aggregation_worker;
 
-const SYSTEM_CONFIG_CACHE_TTL: Duration = Duration::from_secs(3);
+const SYSTEM_CONFIG_CACHE_TTL: Duration = Duration::from_secs(30);
 const SCHEDULER_AFFECTING_SYSTEM_CONFIG_KEYS: &[&str] = &[
     "enable_format_conversion",
     "keep_priority_on_conversion",
@@ -74,6 +79,7 @@ const AUTH_AFFECTING_SYSTEM_CONFIG_KEYS: &[&str] = &[
     crate::constants::ANTIGRAVITY_BEARER_BRIDGE_CONFIG_KEY,
 ];
 const FRONTDOOR_RPM_AFFECTING_SYSTEM_CONFIG_KEYS: &[&str] = &["rate_limit_per_minute"];
+const CHAT_PII_REDACTION_SYSTEM_CONFIG_PREFIX: &str = "module.chat_pii_redaction.";
 
 fn system_config_key_affects_scheduler(key: &str) -> bool {
     let key = key.trim();
@@ -90,7 +96,23 @@ fn system_config_key_affects_frontdoor_rpm(key: &str) -> bool {
     FRONTDOOR_RPM_AFFECTING_SYSTEM_CONFIG_KEYS.contains(&key)
 }
 
+fn system_config_key_affects_chat_pii_redaction(key: &str) -> bool {
+    key.trim()
+        .starts_with(CHAT_PII_REDACTION_SYSTEM_CONFIG_PREFIX)
+}
+
+fn system_config_key_affects_provider_transport_snapshot(key: &str) -> bool {
+    key.trim() == "enable_format_conversion"
+}
+
 impl AppState {
+    pub async fn prewarm_chat_pii_redaction_runtime_config(&self) -> Result<bool, String> {
+        crate::privacy::read_chat_pii_redaction_runtime_config(self)
+            .await
+            .map(|config| config.enabled)
+            .map_err(|err| format!("{err:?}"))
+    }
+
     fn usage_worker_queue_for(
         runtime_state: &Arc<RuntimeState>,
     ) -> Option<Arc<dyn RuntimeQueueStore>> {
@@ -168,6 +190,8 @@ impl AppState {
         self.clear_provider_transport_snapshot_cache();
         self.invalidate_scheduler_affinity_cache();
         self.invalidate_auth_context_cache();
+        self.candidate_row_page_cache.clear();
+        self.candidate_resolved_page_cache.clear();
         self.system_config_cache.clear();
         self.frontdoor_user_rpm.clear_system_default_cache();
         let data = Arc::new(
@@ -175,11 +199,15 @@ impl AppState {
                 .clone()
                 .with_usage_worker_queue(Self::usage_worker_queue_for(&self.runtime_state)),
         );
+        self.candidate_row_page_cache.clear();
+        self.candidate_page_cache.clear();
+        self.candidate_resolved_page_cache.clear();
         self.tunnel = crate::tunnel::EmbeddedTunnelState::with_data_and_runtime_state(
             Arc::clone(&data),
             self.runtime_state.clone(),
         );
         self.data = data;
+        self.configure_request_candidate_queue_from_env();
     }
 
     pub fn force_close_all_tunnel_proxies(&self) -> usize {
@@ -217,6 +245,7 @@ impl AppState {
             http2_adaptive_window: true,
             ..HttpClientConfig::default()
         })?;
+        let frontdoor_runtime_guards = Arc::new(FrontdoorRuntimeGuardConfig::from_env());
         Ok(Self {
             #[cfg(test)]
             execution_runtime_override_base_url: execution_runtime_override_base_url
@@ -231,11 +260,34 @@ impl AppState {
                 VideoTaskTruthSourceMode::PythonSyncReport,
             )),
             video_task_poller: None,
-            frontdoor_runtime_guards: Arc::new(FrontdoorRuntimeGuardConfig::from_env()),
+            frontdoor_runtime_guards: Arc::clone(&frontdoor_runtime_guards),
             request_gate: None,
+            candidate_planning_gate: frontdoor_runtime_guards
+                .candidate_planning_gate_limit
+                .map(|limit| Arc::new(ConcurrencyGate::new("gateway_candidate_planning", limit))),
+            upstream_execution_gate: frontdoor_runtime_guards
+                .upstream_execution_gate_limit
+                .map(|limit| Arc::new(ConcurrencyGate::new("gateway_upstream_execution", limit))),
+            upstream_target_admission: Arc::new(
+                crate::upstream_admission::UpstreamTargetAdmission::new(
+                    frontdoor_runtime_guards.upstream_target_gate_limit,
+                    frontdoor_runtime_guards.internal_gate_queue_budget,
+                ),
+            ),
             distributed_request_gate: None,
             client,
             auth_context_cache: Arc::new(AuthContextCache::default()),
+            auth_snapshot_cache: Arc::new(AuthSnapshotCache::default()),
+            user_model_capability_settings_cache: Arc::new(JsonValueCache::default()),
+            user_feature_settings_cache: Arc::new(JsonValueCache::default()),
+            auth_api_key_force_capabilities_cache: Arc::new(JsonValueCache::default()),
+            auth_api_key_feature_settings_cache: Arc::new(JsonValueCache::default()),
+            auth_daily_quota_availability_cache: Arc::new(ValueCache::default()),
+            auth_wallet_snapshot_cache: Arc::new(ValueCache::default()),
+            auth_request_cost_upper_bound_cache: Arc::new(ValueCache::default()),
+            provider_quota_snapshot_cache: Arc::new(ValueCache::default()),
+            user_groups_for_user_cache: Arc::new(ValueCache::default()),
+            routing_group_selection_cache: Arc::new(ValueCache::default()),
             auth_api_key_last_used_cache: Arc::new(AuthApiKeyLastUsedCache::default()),
             oauth_refresh: Arc::new(provider_transport::LocalOAuthRefreshCoordinator::new()),
             direct_plan_bypass_cache: Arc::new(DirectPlanBypassCache::default()),
@@ -243,7 +295,15 @@ impl AppState {
             scheduler_affinity_epoch: Arc::new(AtomicU64::new(0)),
             dashboard_response_cache: Arc::new(DashboardResponseCache::default()),
             system_config_cache: Arc::new(SystemConfigCache::default()),
+            candidate_row_page_cache: Arc::new(crate::cache::CandidateRowPageCache::default()),
+            candidate_page_cache: Arc::new(crate::cache::CandidatePageCache::default()),
+            candidate_resolved_page_cache: Arc::new(
+                crate::cache::CandidateResolvedPageCache::default(),
+            ),
+            chat_pii_redaction_runtime_config_cache:
+                crate::privacy::new_chat_pii_redaction_runtime_config_cache(),
             fallback_metrics: Arc::new(fallback_metrics::GatewayFallbackMetrics::default()),
+            request_candidate_queue: None,
             frontdoor_cors: None,
             frontdoor_user_rpm: Arc::new(FrontdoorUserRpmLimiter::new(
                 FrontdoorUserRpmConfig::default(),
@@ -252,9 +312,10 @@ impl AppState {
                 data,
                 runtime_state.clone(),
             ),
-            provider_transport_snapshot_cache: Arc::new(StdMutex::new(HashMap::new())),
+            provider_transport_snapshot_cache: Arc::new(DashMap::new()),
+            provider_transport_snapshot_inflight: Arc::new(DashMap::new()),
             provider_key_rpm_resets: Arc::new(StdMutex::new(HashMap::new())),
-            local_execution_runtime_miss_diagnostics: Arc::new(StdMutex::new(HashMap::new())),
+            local_execution_runtime_miss_diagnostics: Arc::new(DashMap::new()),
             admin_monitoring_error_stats_reset_at: Arc::new(StdMutex::new(None)),
             provider_delete_tasks: Arc::new(StdMutex::new(HashMap::new())),
             #[cfg(test)]
@@ -416,6 +477,26 @@ impl AppState {
         self
     }
 
+    fn configure_request_candidate_queue_from_env(&mut self) {
+        let config = RequestCandidateQueueConfig::from_env();
+        self.request_candidate_queue = if config.async_enabled() {
+            if tokio::runtime::Handle::try_current().is_err() {
+                warn!(
+                    event_name = "request_candidate_async_queue_unavailable",
+                    log_type = "ops",
+                    "request candidate async queue requested outside a Tokio runtime; falling back to sync persistence"
+                );
+                None
+            } else {
+                self.data
+                    .request_candidate_writer()
+                    .map(|writer| RequestCandidateQueueRuntime::spawn(writer, config))
+            }
+        } else {
+            None
+        };
+    }
+
     pub fn with_distributed_request_concurrency_gate(mut self, gate: RuntimeSemaphore) -> Self {
         self.distributed_request_gate = Some(Arc::new(gate));
         self
@@ -502,14 +583,44 @@ impl AppState {
             return Ok(value);
         }
 
-        let value = self
-            .data
-            .find_system_config_value(key)
-            .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?;
-        self.system_config_cache
-            .insert(key.to_string(), value.clone(), SYSTEM_CONFIG_CACHE_TTL);
-        Ok(value)
+        loop {
+            let notified = self.system_config_cache.notified();
+            match self.system_config_cache.register_load(key) {
+                SystemConfigInflightRegistration::Bypass => {
+                    let value = self
+                        .data
+                        .find_system_config_value(key)
+                        .await
+                        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+                    self.system_config_cache.insert(
+                        key.to_string(),
+                        value.clone(),
+                        SYSTEM_CONFIG_CACHE_TTL,
+                    );
+                    return Ok(value);
+                }
+                SystemConfigInflightRegistration::Follower => {
+                    notified.await;
+                    if let Some(value) = self.system_config_cache.get(key, SYSTEM_CONFIG_CACHE_TTL)
+                    {
+                        return Ok(value);
+                    }
+                }
+                SystemConfigInflightRegistration::Leader(_guard) => {
+                    let value = self
+                        .data
+                        .find_system_config_value(key)
+                        .await
+                        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+                    self.system_config_cache.insert(
+                        key.to_string(),
+                        value.clone(),
+                        SYSTEM_CONFIG_CACHE_TTL,
+                    );
+                    return Ok(value);
+                }
+            }
+        }
     }
 
     pub(crate) async fn upsert_system_config_json_value(
@@ -568,12 +679,25 @@ impl AppState {
         if deleted && system_config_key_affects_frontdoor_rpm(key) {
             self.frontdoor_user_rpm.clear_system_default_cache();
         }
+        if deleted && system_config_key_affects_chat_pii_redaction(key) {
+            crate::privacy::clear_chat_pii_redaction_runtime_config_cache(
+                &self.chat_pii_redaction_runtime_config_cache,
+            );
+        }
+        if deleted && system_config_key_affects_provider_transport_snapshot(key) {
+            self.clear_provider_transport_snapshot_cache();
+        }
         Ok(deleted)
     }
 
     pub(crate) fn invalidate_provider_routing_caches(&self) {
         self.data.clear_minimal_candidate_selection_cache();
+        self.data.clear_routing_group_cache();
         self.data.clear_provider_catalog_cache();
+        self.routing_group_selection_cache.clear();
+        self.candidate_row_page_cache.clear();
+        self.candidate_page_cache.clear();
+        self.candidate_resolved_page_cache.clear();
         self.clear_provider_transport_snapshot_cache();
         self.invalidate_scheduler_affinity_cache();
     }
@@ -581,11 +705,34 @@ impl AppState {
     pub(crate) fn invalidate_provider_health_routing_caches(&self) {
         self.data.clear_minimal_candidate_selection_cache();
         self.data.clear_provider_catalog_cache();
+        self.candidate_row_page_cache.clear();
+        self.candidate_page_cache.clear();
+        self.candidate_resolved_page_cache.clear();
+        self.clear_provider_transport_snapshot_cache();
+    }
+
+    pub(crate) fn invalidate_provider_runtime_state_caches(&self) {
+        self.data.clear_minimal_candidate_selection_cache();
+        self.data.clear_provider_catalog_cache();
         self.clear_provider_transport_snapshot_cache();
     }
 
     pub(crate) fn invalidate_auth_context_cache(&self) {
         self.auth_context_cache.clear();
+        self.auth_snapshot_cache.clear();
+        self.user_model_capability_settings_cache.clear();
+        self.user_feature_settings_cache.clear();
+        self.auth_api_key_force_capabilities_cache.clear();
+        self.auth_api_key_feature_settings_cache.clear();
+        self.auth_daily_quota_availability_cache.clear();
+        self.auth_wallet_snapshot_cache.clear();
+        self.auth_request_cost_upper_bound_cache.clear();
+        self.provider_quota_snapshot_cache.clear();
+        self.user_groups_for_user_cache.clear();
+        self.routing_group_selection_cache.clear();
+        self.candidate_row_page_cache.clear();
+        self.candidate_page_cache.clear();
+        self.candidate_resolved_page_cache.clear();
     }
 
     fn remember_system_config_write(&self, key: &str, value: Option<serde_json::Value>) {
@@ -599,6 +746,14 @@ impl AppState {
         }
         if system_config_key_affects_frontdoor_rpm(key) {
             self.frontdoor_user_rpm.clear_system_default_cache();
+        }
+        if system_config_key_affects_chat_pii_redaction(key) {
+            crate::privacy::clear_chat_pii_redaction_runtime_config_cache(
+                &self.chat_pii_redaction_runtime_config_cache,
+            );
+        }
+        if system_config_key_affects_provider_transport_snapshot(key) {
+            self.clear_provider_transport_snapshot_cache();
         }
     }
 
@@ -863,6 +1018,18 @@ impl AppState {
         self.request_gate.as_ref().map(|gate| gate.snapshot())
     }
 
+    pub(crate) fn candidate_planning_concurrency_snapshot(&self) -> Option<ConcurrencySnapshot> {
+        self.candidate_planning_gate
+            .as_ref()
+            .map(|gate| gate.snapshot())
+    }
+
+    pub(crate) fn upstream_execution_concurrency_snapshot(&self) -> Option<ConcurrencySnapshot> {
+        self.upstream_execution_gate
+            .as_ref()
+            .map(|gate| gate.snapshot())
+    }
+
     pub(crate) async fn distributed_request_concurrency_snapshot(
         &self,
     ) -> Result<Option<RuntimeSemaphoreSnapshot>, RuntimeSemaphoreError> {
@@ -876,6 +1043,12 @@ impl AppState {
         let mut samples = vec![service_up_sample("aether-gateway")];
         if let Some(snapshot) = self.request_concurrency_snapshot() {
             samples.extend(snapshot.to_metric_samples("gateway_requests"));
+        }
+        if let Some(snapshot) = self.candidate_planning_concurrency_snapshot() {
+            samples.extend(snapshot.to_metric_samples("gateway_candidate_planning"));
+        }
+        if let Some(snapshot) = self.upstream_execution_concurrency_snapshot() {
+            samples.extend(snapshot.to_metric_samples("gateway_upstream_execution"));
         }
         if let Some(gate) = self.distributed_request_gate.as_ref() {
             match gate.snapshot().await {
@@ -896,6 +1069,21 @@ impl AppState {
                 ),
             }
         }
+        if let Some(summary) = self.data.database_pool_summary() {
+            samples.extend(database_pool_metric_samples(&summary));
+        }
+        if let Some(queue) = self.request_candidate_queue.as_ref() {
+            samples.extend(queue.metric_samples());
+        }
+        samples.extend(usage_runtime_metric_samples(
+            &self.usage_runtime.metrics_snapshot(),
+        ));
+        samples.extend(
+            crate::execution_runtime::transport::direct_reqwest_client_cache_metric_samples(),
+        );
+        samples.extend(self.upstream_target_admission.metric_samples());
+        samples.extend(crate::cache::candidate_page_cache_metric_samples());
+        samples.extend(crate::stage_metrics::gateway_stage_metric_samples());
         samples.extend(self.tunnel.metric_samples());
         samples.extend(self.fallback_metrics.metric_samples());
         samples
@@ -915,8 +1103,6 @@ impl AppState {
 
     pub(crate) fn clear_local_execution_runtime_miss_diagnostic(&self, trace_id: &str) {
         self.local_execution_runtime_miss_diagnostics
-            .lock()
-            .expect("local execution runtime miss diagnostics should lock")
             .remove(trace_id);
     }
 
@@ -925,17 +1111,17 @@ impl AppState {
         trace_id: &str,
         diagnostic: LocalExecutionRuntimeMissDiagnostic,
     ) {
-        let mut diagnostics = self
+        if self
             .local_execution_runtime_miss_diagnostics
-            .lock()
-            .expect("local execution runtime miss diagnostics should lock");
-        if diagnostics
             .get(trace_id)
-            .is_some_and(|existing| should_preserve_runtime_miss_diagnostic(existing, &diagnostic))
+            .is_some_and(|existing| {
+                should_preserve_runtime_miss_diagnostic(existing.value(), &diagnostic)
+            })
         {
             return;
         }
-        diagnostics.insert(trace_id.to_string(), diagnostic);
+        self.local_execution_runtime_miss_diagnostics
+            .insert(trace_id.to_string(), diagnostic);
     }
 
     pub(crate) fn mutate_local_execution_runtime_miss_diagnostic<F>(
@@ -945,12 +1131,11 @@ impl AppState {
     ) where
         F: FnOnce(&mut LocalExecutionRuntimeMissDiagnostic),
     {
-        let mut diagnostics = self
+        if let Some(mut diagnostic) = self
             .local_execution_runtime_miss_diagnostics
-            .lock()
-            .expect("local execution runtime miss diagnostics should lock");
-        if let Some(diagnostic) = diagnostics.get_mut(trace_id) {
-            mutate(diagnostic);
+            .get_mut(trace_id)
+        {
+            mutate(&mut diagnostic);
         }
     }
 
@@ -959,10 +1144,10 @@ impl AppState {
         trace_id: &str,
     ) -> bool {
         self.local_execution_runtime_miss_diagnostics
-            .lock()
-            .expect("local execution runtime miss diagnostics should lock")
             .get(trace_id)
-            .is_some_and(runtime_miss_diagnostic_has_candidate_signal)
+            .is_some_and(|diagnostic| {
+                runtime_miss_diagnostic_has_candidate_signal(diagnostic.value())
+            })
     }
 
     pub(crate) fn take_local_execution_runtime_miss_diagnostic(
@@ -970,9 +1155,8 @@ impl AppState {
         trace_id: &str,
     ) -> Option<LocalExecutionRuntimeMissDiagnostic> {
         self.local_execution_runtime_miss_diagnostics
-            .lock()
-            .expect("local execution runtime miss diagnostics should lock")
             .remove(trace_id)
+            .map(|(_, diagnostic)| diagnostic)
     }
 
     pub(crate) async fn try_acquire_request_permit(
@@ -1080,6 +1264,9 @@ impl AppState {
             .fetch_add(1, Ordering::AcqRel)
             .saturating_add(1);
         self.scheduler_affinity_cache.clear();
+        self.candidate_row_page_cache.clear();
+        self.candidate_page_cache.clear();
+        self.candidate_resolved_page_cache.clear();
         next_epoch
     }
 
@@ -1170,6 +1357,15 @@ impl AppState {
                 definition.trigger,
             ));
         };
+
+        if let Some(handle) = self
+            .usage_runtime
+            .spawn_worker_supervisor(self.data.clone())
+        {
+            supervisor.supervise_handle(crate::task_runtime::TASK_KEY_USAGE_QUEUE_WORKER, handle);
+            record_boot(crate::task_runtime::TASK_KEY_USAGE_QUEUE_WORKER);
+        }
+
         let mut supervise_worker =
             |task_key: &'static str, handle: Option<tokio::task::JoinHandle<()>>| {
                 if let Some(handle) = handle {
@@ -1178,10 +1374,6 @@ impl AppState {
                 }
             };
 
-        supervise_worker(
-            crate::task_runtime::TASK_KEY_USAGE_QUEUE_WORKER,
-            self.usage_runtime.spawn_worker(self.data.clone()),
-        );
         supervise_worker(
             crate::task_runtime::TASK_KEY_USAGE_COUNTER_FLUSH,
             spawn_usage_counter_flush_worker(self.data.clone()),
@@ -1277,6 +1469,190 @@ impl AppState {
 
         supervisor
     }
+}
+
+fn database_pool_metric_samples(summary: &aether_data::DatabasePoolSummary) -> Vec<MetricSample> {
+    let labels = vec![MetricLabel::new("driver", summary.driver.to_string())];
+    let usage_basis_points = if summary.usage_rate.is_finite() && summary.usage_rate > 0.0 {
+        (summary.usage_rate * 100.0).round() as u64
+    } else {
+        0
+    };
+    let under_maintenance_pressure =
+        GatewayDataState::database_pool_summary_under_maintenance_pressure(summary);
+
+    vec![
+        MetricSample::new(
+            "database_pool_checked_out_connections",
+            "Number of database connections currently checked out from the gateway pool.",
+            MetricKind::Gauge,
+            summary.checked_out as u64,
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "database_pool_idle_connections",
+            "Number of idle database connections currently available in the gateway pool.",
+            MetricKind::Gauge,
+            summary.idle as u64,
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "database_pool_size_connections",
+            "Current number of database connections opened by the gateway pool.",
+            MetricKind::Gauge,
+            summary.pool_size as u64,
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "database_pool_max_connections",
+            "Configured maximum number of database connections for the gateway pool.",
+            MetricKind::Gauge,
+            summary.max_connections as u64,
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "database_pool_usage_basis_points",
+            "Database pool usage rate in basis points, where 10000 means 100 percent.",
+            MetricKind::Gauge,
+            usage_basis_points,
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "database_pool_idle_reserve_connections",
+            "Idle database connections reserved for foreground traffic before maintenance defers.",
+            MetricKind::Gauge,
+            GatewayDataState::maintenance_pool_idle_reserve(summary) as u64,
+        )
+        .with_labels(labels.clone()),
+        MetricSample::new(
+            "database_pool_under_maintenance_pressure",
+            "Whether maintenance workers should currently defer for foreground database pool capacity.",
+            MetricKind::Gauge,
+            u64::from(under_maintenance_pressure),
+        )
+        .with_labels(labels),
+    ]
+}
+
+fn usage_runtime_metric_samples(
+    snapshot: &usage::UsageRuntimeMetricsSnapshot,
+) -> Vec<MetricSample> {
+    vec![
+        MetricSample::new(
+            "usage_runtime_enabled",
+            "Whether the gateway usage runtime is enabled.",
+            MetricKind::Gauge,
+            u64::from(snapshot.enabled),
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_terminal_events_enabled",
+            "Whether terminal usage events are queued before settlement.",
+            MetricKind::Gauge,
+            u64::from(snapshot.queue_terminal_events),
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_lifecycle_events_enabled",
+            "Whether lifecycle usage events are queued.",
+            MetricKind::Gauge,
+            u64::from(snapshot.queue_lifecycle_events),
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_worker_count",
+            "Minimum configured number of usage queue worker consumers.",
+            MetricKind::Gauge,
+            snapshot.worker_count as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_worker_autoscale_enabled",
+            "Whether usage queue worker autoscaling is enabled.",
+            MetricKind::Gauge,
+            u64::from(snapshot.worker_autoscale_enabled),
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_worker_max_count",
+            "Maximum configured number of elastic usage queue worker consumers.",
+            MetricKind::Gauge,
+            snapshot.worker_max_count as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_worker_active_count",
+            "Current active usage queue worker consumers managed by the supervisor.",
+            MetricKind::Gauge,
+            snapshot.worker_active_count as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_worker_desired_count",
+            "Current desired usage queue worker consumers selected by autoscaling.",
+            MetricKind::Gauge,
+            snapshot.worker_desired_count as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_retry_deferred_lifecycle_events_enabled",
+            "Whether deferred lifecycle usage events are scheduled for local enqueue retry.",
+            MetricKind::Gauge,
+            u64::from(snapshot.retry_deferred_lifecycle_events),
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_enqueue_in_flight",
+            "Current terminal usage enqueue operations in flight.",
+            MetricKind::Gauge,
+            snapshot.terminal_enqueue_in_flight,
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_enqueue_deferred_total",
+            "Total terminal usage enqueue operations deferred by circuit or in-flight limits.",
+            MetricKind::Counter,
+            snapshot.terminal_enqueue_deferred_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_enqueue_deferred_retry_total",
+            "Total deferred terminal usage events scheduled for local retry.",
+            MetricKind::Counter,
+            snapshot.terminal_enqueue_deferred_retry_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_enqueue_failed_total",
+            "Total terminal usage enqueue failures that opened the terminal enqueue circuit.",
+            MetricKind::Counter,
+            snapshot.terminal_enqueue_failed_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_lifecycle_enqueue_in_flight",
+            "Current lifecycle usage enqueue operations in flight.",
+            MetricKind::Gauge,
+            snapshot.lifecycle_enqueue_in_flight,
+        ),
+        MetricSample::new(
+            "usage_runtime_lifecycle_enqueue_deferred_total",
+            "Total lifecycle usage enqueue operations deferred by circuit or in-flight limits.",
+            MetricKind::Counter,
+            snapshot.lifecycle_enqueue_deferred_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_lifecycle_enqueue_deferred_dropped_total",
+            "Total deferred lifecycle usage events dropped instead of retrying.",
+            MetricKind::Counter,
+            snapshot.lifecycle_enqueue_deferred_dropped_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_lifecycle_enqueue_deferred_retry_total",
+            "Total deferred lifecycle usage events scheduled for local retry.",
+            MetricKind::Counter,
+            snapshot.lifecycle_enqueue_deferred_retry_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_lifecycle_enqueue_failed_total",
+            "Total lifecycle usage enqueue failures that opened the lifecycle enqueue circuit.",
+            MetricKind::Counter,
+            snapshot.lifecycle_enqueue_failed_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_enqueue_retry_scheduled_total",
+            "Total usage events scheduled into the local enqueue retry dispatcher.",
+            MetricKind::Counter,
+            snapshot.enqueue_retry_scheduled_total,
+        ),
+    ]
 }
 
 fn should_preserve_runtime_miss_diagnostic(

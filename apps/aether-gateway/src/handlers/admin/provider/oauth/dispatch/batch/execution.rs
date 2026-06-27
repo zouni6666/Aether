@@ -1,6 +1,7 @@
 use super::super::helpers::admin_provider_oauth_key_name_from_auth_config;
 use super::super::token_import::{
-    build_provider_access_token_import_auth_config, provider_type_supports_access_token_import,
+    build_provider_access_token_import_auth_config, decode_access_token_expires_at,
+    provider_oauth_import_authorization_bearer_token, provider_type_supports_access_token_import,
 };
 use super::kiro_import::execute_admin_provider_oauth_kiro_batch_import;
 use super::parse::{
@@ -394,9 +395,22 @@ pub(super) async fn execute_admin_provider_oauth_batch_import(
         let AdminProviderOAuthResolvedBatchImport {
             access_token,
             mut auth_config,
-            expires_at,
+            mut expires_at,
         } = resolved_import;
         apply_admin_provider_oauth_batch_import_hints(provider_type, entry, &mut auth_config);
+        if let Some(header_access_token) =
+            provider_oauth_import_authorization_bearer_token(entry.request_headers.as_ref())
+        {
+            if let Some(header_expires_at) =
+                decode_access_token_expires_at(&header_access_token).or(entry.expires_at)
+            {
+                auth_config.insert("expires_at".to_string(), json!(header_expires_at));
+                expires_at = Some(header_expires_at);
+            } else {
+                auth_config.remove("expires_at");
+                expires_at = None;
+            }
+        }
 
         let duplicate =
             match find_duplicate_provider_oauth_key(state, provider_id, &auth_config, None).await {

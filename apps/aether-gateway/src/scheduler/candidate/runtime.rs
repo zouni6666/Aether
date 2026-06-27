@@ -8,7 +8,7 @@ use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKe
 use aether_scheduler_core::{
     auth_api_key_concurrency_limit_reached, build_provider_concurrent_limit_map,
     candidate_is_selectable_with_runtime_state, candidate_runtime_skip_reason_with_state,
-    CandidateRuntimeSelectabilityInput,
+    effective_provider_key_rpm_limit, CandidateRuntimeSelectabilityInput,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -33,9 +33,9 @@ pub(super) struct CandidateRuntimeSelectionSnapshot {
 pub(super) async fn read_candidate_runtime_selection_snapshot(
     state: &(impl SchedulerRuntimeState + ?Sized),
     candidates: &[SchedulerMinimalCandidateSelectionCandidate],
+    auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
     now_unix_secs: u64,
 ) -> Result<CandidateRuntimeSelectionSnapshot, GatewayError> {
-    let recent_candidates = state.read_recent_request_candidates(128).await?;
     let provider_concurrent_limits = read_provider_concurrent_limits(state, candidates).await?;
     let provider_pool_state = read_provider_pool_state_map(state, candidates).await?;
     let provider_skip_exhausted_accounts = provider_pool_state
@@ -47,6 +47,16 @@ pub(super) async fn read_candidate_runtime_selection_snapshot(
         .filter_map(|(provider_id, state)| state.pool_enabled.then_some(provider_id.clone()))
         .collect::<BTreeSet<_>>();
     let provider_key_rpm_states = read_provider_key_rpm_states(state, candidates).await?;
+    let recent_candidates = if runtime_snapshot_requires_recent_candidates(
+        auth_snapshot,
+        &provider_concurrent_limits,
+        &provider_key_rpm_states,
+        now_unix_secs,
+    ) {
+        state.read_recent_request_candidates(128).await?
+    } else {
+        Vec::new()
+    };
     let key_account_quota_exhausted = read_key_account_quota_exhaustion_map(
         candidates,
         &provider_key_rpm_states,
@@ -68,6 +78,29 @@ pub(super) async fn read_candidate_runtime_selection_snapshot(
         key_account_quota_exhausted,
         key_oauth_invalid,
         provider_key_rpm_reset_ats,
+    })
+}
+
+fn runtime_snapshot_requires_recent_candidates(
+    auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
+    provider_concurrent_limits: &BTreeMap<String, usize>,
+    provider_key_rpm_states: &BTreeMap<String, StoredProviderCatalogKey>,
+    now_unix_secs: u64,
+) -> bool {
+    if auth_snapshot
+        .and_then(|snapshot| snapshot.api_key_concurrent_limit)
+        .is_some_and(|limit| limit > 0)
+    {
+        return true;
+    }
+
+    if provider_concurrent_limits.values().any(|limit| *limit > 0) {
+        return true;
+    }
+
+    provider_key_rpm_states.values().any(|key| {
+        key.concurrent_limit.is_some_and(|limit| limit > 0)
+            || effective_provider_key_rpm_limit(key, now_unix_secs).is_some()
     })
 }
 

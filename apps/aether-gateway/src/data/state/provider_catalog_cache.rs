@@ -174,7 +174,19 @@ impl ProviderCatalogReadRepository for CachedProviderCatalogReadRepository {
         &self,
         endpoint_ids: &[String],
     ) -> Result<Vec<StoredProviderCatalogEndpoint>, DataLayerError> {
-        self.inner.list_endpoints_by_ids(endpoint_ids).await
+        let key = ProviderCatalogCacheKey::EndpointsByIds(normalize_ids(endpoint_ids));
+        match self
+            .get_or_load(key, || async move {
+                self.inner
+                    .list_endpoints_by_ids(endpoint_ids)
+                    .await
+                    .map(ProviderCatalogCacheValue::Endpoints)
+            })
+            .await?
+        {
+            ProviderCatalogCacheValue::Endpoints(items) => Ok(items),
+            _ => Ok(Vec::new()),
+        }
     }
 
     async fn list_endpoints_by_provider_ids(
@@ -200,7 +212,19 @@ impl ProviderCatalogReadRepository for CachedProviderCatalogReadRepository {
         &self,
         key_ids: &[String],
     ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
-        self.inner.list_keys_by_ids(key_ids).await
+        let key = ProviderCatalogCacheKey::KeysByIds(normalize_ids(key_ids));
+        match self
+            .get_or_load(key, || async move {
+                self.inner
+                    .list_keys_by_ids(key_ids)
+                    .await
+                    .map(ProviderCatalogCacheValue::Keys)
+            })
+            .await?
+        {
+            ProviderCatalogCacheValue::Keys(items) => Ok(items),
+            _ => Ok(Vec::new()),
+        }
     }
 
     async fn list_keys_by_provider_ids(
@@ -293,7 +317,9 @@ impl ProviderCatalogReadRepository for CachedProviderCatalogReadRepository {
 enum ProviderCatalogCacheKey {
     Providers { active_only: bool },
     ProvidersByIds(Vec<String>),
+    EndpointsByIds(Vec<String>),
     EndpointsByProviderIds(Vec<String>),
+    KeysByIds(Vec<String>),
     KeysByProviderIds(Vec<String>),
     KeySummariesByProviderIds(Vec<String>),
     KeyMaintenanceSummariesByProviderIds(Vec<String>),

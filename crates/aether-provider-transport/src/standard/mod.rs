@@ -250,6 +250,10 @@ pub fn build_standard_provider_request_headers(
         )
     };
 
+    crate::apply_local_auth_config_header_overrides(
+        &mut headers,
+        input.transport.key.decrypted_auth_config.as_deref(),
+    );
     let protected_headers = if uses_vertex_query_auth {
         &["content-type"][..]
     } else {
@@ -466,6 +470,70 @@ mod tests {
         assert_eq!(
             resolved.headers.get("anthropic-version"),
             Some(&"2023-06-01".to_string())
+        );
+    }
+
+    #[test]
+    fn endpoint_header_rules_do_not_override_protected_authorization() {
+        let mut transport = sample_transport("openai:responses");
+        transport.endpoint.header_rules = Some(json!([
+            {"action":"set","key":"authorization","value":"Bearer imported-session"}
+        ]));
+
+        let resolved =
+            build_standard_provider_request_headers(StandardProviderRequestHeadersInput {
+                transport: &transport,
+                provider_api_format: "openai:responses",
+                same_format: true,
+                headers: &HeaderMap::new(),
+                auth_header: "authorization",
+                auth_value: "Bearer jwt-access-token",
+                extra_headers: &BTreeMap::new(),
+                header_rules: transport.endpoint.header_rules.as_ref(),
+                provider_request_body: &json!({"model":"gpt-test"}),
+                original_request_body: &json!({"model":"gpt-test"}),
+                upstream_is_stream: false,
+            })
+            .expect("headers should build");
+
+        assert_eq!(
+            resolved.headers.get("authorization"),
+            Some(&"Bearer jwt-access-token".to_string())
+        );
+    }
+
+    #[test]
+    fn auth_config_headers_can_override_authorization_when_refresh_token_is_present() {
+        let mut transport = sample_transport("openai:responses");
+        transport.key.decrypted_auth_config = Some(
+            json!({
+                "refresh_token": "rt-1",
+                "headers": {
+                    "authorization": "Bearer imported-session"
+                }
+            })
+            .to_string(),
+        );
+
+        let resolved =
+            build_standard_provider_request_headers(StandardProviderRequestHeadersInput {
+                transport: &transport,
+                provider_api_format: "openai:responses",
+                same_format: true,
+                headers: &HeaderMap::new(),
+                auth_header: "authorization",
+                auth_value: "Bearer refreshed-access-token",
+                extra_headers: &BTreeMap::new(),
+                header_rules: transport.endpoint.header_rules.as_ref(),
+                provider_request_body: &json!({"model":"gpt-test"}),
+                original_request_body: &json!({"model":"gpt-test"}),
+                upstream_is_stream: false,
+            })
+            .expect("headers should build");
+
+        assert_eq!(
+            resolved.headers.get("authorization"),
+            Some(&"Bearer imported-session".to_string())
         );
     }
 

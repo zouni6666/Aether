@@ -1,4 +1,7 @@
-use crate::handlers::shared::decrypt_catalog_secret_with_fallbacks;
+use crate::handlers::shared::{
+    decrypt_catalog_secret_with_fallbacks, module_available_from_env,
+    system_config_bool as system_config_bool_with_default,
+};
 use crate::{AppState, GatewayError};
 use aether_data::repository::oauth_providers::StoredOAuthProviderConfig;
 use aether_data::repository::users::{StoredUserAuthRecord, StoredUserOAuthLinkSummary};
@@ -71,6 +74,10 @@ impl IdentityOAuthAccountError {
 pub(crate) async fn list_enabled_identity_oauth_providers(
     state: &AppState,
 ) -> Result<Vec<IdentityOAuthProviderSummary>, GatewayError> {
+    if !identity_oauth_module_enabled(state).await? {
+        return Ok(Vec::new());
+    }
+
     let mut providers = state
         .list_oauth_provider_configs()
         .await?
@@ -90,6 +97,13 @@ pub(crate) async fn get_enabled_identity_oauth_provider_config(
     state: &AppState,
     provider_type: &str,
 ) -> Result<Option<IdentityOAuthProviderConfig>, IdentityOAuthAccountError> {
+    if !identity_oauth_module_enabled(state)
+        .await
+        .map_err(|err| IdentityOAuthAccountError::Storage(format!("{err:?}")))?
+    {
+        return Ok(None);
+    }
+
     let provider_type = provider_type.trim().to_ascii_lowercase();
     let config = state
         .get_oauth_provider_config(&provider_type)
@@ -99,6 +113,17 @@ pub(crate) async fn get_enabled_identity_oauth_provider_config(
         return Ok(None);
     };
     stored_provider_config_to_identity_config(state, config).map(Some)
+}
+
+async fn identity_oauth_module_enabled(state: &AppState) -> Result<bool, GatewayError> {
+    if !module_available_from_env("OAUTH_AVAILABLE", true) {
+        return Ok(false);
+    }
+
+    let enabled = state
+        .read_system_config_json_value("module.oauth.enabled")
+        .await?;
+    Ok(system_config_bool_with_default(enabled.as_ref(), false))
 }
 
 pub(crate) async fn list_identity_oauth_links(

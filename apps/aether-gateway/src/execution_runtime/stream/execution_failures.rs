@@ -26,6 +26,7 @@ use crate::orchestration::{
     LocalPoolErrorEffect,
 };
 use crate::request_candidate_runtime::record_report_request_candidate_status;
+use crate::request_diagnostics::attach_current_request_diagnostics_to_report_context;
 use crate::usage::submit_sync_report;
 use crate::{usage::GatewaySyncReportRequest, AppState, GatewayError};
 
@@ -319,7 +320,12 @@ async fn record_stream_sync_failure(
         }),
     )
     .await;
-    let context_seed = build_terminal_usage_context_seed(plan, report_context);
+    let report_context_with_diagnostics =
+        attach_current_request_diagnostics_to_report_context(report_context);
+    let context_seed = build_terminal_usage_context_seed(
+        plan,
+        report_context_with_diagnostics.as_ref().or(report_context),
+    );
     let payload_seed = build_sync_terminal_usage_payload_seed(payload);
     state
         .usage_runtime

@@ -64,15 +64,27 @@ fn maintenance_pool_pressure_keeps_idle_reserve_for_foreground_work() {
     };
     assert!(GatewayDataState::database_pool_summary_under_maintenance_pressure(&pressured));
 
-    let one_idle_left = aether_data::DatabasePoolSummary {
+    let reserve_idle_left = aether_data::DatabasePoolSummary {
         driver: DatabaseDriver::Postgres,
-        checked_out: 5,
-        pool_size: 6,
-        idle: 1,
+        checked_out: 18,
+        pool_size: 20,
+        idle: 2,
         max_connections: 20,
-        usage_rate: 25.0,
+        usage_rate: 90.0,
     };
-    assert!(GatewayDataState::database_pool_summary_under_maintenance_pressure(&one_idle_left));
+    assert!(GatewayDataState::database_pool_summary_under_maintenance_pressure(&reserve_idle_left));
+
+    let above_idle_reserve = aether_data::DatabasePoolSummary {
+        driver: DatabaseDriver::Postgres,
+        checked_out: 17,
+        pool_size: 20,
+        idle: 3,
+        max_connections: 20,
+        usage_rate: 85.0,
+    };
+    assert!(
+        !GatewayDataState::database_pool_summary_under_maintenance_pressure(&above_idle_reserve)
+    );
 
     let idle = aether_data::DatabasePoolSummary {
         driver: DatabaseDriver::Postgres,

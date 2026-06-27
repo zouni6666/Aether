@@ -41,7 +41,8 @@ pub use report_context::{
 };
 pub use runtime::{
     UsageBillingEventEnricher, UsageBodyCapturePolicy, UsageRequestRecordLevel, UsageRuntime,
-    UsageRuntimeAccess, DEFAULT_USAGE_REQUEST_BODY_CAPTURE_LIMIT_BYTES,
+    UsageRuntimeAccess, UsageRuntimeMetricsSnapshot,
+    DEFAULT_USAGE_REQUEST_BODY_CAPTURE_LIMIT_BYTES,
     DEFAULT_USAGE_RESPONSE_BODY_CAPTURE_LIMIT_BYTES,
 };
 pub use settlement::{settle_usage_if_needed, UsageSettlementWriter};

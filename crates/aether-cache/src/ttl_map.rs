@@ -63,6 +63,46 @@ where
         );
     }
 
+    pub fn insert_if_absent_fresh(
+        &self,
+        key: K,
+        value: V,
+        ttl: Duration,
+        max_entries: usize,
+    ) -> bool {
+        if ttl.is_zero() {
+            return true;
+        }
+
+        let Ok(mut entries) = self.entries.lock() else {
+            return false;
+        };
+
+        prune_expired(&mut entries, ttl);
+        if entries.contains_key(&key) {
+            return false;
+        }
+        while max_entries > 0 && entries.len() >= max_entries {
+            let Some(oldest_key) = entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.inserted_at)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            entries.remove(&oldest_key);
+        }
+
+        entries.insert(
+            key,
+            TimedEntry {
+                value,
+                inserted_at: Instant::now(),
+            },
+        );
+        true
+    }
+
     pub fn remove(&self, key: &K) -> Option<V> {
         let Ok(mut entries) = self.entries.lock() else {
             return None;
@@ -94,6 +134,22 @@ where
     K: Eq + Hash + Clone,
     V: Clone,
 {
+    pub fn get_with_age(&self, key: &K, max_age: Duration) -> Option<(V, Duration)> {
+        let Ok(mut entries) = self.entries.lock() else {
+            return None;
+        };
+
+        let entry = entries.get(key).cloned()?;
+        let age = entry.inserted_at.elapsed();
+
+        if age > max_age {
+            entries.remove(key);
+            return None;
+        }
+
+        Some((entry.value, age))
+    }
+
     pub fn get_fresh(&self, key: &K, ttl: Duration) -> Option<V> {
         let Ok(mut entries) = self.entries.lock() else {
             return None;
@@ -202,6 +258,51 @@ mod tests {
         assert_eq!(
             cache.get_fresh(&"three".to_string(), std::time::Duration::from_secs(60)),
             Some(3)
+        );
+    }
+
+    #[test]
+    fn insert_if_absent_fresh_rejects_fresh_duplicate() {
+        let cache = ExpiringMap::new();
+
+        assert!(cache.insert_if_absent_fresh(
+            "hello".to_string(),
+            1_u32,
+            std::time::Duration::from_secs(60),
+            16,
+        ));
+        assert!(!cache.insert_if_absent_fresh(
+            "hello".to_string(),
+            2_u32,
+            std::time::Duration::from_secs(60),
+            16,
+        ));
+        assert_eq!(
+            cache.get_fresh(&"hello".to_string(), std::time::Duration::from_secs(60)),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn insert_if_absent_fresh_allows_after_expiry() {
+        let cache = ExpiringMap::new();
+
+        assert!(cache.insert_if_absent_fresh(
+            "hello".to_string(),
+            1_u32,
+            std::time::Duration::from_millis(10),
+            16,
+        ));
+        sleep(std::time::Duration::from_millis(20));
+        assert!(cache.insert_if_absent_fresh(
+            "hello".to_string(),
+            2_u32,
+            std::time::Duration::from_millis(10),
+            16,
+        ));
+        assert_eq!(
+            cache.get_fresh(&"hello".to_string(), std::time::Duration::from_millis(10)),
+            Some(2)
         );
     }
 }

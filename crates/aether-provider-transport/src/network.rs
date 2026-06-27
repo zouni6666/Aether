@@ -344,6 +344,7 @@ mod tests {
         transport_proxy_is_locally_supported, TransportTunnelAffinityLookup,
         TransportTunnelAttachmentOwner,
     };
+    use aether_contracts::TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE;
 
     #[derive(Default)]
     struct TestTunnelAffinityLookup {
@@ -587,6 +588,23 @@ mod tests {
         assert_eq!(profile.backend, "reqwest_rustls");
         assert_eq!(profile.http_mode, "auto");
         assert_eq!(profile.pool_scope, "key");
+    }
+
+    #[test]
+    fn resolves_h2c_prior_knowledge_transport_profile() {
+        let mut transport = sample_transport();
+        transport.key.fingerprint = Some(json!({
+            "transport_profile": {
+                "profile_id": "mock-h2c",
+                "backend": "reqwest_rustls",
+                "http_mode": "h2c_prior_knowledge"
+            }
+        }));
+
+        let profile = resolve_transport_profile(&transport).expect("profile");
+
+        assert_eq!(profile.profile_id, "mock-h2c");
+        assert_eq!(profile.http_mode, TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE);
     }
 
     #[test]

@@ -97,6 +97,7 @@ fn provider_oauth_export_payload(
         if let Some(access_token) = fallback_access_token
             .map(str::trim)
             .filter(|value| !value.is_empty() && *value != "__placeholder__")
+            .filter(|value| !oauth_export_fallback_matches_authorization_header(&payload, value))
         {
             payload.insert("access_token".to_string(), json!(access_token));
         }
@@ -114,6 +115,43 @@ fn provider_oauth_export_payload(
         }
     }
     payload
+}
+
+fn oauth_export_fallback_matches_authorization_header(
+    payload: &serde_json::Map<String, serde_json::Value>,
+    fallback_access_token: &str,
+) -> bool {
+    let fallback_access_token = fallback_access_token.trim();
+    if fallback_access_token.is_empty() {
+        return false;
+    }
+    let Some(authorization) = payload
+        .get("headers")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|headers| {
+            headers
+                .iter()
+                .find(|(key, _)| key.trim().eq_ignore_ascii_case("authorization"))
+                .and_then(|(_, value)| value.as_str())
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+
+    if authorization == fallback_access_token {
+        return true;
+    }
+
+    let mut parts = authorization.splitn(2, char::is_whitespace);
+    let Some(scheme) = parts.next() else {
+        return false;
+    };
+    let Some(token) = parts.next() else {
+        return false;
+    };
+    scheme.eq_ignore_ascii_case("bearer") && token.trim() == fallback_access_token
 }
 
 fn json_map_has_non_empty_string(
@@ -185,4 +223,85 @@ pub(crate) async fn build_admin_export_key_payload(
         json!(Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)),
     );
     Ok(serde_json::Value::Object(payload))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::provider_oauth_export_payload;
+    use serde_json::json;
+
+    #[test]
+    fn oauth_export_preserves_imported_request_headers() {
+        let auth_config = json!({
+            "provider_type": "codex",
+            "email": "user@example.com",
+            "headers": {
+                "authorization": "Bearer imported-session",
+                "chatgpt-account-id": "acct-1"
+            }
+        })
+        .as_object()
+        .cloned()
+        .expect("auth_config should be an object");
+
+        let payload = provider_oauth_export_payload("codex", &auth_config, None, Some("fallback"));
+
+        assert_eq!(
+            payload.get("headers"),
+            Some(&json!({
+                "authorization": "Bearer imported-session",
+                "chatgpt-account-id": "acct-1"
+            }))
+        );
+        assert_eq!(payload.get("access_token"), Some(&json!("fallback")));
+    }
+
+    #[test]
+    fn oauth_export_does_not_promote_imported_header_bearer_to_access_token() {
+        let auth_config = json!({
+            "provider_type": "codex",
+            "email": "user@example.com",
+            "headers": {
+                "authorization": "Bearer imported-session"
+            }
+        })
+        .as_object()
+        .cloned()
+        .expect("auth_config should be an object");
+
+        let payload =
+            provider_oauth_export_payload("codex", &auth_config, None, Some("imported-session"));
+
+        assert_eq!(
+            payload.get("headers"),
+            Some(&json!({"authorization": "Bearer imported-session"}))
+        );
+        assert!(payload.get("access_token").is_none());
+    }
+
+    #[test]
+    fn oauth_export_keeps_explicit_access_token_even_with_header_bearer() {
+        let auth_config = json!({
+            "provider_type": "codex",
+            "access_token": "jwt-access-token",
+            "headers": {
+                "authorization": "Bearer imported-session"
+            }
+        })
+        .as_object()
+        .cloned()
+        .expect("auth_config should be an object");
+
+        let payload =
+            provider_oauth_export_payload("codex", &auth_config, None, Some("imported-session"));
+
+        assert_eq!(
+            payload.get("access_token"),
+            Some(&json!("jwt-access-token"))
+        );
+        assert_eq!(
+            payload.get("headers"),
+            Some(&json!({"authorization": "Bearer imported-session"}))
+        );
+    }
 }

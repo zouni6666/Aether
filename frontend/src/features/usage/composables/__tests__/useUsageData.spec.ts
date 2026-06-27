@@ -65,6 +65,21 @@ function buildUsageRecord(overrides: Partial<UsageRecord> = {}): UsageRecord {
   }
 }
 
+function createDeferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
+async function flushMicrotasks() {
+  await Promise.resolve()
+  await Promise.resolve()
+}
+
 describe('useUsageData', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -147,6 +162,172 @@ describe('useUsageData', () => {
     })
   })
 
+  it('preserves detail-filled usage metrics when a later list refresh is still empty', async () => {
+    const isAdminPage = ref(true)
+    const { loadRecords, currentRecords } = useUsageData({ isAdminPage })
+    const dateRange = { preset: 'today', tz_offset_minutes: 0 }
+
+    getAllUsageRecordsMock.mockResolvedValueOnce({
+      records: [buildUsageRecord({
+        status: 'completed',
+        input_tokens: 0,
+        effective_input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_creation_ephemeral_5m_input_tokens: 0,
+        cache_creation_ephemeral_1h_input_tokens: 0,
+        cache_read_input_tokens: 0,
+        cost: 0,
+        actual_cost: 0,
+        response_time_ms: null,
+        first_byte_time_ms: null,
+        is_stream: false,
+        upstream_is_stream: false,
+        client_requested_stream: false,
+        client_is_stream: false,
+      })],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    })
+
+    await loadRecords({ page: 1, pageSize: 20 }, undefined, dateRange)
+
+    Object.assign(currentRecords.value[0], {
+      input_tokens: 1138,
+      effective_input_tokens: 1138,
+      output_tokens: 244,
+      total_tokens: 81126,
+      cache_creation_input_tokens: 17,
+      cache_creation_ephemeral_5m_input_tokens: 5,
+      cache_creation_ephemeral_1h_input_tokens: 12,
+      cache_read_input_tokens: 79744,
+      cost: 0.052882,
+      actual_cost: 0.052882,
+      response_time_ms: 5570,
+      first_byte_time_ms: 1600,
+      is_stream: true,
+      upstream_is_stream: true,
+      client_requested_stream: true,
+      client_is_stream: true,
+      api_format: 'openai:responses',
+      endpoint_api_format: 'openai:responses',
+      has_format_conversion: false,
+      has_retry: true,
+      target_model: 'gpt-5.5',
+      reasoning_effort: 'xhigh',
+      service_tier: 'auto',
+    })
+
+    getAllUsageRecordsMock.mockResolvedValueOnce({
+      records: [buildUsageRecord({
+        status: 'completed',
+        input_tokens: 0,
+        effective_input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_creation_ephemeral_5m_input_tokens: 0,
+        cache_creation_ephemeral_1h_input_tokens: 0,
+        cache_read_input_tokens: 0,
+        cost: 0,
+        actual_cost: 0,
+        response_time_ms: null,
+        first_byte_time_ms: null,
+        is_stream: false,
+        upstream_is_stream: false,
+        client_requested_stream: false,
+        client_is_stream: false,
+        api_format: undefined,
+        endpoint_api_format: undefined,
+        has_format_conversion: undefined,
+        has_retry: false,
+        target_model: null,
+        reasoning_effort: null,
+        service_tier: null,
+      })],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    })
+
+    await loadRecords({ page: 1, pageSize: 20 }, undefined, dateRange)
+
+    expect(currentRecords.value[0]).toMatchObject({
+      status: 'completed',
+      input_tokens: 1138,
+      effective_input_tokens: 1138,
+      output_tokens: 244,
+      total_tokens: 81126,
+      cache_creation_input_tokens: 17,
+      cache_creation_ephemeral_5m_input_tokens: 5,
+      cache_creation_ephemeral_1h_input_tokens: 12,
+      cache_read_input_tokens: 79744,
+      cost: 0.052882,
+      actual_cost: 0.052882,
+      response_time_ms: 5570,
+      first_byte_time_ms: 1600,
+      is_stream: true,
+      upstream_is_stream: true,
+      client_requested_stream: true,
+      client_is_stream: true,
+      api_format: 'openai:responses',
+      endpoint_api_format: 'openai:responses',
+      has_format_conversion: false,
+      has_retry: true,
+      target_model: 'gpt-5.5',
+      reasoning_effort: 'xhigh',
+      service_tier: 'auto',
+    })
+  })
+
+  it('allows finalized list metrics to replace larger detail estimates', async () => {
+    const isAdminPage = ref(true)
+    const { loadRecords, currentRecords } = useUsageData({ isAdminPage })
+    const dateRange = { preset: 'today', tz_offset_minutes: 0 }
+
+    getAllUsageRecordsMock.mockResolvedValueOnce({
+      records: [buildUsageRecord({
+        status: 'completed',
+        input_tokens: 1200,
+        output_tokens: 300,
+        total_tokens: 1500,
+        cost: 0.09,
+        actual_cost: 0.09,
+      })],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    })
+
+    await loadRecords({ page: 1, pageSize: 20 }, undefined, dateRange)
+
+    getAllUsageRecordsMock.mockResolvedValueOnce({
+      records: [buildUsageRecord({
+        status: 'completed',
+        input_tokens: 1100,
+        output_tokens: 250,
+        total_tokens: 1350,
+        cost: 0.07,
+        actual_cost: 0.07,
+      })],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    })
+
+    await loadRecords({ page: 1, pageSize: 20 }, undefined, dateRange)
+
+    expect(currentRecords.value[0]).toMatchObject({
+      input_tokens: 1100,
+      output_tokens: 250,
+      total_tokens: 1350,
+      cost: 0.07,
+      actual_cost: 0.07,
+    })
+  })
+
   it('refreshes exact admin record totals after an estimated first page', async () => {
     const isAdminPage = ref(true)
     const { loadRecords, totalRecords } = useUsageData({ isAdminPage })
@@ -174,6 +355,45 @@ describe('useUsageData', () => {
       tz_offset_minutes: 0,
     }))
     expect(totalRecords.value).toBe(122101)
+  })
+
+  it('keeps the exact admin record total while a later page returns an estimate', async () => {
+    const isAdminPage = ref(true)
+    const { loadRecords, totalRecords } = useUsageData({ isAdminPage })
+    const dateRange = { preset: 'last7days', tz_offset_minutes: 0 }
+
+    getAllUsageRecordsMock.mockResolvedValueOnce({
+      records: [buildUsageRecord()],
+      total: 21,
+      total_is_estimated: true,
+      limit: 20,
+      offset: 0,
+    })
+    getAllUsageRecordTotalMock.mockResolvedValueOnce(8650)
+
+    await loadRecords({ page: 1, pageSize: 20 }, undefined, dateRange)
+    await flushMicrotasks()
+
+    expect(totalRecords.value).toBe(8650)
+
+    const exactTotal = createDeferred<number>()
+    getAllUsageRecordsMock.mockResolvedValueOnce({
+      records: [buildUsageRecord({ id: 'usage-2' })],
+      total: 41,
+      total_is_estimated: true,
+      limit: 20,
+      offset: 20,
+    })
+    getAllUsageRecordTotalMock.mockReturnValueOnce(exactTotal.promise)
+
+    await loadRecords({ page: 2, pageSize: 20 }, undefined, dateRange)
+
+    expect(totalRecords.value).toBe(8650)
+
+    exactTotal.resolve(8651)
+    await flushMicrotasks()
+
+    expect(totalRecords.value).toBe(8651)
   })
 
   it('continues loading admin breakdowns when the summary request fails', async () => {

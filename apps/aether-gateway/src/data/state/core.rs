@@ -1,10 +1,80 @@
 use aether_data::{DataBackends, DataLayerError, DatabaseDriver};
 use aether_data_contracts::repository::candidate_selection::MinimalCandidateSelectionReadRepository;
+use aether_data_contracts::repository::candidates::RequestCandidateReadRepository;
 use aether_data_contracts::repository::provider_catalog::ProviderCatalogReadRepository;
 use aether_runtime_state::RuntimeQueueStore;
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::Notify;
 
 use super::{GatewayDataConfig, GatewayDataState, StoredSystemConfigEntry};
+
+const SYSTEM_CONFIG_VALUE_CACHE_TTL: Duration = Duration::from_secs(30);
+
+fn system_config_value_load_state() -> &'static SystemConfigValueLoadState {
+    static STATE: std::sync::OnceLock<SystemConfigValueLoadState> = std::sync::OnceLock::new();
+    STATE.get_or_init(SystemConfigValueLoadState::default)
+}
+
+#[derive(Debug, Default)]
+struct SystemConfigValueLoadState {
+    inflight: std::sync::Mutex<HashSet<String>>,
+    notify: Notify,
+}
+
+enum SystemConfigValueLoadRegistration<'a> {
+    Leader(SystemConfigValueLoadGuard<'a>),
+    Follower,
+    Bypass,
+}
+
+struct SystemConfigValueLoadGuard<'a> {
+    state: &'a SystemConfigValueLoadState,
+    key: Option<String>,
+}
+
+impl Drop for SystemConfigValueLoadGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(key) = self.key.take() {
+            self.state.finish(&key);
+        }
+    }
+}
+
+impl SystemConfigValueLoadState {
+    fn register(&self, key: &str) -> SystemConfigValueLoadRegistration<'_> {
+        match self.inflight.lock() {
+            Ok(mut inflight) => {
+                if inflight.contains(key) {
+                    SystemConfigValueLoadRegistration::Follower
+                } else {
+                    inflight.insert(key.to_string());
+                    SystemConfigValueLoadRegistration::Leader(SystemConfigValueLoadGuard {
+                        state: self,
+                        key: Some(key.to_string()),
+                    })
+                }
+            }
+            Err(_) => SystemConfigValueLoadRegistration::Bypass,
+        }
+    }
+
+    fn notified(&self) -> tokio::sync::futures::Notified<'_> {
+        self.notify.notified()
+    }
+
+    fn finish(&self, key: &str) {
+        let removed = self
+            .inflight
+            .lock()
+            .map(|mut inflight| inflight.remove(key))
+            .unwrap_or(false);
+        if removed {
+            self.notify.notify_waiters();
+        }
+    }
+}
 
 fn current_system_config_updated_at_unix_secs() -> u64 {
     std::time::SystemTime::now()
@@ -64,11 +134,16 @@ impl GatewayDataState {
                 wallet_writer: None,
                 settlement_writer: None,
                 system_config_values: None,
+                system_config_value_cache: Default::default(),
+                billing_model_context_cache: Default::default(),
             });
         }
 
         let backends = DataBackends::from_config(config.to_data_layer_config())?;
-        let auth_api_key_reader = backends.read().auth_api_keys();
+        let auth_api_key_reader = backends.read().auth_api_keys().map(|repository| {
+            Arc::new(super::auth_api_key_cache::CachedAuthApiKeyReadRepository::new(repository))
+                as Arc<dyn aether_data::repository::auth::AuthApiKeyReadRepository>
+        });
         let auth_api_key_writer = backends.write().auth_api_keys();
         let auth_module_reader = backends.read().auth_modules();
         let auth_module_writer = backends.write().auth_modules();
@@ -97,7 +172,13 @@ impl GatewayDataState {
                         ),
                     ) as Arc<dyn MinimalCandidateSelectionReadRepository>
                 });
-        let request_candidate_reader = backends.read().request_candidates();
+        let request_candidate_reader = backends.read().request_candidates().map(|repository| {
+            Arc::new(
+                super::request_candidate_cache::CachedRequestCandidateReadRepository::new(
+                    repository,
+                ),
+            ) as Arc<dyn RequestCandidateReadRepository>
+        });
         let request_candidate_writer = backends.write().request_candidates();
         let gemini_file_mapping_writer = backends.write().gemini_file_mappings();
         let provider_catalog_reader = backends.read().provider_catalog().map(|repository| {
@@ -110,7 +191,11 @@ impl GatewayDataState {
         let pool_score_writer = backends.write().pool_scores();
         let provider_quota_reader = backends.read().provider_quotas();
         let provider_quota_writer = backends.write().provider_quotas();
-        let routing_group_reader = backends.read().routing_groups();
+        let routing_group_reader = backends.read().routing_groups().map(|repository| {
+            Arc::new(super::routing_group_cache::CachedRoutingGroupReadRepository::new(
+                repository,
+            )) as Arc<dyn aether_data_contracts::repository::routing_profiles::RoutingGroupReadRepository>
+        });
         let routing_group_writer = backends.write().routing_groups();
         let usage_reader = backends.read().usage();
         let usage_writer = backends.write().usage();
@@ -166,6 +251,8 @@ impl GatewayDataState {
             wallet_writer,
             settlement_writer,
             system_config_values: None,
+            system_config_value_cache: Default::default(),
+            billing_model_context_cache: Default::default(),
         })
     }
 
@@ -281,6 +368,12 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) fn clear_routing_group_cache(&self) {
+        if let Some(repository) = &self.routing_group_reader {
+            repository.clear_local_cache();
+        }
+    }
+
     pub(crate) fn clear_provider_catalog_cache(&self) {
         if let Some(repository) = &self.provider_catalog_reader {
             repository.clear_local_cache();
@@ -293,6 +386,14 @@ impl GatewayDataState {
 
     pub(crate) fn has_request_candidate_writer(&self) -> bool {
         self.request_candidate_writer.is_some()
+    }
+
+    pub(crate) fn request_candidate_writer(
+        &self,
+    ) -> Option<
+        Arc<dyn aether_data_contracts::repository::candidates::RequestCandidateWriteRepository>,
+    > {
+        self.request_candidate_writer.clone()
     }
 
     pub(crate) fn has_routing_group_reader(&self) -> bool {
@@ -401,10 +502,80 @@ impl GatewayDataState {
                 .get(key)
                 .map(|entry| entry.value.clone()));
         }
-        let Some(backends) = self.backends.as_ref() else {
-            return Ok(None);
-        };
-        backends.find_system_config_value(key).await
+        let cached_value = self
+            .system_config_value_cache
+            .read()
+            .expect("system config value cache lock")
+            .get(key)
+            .cloned();
+        if let Some((cached_at, value)) = cached_value {
+            if cached_at.elapsed() <= SYSTEM_CONFIG_VALUE_CACHE_TTL {
+                return Ok(value);
+            }
+        }
+        let load_state = system_config_value_load_state();
+        loop {
+            let notified = load_state.notified();
+            match load_state.register(key) {
+                SystemConfigValueLoadRegistration::Bypass => {
+                    let Some(backends) = self.backends.as_ref() else {
+                        return Ok(None);
+                    };
+                    let value = crate::request_diagnostics::observe_db_operation(
+                        "system_config_value",
+                        self.database_pool_summary(),
+                        backends.find_system_config_value(key),
+                    )
+                    .await?;
+                    self.system_config_value_cache
+                        .write()
+                        .expect("system config value cache lock")
+                        .insert(key.to_string(), (Instant::now(), value.clone()));
+                    return Ok(value);
+                }
+                SystemConfigValueLoadRegistration::Follower => {
+                    notified.await;
+                    let cached_value = self
+                        .system_config_value_cache
+                        .read()
+                        .expect("system config value cache lock")
+                        .get(key)
+                        .cloned();
+                    if let Some((cached_at, value)) = cached_value {
+                        if cached_at.elapsed() <= SYSTEM_CONFIG_VALUE_CACHE_TTL {
+                            return Ok(value);
+                        }
+                    }
+                }
+                SystemConfigValueLoadRegistration::Leader(_guard) => {
+                    let cached_value = self
+                        .system_config_value_cache
+                        .read()
+                        .expect("system config value cache lock")
+                        .get(key)
+                        .cloned();
+                    if let Some((cached_at, value)) = cached_value {
+                        if cached_at.elapsed() <= SYSTEM_CONFIG_VALUE_CACHE_TTL {
+                            return Ok(value);
+                        }
+                    }
+                    let Some(backends) = self.backends.as_ref() else {
+                        return Ok(None);
+                    };
+                    let value = crate::request_diagnostics::observe_db_operation(
+                        "system_config_value",
+                        self.database_pool_summary(),
+                        backends.find_system_config_value(key),
+                    )
+                    .await?;
+                    self.system_config_value_cache
+                        .write()
+                        .expect("system config value cache lock")
+                        .insert(key.to_string(), (Instant::now(), value.clone()));
+                    return Ok(value);
+                }
+            }
+        }
     }
 
     pub(crate) async fn upsert_system_config_value(
@@ -454,6 +625,7 @@ impl GatewayDataState {
                 updated_at_unix_secs: Some(current_system_config_updated_at_unix_secs()),
             };
             values.insert(key.to_string(), entry.clone());
+            self.clear_cached_system_config_value(key);
             return Ok(entry);
         }
         if let Some(backends) = self.backends.as_ref() {
@@ -461,9 +633,11 @@ impl GatewayDataState {
                 .upsert_system_config_entry(key, value, description)
                 .await?
             {
+                self.clear_cached_system_config_value(key);
                 return Ok(entry);
             }
         }
+        self.clear_cached_system_config_value(key);
         Ok(StoredSystemConfigEntry {
             key: key.to_string(),
             value: value.clone(),
@@ -477,16 +651,27 @@ impl GatewayDataState {
         key: &str,
     ) -> Result<bool, DataLayerError> {
         if let Some(values) = &self.system_config_values {
-            return Ok(values
+            let deleted = values
                 .write()
                 .expect("system config values lock")
                 .remove(key)
-                .is_some());
+                .is_some();
+            self.clear_cached_system_config_value(key);
+            return Ok(deleted);
         }
         let Some(backends) = self.backends.as_ref() else {
             return Ok(false);
         };
-        backends.delete_system_config_value(key).await
+        let deleted = backends.delete_system_config_value(key).await?;
+        self.clear_cached_system_config_value(key);
+        Ok(deleted)
+    }
+
+    fn clear_cached_system_config_value(&self, key: &str) {
+        self.system_config_value_cache
+            .write()
+            .expect("system config value cache lock")
+            .remove(key);
     }
 
     pub(crate) async fn read_admin_system_stats(

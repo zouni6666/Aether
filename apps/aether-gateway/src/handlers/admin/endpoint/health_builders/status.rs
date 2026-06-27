@@ -1,6 +1,8 @@
 use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::unix_secs_to_rfc3339;
-use crate::handlers::public::{api_format_display_name, build_public_health_timeline};
+use crate::handlers::public::{
+    api_format_display_name, build_public_health_timeline, build_public_health_timeline_details,
+};
 use crate::handlers::shared::unix_ms_to_rfc3339;
 use crate::provider_key_auth::provider_key_effective_api_formats;
 use aether_data_contracts::repository::candidates::PublicHealthTimelineBucket;
@@ -10,6 +12,8 @@ use aether_scheduler_core::{
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+const ENDPOINT_HEALTH_TIMELINE_SEGMENTS: u32 = 60;
 
 pub(crate) async fn build_admin_endpoint_health_status_payload(
     state: &AdminAppState<'_>,
@@ -124,7 +128,7 @@ pub(crate) async fn build_admin_endpoint_health_status_payload(
             &all_endpoint_ids,
             since_unix_secs,
             now_unix_secs,
-            100,
+            ENDPOINT_HEALTH_TIMELINE_SEGMENTS,
         )
         .await
         .ok()
@@ -171,7 +175,14 @@ pub(crate) async fn build_admin_endpoint_health_status_payload(
             let empty_timeline = BTreeMap::new();
             let timeline_source = timeline_by_format.get(&api_format).unwrap_or(&empty_timeline);
             let (timeline, time_range_start, time_range_end) =
-                build_public_health_timeline(timeline_source, 100);
+                build_public_health_timeline(timeline_source, ENDPOINT_HEALTH_TIMELINE_SEGMENTS);
+            let timeline_details = build_public_health_timeline_details(
+                timeline_source,
+                since_unix_secs,
+                now_unix_secs,
+                ENDPOINT_HEALTH_TIMELINE_SEGMENTS,
+                &[],
+            );
             let healthy_count = timeline.iter().filter(|status| **status == "healthy").count();
             let warning_count = timeline.iter().filter(|status| **status == "warning").count();
             let unhealthy_count = timeline.iter().filter(|status| **status == "unhealthy").count();
@@ -199,6 +210,7 @@ pub(crate) async fn build_admin_endpoint_health_status_payload(
                 "display_name": api_format_display_name(&api_format),
                 "health_score": health_score,
                 "timeline": timeline,
+                "timeline_details": timeline_details,
                 "time_range_start": time_range_start.and_then(unix_ms_to_rfc3339),
                 "time_range_end": time_range_end.map(|ms| unix_ms_to_rfc3339(ms)).unwrap_or_else(|| unix_secs_to_rfc3339(now_unix_secs)),
                 "total_endpoints": endpoint_ids.len(),

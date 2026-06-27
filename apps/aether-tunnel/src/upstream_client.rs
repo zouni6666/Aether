@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use aether_contracts::{
     ResolvedTransportProfile, TRANSPORT_BACKEND_HYPER_RUSTLS, TRANSPORT_BACKEND_REQWEST_RUSTLS,
-    TRANSPORT_HTTP_MODE_HTTP1_ONLY,
+    TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE, TRANSPORT_HTTP_MODE_HTTP1_ONLY,
 };
 use bytes::Bytes;
 use futures_util::Stream;
@@ -99,10 +99,15 @@ impl UpstreamClientPool {
         let http1_only = key
             .http_mode
             .eq_ignore_ascii_case(TRANSPORT_HTTP_MODE_HTTP1_ONLY);
+        let h2c_prior_knowledge = !http1_only
+            && key
+                .http_mode
+                .eq_ignore_ascii_case(TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE);
         let client = build_upstream_client_with_protocol(
             &self.config,
             Arc::clone(&self.dns_cache),
             http1_only,
+            h2c_prior_knowledge,
         )?;
         let mut clients = self.clients.lock().expect("client pool lock");
         if let Some(entry) = clients.get_mut(&key) {
@@ -472,6 +477,7 @@ fn build_upstream_client_with_protocol(
     config: &Config,
     dns_cache: Arc<DnsCache>,
     http1_only: bool,
+    h2c_prior_knowledge: bool,
 ) -> Result<UpstreamClient, String> {
     let mut http = HttpConnector::new_with_resolver(ValidatedResolver::new(
         dns_cache,
@@ -507,6 +513,9 @@ fn build_upstream_client_with_protocol(
     };
 
     let mut builder = Client::builder(TokioExecutor::new());
+    if h2c_prior_knowledge {
+        builder.http2_only(true);
+    }
     builder.pool_max_idle_per_host(config.upstream_pool_max_idle_per_host);
     builder.pool_idle_timeout(Duration::from_secs(config.upstream_pool_idle_timeout_secs));
     builder.pool_timer(TokioTimer::new());
@@ -962,6 +971,7 @@ mod tests {
             &config,
             Arc::new(DnsCache::new(Duration::from_secs(60), 16)),
             true,
+            false,
         )
         .expect("client should build")
     }

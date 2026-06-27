@@ -29,6 +29,7 @@ pub mod windsurf;
 
 pub use aether_oauth as oauth;
 pub use auth::{build_passthrough_headers, ensure_upstream_auth_header};
+pub use auth_config::apply_local_auth_config_header_overrides;
 pub use cache::{provider_transport_snapshot_looks_refreshed, ProviderTransportSnapshotCacheKey};
 pub use conversion::{
     candidate_common_transport_skip_reason, candidate_transport_pair_skip_reason,

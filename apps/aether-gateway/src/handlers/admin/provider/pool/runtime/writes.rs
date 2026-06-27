@@ -267,15 +267,20 @@ fn resolve_transient_cooldown_ttl(
     retry_after_seconds: Option<u64>,
     pool_config: &AdminProviderPoolConfig,
 ) -> u64 {
+    let configured_cooldown_seconds = if status_code == 429 {
+        pool_config.rate_limit_cooldown_seconds
+    } else {
+        pool_config.overload_cooldown_seconds
+    };
+    if configured_cooldown_seconds == 0 {
+        return 0;
+    }
     if matches!(status_code, 429 | 503) {
         if let Some(retry_after_seconds) = retry_after_seconds {
             return retry_after_seconds;
         }
     }
-    if status_code == 429 {
-        return pool_config.rate_limit_cooldown_seconds;
-    }
-    pool_config.overload_cooldown_seconds
+    configured_cooldown_seconds
 }
 
 async fn set_pool_cooldown(
@@ -437,10 +442,6 @@ pub(crate) async fn record_admin_provider_pool_error(
     error_body: Option<&str>,
     response_headers: Option<&BTreeMap<String, String>>,
 ) {
-    if !pool_config.health_policy_enabled {
-        return;
-    }
-
     let error_message = extract_error_message(error_body).to_ascii_lowercase();
 
     if status_code == 401 {
@@ -553,7 +554,7 @@ pub(crate) async fn record_admin_provider_pool_stream_timeout(
     key_id: &str,
     pool_config: &AdminProviderPoolConfig,
 ) {
-    if !pool_config.health_policy_enabled || pool_config.stream_timeout_threshold == 0 {
+    if pool_config.stream_timeout_threshold == 0 {
         return;
     }
 
@@ -590,7 +591,7 @@ mod tests {
     use super::{
         admin_provider_pool_key_terminal_error_reason, parse_google_quota_cooldown_seconds_at,
         record_admin_provider_pool_error, record_admin_provider_pool_stream_timeout,
-        record_admin_provider_pool_success,
+        record_admin_provider_pool_success, resolve_transient_cooldown_ttl,
     };
     use crate::handlers::admin::provider::pool::runtime::reads::read_admin_provider_pool_runtime_state;
     use crate::handlers::admin::provider::shared::support::{
@@ -637,7 +638,6 @@ mod tests {
             cost_limit_per_key_tokens: Some(10_000),
             rate_limit_cooldown_seconds: 300,
             overload_cooldown_seconds: 30,
-            health_policy_enabled: true,
             probing_enabled: false,
             probing_target_percent: None,
             probing_target_count: None,
@@ -784,6 +784,23 @@ mod tests {
             .as_deref(),
             Some("account_locked_423")
         );
+    }
+
+    #[test]
+    fn zero_cooldown_settings_disable_retry_after_transient_cooldowns() {
+        let mut pool_config = sample_pool_config();
+        pool_config.rate_limit_cooldown_seconds = 0;
+        pool_config.overload_cooldown_seconds = 0;
+
+        assert_eq!(
+            resolve_transient_cooldown_ttl(429, Some(120), &pool_config),
+            0
+        );
+        assert_eq!(
+            resolve_transient_cooldown_ttl(503, Some(120), &pool_config),
+            0
+        );
+        assert_eq!(resolve_transient_cooldown_ttl(500, None, &pool_config), 0);
     }
 
     #[tokio::test]
@@ -951,6 +968,55 @@ mod tests {
             .cooldown_ttl_by_key
             .get("key-2")
             .is_some_and(|ttl| *ttl <= 120 && *ttl >= 100));
+    }
+
+    #[tokio::test]
+    async fn error_feedback_does_not_write_cooldown_when_429_or_529_cooldown_is_zero() {
+        let Some(redis) = start_managed_redis_or_skip().await else {
+            return;
+        };
+        let app = build_runner_app(redis.redis_url(), "pool_runtime_zero_cooldown").await;
+        let runtime = app.runtime_state.as_ref();
+        let mut pool_config = sample_pool_config();
+        pool_config.rate_limit_cooldown_seconds = 0;
+        pool_config.overload_cooldown_seconds = 0;
+        let key_ids = vec!["key-429".to_string(), "key-529".to_string()];
+
+        record_admin_provider_pool_error(
+            runtime,
+            "provider-1",
+            "key-429",
+            &pool_config,
+            429,
+            Some(r#"{"error":{"message":"rate limited"}}"#),
+            Some(&BTreeMap::from([(
+                "Retry-After".to_string(),
+                "120".to_string(),
+            )])),
+        )
+        .await;
+        record_admin_provider_pool_error(
+            runtime,
+            "provider-1",
+            "key-529",
+            &pool_config,
+            529,
+            Some(r#"{"error":{"message":"overloaded"}}"#),
+            None,
+        )
+        .await;
+
+        let runtime = read_admin_provider_pool_runtime_state(
+            runtime,
+            "provider-1",
+            &key_ids,
+            &pool_config,
+            None,
+        )
+        .await;
+
+        assert!(runtime.cooldown_reason_by_key.is_empty());
+        assert!(runtime.cooldown_ttl_by_key.is_empty());
     }
 
     #[tokio::test]

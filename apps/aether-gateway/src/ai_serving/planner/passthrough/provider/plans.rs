@@ -190,7 +190,7 @@ pub(crate) async fn build_local_stream_attempt_source<'a>(
 #[async_trait]
 impl LocalExecutionAttemptSource<AiSyncAttempt> for LocalSameFormatProviderSyncAttemptSource<'_> {
     async fn next_execution_attempt(&mut self) -> Result<Option<AiSyncAttempt>, GatewayError> {
-        while let Some(attempt) = self.candidates.next_attempt().await {
+        while let Some(attempt) = self.candidates.next_attempt().await? {
             match self.build_sync_attempt(attempt).await? {
                 Some(attempt) => return Ok(Some(attempt)),
                 None => continue,
@@ -220,7 +220,7 @@ impl LocalExecutionAttemptSource<AiStreamAttempt>
     for LocalSameFormatProviderStreamAttemptSource<'_>
 {
     async fn next_execution_attempt(&mut self) -> Result<Option<AiStreamAttempt>, GatewayError> {
-        while let Some(attempt) = self.candidates.next_attempt().await {
+        while let Some(attempt) = self.candidates.next_attempt().await? {
             match self.build_stream_attempt(attempt).await? {
                 Some(attempt) => return Ok(Some(attempt)),
                 None => continue,
@@ -372,7 +372,7 @@ pub(crate) async fn build_local_sync_plan_and_reports(
     }
 
     let mut plans = Vec::new();
-    while let Some(attempt) = source.next_attempt().await {
+    while let Some(attempt) = source.next_attempt().await? {
         let Some(payload) = maybe_build_local_same_format_provider_decision_payload_for_candidate(
             state, parts, trace_id, body_json, &input, attempt, spec,
         )
@@ -458,7 +458,7 @@ pub(crate) async fn build_local_stream_plan_and_reports(
     }
 
     let mut plans = Vec::new();
-    while let Some(attempt) = source.next_attempt().await {
+    while let Some(attempt) = source.next_attempt().await? {
         let Some(payload) = maybe_build_local_same_format_provider_decision_payload_for_candidate(
             state, parts, trace_id, body_json, &input, attempt, spec,
         )

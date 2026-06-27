@@ -5,7 +5,9 @@ use crate::scheduler::config::SchedulerSchedulingMode;
 use crate::GatewayError;
 use aether_scheduler_core::ClientSessionAffinity;
 
-use super::affinity::{build_scheduler_affinity_cache_key, remember_scheduler_affinity};
+use super::affinity::{
+    build_scheduler_affinity_cache_key, has_explicit_session_affinity, remember_scheduler_affinity,
+};
 use super::enumeration::enumerate_scheduler_candidates;
 use super::ranking::rank_scheduler_candidates;
 use super::resolution::resolve_scheduler_candidate_selectability;
@@ -66,8 +68,11 @@ pub(super) async fn select_minimal_candidate(
         global_model_name,
         client_session_affinity,
     );
-    let priority_affinity_key =
-        scheduling_priority_affinity_key(auth_snapshot, ordering_config.scheduling_mode);
+    let priority_affinity_key = scheduling_priority_affinity_key(
+        auth_snapshot,
+        client_session_affinity,
+        ordering_config.scheduling_mode,
+    );
     let candidates = enumerate_scheduler_candidates(
         selection_row_source,
         api_format,
@@ -94,7 +99,9 @@ pub(super) async fn select_minimal_candidate(
     .0
     .into_iter()
     .next();
-    if ordering_config.scheduling_mode == SchedulerSchedulingMode::CacheAffinity {
+    if ordering_config.scheduling_mode == SchedulerSchedulingMode::CacheAffinity
+        && has_explicit_session_affinity(client_session_affinity)
+    {
         if let Some(candidate) = selected.as_ref() {
             remember_scheduler_affinity(
                 affinity_cache_key.as_deref(),
@@ -154,8 +161,11 @@ pub(super) async fn collect_selectable_candidates_with_skip_reasons(
     GatewayError,
 > {
     let ordering_config = runtime_state.read_scheduler_ordering_config().await?;
-    let priority_affinity_key =
-        scheduling_priority_affinity_key(auth_snapshot, ordering_config.scheduling_mode);
+    let priority_affinity_key = scheduling_priority_affinity_key(
+        auth_snapshot,
+        client_session_affinity,
+        ordering_config.scheduling_mode,
+    );
     let candidates = enumerate_scheduler_candidates(
         selection_row_source,
         api_format,
@@ -200,9 +210,13 @@ pub(super) async fn collect_selectable_enumerated_candidates_with_skip_reasons(
     ),
     GatewayError,
 > {
-    let runtime_snapshot =
-        read_candidate_runtime_selection_snapshot(runtime_state, &candidates, now_unix_secs)
-            .await?;
+    let runtime_snapshot = read_candidate_runtime_selection_snapshot(
+        runtime_state,
+        &candidates,
+        auth_snapshot,
+        now_unix_secs,
+    )
+    .await?;
     let affinity_cache_key = build_scheduler_affinity_cache_key(
         auth_snapshot,
         api_format,
@@ -211,6 +225,7 @@ pub(super) async fn collect_selectable_enumerated_candidates_with_skip_reasons(
     );
     let cached_affinity_target = if ordering_config.scheduling_mode
         == SchedulerSchedulingMode::CacheAffinity
+        && has_explicit_session_affinity(client_session_affinity)
     {
         affinity_cache_key.as_deref().and_then(|cache_key| {
             runtime_state.read_cached_scheduler_affinity_target(cache_key, SCHEDULER_AFFINITY_TTL)
@@ -258,9 +273,15 @@ pub(super) async fn collect_selectable_enumerated_candidates_with_skip_reasons(
 
 pub(super) fn scheduling_priority_affinity_key<'a>(
     auth_snapshot: Option<&'a GatewayAuthApiKeySnapshot>,
+    client_session_affinity: Option<&ClientSessionAffinity>,
     scheduling_mode: SchedulerSchedulingMode,
 ) -> Option<&'a str> {
     if scheduling_mode == SchedulerSchedulingMode::FixedOrder {
+        return None;
+    }
+    if scheduling_mode == SchedulerSchedulingMode::CacheAffinity
+        && !has_explicit_session_affinity(client_session_affinity)
+    {
         return None;
     }
 

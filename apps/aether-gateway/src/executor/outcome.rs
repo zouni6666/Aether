@@ -150,6 +150,7 @@ pub(crate) async fn build_local_execution_exhaustion(
     plan: &ExecutionPlan,
     report_context: Option<&Value>,
 ) -> LocalExecutionExhaustion {
+    let mut exhaustion = build_fast_local_execution_exhaustion(plan, report_context);
     let mut data = build_usage_event_data_seed(plan, report_context);
     let last_failed_candidate = match state
         .read_request_candidates_by_request_id(plan.request_id.as_str())
@@ -180,28 +181,46 @@ pub(crate) async fn build_local_execution_exhaustion(
             .or_else(|| candidate.key_id.clone());
     }
 
+    exhaustion.data = data;
+    exhaustion.candidate_id = last_failed_candidate
+        .as_ref()
+        .map(|candidate| candidate.id.clone());
+    exhaustion.candidate_index = last_failed_candidate
+        .as_ref()
+        .map(|candidate| candidate.candidate_index);
+    exhaustion.upstream_status_code = last_failed_candidate
+        .as_ref()
+        .and_then(|candidate| candidate.status_code);
+    exhaustion.upstream_error_type = last_failed_candidate
+        .as_ref()
+        .and_then(|candidate| candidate.error_type.clone())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    exhaustion.upstream_error_message = last_failed_candidate
+        .as_ref()
+        .and_then(|candidate| candidate.error_message.clone())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    exhaustion
+}
+
+pub(crate) fn build_fast_local_execution_exhaustion(
+    plan: &ExecutionPlan,
+    report_context: Option<&Value>,
+) -> LocalExecutionExhaustion {
+    let data = build_usage_event_data_seed(plan, report_context);
     LocalExecutionExhaustion {
         request_id: plan.request_id.clone(),
+        candidate_id: plan.candidate_id.clone(),
+        candidate_index: report_context
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("candidate_index"))
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok()),
         data,
-        candidate_id: last_failed_candidate
-            .as_ref()
-            .map(|candidate| candidate.id.clone()),
-        candidate_index: last_failed_candidate
-            .as_ref()
-            .map(|candidate| candidate.candidate_index),
-        upstream_status_code: last_failed_candidate
-            .as_ref()
-            .and_then(|candidate| candidate.status_code),
-        upstream_error_type: last_failed_candidate
-            .as_ref()
-            .and_then(|candidate| candidate.error_type.clone())
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty()),
-        upstream_error_message: last_failed_candidate
-            .as_ref()
-            .and_then(|candidate| candidate.error_message.clone())
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty()),
+        upstream_status_code: None,
+        upstream_error_type: None,
+        upstream_error_message: None,
     }
 }
 
@@ -221,6 +240,20 @@ pub(crate) async fn build_local_execution_runtime_miss_context(
             state, request_id, decision,
         )
         .await,
+    }
+}
+
+pub(crate) fn build_fast_local_execution_runtime_miss_context(
+    decision: Option<&GatewayControlDecision>,
+) -> LocalExecutionRuntimeMissContext {
+    let auth_context = decision.and_then(|value| value.auth_context.as_ref());
+
+    LocalExecutionRuntimeMissContext {
+        auth_user_id: auth_context.map(|value| value.user_id.clone()),
+        auth_api_key_id: auth_context.map(|value| value.api_key_id.clone()),
+        auth_username: auth_context.and_then(|value| value.username.clone()),
+        auth_api_key_name: auth_context.and_then(|value| value.api_key_name.clone()),
+        candidate_contexts: Vec::new(),
     }
 }
 
@@ -309,13 +342,10 @@ pub(crate) async fn record_failed_usage_for_exhausted_request(
     );
     data.request_metadata = Some(Value::Object(request_metadata));
 
-    state
-        .usage_runtime
-        .record_terminal_event_direct(
-            state.data.as_ref(),
-            UsageEvent::new(UsageEventType::Failed, request_id, data),
-        )
-        .await;
+    state.usage_runtime.submit_terminal_event(
+        state.data.as_ref(),
+        UsageEvent::new(UsageEventType::Failed, request_id, data),
+    );
 }
 
 pub(crate) async fn record_failed_usage_for_runtime_miss_request(
@@ -448,13 +478,10 @@ pub(crate) async fn record_failed_usage_for_runtime_miss_request(
     data.request_metadata =
         (!request_metadata.is_empty()).then_some(Value::Object(request_metadata));
 
-    state
-        .usage_runtime
-        .record_terminal_event_direct(
-            state.data.as_ref(),
-            UsageEvent::new(UsageEventType::Failed, request_id, data),
-        )
-        .await;
+    state.usage_runtime.submit_terminal_event(
+        state.data.as_ref(),
+        UsageEvent::new(UsageEventType::Failed, request_id, data),
+    );
 }
 
 pub(crate) fn beautify_local_execution_client_error_message(message: &str) -> String {

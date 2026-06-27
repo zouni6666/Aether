@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aether_data_contracts::DataLayerError;
 use aether_runtime_state::RuntimeState;
@@ -26,6 +27,7 @@ const MAX_SENTINEL_NAMESPACE_LEN: usize = 32;
 const DIRECT_RESTORE_SENTINEL_LIMIT: usize = 32;
 const MAX_CACHE_SENTINEL_BYTES: usize = 128;
 const MAX_CACHE_RECORD_BYTES: usize = 512;
+const CHAT_PII_REDACTION_RUNTIME_CONFIG_CACHE_TTL: Duration = Duration::from_secs(5);
 
 static EMAIL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)[A-Z0-9._%+-]{1,64}@[A-Z0-9.-]{1,253}\.[A-Z]{2,63}")
@@ -368,6 +370,7 @@ struct MappingKey {
     original: String,
 }
 
+#[derive(Clone)]
 pub(crate) struct RedactionSession {
     config: RedactionSessionConfig,
     mappings: HashMap<MappingKey, RedactionMapping>,
@@ -717,10 +720,53 @@ impl fmt::Debug for MaskedChatRequest {
     }
 }
 
+pub(crate) struct MaskedChatRequestValue {
+    pub(crate) body_json: Option<Value>,
+    pub(crate) session: RedactionSession,
+    pub(crate) redacted: bool,
+}
+
+impl fmt::Debug for MaskedChatRequestValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MaskedChatRequestValue")
+            .field("body_json_owned", &self.body_json.is_some())
+            .field("session", &self.session)
+            .field("redacted", &self.redacted)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct CachedRequestRedaction {
+    pub(crate) body_json: Option<Value>,
+    pub(crate) session: Option<RedactionSession>,
+    pub(crate) redacted: bool,
+}
+
+impl CachedRequestRedaction {
+    pub(crate) fn unredacted() -> Self {
+        Self {
+            body_json: None,
+            session: None,
+            redacted: false,
+        }
+    }
+
+    pub(crate) fn redacted(body_json: Value, session: RedactionSession) -> Self {
+        Self {
+            body_json: Some(body_json),
+            session: Some(session),
+            redacted: true,
+        }
+    }
+}
+
 #[derive(Default, Clone)]
 pub(crate) struct RedactionSessionSlot {
     session: Arc<Mutex<Option<RedactionSession>>>,
     sessions_by_candidate: Arc<Mutex<HashMap<String, RedactionSession>>>,
+    request_redactions: Arc<Mutex<HashMap<String, CachedRequestRedaction>>>,
 }
 
 impl RedactionSessionSlot {
@@ -746,6 +792,10 @@ impl RedactionSessionSlot {
         self.sessions_by_candidate
             .lock()
             .expect("redaction session candidate slot should lock")
+            .clear();
+        self.request_redactions
+            .lock()
+            .expect("redaction request cache slot should lock")
             .clear();
     }
 
@@ -794,6 +844,25 @@ impl RedactionSessionSlot {
             _ => None,
         }
     }
+
+    pub(crate) fn cached_request_redaction(&self, key: &str) -> Option<CachedRequestRedaction> {
+        self.request_redactions
+            .lock()
+            .expect("redaction request cache slot should lock")
+            .get(key)
+            .cloned()
+    }
+
+    pub(crate) fn put_cached_request_redaction(
+        &self,
+        key: impl Into<String>,
+        redaction: CachedRequestRedaction,
+    ) {
+        self.request_redactions
+            .lock()
+            .expect("redaction request cache slot should lock")
+            .insert(key.into(), redaction);
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -825,6 +894,150 @@ impl Default for ChatPiiRedactionRuntimeConfig {
             ttl_seconds: DEFAULT_REDACTION_TTL_SECONDS,
             placeholder_prefix: DEFAULT_SENTINEL_NAMESPACE.to_string(),
         }
+    }
+}
+
+impl ChatPiiRedactionRuntimeConfig {
+    fn disabled() -> Self {
+        Self {
+            enabled: false,
+            rules: Vec::new(),
+            ttl_seconds: DEFAULT_REDACTION_TTL_SECONDS,
+            placeholder_prefix: DEFAULT_SENTINEL_NAMESPACE.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ChatPiiRedactionRuntimeConfigCache {
+    value: Mutex<Option<(Instant, ChatPiiRedactionRuntimeConfig)>>,
+    loading_generation: Mutex<Option<u64>>,
+    generation: AtomicU64,
+    notify: tokio::sync::Notify,
+}
+
+enum ChatPiiRedactionRuntimeConfigLoadRegistration {
+    Leader(ChatPiiRedactionRuntimeConfigLoadGuard),
+    Follower,
+    Bypass,
+}
+
+struct ChatPiiRedactionRuntimeConfigLoadGuard {
+    cache: ChatPiiRedactionRuntimeConfigCacheHandle,
+    generation: u64,
+    active: bool,
+}
+
+impl ChatPiiRedactionRuntimeConfigLoadGuard {
+    fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
+impl Drop for ChatPiiRedactionRuntimeConfigLoadGuard {
+    fn drop(&mut self) {
+        if self.active {
+            self.cache.finish_load(self.generation);
+        }
+    }
+}
+
+impl ChatPiiRedactionRuntimeConfigCache {
+    fn get(&self) -> Option<ChatPiiRedactionRuntimeConfig> {
+        self.value.lock().ok().and_then(|guard| {
+            guard.as_ref().and_then(|(loaded_at, value)| {
+                (loaded_at.elapsed() <= CHAT_PII_REDACTION_RUNTIME_CONFIG_CACHE_TTL)
+                    .then(|| value.clone())
+            })
+        })
+    }
+
+    fn get_stale(&self) -> Option<ChatPiiRedactionRuntimeConfig> {
+        self.value
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|(_, value)| value.clone()))
+    }
+
+    fn insert(&self, value: ChatPiiRedactionRuntimeConfig) {
+        if let Ok(mut guard) = self.value.lock() {
+            *guard = Some((Instant::now(), value));
+        }
+    }
+
+    fn insert_if_generation(&self, generation: u64, value: ChatPiiRedactionRuntimeConfig) {
+        if self.generation.load(Ordering::Acquire) == generation {
+            self.insert(value);
+        }
+    }
+
+    fn register_load(self: &Arc<Self>) -> ChatPiiRedactionRuntimeConfigLoadRegistration {
+        let generation = self.generation.load(Ordering::Acquire);
+        match self.loading_generation.lock() {
+            Ok(mut loading_generation) => {
+                if loading_generation.is_some() {
+                    ChatPiiRedactionRuntimeConfigLoadRegistration::Follower
+                } else {
+                    *loading_generation = Some(generation);
+                    ChatPiiRedactionRuntimeConfigLoadRegistration::Leader(
+                        ChatPiiRedactionRuntimeConfigLoadGuard {
+                            cache: Arc::clone(self),
+                            generation,
+                            active: true,
+                        },
+                    )
+                }
+            }
+            Err(_) => ChatPiiRedactionRuntimeConfigLoadRegistration::Bypass,
+        }
+    }
+
+    fn notified(&self) -> tokio::sync::futures::Notified<'_> {
+        self.notify.notified()
+    }
+
+    fn finish_load(&self, generation: u64) {
+        let finished = self
+            .loading_generation
+            .lock()
+            .map(|mut loading_generation| {
+                if *loading_generation == Some(generation) {
+                    *loading_generation = None;
+                    true
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(false);
+        if finished {
+            self.notify.notify_waiters();
+        }
+    }
+}
+
+pub(crate) type ChatPiiRedactionRuntimeConfigCacheHandle = Arc<ChatPiiRedactionRuntimeConfigCache>;
+
+pub(crate) fn new_chat_pii_redaction_runtime_config_cache(
+) -> ChatPiiRedactionRuntimeConfigCacheHandle {
+    Arc::new(ChatPiiRedactionRuntimeConfigCache::default())
+}
+
+pub(crate) fn clear_chat_pii_redaction_runtime_config_cache(
+    cache: &ChatPiiRedactionRuntimeConfigCacheHandle,
+) {
+    cache.clear();
+}
+
+impl ChatPiiRedactionRuntimeConfigCache {
+    fn clear(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        if let Ok(mut value) = self.value.lock() {
+            *value = None;
+        }
+        if let Ok(mut loading_generation) = self.loading_generation.lock() {
+            *loading_generation = None;
+        }
+        self.notify.notify_waiters();
     }
 }
 
@@ -1127,13 +1340,76 @@ fn parse_chat_pii_redaction_rules(
 pub(crate) async fn read_chat_pii_redaction_runtime_config(
     state: &crate::AppState,
 ) -> Result<ChatPiiRedactionRuntimeConfig, GatewayError> {
-    let mut config = ChatPiiRedactionRuntimeConfig::default();
-    config.enabled = state
+    let cache = Arc::clone(&state.chat_pii_redaction_runtime_config_cache);
+    if let Some(value) = cache.get() {
+        return Ok(value);
+    }
+    if let Some(value) = cache.get_stale() {
+        if let ChatPiiRedactionRuntimeConfigLoadRegistration::Leader(guard) = cache.register_load()
+        {
+            spawn_chat_pii_redaction_runtime_config_refresh(state.clone(), cache, guard);
+        }
+        return Ok(value);
+    }
+
+    loop {
+        let notified = cache.notified();
+        match cache.register_load() {
+            ChatPiiRedactionRuntimeConfigLoadRegistration::Bypass => {
+                let value = load_chat_pii_redaction_runtime_config(state).await?;
+                cache.insert(value.clone());
+                return Ok(value);
+            }
+            ChatPiiRedactionRuntimeConfigLoadRegistration::Follower => {
+                notified.await;
+                if let Some(value) = cache.get() {
+                    return Ok(value);
+                }
+            }
+            ChatPiiRedactionRuntimeConfigLoadRegistration::Leader(_guard) => {
+                let generation = _guard.generation();
+                let value = load_chat_pii_redaction_runtime_config(state).await?;
+                cache.insert_if_generation(generation, value.clone());
+                return Ok(value);
+            }
+        }
+    }
+}
+
+fn spawn_chat_pii_redaction_runtime_config_refresh(
+    state: crate::AppState,
+    cache: ChatPiiRedactionRuntimeConfigCacheHandle,
+    guard: ChatPiiRedactionRuntimeConfigLoadGuard,
+) {
+    tokio::spawn(async move {
+        let generation = guard.generation();
+        match load_chat_pii_redaction_runtime_config(&state).await {
+            Ok(value) => cache.insert_if_generation(generation, value),
+            Err(err) => {
+                tracing::warn!(
+                    error = ?err,
+                    "gateway failed to refresh chat pii redaction runtime config"
+                );
+            }
+        }
+        drop(guard);
+    });
+}
+
+async fn load_chat_pii_redaction_runtime_config(
+    state: &crate::AppState,
+) -> Result<ChatPiiRedactionRuntimeConfig, GatewayError> {
+    let enabled = state
         .read_system_config_json_value("module.chat_pii_redaction.enabled")
         .await?
         .as_ref()
         .and_then(Value::as_bool)
-        .unwrap_or(config.enabled);
+        .unwrap_or(false);
+    if !enabled {
+        return Ok(ChatPiiRedactionRuntimeConfig::disabled());
+    }
+    let mut config = ChatPiiRedactionRuntimeConfig::default();
+    config.enabled = true;
     config.rules = parse_chat_pii_redaction_rules(
         state
             .read_system_config_json_value("module.chat_pii_redaction.rules")
@@ -1286,6 +1562,35 @@ pub(crate) async fn try_mask_chat_pii_request_json_with_cache_options(
     let body = serde_json::to_vec(&value).unwrap_or_else(|_| body.to_vec());
     Ok(MaskedChatRequest {
         body,
+        session,
+        redacted,
+    })
+}
+
+pub(crate) async fn try_mask_chat_pii_request_value_with_cache_options(
+    body_json: &Value,
+    format: ChatPiiRedactionRequestFormat,
+    config: RedactionSessionConfig,
+    options: MaskChatRequestOptions,
+    cache: Option<&RedisRedactionMappingCache<'_>>,
+) -> Result<MaskedChatRequestValue, RedactionMaskError> {
+    let mut session = RedactionSession::new(config);
+    let mut value = body_json.clone();
+
+    session.set_collision_corpus(request_collision_corpus(format, &value));
+    let mut scan_state = RedactionScanState::new(options.scan_limits);
+    let redacted = mask_request_value_async(
+        format,
+        &mut value,
+        &mut session,
+        &mut scan_state,
+        options,
+        cache,
+    )
+    .await?;
+
+    Ok(MaskedChatRequestValue {
+        body_json: redacted.then_some(value),
         session,
         redacted,
     })
@@ -2752,6 +3057,7 @@ impl fmt::Debug for RedactionMatch {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct RedactionMapping {
     pub(crate) rule_label: String,
     pub(crate) kind: Option<RedactionKind>,

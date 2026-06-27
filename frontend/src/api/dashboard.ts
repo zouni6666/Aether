@@ -57,6 +57,7 @@ export interface CacheStats {
 export interface UserStats {
   total: number
   active: number
+  online?: number
 }
 
 // Token 详细分类
@@ -169,8 +170,11 @@ export interface RequestDetail {
   provider: string
   api_format?: string
   endpoint_api_format?: string
+  has_format_conversion?: boolean | null
   model: string
   target_model?: string | null  // 映射后的目标模型名
+  reasoning_effort?: string | null
+  service_tier?: string | null
   tokens: {
     input: number
     output: number
@@ -189,11 +193,14 @@ export interface RequestDetail {
   cache_creation_input_tokens?: number
   cache_creation_input_tokens_5m?: number
   cache_creation_input_tokens_1h?: number
+  cache_creation_ephemeral_5m_input_tokens?: number
+  cache_creation_ephemeral_1h_input_tokens?: number
   cache_read_input_tokens?: number
   // Additional cost fields
   input_cost?: number
   output_cost?: number
   total_cost?: number
+  actual_cost?: number
   cache_creation_cost?: number
   cache_read_cost?: number
   image_output_cost?: number

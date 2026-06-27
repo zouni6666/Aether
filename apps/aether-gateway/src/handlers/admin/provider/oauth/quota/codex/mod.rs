@@ -15,7 +15,8 @@ use self::plan::{build_codex_quota_request_spec, execute_codex_quota_plan};
 use super::shared::{
     build_quota_snapshot_payload, extract_execution_error_message,
     oauth_refresh_auto_removed_result, persist_provider_quota_refresh_state,
-    provider_auto_remove_banned_keys, quota_key_auto_removed, quota_refresh_success_invalid_state,
+    provider_auto_remove_banned_keys, provider_auto_remove_quota_exhausted_keys,
+    quota_key_auto_removed, quota_refresh_success_invalid_state,
     should_auto_remove_structured_reason, ProviderQuotaExecutionOutcome,
 };
 use crate::handlers::admin::request::AdminAppState;
@@ -61,6 +62,8 @@ pub(crate) async fn refresh_codex_provider_quota_locally(
     proxy_override: Option<ProxySnapshot>,
 ) -> Result<Option<serde_json::Value>, GatewayError> {
     let auto_remove_abnormal_keys = provider_auto_remove_banned_keys(provider.config.as_ref());
+    let auto_remove_quota_exhausted_keys =
+        provider_auto_remove_quota_exhausted_keys(provider.config.as_ref());
     let mut results = Vec::new();
     let mut success_count = 0usize;
     let mut failed_count = 0usize;
@@ -312,7 +315,7 @@ pub(crate) async fn refresh_codex_provider_quota_locally(
             }));
             continue;
         }
-        let auto_removed = if auto_remove_candidate {
+        let auto_removed_hard_banned = if auto_remove_candidate {
             state
                 .cleanup_provider_catalog_key_if_current(provider, &key.id, |latest_key| {
                     should_auto_remove_structured_reason(latest_key.oauth_invalid_reason.as_deref())
@@ -321,10 +324,28 @@ pub(crate) async fn refresh_codex_provider_quota_locally(
         } else {
             false
         };
-        if auto_removed {
+        if auto_removed_hard_banned {
             auto_removed_count += 1;
             auto_removed_hard_banned_count += 1;
         }
+        let auto_removed_quota_exhausted =
+            if !auto_removed_hard_banned && auto_remove_quota_exhausted_keys {
+                state
+                    .cleanup_provider_catalog_key_if_current(provider, &key.id, |latest_key| {
+                        aether_admin::provider::pool::admin_pool_key_account_quota_exhausted(
+                            latest_key,
+                            provider.provider_type.as_str(),
+                        )
+                    })
+                    .await?
+            } else {
+                false
+            };
+        if auto_removed_quota_exhausted {
+            auto_removed_count += 1;
+            status = "quota_exhausted".to_string();
+        }
+        let auto_removed = auto_removed_hard_banned || auto_removed_quota_exhausted;
         let refresh_fixed =
             status == "success" && had_oauth_refresh_issue && oauth_invalid_reason.is_none();
         if refresh_fixed {
@@ -370,7 +391,12 @@ pub(crate) async fn refresh_codex_provider_quota_locally(
         }
         if auto_removed {
             payload.insert("auto_removed".to_string(), json!(true));
+        }
+        if auto_removed_hard_banned {
             payload.insert("auto_removed_hard_banned".to_string(), json!(true));
+        }
+        if auto_removed_quota_exhausted {
+            payload.insert("auto_removed_quota_exhausted".to_string(), json!(true));
         }
         if refresh_fixed {
             payload.insert("refresh_fixed".to_string(), json!(true));

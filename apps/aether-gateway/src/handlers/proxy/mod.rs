@@ -60,6 +60,7 @@ use crate::scheduler::candidate::{
     LEGACY_API_KEY_CONCURRENCY_LIMIT_SKIP_REASON,
 };
 use crate::scheduler::config::{read_scheduler_ordering_config, SchedulerSchedulingMode};
+use crate::stage_metrics::observe_gateway_stage_ms;
 use crate::{
     AppState, FrontdoorUserRpmOutcome, GatewayError, GatewayFallbackMetricKind,
     GatewayFallbackReason, LocalExecutionRuntimeMissDiagnostic,
@@ -1024,7 +1025,36 @@ pub(crate) async fn proxy_request(
     ConnectInfo(remote_addr): ConnectInfo<std::net::SocketAddr>,
     request: Request,
 ) -> Result<Response<Body>, GatewayError> {
+    crate::request_diagnostics::scope_request_diagnostics(proxy_request_inner(
+        state,
+        remote_addr,
+        request,
+    ))
+    .await
+}
+
+async fn proxy_request_inner(
+    state: AppState,
+    remote_addr: std::net::SocketAddr,
+    request: Request,
+) -> Result<Response<Body>, GatewayError> {
     let started_at = Instant::now();
+    let accepted_at = request
+        .extensions()
+        .get::<crate::middleware::GatewayRequestAcceptedAt>()
+        .map(|accepted_at| accepted_at.0)
+        .unwrap_or(started_at);
+    crate::request_diagnostics::record_request_accepted_at(accepted_at);
+    if request
+        .extensions()
+        .get::<crate::middleware::GatewayRequestAcceptedAt>()
+        .is_some()
+    {
+        observe_gateway_stage_ms(
+            "frontdoor_handler_queue",
+            started_at.duration_since(accepted_at).as_millis() as u64,
+        );
+    }
     let mut request_permit = match state.try_acquire_request_permit().await {
         Ok(permit) => permit,
         Err(RequestAdmissionError::Local(aether_runtime::ConcurrencyError::Saturated {
@@ -1085,6 +1115,7 @@ pub(crate) async fn proxy_request(
         )) => return Err(GatewayError::Internal(message)),
     };
     let request_admission_ms = started_at.elapsed().as_millis() as u64;
+    observe_gateway_stage_ms("frontdoor_admission", request_admission_ms);
     let (mut parts, body) = request.into_parts();
     let redaction_slot = crate::privacy::RedactionSessionSlot::default();
     parts.extensions.insert(redaction_slot.clone());
@@ -1176,6 +1207,7 @@ pub(crate) async fn proxy_request(
         }
     }
     let request_context_ms = request_context_started_at.elapsed().as_millis() as u64;
+    observe_gateway_stage_ms("frontdoor_context", request_context_ms);
     if request_context
         .control_decision
         .as_ref()
@@ -1202,6 +1234,7 @@ pub(crate) async fn proxy_request(
     let mut request_body = Some(body);
     let local_proxy_body = if local_proxy_route_requires_buffered_body(&request_context) {
         let body_buffer_policy = RequestBodyBufferPolicy::from_state(&state);
+        let stage_started_at = Instant::now();
         let body = buffer_and_normalize_request_body(
             &mut request_body,
             &mut parts.headers,
@@ -1213,6 +1246,10 @@ pub(crate) async fn proxy_request(
             body_buffer_policy,
         )
         .await;
+        observe_gateway_stage_ms(
+            "frontdoor_body_buffer",
+            stage_started_at.elapsed().as_millis() as u64,
+        );
         match body {
             Ok(body) => Some(body),
             Err(err) => {
@@ -1388,6 +1425,7 @@ pub(crate) async fn proxy_request(
 
     let buffered_body = if should_buffer_body {
         let body_buffer_policy = RequestBodyBufferPolicy::from_state(&state);
+        let stage_started_at = Instant::now();
         let body = buffer_and_normalize_request_body(
             &mut request_body,
             &mut parts.headers,
@@ -1399,6 +1437,10 @@ pub(crate) async fn proxy_request(
             body_buffer_policy,
         )
         .await;
+        observe_gateway_stage_ms(
+            "frontdoor_body_buffer",
+            stage_started_at.elapsed().as_millis() as u64,
+        );
         match body {
             Ok(body) => Some(body),
             Err(err) => {
@@ -1417,15 +1459,20 @@ pub(crate) async fn proxy_request(
         None
     };
 
-    if let Some(response) = maybe_forward_public_request_to_tunnel_owner(
+    let owner_forward_started_at = Instant::now();
+    let owner_forward_response = maybe_forward_public_request_to_tunnel_owner(
         &state,
         &remote_addr,
         &request_context,
         &parts,
         buffered_body.as_ref(),
     )
-    .await?
-    {
+    .await?;
+    observe_gateway_stage_ms(
+        "frontdoor_owner_forward",
+        owner_forward_started_at.elapsed().as_millis() as u64,
+    );
+    if let Some(response) = owner_forward_response {
         return Ok(finalize_gateway_response_with_context(
             &state,
             response,
@@ -1452,15 +1499,20 @@ pub(crate) async fn proxy_request(
     }
 
     if let Some(buffered_body) = buffered_body.as_ref() {
-        if let Some(rejection) = request_model_local_rejection(
+        let auth_model_started_at = Instant::now();
+        let model_rejection = request_model_local_rejection(
             &state,
             control_decision,
             &parts.uri,
             &parts.headers,
             buffered_body,
         )
-        .await?
-        {
+        .await?;
+        observe_gateway_stage_ms(
+            "frontdoor_auth_model",
+            auth_model_started_at.elapsed().as_millis() as u64,
+        );
+        if let Some(rejection) = model_rejection {
             let response =
                 build_local_auth_rejection_response(&trace_id, control_decision, &rejection)?;
             return Ok(finalize_gateway_response_with_context(
@@ -1475,10 +1527,12 @@ pub(crate) async fn proxy_request(
         }
     }
 
+    let rpm_started_at = Instant::now();
     let rate_limit_outcome = state
         .frontdoor_user_rpm()
         .check_and_consume(&state, control_decision)
         .await?;
+    observe_gateway_stage_ms("frontdoor_rpm", rpm_started_at.elapsed().as_millis() as u64);
     if let FrontdoorUserRpmOutcome::Rejected(rejection) = &rate_limit_outcome {
         let auth_context = control_decision.and_then(|decision| decision.auth_context.as_ref());
         let user_id = auth_context
@@ -1514,13 +1568,18 @@ pub(crate) async fn proxy_request(
         ));
     }
 
-    if let Some(response) = super::public::maybe_build_local_ai_public_response(
+    let local_ai_public_started_at = Instant::now();
+    let local_ai_public_response = super::public::maybe_build_local_ai_public_response(
         &state,
         &request_context,
         buffered_body.as_ref(),
     )
-    .await
-    {
+    .await;
+    observe_gateway_stage_ms(
+        "frontdoor_local_ai_public",
+        local_ai_public_started_at.elapsed().as_millis() as u64,
+    );
+    if let Some(response) = local_ai_public_response {
         return Ok(finalize_gateway_response_with_context(
             &state,
             response,
@@ -1557,6 +1616,7 @@ pub(crate) async fn proxy_request(
         let stream_request = request_wants_stream(&request_context, &parts.headers, buffered_body);
         let mut local_execution_exhaustion = None;
         if stream_request {
+            let execute_stream_started_at = Instant::now();
             let stream_outcome = match maybe_execute_stream_request(
                 &state,
                 &parts,
@@ -1568,6 +1628,10 @@ pub(crate) async fn proxy_request(
             {
                 Ok(outcome) => outcome,
                 Err(err) => {
+                    observe_gateway_stage_ms(
+                        "frontdoor_execute_stream",
+                        execute_stream_started_at.elapsed().as_millis() as u64,
+                    );
                     if let Some((phase, timeout_ms)) = local_execution_planning_timeout_parts(&err)
                     {
                         return finalize_local_execution_planning_timeout(
@@ -1585,6 +1649,10 @@ pub(crate) async fn proxy_request(
                     return Err(err);
                 }
             };
+            observe_gateway_stage_ms(
+                "frontdoor_execute_stream",
+                execute_stream_started_at.elapsed().as_millis() as u64,
+            );
             debug!(
                 event_name = "proxy_stream_local_execute_outcome",
                 log_type = "debug",
@@ -1622,6 +1690,7 @@ pub(crate) async fn proxy_request(
                 LocalExecutionRequestOutcome::NoPath => {}
             }
         }
+        let execute_sync_started_at = Instant::now();
         let sync_outcome = match maybe_execute_sync_request(
             &state,
             &parts,
@@ -1633,6 +1702,10 @@ pub(crate) async fn proxy_request(
         {
             Ok(outcome) => outcome,
             Err(err) => {
+                observe_gateway_stage_ms(
+                    "frontdoor_execute_sync",
+                    execute_sync_started_at.elapsed().as_millis() as u64,
+                );
                 if let Some((phase, timeout_ms)) = local_execution_planning_timeout_parts(&err) {
                     return finalize_local_execution_planning_timeout(
                         &state,
@@ -1649,6 +1722,10 @@ pub(crate) async fn proxy_request(
                 return Err(err);
             }
         };
+        observe_gateway_stage_ms(
+            "frontdoor_execute_sync",
+            execute_sync_started_at.elapsed().as_millis() as u64,
+        );
         match sync_outcome {
             LocalExecutionRequestOutcome::Responded(execution_runtime_response) => {
                 let execution_runtime_response = restore_redacted_sync_execution_response(
@@ -1673,6 +1750,7 @@ pub(crate) async fn proxy_request(
             LocalExecutionRequestOutcome::NoPath => {}
         }
         if parts.method != http::Method::POST {
+            let execute_stream_started_at = Instant::now();
             let stream_outcome = match maybe_execute_stream_request(
                 &state,
                 &parts,
@@ -1684,6 +1762,10 @@ pub(crate) async fn proxy_request(
             {
                 Ok(outcome) => outcome,
                 Err(err) => {
+                    observe_gateway_stage_ms(
+                        "frontdoor_execute_stream",
+                        execute_stream_started_at.elapsed().as_millis() as u64,
+                    );
                     if let Some((phase, timeout_ms)) = local_execution_planning_timeout_parts(&err)
                     {
                         return finalize_local_execution_planning_timeout(
@@ -1701,6 +1783,10 @@ pub(crate) async fn proxy_request(
                     return Err(err);
                 }
             };
+            observe_gateway_stage_ms(
+                "frontdoor_execute_stream",
+                execute_stream_started_at.elapsed().as_millis() as u64,
+            );
             match stream_outcome {
                 LocalExecutionRequestOutcome::Responded(execution_runtime_response) => {
                     let execution_runtime_response = restore_redacted_stream_execution_response(

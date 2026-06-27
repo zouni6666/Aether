@@ -116,6 +116,15 @@ impl GenericOAuthRefreshAdapter {
             return None;
         }
 
+        if let Some(value) =
+            auth_config_authorization_header(transport.key.decrypted_auth_config.as_deref())
+        {
+            return Some(LocalResolvedOAuthRequestAuth::Header {
+                name: AUTH_HEADER_NAME.to_string(),
+                value,
+            });
+        }
+
         let secret = transport.key.decrypted_api_key.trim();
         if secret.is_empty() || secret == PLACEHOLDER_API_KEY {
             return None;
@@ -170,6 +179,14 @@ impl LocalOAuthRefreshAdapter for GenericOAuthRefreshAdapter {
             .eq_ignore_ascii_case(transport.provider.provider_type.as_str())
         {
             return None;
+        }
+        if let Some(value) =
+            auth_config_authorization_header(transport.key.decrypted_auth_config.as_deref())
+        {
+            return Some(LocalResolvedOAuthRequestAuth::Header {
+                name: AUTH_HEADER_NAME.to_string(),
+                value,
+            });
         }
         if expires_at_requires_refresh(entry.expires_at_unix_secs) {
             return None;
@@ -331,6 +348,15 @@ fn non_empty_string(value: &Value) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn auth_config_authorization_header(raw_auth_config: Option<&str>) -> Option<String> {
+    let mut headers = BTreeMap::new();
+    crate::auth_config::apply_local_auth_config_header_overrides(&mut headers, raw_auth_config);
+    headers
+        .remove(AUTH_HEADER_NAME)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 fn current_access_token(
     transport: &GatewayProviderTransportSnapshot,
     entry: Option<&CachedOAuthEntry>,
@@ -349,4 +375,123 @@ fn current_access_token(
             let secret = transport.key.decrypted_api_key.trim();
             (!secret.is_empty() && secret != PLACEHOLDER_API_KEY).then(|| secret.to_string())
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::super::oauth_refresh::{
+        CachedOAuthEntry, LocalOAuthRefreshAdapter, LocalResolvedOAuthRequestAuth,
+    };
+    use super::super::snapshot::{
+        GatewayProviderTransportEndpoint, GatewayProviderTransportKey,
+        GatewayProviderTransportProvider, GatewayProviderTransportSnapshot,
+    };
+    use super::GenericOAuthRefreshAdapter;
+
+    fn sample_transport() -> GatewayProviderTransportSnapshot {
+        GatewayProviderTransportSnapshot {
+            provider: GatewayProviderTransportProvider {
+                id: "provider-1".to_string(),
+                name: "Codex".to_string(),
+                provider_type: "codex".to_string(),
+                website: None,
+                is_active: true,
+                keep_priority_on_conversion: false,
+                enable_format_conversion: false,
+                concurrent_limit: None,
+                max_retries: None,
+                proxy: None,
+                request_timeout_secs: None,
+                stream_first_byte_timeout_secs: None,
+                config: None,
+            },
+            endpoint: GatewayProviderTransportEndpoint {
+                id: "endpoint-1".to_string(),
+                provider_id: "provider-1".to_string(),
+                api_format: "openai:responses".to_string(),
+                api_family: Some("openai".to_string()),
+                endpoint_kind: Some("responses".to_string()),
+                is_active: true,
+                base_url: "https://chatgpt.com/backend-api/codex".to_string(),
+                header_rules: None,
+                body_rules: None,
+                max_retries: None,
+                custom_path: None,
+                config: None,
+                format_acceptance_config: None,
+                proxy: None,
+            },
+            key: GatewayProviderTransportKey {
+                id: "key-1".to_string(),
+                provider_id: "provider-1".to_string(),
+                name: "OAuth headers".to_string(),
+                auth_type: "oauth".to_string(),
+                is_active: true,
+                api_formats: None,
+                auth_type_by_format: None,
+                allow_auth_channel_mismatch_formats: None,
+                allowed_models: None,
+                capabilities: None,
+                rate_multipliers: None,
+                global_priority_by_format: None,
+                expires_at_unix_secs: None,
+                proxy: None,
+                fingerprint: None,
+                upstream_metadata: None,
+                decrypted_api_key: "__placeholder__".to_string(),
+                decrypted_auth_config: Some(
+                    json!({
+                        "provider_type": "codex",
+                        "access_token_import_temporary": true,
+                        "headers": {
+                            "Authorization": "Bearer imported-session",
+                            "Host": "blocked.example"
+                        }
+                    })
+                    .to_string(),
+                ),
+            },
+        }
+    }
+
+    #[test]
+    fn resolves_imported_authorization_header_without_api_key_secret() {
+        let adapter = GenericOAuthRefreshAdapter::default();
+        let auth = adapter
+            .resolve_without_refresh(&sample_transport())
+            .expect("auth_config authorization header should resolve");
+
+        assert_eq!(
+            auth,
+            LocalResolvedOAuthRequestAuth::Header {
+                name: "authorization".to_string(),
+                value: "Bearer imported-session".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn auth_config_authorization_header_overrides_cached_oauth_entry() {
+        let adapter = GenericOAuthRefreshAdapter::default();
+        let entry = CachedOAuthEntry {
+            provider_type: "codex".to_string(),
+            auth_header_name: "authorization".to_string(),
+            auth_header_value: "Bearer refreshed-access-token".to_string(),
+            expires_at_unix_secs: Some(u64::MAX),
+            metadata: None,
+        };
+        let auth = adapter
+            .resolve_cached(&sample_transport(), &entry)
+            .expect("auth_config authorization header should override cache");
+
+        assert_eq!(
+            auth,
+            LocalResolvedOAuthRequestAuth::Header {
+                name: "authorization".to_string(),
+                value: "Bearer imported-session".to_string(),
+            }
+        );
+    }
 }

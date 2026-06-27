@@ -31,6 +31,12 @@ pub fn build_upsert_usage_record_from_event(
     event: &UsageEvent,
 ) -> Result<UpsertUsageRecord, DataLayerError> {
     let (status, billing_status) = lifecycle_status_and_billing(event.event_type);
+    let finalized_at_unix_secs = match event.event_type {
+        UsageEventType::Pending | UsageEventType::Streaming => None,
+        UsageEventType::Completed | UsageEventType::Failed | UsageEventType::Cancelled => {
+            Some(event.timestamp_ms / 1_000)
+        }
+    };
     let mut data = event.data.clone();
     data.request_metadata = attach_provider_request_body_metadata(
         data.request_metadata,
@@ -130,7 +136,7 @@ pub fn build_upsert_usage_record_from_event(
             },
         ),
         request_metadata: sanitize_usage_request_metadata(data.request_metadata),
-        finalized_at_unix_secs: Some(now_unix_secs),
+        finalized_at_unix_secs,
         created_at_unix_ms: Some(now_unix_secs),
         updated_at_unix_secs: now_unix_secs,
     })

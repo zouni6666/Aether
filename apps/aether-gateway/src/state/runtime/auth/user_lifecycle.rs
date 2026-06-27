@@ -2,6 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::constants::{BUILTIN_DEFAULT_USER_GROUP_ID, DEFAULT_USER_GROUP_CONFIG_KEY};
 use crate::{AppState, GatewayError};
+use std::time::Duration;
+
+const USER_GROUPS_FOR_USER_CACHE_TTL: Duration = Duration::from_secs(30);
 
 impl AppState {
     pub(crate) async fn assign_default_group_to_self_registered_user(
@@ -323,10 +326,21 @@ impl AppState {
         &self,
         user_id: &str,
     ) -> Result<Vec<aether_data::repository::users::StoredUserGroup>, GatewayError> {
-        self.data
-            .list_user_groups_for_user(user_id)
+        let user_id = user_id.trim();
+        if user_id.is_empty() {
+            return Ok(Vec::new());
+        }
+        let cache_key = user_id.to_string();
+        self.user_groups_for_user_cache
+            .get_or_load(cache_key, USER_GROUPS_FOR_USER_CACHE_TTL, || async move {
+                self.data
+                    .list_user_groups_for_user(user_id)
+                    .await
+                    .map(Some)
+                    .map_err(|err| GatewayError::Internal(err.to_string()))
+            })
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map(|value| value.unwrap_or_default())
     }
 
     pub(crate) async fn list_user_group_memberships_by_user_ids(

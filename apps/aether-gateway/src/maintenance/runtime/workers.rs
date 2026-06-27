@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use tracing::{debug, warn};
@@ -31,6 +31,7 @@ use super::{
 
 const STATS_DAILY_CATCH_UP_BURST_LIMIT: usize = 14;
 const STATS_HOURLY_CATCH_UP_BURST_LIMIT: usize = 72;
+const MAINTENANCE_PRESSURE_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 
 fn log_maintenance_worker_failure(
     worker: &'static str,
@@ -71,6 +72,7 @@ fn should_defer_for_database_pressure(
         checked_out = summary.checked_out,
         pool_size = summary.pool_size,
         idle = summary.idle,
+        idle_reserve = GatewayDataState::maintenance_pool_idle_reserve(&summary),
         max_connections = summary.max_connections,
         usage_rate = summary.usage_rate,
         "gateway maintenance worker deferred because database pool has no idle reserve"
@@ -92,8 +94,12 @@ pub(crate) fn spawn_audit_cleanup_worker(
         let mut interval = tokio::time::interval(AUDIT_LOG_CLEANUP_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         interval.tick().await;
+        let mut deferred_since = None;
         loop {
             interval.tick().await;
+            if should_defer_for_database_pressure(&data, "audit_cleanup", &mut deferred_since) {
+                continue;
+            }
             if let Err(err) = run_audit_cleanup_once(&data).await {
                 log_maintenance_worker_failure("audit_cleanup", "tick", &err);
             }
@@ -110,8 +116,17 @@ pub(crate) fn spawn_db_maintenance_worker(
 
     let timezone = maintenance_timezone();
     Some(tokio::spawn(async move {
+        let mut deferred_since = None;
         loop {
             tokio::time::sleep(duration_until_next_db_maintenance_run(Utc::now(), timezone)).await;
+            loop {
+                if should_defer_for_database_pressure(&data, "db_maintenance", &mut deferred_since)
+                {
+                    tokio::time::sleep(MAINTENANCE_PRESSURE_RETRY_INTERVAL).await;
+                    continue;
+                }
+                break;
+            }
             if let Err(err) = run_db_maintenance_once(&data).await {
                 log_maintenance_worker_failure("db_maintenance", "tick", &err);
             }
@@ -128,6 +143,7 @@ pub(crate) fn spawn_wallet_daily_usage_aggregation_worker(
 
     let timezone = maintenance_timezone();
     Some(tokio::spawn(async move {
+        let mut deferred_since = None;
         loop {
             tokio::time::sleep(duration_until_next_daily_run(
                 Utc::now(),
@@ -136,6 +152,17 @@ pub(crate) fn spawn_wallet_daily_usage_aggregation_worker(
                 WALLET_DAILY_USAGE_AGGREGATION_MINUTE,
             ))
             .await;
+            loop {
+                if should_defer_for_database_pressure(
+                    &data,
+                    "wallet_daily_usage_aggregation",
+                    &mut deferred_since,
+                ) {
+                    tokio::time::sleep(MAINTENANCE_PRESSURE_RETRY_INTERVAL).await;
+                    continue;
+                }
+                break;
+            }
             if let Err(err) = run_wallet_daily_usage_aggregation_once(&data).await {
                 log_maintenance_worker_failure("wallet_daily_usage_aggregation", "tick", &err);
             }
@@ -151,9 +178,19 @@ pub(crate) fn spawn_stats_aggregation_worker(
     }
 
     Some(tokio::spawn(async move {
+        let mut deferred_since = None;
         loop {
             let mut processed = 0_usize;
+            let mut deferred = false;
             while processed < STATS_DAILY_CATCH_UP_BURST_LIMIT {
+                if should_defer_for_database_pressure(
+                    &data,
+                    "stats_daily_aggregation",
+                    &mut deferred_since,
+                ) {
+                    deferred = true;
+                    break;
+                }
                 match run_stats_aggregation_once(&data).await {
                     Ok(true) => processed += 1,
                     Ok(false) => break,
@@ -162,6 +199,11 @@ pub(crate) fn spawn_stats_aggregation_worker(
                         break;
                     }
                 }
+            }
+
+            if deferred {
+                tokio::time::sleep(MAINTENANCE_PRESSURE_RETRY_INTERVAL).await;
+                continue;
             }
 
             if processed >= STATS_DAILY_CATCH_UP_BURST_LIMIT {
@@ -182,6 +224,7 @@ pub(crate) fn spawn_usage_cleanup_worker(
 
     let timezone = maintenance_timezone();
     Some(tokio::spawn(async move {
+        let mut deferred_since = None;
         loop {
             tokio::time::sleep(duration_until_next_daily_run(
                 Utc::now(),
@@ -190,6 +233,13 @@ pub(crate) fn spawn_usage_cleanup_worker(
                 USAGE_CLEANUP_MINUTE,
             ))
             .await;
+            loop {
+                if should_defer_for_database_pressure(&data, "usage_cleanup", &mut deferred_since) {
+                    tokio::time::sleep(MAINTENANCE_PRESSURE_RETRY_INTERVAL).await;
+                    continue;
+                }
+                break;
+            }
             if let Err(err) = run_usage_cleanup_once(&data).await {
                 log_maintenance_worker_failure("usage_cleanup", "tick", &err);
             }
@@ -277,6 +327,7 @@ pub(crate) fn spawn_provider_checkin_worker(
 
     let timezone = maintenance_timezone();
     Some(tokio::spawn(async move {
+        let mut deferred_since = None;
         loop {
             let (hour, minute) = match provider_checkin_schedule(&state.data).await {
                 Ok(schedule) => schedule,
@@ -301,6 +352,17 @@ pub(crate) fn spawn_provider_checkin_worker(
                 minute,
             ))
             .await;
+            loop {
+                if should_defer_for_database_pressure(
+                    &state.data,
+                    "provider_checkin",
+                    &mut deferred_since,
+                ) {
+                    tokio::time::sleep(MAINTENANCE_PRESSURE_RETRY_INTERVAL).await;
+                    continue;
+                }
+                break;
+            }
             if let Err(err) = run_provider_checkin_once(&state).await {
                 log_maintenance_worker_failure("provider_checkin", "tick", &err);
             }
@@ -381,8 +443,16 @@ pub(crate) fn spawn_gemini_file_mapping_cleanup_worker(
         let mut interval = tokio::time::interval(GEMINI_FILE_MAPPING_CLEANUP_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         interval.tick().await;
+        let mut deferred_since = None;
         loop {
             interval.tick().await;
+            if should_defer_for_database_pressure(
+                &data,
+                "gemini_file_mapping_cleanup",
+                &mut deferred_since,
+            ) {
+                continue;
+            }
             if let Err(err) = run_gemini_file_mapping_cleanup_once(&data).await {
                 log_maintenance_worker_failure("gemini_file_mapping_cleanup", "tick", &err);
             }
@@ -457,6 +527,7 @@ pub(crate) fn spawn_proxy_node_metrics_cleanup_worker(
 
     let timezone = maintenance_timezone();
     Some(tokio::spawn(async move {
+        let mut deferred_since = None;
         loop {
             tokio::time::sleep(duration_until_next_daily_run(
                 Utc::now(),
@@ -465,6 +536,17 @@ pub(crate) fn spawn_proxy_node_metrics_cleanup_worker(
                 PROXY_NODE_METRICS_CLEANUP_MINUTE,
             ))
             .await;
+            loop {
+                if should_defer_for_database_pressure(
+                    &data,
+                    "proxy_node_metrics_cleanup",
+                    &mut deferred_since,
+                ) {
+                    tokio::time::sleep(MAINTENANCE_PRESSURE_RETRY_INTERVAL).await;
+                    continue;
+                }
+                break;
+            }
             if let Err(err) = run_proxy_node_metrics_cleanup_once(&data).await {
                 log_maintenance_worker_failure("proxy_node_metrics_cleanup", "tick", &err);
             }
@@ -532,9 +614,19 @@ pub(crate) fn spawn_stats_hourly_aggregation_worker(
     }
 
     Some(tokio::spawn(async move {
+        let mut deferred_since = None;
         loop {
             let mut processed = 0_usize;
+            let mut deferred = false;
             while processed < STATS_HOURLY_CATCH_UP_BURST_LIMIT {
+                if should_defer_for_database_pressure(
+                    &data,
+                    "stats_hourly_aggregation",
+                    &mut deferred_since,
+                ) {
+                    deferred = true;
+                    break;
+                }
                 match run_stats_hourly_aggregation_once(&data).await {
                     Ok(true) => processed += 1,
                     Ok(false) => break,
@@ -543,6 +635,11 @@ pub(crate) fn spawn_stats_hourly_aggregation_worker(
                         break;
                     }
                 }
+            }
+
+            if deferred {
+                tokio::time::sleep(MAINTENANCE_PRESSURE_RETRY_INTERVAL).await;
+                continue;
             }
 
             if processed >= STATS_HOURLY_CATCH_UP_BURST_LIMIT {
@@ -568,8 +665,16 @@ pub(crate) fn spawn_request_candidate_cleanup_worker(
         let mut interval = tokio::time::interval(REQUEST_CANDIDATE_CLEANUP_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         interval.tick().await;
+        let mut deferred_since = None;
         loop {
             interval.tick().await;
+            if should_defer_for_database_pressure(
+                &data,
+                "request_candidate_cleanup",
+                &mut deferred_since,
+            ) {
+                continue;
+            }
             if let Err(err) = run_request_candidate_cleanup_once(&data).await {
                 log_maintenance_worker_failure("request_candidate_cleanup", "tick", &err);
             }

@@ -13,6 +13,7 @@ use self::decision::{
     build_lazy_local_openai_chat_candidate_attempt_source,
     maybe_build_local_openai_chat_decision_payload_for_candidate, LocalOpenAiChatCandidateAttempt,
     LocalOpenAiChatCandidateAttemptSource, LocalOpenAiChatDecisionInput,
+    LocalOpenAiChatRequestPreparation,
 };
 use self::plans::{
     build_local_openai_chat_stream_attempt_source, build_local_openai_chat_stream_plan_and_reports,
@@ -147,7 +148,7 @@ pub(crate) async fn maybe_build_sync_local_decision_payload(
     )
     .await;
 
-    while let Some(attempt) = source.next_attempt().await {
+    while let Some(attempt) = source.next_attempt().await? {
         let upstream_is_stream = self::plans::openai_chat_upstream_is_stream_for_candidate(
             &attempt.eligible.transport,
             attempt.eligible.provider_api_format.as_str(),
@@ -159,6 +160,7 @@ pub(crate) async fn maybe_build_sync_local_decision_payload(
             trace_id,
             body_json,
             &input,
+            None,
             attempt,
             OPENAI_CHAT_SYNC_PLAN_KIND,
             "openai_chat_sync_success",
@@ -199,7 +201,7 @@ pub(crate) async fn maybe_build_stream_local_decision_payload(
     )
     .await;
 
-    while let Some(attempt) = source.next_attempt().await {
+    while let Some(attempt) = source.next_attempt().await? {
         let upstream_is_stream = self::plans::openai_chat_upstream_is_stream_for_candidate(
             &attempt.eligible.transport,
             attempt.eligible.provider_api_format.as_str(),
@@ -211,6 +213,7 @@ pub(crate) async fn maybe_build_stream_local_decision_payload(
             trace_id,
             body_json,
             &input,
+            None,
             attempt,
             OPENAI_CHAT_STREAM_PLAN_KIND,
             "openai_chat_stream_success",

@@ -70,6 +70,13 @@ impl<'a> AdminAppState<'a> {
         self.app.list_monitoring_usage_errors(query).await
     }
 
+    pub(crate) async fn count_monitoring_usage_errors(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageMonitoringErrorCountQuery,
+    ) -> Result<u64, GatewayError> {
+        self.app.count_monitoring_usage_errors(query).await
+    }
+
     pub(crate) async fn aggregate_usage_audits(
         &self,
         query: &aether_data_contracts::repository::usage::UsageAuditAggregationQuery,
@@ -272,6 +279,26 @@ impl<'a> AdminAppState<'a> {
             provider_limit,
             per_provider_model_limit,
             per_model_event_limit,
+        )
+        .await
+    }
+
+    pub(crate) async fn build_related_health_monitor_payload(
+        &self,
+        lookback_hours: u64,
+        dimension: crate::handlers::public::HealthMonitorRelationDimension,
+        value: &str,
+        related_limit: usize,
+        per_item_limit: usize,
+    ) -> Option<serde_json::Value> {
+        crate::handlers::public::build_related_health_monitor_payload(
+            self.app,
+            lookback_hours,
+            dimension,
+            value,
+            related_limit,
+            per_item_limit,
+            true,
         )
         .await
     }

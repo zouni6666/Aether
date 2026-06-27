@@ -268,6 +268,7 @@ function affinityModelSubtitle(item: UserAffinity): string {
 function providerKeyLabel(item: UserAffinity): string {
   if (item.key_name) return item.key_name
   if (item.key_prefix === '[OAuth Token]') return 'OAuth 认证'
+  if (item.key_prefix === '[OAuth Header]') return 'OAuth Header'
   return item.key_prefix || '---'
 }
 

@@ -23,6 +23,81 @@ use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+const USER_CANCELLED_STATUS_CODE: u16 = 499;
+
+#[derive(Clone, Copy, Debug, Default)]
+struct HealthTimelineMetricBucket {
+    total_count: u64,
+    success_count: u64,
+    failed_count: u64,
+    latency_sum_ms: u64,
+    latency_samples: u64,
+    first_byte_sum_ms: u64,
+    first_byte_samples: u64,
+    output_tokens: u64,
+    response_time_sum_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct HealthTimelineDetailCounts {
+    status: &'static str,
+    total_attempts: u64,
+    success_count: u64,
+    failed_count: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct HealthTimelineWindow {
+    since_unix_secs: u64,
+    until_unix_secs: u64,
+    segments: u32,
+}
+
+impl HealthTimelineMetricBucket {
+    fn add_usage_event(&mut self, event: &StoredRequestUsageAudit) {
+        self.total_count = self.total_count.saturating_add(1);
+        if model_health_event_success(event) {
+            self.success_count = self.success_count.saturating_add(1);
+        } else {
+            self.failed_count = self.failed_count.saturating_add(1);
+        }
+        if let Some(response_time_ms) = event.response_time_ms {
+            self.latency_sum_ms = self.latency_sum_ms.saturating_add(response_time_ms);
+            self.latency_samples = self.latency_samples.saturating_add(1);
+            self.response_time_sum_ms = self.response_time_sum_ms.saturating_add(response_time_ms);
+        }
+        if let Some(first_byte_time_ms) = event.first_byte_time_ms {
+            self.first_byte_sum_ms = self.first_byte_sum_ms.saturating_add(first_byte_time_ms);
+            self.first_byte_samples = self.first_byte_samples.saturating_add(1);
+        }
+        self.output_tokens = self.output_tokens.saturating_add(event.output_tokens);
+    }
+
+    fn avg_latency_ms(self) -> Option<f64> {
+        if self.latency_samples == 0 {
+            None
+        } else {
+            Some(self.latency_sum_ms as f64 / self.latency_samples as f64)
+        }
+    }
+
+    fn avg_first_byte_ms(self) -> Option<f64> {
+        if self.first_byte_samples == 0 {
+            None
+        } else {
+            Some(self.first_byte_sum_ms as f64 / self.first_byte_samples as f64)
+        }
+    }
+
+    fn avg_tps(self) -> Option<f64> {
+        if self.output_tokens == 0 || self.response_time_sum_ms == 0 {
+            None
+        } else {
+            Some(self.output_tokens as f64 / (self.response_time_sum_ms as f64 / 1000.0))
+        }
+    }
+}
+
 pub(crate) fn request_candidate_status_label(status: RequestCandidateStatus) -> &'static str {
     match status {
         RequestCandidateStatus::Available => "available",
@@ -102,6 +177,7 @@ pub(crate) struct ModelHealthMonitorOptions {
     pub(crate) include_provider_count: bool,
 }
 
+const API_FORMAT_HEALTH_TIMELINE_SEGMENTS: u32 = 60;
 const MODEL_HEALTH_TIMELINE_SEGMENTS: u32 = 60;
 
 pub(crate) fn provider_key_api_formats(key: &StoredProviderCatalogKey) -> Vec<String> {
@@ -326,6 +402,29 @@ pub(crate) async fn build_api_format_health_monitor_payload(
         .map(|duration| duration.as_secs())
         .unwrap_or_default();
     let since_unix_secs = now_unix_secs.saturating_sub(lookback_hours * 3600);
+    let usage_data_available = state.has_usage_data_reader();
+    let usage_breakdown_by_format = if usage_data_available {
+        state
+            .summarize_usage_breakdown(&UsageBreakdownSummaryQuery {
+                created_from_unix_secs: since_unix_secs,
+                created_until_unix_secs: now_unix_secs,
+                user_id: None,
+                provider_name: None,
+                model: None,
+                api_format: None,
+                exclude_status_codes: vec![USER_CANCELLED_STATUS_CODE],
+                group_by: UsageBreakdownGroupBy::ApiFormat,
+            })
+            .await
+            .ok()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|row| !row.group_key.trim().is_empty())
+            .map(|row| (row.group_key.clone(), row))
+            .collect::<BTreeMap<_, _>>()
+    } else {
+        BTreeMap::new()
+    };
 
     let providers = state
         .list_provider_catalog_providers(true)
@@ -428,7 +527,7 @@ pub(crate) async fn build_api_format_health_monitor_payload(
             &all_endpoint_ids,
             since_unix_secs,
             now_unix_secs,
-            100,
+            API_FORMAT_HEALTH_TIMELINE_SEGMENTS,
         )
         .await
         .ok()
@@ -495,6 +594,31 @@ pub(crate) async fn build_api_format_health_monitor_payload(
                 .or(candidate.started_at_unix_ms)
                 .or(Some(candidate.created_at_unix_ms))
         });
+        let avg_latency_ms = usage_breakdown_by_format
+            .get(&api_format)
+            .and_then(model_health_average_latency_ms)
+            .or_else(|| request_candidate_average_latency_ms(&attempts));
+        let avg_tps = usage_breakdown_by_format
+            .get(&api_format)
+            .and_then(model_health_average_tps);
+        let usage_events = if usage_data_available {
+            state
+                .list_usage_audits(&UsageAuditListQuery {
+                    created_from_unix_secs: Some(since_unix_secs),
+                    created_until_unix_secs: Some(now_unix_secs),
+                    api_format: Some(api_format.clone()),
+                    exclude_status_codes: vec![USER_CANCELLED_STATUS_CODE],
+                    limit: Some(per_format_limit),
+                    newest_first: true,
+                    ..UsageAuditListQuery::default()
+                })
+                .await
+                .ok()
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let avg_first_byte_ms = model_health_average_first_byte_ms(&usage_events);
         let events = attempts
             .into_iter()
             .filter_map(|candidate| {
@@ -516,7 +640,14 @@ pub(crate) async fn build_api_format_health_monitor_payload(
             .get(&api_format)
             .unwrap_or(&empty_timeline);
         let (timeline, time_range_start, time_range_end) =
-            build_public_health_timeline(timeline_source, 100);
+            build_public_health_timeline(timeline_source, API_FORMAT_HEALTH_TIMELINE_SEGMENTS);
+        let timeline_details = build_public_health_timeline_details(
+            timeline_source,
+            since_unix_secs,
+            now_unix_secs,
+            API_FORMAT_HEALTH_TIMELINE_SEGMENTS,
+            &usage_events,
+        );
 
         let mut format_payload = json!({
             "api_format": api_format.clone(),
@@ -525,9 +656,13 @@ pub(crate) async fn build_api_format_health_monitor_payload(
             "failed_count": failed_count,
             "skipped_count": skipped_count,
             "success_rate": success_rate,
+            "avg_latency_ms": avg_latency_ms,
+            "avg_first_byte_ms": avg_first_byte_ms,
+            "avg_tps": avg_tps,
             "last_event_at": last_event_at.and_then(unix_ms_to_rfc3339),
             "events": events,
             "timeline": timeline,
+            "timeline_details": timeline_details,
             "time_range_start": time_range_start.and_then(unix_ms_to_rfc3339),
             "time_range_end": time_range_end.map(|ms| unix_ms_to_rfc3339(ms)).unwrap_or_else(|| unix_secs_to_rfc3339(now_unix_secs)),
         });
@@ -576,6 +711,9 @@ pub(crate) async fn build_model_health_monitor_payload(
             created_until_unix_secs: now_unix_secs,
             user_id: None,
             provider_name: None,
+            model: None,
+            api_format: None,
+            exclude_status_codes: vec![USER_CANCELLED_STATUS_CODE],
             group_by: UsageBreakdownGroupBy::Model,
         })
         .await
@@ -595,6 +733,7 @@ pub(crate) async fn build_model_health_monitor_payload(
                 created_from_unix_secs: Some(since_unix_secs),
                 created_until_unix_secs: Some(now_unix_secs),
                 model: Some(row.group_key.clone()),
+                exclude_status_codes: vec![USER_CANCELLED_STATUS_CODE],
                 limit: Some(per_model_limit),
                 newest_first: true,
                 ..UsageAuditListQuery::default()
@@ -604,6 +743,12 @@ pub(crate) async fn build_model_health_monitor_payload(
             .unwrap_or_default();
 
         let (timeline, time_range_start, time_range_end) = build_model_health_timeline(
+            &events,
+            since_unix_secs,
+            now_unix_secs,
+            MODEL_HEALTH_TIMELINE_SEGMENTS,
+        );
+        let timeline_details = build_usage_health_timeline_details(
             &events,
             since_unix_secs,
             now_unix_secs,
@@ -640,9 +785,11 @@ pub(crate) async fn build_model_health_monitor_payload(
             "success_rate": success_rate,
             "avg_latency_ms": avg_latency_ms,
             "avg_first_byte_ms": first_byte_average,
+            "avg_tps": model_health_average_tps(&row),
             "last_event_at": last_event_at,
             "events": event_payload,
             "timeline": timeline,
+            "timeline_details": timeline_details,
             "time_range_start": unix_secs_to_rfc3339(time_range_start),
             "time_range_end": unix_secs_to_rfc3339(time_range_end),
         });
@@ -691,6 +838,9 @@ pub(crate) async fn build_provider_health_monitor_payload(
             created_until_unix_secs: now_unix_secs,
             user_id: None,
             provider_name: None,
+            model: None,
+            api_format: None,
+            exclude_status_codes: vec![USER_CANCELLED_STATUS_CODE],
             group_by: UsageBreakdownGroupBy::Provider,
         })
         .await
@@ -739,6 +889,472 @@ pub(crate) async fn build_provider_health_monitor_payload(
     }))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HealthMonitorRelationDimension {
+    Endpoint,
+    Model,
+    Provider,
+}
+
+impl HealthMonitorRelationDimension {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "endpoint" | "api_format" | "api-format" => Some(Self::Endpoint),
+            "model" => Some(Self::Model),
+            "provider" => Some(Self::Provider),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Endpoint => "endpoint",
+            Self::Model => "model",
+            Self::Provider => "provider",
+        }
+    }
+}
+
+pub(crate) async fn build_related_health_monitor_payload(
+    state: &AppState,
+    lookback_hours: u64,
+    dimension: HealthMonitorRelationDimension,
+    value: &str,
+    related_limit: usize,
+    per_item_limit: usize,
+    include_provider_info: bool,
+) -> Option<serde_json::Value> {
+    if !state.has_usage_data_reader() {
+        return None;
+    }
+
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    let now_unix_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    let since_unix_secs = now_unix_secs.saturating_sub(lookback_hours * 3600);
+    let related_limit = related_limit.max(1);
+    let per_item_limit = per_item_limit.max(1);
+
+    let mut related_endpoints = Vec::new();
+    let mut related_models = Vec::new();
+    let mut related_providers = Vec::new();
+
+    match dimension {
+        HealthMonitorRelationDimension::Endpoint => {
+            let api_format = value.to_string();
+            related_models = build_related_health_items(
+                state,
+                breakdown_summary_query(
+                    since_unix_secs,
+                    now_unix_secs,
+                    None,
+                    None,
+                    Some(api_format.clone()),
+                    UsageBreakdownGroupBy::Model,
+                ),
+                since_unix_secs,
+                now_unix_secs,
+                related_limit,
+                per_item_limit,
+                "model",
+                {
+                    let api_format = api_format.clone();
+                    move |row| {
+                        usage_audit_query(
+                            since_unix_secs,
+                            now_unix_secs,
+                            None,
+                            Some(row.group_key.clone()),
+                            Some(api_format.clone()),
+                            per_item_limit,
+                        )
+                    }
+                },
+                |row, events| related_model_display_meta(row, events),
+            )
+            .await;
+
+            if include_provider_info {
+                let api_format = value.to_string();
+                related_providers = build_related_health_items(
+                    state,
+                    breakdown_summary_query(
+                        since_unix_secs,
+                        now_unix_secs,
+                        None,
+                        None,
+                        Some(api_format.clone()),
+                        UsageBreakdownGroupBy::Provider,
+                    ),
+                    since_unix_secs,
+                    now_unix_secs,
+                    related_limit,
+                    per_item_limit,
+                    "provider",
+                    {
+                        let api_format = api_format.clone();
+                        move |row| {
+                            usage_audit_query(
+                                since_unix_secs,
+                                now_unix_secs,
+                                Some(row.group_key.clone()),
+                                None,
+                                Some(api_format.clone()),
+                                per_item_limit,
+                            )
+                        }
+                    },
+                    related_provider_display_meta,
+                )
+                .await;
+            }
+        }
+        HealthMonitorRelationDimension::Model => {
+            let model = value.to_string();
+            related_endpoints = build_related_health_items(
+                state,
+                breakdown_summary_query(
+                    since_unix_secs,
+                    now_unix_secs,
+                    None,
+                    Some(model.clone()),
+                    None,
+                    UsageBreakdownGroupBy::ApiFormat,
+                ),
+                since_unix_secs,
+                now_unix_secs,
+                related_limit,
+                per_item_limit,
+                "endpoint",
+                {
+                    let model = model.clone();
+                    move |row| {
+                        usage_audit_query(
+                            since_unix_secs,
+                            now_unix_secs,
+                            None,
+                            Some(model.clone()),
+                            Some(row.group_key.clone()),
+                            per_item_limit,
+                        )
+                    }
+                },
+                related_endpoint_display_meta,
+            )
+            .await;
+
+            if include_provider_info {
+                let model = value.to_string();
+                related_providers = build_related_health_items(
+                    state,
+                    breakdown_summary_query(
+                        since_unix_secs,
+                        now_unix_secs,
+                        None,
+                        Some(model.clone()),
+                        None,
+                        UsageBreakdownGroupBy::Provider,
+                    ),
+                    since_unix_secs,
+                    now_unix_secs,
+                    related_limit,
+                    per_item_limit,
+                    "provider",
+                    {
+                        let model = model.clone();
+                        move |row| {
+                            usage_audit_query(
+                                since_unix_secs,
+                                now_unix_secs,
+                                Some(row.group_key.clone()),
+                                Some(model.clone()),
+                                None,
+                                per_item_limit,
+                            )
+                        }
+                    },
+                    related_provider_display_meta,
+                )
+                .await;
+            }
+        }
+        HealthMonitorRelationDimension::Provider => {
+            let provider_name = value.to_string();
+            related_endpoints = build_related_health_items(
+                state,
+                breakdown_summary_query(
+                    since_unix_secs,
+                    now_unix_secs,
+                    Some(provider_name.clone()),
+                    None,
+                    None,
+                    UsageBreakdownGroupBy::ApiFormat,
+                ),
+                since_unix_secs,
+                now_unix_secs,
+                related_limit,
+                per_item_limit,
+                "endpoint",
+                {
+                    let provider_name = provider_name.clone();
+                    move |row| {
+                        usage_audit_query(
+                            since_unix_secs,
+                            now_unix_secs,
+                            Some(provider_name.clone()),
+                            None,
+                            Some(row.group_key.clone()),
+                            per_item_limit,
+                        )
+                    }
+                },
+                related_endpoint_display_meta,
+            )
+            .await;
+
+            let provider_name = value.to_string();
+            related_models = build_related_health_items(
+                state,
+                breakdown_summary_query(
+                    since_unix_secs,
+                    now_unix_secs,
+                    Some(provider_name.clone()),
+                    None,
+                    None,
+                    UsageBreakdownGroupBy::Model,
+                ),
+                since_unix_secs,
+                now_unix_secs,
+                related_limit,
+                per_item_limit,
+                "model",
+                {
+                    let provider_name = provider_name.clone();
+                    move |row| {
+                        usage_audit_query(
+                            since_unix_secs,
+                            now_unix_secs,
+                            Some(provider_name.clone()),
+                            Some(row.group_key.clone()),
+                            None,
+                            per_item_limit,
+                        )
+                    }
+                },
+                |row, events| related_model_display_meta(row, events),
+            )
+            .await;
+        }
+    }
+
+    Some(json!({
+        "generated_at": unix_secs_to_rfc3339(now_unix_secs),
+        "dimension": dimension.as_str(),
+        "value": value,
+        "related_endpoints": related_endpoints,
+        "related_models": related_models,
+        "related_providers": related_providers,
+    }))
+}
+
+fn breakdown_summary_query(
+    created_from_unix_secs: u64,
+    created_until_unix_secs: u64,
+    provider_name: Option<String>,
+    model: Option<String>,
+    api_format: Option<String>,
+    group_by: UsageBreakdownGroupBy,
+) -> UsageBreakdownSummaryQuery {
+    UsageBreakdownSummaryQuery {
+        created_from_unix_secs,
+        created_until_unix_secs,
+        user_id: None,
+        provider_name,
+        model,
+        api_format,
+        exclude_status_codes: vec![USER_CANCELLED_STATUS_CODE],
+        group_by,
+    }
+}
+
+fn usage_audit_query(
+    created_from_unix_secs: u64,
+    created_until_unix_secs: u64,
+    provider_name: Option<String>,
+    model: Option<String>,
+    api_format: Option<String>,
+    limit: usize,
+) -> UsageAuditListQuery {
+    UsageAuditListQuery {
+        created_from_unix_secs: Some(created_from_unix_secs),
+        created_until_unix_secs: Some(created_until_unix_secs),
+        provider_name,
+        model,
+        api_format,
+        exclude_status_codes: vec![USER_CANCELLED_STATUS_CODE],
+        limit: Some(limit),
+        newest_first: true,
+        ..UsageAuditListQuery::default()
+    }
+}
+
+async fn build_related_health_items<F, G>(
+    state: &AppState,
+    query: UsageBreakdownSummaryQuery,
+    since_unix_secs: u64,
+    now_unix_secs: u64,
+    related_limit: usize,
+    per_item_limit: usize,
+    kind: &'static str,
+    build_events_query: F,
+    build_display_meta: G,
+) -> Vec<serde_json::Value>
+where
+    F: Fn(&StoredUsageBreakdownSummaryRow) -> UsageAuditListQuery,
+    G: Fn(&StoredUsageBreakdownSummaryRow, &[StoredRequestUsageAudit]) -> (String, Option<String>),
+{
+    let mut rows = state
+        .summarize_usage_breakdown(&query)
+        .await
+        .ok()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|row| !row.group_key.trim().is_empty())
+        .collect::<Vec<_>>();
+
+    rows.sort_by(|left, right| {
+        related_health_sort_rank(left)
+            .cmp(&related_health_sort_rank(right))
+            .then_with(|| right.request_count.cmp(&left.request_count))
+            .then_with(|| left.group_key.cmp(&right.group_key))
+    });
+
+    let mut items = Vec::new();
+    for row in rows.into_iter().take(related_limit) {
+        let events = state
+            .list_usage_audits(&build_events_query(&row))
+            .await
+            .ok()
+            .unwrap_or_default();
+        let (display_name, meta_text) = build_display_meta(&row, &events);
+        items.push(related_health_item_payload(
+            kind,
+            &row,
+            &events,
+            display_name,
+            meta_text,
+            since_unix_secs,
+            now_unix_secs,
+        ));
+    }
+
+    items
+}
+
+fn related_health_item_payload(
+    kind: &'static str,
+    row: &StoredUsageBreakdownSummaryRow,
+    events: &[StoredRequestUsageAudit],
+    display_name: String,
+    meta_text: Option<String>,
+    since_unix_secs: u64,
+    now_unix_secs: u64,
+) -> serde_json::Value {
+    let (timeline, time_range_start, time_range_end) = build_model_health_timeline(
+        events,
+        since_unix_secs,
+        now_unix_secs,
+        MODEL_HEALTH_TIMELINE_SEGMENTS,
+    );
+    let timeline_details = build_usage_health_timeline_details(
+        events,
+        since_unix_secs,
+        now_unix_secs,
+        MODEL_HEALTH_TIMELINE_SEGMENTS,
+    );
+    let total_attempts = row.request_count;
+    let success_count = row.success_count.min(total_attempts);
+    let failed_count = total_attempts.saturating_sub(success_count);
+    let success_rate = if total_attempts > 0 {
+        success_count as f64 / total_attempts as f64
+    } else {
+        1.0
+    };
+    let last_event_at = events
+        .first()
+        .and_then(|item| unix_secs_to_rfc3339(item.created_at_unix_ms));
+
+    json!({
+        "kind": kind,
+        "key": row.group_key.clone(),
+        "display_name": display_name,
+        "meta_text": meta_text,
+        "total_attempts": total_attempts,
+        "success_count": success_count,
+        "failed_count": failed_count,
+        "success_rate": success_rate,
+        "avg_latency_ms": model_health_average_latency_ms(row),
+        "avg_first_byte_ms": model_health_average_first_byte_ms(events),
+        "avg_tps": model_health_average_tps(row),
+        "last_event_at": last_event_at,
+        "timeline": timeline,
+        "timeline_details": timeline_details,
+        "time_range_start": unix_secs_to_rfc3339(time_range_start),
+        "time_range_end": unix_secs_to_rfc3339(time_range_end),
+    })
+}
+
+fn related_model_display_meta(
+    row: &StoredUsageBreakdownSummaryRow,
+    events: &[StoredRequestUsageAudit],
+) -> (String, Option<String>) {
+    let provider_count = model_health_provider_count(events);
+    let meta_text = if provider_count > 0 {
+        Some(format!("{provider_count} 个提供商"))
+    } else {
+        None
+    };
+    (model_health_display_name(&row.group_key), meta_text)
+}
+
+fn related_provider_display_meta(
+    row: &StoredUsageBreakdownSummaryRow,
+    _events: &[StoredRequestUsageAudit],
+) -> (String, Option<String>) {
+    (row.group_key.clone(), None)
+}
+
+fn related_endpoint_display_meta(
+    row: &StoredUsageBreakdownSummaryRow,
+    _events: &[StoredRequestUsageAudit],
+) -> (String, Option<String>) {
+    (
+        api_format_display_name(&row.group_key),
+        Some(public_api_format_local_path(&row.group_key).to_string()),
+    )
+}
+
+fn related_health_sort_rank(row: &StoredUsageBreakdownSummaryRow) -> u8 {
+    if row.request_count == 0 {
+        return 3;
+    }
+    let success_count = row.success_count.min(row.request_count);
+    let success_rate = success_count as f64 / row.request_count as f64;
+    if success_rate < 0.8 {
+        0
+    } else if success_rate < 0.95 {
+        1
+    } else {
+        2
+    }
+}
+
 async fn build_provider_health_payload(
     state: &AppState,
     provider: StoredProviderCatalogProvider,
@@ -754,6 +1370,9 @@ async fn build_provider_health_payload(
             created_until_unix_secs: now_unix_secs,
             user_id: None,
             provider_name: Some(provider.name.clone()),
+            model: None,
+            api_format: None,
+            exclude_status_codes: vec![USER_CANCELLED_STATUS_CODE],
             group_by: UsageBreakdownGroupBy::Model,
         })
         .await
@@ -768,6 +1387,7 @@ async fn build_provider_health_payload(
             created_from_unix_secs: Some(since_unix_secs),
             created_until_unix_secs: Some(now_unix_secs),
             provider_name: Some(provider.name.clone()),
+            exclude_status_codes: vec![USER_CANCELLED_STATUS_CODE],
             limit: Some(provider_event_limit),
             newest_first: true,
             ..UsageAuditListQuery::default()
@@ -804,7 +1424,7 @@ async fn build_provider_health_payload(
         ));
     }
 
-    let (total_attempts, success_count, failed_count, success_rate, avg_latency_ms) =
+    let (total_attempts, success_count, failed_count, success_rate, avg_latency_ms, avg_tps) =
         if let Some(row) = provider_stats {
             let total_attempts = row.request_count;
             let success_count = row.success_count.min(total_attempts);
@@ -820,12 +1440,19 @@ async fn build_provider_health_payload(
                 failed_count,
                 success_rate,
                 model_health_average_latency_ms(row),
+                model_health_average_tps(row),
             )
         } else {
-            (0, 0, 0, 1.0, None)
+            (0, 0, 0, 1.0, None, None)
         };
 
     let (timeline, time_range_start, time_range_end) = build_model_health_timeline(
+        &provider_events,
+        since_unix_secs,
+        now_unix_secs,
+        MODEL_HEALTH_TIMELINE_SEGMENTS,
+    );
+    let timeline_details = build_usage_health_timeline_details(
         &provider_events,
         since_unix_secs,
         now_unix_secs,
@@ -847,9 +1474,11 @@ async fn build_provider_health_payload(
         "success_rate": success_rate,
         "avg_latency_ms": avg_latency_ms,
         "avg_first_byte_ms": model_health_average_first_byte_ms(&provider_events),
+        "avg_tps": avg_tps,
         "model_count": model_breakdown.len(),
         "last_event_at": last_event_at,
         "timeline": timeline,
+        "timeline_details": timeline_details,
         "time_range_start": unix_secs_to_rfc3339(time_range_start),
         "time_range_end": unix_secs_to_rfc3339(time_range_end),
         "models": models,
@@ -890,6 +1519,12 @@ fn model_health_payload_from_row(
         now_unix_secs,
         MODEL_HEALTH_TIMELINE_SEGMENTS,
     );
+    let timeline_details = build_usage_health_timeline_details(
+        events,
+        since_unix_secs,
+        now_unix_secs,
+        MODEL_HEALTH_TIMELINE_SEGMENTS,
+    );
     let last_event_at = events
         .first()
         .and_then(|item| unix_secs_to_rfc3339(item.created_at_unix_ms));
@@ -917,9 +1552,11 @@ fn model_health_payload_from_row(
         "success_rate": success_rate,
         "avg_latency_ms": model_health_average_latency_ms(row),
         "avg_first_byte_ms": model_health_average_first_byte_ms(events),
+        "avg_tps": model_health_average_tps(row),
         "last_event_at": last_event_at,
         "events": event_payload,
         "timeline": timeline,
+        "timeline_details": timeline_details,
         "time_range_start": unix_secs_to_rfc3339(time_range_start),
         "time_range_end": unix_secs_to_rfc3339(time_range_end),
     });
@@ -927,6 +1564,22 @@ fn model_health_payload_from_row(
         model_payload["provider_count"] = json!(provider_count);
     }
     model_payload
+}
+
+fn request_candidate_average_latency_ms(candidates: &[StoredRequestCandidate]) -> Option<f64> {
+    let mut sum = 0u64;
+    let mut count = 0u64;
+    for candidate in candidates {
+        if let Some(latency_ms) = candidate.latency_ms {
+            sum = sum.saturating_add(latency_ms);
+            count = count.saturating_add(1);
+        }
+    }
+    if count == 0 {
+        None
+    } else {
+        Some(sum as f64 / count as f64)
+    }
 }
 
 fn model_health_average_latency_ms(row: &StoredUsageBreakdownSummaryRow) -> Option<f64> {
@@ -937,6 +1590,13 @@ fn model_health_average_latency_ms(row: &StoredUsageBreakdownSummaryRow) -> Opti
         return Some(row.response_time_sum_ms / row.response_time_samples as f64);
     }
     None
+}
+
+fn model_health_average_tps(row: &StoredUsageBreakdownSummaryRow) -> Option<f64> {
+    if row.output_tokens == 0 || row.response_time_sum_ms <= 0.0 {
+        return None;
+    }
+    Some(row.output_tokens as f64 / (row.response_time_sum_ms / 1000.0))
 }
 
 fn model_health_average_first_byte_ms(events: &[StoredRequestUsageAudit]) -> Option<f64> {
@@ -997,6 +1657,203 @@ fn model_health_event_success(event: &StoredRequestUsageAudit) -> bool {
             .is_empty()
 }
 
+fn health_timeline_status(success_count: u64, failed_count: u64) -> &'static str {
+    let actual_completed = success_count.saturating_add(failed_count);
+    if actual_completed == 0 {
+        return "unknown";
+    }
+    let success_rate = success_count as f64 / actual_completed as f64;
+    if success_rate >= 0.95 {
+        "healthy"
+    } else if success_rate >= 0.7 {
+        "warning"
+    } else {
+        "unhealthy"
+    }
+}
+
+fn health_timeline_success_rate(success_count: u64, failed_count: u64) -> Option<f64> {
+    let actual_completed = success_count.saturating_add(failed_count);
+    if actual_completed == 0 {
+        None
+    } else {
+        Some(success_count as f64 / actual_completed as f64)
+    }
+}
+
+fn health_timeline_segment_index(
+    timestamp_unix_secs: u64,
+    since_unix_secs: u64,
+    until_unix_secs: u64,
+    segments: u32,
+) -> Option<usize> {
+    if segments == 0
+        || timestamp_unix_secs < since_unix_secs
+        || timestamp_unix_secs > until_unix_secs
+    {
+        return None;
+    }
+    let safe_range = until_unix_secs.saturating_sub(since_unix_secs).max(1);
+    let offset = timestamp_unix_secs.saturating_sub(since_unix_secs);
+    let mut segment_idx = ((offset as u128 * segments as u128) / safe_range as u128) as usize;
+    if segment_idx >= segments as usize {
+        segment_idx = segments.saturating_sub(1) as usize;
+    }
+    Some(segment_idx)
+}
+
+fn health_timeline_segment_bounds(
+    since_unix_secs: u64,
+    until_unix_secs: u64,
+    segments: u32,
+    segment_idx: u32,
+) -> (u64, u64) {
+    let segment_count = segments.max(1);
+    let safe_range = until_unix_secs.saturating_sub(since_unix_secs).max(1);
+    let start_offset =
+        (safe_range as u128 * u128::from(segment_idx) / u128::from(segment_count)) as u64;
+    let end_offset = (safe_range as u128 * u128::from(segment_idx.saturating_add(1))
+        / u128::from(segment_count)) as u64;
+    let start = since_unix_secs.saturating_add(start_offset);
+    let end = if segment_idx.saturating_add(1) >= segment_count {
+        until_unix_secs
+    } else {
+        since_unix_secs.saturating_add(end_offset)
+    };
+    (start, end.max(start))
+}
+
+fn aggregate_usage_timeline_metrics(
+    events: &[StoredRequestUsageAudit],
+    since_unix_secs: u64,
+    until_unix_secs: u64,
+    segments: u32,
+) -> Vec<HealthTimelineMetricBucket> {
+    let mut buckets = (0..segments)
+        .map(|_| HealthTimelineMetricBucket::default())
+        .collect::<Vec<_>>();
+    for event in events {
+        let Some(segment_idx) = health_timeline_segment_index(
+            event.created_at_unix_ms,
+            since_unix_secs,
+            until_unix_secs,
+            segments,
+        ) else {
+            continue;
+        };
+        if let Some(bucket) = buckets.get_mut(segment_idx) {
+            bucket.add_usage_event(event);
+        }
+    }
+    buckets
+}
+
+fn health_timeline_detail_payload(
+    segment_idx: u32,
+    counts: HealthTimelineDetailCounts,
+    metrics: HealthTimelineMetricBucket,
+    window: HealthTimelineWindow,
+) -> serde_json::Value {
+    let (range_start, range_end) = health_timeline_segment_bounds(
+        window.since_unix_secs,
+        window.until_unix_secs,
+        window.segments,
+        segment_idx,
+    );
+    json!({
+        "segment_index": segment_idx,
+        "status": counts.status,
+        "time_range_start": unix_secs_to_rfc3339(range_start),
+        "time_range_end": unix_secs_to_rfc3339(range_end),
+        "total_attempts": counts.total_attempts,
+        "success_count": counts.success_count,
+        "failed_count": counts.failed_count,
+        "success_rate": health_timeline_success_rate(counts.success_count, counts.failed_count),
+        "avg_latency_ms": metrics.avg_latency_ms(),
+        "avg_first_byte_ms": metrics.avg_first_byte_ms(),
+        "avg_tps": metrics.avg_tps(),
+    })
+}
+
+pub(crate) fn build_public_health_timeline_details(
+    buckets_by_segment: &BTreeMap<u32, PublicHealthTimelineBucket>,
+    since_unix_secs: u64,
+    until_unix_secs: u64,
+    segments: u32,
+    usage_events: &[StoredRequestUsageAudit],
+) -> Vec<serde_json::Value> {
+    let usage_metrics =
+        aggregate_usage_timeline_metrics(usage_events, since_unix_secs, until_unix_secs, segments);
+    let window = HealthTimelineWindow {
+        since_unix_secs,
+        until_unix_secs,
+        segments,
+    };
+    (0..segments)
+        .map(|segment_idx| {
+            let count_bucket = buckets_by_segment.get(&segment_idx);
+            let metrics = usage_metrics
+                .get(segment_idx as usize)
+                .copied()
+                .unwrap_or_default();
+            let total_attempts = count_bucket
+                .map(|bucket| bucket.total_count)
+                .unwrap_or(metrics.total_count);
+            let success_count = count_bucket
+                .map(|bucket| bucket.success_count)
+                .unwrap_or(metrics.success_count);
+            let failed_count = count_bucket
+                .map(|bucket| bucket.failed_count)
+                .unwrap_or(metrics.failed_count);
+            let status = health_timeline_status(success_count, failed_count);
+            health_timeline_detail_payload(
+                segment_idx,
+                HealthTimelineDetailCounts {
+                    status,
+                    total_attempts,
+                    success_count,
+                    failed_count,
+                },
+                metrics,
+                window,
+            )
+        })
+        .collect()
+}
+
+fn build_usage_health_timeline_details(
+    events: &[StoredRequestUsageAudit],
+    since_unix_secs: u64,
+    until_unix_secs: u64,
+    segments: u32,
+) -> Vec<serde_json::Value> {
+    let usage_metrics =
+        aggregate_usage_timeline_metrics(events, since_unix_secs, until_unix_secs, segments);
+    let window = HealthTimelineWindow {
+        since_unix_secs,
+        until_unix_secs,
+        segments,
+    };
+    usage_metrics
+        .into_iter()
+        .enumerate()
+        .map(|(index, metrics)| {
+            let status = health_timeline_status(metrics.success_count, metrics.failed_count);
+            health_timeline_detail_payload(
+                index as u32,
+                HealthTimelineDetailCounts {
+                    status,
+                    total_attempts: metrics.total_count,
+                    success_count: metrics.success_count,
+                    failed_count: metrics.failed_count,
+                },
+                metrics,
+                window,
+            )
+        })
+        .collect()
+}
+
 fn build_model_health_timeline(
     events: &[StoredRequestUsageAudit],
     since_unix_secs: u64,
@@ -1032,20 +1889,7 @@ fn build_model_health_timeline(
 
     let timeline = buckets
         .into_iter()
-        .map(|bucket| {
-            let total = bucket.success_count.saturating_add(bucket.failed_count);
-            if total == 0 {
-                return "unknown";
-            }
-            let success_rate = bucket.success_count as f64 / total as f64;
-            if success_rate >= 0.95 {
-                "healthy"
-            } else if success_rate >= 0.7 {
-                "warning"
-            } else {
-                "unhealthy"
-            }
-        })
+        .map(|bucket| health_timeline_status(bucket.success_count, bucket.failed_count))
         .collect::<Vec<_>>();
 
     (timeline, since_unix_secs, until_unix_secs)

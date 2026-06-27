@@ -367,6 +367,17 @@ pub(crate) fn build_pending_usage_record_from_owned_seed(
     })
 }
 
+pub(crate) fn build_pending_usage_event_from_owned_seed(
+    seed: LifecycleUsageSeed,
+    updated_at_unix_secs: u64,
+) -> Result<UsageEvent, DataLayerError> {
+    let record = build_pending_usage_record_from_owned_seed(seed, updated_at_unix_secs)?;
+    Ok(build_lifecycle_usage_event_from_record(
+        record,
+        UsageEventType::Pending,
+    ))
+}
+
 pub fn build_streaming_usage_record(
     plan: &ExecutionPlan,
     report_context: Option<&Value>,
@@ -430,6 +441,101 @@ pub(crate) fn build_streaming_usage_record_from_owned_seed(
             trusted_request_metadata: false,
         },
     })
+}
+
+pub(crate) fn build_streaming_usage_event_from_owned_seed(
+    seed: LifecycleUsageSeed,
+    status_code: u16,
+    telemetry: Option<ExecutionTelemetry>,
+    updated_at_unix_secs: u64,
+) -> Result<UsageEvent, DataLayerError> {
+    let record = build_streaming_usage_record_from_owned_seed(
+        seed,
+        status_code,
+        telemetry,
+        updated_at_unix_secs,
+    )?;
+    Ok(build_lifecycle_usage_event_from_record(
+        record,
+        UsageEventType::Streaming,
+    ))
+}
+
+fn build_lifecycle_usage_event_from_record(
+    record: UpsertUsageRecord,
+    event_type: UsageEventType,
+) -> UsageEvent {
+    UsageEvent {
+        event_type,
+        request_id: record.request_id,
+        timestamp_ms: record.updated_at_unix_secs.saturating_mul(1_000),
+        data: UsageEventData {
+            user_id: record.user_id,
+            api_key_id: record.api_key_id,
+            username: record.username,
+            api_key_name: record.api_key_name,
+            provider_name: record.provider_name,
+            model: record.model,
+            target_model: record.target_model,
+            provider_id: record.provider_id,
+            provider_endpoint_id: record.provider_endpoint_id,
+            provider_api_key_id: record.provider_api_key_id,
+            request_type: record.request_type,
+            api_format: record.api_format,
+            api_family: record.api_family,
+            endpoint_kind: record.endpoint_kind,
+            endpoint_api_format: record.endpoint_api_format,
+            provider_api_family: record.provider_api_family,
+            provider_endpoint_kind: record.provider_endpoint_kind,
+            has_format_conversion: record.has_format_conversion,
+            is_stream: record.is_stream,
+            input_tokens: record.input_tokens,
+            output_tokens: record.output_tokens,
+            total_tokens: record.total_tokens,
+            cache_creation_input_tokens: record.cache_creation_input_tokens,
+            cache_creation_ephemeral_5m_input_tokens: record
+                .cache_creation_ephemeral_5m_input_tokens,
+            cache_creation_ephemeral_1h_input_tokens: record
+                .cache_creation_ephemeral_1h_input_tokens,
+            cache_read_input_tokens: record.cache_read_input_tokens,
+            cache_creation_cost_usd: record.cache_creation_cost_usd,
+            cache_read_cost_usd: record.cache_read_cost_usd,
+            output_price_per_1m: record.output_price_per_1m,
+            total_cost_usd: record.total_cost_usd,
+            actual_total_cost_usd: record.actual_total_cost_usd,
+            status_code: record.status_code,
+            error_message: record.error_message,
+            error_category: record.error_category,
+            response_time_ms: record.response_time_ms,
+            first_byte_time_ms: record.first_byte_time_ms,
+            request_headers: record.request_headers,
+            request_body: record.request_body,
+            request_body_ref: record.request_body_ref,
+            request_body_state: record.request_body_state,
+            provider_request_headers: record.provider_request_headers,
+            provider_request_body: record.provider_request_body,
+            provider_request_body_ref: record.provider_request_body_ref,
+            provider_request_body_state: record.provider_request_body_state,
+            response_headers: record.response_headers,
+            response_body: record.response_body,
+            response_body_ref: record.response_body_ref,
+            response_body_state: record.response_body_state,
+            client_response_headers: record.client_response_headers,
+            client_response_body: record.client_response_body,
+            client_response_body_ref: record.client_response_body_ref,
+            client_response_body_state: record.client_response_body_state,
+            candidate_id: record.candidate_id,
+            candidate_index: record.candidate_index,
+            key_name: record.key_name,
+            planner_kind: record.planner_kind,
+            route_family: record.route_family,
+            route_kind: record.route_kind,
+            execution_path: record.execution_path,
+            local_execution_runtime_miss_reason: record.local_execution_runtime_miss_reason,
+            request_metadata: record.request_metadata,
+            ..UsageEventData::default()
+        },
+    }
 }
 
 pub fn build_sync_terminal_usage_event(
@@ -2539,12 +2645,39 @@ fn is_sensitive_body_key(key: &str) -> bool {
         .filter(|ch| ch.is_ascii_alphanumeric())
         .collect::<String>()
         .to_ascii_lowercase();
-    normalized.contains("token")
+    is_sensitive_token_body_key(&normalized)
         || normalized.contains("apikey")
         || normalized.contains("password")
         || normalized.contains("authorization")
         || normalized.contains("secret")
         || normalized == "cookie"
+}
+
+fn is_sensitive_token_body_key(normalized: &str) -> bool {
+    if !normalized.contains("token") || is_token_quantity_body_key(normalized) {
+        return false;
+    }
+
+    normalized == "token" || normalized.ends_with("token")
+}
+
+fn is_token_quantity_body_key(normalized: &str) -> bool {
+    normalized.ends_with("tokens")
+        || normalized.ends_with("tokencount")
+        || normalized.ends_with("tokenlimit")
+        || matches!(
+            normalized,
+            "maxtoken"
+                | "maxcompletiontoken"
+                | "maxoutputtoken"
+                | "inputtoken"
+                | "outputtoken"
+                | "completiontoken"
+                | "prompttoken"
+                | "totaltoken"
+                | "reasoningtoken"
+                | "cachedtoken"
+        )
 }
 
 fn resolve_error_category(
@@ -3228,8 +3361,9 @@ fn empty_to_none(value: Option<String>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_pending_usage_record, build_pending_usage_record_from_seed,
-        build_stream_terminal_usage_event, build_streaming_usage_record,
+        build_pending_usage_event_from_owned_seed, build_pending_usage_record,
+        build_pending_usage_record_from_seed, build_stream_terminal_usage_event,
+        build_streaming_usage_event_from_owned_seed, build_streaming_usage_record,
         build_sync_terminal_usage_event, build_sync_terminal_usage_payload_seed,
         build_sync_terminal_usage_seed, build_terminal_usage_context_seed,
         build_terminal_usage_event_from_seed, build_usage_event_data_seed, decode_body_for_storage,
@@ -3500,6 +3634,113 @@ mod tests {
     }
 
     #[test]
+    fn pending_usage_event_round_trips_to_lightweight_upsert_record() {
+        let plan = ExecutionPlan {
+            request_id: "req-pending-event-1".to_string(),
+            candidate_id: Some("cand-pending-event-1".to_string()),
+            provider_name: Some("Codex Proxy".to_string()),
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            key_id: "key-1".to_string(),
+            method: "POST".to_string(),
+            url: "https://example.com/v1/messages".to_string(),
+            headers: BTreeMap::new(),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({"model": "gpt-5.4"})),
+            stream: false,
+            client_api_format: "claude:messages".to_string(),
+            provider_api_format: "openai:responses".to_string(),
+            model_name: Some("gpt-5.4".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+
+        let event = build_pending_usage_event_from_owned_seed(
+            super::build_lifecycle_usage_seed(
+                &plan,
+                Some(&json!({
+                    "candidate_id": "cand-pending-event-1",
+                    "candidate_index": 3,
+                    "original_request_body": {"messages": [{"content": "omit me"}]},
+                    "provider_request_body": {"input": "omit me too"}
+                })),
+            ),
+            1_700_000_020,
+        )
+        .expect("pending usage event should build");
+        let record = build_upsert_usage_record_from_event(&event).expect("record should build");
+
+        assert_eq!(event.event_type, UsageEventType::Pending);
+        assert_eq!(record.request_id, "req-pending-event-1");
+        assert_eq!(record.status, "pending");
+        assert_eq!(record.billing_status, "pending");
+        assert_eq!(record.finalized_at_unix_secs, None);
+        assert_eq!(record.updated_at_unix_secs, 1_700_000_020);
+        assert!(record.request_body.is_none());
+        assert!(record.provider_request_body.is_none());
+        assert_eq!(record.candidate_id.as_deref(), Some("cand-pending-event-1"));
+        assert_eq!(record.candidate_index, Some(3));
+    }
+
+    #[test]
+    fn streaming_usage_event_round_trips_to_lightweight_upsert_record() {
+        let plan = ExecutionPlan {
+            request_id: "req-streaming-event-1".to_string(),
+            candidate_id: Some("cand-streaming-event-1".to_string()),
+            provider_name: Some("Codex Proxy".to_string()),
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            key_id: "key-1".to_string(),
+            method: "POST".to_string(),
+            url: "https://example.com/v1/messages".to_string(),
+            headers: BTreeMap::new(),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({"model": "gpt-5.4"})),
+            stream: true,
+            client_api_format: "claude:messages".to_string(),
+            provider_api_format: "openai:responses".to_string(),
+            model_name: Some("gpt-5.4".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+
+        let event = build_streaming_usage_event_from_owned_seed(
+            super::build_lifecycle_usage_seed(
+                &plan,
+                Some(&json!({
+                    "candidate_id": "cand-streaming-event-1",
+                    "candidate_index": 4,
+                    "provider_request_body": {"input": "omit me"}
+                })),
+            ),
+            200,
+            None,
+            1_700_000_030,
+        )
+        .expect("streaming usage event should build");
+        let record = build_upsert_usage_record_from_event(&event).expect("record should build");
+
+        assert_eq!(event.event_type, UsageEventType::Streaming);
+        assert_eq!(record.request_id, "req-streaming-event-1");
+        assert_eq!(record.status, "streaming");
+        assert_eq!(record.billing_status, "pending");
+        assert_eq!(record.status_code, Some(200));
+        assert_eq!(record.finalized_at_unix_secs, None);
+        assert_eq!(record.updated_at_unix_secs, 1_700_000_030);
+        assert!(record.request_body.is_none());
+        assert!(record.provider_request_body.is_none());
+        assert_eq!(
+            record.candidate_id.as_deref(),
+            Some("cand-streaming-event-1")
+        );
+        assert_eq!(record.candidate_index, Some(4));
+    }
+
+    #[test]
     fn pending_usage_record_preserves_standalone_key_metadata() {
         let plan = ExecutionPlan {
             request_id: "req-pending-standalone-1".to_string(),
@@ -3705,6 +3946,69 @@ mod tests {
                 .pointer("/messages/0/content")
                 .and_then(Value::as_str),
             Some("safe text")
+        );
+    }
+
+    #[test]
+    fn usage_body_capture_preserves_token_limits_and_counts() {
+        let masked = mask_sensitive_body_fields(json!({
+            "max_token": 4096,
+            "max_tokens": 128000,
+            "max_completion_tokens": 128000,
+            "max_output_tokens": 64000,
+            "usage": {
+                "prompt_tokens": 1,
+                "completion_tokens": 2,
+                "total_tokens": 3,
+                "promptTokenCount": 4,
+                "candidatesTokenCount": 5
+            },
+            "generationConfig": {
+                "maxOutputTokens": 8192,
+                "maxOutputToken": 4096
+            },
+            "metadata": {
+                "access_token": "secret-access-token-value",
+                "authToken": "secret-auth-token-value",
+                "token": "secret-token-value"
+            }
+        }));
+
+        assert_eq!(masked.get("max_token"), Some(&json!(4096)));
+        assert_eq!(masked.get("max_tokens"), Some(&json!(128000)));
+        assert_eq!(masked.get("max_completion_tokens"), Some(&json!(128000)));
+        assert_eq!(masked.get("max_output_tokens"), Some(&json!(64000)));
+        assert_eq!(masked.pointer("/usage/prompt_tokens"), Some(&json!(1)));
+        assert_eq!(masked.pointer("/usage/completion_tokens"), Some(&json!(2)));
+        assert_eq!(masked.pointer("/usage/total_tokens"), Some(&json!(3)));
+        assert_eq!(masked.pointer("/usage/promptTokenCount"), Some(&json!(4)));
+        assert_eq!(
+            masked.pointer("/usage/candidatesTokenCount"),
+            Some(&json!(5))
+        );
+        assert_eq!(
+            masked.pointer("/generationConfig/maxOutputTokens"),
+            Some(&json!(8192))
+        );
+        assert_eq!(
+            masked.pointer("/generationConfig/maxOutputToken"),
+            Some(&json!(4096))
+        );
+        assert_ne!(
+            masked
+                .pointer("/metadata/access_token")
+                .and_then(Value::as_str),
+            Some("secret-access-token-value")
+        );
+        assert_ne!(
+            masked
+                .pointer("/metadata/authToken")
+                .and_then(Value::as_str),
+            Some("secret-auth-token-value")
+        );
+        assert_ne!(
+            masked.pointer("/metadata/token").and_then(Value::as_str),
+            Some("secret-token-value")
         );
     }
 

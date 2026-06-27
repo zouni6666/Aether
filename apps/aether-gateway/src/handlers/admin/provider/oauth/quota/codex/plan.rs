@@ -16,12 +16,17 @@ pub(super) fn build_codex_quota_request_spec(
         .decrypted_auth_config
         .as_deref()
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
-    build_codex_pool_quota_request(
+    let mut request = build_codex_pool_quota_request(
         &transport.key.id,
         resolved_oauth_auth,
         Some(transport.key.decrypted_api_key.as_str()),
         auth_config.as_ref(),
-    )
+    )?;
+    crate::provider_transport::apply_local_auth_config_header_overrides(
+        &mut request.headers,
+        transport.key.decrypted_auth_config.as_deref(),
+    );
+    Ok(request)
 }
 
 pub(super) async fn execute_codex_quota_plan(

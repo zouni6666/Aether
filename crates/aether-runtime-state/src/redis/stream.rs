@@ -289,27 +289,11 @@ impl RedisStreamRunner {
             command.arg("STREAMS").arg(&stream.0).arg(">");
 
             let reply = command
-                .query_async::<StreamReadReply>(&mut connection)
+                .query_async::<RedisValue>(&mut connection)
                 .await
                 .map_redis_err()?;
 
-            Ok(reply
-                .keys
-                .into_iter()
-                .flat_map(|key| key.ids.into_iter())
-                .map(|id| RedisStreamEntry {
-                    id: id.id,
-                    fields: id
-                        .map
-                        .into_iter()
-                        .filter_map(|(field, value)| {
-                            redis::from_redis_value::<String>(&value)
-                                .ok()
-                                .map(|text| (field, text))
-                        })
-                        .collect(),
-                })
-                .collect())
+            parse_stream_read_entries(reply)
         })
         .await
     }
@@ -455,6 +439,31 @@ fn validate_stream_position(position: &str) -> Result<(), DataLayerError> {
     Ok(())
 }
 
+fn parse_stream_read_entries(value: RedisValue) -> Result<Vec<RedisStreamEntry>, DataLayerError> {
+    if matches!(value, RedisValue::Nil) {
+        return Ok(Vec::new());
+    }
+
+    let reply = from_redis_value::<StreamReadReply>(&value).map_err(redis_error)?;
+    Ok(reply
+        .keys
+        .into_iter()
+        .flat_map(|key| key.ids.into_iter())
+        .map(|id| RedisStreamEntry {
+            id: id.id,
+            fields: id
+                .map
+                .into_iter()
+                .filter_map(|(field, value)| {
+                    redis::from_redis_value::<String>(&value)
+                        .ok()
+                        .map(|text| (field, text))
+                })
+                .collect(),
+        })
+        .collect())
+}
+
 fn parse_reclaim_result(value: RedisValue) -> Result<RedisStreamReclaimResult, DataLayerError> {
     let RedisValue::Array(parts) = value else {
         return Err(DataLayerError::UnexpectedValue(
@@ -573,9 +582,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        parse_reclaim_result, validate_consumer, validate_group, validate_stream_name,
-        validate_stream_position, RedisConsumerName, RedisStreamName, RedisStreamReclaimConfig,
-        RedisStreamReclaimResult, RedisStreamRunnerConfig,
+        parse_reclaim_result, parse_stream_read_entries, validate_consumer, validate_group,
+        validate_stream_name, validate_stream_position, RedisConsumerName, RedisStreamName,
+        RedisStreamReclaimConfig, RedisStreamReclaimResult, RedisStreamRunnerConfig,
     };
     use redis::Value as RedisValue;
 
@@ -637,6 +646,14 @@ mod tests {
         assert!(validate_group(&super::RedisConsumerGroup(String::new())).is_err());
         assert!(validate_consumer(&RedisConsumerName(String::new())).is_err());
         assert!(validate_stream_position("").is_err());
+    }
+
+    #[test]
+    fn parses_empty_blocking_read_as_no_entries() {
+        let parsed = parse_stream_read_entries(RedisValue::Nil)
+            .expect("nil stream read reply should be empty");
+
+        assert!(parsed.is_empty());
     }
 
     #[test]

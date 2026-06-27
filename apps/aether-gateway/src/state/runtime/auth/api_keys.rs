@@ -2,11 +2,73 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use aether_data::repository::auth::{AuthApiKeyLookupKey, ResolvedAuthApiKeySnapshotReader};
 
+use std::time::Duration;
+
+use crate::cache::AuthSnapshotCacheKey;
+use crate::data::auth::GatewayAuthApiKeySnapshot;
 use crate::{AppState, GatewayError};
+
+const AUTH_API_KEY_SNAPSHOT_RUNTIME_CACHE_TTL: Duration = Duration::from_secs(30);
 
 use super::super::super::{AUTH_API_KEY_LAST_USED_MAX_ENTRIES, AUTH_API_KEY_LAST_USED_TTL};
 
 impl AppState {
+    pub(crate) async fn read_cached_auth_api_key_snapshot(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+        now_unix_secs: u64,
+    ) -> Result<Option<GatewayAuthApiKeySnapshot>, GatewayError> {
+        let cache_key = AuthSnapshotCacheKey::user_api_key_ids(user_id, api_key_id);
+        if cache_key.is_empty() {
+            return Ok(None);
+        }
+        self.auth_snapshot_cache
+            .get_or_load(
+                cache_key,
+                AUTH_API_KEY_SNAPSHOT_RUNTIME_CACHE_TTL,
+                || async move {
+                    self.data
+                        .read_auth_api_key_snapshot(user_id, api_key_id, now_unix_secs)
+                        .await
+                        .map_err(|err| GatewayError::Internal(err.to_string()))
+                },
+            )
+            .await
+    }
+
+    pub(crate) async fn read_cached_auth_api_key_snapshot_by_key_hash(
+        &self,
+        key_hash: &str,
+        now_unix_secs: u64,
+    ) -> Result<Option<GatewayAuthApiKeySnapshot>, GatewayError> {
+        let cache_key = AuthSnapshotCacheKey::key_hash(key_hash);
+        if cache_key.is_empty() {
+            return Ok(None);
+        }
+        let snapshot = self
+            .auth_snapshot_cache
+            .get_or_load(
+                cache_key.clone(),
+                AUTH_API_KEY_SNAPSHOT_RUNTIME_CACHE_TTL,
+                || async move {
+                    self.data
+                        .read_auth_api_key_snapshot_by_key_hash(key_hash, now_unix_secs)
+                        .await
+                        .map_err(|err| GatewayError::Internal(err.to_string()))
+                },
+            )
+            .await?;
+        if let Some(snapshot) = snapshot.as_ref() {
+            self.auth_snapshot_cache.insert(
+                AuthSnapshotCacheKey::user_api_key_ids(&snapshot.user_id, &snapshot.api_key_id),
+                Some(snapshot.clone()),
+                AUTH_API_KEY_SNAPSHOT_RUNTIME_CACHE_TTL,
+            );
+        }
+        Ok(snapshot)
+    }
+
     pub(crate) async fn resolve_auth_api_key_snapshots_by_ids(
         &self,
         api_key_ids: &[String],

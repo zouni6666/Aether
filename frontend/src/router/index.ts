@@ -172,6 +172,11 @@ const routes: RouteRecordRaw[] = [
         component: () => importWithRetry(() => import('@/views/shared/Dashboard.vue'))
       },
       {
+        path: 'operations',
+        name: 'AdminOperationsDashboard',
+        component: () => importWithRetry(() => import('@/views/admin/AdminOperationsDashboard.vue'))
+      },
+      {
         path: 'users',
         name: 'Users',
         component: () => importWithRetry(() => import('@/views/admin/Users.vue'))

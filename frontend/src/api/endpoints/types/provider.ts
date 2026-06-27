@@ -237,6 +237,7 @@ export interface EndpointAPIKey {
   credential_kind?: 'raw_secret' | 'oauth_session' | 'service_account' | string | null
   runtime_auth_kind?: 'api_key' | 'bearer' | 'service_account' | 'mixed' | 'unknown' | string | null
   oauth_managed?: boolean
+  oauth_header_auth?: boolean
   can_refresh_oauth?: boolean
   can_export_oauth?: boolean
   can_edit_oauth?: boolean
@@ -562,6 +563,20 @@ export interface EndpointHealthEvent {
   error_message?: string | null
 }
 
+export interface HealthTimelineDetail {
+  segment_index?: number
+  status?: string
+  time_range_start?: string | null
+  time_range_end?: string | null
+  total_attempts?: number | null
+  success_count?: number | null
+  failed_count?: number | null
+  success_rate?: number | null
+  avg_latency_ms?: number | null
+  avg_first_byte_ms?: number | null
+  avg_tps?: number | null
+}
+
 export interface EndpointStatusMonitor {
   api_format: string
   total_attempts: number
@@ -569,11 +584,15 @@ export interface EndpointStatusMonitor {
   failed_count: number
   skipped_count: number
   success_rate: number
+  avg_latency_ms?: number | null
+  avg_first_byte_ms?: number | null
+  avg_tps?: number | null
   provider_count: number
   key_count: number
   last_event_at?: string | null
   events: EndpointHealthEvent[]
   timeline?: string[]
+  timeline_details?: HealthTimelineDetail[]
   time_range_start?: string | null
   time_range_end?: string | null
 }
@@ -601,9 +620,13 @@ export interface PublicEndpointStatusMonitor {
   failed_count: number
   skipped_count: number
   success_rate: number
+  avg_latency_ms?: number | null
+  avg_first_byte_ms?: number | null
+  avg_tps?: number | null
   last_event_at?: string | null
   events: PublicHealthEvent[]
   timeline?: string[]
+  timeline_details?: HealthTimelineDetail[]
   time_range_start?: string | null
   time_range_end?: string | null
 }
@@ -631,10 +654,12 @@ export interface ModelStatusMonitor {
   success_rate: number
   avg_latency_ms?: number | null
   avg_first_byte_ms?: number | null
+  avg_tps?: number | null
   provider_count?: number
   last_event_at?: string | null
   events: ModelHealthEvent[]
   timeline?: string[]
+  timeline_details?: HealthTimelineDetail[]
   time_range_start?: string | null
   time_range_end?: string | null
 }
@@ -655,9 +680,11 @@ export interface ProviderStatusMonitor {
   success_rate: number
   avg_latency_ms?: number | null
   avg_first_byte_ms?: number | null
+  avg_tps?: number | null
   model_count: number
   last_event_at?: string | null
   timeline?: string[]
+  timeline_details?: HealthTimelineDetail[]
   time_range_start?: string | null
   time_range_end?: string | null
   models: ModelStatusMonitor[]
@@ -666,6 +693,36 @@ export interface ProviderStatusMonitor {
 export interface ProviderStatusMonitorResponse {
   generated_at: string
   providers: ProviderStatusMonitor[]
+}
+
+export type HealthMonitorRelatedDimension = 'endpoint' | 'model' | 'provider'
+
+export interface HealthRelatedMonitor {
+  kind: HealthMonitorRelatedDimension
+  key: string
+  display_name: string
+  meta_text?: string | null
+  total_attempts: number
+  success_count: number
+  failed_count: number
+  success_rate: number
+  avg_latency_ms?: number | null
+  avg_first_byte_ms?: number | null
+  avg_tps?: number | null
+  last_event_at?: string | null
+  timeline?: string[]
+  timeline_details?: HealthTimelineDetail[]
+  time_range_start?: string | null
+  time_range_end?: string | null
+}
+
+export interface HealthRelatedMonitorResponse {
+  generated_at: string
+  dimension: HealthMonitorRelatedDimension
+  value: string
+  related_endpoints: HealthRelatedMonitor[]
+  related_models: HealthRelatedMonitor[]
+  related_providers: HealthRelatedMonitor[]
 }
 
 export type ProviderType = 'custom' | 'claude_code' | 'codex' | 'chatgpt_web' | 'gemini_cli' | 'antigravity' | 'kiro' | 'grok' | 'windsurf' | 'vertex_ai'
@@ -708,7 +765,9 @@ export interface PoolScoreRules {
 }
 
 export interface PoolAdvancedConfig {
+  // deprecated: hidden from pool advanced dialog, retained for backward-compatible reads
   global_priority?: number | null
+  // deprecated: hidden from pool advanced dialog, retained for backward-compatible reads
   sticky_session_ttl_seconds?: number | null
   load_threshold_percent?: number | null
   skip_exhausted_accounts?: boolean | null
@@ -725,13 +784,15 @@ export interface PoolAdvancedConfig {
   } | null
   latency_window_seconds?: number | null
   latency_sample_limit?: number | null
+  // deprecated: hidden from pool advanced dialog, retained for backward-compatible reads
   cost_window_seconds?: number | null
+  // deprecated: hidden from pool advanced dialog, retained for backward-compatible reads
   cost_limit_per_key_tokens?: number | null
+  // deprecated: hidden from pool advanced dialog, retained for backward-compatible reads
   cost_soft_threshold_percent?: number | null
   rate_limit_cooldown_seconds?: number | null
   overload_cooldown_seconds?: number | null
   proactive_refresh_seconds?: number | null
-  health_policy_enabled?: boolean
   unschedulable_rules?: Array<Record<string, unknown>> | null
   batch_concurrency?: number | null
   probe_concurrency?: number | null
@@ -747,6 +808,7 @@ export interface PoolAdvancedConfig {
   account_self_check_interval_minutes?: number | null
   account_self_check_concurrency?: number | null
   auto_remove_banned_keys?: boolean
+  auto_remove_quota_exhausted_keys?: boolean
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

@@ -3,14 +3,12 @@ use std::collections::BTreeMap;
 use serde_json::Value;
 use url::form_urlencoded;
 
-const UNSAFE_AUTH_CONFIG_HEADER_NAMES: &[&str] = &[
+const UNSAFE_AUTH_CONFIG_HEADER_NAMES: &[&str] = &["content-length", "host", "proxy-authorization"];
+const RUNTIME_ONLY_AUTH_CONFIG_HEADER_NAMES: &[&str] = &[
     "api-key",
     "authorization",
-    "content-length",
     "content-type",
     "cookie",
-    "host",
-    "proxy-authorization",
     "x-api-key",
     "x-goog-api-key",
 ];
@@ -44,14 +42,20 @@ const IGNORABLE_AUTH_CONFIG_METADATA_KEYS: &[&str] = &[
     "account_name",
     "account_user_id",
     "auth_method",
+    "access_token_import_temporary",
     "email",
+    "expires_at",
     "model_regions",
     "organizations",
     "plan_type",
     "project_id",
     "provider_type",
+    "refresh_token_import_error",
     "region",
+    "scope",
     "tier",
+    "token_type",
+    "updated_at",
     "user_id",
     "workspace_id",
     "workspace_name",
@@ -79,6 +83,30 @@ pub enum LocalAuthConfigAbsorption {
         header_rules: Option<Value>,
         custom_path: Option<String>,
     },
+}
+
+pub fn apply_local_auth_config_header_overrides(
+    headers: &mut BTreeMap<String, String>,
+    raw_auth_config: Option<&str>,
+) {
+    let Some(raw_auth_config) = raw_auth_config
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+    let Ok(parsed) = serde_json::from_str::<Value>(raw_auth_config) else {
+        return;
+    };
+    let Some(object) = parsed.as_object() else {
+        return;
+    };
+
+    let mut overrides = BTreeMap::new();
+    collect_auth_config_header_overrides(object, &mut overrides);
+    for (key, value) in overrides {
+        headers.insert(key, value);
+    }
 }
 
 pub fn absorb_local_auth_config_safe_subset(
@@ -130,12 +158,38 @@ fn parse_local_auth_config_safe_subset(raw: &str) -> Result<LocalAuthConfigSafeS
     let mut path = None;
 
     parse_local_auth_config_object(object, &mut headers, &mut query, &mut path, true)?;
+    if headers
+        .keys()
+        .any(|key| RUNTIME_ONLY_AUTH_CONFIG_HEADER_NAMES.contains(&key.as_str()))
+    {
+        return Err(());
+    }
 
     Ok(LocalAuthConfigSafeSubset {
         headers,
         query,
         path,
     })
+}
+
+fn collect_auth_config_header_overrides(
+    object: &serde_json::Map<String, Value>,
+    out: &mut BTreeMap<String, String>,
+) {
+    for (key, value) in object {
+        let normalized = key.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "headers" | "extra_headers" | "extraheaders" => {
+                merge_header_string_map_lenient(out, value);
+            }
+            "transport" | "request" => {
+                if let Some(nested) = value.as_object() {
+                    collect_auth_config_header_overrides(nested, out);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn parse_local_auth_config_object(
@@ -149,7 +203,7 @@ fn parse_local_auth_config_object(
         let normalized = key.trim().to_ascii_lowercase();
         match normalized.as_str() {
             "headers" | "extra_headers" | "extraheaders" => {
-                merge_string_map(headers, value, normalize_auth_config_header_name)?
+                merge_header_string_map(headers, value)?
             }
             "query" | "query_params" | "queryparams" => {
                 merge_string_map(query, value, normalize_auth_config_query_key)?
@@ -204,6 +258,38 @@ fn parse_static_auth_config_value(value: &Value) -> Option<String> {
         Value::Bool(raw) => Some(raw.to_string()),
         _ => None,
     }
+}
+
+fn merge_header_string_map(out: &mut BTreeMap<String, String>, value: &Value) -> Result<(), ()> {
+    let object = value.as_object().ok_or(())?;
+    for (raw_key, raw_value) in object {
+        let key = normalize_auth_config_header_name(raw_key).ok_or(())?;
+        let value = parse_static_auth_config_header_value(raw_value).ok_or(())?;
+        out.insert(key, value);
+    }
+    Ok(())
+}
+
+fn merge_header_string_map_lenient(out: &mut BTreeMap<String, String>, value: &Value) {
+    let Some(object) = value.as_object() else {
+        return;
+    };
+    for (raw_key, raw_value) in object {
+        let Some(key) = normalize_auth_config_header_name(raw_key) else {
+            continue;
+        };
+        let Some(value) = parse_static_auth_config_header_value(raw_value) else {
+            continue;
+        };
+        out.insert(key, value);
+    }
+}
+
+fn parse_static_auth_config_header_value(value: &Value) -> Option<String> {
+    let value = parse_static_auth_config_value(value)?;
+    http::header::HeaderValue::from_str(&value)
+        .is_ok()
+        .then_some(value)
 }
 
 fn normalize_auth_config_header_name(raw: &str) -> Option<String> {
@@ -379,7 +465,10 @@ fn split_path_and_query(path: &str) -> Option<(String, BTreeMap<String, String>)
 mod tests {
     use serde_json::json;
 
-    use super::{absorb_local_auth_config_safe_subset, LocalAuthConfigAbsorption};
+    use super::{
+        absorb_local_auth_config_safe_subset, apply_local_auth_config_header_overrides,
+        LocalAuthConfigAbsorption,
+    };
 
     #[test]
     fn absorbs_static_headers_and_query_into_existing_transport_fields() {
@@ -469,7 +558,7 @@ mod tests {
                 "https://api.openai.example/v1",
                 None,
                 None,
-                Some(r#"{"headers":{"authorization":"Bearer x"}}"#),
+                Some(r#"{"headers":{"host":"api.example.test"}}"#),
             ),
             LocalAuthConfigAbsorption::Unsupported
         );
@@ -481,6 +570,100 @@ mod tests {
                 Some(r#"{"query":{"key":"secret"}}"#),
             ),
             LocalAuthConfigAbsorption::Unsupported
+        );
+    }
+
+    #[test]
+    fn applies_header_overrides_even_when_auth_config_has_refresh_token() {
+        let mut headers = std::collections::BTreeMap::from([
+            (
+                "authorization".to_string(),
+                "Bearer direct-token".to_string(),
+            ),
+            ("content-type".to_string(), "application/json".to_string()),
+        ]);
+
+        apply_local_auth_config_header_overrides(
+            &mut headers,
+            Some(
+                r#"{
+                    "refresh_token": "rt-1",
+                    "headers": {
+                        "authorization": "Bearer imported-session",
+                        "content-type": "text/plain",
+                        "host": "blocked.example"
+                    }
+                }"#,
+            ),
+        );
+
+        assert_eq!(
+            headers.get("authorization"),
+            Some(&"Bearer imported-session".to_string())
+        );
+        assert_eq!(headers.get("content-type"), Some(&"text/plain".to_string()));
+        assert!(!headers.contains_key("host"));
+    }
+
+    #[test]
+    fn ignores_invalid_auth_config_header_values_when_applying_overrides() {
+        let mut headers = std::collections::BTreeMap::new();
+
+        apply_local_auth_config_header_overrides(
+            &mut headers,
+            Some(r#"{"headers":{"authorization":"Bearer ok","x-bad":"line\nbreak"}}"#),
+        );
+
+        assert_eq!(headers.get("authorization"), Some(&"Bearer ok".to_string()));
+        assert!(!headers.contains_key("x-bad"));
+    }
+
+    #[test]
+    fn keeps_imported_authorization_headers_for_runtime_override() {
+        assert_eq!(
+            absorb_local_auth_config_safe_subset(
+                "https://api.openai.example/v1",
+                None,
+                None,
+                Some(
+                    r#"{
+                        "provider_type": "codex",
+                        "access_token_import_temporary": true,
+                        "headers": {
+                            "authorization": "Bearer imported-session",
+                            "chatgpt-account-id": "acct-1"
+                        }
+                    }"#,
+                ),
+            ),
+            LocalAuthConfigAbsorption::Unsupported
+        );
+
+        let mut headers = std::collections::BTreeMap::from([(
+            "authorization".to_string(),
+            "Bearer direct-token".to_string(),
+        )]);
+        apply_local_auth_config_header_overrides(
+            &mut headers,
+            Some(
+                r#"{
+                    "provider_type": "codex",
+                    "access_token_import_temporary": true,
+                    "headers": {
+                        "authorization": "Bearer imported-session",
+                        "chatgpt-account-id": "acct-1"
+                    }
+                }"#,
+            ),
+        );
+
+        assert_eq!(
+            headers.get("authorization"),
+            Some(&"Bearer imported-session".to_string())
+        );
+        assert_eq!(
+            headers.get("chatgpt-account-id"),
+            Some(&"acct-1".to_string())
         );
     }
 

@@ -28,6 +28,10 @@ CREATE INDEX IF NOT EXISTS idx_background_task_runs_kind
     ON public.background_task_runs (kind);
 CREATE INDEX IF NOT EXISTS idx_background_task_runs_created_at
     ON public.background_task_runs (created_at_unix_secs DESC);
+CREATE INDEX IF NOT EXISTS idx_background_task_runs_status_created
+    ON public.background_task_runs (status, created_at_unix_secs DESC, updated_at_unix_secs DESC);
+CREATE INDEX IF NOT EXISTS idx_background_task_runs_kind_created
+    ON public.background_task_runs (kind, created_at_unix_secs DESC, updated_at_unix_secs DESC);
 
 CREATE TABLE IF NOT EXISTS public.background_task_events (
     id character varying(64) PRIMARY KEY,

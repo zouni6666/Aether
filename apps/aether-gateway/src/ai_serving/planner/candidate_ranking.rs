@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use aether_ai_serving::{
     ai_ranking_context, build_ai_rankable_candidate, run_ai_candidate_ranking,
     AiCandidateRankingPort, AiRankableCandidateParts, AiRankingContextConfig,
@@ -7,6 +5,7 @@ use aether_ai_serving::{
 };
 use aether_routing_core::{ResolvedRoutingPolicy, RoutingSchedulingMode, RoutingSetPriorityMode};
 use async_trait::async_trait;
+use tokio::sync::Mutex;
 use tracing::warn;
 
 use crate::ai_serving::{GatewayAuthApiKeySnapshot, PlannerAppState};
@@ -24,7 +23,7 @@ use aether_scheduler_core::{
 use super::candidate_affinity_cache::read_cached_scheduler_affinity_target;
 use super::candidate_resolution::{EligibleLocalExecutionCandidate, LocalExecutionCandidateKind};
 use super::candidate_transport_ranking_facts::{
-    resolve_cached_transport_ranking_facts, CandidateTransportRankingFacts,
+    resolve_cached_transport_ranking_facts, CandidateTransportRankingFactsCache,
 };
 
 struct GatewayLocalCandidateRankingPort<'a> {
@@ -35,6 +34,7 @@ struct GatewayLocalCandidateRankingPort<'a> {
     required_capabilities: Option<&'a serde_json::Value>,
     ordering_config: SchedulerOrderingConfig,
     routing_policy: Option<&'a ResolvedRoutingPolicy>,
+    transport_ranking_facts_cache: Mutex<CandidateTransportRankingFactsCache>,
 }
 
 #[async_trait]
@@ -84,13 +84,17 @@ impl AiCandidateRankingPort for GatewayLocalCandidateRankingPort<'_> {
         normalized_client_api_format: &str,
         cached_affinity_match: bool,
     ) -> Result<SchedulerRankableCandidate, Self::Error> {
-        let ranking_facts = resolve_transport_ranking_facts_for_candidate(
-            self.state,
-            &candidate.candidate,
-            candidate.transport.as_ref(),
-            self.ordering_config,
-        )
-        .await;
+        let ranking_facts = {
+            let mut cache = self.transport_ranking_facts_cache.lock().await;
+            resolve_cached_transport_ranking_facts(
+                self.state,
+                &mut cache,
+                &candidate.candidate,
+                candidate.transport.as_ref(),
+                self.ordering_config,
+            )
+            .await
+        };
         let routing_overlaid_candidate =
             routing_overlaid_candidate(self.routing_policy, candidate.kind, &candidate.candidate);
         Ok(build_ai_rankable_candidate(AiRankableCandidateParts {
@@ -137,29 +141,13 @@ pub(crate) async fn rank_eligible_local_execution_candidates(
         required_capabilities,
         ordering_config,
         routing_policy,
+        transport_ranking_facts_cache: Mutex::new(CandidateTransportRankingFactsCache::default()),
     };
 
     match run_ai_candidate_ranking(&port, candidates, normalized_client_api_format).await {
         Ok(candidates) => candidates,
         Err(error) => match error {},
     }
-}
-
-async fn resolve_transport_ranking_facts_for_candidate(
-    state: PlannerAppState<'_>,
-    candidate: &SchedulerMinimalCandidateSelectionCandidate,
-    transport: &crate::ai_serving::GatewayProviderTransportSnapshot,
-    ordering_config: SchedulerOrderingConfig,
-) -> CandidateTransportRankingFacts {
-    let mut ordering_cache = BTreeMap::new();
-    resolve_cached_transport_ranking_facts(
-        state,
-        &mut ordering_cache,
-        candidate,
-        transport,
-        ordering_config,
-    )
-    .await
 }
 
 fn cached_affinity_matches_local_execution_scope(
@@ -284,7 +272,9 @@ mod tests {
     use serde_json::json;
 
     use super::super::candidate_affinity_cache::remember_scheduler_affinity_for_candidate;
-    use super::super::candidate_transport_ranking_facts::resolve_cached_candidate_transport_ranking_facts;
+    use super::super::candidate_transport_ranking_facts::{
+        resolve_cached_candidate_transport_ranking_facts, CandidateTransportRankingFactsCache,
+    };
     use super::{PlannerAppState, SchedulerMinimalCandidateSelectionCandidate};
     use crate::ai_serving::planner::candidate_resolution::{
         resolve_and_rank_local_execution_candidates,
@@ -306,7 +296,7 @@ mod tests {
         let ordering_config = super::read_scheduler_ordering_config_or_default(state).await;
         let mut candidates = candidates;
         let mut rankables = Vec::with_capacity(candidates.len());
-        let mut ordering_cache = BTreeMap::new();
+        let mut ordering_cache = CandidateTransportRankingFactsCache::default();
 
         for (original_index, candidate) in candidates.iter().enumerate() {
             let ranking_facts = resolve_cached_candidate_transport_ranking_facts(
@@ -1540,6 +1530,7 @@ mod tests {
             .expect("state should build")
             .with_data_state_for_tests(data_state);
         let auth_snapshot = sample_auth_snapshot();
+        let client_session_affinity = ClientSessionAffinity::from_session_key("session-1");
         let cached_candidate = sample_priority_candidate(
             "provider-cached",
             "endpoint-cached",
@@ -1551,7 +1542,7 @@ mod tests {
         remember_scheduler_affinity_for_candidate(
             PlannerAppState::new(&state),
             Some(&auth_snapshot),
-            None,
+            Some(&client_session_affinity),
             "openai:chat",
             "gpt-4.1",
             &cached_candidate,
@@ -1573,7 +1564,7 @@ mod tests {
             "openai:chat",
             "gpt-4.1",
             Some(&auth_snapshot),
-            None,
+            Some(&client_session_affinity),
             None,
             None,
             None,
@@ -1714,6 +1705,7 @@ mod tests {
             .expect("state should build")
             .with_data_state_for_tests(data_state);
         let auth_snapshot = sample_auth_snapshot();
+        let client_session_affinity = ClientSessionAffinity::from_session_key("session-1");
         let cached_cross_format = sample_priority_candidate(
             "provider-shared",
             "endpoint-openai",
@@ -1725,7 +1717,7 @@ mod tests {
         remember_scheduler_affinity_for_candidate(
             PlannerAppState::new(&state),
             Some(&auth_snapshot),
-            None,
+            Some(&client_session_affinity),
             "claude:messages",
             "gpt-4.1",
             &cached_cross_format,
@@ -1747,7 +1739,7 @@ mod tests {
             "claude:messages",
             "gpt-4.1",
             Some(&auth_snapshot),
-            None,
+            Some(&client_session_affinity),
             None,
             None,
             None,
@@ -1915,6 +1907,7 @@ mod tests {
             .expect("state should build")
             .with_data_state_for_tests(data_state);
         let auth_snapshot = sample_auth_snapshot();
+        let client_session_affinity = ClientSessionAffinity::from_session_key("session-1");
         let cached_candidate = sample_priority_candidate(
             "provider-pool",
             "endpoint-pool",
@@ -1926,7 +1919,7 @@ mod tests {
         remember_scheduler_affinity_for_candidate(
             PlannerAppState::new(&state),
             Some(&auth_snapshot),
-            None,
+            Some(&client_session_affinity),
             "openai:chat",
             "gpt-4.1",
             &cached_candidate,
@@ -1948,7 +1941,7 @@ mod tests {
             "openai:chat",
             Some("gpt-4.1"),
             Some(&auth_snapshot),
-            None,
+            Some(&client_session_affinity),
             None,
             None,
             None,
@@ -2008,6 +2001,7 @@ mod tests {
             .expect("state should build")
             .with_data_state_for_tests(data_state);
         let auth_snapshot = sample_auth_snapshot();
+        let client_session_affinity = ClientSessionAffinity::from_session_key("session-1");
         let cached_candidate = sample_priority_candidate(
             "provider-pool",
             "endpoint-pool",
@@ -2019,7 +2013,7 @@ mod tests {
         remember_scheduler_affinity_for_candidate(
             PlannerAppState::new(&state),
             Some(&auth_snapshot),
-            None,
+            Some(&client_session_affinity),
             "openai:chat",
             "gpt-4.1",
             &cached_candidate,
@@ -2041,7 +2035,7 @@ mod tests {
             "openai:chat",
             Some("gpt-4.1"),
             Some(&auth_snapshot),
-            None,
+            Some(&client_session_affinity),
             None,
             None,
             None,
@@ -2064,7 +2058,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remembers_scheduler_affinity_for_candidate_using_requested_model_key() {
+    async fn ignores_scheduler_affinity_without_client_session_scope() {
         let state = AppState::new().expect("state should build");
         let auth_snapshot = sample_auth_snapshot();
         let candidate = sample_candidate("endpoint-1", "key-1");
@@ -2078,15 +2072,12 @@ mod tests {
             &candidate,
         );
 
-        let remembered = state
+        assert!(state
             .read_scheduler_affinity_target(
                 "scheduler_affinity:api-key-1:openai:chat:gpt-5",
                 SCHEDULER_AFFINITY_TTL,
             )
-            .expect("affinity target should be cached");
-        assert_eq!(remembered.provider_id, "provider-1");
-        assert_eq!(remembered.endpoint_id, "endpoint-1");
-        assert_eq!(remembered.key_id, "key-1");
+            .is_none());
     }
 
     #[tokio::test]

@@ -158,6 +158,9 @@ pub fn oauth_token_reason_is_hard_invalid(reason: &str) -> bool {
         "authentication token has been invalidated",
         "token has been invalidated",
         "token invalidated",
+        "personal access token owner is inactive",
+        "biscuit_baker_service_auth_credential_error_status",
+        "auth_credential",
         "invalidated",
         "revoked",
         "已撤销",
@@ -714,6 +717,20 @@ mod tests {
             Some("codex"),
             None,
             Some("[OAUTH_EXPIRED] Your authentication token has been invalidated. Please try signing in again."),
+        );
+
+        assert_eq!(snapshot.code, "oauth_token_invalid");
+        assert_eq!(snapshot.label.as_deref(), Some("Token 失效"));
+        assert!(snapshot.blocked);
+        assert!(!snapshot.recoverable);
+    }
+
+    #[test]
+    fn account_snapshot_marks_inactive_pat_owner_as_token_invalid() {
+        let snapshot = resolve_account_status_snapshot(
+            Some("codex"),
+            None,
+            Some("[OAUTH_EXPIRED] Personal access token owner is inactive."),
         );
 
         assert_eq!(snapshot.code, "oauth_token_invalid");

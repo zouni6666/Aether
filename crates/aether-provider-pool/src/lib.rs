@@ -136,6 +136,29 @@ mod tests {
     }
 
     #[test]
+    fn codex_quota_request_prefers_imported_authorization_header() {
+        let spec = build_codex_pool_quota_request(
+            "key-1",
+            Some((
+                "authorization".to_string(),
+                "Bearer jwt-access-token".to_string(),
+            )),
+            None,
+            Some(&json!({
+                "headers": {
+                    "authorization": "Bearer imported-session"
+                }
+            })),
+        )
+        .expect("spec should build");
+
+        assert_eq!(
+            spec.headers.get("authorization").map(String::as_str),
+            Some("Bearer imported-session")
+        );
+    }
+
+    #[test]
     fn gemini_cli_quota_request_uses_v1internal_retrieve_user_quota() {
         let spec = build_gemini_cli_pool_quota_request(
             "key-1",

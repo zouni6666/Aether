@@ -649,11 +649,24 @@ async fn gateway_handles_admin_dashboard_stats_locally_without_proxying_upstream
     assert_eq!(payload["today"]["tokens"], 17_450);
     assert_eq!(payload["today"]["cost"], json!(2.5));
     assert_eq!(payload["cost_stats"]["cost_savings"], json!(0.025));
-    assert_eq!(payload["stats"][2]["subValue"], json!("节省 $0.01"));
-    assert_eq!(payload["stats"][0]["value"], json!("2"));
-    assert_eq!(payload["stats"][1]["value"], json!("17.4K"));
+    let stats = payload["stats"].as_array().expect("stats should be array");
+    assert_eq!(stats.len(), 4);
+    let today_request_stats = stats
+        .iter()
+        .find(|item| item["name"] == json!("今日请求 / 费用"))
+        .expect("today request stats card should exist");
+    assert_eq!(today_request_stats["value"], json!("2 / $2.50"));
     assert_eq!(
-        payload["stats"][1]["subValue"],
+        today_request_stats["subValue"],
+        json!("成功率 100.0% / 节省 $0.01")
+    );
+    let today_token_stats = stats
+        .iter()
+        .find(|item| item["name"] == json!("今日 Token"))
+        .expect("today token stats card should exist");
+    assert_eq!(today_token_stats["value"], json!("17.4K"));
+    assert_eq!(
+        today_token_stats["subValue"],
         json!("输入 12.1K / 输出 3.1K · 写缓存 1.25K / 读缓存 1K")
     );
     assert_eq!(payload["users"]["total"], 2);

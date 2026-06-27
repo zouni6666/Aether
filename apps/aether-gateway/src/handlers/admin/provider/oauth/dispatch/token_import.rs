@@ -5,6 +5,7 @@ use base64::{
     Engine as _,
 };
 use serde_json::{json, Map, Value};
+use std::collections::BTreeMap;
 
 fn decode_base64_url_part(value: &str) -> Option<Vec<u8>> {
     URL_SAFE_NO_PAD
@@ -117,6 +118,95 @@ pub(super) fn decode_access_token_expires_at(access_token: &str) -> Option<u64> 
     json_u64_value(claims.get("exp"))
 }
 
+fn normalize_import_header_name(raw: &str) -> Option<String> {
+    let value = raw.trim().to_ascii_lowercase();
+    if value.is_empty()
+        || matches!(
+            value.as_str(),
+            "host"
+                | "content-length"
+                | "connection"
+                | "keep-alive"
+                | "proxy-authenticate"
+                | "proxy-authorization"
+                | "proxy-connection"
+                | "te"
+                | "trailer"
+                | "transfer-encoding"
+                | "upgrade"
+        )
+    {
+        return None;
+    }
+    http::header::HeaderName::from_bytes(value.as_bytes())
+        .ok()
+        .map(|name| name.as_str().to_string())
+}
+
+fn normalize_import_header_value(value: &Value) -> Option<String> {
+    let value = match value {
+        Value::String(raw) => raw.trim().to_string(),
+        Value::Number(raw) => raw.to_string(),
+        Value::Bool(raw) => raw.to_string(),
+        _ => return None,
+    };
+    if value.is_empty() || http::header::HeaderValue::from_str(&value).is_err() {
+        return None;
+    }
+    Some(value)
+}
+
+pub(super) fn normalize_provider_oauth_import_headers(
+    value: Option<&Value>,
+) -> Option<BTreeMap<String, String>> {
+    let object = value?.as_object()?;
+    let mut headers = BTreeMap::new();
+    for (raw_key, raw_value) in object {
+        let Some(key) = normalize_import_header_name(raw_key) else {
+            continue;
+        };
+        let Some(value) = normalize_import_header_value(raw_value) else {
+            continue;
+        };
+        headers.insert(key, value);
+    }
+    (!headers.is_empty()).then_some(headers)
+}
+
+pub(super) fn normalize_provider_oauth_import_headers_from_object(
+    object: &Map<String, Value>,
+) -> Option<BTreeMap<String, String>> {
+    normalize_provider_oauth_import_headers(
+        object
+            .get("headers")
+            .or_else(|| object.get("request_headers"))
+            .or_else(|| object.get("requestHeaders"))
+            .or_else(|| object.get("header_overrides"))
+            .or_else(|| object.get("headerOverrides"))
+            .or_else(|| object.get("extra_headers"))
+            .or_else(|| object.get("extraHeaders")),
+    )
+}
+
+pub(super) fn provider_oauth_import_authorization_bearer_token(
+    headers: Option<&BTreeMap<String, String>>,
+) -> Option<String> {
+    let value = headers?.get("authorization")?.trim();
+    let (scheme, token) = value.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    let token = token.trim();
+    (!token.is_empty()).then(|| token.to_string())
+}
+
+pub(super) fn provider_oauth_import_authorization_bearer_token_from_object(
+    object: &Map<String, Value>,
+) -> Option<String> {
+    let headers = normalize_provider_oauth_import_headers_from_object(object)?;
+    provider_oauth_import_authorization_bearer_token(Some(&headers))
+}
+
 pub(super) fn provider_type_supports_access_token_import(provider_type: &str) -> bool {
     matches!(
         provider_type.trim().to_ascii_lowercase().as_str(),
@@ -176,7 +266,9 @@ pub(super) fn build_provider_access_token_import_auth_config(
 mod tests {
     use super::{
         build_provider_access_token_import_auth_config, decode_access_token_expires_at,
-        looks_like_access_token, normalize_provider_import_tokens, normalize_single_import_tokens,
+        looks_like_access_token, normalize_provider_import_tokens,
+        normalize_provider_oauth_import_headers, normalize_single_import_tokens,
+        provider_oauth_import_authorization_bearer_token,
     };
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     use serde_json::json;
@@ -244,6 +336,38 @@ mod tests {
         assert_eq!(
             auth_config.get("expires_at"),
             Some(&json!(2_100_000_000u64))
+        );
+    }
+
+    #[test]
+    fn normalizes_import_header_overrides_for_auth_headers() {
+        let headers = normalize_provider_oauth_import_headers(Some(&json!({
+            "Authorization": " Bearer session-token ",
+            "X-Feature": true,
+            "Host": "evil.example",
+            "X-Bad": "line\nbreak",
+        })))
+        .expect("headers should normalize");
+
+        assert_eq!(
+            headers.get("authorization"),
+            Some(&"Bearer session-token".to_string())
+        );
+        assert_eq!(headers.get("x-feature"), Some(&"true".to_string()));
+        assert!(!headers.contains_key("host"));
+        assert!(!headers.contains_key("x-bad"));
+    }
+
+    #[test]
+    fn extracts_import_authorization_header_bearer_token() {
+        let headers = normalize_provider_oauth_import_headers(Some(&json!({
+            "Authorization": "Bearer at-session-token",
+        })))
+        .expect("headers should normalize");
+
+        assert_eq!(
+            provider_oauth_import_authorization_bearer_token(Some(&headers)).as_deref(),
+            Some("at-session-token")
         );
     }
 

@@ -11,6 +11,7 @@ use crate::url::{build_openai_image_url, build_openai_responses_url};
 
 #[derive(Debug, Clone, Copy)]
 pub struct ProviderOpenAiImageHeadersInput<'a> {
+    pub transport: &'a GatewayProviderTransportSnapshot,
     pub headers: &'a http::HeaderMap,
     pub auth_header: &'a str,
     pub auth_value: &'a str,
@@ -82,6 +83,10 @@ pub fn build_openai_image_headers(
     );
     provider_request_headers.insert("content-type".to_string(), "application/json".to_string());
     provider_request_headers.insert("accept".to_string(), input.accept.to_string());
+    crate::apply_local_auth_config_header_overrides(
+        &mut provider_request_headers,
+        input.transport.key.decrypted_auth_config.as_deref(),
+    );
     if !apply_local_header_rules_with_request_headers(
         &mut provider_request_headers,
         input.header_rules,
@@ -253,7 +258,9 @@ mod tests {
 
     #[test]
     fn builds_json_eventstream_headers_and_applies_rules() {
+        let transport = sample_transport();
         let headers = build_openai_image_headers(ProviderOpenAiImageHeadersInput {
+            transport: &transport,
             headers: &HeaderMap::new(),
             auth_header: "authorization",
             auth_value: "Bearer secret",
@@ -282,8 +289,46 @@ mod tests {
     }
 
     #[test]
-    fn standard_openai_compatible_image_headers_can_request_json() {
+    fn auth_config_headers_override_default_authorization() {
+        let mut transport = sample_transport();
+        transport.key.decrypted_auth_config = Some(
+            json!({
+                "refresh_token": "rt-1",
+                "headers": {
+                    "authorization": "Bearer imported-session",
+                    "chatgpt-account-id": "acct-1"
+                }
+            })
+            .to_string(),
+        );
+
         let headers = build_openai_image_headers(ProviderOpenAiImageHeadersInput {
+            transport: &transport,
+            headers: &HeaderMap::new(),
+            auth_header: "authorization",
+            auth_value: "Bearer refreshed-access-token",
+            accept: "text/event-stream",
+            header_rules: None,
+            provider_request_body: &json!({"model":"gpt-5.4-mini"}),
+            original_request_body: &json!({"prompt":"draw"}),
+        })
+        .expect("headers should build");
+
+        assert_eq!(
+            headers.get("authorization"),
+            Some(&"Bearer imported-session".to_string())
+        );
+        assert_eq!(
+            headers.get("chatgpt-account-id"),
+            Some(&"acct-1".to_string())
+        );
+    }
+
+    #[test]
+    fn standard_openai_compatible_image_headers_can_request_json() {
+        let transport = sample_transport();
+        let headers = build_openai_image_headers(ProviderOpenAiImageHeadersInput {
+            transport: &transport,
             headers: &HeaderMap::new(),
             auth_header: "authorization",
             auth_value: "Bearer secret",

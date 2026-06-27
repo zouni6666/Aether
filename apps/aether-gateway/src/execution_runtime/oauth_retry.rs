@@ -149,6 +149,8 @@ fn status_proves_access_token_invalid(status_code: u16, response_text: Option<&s
         "expired access token",
         "authentication token has been invalidated",
         "token has been invalidated",
+        "personal access token owner is inactive",
+        "biscuit_baker_service_auth_credential_error_status",
         "security token included in the request is expired",
     ]
     .iter()
@@ -195,6 +197,12 @@ mod tests {
         assert!(status_proves_access_token_invalid(
             403,
             Some("The security token included in the request is expired")
+        ));
+        assert!(status_proves_access_token_invalid(
+            403,
+            Some(
+                r#"{"error":{"code":"biscuit_baker_service_auth_credential_error_status","message":"Personal access token owner is inactive."}}"#
+            )
         ));
         assert!(!status_proves_access_token_invalid(403, None));
         assert!(!status_proves_access_token_invalid(

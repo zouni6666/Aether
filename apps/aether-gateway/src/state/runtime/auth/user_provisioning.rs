@@ -1,10 +1,18 @@
+use std::time::Duration;
+
 use crate::{AppState, GatewayError};
+
+const USER_RUNTIME_JSON_CACHE_TTL: Duration = Duration::from_secs(30);
 
 impl AppState {
     pub(crate) async fn read_user_model_capability_settings(
         &self,
         user_id: &str,
     ) -> Result<Option<serde_json::Value>, GatewayError> {
+        let user_id = user_id.trim();
+        if user_id.is_empty() {
+            return Ok(None);
+        }
         #[cfg(test)]
         if let Some(store) = self.auth_user_model_capability_store.as_ref() {
             if let Some(settings) = store
@@ -17,11 +25,17 @@ impl AppState {
             }
         }
 
-        let users = self.list_non_admin_export_users().await?;
-        Ok(users
-            .into_iter()
-            .find(|user| user.id == user_id)
-            .and_then(|user| user.model_capability_settings))
+        let cache_key = user_id.to_string();
+        self.user_model_capability_settings_cache
+            .get_or_load(cache_key, USER_RUNTIME_JSON_CACHE_TTL, || async move {
+                Ok(self
+                    .data
+                    .find_export_user_by_id(user_id)
+                    .await
+                    .map_err(|err| GatewayError::Internal(err.to_string()))?
+                    .and_then(|user| user.model_capability_settings))
+            })
+            .await
     }
 
     pub(crate) async fn update_user_model_capability_settings(
@@ -56,10 +70,19 @@ impl AppState {
         &self,
         user_id: &str,
     ) -> Result<Option<serde_json::Value>, GatewayError> {
-        self.data
-            .read_user_feature_settings(user_id)
+        let user_id = user_id.trim();
+        if user_id.is_empty() {
+            return Ok(None);
+        }
+        let cache_key = user_id.to_string();
+        self.user_feature_settings_cache
+            .get_or_load(cache_key, USER_RUNTIME_JSON_CACHE_TTL, || async move {
+                self.data
+                    .read_user_feature_settings(user_id)
+                    .await
+                    .map_err(|err| GatewayError::Internal(err.to_string()))
+            })
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
     pub(crate) async fn update_user_feature_settings(

@@ -808,7 +808,11 @@ onMounted(async () => {
   document.addEventListener('visibilitychange', handleVisibilityChange)
 
   if (isAdminPage.value) {
-    // 管理员页面优先加载记录，统计面板在后台顺序刷新，避免瞬时并发打满后端。
+    // 管理员页面优先启动热力图加载，避免被统计聚合链路阻塞。
+    const heatmapPromise = loadHeatmapData().catch(err => {
+      log.error('加载热力图数据失败:', err)
+    })
+
     await loadRecords(
       { page: currentPage.value, pageSize: pageSize.value },
       getCurrentFilters(),
@@ -816,7 +820,7 @@ onMounted(async () => {
     )
     void (async () => {
       await refreshAdminAnalytics({ force: true, preserveOnFailure: false })
-      await loadHeatmapData()
+      await heatmapPromise
       await loadAdminUsers()
     })()
   } else {
@@ -1013,7 +1017,28 @@ function handleDetailRequestState(update: {
   id: string
   status?: RequestStatus
   statusCode?: number | null
+  inputTokens?: number | null
+  effectiveInputTokens?: number | null
+  outputTokens?: number | null
+  totalTokens?: number | null
+  cacheCreationInputTokens?: number | null
+  cacheCreationEphemeral5mInputTokens?: number | null
+  cacheCreationEphemeral1hInputTokens?: number | null
+  cacheReadInputTokens?: number | null
+  cost?: number | null
+  actualCost?: number | null
   responseTimeMs?: number | null
+  firstByteTimeMs?: number | null
+  isStream?: boolean | null
+  upstreamIsStream?: boolean | null
+  clientRequestedStream?: boolean | null
+  clientIsStream?: boolean | null
+  apiFormat?: string | null
+  endpointApiFormat?: string | null
+  hasFormatConversion?: boolean | null
+  targetModel?: string | null
+  reasoningEffort?: string | null
+  serviceTier?: string | null
   imageProgress?: ImageProgress | null
   errorMessage?: string | null
 }) {
@@ -1039,8 +1064,71 @@ function handleDetailRequestState(update: {
   if ('statusCode' in update) {
     record.status_code = update.statusCode ?? undefined
   }
+  if ('inputTokens' in update && update.inputTokens != null) {
+    record.input_tokens = update.inputTokens
+  }
+  if ('effectiveInputTokens' in update && update.effectiveInputTokens != null) {
+    record.effective_input_tokens = update.effectiveInputTokens
+  }
+  if ('outputTokens' in update && update.outputTokens != null) {
+    record.output_tokens = update.outputTokens
+  }
+  if ('totalTokens' in update && update.totalTokens != null) {
+    record.total_tokens = update.totalTokens
+  }
+  if ('cacheCreationInputTokens' in update && update.cacheCreationInputTokens != null) {
+    record.cache_creation_input_tokens = update.cacheCreationInputTokens
+  }
+  if ('cacheCreationEphemeral5mInputTokens' in update && update.cacheCreationEphemeral5mInputTokens != null) {
+    record.cache_creation_ephemeral_5m_input_tokens = update.cacheCreationEphemeral5mInputTokens
+  }
+  if ('cacheCreationEphemeral1hInputTokens' in update && update.cacheCreationEphemeral1hInputTokens != null) {
+    record.cache_creation_ephemeral_1h_input_tokens = update.cacheCreationEphemeral1hInputTokens
+  }
+  if ('cacheReadInputTokens' in update && update.cacheReadInputTokens != null) {
+    record.cache_read_input_tokens = update.cacheReadInputTokens
+  }
+  if ('cost' in update && update.cost != null) {
+    record.cost = update.cost
+  }
+  if ('actualCost' in update && update.actualCost != null) {
+    record.actual_cost = update.actualCost
+  }
   if ('responseTimeMs' in update && update.responseTimeMs != null) {
     record.response_time_ms = update.responseTimeMs
+  }
+  if ('firstByteTimeMs' in update) {
+    record.first_byte_time_ms = update.firstByteTimeMs ?? undefined
+  }
+  if ('isStream' in update && typeof update.isStream === 'boolean') {
+    record.is_stream = update.isStream
+  }
+  if ('upstreamIsStream' in update && typeof update.upstreamIsStream === 'boolean') {
+    record.upstream_is_stream = update.upstreamIsStream
+  }
+  if ('clientRequestedStream' in update && typeof update.clientRequestedStream === 'boolean') {
+    record.client_requested_stream = update.clientRequestedStream
+  }
+  if ('clientIsStream' in update && typeof update.clientIsStream === 'boolean') {
+    record.client_is_stream = update.clientIsStream
+  }
+  if ('apiFormat' in update && typeof update.apiFormat === 'string') {
+    record.api_format = update.apiFormat
+  }
+  if ('endpointApiFormat' in update && typeof update.endpointApiFormat === 'string') {
+    record.endpoint_api_format = update.endpointApiFormat
+  }
+  if ('hasFormatConversion' in update && typeof update.hasFormatConversion === 'boolean') {
+    record.has_format_conversion = update.hasFormatConversion
+  }
+  if ('targetModel' in update) {
+    record.target_model = typeof update.targetModel === 'string' ? update.targetModel : update.targetModel ?? undefined
+  }
+  if ('reasoningEffort' in update) {
+    record.reasoning_effort = typeof update.reasoningEffort === 'string' ? update.reasoningEffort : null
+  }
+  if ('serviceTier' in update) {
+    record.service_tier = typeof update.serviceTier === 'string' ? update.serviceTier : null
   }
   if ('imageProgress' in update) {
     const nextProgress = update.imageProgress ?? null

@@ -3,28 +3,21 @@ import { describe, expect, it } from 'vitest'
 import {
   buildPoolCooldownFieldLayout,
   buildPoolHealthToggleCards,
-  buildPoolCostFieldLayout,
-  buildPoolSecondarySectionLayout,
 } from '@/features/pool/utils/poolAdvancedDialog'
 
 describe('poolAdvancedDialog', () => {
   it('returns health toggle cards in the desktop display order', () => {
     expect(buildPoolHealthToggleCards().map(item => item.key)).toEqual([
-      'health_policy_enabled',
       'probing_enabled',
       'account_self_check_enabled',
       'auto_remove_banned_keys',
+      'auto_remove_quota_exhausted_keys',
       'skip_exhausted_accounts',
     ])
   })
 
   it('provides tooltip copy for every desktop health toggle card', () => {
     expect(buildPoolHealthToggleCards()).toEqual([
-      {
-        key: 'health_policy_enabled',
-        label: '健康策略',
-        description: '按上游错误自动冷却并跳过异常账号。',
-      },
       {
         key: 'probing_enabled',
         label: '自适应热池',
@@ -41,6 +34,11 @@ describe('poolAdvancedDialog', () => {
         description: '检测到不可恢复账号异常，或 RT 与 AT 均失效时自动从号池移除。',
       },
       {
+        key: 'auto_remove_quota_exhausted_keys',
+        label: '自动清理额度耗尽',
+        description: '探测到黑色“额度耗尽”账号后自动从号池移除。',
+      },
+      {
         key: 'skip_exhausted_accounts',
         label: '跳过额度耗尽账号',
         description: '当 Codex / Kiro 账号额度已耗尽时，直接标记为不可调度并在请求侧跳过。',
@@ -48,32 +46,13 @@ describe('poolAdvancedDialog', () => {
     ])
   })
 
-  it('returns the four cooldown-related fields in one desktop row order', () => {
+  it('returns only cooldown-related fields in one desktop row order', () => {
     expect(buildPoolCooldownFieldLayout()).toEqual({
       fields: [
         'rate_limit_cooldown_seconds',
         'overload_cooldown_seconds',
-        'sticky_session_ttl_seconds',
-        'global_priority',
       ],
-      desktopColumnsClass: 'xl:grid-cols-4',
-    })
-  })
-
-  it('stacks batch and cost sections as full-width rows on desktop', () => {
-    expect(buildPoolSecondarySectionLayout()).toEqual({
-      wrapperClass: 'space-y-4',
-    })
-  })
-
-  it('returns the three cost fields in one desktop row order', () => {
-    expect(buildPoolCostFieldLayout()).toEqual({
-      fields: [
-        'cost_window_seconds',
-        'cost_limit_per_key_tokens',
-        'cost_soft_threshold_percent',
-      ],
-      desktopColumnsClass: 'xl:grid-cols-3',
+      desktopColumnsClass: 'xl:grid-cols-2',
     })
   })
 })

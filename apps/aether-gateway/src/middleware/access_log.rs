@@ -18,6 +18,9 @@ use crate::log_ids::short_request_id;
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RequestLogEmitted;
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GatewayRequestAcceptedAt(pub(crate) Instant);
+
 fn is_usage_detail_path(path: &str) -> bool {
     let Some(detail_id) = path.strip_prefix("/api/admin/usage/") else {
         return false;
@@ -59,6 +62,9 @@ pub(crate) fn sanitize_access_log_path(path: &str) -> String {
 
 pub(crate) async fn access_log_middleware(mut request: Request<Body>, next: Next) -> Response {
     let started_at = Instant::now();
+    request
+        .extensions_mut()
+        .insert(GatewayRequestAcceptedAt(started_at));
     let method = request.method().clone();
     let raw_path = request
         .uri()

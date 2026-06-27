@@ -1,4 +1,5 @@
 use crate::handlers::admin::request::AdminAppState;
+use crate::provider_key_auth::provider_key_auth_config_uses_header_authorization;
 use aether_crypto::decrypt_python_fernet_ciphertext;
 #[cfg(test)]
 use aether_crypto::DEVELOPMENT_ENCRYPTION_KEY;
@@ -28,7 +29,15 @@ pub(super) fn admin_monitoring_masked_provider_key_prefix(
 ) -> Option<String> {
     match key.auth_type.trim() {
         "service_account" | "vertex_ai" => Some("[Service Account]".to_string()),
-        "oauth" => Some("[OAuth Token]".to_string()),
+        "oauth" => {
+            if provider_key_auth_config_uses_header_authorization(
+                state.parse_catalog_auth_config_json(key).as_ref(),
+            ) {
+                Some("[OAuth Header]".to_string())
+            } else {
+                Some("[OAuth Token]".to_string())
+            }
+        }
         _ => {
             let full_key = key
                 .encrypted_api_key

@@ -1,7 +1,8 @@
 use crate::handlers::shared::{json_string_list, unix_secs_to_rfc3339};
 use crate::provider_key_auth::{
-    provider_key_auth_semantics, provider_key_can_refresh_oauth,
-    provider_key_configured_api_formats, provider_key_inherits_provider_api_formats,
+    provider_key_auth_config_uses_header_authorization, provider_key_auth_semantics,
+    provider_key_can_refresh_oauth, provider_key_configured_api_formats,
+    provider_key_inherits_provider_api_formats,
 };
 use crate::AppState;
 use aether_admin::provider::quota as admin_provider_quota_pure;
@@ -132,7 +133,15 @@ pub(crate) fn take_secret_suffix(value: &str, suffix_chars: usize) -> &str {
 pub(crate) fn masked_catalog_api_key(state: &AppState, key: &StoredProviderCatalogKey) -> String {
     match key.auth_type.trim() {
         "service_account" | "vertex_ai" => "[Service Account]".to_string(),
-        "oauth" => "[OAuth Token]".to_string(),
+        "oauth" => {
+            if provider_key_auth_config_uses_header_authorization(
+                parse_catalog_auth_config_json(state, key).as_ref(),
+            ) {
+                "[OAuth Header]".to_string()
+            } else {
+                "[OAuth Token]".to_string()
+            }
+        }
         _ => {
             let Some(ciphertext) = key
                 .encrypted_api_key
@@ -2207,6 +2216,8 @@ pub(crate) fn build_admin_provider_key_response(
             .and_then(|config| config.get("access_token_import_temporary"))
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
+    let oauth_header_auth = auth_semantics.oauth_managed()
+        && provider_key_auth_config_uses_header_authorization(auth_config.as_ref());
     let oauth_plan_type = derive_catalog_oauth_plan_type(key, provider_type, auth_config.as_ref());
     let (
         health_score,
@@ -2279,6 +2290,7 @@ pub(crate) fn build_admin_provider_key_response(
         "can_edit_oauth".to_string(),
         json!(auth_semantics.can_edit_oauth()),
     );
+    payload.insert("oauth_header_auth".to_string(), json!(oauth_header_auth));
     payload.insert("name".to_string(), json!(key.name));
     payload.insert("rate_multipliers".to_string(), json!(key.rate_multipliers));
     payload.insert(

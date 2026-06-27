@@ -101,6 +101,7 @@ vi.mock('lucide-vue-next', async () => {
     Clock: Icon,
     Database: Icon,
     Shuffle: Icon,
+    RefreshCw: Icon,
   }
 })
 

@@ -3,7 +3,10 @@ use super::{
     AdminPoolResolveSelectionRequest, ADMIN_POOL_PROVIDER_CATALOG_READER_UNAVAILABLE_DETAIL,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
-use crate::provider_key_auth::{provider_key_auth_semantics, provider_key_can_refresh_oauth};
+use crate::provider_key_auth::{
+    provider_key_auth_config_uses_header_authorization, provider_key_auth_semantics,
+    provider_key_can_refresh_oauth,
+};
 use crate::GatewayError;
 use aether_admin::provider::pool as admin_provider_pool_pure;
 use axum::{
@@ -106,6 +109,8 @@ pub(super) async fn build_admin_pool_resolve_selection_response(
                 "can_refresh_oauth": provider_key_can_refresh_oauth(auth_semantics, auth_config.as_ref()),
                 "can_export_oauth": auth_semantics.can_export_oauth(),
                 "can_edit_oauth": auth_semantics.can_edit_oauth(),
+                "oauth_header_auth": auth_semantics.oauth_managed()
+                    && provider_key_auth_config_uses_header_authorization(auth_config.as_ref()),
             })
         })
         .collect::<Vec<_>>();

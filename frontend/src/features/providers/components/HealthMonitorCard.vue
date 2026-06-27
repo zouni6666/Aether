@@ -3,52 +3,14 @@
     variant="default"
     class="overflow-hidden"
   >
-    <!-- 标题和筛选器 -->
-    <div class="px-6 py-3.5 border-b border-border/60">
-      <div class="flex items-center justify-between gap-4">
-        <div>
-          <h3 class="text-base font-semibold">
-            {{ title }}
-          </h3>
-          <p class="mt-1 text-xs text-muted-foreground">
-            基于真实请求统计端点可用率、请求成功率与健康历史
-          </p>
-        </div>
-        <div class="flex items-center gap-3">
-          <Label class="text-xs text-muted-foreground">回溯时间：</Label>
-          <Select
-            v-model="lookbackHours"
-          >
-            <SelectTrigger class="w-28 h-8 text-xs border-border/60">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="1">
-                1 小时
-              </SelectItem>
-              <SelectItem value="6">
-                6 小时
-              </SelectItem>
-              <SelectItem value="12">
-                12 小时
-              </SelectItem>
-              <SelectItem value="24">
-                24 小时
-              </SelectItem>
-              <SelectItem value="48">
-                48 小时
-              </SelectItem>
-            </SelectContent>
-          </Select>
-          <RefreshButton
-            :loading="loading"
-            @click="refreshData"
-          />
-        </div>
-      </div>
-    </div>
+    <HealthMonitorHeader
+      v-model:lookback-hours="lookbackHours"
+      :title="title"
+      description="基于真实请求统计端点可用率、平均耗时、平均TTFB 与平均速度"
+      :loading="loading"
+      @refresh="refreshData"
+    />
 
-    <!-- 内容区域 -->
     <div class="p-6">
       <div
         v-if="loadingMonitors"
@@ -59,7 +21,7 @@
       </div>
 
       <div
-        v-else-if="monitors.length === 0"
+        v-else-if="visibleMonitors.length === 0"
         class="flex flex-col items-center justify-center py-12 text-muted-foreground"
       >
         <Activity class="w-12 h-12 mb-3 opacity-30" />
@@ -71,59 +33,70 @@
 
       <div
         v-else
-        class="space-y-3"
+        class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4"
       >
         <div
-          v-for="monitor in monitors"
-          :key="monitor.api_format"
-          class="border border-border/60 rounded-lg p-4 hover:border-primary/50 transition-colors"
+          v-for="(monitor, index) in visibleMonitors"
+          :key="`${monitor.api_format}-${index}`"
+          class="relative overflow-hidden rounded-xl border border-border/60 bg-card/60 p-4 transition-colors hover:border-primary/50"
         >
-          <!-- 响应式布局：窄屏上下两行，宽屏左右结构 -->
-          <div class="flex flex-col sm:flex-row sm:gap-6 sm:items-center">
-            <!-- 第一行/左侧：信息区域 -->
-            <div class="sm:w-52 flex-shrink-0 space-y-1.5 mb-3 sm:mb-0">
-              <!-- API 格式标签和成功率 -->
-              <div class="flex items-center gap-2 flex-wrap">
-                <Badge
-                  variant="outline"
-                  class="font-mono text-xs whitespace-nowrap"
-                >
-                  {{ formatApiFormat(monitor.api_format) }}
-                </Badge>
-                <Badge
-                  v-if="monitor.total_attempts > 0"
-                  :variant="getSuccessRateVariant(monitor.success_rate)"
-                  class="text-xs whitespace-nowrap"
-                >
-                  {{ (monitor.success_rate * 100).toFixed(0) }}%
-                </Badge>
-                <!-- 提供商信息（仅管理员可见）- 窄屏时显示在同一行 -->
-                <span
-                  v-if="showProviderInfo && 'provider_count' in monitor"
-                  class="text-xs text-muted-foreground sm:hidden"
-                >
-                  {{ monitor.provider_count }} 个提供商 / {{ monitor.key_count }} 个密钥
-                </span>
-              </div>
-
-              <!-- 提供商信息（仅管理员可见）- 宽屏时显示在下方 -->
+          <div
+            class="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/40 to-transparent"
+          />
+          <div class="flex items-start justify-between gap-3">
+            <div class="flex min-w-0 items-center gap-3">
               <div
-                v-if="showProviderInfo && 'provider_count' in monitor"
-                class="text-xs text-muted-foreground hidden sm:block"
+                class="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/50"
               >
-                {{ monitor.provider_count }} 个提供商 / {{ monitor.key_count }} 个密钥
+                <Activity class="h-5 w-5 text-muted-foreground" />
+              </div>
+              <div class="min-w-0">
+                <h4 class="truncate text-sm font-semibold">
+                  {{ formatApiFormat(monitor.api_format) }}
+                </h4>
               </div>
             </div>
+            <Badge
+              :variant="getHealthBadgeVariant(monitor)"
+              class="shrink-0"
+            >
+              {{ getHealthLabel(monitor) }}
+            </Badge>
+          </div>
 
-            <!-- 第二行/右侧：时间线区域 -->
-            <div class="flex-1 min-w-0 sm:flex sm:justify-end">
-              <div class="w-full sm:max-w-5xl">
-                <EndpointHealthTimeline
-                  :monitor="monitor"
-                  :lookback-hours="parseInt(lookbackHours)"
-                />
-              </div>
-            </div>
+          <HealthMetricGrid
+            class="mt-4"
+            :avg-latency-ms="monitor.avg_latency_ms"
+            :avg-first-byte-ms="monitor.avg_first_byte_ms"
+            :avg-tps="monitor.avg_tps"
+            :total-attempts="monitor.total_attempts"
+            :success-rate="monitor.success_rate"
+          />
+
+          <div
+            class="mt-4 flex items-center justify-between gap-3 text-[11px] uppercase tracking-wide text-muted-foreground"
+          >
+            <span>History (60pts)</span>
+            <span class="truncate normal-case tracking-normal">
+              {{ getEndpointMetaText(monitor) }}
+            </span>
+          </div>
+
+          <div class="mt-2">
+            <EndpointHealthTimeline
+              :monitor="monitor"
+              :lookback-hours="parseInt(lookbackHours)"
+            />
+          </div>
+
+          <div class="mt-4 flex justify-end">
+            <Button
+              variant="outline"
+              size="sm"
+              @click="openDetails(monitor)"
+            >
+              查看详情
+            </Button>
           </div>
         </div>
       </div>
@@ -132,23 +105,28 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, watch } from 'vue'
+import { computed, ref, onMounted, watch } from 'vue'
 import { Activity, Loader2 } from 'lucide-vue-next'
 import Card from '@/components/ui/card.vue'
 import Badge from '@/components/ui/badge.vue'
-import Label from '@/components/ui/label.vue'
-import Select from '@/components/ui/select.vue'
-import SelectTrigger from '@/components/ui/select-trigger.vue'
-import SelectValue from '@/components/ui/select-value.vue'
-import SelectContent from '@/components/ui/select-content.vue'
-import SelectItem from '@/components/ui/select-item.vue'
-import RefreshButton from '@/components/ui/refresh-button.vue'
+import Button from '@/components/ui/button.vue'
+import HealthMetricGrid from './HealthMetricGrid.vue'
+import HealthMonitorHeader from './HealthMonitorHeader.vue'
 import EndpointHealthTimeline from './EndpointHealthTimeline.vue'
 import { getEndpointStatusMonitor, getPublicEndpointStatusMonitor } from '@/api/endpoints/health'
 import type { EndpointStatusMonitor, PublicEndpointStatusMonitor } from '@/api/endpoints/types'
+import type { HealthMonitorDetailTarget, HealthMonitorSectionSummary } from './health-monitor-utils'
 import { useToast } from '@/composables/useToast'
 import { parseApiError } from '@/utils/errorParser'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
+import {
+  formatCompactNumber,
+  getHealthBadgeVariant,
+  getHealthLabel,
+  summarizeHealthMonitorItems
+} from './health-monitor-utils'
+
+type EndpointMonitor = EndpointStatusMonitor | PublicEndpointStatusMonitor
 
 const props = withDefaults(defineProps<{
   title?: string
@@ -160,12 +138,18 @@ const props = withDefaults(defineProps<{
   showProviderInfo: false
 })
 
+const emit = defineEmits<{
+  viewDetails: [target: HealthMonitorDetailTarget]
+  summaryUpdated: [summary: HealthMonitorSectionSummary]
+}>()
+
 const { error: showError } = useToast()
 
 const loading = ref(false)
 const loadingMonitors = ref(false)
-const monitors = ref<(EndpointStatusMonitor | PublicEndpointStatusMonitor)[]>([])
+const monitors = ref<EndpointMonitor[]>([])
 const lookbackHours = ref('6')
+const visibleMonitors = computed(() => monitors.value.filter(monitor => monitor.total_attempts > 0))
 
 async function loadMonitors() {
   loadingMonitors.value = true
@@ -182,6 +166,7 @@ async function loadMonitors() {
       const data = await getPublicEndpointStatusMonitor(params)
       monitors.value = data.formats || []
     }
+    emitSummary()
   } catch (err: unknown) {
     showError(parseApiError(err, '加载健康监控数据失败'), '错误')
   } finally {
@@ -198,10 +183,60 @@ async function refreshData() {
   }
 }
 
-function getSuccessRateVariant(rate: number): 'default' | 'secondary' | 'destructive' | 'outline' {
-  if (rate >= 0.95) return 'default'
-  if (rate >= 0.8) return 'secondary'
-  return 'destructive'
+function getEndpointMetaText(monitor: EndpointMonitor) {
+  const attempts = `${formatCompactNumber(monitor.total_attempts)} 次请求`
+  if (props.showProviderInfo && hasProviderInfo(monitor)) {
+    return `${monitor.provider_count} 个提供商 / ${monitor.key_count} 个密钥 / ${attempts}`
+  }
+  if (hasApiPath(monitor)) {
+    return `${monitor.api_path} / ${attempts}`
+  }
+  return attempts
+}
+
+function openDetails(monitor: EndpointMonitor) {
+  emit('viewDetails', {
+    lookbackHours: parseInt(lookbackHours.value),
+    source: {
+      kind: 'endpoint',
+      value: monitor.api_format,
+      title: formatApiFormat(monitor.api_format),
+      metaText: getEndpointDetailMetaText(monitor),
+      totalAttempts: monitor.total_attempts,
+      successCount: monitor.success_count,
+      failedCount: monitor.failed_count,
+      successRate: monitor.success_rate,
+      avgLatencyMs: monitor.avg_latency_ms,
+      avgFirstByteMs: monitor.avg_first_byte_ms,
+      avgTps: monitor.avg_tps,
+      timeline: monitor.timeline || null,
+      timelineDetails: monitor.timeline_details || null,
+      timeRangeStart: monitor.time_range_start || null,
+      timeRangeEnd: monitor.time_range_end || null
+    }
+  })
+}
+
+function getEndpointDetailMetaText(monitor: EndpointMonitor) {
+  if (props.showProviderInfo && hasProviderInfo(monitor)) {
+    return `${monitor.provider_count} 个提供商 / ${monitor.key_count} 个密钥`
+  }
+  if (hasApiPath(monitor)) {
+    return monitor.api_path
+  }
+  return null
+}
+
+function emitSummary() {
+  emit('summaryUpdated', summarizeHealthMonitorItems(visibleMonitors.value))
+}
+
+function hasProviderInfo(monitor: EndpointMonitor): monitor is EndpointStatusMonitor {
+  return 'provider_count' in monitor && typeof monitor.provider_count === 'number'
+}
+
+function hasApiPath(monitor: EndpointMonitor): monitor is PublicEndpointStatusMonitor {
+  return 'api_path' in monitor && typeof monitor.api_path === 'string' && monitor.api_path.length > 0
 }
 
 watch(lookbackHours, () => {

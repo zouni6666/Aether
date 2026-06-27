@@ -62,6 +62,7 @@ pub struct RuntimeStateConfig {
     pub redis: Option<RedisClientConfig>,
     pub memory: MemoryRuntimeStateConfig,
     pub command_timeout_ms: Option<u64>,
+    pub blocking_stream_lanes: Option<usize>,
 }
 
 impl Default for RuntimeStateConfig {
@@ -71,6 +72,7 @@ impl Default for RuntimeStateConfig {
             redis: None,
             memory: MemoryRuntimeStateConfig::default(),
             command_timeout_ms: Some(DEFAULT_COMMAND_TIMEOUT_MS),
+            blocking_stream_lanes: None,
         }
     }
 }
@@ -138,6 +140,11 @@ impl RuntimeStateConfig {
                 "runtime state command_timeout_ms must be positive".to_string(),
             ));
         }
+        if matches!(self.blocking_stream_lanes, Some(0)) {
+            return Err(DataLayerError::InvalidConfiguration(
+                "runtime state blocking_stream_lanes must be positive".to_string(),
+            ));
+        }
         Ok(())
     }
 }
@@ -194,7 +201,12 @@ impl RuntimeState {
                 let redis = config.redis.clone().ok_or_else(|| {
                     DataLayerError::InvalidConfiguration("runtime redis config missing".to_string())
                 })?;
-                Self::redis(redis, config.command_timeout_ms).await
+                Self::redis_with_blocking_stream_lanes(
+                    redis,
+                    config.command_timeout_ms,
+                    config.blocking_stream_lanes,
+                )
+                .await
             }
             RuntimeStateBackendMode::Auto => unreachable!("auto resolved above"),
         }
@@ -212,9 +224,19 @@ impl RuntimeState {
         config: RedisClientConfig,
         command_timeout_ms: Option<u64>,
     ) -> Result<Self, DataLayerError> {
+        Self::redis_with_blocking_stream_lanes(config, command_timeout_ms, None).await
+    }
+
+    pub async fn redis_with_blocking_stream_lanes(
+        config: RedisClientConfig,
+        command_timeout_ms: Option<u64>,
+        blocking_stream_lanes: Option<usize>,
+    ) -> Result<Self, DataLayerError> {
         let factory = redis::RedisClientFactory::new(config)?;
         let keyspace = factory.config().keyspace();
-        let connections = factory.connect_router(command_timeout_ms).await?;
+        let connections = factory
+            .connect_router_with_blocking_stream_lanes(command_timeout_ms, blocking_stream_lanes)
+            .await?;
         let runtime = redis::RedisRuntimeRunner::new(
             connections.clone(),
             keyspace.clone(),
@@ -435,6 +457,18 @@ impl RuntimeState {
             RuntimeStateBackend::Redis(redis) => {
                 redis.runtime.check_and_consume_rate_limit(input).await
             }
+        }
+    }
+
+    pub async fn rate_limit_count(&self, key: &str, bucket: u64) -> Result<u32, DataLayerError> {
+        match self.backend.as_ref() {
+            RuntimeStateBackend::Memory(memory) => memory.rate_limit_count(key, bucket),
+            RuntimeStateBackend::Redis(redis) => Ok(redis
+                .kv
+                .get(key)
+                .await?
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or_default()),
         }
     }
 
@@ -1447,6 +1481,13 @@ mod tests {
         ));
         assert_eq!(
             runtime
+                .rate_limit_count(input.user_key, input.bucket)
+                .await
+                .expect("count after first"),
+            1
+        );
+        assert_eq!(
+            runtime
                 .check_and_consume_rate_limit(input)
                 .await
                 .expect("second"),
@@ -1454,6 +1495,13 @@ mod tests {
                 scope: RateLimitScope::User,
                 limit: 1
             }
+        );
+        assert_eq!(
+            runtime
+                .rate_limit_count(input.user_key, input.bucket)
+                .await
+                .expect("count after reject"),
+            1
         );
     }
 
@@ -1569,6 +1617,51 @@ mod tests {
             Some("ok")
         );
         let _ = blocking.await.expect("blocking task join");
+    }
+
+    #[tokio::test]
+    async fn redis_concurrent_blocking_stream_reads_do_not_share_single_connection() {
+        let Some(redis) = TestRedisServer::start().await else {
+            return;
+        };
+        let runtime = RuntimeState::redis(
+            RedisClientConfig {
+                url: redis.redis_url.clone(),
+                key_prefix: Some(format!("aether-block-pool-test-{}", std::process::id())),
+            },
+            Some(1_000),
+        )
+        .await
+        .expect("runtime should connect");
+        RuntimeQueueStore::ensure_consumer_group(&runtime, "blocking-stream", "workers", "0-0")
+            .await
+            .expect("consumer group");
+
+        let mut handles = Vec::new();
+        for index in 0..4 {
+            let blocking_runtime = runtime.clone();
+            handles.push(tokio::spawn(async move {
+                let consumer = format!("consumer-{index}");
+                RuntimeQueueStore::read_group(
+                    &blocking_runtime,
+                    "blocking-stream",
+                    "workers",
+                    &consumer,
+                    1,
+                    Some(600),
+                )
+                .await
+            }));
+        }
+
+        for handle in handles {
+            let result = handle.await.expect("blocking task join");
+            assert!(
+                !matches!(result, Err(DataLayerError::TimedOut(_))),
+                "concurrent blocking stream reads should not queue behind one connection"
+            );
+            assert!(result.expect("blocking read should succeed").is_empty());
+        }
     }
 
     #[tokio::test]

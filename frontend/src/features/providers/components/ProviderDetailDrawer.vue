@@ -323,14 +323,14 @@
                           </div>
                           <div class="flex items-center gap-1">
                             <span class="text-[11px] font-mono text-muted-foreground">
-                              {{ isOAuthManagedCredential(key) ? '[Refresh Token]' : (isServiceAccountCredential(key) ? '[Service Account]' : key.api_key_masked) }}
+                              {{ getProviderMaskedSecretLabel(key, provider.provider_type) }}
                             </span>
                             <Button
                               v-if="canExportOAuthCredential(key)"
                               variant="ghost"
                               size="icon"
                               class="h-4 w-4 shrink-0"
-                              title="下载 Refresh Token 授权文件"
+                              title="下载 OAuth 授权文件"
                               @click.stop="downloadRefreshToken(key)"
                             >
                               <Download class="w-2.5 h-2.5" />
@@ -1513,6 +1513,7 @@ import {
   canRefreshOAuthCredential,
   isOAuthManagedCredential,
   isServiceAccountCredential,
+  getProviderMaskedSecretLabel,
   shouldShowOAuthRefreshControl,
 } from '@/utils/providerKeyAuth'
 import {

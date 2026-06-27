@@ -153,6 +153,77 @@ function generateHealthTimeline(
   })
 }
 
+function generateHealthTimelineDetails(
+  timeline: string[],
+  avgLatencyMs: number | null,
+  avgFirstByteMs: number | null,
+  avgTps: number | null,
+  rangeStart = Date.now() - 6 * 60 * 60 * 1000,
+  rangeEnd = Date.now()
+) {
+  const safeRange = Math.max(rangeEnd - rangeStart, 1)
+  const interval = safeRange / Math.max(timeline.length, 1)
+  return timeline.map((status, index) => {
+    const totalAttempts = status === 'unknown' ? 0 : 3 + (index % 6)
+    const successRate = status === 'healthy'
+      ? 0.98
+      : status === 'warning'
+        ? 0.84
+        : status === 'unhealthy'
+          ? 0.42
+          : null
+    const successCount = successRate == null ? 0 : Math.round(totalAttempts * successRate)
+    const failedCount = successRate == null ? 0 : Math.max(totalAttempts - successCount, 0)
+    const latencyFactor = status === 'warning' ? 1.25 : status === 'unhealthy' ? 1.7 : 1
+    return {
+      segment_index: index,
+      status,
+      time_range_start: new Date(rangeStart + index * interval).toISOString(),
+      time_range_end: new Date(rangeStart + (index + 1) * interval).toISOString(),
+      total_attempts: totalAttempts,
+      success_count: successCount,
+      failed_count: failedCount,
+      success_rate: successRate,
+      avg_latency_ms: avgLatencyMs == null || totalAttempts === 0
+        ? null
+        : Math.round(avgLatencyMs * latencyFactor),
+      avg_first_byte_ms: avgFirstByteMs == null || totalAttempts === 0
+        ? null
+        : Math.round(avgFirstByteMs * latencyFactor),
+      avg_tps: avgTps == null || totalAttempts === 0
+        ? null
+        : Number((avgTps / latencyFactor).toFixed(1))
+    }
+  })
+}
+
+function withHealthTimelineDetails<T extends {
+  timeline?: string[]
+  time_range_start?: string
+  time_range_end?: string
+  avg_latency_ms?: number | null
+  avg_first_byte_ms?: number | null
+  avg_tps?: number | null
+}>(item: T) {
+  const rangeStart = item.time_range_start
+    ? new Date(item.time_range_start).getTime()
+    : Date.now() - 6 * 60 * 60 * 1000
+  const rangeEnd = item.time_range_end
+    ? new Date(item.time_range_end).getTime()
+    : Date.now()
+  return {
+    ...item,
+    timeline_details: generateHealthTimelineDetails(
+      item.timeline || [],
+      item.avg_latency_ms ?? null,
+      item.avg_first_byte_ms ?? null,
+      item.avg_tps ?? null,
+      rangeStart,
+      rangeEnd
+    )
+  }
+}
+
 // Mock 端点健康数据
 // 注意：success_rate 使用 0-1 之间的小数，前端会乘以 100 显示为百分比
 // 事件的成功/失败/跳过比例必须与 success_rate 保持一致
@@ -168,11 +239,17 @@ const MOCK_ENDPOINT_STATUS = {
       failed_count: 30,
       skipped_count: 10,
       success_rate: 0.984,
+      avg_latency_ms: 920,
+      avg_first_byte_ms: 148,
+      avg_tps: 92.4,
       provider_count: 2,
       key_count: 4,
       last_event_at: new Date().toISOString(),
       // 98.4% 成功率：successRate=0.984, failRate=0.012, skipRate=0.004
-      events: generateHealthEvents(80, 0.984, 0.012, 0.004, 900, 500)
+      events: generateHealthEvents(80, 0.984, 0.012, 0.004, 900, 500),
+      timeline: generateHealthTimeline(0.9, 0.06, 60),
+      time_range_start: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(),
+      time_range_end: new Date().toISOString()
     },
     {
       api_format: 'claude:messages',
@@ -182,11 +259,17 @@ const MOCK_ENDPOINT_STATUS = {
       failed_count: 85,
       skipped_count: 25,
       success_rate: 0.942,
+      avg_latency_ms: 1280,
+      avg_first_byte_ms: 232,
+      avg_tps: 71.5,
       provider_count: 5,
       key_count: 9,
       last_event_at: new Date().toISOString(),
       // 94.2% 成功率：successRate=0.942, failRate=0.045, skipRate=0.013
-      events: generateHealthEvents(120, 0.942, 0.045, 0.013, 1200, 800)
+      events: generateHealthEvents(120, 0.942, 0.045, 0.013, 1200, 800),
+      timeline: generateHealthTimeline(0.78, 0.14, 60),
+      time_range_start: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(),
+      time_range_end: new Date().toISOString()
     },
     {
       api_format: 'gemini:generate_content',
@@ -196,11 +279,17 @@ const MOCK_ENDPOINT_STATUS = {
       failed_count: 0,
       skipped_count: 0,
       success_rate: 1.0,
+      avg_latency_ms: 410,
+      avg_first_byte_ms: 92,
+      avg_tps: 118.2,
       provider_count: 3,
       key_count: 3,
       last_event_at: new Date().toISOString(),
       // 100% 成功率：全部成功
-      events: generateHealthEvents(45, 1.0, 0, 0, 400, 200)
+      events: generateHealthEvents(45, 1.0, 0, 0, 400, 200),
+      timeline: generateHealthTimeline(0.96, 0.02, 60),
+      time_range_start: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(),
+      time_range_end: new Date().toISOString()
     },
     {
       api_format: 'gemini:generate_content',
@@ -210,11 +299,17 @@ const MOCK_ENDPOINT_STATUS = {
       failed_count: 4,
       skipped_count: 2,
       success_rate: 0.987,
+      avg_latency_ms: 520,
+      avg_first_byte_ms: 110,
+      avg_tps: 102.7,
       provider_count: 3,
       key_count: 3,
       last_event_at: new Date().toISOString(),
       // 98.7% 成功率：successRate=0.987, failRate=0.009, skipRate=0.004
-      events: generateHealthEvents(25, 0.987, 0.009, 0.004, 500, 300)
+      events: generateHealthEvents(25, 0.987, 0.009, 0.004, 500, 300),
+      timeline: generateHealthTimeline(0.9, 0.06, 60),
+      time_range_start: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(),
+      time_range_end: new Date().toISOString()
     },
     {
       api_format: 'openai:chat',
@@ -224,11 +319,17 @@ const MOCK_ENDPOINT_STATUS = {
       failed_count: 35,
       skipped_count: 5,
       success_rate: 0.974,
+      avg_latency_ms: 760,
+      avg_first_byte_ms: 138,
+      avg_tps: 88.9,
       provider_count: 1,
       key_count: 2,
       last_event_at: new Date().toISOString(),
       // 97.4% 成功率：successRate=0.974, failRate=0.022, skipRate=0.004
-      events: generateHealthEvents(60, 0.974, 0.022, 0.004, 700, 400)
+      events: generateHealthEvents(60, 0.974, 0.022, 0.004, 700, 400),
+      timeline: generateHealthTimeline(0.86, 0.09, 60),
+      time_range_start: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(),
+      time_range_end: new Date().toISOString()
     },
     {
       api_format: 'openai:responses',
@@ -238,11 +339,17 @@ const MOCK_ENDPOINT_STATUS = {
       failed_count: 100,
       skipped_count: 40,
       success_rate: 0.940,
+      avg_latency_ms: 980,
+      avg_first_byte_ms: 185,
+      avg_tps: 64.3,
       provider_count: 4,
       key_count: 5,
       last_event_at: new Date().toISOString(),
       // 94.0% 成功率：successRate=0.940, failRate=0.043, skipRate=0.017
-      events: generateHealthEvents(100, 0.940, 0.043, 0.017, 800, 600)
+      events: generateHealthEvents(100, 0.940, 0.043, 0.017, 800, 600),
+      timeline: generateHealthTimeline(0.76, 0.14, 60),
+      time_range_start: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(),
+      time_range_end: new Date().toISOString()
     },
     {
       api_format: 'openai:embedding',
@@ -252,10 +359,16 @@ const MOCK_ENDPOINT_STATUS = {
       failed_count: 6,
       skipped_count: 2,
       success_rate: 0.987,
+      avg_latency_ms: 330,
+      avg_first_byte_ms: 72,
+      avg_tps: 0,
       provider_count: 1,
       key_count: 1,
       last_event_at: new Date().toISOString(),
-      events: generateHealthEvents(40, 0.987, 0.01, 0.003, 320, 140)
+      events: generateHealthEvents(40, 0.987, 0.01, 0.003, 320, 140),
+      timeline: generateHealthTimeline(0.92, 0.05, 60),
+      time_range_start: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(),
+      time_range_end: new Date().toISOString()
     }
   ]
 }
@@ -272,6 +385,7 @@ const MOCK_MODEL_STATUS = {
       success_rate: 0.9896,
       avg_latency_ms: 1736,
       avg_first_byte_ms: 176,
+      avg_tps: 84.6,
       provider_count: 3,
       last_event_at: new Date().toISOString(),
       events: generateHealthEvents(60, 0.989, 0.008, 0.003, 1600, 460),
@@ -288,6 +402,7 @@ const MOCK_MODEL_STATUS = {
       success_rate: 0.9751,
       avg_latency_ms: 1280,
       avg_first_byte_ms: 221,
+      avg_tps: 76.2,
       provider_count: 2,
       last_event_at: new Date().toISOString(),
       events: generateHealthEvents(60, 0.975, 0.02, 0.005, 1200, 520),
@@ -304,6 +419,7 @@ const MOCK_MODEL_STATUS = {
       success_rate: 0.9517,
       avg_latency_ms: 940,
       avg_first_byte_ms: 184,
+      avg_tps: 101.8,
       provider_count: 2,
       last_event_at: new Date().toISOString(),
       events: generateHealthEvents(55, 0.952, 0.04, 0.008, 860, 300),
@@ -320,6 +436,7 @@ const MOCK_MODEL_STATUS = {
       success_rate: 0.835,
       avg_latency_ms: 2310,
       avg_first_byte_ms: 420,
+      avg_tps: 38.4,
       provider_count: 1,
       last_event_at: new Date().toISOString(),
       events: generateHealthEvents(45, 0.835, 0.145, 0.02, 2200, 780),
@@ -344,6 +461,7 @@ const MOCK_PROVIDER_HEALTH_STATUS = {
       success_rate: 0.9896,
       avg_latency_ms: 1736,
       avg_first_byte_ms: 176,
+      avg_tps: 84.6,
       model_count: 2,
       last_event_at: new Date().toISOString(),
       timeline: generateHealthTimeline(0.9, 0.05),
@@ -362,6 +480,7 @@ const MOCK_PROVIDER_HEALTH_STATUS = {
       success_rate: 0.9751,
       avg_latency_ms: 1280,
       avg_first_byte_ms: 221,
+      avg_tps: 76.2,
       model_count: 1,
       last_event_at: new Date().toISOString(),
       timeline: generateHealthTimeline(0.84, 0.09),
@@ -380,6 +499,7 @@ const MOCK_PROVIDER_HEALTH_STATUS = {
       success_rate: 0.9517,
       avg_latency_ms: 940,
       avg_first_byte_ms: 184,
+      avg_tps: 101.8,
       model_count: 1,
       last_event_at: new Date().toISOString(),
       timeline: generateHealthTimeline(0.78, 0.14),
@@ -398,6 +518,7 @@ const MOCK_PROVIDER_HEALTH_STATUS = {
       success_rate: 1,
       avg_latency_ms: null,
       avg_first_byte_ms: null,
+      avg_tps: null,
       model_count: 0,
       last_event_at: null,
       timeline: Array.from({ length: 60 }, () => 'unknown'),
@@ -406,6 +527,110 @@ const MOCK_PROVIDER_HEALTH_STATUS = {
       models: []
     }
   ]
+}
+
+function mockApiFormatDisplayName(apiFormat: string) {
+  const labels: Record<string, string> = {
+    'claude:messages': 'Claude Messages',
+    'gemini:generate_content': 'Gemini Generate Content',
+    'openai:chat': 'OpenAI Chat',
+    'openai:embedding': 'OpenAI Embedding'
+  }
+  return labels[apiFormat] || apiFormat
+}
+
+function relatedEndpointMonitor(format: typeof MOCK_ENDPOINT_STATUS.formats[number]) {
+  const detailed = withHealthTimelineDetails(format)
+  return {
+    kind: 'endpoint',
+    key: format.api_format,
+    display_name: mockApiFormatDisplayName(format.api_format),
+    meta_text: format.api_path,
+    total_attempts: format.total_attempts,
+    success_count: format.success_count,
+    failed_count: format.failed_count,
+    success_rate: format.success_rate,
+    avg_latency_ms: format.avg_latency_ms,
+    avg_first_byte_ms: format.avg_first_byte_ms,
+    avg_tps: format.avg_tps,
+    last_event_at: format.last_event_at,
+    timeline: format.timeline,
+    timeline_details: detailed.timeline_details,
+    time_range_start: format.time_range_start,
+    time_range_end: format.time_range_end
+  }
+}
+
+function relatedModelMonitor(model: typeof MOCK_MODEL_STATUS.models[number]) {
+  const detailed = withHealthTimelineDetails(model)
+  return {
+    kind: 'model',
+    key: model.model,
+    display_name: model.display_name || model.model,
+    meta_text: model.provider_count ? `${model.provider_count} 个提供商` : null,
+    total_attempts: model.total_attempts,
+    success_count: model.success_count,
+    failed_count: model.failed_count,
+    success_rate: model.success_rate,
+    avg_latency_ms: model.avg_latency_ms,
+    avg_first_byte_ms: model.avg_first_byte_ms,
+    avg_tps: model.avg_tps,
+    last_event_at: model.last_event_at,
+    timeline: model.timeline,
+    timeline_details: detailed.timeline_details,
+    time_range_start: model.time_range_start,
+    time_range_end: model.time_range_end
+  }
+}
+
+function relatedProviderMonitor(provider: typeof MOCK_PROVIDER_HEALTH_STATUS.providers[number]) {
+  const detailed = withHealthTimelineDetails(provider)
+  return {
+    kind: 'provider',
+    key: provider.provider_name,
+    display_name: provider.provider_name,
+    meta_text: provider.provider_type || 'custom',
+    total_attempts: provider.total_attempts,
+    success_count: provider.success_count,
+    failed_count: provider.failed_count,
+    success_rate: provider.success_rate,
+    avg_latency_ms: provider.avg_latency_ms,
+    avg_first_byte_ms: provider.avg_first_byte_ms,
+    avg_tps: provider.avg_tps,
+    last_event_at: provider.last_event_at,
+    timeline: provider.timeline,
+    timeline_details: detailed.timeline_details,
+    time_range_start: provider.time_range_start,
+    time_range_end: provider.time_range_end
+  }
+}
+
+function uniqueMockEndpointFormats() {
+  const seen = new Set<string>()
+  return MOCK_ENDPOINT_STATUS.formats.filter(format => {
+    if (seen.has(format.api_format)) return false
+    seen.add(format.api_format)
+    return true
+  })
+}
+
+function buildMockRelatedHealthResponse(config: AxiosRequestConfig, includeProviders: boolean) {
+  const dimension = String(config.params?.dimension || 'endpoint')
+  const value = String(config.params?.value || '')
+  const endpoints = uniqueMockEndpointFormats().slice(0, 3).map(relatedEndpointMonitor)
+  const models = MOCK_MODEL_STATUS.models.slice(0, 3).map(relatedModelMonitor)
+  const providers = includeProviders
+    ? MOCK_PROVIDER_HEALTH_STATUS.providers.slice(0, 3).map(relatedProviderMonitor)
+    : []
+
+  return {
+    generated_at: new Date().toISOString(),
+    dimension,
+    value,
+    related_endpoints: dimension === 'endpoint' ? [] : endpoints,
+    related_models: dimension === 'model' ? [] : models,
+    related_providers: dimension === 'provider' ? [] : providers
+  }
 }
 
 // 生成活跃热力图数据（最近365天）
@@ -1193,19 +1418,37 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
   'GET /api/admin/endpoints/health/api-formats': async () => {
     await delay()
     requireAdmin()
-    return createMockResponse(MOCK_ENDPOINT_STATUS)
+    return createMockResponse({
+      ...MOCK_ENDPOINT_STATUS,
+      formats: MOCK_ENDPOINT_STATUS.formats.map(withHealthTimelineDetails)
+    })
   },
 
   'GET /api/admin/endpoints/health/models': async () => {
     await delay()
     requireAdmin()
-    return createMockResponse(MOCK_MODEL_STATUS)
+    return createMockResponse({
+      ...MOCK_MODEL_STATUS,
+      models: MOCK_MODEL_STATUS.models.map(withHealthTimelineDetails)
+    })
   },
 
   'GET /api/admin/endpoints/health/providers': async () => {
     await delay()
     requireAdmin()
-    return createMockResponse(MOCK_PROVIDER_HEALTH_STATUS)
+    return createMockResponse({
+      ...MOCK_PROVIDER_HEALTH_STATUS,
+      providers: MOCK_PROVIDER_HEALTH_STATUS.providers.map(provider => ({
+        ...withHealthTimelineDetails(provider),
+        models: provider.models.map(withHealthTimelineDetails)
+      }))
+    })
+  },
+
+  'GET /api/admin/endpoints/health/related': async (config) => {
+    await delay()
+    requireAdmin()
+    return createMockResponse(buildMockRelatedHealthResponse(config, true))
   },
 
   'GET /api/admin/endpoints/keys': async () => {
@@ -1565,8 +1808,15 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
         failed_count: f.failed_count,
         skipped_count: f.skipped_count,
         success_rate: f.success_rate,
+        avg_latency_ms: f.avg_latency_ms,
+        avg_first_byte_ms: f.avg_first_byte_ms,
+        avg_tps: f.avg_tps,
         last_event_at: f.last_event_at,
-        events: f.events.slice(0, 10)
+        events: f.events.slice(0, 10),
+        timeline: f.timeline,
+        timeline_details: withHealthTimelineDetails(f).timeline_details,
+        time_range_start: f.time_range_start,
+        time_range_end: f.time_range_end
       }))
     })
   },
@@ -1584,13 +1834,20 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
         success_rate: model.success_rate,
         avg_latency_ms: model.avg_latency_ms,
         avg_first_byte_ms: model.avg_first_byte_ms,
+        avg_tps: model.avg_tps,
         last_event_at: model.last_event_at,
         events: model.events.slice(0, 10),
         timeline: model.timeline,
+        timeline_details: withHealthTimelineDetails(model).timeline_details,
         time_range_start: model.time_range_start,
         time_range_end: model.time_range_end
       }))
     })
+  },
+
+  'GET /api/public/health/related': async (config) => {
+    await delay()
+    return createMockResponse(buildMockRelatedHealthResponse(config, false))
   }
 }
 
@@ -3843,6 +4100,98 @@ mockHandlers['GET /api/admin/stats/performance/percentiles'] = async () => {
   ])
 }
 
+mockHandlers['GET /api/admin/stats/performance/providers'] = async () => {
+  await delay()
+  requireAdmin()
+  return createMockResponse({
+    summary: {
+      request_count: 18420,
+      success_rate: 97.36,
+      avg_output_tps: 78.4,
+      avg_first_byte_time_ms: 318,
+      avg_response_time_ms: 1640,
+      p90_response_time_ms: 2860,
+      p99_response_time_ms: 9120,
+      p90_first_byte_time_ms: 690,
+      p99_first_byte_time_ms: 2210,
+      tps_sample_count: 17120,
+      response_time_sample_count: 18200,
+      first_byte_sample_count: 16840,
+      slow_request_count: 214
+    },
+    providers: [
+      {
+        provider_id: 'provider-openai',
+        provider: 'OpenAI',
+        request_count: 8120,
+        success_count: 7930,
+        error_count: 190,
+        success_rate: 97.66,
+        output_tokens: 1480000,
+        avg_output_tps: 83.2,
+        avg_first_byte_time_ms: 286,
+        avg_response_time_ms: 1420,
+        p90_response_time_ms: 2440,
+        p99_response_time_ms: 7520,
+        p90_first_byte_time_ms: 620,
+        p99_first_byte_time_ms: 1840,
+        tps_sample_count: 7890,
+        response_time_sample_count: 8050,
+        first_byte_sample_count: 7760,
+        slow_request_count: 71
+      },
+      {
+        provider_id: 'provider-anthropic',
+        provider: 'Anthropic',
+        request_count: 6230,
+        success_count: 6044,
+        error_count: 186,
+        success_rate: 97.01,
+        output_tokens: 1120000,
+        avg_output_tps: 62.7,
+        avg_first_byte_time_ms: 410,
+        avg_response_time_ms: 1880,
+        p90_response_time_ms: 3180,
+        p99_response_time_ms: 10120,
+        p90_first_byte_time_ms: 820,
+        p99_first_byte_time_ms: 2680,
+        tps_sample_count: 5900,
+        response_time_sample_count: 6150,
+        first_byte_sample_count: 5810,
+        slow_request_count: 109
+      },
+      {
+        provider_id: 'provider-gemini',
+        provider: 'Gemini',
+        request_count: 4070,
+        success_count: 3960,
+        error_count: 110,
+        success_rate: 97.30,
+        output_tokens: 780000,
+        avg_output_tps: 91.1,
+        avg_first_byte_time_ms: 240,
+        avg_response_time_ms: 1210,
+        p90_response_time_ms: 2190,
+        p99_response_time_ms: 6420,
+        p90_first_byte_time_ms: 520,
+        p99_first_byte_time_ms: 1510,
+        tps_sample_count: 3930,
+        response_time_sample_count: 4000,
+        first_byte_sample_count: 3820,
+        slow_request_count: 34
+      }
+    ],
+    timeline: [
+      { date: '2026-02-01', provider_id: 'provider-openai', provider: 'OpenAI', request_count: 4020, output_tokens: 720000, avg_output_tps: 81.4, avg_first_byte_time_ms: 294, avg_response_time_ms: 1450, success_rate: 97.4, slow_request_count: 38 },
+      { date: '2026-02-02', provider_id: 'provider-openai', provider: 'OpenAI', request_count: 4100, output_tokens: 760000, avg_output_tps: 85.1, avg_first_byte_time_ms: 278, avg_response_time_ms: 1390, success_rate: 97.9, slow_request_count: 33 },
+      { date: '2026-02-01', provider_id: 'provider-anthropic', provider: 'Anthropic', request_count: 3020, output_tokens: 540000, avg_output_tps: 60.8, avg_first_byte_time_ms: 430, avg_response_time_ms: 1940, success_rate: 96.7, slow_request_count: 58 },
+      { date: '2026-02-02', provider_id: 'provider-anthropic', provider: 'Anthropic', request_count: 3210, output_tokens: 580000, avg_output_tps: 64.2, avg_first_byte_time_ms: 392, avg_response_time_ms: 1810, success_rate: 97.3, slow_request_count: 51 },
+      { date: '2026-02-01', provider_id: 'provider-gemini', provider: 'Gemini', request_count: 2020, output_tokens: 382000, avg_output_tps: 88.6, avg_first_byte_time_ms: 252, avg_response_time_ms: 1260, success_rate: 97.0, slow_request_count: 18 },
+      { date: '2026-02-02', provider_id: 'provider-gemini', provider: 'Gemini', request_count: 2050, output_tokens: 398000, avg_output_tps: 93.6, avg_first_byte_time_ms: 228, avg_response_time_ms: 1160, success_rate: 97.6, slow_request_count: 16 }
+    ]
+  })
+}
+
 mockHandlers['GET /api/admin/stats/errors/distribution'] = async () => {
   await delay()
   requireAdmin()
@@ -3992,6 +4341,241 @@ mockHandlers['GET /api/admin/monitoring/resilience/circuit-history'] = async () 
   })
 }
 
+mockHandlers['GET /api/admin/monitoring/cache/stats'] = async () => {
+  await delay()
+  requireAdmin()
+  return createMockResponse({
+    status: 'ok',
+    data: {
+      scheduler: 'adaptive-cache-affinity',
+      total_affinities: 1428,
+      cache_hit_rate: 0.842,
+      provider_switches: 38,
+      key_switches: 74,
+      cache_hits: 93842,
+      cache_misses: 17610,
+      scheduler_metrics: {
+        cache_hits: 93842,
+        cache_misses: 17610,
+        cache_hit_rate: 0.842,
+        total_batches: 0,
+        last_batch_size: 0,
+        total_candidates: 0,
+        last_candidate_count: 0,
+        concurrency_denied: 0,
+        avg_candidates_per_batch: 0,
+        scheduling_mode: 'adaptive',
+        provider_priority_mode: 'weighted'
+      },
+      affinity_stats: {
+        storage_type: 'redis',
+        total_affinities: 1428,
+        active_affinities: 1410,
+        cache_hits: 93842,
+        cache_misses: 17610,
+        cache_hit_rate: 0.842,
+        cache_invalidations: 42,
+        provider_switches: 38,
+        key_switches: 74,
+        config: {
+          default_ttl: 300
+        }
+      }
+    }
+  })
+}
+
+mockHandlers['GET /api/admin/monitoring/cache/redis-keys'] = async () => {
+  await delay()
+  requireAdmin()
+  return createMockResponse({
+    status: 'ok',
+    data: {
+      available: true,
+      categories: [
+        { key: 'cache_affinity', name: '缓存亲和性', pattern: 'cache_affinity:*', description: '请求路由亲和性缓存', count: 1428 },
+        { key: 'concurrency_lock', name: '并发锁', pattern: 'concurrency:*', description: '请求并发控制锁', count: 186 },
+        { key: 'apikey', name: 'API Key', pattern: 'apikey:*', description: 'API Key 认证缓存', count: 263 },
+        { key: 'health', name: '健康检查', pattern: 'health:*', description: '端点健康状态缓存', count: 154 },
+        { key: 'models_list', name: '模型列表', pattern: 'models:list:*', description: '/v1/models 端点模型列表缓存', count: 38 },
+        { key: 'provider_balance', name: 'Provider 余额', pattern: 'provider_ops:balance:*', description: 'Provider 余额查询缓存', count: 24 }
+      ],
+      total_keys: 2093
+    }
+  })
+}
+
+mockHandlers['GET /api/admin/proxy-nodes'] = async () => {
+  await delay()
+  requireAdmin()
+  const now = new Date().toISOString()
+  return createMockResponse({
+    items: [
+      {
+        id: 'proxy-node-1',
+        name: 'edge-shanghai-1',
+        ip: '10.8.0.12',
+        port: 8443,
+        region: 'cn-east',
+        status: 'online',
+        is_manual: false,
+        tunnel_mode: true,
+        tunnel_connected: true,
+        tunnel_connected_at: now,
+        hardware_info: {
+          cpu_cores: 8,
+          total_memory_mb: 16384,
+          os_info: 'linux'
+        },
+        estimated_max_concurrency: 620,
+        remote_config: null,
+        config_version: 12,
+        registered_by: 'agent',
+        last_heartbeat_at: now,
+        heartbeat_interval: 15,
+        active_connections: 82,
+        total_requests: 43820,
+        avg_latency_ms: 42,
+        failed_requests: 34,
+        dns_failures: 2,
+        stream_errors: 7,
+        proxy_metadata: {
+          resource_usage: {
+            system_cpu_usage_percent: 41.8,
+            process_cpu_usage_percent: 18.4,
+            memory_total_bytes: 17179869184,
+            memory_used_bytes: 9878424780,
+            memory_used_percent: 57.5,
+            process_memory_bytes: 438304768,
+            process_memory_percent: 2.6,
+            process_uptime_secs: 86400
+          }
+        },
+        created_at: now,
+        updated_at: now
+      },
+      {
+        id: 'proxy-node-2',
+        name: 'edge-us-west-1',
+        ip: '10.8.1.18',
+        port: 8443,
+        region: 'us-west',
+        status: 'online',
+        is_manual: false,
+        tunnel_mode: true,
+        tunnel_connected: true,
+        tunnel_connected_at: now,
+        hardware_info: {
+          cpu_cores: 16,
+          total_memory_mb: 32768,
+          os_info: 'linux'
+        },
+        estimated_max_concurrency: 980,
+        remote_config: null,
+        config_version: 9,
+        registered_by: 'agent',
+        last_heartbeat_at: now,
+        heartbeat_interval: 15,
+        active_connections: 94,
+        total_requests: 58340,
+        avg_latency_ms: 58,
+        failed_requests: 52,
+        dns_failures: 1,
+        stream_errors: 9,
+        proxy_metadata: {
+          resource_usage: {
+            system_cpu_usage_percent: 55.2,
+            process_cpu_usage_percent: 22.6,
+            memory_total_bytes: 34359738368,
+            memory_used_bytes: 22333829939,
+            memory_used_percent: 65.0,
+            process_memory_bytes: 612368384,
+            process_memory_percent: 1.8,
+            process_uptime_secs: 172800
+          }
+        },
+        created_at: now,
+        updated_at: now
+      }
+    ],
+    total: 2,
+    skip: 0,
+    limit: 200,
+    rollout: null
+  })
+}
+
+mockHandlers['GET /api/admin/proxy-nodes/metrics/fleet'] = async () => {
+  await delay()
+  requireAdmin()
+  const now = Math.floor(Date.now() / 1000)
+  return createMockResponse({
+    step: '1m',
+    from: now - 3600,
+    to: now,
+    items: [
+      {
+        bucket_start_unix_secs: now - 120,
+        bucket_start: new Date((now - 120) * 1000).toISOString(),
+        samples: 2,
+        uptime_samples: 2,
+        uptime_ratio: 1,
+        active_connections_sum: 168,
+        active_connections_max: 92,
+        active_connections_avg: 84,
+        heartbeat_rtt_ms_sum: 86,
+        heartbeat_rtt_ms_max: 52,
+        heartbeat_rtt_ms_avg: 43,
+        connect_errors_delta: 0,
+        disconnects_delta: 0,
+        error_events_delta: 1,
+        ws_in_bytes_delta: 4849664,
+        ws_out_bytes_delta: 12812288,
+        ws_in_frames_delta: 18320,
+        ws_out_frames_delta: 42110
+      },
+      {
+        bucket_start_unix_secs: now - 60,
+        bucket_start: new Date((now - 60) * 1000).toISOString(),
+        samples: 2,
+        uptime_samples: 2,
+        uptime_ratio: 1,
+        active_connections_sum: 176,
+        active_connections_max: 94,
+        active_connections_avg: 88,
+        heartbeat_rtt_ms_sum: 82,
+        heartbeat_rtt_ms_max: 48,
+        heartbeat_rtt_ms_avg: 41,
+        connect_errors_delta: 0,
+        disconnects_delta: 0,
+        error_events_delta: 0,
+        ws_in_bytes_delta: 5154816,
+        ws_out_bytes_delta: 13996032,
+        ws_in_frames_delta: 19120,
+        ws_out_frames_delta: 44710
+      }
+    ],
+    summary: {
+      samples: 4,
+      uptime_samples: 4,
+      uptime_ratio: 1,
+      active_connections_sum: 344,
+      active_connections_max: 94,
+      active_connections_avg: 86,
+      heartbeat_rtt_ms_sum: 168,
+      heartbeat_rtt_ms_max: 52,
+      heartbeat_rtt_ms_avg: 42,
+      connect_errors_delta: 0,
+      disconnects_delta: 0,
+      error_events_delta: 1,
+      ws_in_bytes_delta: 10004480,
+      ws_out_bytes_delta: 26808320,
+      ws_in_frames_delta: 37440,
+      ws_out_frames_delta: 86820
+    }
+  })
+}
+
 mockHandlers['GET /_gateway/metrics'] = async () => {
   await delay(60)
   requireAdmin()
@@ -4031,6 +4615,45 @@ aether_gateway_tunnel_nodes 6
 # HELP aether_gateway_tunnel_active_streams Current number of active local relay streams.
 # TYPE aether_gateway_tunnel_active_streams gauge
 aether_gateway_tunnel_active_streams 164
+# HELP aether_gateway_tunnel_proxy_connections_available Current number of available proxy sockets.
+# TYPE aether_gateway_tunnel_proxy_connections_available gauge
+aether_gateway_tunnel_proxy_connections_available 24
+# HELP aether_gateway_tunnel_proxy_connections_closing Current number of closing proxy sockets.
+# TYPE aether_gateway_tunnel_proxy_connections_closing gauge
+aether_gateway_tunnel_proxy_connections_closing 1
+# HELP aether_gateway_tunnel_proxy_connections_draining Current number of draining proxy sockets.
+# TYPE aether_gateway_tunnel_proxy_connections_draining gauge
+aether_gateway_tunnel_proxy_connections_draining 2
+# HELP aether_gateway_tunnel_proxy_connections_soft_avoid Current number of soft-avoid proxy sockets.
+# TYPE aether_gateway_tunnel_proxy_connections_soft_avoid gauge
+aether_gateway_tunnel_proxy_connections_soft_avoid 3
+# HELP aether_gateway_tunnel_proxy_outbound_queue_depth_total Current outbound queue depth total.
+# TYPE aether_gateway_tunnel_proxy_outbound_queue_depth_total gauge
+aether_gateway_tunnel_proxy_outbound_queue_depth_total 312
+# HELP aether_gateway_tunnel_proxy_outbound_queue_depth_max Current outbound queue max depth.
+# TYPE aether_gateway_tunnel_proxy_outbound_queue_depth_max gauge
+aether_gateway_tunnel_proxy_outbound_queue_depth_max 38
+# HELP aether_gateway_tunnel_proxy_outbound_queue_capacity_total Current outbound queue capacity total.
+# TYPE aether_gateway_tunnel_proxy_outbound_queue_capacity_total gauge
+aether_gateway_tunnel_proxy_outbound_queue_capacity_total 2048
+# HELP aether_gateway_tunnel_proxy_outbound_queue_rejected_full_total Outbound queue full rejections.
+# TYPE aether_gateway_tunnel_proxy_outbound_queue_rejected_full_total counter
+aether_gateway_tunnel_proxy_outbound_queue_rejected_full_total 7
+# HELP aether_gateway_tunnel_proxy_outbound_queue_rejected_closed_total Outbound queue closed rejections.
+# TYPE aether_gateway_tunnel_proxy_outbound_queue_rejected_closed_total counter
+aether_gateway_tunnel_proxy_outbound_queue_rejected_closed_total 2
+# HELP aether_gateway_tunnel_proxy_connection_congested_total Congested proxy selections.
+# TYPE aether_gateway_tunnel_proxy_connection_congested_total counter
+aether_gateway_tunnel_proxy_connection_congested_total 21
+# HELP aether_gateway_tunnel_proxy_soft_avoid_selection_total Soft-avoid proxy selections.
+# TYPE aether_gateway_tunnel_proxy_soft_avoid_selection_total counter
+aether_gateway_tunnel_proxy_soft_avoid_selection_total 18
+# HELP aether_gateway_tunnel_proxy_selection_retry_total Proxy selection retries.
+# TYPE aether_gateway_tunnel_proxy_selection_retry_total counter
+aether_gateway_tunnel_proxy_selection_retry_total 11
+# HELP aether_gateway_tunnel_proxy_selection_unavailable_total Proxy selection unavailable events.
+# TYPE aether_gateway_tunnel_proxy_selection_unavailable_total counter
+aether_gateway_tunnel_proxy_selection_unavailable_total 4
 # HELP aether_gateway_decision_remote_total Number of requests that fell back to Python decision endpoints.
 # TYPE aether_gateway_decision_remote_total counter
 aether_gateway_decision_remote_total{route_kind="chat",reason="local_decision_miss"} 4
@@ -4086,7 +4709,7 @@ mockHandlers['GET /api/admin/stats/time-series'] = async () => {
   await delay()
   requireAdmin()
   return createMockResponse([
-    { date: '2026-02-01', total_requests: 120, input_tokens: 20000, output_tokens: 30000, total_cost: 12.3 },
-    { date: '2026-02-02', total_requests: 140, input_tokens: 22000, output_tokens: 32000, total_cost: 13.8 }
+    { date: '2026-02-01', total_requests: 120, input_tokens: 20000, output_tokens: 30000, total_tokens: 50000, total_cost: 12.3 },
+    { date: '2026-02-02', total_requests: 140, input_tokens: 22000, output_tokens: 32000, total_tokens: 54000, total_cost: 13.8 }
   ])
 }

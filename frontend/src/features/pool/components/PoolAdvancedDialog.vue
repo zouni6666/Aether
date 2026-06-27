@@ -2,7 +2,7 @@
   <Dialog
     :model-value="modelValue"
     title="高级设置"
-    description="冷却、健康、成本控制与其他高级参数"
+    description="冷却、热池与其他高级参数"
     size="3xl"
     @update:model-value="emit('update:modelValue', $event)"
   >
@@ -11,18 +11,18 @@
         <div class="space-y-1">
           <div class="flex flex-wrap items-center gap-2">
             <h3 class="text-sm font-semibold">
-              冷却与健康
+              冷却与热池
             </h3>
             <span class="rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">
               核心策略
             </span>
           </div>
           <p class="text-xs leading-5 text-muted-foreground">
-            控制自动冷却、自适应热池、异常清理和全局调度优先级。
+            控制冷却时间、自适应热池和异常清理。
           </p>
         </div>
 
-        <div class="grid gap-3 lg:grid-cols-3">
+        <div class="grid gap-3 lg:grid-cols-2">
           <div
             v-for="item in healthToggleCards"
             :key="item.key"
@@ -134,174 +134,82 @@
               @update:model-value="(v) => form.overload_cooldown_seconds = parseNum(v)"
             />
           </div>
+        </div>
+      </section>
+
+      <section class="space-y-4 rounded-2xl border border-border/60 bg-card/70 p-4 sm:p-5">
+        <div class="space-y-1">
+          <div class="flex flex-wrap items-center gap-2">
+            <h3 class="text-sm font-semibold">
+              批量操作
+            </h3>
+            <span class="rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">
+              任务效率
+            </span>
+          </div>
+          <p class="text-xs leading-5 text-muted-foreground">
+            控制刷新 OAuth、自适应热池和批量额度处理时的并行请求数。
+          </p>
+        </div>
+
+        <div class="grid gap-3 rounded-xl bg-muted/30 p-4 sm:grid-cols-2 xl:grid-cols-4">
           <div class="space-y-1.5">
             <Label>
-              粘性会话 TTL
-              <span class="text-xs text-muted-foreground">(秒)</span>
+              并发数
             </Label>
             <Input
-              :model-value="form.sticky_session_ttl_seconds ?? ''"
+              :model-value="form.batch_concurrency ?? ''"
               type="number"
-              min="60"
-              max="86400"
-              placeholder="3600 (留空禁用)"
-              @update:model-value="(v) => form.sticky_session_ttl_seconds = parseNum(v)"
+              min="1"
+              max="32"
+              placeholder="8"
+              @update:model-value="(v) => form.batch_concurrency = parseNum(v)"
+            />
+            <p class="text-[11px] leading-5 text-muted-foreground">
+              为空时沿用默认值；数值越大，批量操作越快，但会增加瞬时请求压力。
+            </p>
+          </div>
+          <div class="space-y-1.5">
+            <Label>
+              探测并发
+            </Label>
+            <Input
+              :model-value="form.probe_concurrency ?? ''"
+              type="number"
+              min="1"
+              max="64"
+              placeholder="4"
+              @update:model-value="(v) => form.probe_concurrency = parseNum(v)"
             />
           </div>
           <div class="space-y-1.5">
             <Label>
-              全局优先级
+              评分 Top-N
             </Label>
             <Input
-              :model-value="form.global_priority ?? ''"
+              :model-value="form.score_top_n ?? ''"
               type="number"
-              min="0"
-              max="999999"
-              placeholder="留空回退 provider_priority"
-              @update:model-value="(v) => form.global_priority = parseNum(v)"
+              min="1"
+              max="4096"
+              placeholder="128"
+              @update:model-value="(v) => form.score_top_n = parseNum(v)"
+            />
+          </div>
+          <div class="space-y-1.5">
+            <Label>
+              回退扫描
+            </Label>
+            <Input
+              :model-value="form.score_fallback_scan_limit ?? ''"
+              type="number"
+              min="1"
+              max="100000"
+              placeholder="1024"
+              @update:model-value="(v) => form.score_fallback_scan_limit = parseNum(v)"
             />
           </div>
         </div>
       </section>
-
-      <div :class="secondarySectionLayout.wrapperClass">
-        <section class="space-y-4 rounded-2xl border border-border/60 bg-card/70 p-4 sm:p-5">
-          <div class="space-y-1">
-            <div class="flex flex-wrap items-center gap-2">
-              <h3 class="text-sm font-semibold">
-                成本控制
-              </h3>
-              <span class="rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">
-                额度保护
-              </span>
-            </div>
-            <p class="text-xs leading-5 text-muted-foreground">
-              控制窗口期、Key 限额与软阈值，防止个别账号短时间内过度消耗。
-            </p>
-          </div>
-
-          <div
-            class="grid gap-3 sm:grid-cols-2"
-            :class="costFieldLayout.desktopColumnsClass"
-          >
-            <div class="space-y-1.5">
-              <Label>
-                成本窗口
-                <span class="text-xs text-muted-foreground">(秒)</span>
-              </Label>
-              <Input
-                :model-value="form.cost_window_seconds ?? ''"
-                type="number"
-                min="3600"
-                max="86400"
-                placeholder="18000 (5 小时)"
-                @update:model-value="(v) => form.cost_window_seconds = parseNum(v)"
-              />
-            </div>
-            <div class="space-y-1.5">
-              <Label>
-                Key 窗口限额
-                <span class="text-xs text-muted-foreground">(tokens)</span>
-              </Label>
-              <Input
-                :model-value="form.cost_limit_per_key_tokens ?? ''"
-                type="number"
-                min="0"
-                placeholder="留空 = 不限"
-                @update:model-value="(v) => form.cost_limit_per_key_tokens = parseNum(v)"
-              />
-            </div>
-            <div class="space-y-1.5">
-              <Label>
-                软阈值
-                <span class="text-xs text-muted-foreground">(%)</span>
-              </Label>
-              <Input
-                :model-value="form.cost_soft_threshold_percent ?? ''"
-                type="number"
-                min="0"
-                max="100"
-                placeholder="80"
-                @update:model-value="(v) => form.cost_soft_threshold_percent = parseNum(v)"
-              />
-            </div>
-          </div>
-        </section>
-
-        <section class="space-y-4 rounded-2xl border border-border/60 bg-card/70 p-4 sm:p-5">
-          <div class="space-y-1">
-            <div class="flex flex-wrap items-center gap-2">
-              <h3 class="text-sm font-semibold">
-                批量操作
-              </h3>
-              <span class="rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">
-                任务效率
-              </span>
-            </div>
-            <p class="text-xs leading-5 text-muted-foreground">
-              控制刷新 OAuth、自适应热池和批量额度处理时的并行请求数。
-            </p>
-          </div>
-
-          <div class="grid gap-3 rounded-xl bg-muted/30 p-4 sm:grid-cols-2">
-            <div class="space-y-1.5">
-              <Label>
-                并发数
-              </Label>
-              <Input
-                :model-value="form.batch_concurrency ?? ''"
-                type="number"
-                min="1"
-                max="32"
-                placeholder="8"
-                @update:model-value="(v) => form.batch_concurrency = parseNum(v)"
-              />
-              <p class="text-[11px] leading-5 text-muted-foreground">
-                为空时沿用默认值；数值越大，批量操作越快，但会增加瞬时请求压力。
-              </p>
-            </div>
-            <div class="space-y-1.5">
-              <Label>
-                探测并发
-              </Label>
-              <Input
-                :model-value="form.probe_concurrency ?? ''"
-                type="number"
-                min="1"
-                max="64"
-                placeholder="4"
-                @update:model-value="(v) => form.probe_concurrency = parseNum(v)"
-              />
-            </div>
-            <div class="space-y-1.5">
-              <Label>
-                评分 Top-N
-              </Label>
-              <Input
-                :model-value="form.score_top_n ?? ''"
-                type="number"
-                min="1"
-                max="4096"
-                placeholder="128"
-                @update:model-value="(v) => form.score_top_n = parseNum(v)"
-              />
-            </div>
-            <div class="space-y-1.5">
-              <Label>
-                回退扫描
-              </Label>
-              <Input
-                :model-value="form.score_fallback_scan_limit ?? ''"
-                type="number"
-                min="1"
-                max="100000"
-                placeholder="1024"
-                @update:model-value="(v) => form.score_fallback_scan_limit = parseNum(v)"
-              />
-            </div>
-          </div>
-        </section>
-      </div>
 
       <section class="space-y-4 rounded-2xl border border-border/60 bg-card/70 p-4 sm:p-5">
         <div class="space-y-1">
@@ -625,9 +533,7 @@ import { parseApiError } from '@/utils/errorParser'
 import { updateProvider } from '@/api/endpoints'
 import {
   buildPoolCooldownFieldLayout,
-  buildPoolCostFieldLayout,
   buildPoolHealthToggleCards,
-  buildPoolSecondarySectionLayout,
   type PoolHealthToggleKey,
 } from '@/features/pool/utils/poolAdvancedDialog'
 import type {
@@ -658,18 +564,10 @@ const isClaudeCode = computed(() => {
 
 const healthToggleCards = buildPoolHealthToggleCards()
 const cooldownFieldLayout = buildPoolCooldownFieldLayout()
-const costFieldLayout = buildPoolCostFieldLayout()
-const secondarySectionLayout = buildPoolSecondarySectionLayout()
 
 const form = ref({
-  global_priority: null as number | null | undefined,
-  sticky_session_ttl_seconds: null as number | null | undefined,
-  health_policy_enabled: true,
   rate_limit_cooldown_seconds: null as number | null | undefined,
   overload_cooldown_seconds: null as number | null | undefined,
-  cost_window_seconds: null as number | null | undefined,
-  cost_limit_per_key_tokens: null as number | null | undefined,
-  cost_soft_threshold_percent: null as number | null | undefined,
   batch_concurrency: null as number | null | undefined,
   probe_concurrency: null as number | null | undefined,
   score_top_n: null as number | null | undefined,
@@ -690,6 +588,7 @@ const form = ref({
   account_self_check_interval_minutes: null as number | null | undefined,
   account_self_check_concurrency: null as number | null | undefined,
   auto_remove_banned_keys: false,
+  auto_remove_quota_exhausted_keys: false,
   skip_exhausted_accounts: false,
 })
 
@@ -721,14 +620,14 @@ function parseNum(v: string | number): number | undefined {
 
 function getHealthToggleValue(key: PoolHealthToggleKey): boolean {
   switch (key) {
-    case 'health_policy_enabled':
-      return form.value.health_policy_enabled
     case 'probing_enabled':
       return form.value.probing_enabled
     case 'account_self_check_enabled':
       return form.value.account_self_check_enabled
     case 'auto_remove_banned_keys':
       return form.value.auto_remove_banned_keys
+    case 'auto_remove_quota_exhausted_keys':
+      return form.value.auto_remove_quota_exhausted_keys
     case 'skip_exhausted_accounts':
       return form.value.skip_exhausted_accounts
   }
@@ -736,9 +635,6 @@ function getHealthToggleValue(key: PoolHealthToggleKey): boolean {
 
 function updateHealthToggleValue(key: PoolHealthToggleKey, value: boolean): void {
   switch (key) {
-    case 'health_policy_enabled':
-      form.value.health_policy_enabled = value
-      return
     case 'probing_enabled':
       form.value.probing_enabled = value
       return
@@ -747,6 +643,9 @@ function updateHealthToggleValue(key: PoolHealthToggleKey, value: boolean): void
       return
     case 'auto_remove_banned_keys':
       form.value.auto_remove_banned_keys = value
+      return
+    case 'auto_remove_quota_exhausted_keys':
+      form.value.auto_remove_quota_exhausted_keys = value
       return
     case 'skip_exhausted_accounts':
       form.value.skip_exhausted_accounts = value
@@ -760,14 +659,8 @@ watch(() => props.modelValue, (open) => {
   const scoreRules = cfg?.score_rules
   const scoreWeights = scoreRules?.weights
   form.value = {
-    global_priority: cfg?.global_priority ?? null,
-    sticky_session_ttl_seconds: cfg?.sticky_session_ttl_seconds ?? null,
-    health_policy_enabled: cfg?.health_policy_enabled !== false,
     rate_limit_cooldown_seconds: cfg?.rate_limit_cooldown_seconds ?? null,
     overload_cooldown_seconds: cfg?.overload_cooldown_seconds ?? null,
-    cost_window_seconds: cfg?.cost_window_seconds ?? null,
-    cost_limit_per_key_tokens: cfg?.cost_limit_per_key_tokens ?? null,
-    cost_soft_threshold_percent: cfg?.cost_soft_threshold_percent ?? null,
     batch_concurrency: cfg?.batch_concurrency ?? null,
     probe_concurrency: cfg?.probe_concurrency ?? null,
     score_top_n: cfg?.score_top_n ?? null,
@@ -788,6 +681,7 @@ watch(() => props.modelValue, (open) => {
     account_self_check_interval_minutes: cfg?.account_self_check_interval_minutes ?? null,
     account_self_check_concurrency: cfg?.account_self_check_concurrency ?? null,
     auto_remove_banned_keys: cfg?.auto_remove_banned_keys ?? false,
+    auto_remove_quota_exhausted_keys: cfg?.auto_remove_quota_exhausted_keys ?? false,
     skip_exhausted_accounts: cfg?.skip_exhausted_accounts ?? false,
   }
 
@@ -836,20 +730,20 @@ async function handleSave() {
       'self_check_method',
       'account_self_check_request',
       'self_check_request',
+      'health_policy_enabled',
+      'sticky_session_ttl_seconds',
+      'global_priority',
+      'cost_window_seconds',
+      'cost_limit_per_key_tokens',
+      'cost_soft_threshold_percent',
     ]) {
       delete existingPoolAdvanced[key]
     }
     // 合并已有配置（保留 scheduling_presets 等不在此对话框编辑的字段）
     const poolAdvanced: Record<string, unknown> = {
       ...existingPoolAdvanced,
-      global_priority: form.value.global_priority ?? undefined,
-      sticky_session_ttl_seconds: form.value.sticky_session_ttl_seconds ?? undefined,
-      cost_window_seconds: form.value.cost_window_seconds ?? undefined,
-      cost_limit_per_key_tokens: form.value.cost_limit_per_key_tokens ?? undefined,
-      cost_soft_threshold_percent: form.value.cost_soft_threshold_percent ?? undefined,
       rate_limit_cooldown_seconds: form.value.rate_limit_cooldown_seconds ?? undefined,
       overload_cooldown_seconds: form.value.overload_cooldown_seconds ?? undefined,
-      health_policy_enabled: form.value.health_policy_enabled,
       batch_concurrency: form.value.batch_concurrency ?? undefined,
       probe_concurrency: form.value.probe_concurrency ?? undefined,
       score_top_n: form.value.score_top_n ?? undefined,
@@ -864,6 +758,7 @@ async function handleSave() {
         ? (form.value.account_self_check_concurrency ?? undefined)
         : undefined,
       auto_remove_banned_keys: form.value.auto_remove_banned_keys,
+      auto_remove_quota_exhausted_keys: form.value.auto_remove_quota_exhausted_keys,
       skip_exhausted_accounts: form.value.skip_exhausted_accounts,
     }
 

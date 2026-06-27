@@ -24,6 +24,11 @@ pub(crate) enum GatewayError {
         phase: &'static str,
         timeout_ms: u64,
     },
+    AdmissionTimeout {
+        trace_id: String,
+        gate: &'static str,
+        queue_budget_ms: u64,
+    },
     Client {
         status: StatusCode,
         message: String,
@@ -42,6 +47,13 @@ impl GatewayError {
                 phase, timeout_ms, ..
             } => {
                 format!("local execution planning timed out in {phase} after {timeout_ms}ms")
+            }
+            Self::AdmissionTimeout {
+                gate,
+                queue_budget_ms,
+                ..
+            } => {
+                format!("gateway admission gate {gate} timed out after {queue_budget_ms}ms")
             }
         }
     }
@@ -113,6 +125,34 @@ impl IntoResponse for GatewayError {
                 );
                 response
             }
+            Self::AdmissionTimeout {
+                trace_id,
+                gate,
+                queue_budget_ms,
+            } => {
+                tracing::debug!(
+                    trace_id = %trace_id,
+                    gate,
+                    queue_budget_ms,
+                    "gateway admission gate timed out"
+                );
+                let body = Json(json!({
+                    "error": {
+                        "message": "gateway admission queue timed out",
+                        "trace_id": trace_id,
+                    }
+                }));
+                let mut response = (StatusCode::TOO_MANY_REQUESTS, body).into_response();
+                let _ =
+                    insert_header_if_missing(response.headers_mut(), TRACE_ID_HEADER, &trace_id);
+                let _ = insert_header_if_missing(
+                    response.headers_mut(),
+                    GATEWAY_HEADER,
+                    "rust-phase3b",
+                );
+                let _ = insert_header_if_missing(response.headers_mut(), "Retry-After", "1");
+                response
+            }
             Self::Client { status, message } => (
                 status,
                 Json(json!({
@@ -138,5 +178,43 @@ impl IntoResponse for GatewayError {
 impl From<AiSurfaceFinalizeError> for GatewayError {
     fn from(error: AiSurfaceFinalizeError) -> Self {
         GatewayError::Internal(error.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::{header::RETRY_AFTER, StatusCode};
+    use axum::response::IntoResponse;
+
+    use crate::constants::TRACE_ID_HEADER;
+
+    use super::GatewayError;
+
+    #[test]
+    fn admission_timeout_returns_429_with_retry_after_without_panicking() {
+        let trace_id = "trace-admission-timeout".to_string();
+
+        let response = GatewayError::AdmissionTimeout {
+            trace_id: trace_id.clone(),
+            gate: "gateway_upstream_execution",
+            queue_budget_ms: 250,
+        }
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response
+                .headers()
+                .get(RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("1")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(TRACE_ID_HEADER)
+                .and_then(|v| v.to_str().ok()),
+            Some(trace_id.as_str())
+        );
     }
 }

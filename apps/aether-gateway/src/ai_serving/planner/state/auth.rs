@@ -10,9 +10,7 @@ impl<'a> PlannerAppState<'a> {
         now_unix_secs: u64,
     ) -> Result<Option<GatewayAuthApiKeySnapshot>, GatewayError> {
         self.app()
-            .data
-            .read_auth_api_key_snapshot(user_id, api_key_id, now_unix_secs)
+            .read_cached_auth_api_key_snapshot(user_id, api_key_id, now_unix_secs)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 }

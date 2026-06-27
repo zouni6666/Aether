@@ -107,10 +107,17 @@ impl GatewayDataState {
         &self,
         candidate: UpsertRequestCandidateRecord,
     ) -> Result<Option<StoredRequestCandidate>, DataLayerError> {
-        match &self.request_candidate_writer {
-            Some(repository) => repository.upsert(candidate).await.map(Some),
-            None => Ok(None),
-        }
+        crate::request_diagnostics::observe_db_operation(
+            "request_candidate_upsert",
+            self.database_pool_summary(),
+            async {
+                match &self.request_candidate_writer {
+                    Some(repository) => repository.upsert(candidate).await.map(Some),
+                    None => Ok(None),
+                }
+            },
+        )
+        .await
     }
 
     pub(crate) async fn delete_request_candidates_created_before(

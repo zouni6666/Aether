@@ -256,6 +256,7 @@ export async function importProviderRefreshToken(
     browser_profile?: string
     user_id?: string
     account_name?: string
+    headers?: Record<string, string>
   }
 ): Promise<ProviderOAuthCompleteResponseWithKey> {
   const resp = await client.post(`/api/admin/provider-oauth/providers/${providerId}/import-refresh-token`, data)

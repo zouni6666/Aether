@@ -253,12 +253,15 @@ impl UsageRuntimeAccess for GatewayDataState {
     }
 
     async fn body_capture_policy(&self) -> Result<UsageBodyCapturePolicy, DataLayerError> {
-        let value = GatewayDataState::find_system_config_value(self, REQUEST_RECORD_LEVEL_KEY)
+        let value = match GatewayDataState::find_system_config_value(self, REQUEST_RECORD_LEVEL_KEY)
             .await?
-            .or(
+        {
+            Some(value) => Some(value),
+            None => {
                 GatewayDataState::find_system_config_value(self, LEGACY_REQUEST_LOG_LEVEL_KEY)
-                    .await?,
-            );
+                    .await?
+            }
+        };
         let max_request_body_size =
             GatewayDataState::find_system_config_value(self, MAX_REQUEST_BODY_SIZE_KEY).await?;
         let max_response_body_size =

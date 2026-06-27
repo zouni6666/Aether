@@ -18,6 +18,12 @@ use crate::{provider_transport, usage};
 impl AppState {
     pub(crate) fn with_data_state_for_tests(mut self, data_state: GatewayDataState) -> Self {
         self.replace_data_state(Arc::new(data_state));
+        self.request_candidate_queue = None;
+        self
+    }
+
+    pub(crate) fn without_request_candidate_queue_for_tests(mut self) -> Self {
+        self.request_candidate_queue = None;
         self
     }
 
