@@ -103,8 +103,6 @@ const STAGES: &[&str] = &[
     "direct_passthrough_first_client_send",
     "direct_passthrough_first_client_send_wait",
     "direct_passthrough_body_send_wait",
-    "direct_passthrough_drop_drain_enqueue",
-    "direct_passthrough_drop_drain_shed",
     "direct_passthrough_body_recv_first",
     "direct_build_body",
     "direct_request_prepare",
