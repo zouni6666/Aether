@@ -4,7 +4,7 @@ use std::io::Error as IoError;
 use std::pin::Pin;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc, LazyLock,
+    Arc,
 };
 use std::time::{Duration, Instant};
 
@@ -30,7 +30,7 @@ use futures_util::stream::{self as futures_stream, BoxStream};
 use futures_util::{StreamExt, TryStreamExt};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
-use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 use tokio_util::codec::{FramedRead, LinesCodec};
 use tokio_util::io::StreamReader;
@@ -139,18 +139,6 @@ const MAX_DIRECT_PASSTHROUGH_CHANNEL_CAPACITY: usize = 1024;
 const DIRECT_PASSTHROUGH_CHANNEL_CAPACITY_ENV: &str =
     "AETHER_GATEWAY_DIRECT_PASSTHROUGH_CHANNEL_CAPACITY";
 const DIRECT_PASSTHROUGH_MODE_ENV: &str = "AETHER_GATEWAY_DIRECT_PASSTHROUGH_MODE";
-const DIRECT_PASSTHROUGH_DROP_DRAIN_ENV: &str = "AETHER_GATEWAY_DIRECT_PASSTHROUGH_DROP_DRAIN";
-const DIRECT_PASSTHROUGH_DROP_DRAIN_TIMEOUT_MS_ENV: &str =
-    "AETHER_GATEWAY_DIRECT_PASSTHROUGH_DROP_DRAIN_TIMEOUT_MS";
-const DIRECT_PASSTHROUGH_DROP_DRAIN_LIMIT_ENV: &str =
-    "AETHER_GATEWAY_DIRECT_PASSTHROUGH_DROP_DRAIN_LIMIT";
-const DEFAULT_DIRECT_PASSTHROUGH_DROP_DRAIN_TIMEOUT_MS: u64 = 30_000;
-const DEFAULT_DIRECT_PASSTHROUGH_DROP_DRAIN_PER_CPU: usize = 32;
-const MIN_DIRECT_PASSTHROUGH_DROP_DRAIN_LIMIT: usize = 32;
-const MAX_DIRECT_PASSTHROUGH_DROP_DRAIN_LIMIT: usize = 512;
-
-static DIRECT_PASSTHROUGH_DROP_DRAIN_SEMAPHORE: LazyLock<Arc<Semaphore>> =
-    LazyLock::new(|| Arc::new(Semaphore::new(direct_passthrough_drop_drain_limit())));
 
 struct StageElapsedGuard {
     stage: &'static str,
@@ -254,62 +242,6 @@ fn parse_direct_passthrough_mode(value: &str) -> DirectPassthroughMode {
         "legacy" | "pump" | "mpsc" => DirectPassthroughMode::Legacy,
         _ => DirectPassthroughMode::Inline,
     }
-}
-
-fn direct_passthrough_drop_drain_enabled() -> bool {
-    std::env::var(DIRECT_PASSTHROUGH_DROP_DRAIN_ENV)
-        .ok()
-        .map(|value| parse_boolish_enabled(&value))
-        .unwrap_or(true)
-}
-
-fn direct_passthrough_drop_drain_timeout() -> Duration {
-    let timeout_ms = std::env::var(DIRECT_PASSTHROUGH_DROP_DRAIN_TIMEOUT_MS_ENV)
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_DIRECT_PASSTHROUGH_DROP_DRAIN_TIMEOUT_MS);
-    Duration::from_millis(timeout_ms)
-}
-
-fn direct_passthrough_drop_drain_limit() -> usize {
-    std::env::var(DIRECT_PASSTHROUGH_DROP_DRAIN_LIMIT_ENV)
-        .ok()
-        .as_deref()
-        .and_then(parse_direct_passthrough_drop_drain_limit)
-        .unwrap_or_else(default_direct_passthrough_drop_drain_limit)
-}
-
-fn parse_direct_passthrough_drop_drain_limit(value: &str) -> Option<usize> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "auto" | "default" => Some(default_direct_passthrough_drop_drain_limit()),
-        "0" | "off" | "false" | "no" | "disabled" => Some(0),
-        value => value.parse::<usize>().ok(),
-    }
-}
-
-fn default_direct_passthrough_drop_drain_limit() -> usize {
-    std::thread::available_parallelism()
-        .map(usize::from)
-        .unwrap_or(1)
-        .saturating_mul(DEFAULT_DIRECT_PASSTHROUGH_DROP_DRAIN_PER_CPU)
-        .clamp(
-            MIN_DIRECT_PASSTHROUGH_DROP_DRAIN_LIMIT,
-            MAX_DIRECT_PASSTHROUGH_DROP_DRAIN_LIMIT,
-        )
-}
-
-fn try_acquire_direct_passthrough_drop_drain_permit() -> Option<OwnedSemaphorePermit> {
-    Arc::clone(&DIRECT_PASSTHROUGH_DROP_DRAIN_SEMAPHORE)
-        .try_acquire_owned()
-        .ok()
-}
-
-fn parse_boolish_enabled(value: &str) -> bool {
-    !matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "0" | "false" | "off" | "no" | "disabled"
-    )
 }
 
 fn record_sync_terminal_usage(
@@ -1452,10 +1384,6 @@ impl DirectPassthroughFinalizer {
         }
     }
 
-    fn client_visible_stream_completed(&self) -> bool {
-        self.core().client_visible_stream_completed
-    }
-
     async fn record_client_visible_stream_started_if_needed(&mut self) {
         let Some(core) = self.core.as_mut() else {
             return;
@@ -2066,87 +1994,19 @@ impl DirectPassthroughInlineBodyState {
 
 impl Drop for DirectPassthroughInlineBodyState {
     fn drop(&mut self) {
-        if self.finalized
-            || !self.observed_first_client_yield
-            || !direct_passthrough_drop_drain_enabled()
-        {
+        if self.finalized {
             return;
         }
-        let should_drain = self.finalizer.as_ref().is_some_and(|finalizer| {
-            finalizer.terminal_failure().is_none() && !finalizer.client_visible_stream_completed()
-        }) && !self.upstream_done;
-        if !should_drain {
-            return;
-        }
-        let Some(drain_permit) = try_acquire_direct_passthrough_drop_drain_permit() else {
-            observe_gateway_stage_ms("direct_passthrough_drop_drain_shed", 0);
-            return;
-        };
-        let Ok(handle) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
-        let Some(mut upstream) = self.upstream.take() else {
-            return;
-        };
-        let Some(mut finalizer) = self.finalizer.take() else {
-            return;
-        };
-        observe_gateway_stage_ms("direct_passthrough_drop_drain_enqueue", 0);
-        let timeout = direct_passthrough_drop_drain_timeout();
-        handle.spawn(async move {
-            let _drain_permit = drain_permit;
-            let drain_result = tokio::time::timeout(timeout, async {
-                while let Some(item) = upstream.next().await {
-                    match item {
-                        Ok(chunk) => {
-                            if chunk.is_empty() {
-                                continue;
-                            }
-                            let observed_at = Instant::now();
-                            finalizer.observe_upstream_chunk(&chunk, observed_at);
-                            if finalizer.terminal_failure().is_some() {
-                                break;
-                            }
-                        }
-                        Err(message) => {
-                            let core = finalizer.core();
-                            warn!(
-                                event_name = "direct_passthrough_drop_drain_read_error",
-                                log_type = "ops",
-                                trace_id = %core.trace_id,
-                                request_id = %core.request_id_for_log,
-                                candidate_id = ?core.candidate_id.as_deref(),
-                                upstream_bytes = core.provider_stream_bytes,
-                                error = %message,
-                                "gateway direct passthrough drop-drain upstream body read failed"
-                            );
-                            finalizer.set_terminal_failure(build_stream_failure_report(
-                                "execution_runtime_stream_read_error",
-                                message,
-                                502,
-                            ));
-                            break;
-                        }
-                    }
-                }
-            })
-            .await;
-            let drain_timed_out = drain_result.is_err();
-            if drain_timed_out {
-                let core = finalizer.core();
-                warn!(
-                    event_name = "direct_passthrough_drop_drain_timeout",
-                    log_type = "ops",
-                    trace_id = %core.trace_id,
-                    request_id = %core.request_id_for_log,
-                    candidate_id = ?core.candidate_id.as_deref(),
-                    timeout_ms = timeout.as_millis() as u64,
-                    upstream_bytes = core.provider_stream_bytes,
-                    "gateway direct passthrough drop-drain timed out"
-                );
+        self.upstream.take();
+        if let Some(finalizer) = self.finalizer.take() {
+            observe_gateway_stage_ms("stream_finalizer_enqueue", 0);
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    let mut finalizer = finalizer;
+                    finalizer.finalize(true).await;
+                });
             }
-            finalizer.finalize(drain_timed_out).await;
-        });
+        }
     }
 }
 
@@ -5342,7 +5202,7 @@ async fn execute_stream_from_frame_stream(
             loop {
                 let next_frame_result = tokio::select! {
                     biased;
-                    _ = tx.closed(), if client_visible_stream_completed => {
+                    _ = tx.closed(), if !downstream_dropped => {
                         downstream_dropped = true;
                         break;
                     }
@@ -5558,9 +5418,10 @@ async fn execute_stream_from_frame_stream(
                                 trace_id = %trace_id_owned,
                                 request_id = %request_id_for_report_log,
                                 candidate_id = ?candidate_id_for_report.as_deref(),
-                                "gateway stream downstream dropped; continuing to drain execution runtime stream"
+                                "gateway stream downstream dropped; cancelling execution runtime stream"
                             );
                             downstream_dropped = true;
+                            break;
                         } else {
                             client_visible_stream_completed |= client_stream_completion_tracker
                                 .observe_chunk(rewritten_chunk.as_ref());
@@ -6261,7 +6122,6 @@ mod tests {
         ensure_stream_terminal_summary_for_missing_observed_finish,
         execute_execution_runtime_stream, execute_stream_from_frame_stream,
         maybe_apply_kiro_prompt_cache_usage_to_stream_summary, merge_stream_terminal_summary,
-        parse_boolish_enabled, parse_direct_passthrough_drop_drain_limit,
         parse_direct_passthrough_mode, should_limit_direct_finalize_prefetch,
         should_probe_success_failover_before_stream, should_skip_direct_finalize_prefetch,
         stream_chunk_contains_sse_done, stream_requires_observed_terminal_event,
@@ -6269,7 +6129,6 @@ mod tests {
         stream_terminal_summary_missing_observed_finish_with_requirement,
         stream_terminal_summary_represents_failure_with_requirement,
         ClientVisibleStreamCompletionTracker, DirectPassthroughMode,
-        DEFAULT_DIRECT_PASSTHROUGH_DROP_DRAIN_TIMEOUT_MS,
     };
     use crate::control::GatewayControlDecision;
     use crate::stage_metrics::RequestStageTrace;
@@ -7369,29 +7228,6 @@ mod tests {
     }
 
     #[test]
-    fn direct_passthrough_drop_drain_bool_parser_defaults_enabled() {
-        assert!(parse_boolish_enabled(""));
-        assert!(parse_boolish_enabled("true"));
-        assert!(parse_boolish_enabled("1"));
-        assert!(!parse_boolish_enabled("false"));
-        assert!(!parse_boolish_enabled("off"));
-        assert!(!parse_boolish_enabled("disabled"));
-        assert_eq!(DEFAULT_DIRECT_PASSTHROUGH_DROP_DRAIN_TIMEOUT_MS, 30_000);
-    }
-
-    #[test]
-    fn direct_passthrough_drop_drain_limit_parser_accepts_auto_off_and_manual() {
-        assert!(parse_direct_passthrough_drop_drain_limit("auto").is_some_and(|value| value > 0));
-        assert_eq!(parse_direct_passthrough_drop_drain_limit("off"), Some(0));
-        assert_eq!(
-            parse_direct_passthrough_drop_drain_limit("disabled"),
-            Some(0)
-        );
-        assert_eq!(parse_direct_passthrough_drop_drain_limit("64"), Some(64));
-        assert_eq!(parse_direct_passthrough_drop_drain_limit("bogus"), None);
-    }
-
-    #[test]
     fn openai_client_formats_disallow_proxy_generated_sse_control_blocks() {
         let mut plan = ExecutionPlan {
             request_id: "req-openai-keepalive".into(),
@@ -8127,7 +7963,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_stream_from_frame_stream_drains_upstream_when_client_drops_body() {
+    async fn execute_stream_from_frame_stream_cancels_upstream_when_client_drops_body() {
         let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
         let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
         let state = AppState::new()
@@ -8235,11 +8071,6 @@ mod tests {
         );
         tokio::time::sleep(Duration::from_millis(30)).await;
         drop(body_stream);
-        release_terminal.notify_one();
-
-        tokio::time::timeout(Duration::from_secs(1), terminal_frame_drained.notified())
-            .await
-            .expect("upstream frame stream should be drained after client disconnect");
         let candidates = tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 let candidates = request_candidate_repository
@@ -8280,11 +8111,11 @@ mod tests {
         })
         .await
         .expect("usage should be marked cancelled");
-        assert_eq!(stored_usage.billing_status, "pending");
+        assert_eq!(stored_usage.billing_status, "void");
         assert_eq!(stored_usage.status_code, Some(499));
-        assert_eq!(stored_usage.input_tokens, 7);
-        assert_eq!(stored_usage.output_tokens, 11);
-        assert_eq!(stored_usage.total_tokens, 18);
+        assert_eq!(stored_usage.input_tokens, 0);
+        assert_eq!(stored_usage.output_tokens, 0);
+        assert_eq!(stored_usage.total_tokens, 0);
         let first_byte_time_ms = stored_usage
             .first_byte_time_ms
             .expect("cancelled stream should retain first byte time");
@@ -8294,6 +8125,17 @@ mod tests {
         assert!(
             response_time_ms > first_byte_time_ms,
             "terminal duration should include time after the first byte"
+        );
+
+        release_terminal.notify_one();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                terminal_frame_drained.notified()
+            )
+            .await
+            .is_err(),
+            "upstream frame stream should stop when the client disconnects"
         );
     }
 
