@@ -46,46 +46,12 @@
 
             <div class="space-y-6 p-4 sm:p-6">
               <!-- 配额使用情况 -->
-              <Card
+              <ProviderMonthlyQuotaCard
                 v-if="provider.billing_type === 'monthly_quota' && provider.monthly_quota_usd"
-                class="p-4"
-              >
-                <div class="space-y-3">
-                  <div class="flex items-center justify-between">
-                    <h3 class="text-sm font-semibold">
-                      {{ legacyT('订阅配额') }}
-                    </h3>
-                    <Badge
-                      variant="secondary"
-                      class="text-xs"
-                    >
-                      {{ ((provider.monthly_used_usd || 0) / provider.monthly_quota_usd * 100).toFixed(1) }}%
-                    </Badge>
-                  </div>
-                  <div class="relative w-full h-2 bg-border rounded-full overflow-hidden">
-                    <div
-                      class="absolute left-0 top-0 h-full transition-all duration-300"
-                      :class="{
-                        'bg-green-500': (provider.monthly_used_usd || 0) / provider.monthly_quota_usd < 0.7,
-                        'bg-yellow-500': (provider.monthly_used_usd || 0) / provider.monthly_quota_usd >= 0.7 && (provider.monthly_used_usd || 0) / provider.monthly_quota_usd < 0.9,
-                        'bg-red-500': (provider.monthly_used_usd || 0) / provider.monthly_quota_usd >= 0.9
-                      }"
-                      :style="{ width: `${Math.min((provider.monthly_used_usd || 0) / provider.monthly_quota_usd * 100, 100)}%` }"
-                    />
-                  </div>
-                  <div class="flex items-center justify-between text-xs">
-                    <span class="font-semibold">
-                      ${{ (provider.monthly_used_usd || 0).toFixed(2) }} / ${{ provider.monthly_quota_usd.toFixed(2) }}
-                    </span>
-                    <span
-                      v-if="provider.quota_reset_day"
-                      class="text-muted-foreground"
-                    >
-                      {{ legacyT('每月') }} {{ provider.quota_reset_day }} {{ legacyT('号重置') }}
-                    </span>
-                  </div>
-                </div>
-              </Card>
+                :used="provider.monthly_used_usd"
+                :quota="provider.monthly_quota_usd"
+                :reset-day="provider.quota_reset_day"
+              />
 
               <!-- 密钥管理 -->
               <Card class="overflow-hidden">
@@ -420,97 +386,60 @@
                       v-if="hasCodexQuotaDisplayData(key)"
                       class="mt-2 p-2 bg-muted/30 rounded-md"
                     >
-                      <div class="flex items-center justify-between mb-1">
-                        <span class="text-[10px] text-muted-foreground">{{ legacyT('账号配额') }}</span>
-                        <div class="flex items-center gap-1">
-                          <RefreshCw
-                            v-if="refreshingQuota"
-                            class="w-3 h-3 text-muted-foreground/70 animate-spin"
-                          />
-                          <span
-                            v-if="getCodexQuotaDisplay(key)?.updated_at"
-                            class="text-[9px] text-muted-foreground/70"
-                          >
-                            {{ formatCodexUpdatedAt(getCodexQuotaDisplay(key)?.updated_at || 0) }}
-                          </span>
-                        </div>
-                      </div>
+                      <ProviderQuotaSectionHeader
+                        :title="legacyT('账号配额')"
+                        :loading="refreshingQuota"
+                        :updated-text="getCodexQuotaDisplay(key)?.updated_at ? formatCodexUpdatedAt(getCodexQuotaDisplay(key)?.updated_at || 0) : null"
+                      />
                       <!-- 普通 Codex 限额并排显示：Team/Plus/Enterprise 账号 2列, Free 账号 1列 -->
                       <div
                         class="grid gap-3"
                         :class="isCodexTeamPlan(key) ? 'grid-cols-2' : 'grid-cols-1'"
                       >
                         <!-- 周限额 -->
-                        <div v-if="getCodexQuotaDisplay(key)?.primary_used_percent !== undefined">
-                          <div class="flex items-center justify-between text-[10px] mb-0.5">
-                            <span class="text-muted-foreground">{{ legacyT('周限额') }}</span>
-                            <span :class="getQuotaRemainingClass(getCodexQuotaDisplay(key)?.primary_used_percent || 0)">
-                              {{ (100 - (getCodexQuotaDisplay(key)?.primary_used_percent || 0)).toFixed(1) }}%
-                            </span>
-                          </div>
-                          <div class="relative w-full h-1.5 bg-border rounded-full overflow-hidden">
-                            <div
-                              class="absolute left-0 top-0 h-full transition-all duration-300"
-                              :class="getQuotaRemainingBarColor(getCodexQuotaDisplay(key)?.primary_used_percent || 0)"
-                              :style="{ width: `${Math.max(100 - (getCodexQuotaDisplay(key)?.primary_used_percent || 0), 0)}%` }"
-                            />
-                          </div>
-                          <div
-                            v-if="(getCodexQuotaDisplay(key)?.primary_reset_at || getCodexQuotaDisplay(key)?.primary_reset_seconds) && shouldStartCodexResetCountdown(getCodexQuotaDisplay(key)?.primary_used_percent || 0)"
-                            class="text-[9px] mt-0.5 tabular-nums"
-                            :class="getResetCountdownClass(
+                        <ProviderQuotaProgressRow
+                          v-if="getCodexQuotaDisplay(key)?.primary_used_percent !== undefined"
+                          :label="legacyT('周限额')"
+                          :used-percent="getCodexQuotaDisplay(key)?.primary_used_percent || 0"
+                          :meter-class="getQuotaRemainingClass(getCodexQuotaDisplay(key)?.primary_used_percent || 0)"
+                          :bar-class="getQuotaRemainingBarColor(getCodexQuotaDisplay(key)?.primary_used_percent || 0)"
+                          :reset-text="(getCodexQuotaDisplay(key)?.primary_reset_at || getCodexQuotaDisplay(key)?.primary_reset_seconds) && shouldStartCodexResetCountdown(getCodexQuotaDisplay(key)?.primary_used_percent || 0)
+                            ? getResetCountdownText(
                               getCodexQuotaDisplay(key)?.primary_reset_at,
                               getCodexQuotaDisplay(key)?.primary_reset_seconds,
                               getCodexQuotaDisplay(key)?.updated_at,
                               getCodexQuotaDisplay(key)?.primary_used_percent
-                            )"
-                          >
-                            {{ getResetCountdownText(
-                              getCodexQuotaDisplay(key)?.primary_reset_at,
-                              getCodexQuotaDisplay(key)?.primary_reset_seconds,
-                              getCodexQuotaDisplay(key)?.updated_at,
-                              getCodexQuotaDisplay(key)?.primary_used_percent
-                            ) }}
-                          </div>
-                        </div>
+                            )
+                            : null"
+                          :footer-class="getResetCountdownClass(
+                            getCodexQuotaDisplay(key)?.primary_reset_at,
+                            getCodexQuotaDisplay(key)?.primary_reset_seconds,
+                            getCodexQuotaDisplay(key)?.updated_at,
+                            getCodexQuotaDisplay(key)?.primary_used_percent
+                          )"
+                        />
                         <!-- 5H限额（仅 Team/Plus/Enterprise 显示） -->
-                        <div v-if="isCodexTeamPlan(key) && getCodexQuotaDisplay(key)?.secondary_used_percent !== undefined">
-                          <div class="flex items-center justify-between text-[10px] mb-0.5">
-                            <span class="text-muted-foreground">{{ legacyT('5H限额') }}</span>
-                            <span :class="getQuotaRemainingClass(getCodexQuotaDisplay(key)?.secondary_used_percent || 0)">
-                              {{ (100 - (getCodexQuotaDisplay(key)?.secondary_used_percent || 0)).toFixed(1) }}%
-                            </span>
-                          </div>
-                          <div class="relative w-full h-1.5 bg-border rounded-full overflow-hidden">
-                            <div
-                              class="absolute left-0 top-0 h-full transition-all duration-300"
-                              :class="getQuotaRemainingBarColor(getCodexQuotaDisplay(key)?.secondary_used_percent || 0)"
-                              :style="{ width: `${Math.max(100 - (getCodexQuotaDisplay(key)?.secondary_used_percent || 0), 0)}%` }"
-                            />
-                          </div>
-                          <div
-                            v-if="shouldStartCodexResetCountdown(getCodexQuotaDisplay(key)?.secondary_used_percent || 0)"
-                            class="text-[9px] mt-0.5 tabular-nums"
-                            :class="getResetCountdownClass(
+                        <ProviderQuotaProgressRow
+                          v-if="isCodexTeamPlan(key) && getCodexQuotaDisplay(key)?.secondary_used_percent !== undefined"
+                          :label="legacyT('5H限额')"
+                          :used-percent="getCodexQuotaDisplay(key)?.secondary_used_percent || 0"
+                          :meter-class="getQuotaRemainingClass(getCodexQuotaDisplay(key)?.secondary_used_percent || 0)"
+                          :bar-class="getQuotaRemainingBarColor(getCodexQuotaDisplay(key)?.secondary_used_percent || 0)"
+                          :reset-text="shouldStartCodexResetCountdown(getCodexQuotaDisplay(key)?.secondary_used_percent || 0)
+                            ? getCodexQuotaResetText(
                               getCodexQuotaDisplay(key)?.secondary_reset_at,
                               getCodexQuotaDisplay(key)?.secondary_reset_seconds,
                               getCodexQuotaDisplay(key)?.updated_at,
                               getCodexQuotaDisplay(key)?.secondary_used_percent
-                            )"
-                          >
-                            <template v-if="getCodexQuotaDisplay(key)?.secondary_reset_at || getCodexQuotaDisplay(key)?.secondary_reset_seconds">
-                              {{ getResetCountdownText(
-                                getCodexQuotaDisplay(key)?.secondary_reset_at,
-                                getCodexQuotaDisplay(key)?.secondary_reset_seconds,
-                                getCodexQuotaDisplay(key)?.updated_at,
-                                getCodexQuotaDisplay(key)?.secondary_used_percent
-                              ) }}
-                            </template>
-                            <template v-else>
-                              {{ legacyT('已重置') }}
-                            </template>
-                          </div>
-                        </div>
+                            )
+                            : null"
+                          :footer-class="getResetCountdownClass(
+                            getCodexQuotaDisplay(key)?.secondary_reset_at,
+                            getCodexQuotaDisplay(key)?.secondary_reset_seconds,
+                            getCodexQuotaDisplay(key)?.updated_at,
+                            getCodexQuotaDisplay(key)?.secondary_used_percent
+                          )"
+                        />
                       </div>
                       <!-- Spark 限额独立一行展示，避免与普通 Codex 周/5H 混淆 -->
                       <div
@@ -521,80 +450,48 @@
                           GPT-5.3 Codex Spark
                         </div>
                         <div class="grid gap-3 grid-cols-2">
-                          <div v-if="getCodexQuotaDisplay(key)?.spark_secondary_used_percent !== undefined">
-                            <div class="flex items-center justify-between text-[10px] mb-0.5">
-                              <span class="text-muted-foreground">{{ legacyT('Spark 周') }}</span>
-                              <span :class="getQuotaRemainingClass(getCodexQuotaDisplay(key)?.spark_secondary_used_percent || 0)">
-                                {{ (100 - (getCodexQuotaDisplay(key)?.spark_secondary_used_percent || 0)).toFixed(1) }}%
-                              </span>
-                            </div>
-                            <div class="relative w-full h-1.5 bg-border rounded-full overflow-hidden">
-                              <div
-                                class="absolute left-0 top-0 h-full transition-all duration-300"
-                                :class="getQuotaRemainingBarColor(getCodexQuotaDisplay(key)?.spark_secondary_used_percent || 0)"
-                                :style="{ width: `${Math.max(100 - (getCodexQuotaDisplay(key)?.spark_secondary_used_percent || 0), 0)}%` }"
-                              />
-                            </div>
-                            <div
-                              v-if="shouldStartCodexResetCountdown(getCodexQuotaDisplay(key)?.spark_secondary_used_percent || 0)"
-                              class="text-[9px] mt-0.5 tabular-nums"
-                              :class="getResetCountdownClass(
+                          <ProviderQuotaProgressRow
+                            v-if="getCodexQuotaDisplay(key)?.spark_secondary_used_percent !== undefined"
+                            :label="legacyT('Spark 周')"
+                            :used-percent="getCodexQuotaDisplay(key)?.spark_secondary_used_percent || 0"
+                            :meter-class="getQuotaRemainingClass(getCodexQuotaDisplay(key)?.spark_secondary_used_percent || 0)"
+                            :bar-class="getQuotaRemainingBarColor(getCodexQuotaDisplay(key)?.spark_secondary_used_percent || 0)"
+                            :reset-text="shouldStartCodexResetCountdown(getCodexQuotaDisplay(key)?.spark_secondary_used_percent || 0)
+                              ? getCodexQuotaResetText(
                                 getCodexQuotaDisplay(key)?.spark_secondary_reset_at,
                                 getCodexQuotaDisplay(key)?.spark_secondary_reset_seconds,
                                 getCodexQuotaDisplay(key)?.updated_at,
                                 getCodexQuotaDisplay(key)?.spark_secondary_used_percent
-                              )"
-                            >
-                              <template v-if="getCodexQuotaDisplay(key)?.spark_secondary_reset_at || getCodexQuotaDisplay(key)?.spark_secondary_reset_seconds">
-                                {{ getResetCountdownText(
-                                  getCodexQuotaDisplay(key)?.spark_secondary_reset_at,
-                                  getCodexQuotaDisplay(key)?.spark_secondary_reset_seconds,
-                                  getCodexQuotaDisplay(key)?.updated_at,
-                                  getCodexQuotaDisplay(key)?.spark_secondary_used_percent
-                                ) }}
-                              </template>
-                              <template v-else>
-                                {{ legacyT('已重置') }}
-                              </template>
-                            </div>
-                          </div>
-                          <div v-if="getCodexQuotaDisplay(key)?.spark_primary_used_percent !== undefined">
-                            <div class="flex items-center justify-between text-[10px] mb-0.5">
-                              <span class="text-muted-foreground">{{ legacyT('Spark 5H') }}</span>
-                              <span :class="getQuotaRemainingClass(getCodexQuotaDisplay(key)?.spark_primary_used_percent || 0)">
-                                {{ (100 - (getCodexQuotaDisplay(key)?.spark_primary_used_percent || 0)).toFixed(1) }}%
-                              </span>
-                            </div>
-                            <div class="relative w-full h-1.5 bg-border rounded-full overflow-hidden">
-                              <div
-                                class="absolute left-0 top-0 h-full transition-all duration-300"
-                                :class="getQuotaRemainingBarColor(getCodexQuotaDisplay(key)?.spark_primary_used_percent || 0)"
-                                :style="{ width: `${Math.max(100 - (getCodexQuotaDisplay(key)?.spark_primary_used_percent || 0), 0)}%` }"
-                              />
-                            </div>
-                            <div
-                              v-if="shouldStartCodexResetCountdown(getCodexQuotaDisplay(key)?.spark_primary_used_percent || 0)"
-                              class="text-[9px] mt-0.5 tabular-nums"
-                              :class="getResetCountdownClass(
+                              )
+                              : null"
+                            :footer-class="getResetCountdownClass(
+                              getCodexQuotaDisplay(key)?.spark_secondary_reset_at,
+                              getCodexQuotaDisplay(key)?.spark_secondary_reset_seconds,
+                              getCodexQuotaDisplay(key)?.updated_at,
+                              getCodexQuotaDisplay(key)?.spark_secondary_used_percent
+                            )"
+                          />
+                          <ProviderQuotaProgressRow
+                            v-if="getCodexQuotaDisplay(key)?.spark_primary_used_percent !== undefined"
+                            :label="legacyT('Spark 5H')"
+                            :used-percent="getCodexQuotaDisplay(key)?.spark_primary_used_percent || 0"
+                            :meter-class="getQuotaRemainingClass(getCodexQuotaDisplay(key)?.spark_primary_used_percent || 0)"
+                            :bar-class="getQuotaRemainingBarColor(getCodexQuotaDisplay(key)?.spark_primary_used_percent || 0)"
+                            :reset-text="shouldStartCodexResetCountdown(getCodexQuotaDisplay(key)?.spark_primary_used_percent || 0)
+                              ? getCodexQuotaResetText(
                                 getCodexQuotaDisplay(key)?.spark_primary_reset_at,
                                 getCodexQuotaDisplay(key)?.spark_primary_reset_seconds,
                                 getCodexQuotaDisplay(key)?.updated_at,
                                 getCodexQuotaDisplay(key)?.spark_primary_used_percent
-                              )"
-                            >
-                              <template v-if="getCodexQuotaDisplay(key)?.spark_primary_reset_at || getCodexQuotaDisplay(key)?.spark_primary_reset_seconds">
-                                {{ getResetCountdownText(
-                                  getCodexQuotaDisplay(key)?.spark_primary_reset_at,
-                                  getCodexQuotaDisplay(key)?.spark_primary_reset_seconds,
-                                  getCodexQuotaDisplay(key)?.updated_at,
-                                  getCodexQuotaDisplay(key)?.spark_primary_used_percent
-                                ) }}
-                              </template>
-                              <template v-else>
-                                {{ legacyT('已重置') }}
-                              </template>
-                            </div>
-                          </div>
+                              )
+                              : null"
+                            :footer-class="getResetCountdownClass(
+                              getCodexQuotaDisplay(key)?.spark_primary_reset_at,
+                              getCodexQuotaDisplay(key)?.spark_primary_reset_seconds,
+                              getCodexQuotaDisplay(key)?.updated_at,
+                              getCodexQuotaDisplay(key)?.spark_primary_used_percent
+                            )"
+                          />
                         </div>
                       </div>
                     </div>
@@ -631,56 +528,38 @@
                       </div>
                       <!-- 正常配额显示 -->
                       <template v-else>
-                        <div class="flex items-center justify-between mb-1">
-                          <span class="text-[10px] text-muted-foreground">{{ legacyT('模型配额') }}</span>
-                          <div class="flex items-center gap-1">
-                            <RefreshCw
-                              v-if="refreshingQuota"
-                              class="w-3 h-3 text-muted-foreground/70 animate-spin"
-                            />
-                            <span
-                              v-if="getAntigravityQuotaUpdatedAt(key)"
-                              class="text-[9px] text-muted-foreground/70"
-                            >
-                              {{ formatAntigravityUpdatedAt(getAntigravityQuotaUpdatedAt(key) || 0) }}
-                            </span>
-                          </div>
-                        </div>
+                        <ProviderQuotaSectionHeader
+                          :title="legacyT('模型配额')"
+                          :loading="refreshingQuota"
+                          :updated-text="getAntigravityQuotaUpdatedAt(key) ? formatAntigravityUpdatedAt(getAntigravityQuotaUpdatedAt(key) || 0) : null"
+                        />
                         <div class="grid grid-cols-2 gap-3">
-                          <div
+                          <ProviderQuotaProgressRow
                             v-for="group in getAntigravityQuotaSummaryForKey(key)"
                             :key="group.key"
+                            :label="group.label"
+                            :used-percent="group.usedPercent"
+                            :remaining-percent="group.remainingPercent"
+                            :meter-class="getQuotaRemainingClass(group.usedPercent)"
+                            :bar-class="getQuotaRemainingBarColor(group.usedPercent)"
                           >
-                            <div class="flex items-center justify-between text-[10px] mb-0.5">
-                              <span class="text-muted-foreground truncate mr-2 min-w-0 flex-1">
-                                {{ group.label }}
-                              </span>
-                              <span :class="getQuotaRemainingClass(group.usedPercent)">
-                                {{ group.remainingPercent.toFixed(1) }}%
-                              </span>
-                            </div>
-                            <div class="relative w-full h-1.5 bg-border rounded-full overflow-hidden">
+                            <template #footer>
                               <div
-                                class="absolute left-0 top-0 h-full transition-all duration-300"
-                                :class="getQuotaRemainingBarColor(group.usedPercent)"
-                                :style="{ width: `${Math.max(group.remainingPercent, 0)}%` }"
-                              />
-                            </div>
-                            <div
-                              v-if="group.resetSeconds !== null || group.usedPercent > 0"
-                              class="text-[9px] text-muted-foreground/70 mt-0.5"
-                            >
-                              <template v-if="group.resetSeconds !== null && group.resetSeconds > 0">
-                                {{ formatResetTime(group.resetSeconds) }}{{ legacyT('后重置') }}
-                              </template>
-                              <template v-else-if="group.resetSeconds !== null && group.resetSeconds <= 0">
-                                {{ legacyT('已重置') }}
-                              </template>
-                              <template v-else>
-                                {{ legacyT('重置时间未知') }}
-                              </template>
-                            </div>
-                          </div>
+                                v-if="group.resetSeconds !== null || group.usedPercent > 0"
+                                class="text-[9px] text-muted-foreground/70 mt-0.5"
+                              >
+                                <template v-if="group.resetSeconds !== null && group.resetSeconds > 0">
+                                  {{ formatResetTime(group.resetSeconds) }}{{ legacyT('后重置') }}
+                                </template>
+                                <template v-else-if="group.resetSeconds !== null && group.resetSeconds <= 0">
+                                  {{ legacyT('已重置') }}
+                                </template>
+                                <template v-else>
+                                  {{ legacyT('重置时间未知') }}
+                                </template>
+                              </div>
+                            </template>
+                          </ProviderQuotaProgressRow>
                         </div>
                       </template>
                     </div>
@@ -689,21 +568,11 @@
                       v-if="provider.provider_type === 'gemini_cli' && hasGeminiCliQuotaDisplayData(key)"
                       class="mt-2 p-2 rounded-md bg-muted/30"
                     >
-                      <div class="flex items-center justify-between mb-1">
-                        <span class="text-[10px] text-muted-foreground">{{ legacyT('模型配额') }}</span>
-                        <div class="flex items-center gap-1">
-                          <RefreshCw
-                            v-if="refreshingQuota"
-                            class="w-3 h-3 text-muted-foreground/70 animate-spin"
-                          />
-                          <span
-                            v-if="getGeminiCliQuotaUpdatedAt(key)"
-                            class="text-[9px] text-muted-foreground/70"
-                          >
-                            {{ formatUpdatedAt(getGeminiCliQuotaUpdatedAt(key) || 0) }}
-                          </span>
-                        </div>
-                      </div>
+                      <ProviderQuotaSectionHeader
+                        :title="legacyT('模型配额')"
+                        :loading="refreshingQuota"
+                        :updated-text="getGeminiCliQuotaUpdatedAt(key) ? formatUpdatedAt(getGeminiCliQuotaUpdatedAt(key) || 0) : null"
+                      />
                       <div
                         v-if="getGeminiCliAccountCreditsText(key, 'gemini_cli')"
                         class="mb-2 text-[10px] font-medium text-foreground/90"
@@ -714,40 +583,30 @@
                         v-if="getGeminiCliQuotaItems(key).length > 0"
                         class="grid grid-cols-2 gap-3"
                       >
-                        <div
+                        <ProviderQuotaProgressRow
                           v-for="item in getGeminiCliQuotaItems(key)"
                           :key="item.model"
+                          :label="item.label"
+                          :title="item.model"
+                          :used-percent="item.usedPercent"
+                          :remaining-percent="item.remainingPercent"
+                          :meter-class="getQuotaRemainingClass(item.usedPercent)"
+                          :bar-class="getQuotaRemainingBarColor(item.usedPercent)"
                         >
-                          <div class="flex items-center justify-between text-[10px] mb-0.5">
-                            <span
-                              class="text-muted-foreground truncate mr-2 min-w-0 flex-1"
-                              :title="item.model"
-                            >
-                              {{ item.label }}
-                            </span>
-                            <span :class="getQuotaRemainingClass(item.usedPercent)">
-                              {{ item.remainingPercent.toFixed(1) }}%
-                            </span>
-                          </div>
-                          <div class="relative w-full h-1.5 bg-border rounded-full overflow-hidden">
+                          <template #footer>
                             <div
-                              class="absolute left-0 top-0 h-full transition-all duration-300"
-                              :class="getQuotaRemainingBarColor(item.usedPercent)"
-                              :style="{ width: `${Math.max(item.remainingPercent, 0)}%` }"
-                            />
-                          </div>
-                          <div
-                            v-if="item.resetSeconds !== null && item.remainingPercent < 100"
-                            class="text-[9px] text-muted-foreground/70 mt-0.5"
-                          >
-                            <template v-if="item.resetSeconds > 0">
-                              {{ formatResetTime(item.resetSeconds) }}{{ legacyT('后重置') }}
-                            </template>
-                            <template v-else>
-                              {{ legacyT('已重置') }}
-                            </template>
-                          </div>
-                        </div>
+                              v-if="item.resetSeconds !== null && item.remainingPercent < 100"
+                              class="text-[9px] text-muted-foreground/70 mt-0.5"
+                            >
+                              <template v-if="item.resetSeconds > 0">
+                                {{ formatResetTime(item.resetSeconds) }}{{ legacyT('后重置') }}
+                              </template>
+                              <template v-else>
+                                {{ legacyT('已重置') }}
+                              </template>
+                            </div>
+                          </template>
+                        </ProviderQuotaProgressRow>
                       </div>
                     </div>
                     <!-- Kiro 上游额度信息（仅当有元数据时显示） -->
@@ -783,48 +642,32 @@
                       </div>
                       <!-- 正常配额显示 -->
                       <template v-else>
-                        <div class="flex items-center justify-between mb-1">
-                          <span class="text-[10px] text-muted-foreground">{{ legacyT('账号配额') }}</span>
-                          <div class="flex items-center gap-1">
-                            <RefreshCw
-                              v-if="refreshingQuota"
-                              class="w-3 h-3 text-muted-foreground/70 animate-spin"
-                            />
-                            <span
-                              v-if="getKiroQuotaDisplay(key)?.updated_at"
-                              class="text-[9px] text-muted-foreground/70"
-                            >
-                              {{ formatKiroUpdatedAt(getKiroQuotaDisplay(key)?.updated_at || 0) }}
-                            </span>
-                          </div>
-                        </div>
+                        <ProviderQuotaSectionHeader
+                          :title="legacyT('账号配额')"
+                          :loading="refreshingQuota"
+                          :updated-text="getKiroQuotaDisplay(key)?.updated_at ? formatKiroUpdatedAt(getKiroQuotaDisplay(key)?.updated_at || 0) : null"
+                        />
                         <!-- Kiro 额度显示：使用进度 -->
                         <div>
                           <!-- 使用额度进度条 -->
-                          <div>
-                            <div class="flex items-center justify-between text-[10px] mb-0.5">
-                              <span class="text-muted-foreground">{{ legacyT('使用额度') }}</span>
-                              <span :class="getQuotaRemainingClass(getKiroQuotaDisplay(key)?.usage_percentage || 0)">
-                                {{ (100 - (getKiroQuotaDisplay(key)?.usage_percentage || 0)).toFixed(1) }}%
-                              </span>
-                            </div>
-                            <div class="relative w-full h-1.5 bg-border rounded-full overflow-hidden">
-                              <div
-                                class="absolute left-0 top-0 h-full transition-all duration-300"
-                                :class="getQuotaRemainingBarColor(getKiroQuotaDisplay(key)?.usage_percentage || 0)"
-                                :style="{ width: `${Math.max(100 - (getKiroQuotaDisplay(key)?.usage_percentage || 0), 0)}%` }"
-                              />
-                            </div>
-                            <div class="flex items-center justify-between text-[9px] text-muted-foreground/70 mt-0.5">
-                              <span>
-                                {{ formatKiroUsage(getKiroQuotaDisplay(key)?.current_usage) }} /
-                                {{ formatKiroUsage(getKiroQuotaDisplay(key)?.usage_limit) }}
-                              </span>
-                              <span v-if="getKiroQuotaDisplay(key)?.next_reset_at">
-                                {{ formatKiroResetTime(getKiroQuotaDisplay(key)?.next_reset_at) }}{{ legacyT('重置') }}
-                              </span>
-                            </div>
-                          </div>
+                          <ProviderQuotaProgressRow
+                            :label="legacyT('使用额度')"
+                            :used-percent="getKiroQuotaDisplay(key)?.usage_percentage || 0"
+                            :meter-class="getQuotaRemainingClass(getKiroQuotaDisplay(key)?.usage_percentage || 0)"
+                            :bar-class="getQuotaRemainingBarColor(getKiroQuotaDisplay(key)?.usage_percentage || 0)"
+                          >
+                            <template #footer>
+                              <div class="flex items-center justify-between text-[9px] text-muted-foreground/70 mt-0.5">
+                                <span>
+                                  {{ formatKiroUsage(getKiroQuotaDisplay(key)?.current_usage) }} /
+                                  {{ formatKiroUsage(getKiroQuotaDisplay(key)?.usage_limit) }}
+                                </span>
+                                <span v-if="getKiroQuotaDisplay(key)?.next_reset_at">
+                                  {{ formatKiroResetTime(getKiroQuotaDisplay(key)?.next_reset_at) }}{{ legacyT('重置') }}
+                                </span>
+                              </div>
+                            </template>
+                          </ProviderQuotaProgressRow>
                         </div>
                       </template>
                     </div>
@@ -871,64 +714,34 @@
                             </div>
                           </div>
                         </div>
-                        <div class="flex items-center justify-between mb-1">
-                          <span class="text-[10px] text-muted-foreground">{{ legacyT('账号配额') }}</span>
-                          <div class="flex items-center gap-1">
-                            <RefreshCw
-                              v-if="refreshingQuota"
-                              class="w-3 h-3 text-muted-foreground/70 animate-spin"
-                            />
-                            <span
-                              v-if="getWindsurfQuotaDisplay(key)?.updated_at"
-                              class="text-[9px] text-muted-foreground/70"
-                            >
-                              {{ formatKiroUpdatedAt(getWindsurfQuotaDisplay(key)?.updated_at || 0) }}
-                            </span>
-                          </div>
-                        </div>
+                        <ProviderQuotaSectionHeader
+                          :title="legacyT('账号配额')"
+                          :loading="refreshingQuota"
+                          :updated-text="getWindsurfQuotaDisplay(key)?.updated_at ? formatKiroUpdatedAt(getWindsurfQuotaDisplay(key)?.updated_at || 0) : null"
+                        />
                         <div class="grid grid-cols-2 gap-3">
-                          <div v-if="getWindsurfQuotaDisplay(key)?.daily_remaining_percent !== undefined">
-                            <div class="flex items-center justify-between text-[10px] mb-0.5">
-                              <span class="text-muted-foreground">{{ legacyT('日额度') }}</span>
-                              <span :class="getQuotaRemainingClass(getWindsurfQuotaDisplay(key)?.daily_used_percent || 0)">
-                                {{ (getWindsurfQuotaDisplay(key)?.daily_remaining_percent || 0).toFixed(1) }}%
-                              </span>
-                            </div>
-                            <div class="relative w-full h-1.5 bg-border rounded-full overflow-hidden">
-                              <div
-                                class="absolute left-0 top-0 h-full transition-all duration-300"
-                                :class="getQuotaRemainingBarColor(getWindsurfQuotaDisplay(key)?.daily_used_percent || 0)"
-                                :style="{ width: `${Math.max(getWindsurfQuotaDisplay(key)?.daily_remaining_percent || 0, 0)}%` }"
-                              />
-                            </div>
-                            <div
-                              v-if="getWindsurfQuotaDisplay(key)?.daily_reset_at"
-                              class="text-[9px] text-muted-foreground/70 mt-0.5"
-                            >
-                              {{ formatKiroResetTime(getWindsurfQuotaDisplay(key)?.daily_reset_at || 0) }}{{ legacyT('重置') }}
-                            </div>
-                          </div>
-                          <div v-if="getWindsurfQuotaDisplay(key)?.weekly_remaining_percent !== undefined">
-                            <div class="flex items-center justify-between text-[10px] mb-0.5">
-                              <span class="text-muted-foreground">{{ legacyT('周额度') }}</span>
-                              <span :class="getQuotaRemainingClass(getWindsurfQuotaDisplay(key)?.weekly_used_percent || 0)">
-                                {{ (getWindsurfQuotaDisplay(key)?.weekly_remaining_percent || 0).toFixed(1) }}%
-                              </span>
-                            </div>
-                            <div class="relative w-full h-1.5 bg-border rounded-full overflow-hidden">
-                              <div
-                                class="absolute left-0 top-0 h-full transition-all duration-300"
-                                :class="getQuotaRemainingBarColor(getWindsurfQuotaDisplay(key)?.weekly_used_percent || 0)"
-                                :style="{ width: `${Math.max(getWindsurfQuotaDisplay(key)?.weekly_remaining_percent || 0, 0)}%` }"
-                              />
-                            </div>
-                            <div
-                              v-if="getWindsurfQuotaDisplay(key)?.weekly_reset_at"
-                              class="text-[9px] text-muted-foreground/70 mt-0.5"
-                            >
-                              {{ formatKiroResetTime(getWindsurfQuotaDisplay(key)?.weekly_reset_at || 0) }}{{ legacyT('重置') }}
-                            </div>
-                          </div>
+                          <ProviderQuotaProgressRow
+                            v-if="getWindsurfQuotaDisplay(key)?.daily_remaining_percent !== undefined"
+                            :label="legacyT('日额度')"
+                            :used-percent="getWindsurfQuotaDisplay(key)?.daily_used_percent || 0"
+                            :remaining-percent="getWindsurfQuotaDisplay(key)?.daily_remaining_percent || 0"
+                            :meter-class="getQuotaRemainingClass(getWindsurfQuotaDisplay(key)?.daily_used_percent || 0)"
+                            :bar-class="getQuotaRemainingBarColor(getWindsurfQuotaDisplay(key)?.daily_used_percent || 0)"
+                            :reset-text="getWindsurfQuotaDisplay(key)?.daily_reset_at
+                              ? `${formatKiroResetTime(getWindsurfQuotaDisplay(key)?.daily_reset_at || 0)}${legacyT('重置')}`
+                              : null"
+                          />
+                          <ProviderQuotaProgressRow
+                            v-if="getWindsurfQuotaDisplay(key)?.weekly_remaining_percent !== undefined"
+                            :label="legacyT('周额度')"
+                            :used-percent="getWindsurfQuotaDisplay(key)?.weekly_used_percent || 0"
+                            :remaining-percent="getWindsurfQuotaDisplay(key)?.weekly_remaining_percent || 0"
+                            :meter-class="getQuotaRemainingClass(getWindsurfQuotaDisplay(key)?.weekly_used_percent || 0)"
+                            :bar-class="getQuotaRemainingBarColor(getWindsurfQuotaDisplay(key)?.weekly_used_percent || 0)"
+                            :reset-text="getWindsurfQuotaDisplay(key)?.weekly_reset_at
+                              ? `${formatKiroResetTime(getWindsurfQuotaDisplay(key)?.weekly_reset_at || 0)}${legacyT('重置')}`
+                              : null"
+                          />
                         </div>
                         <div
                           v-if="hasWindsurfPromptQuota(key) || hasWindsurfFlexQuota(key)"
@@ -965,44 +778,31 @@
                       v-if="provider.provider_type === 'chatgpt_web' && hasChatGPTWebQuotaDisplayData(key)"
                       class="mt-2 p-2 rounded-md bg-muted/30"
                     >
-                      <div class="flex items-center justify-between mb-1">
-                        <span class="text-[10px] text-muted-foreground">{{ legacyT('账号配额') }}</span>
-                        <div class="flex items-center gap-1">
-                          <RefreshCw
-                            v-if="refreshingQuota"
-                            class="w-3 h-3 text-muted-foreground/70 animate-spin"
-                          />
-                          <span
-                            v-if="getChatGPTWebQuotaDisplay(key)?.updated_at"
-                            class="text-[9px] text-muted-foreground/70"
-                          >
-                            {{ formatKiroUpdatedAt(getChatGPTWebQuotaDisplay(key)?.updated_at || 0) }}
-                          </span>
-                        </div>
-                      </div>
+                      <ProviderQuotaSectionHeader
+                        :title="legacyT('账号配额')"
+                        :loading="refreshingQuota"
+                        :updated-text="getChatGPTWebQuotaDisplay(key)?.updated_at ? formatKiroUpdatedAt(getChatGPTWebQuotaDisplay(key)?.updated_at || 0) : null"
+                      />
                       <div>
-                        <div class="flex items-center justify-between text-[10px] mb-0.5">
-                          <span class="text-muted-foreground">{{ legacyT('剩余额度') }}</span>
-                          <span :class="getQuotaRemainingClass(getChatGPTWebQuotaUsedPercent(key))">
-                            {{ getChatGPTWebQuotaRemainingPercent(key).toFixed(1) }}%
-                          </span>
-                        </div>
-                        <div class="relative w-full h-1.5 bg-border rounded-full overflow-hidden">
-                          <div
-                            class="absolute left-0 top-0 h-full transition-all duration-300"
-                            :class="getQuotaRemainingBarColor(getChatGPTWebQuotaUsedPercent(key))"
-                            :style="{ width: `${Math.max(getChatGPTWebQuotaRemainingPercent(key), 0)}%` }"
-                          />
-                        </div>
-                        <div class="flex items-center justify-between text-[9px] text-muted-foreground/70 mt-0.5">
-                          <span>
-                            {{ formatChatGPTWebUsage(getChatGPTWebQuotaDisplay(key)?.image_quota_remaining) }} /
-                            {{ formatChatGPTWebUsage(getChatGPTWebQuotaDisplay(key)?.image_quota_total) }}
-                          </span>
-                          <span v-if="getChatGPTWebQuotaDisplay(key)?.image_quota_reset_at">
-                            {{ formatKiroResetTime(getChatGPTWebQuotaDisplay(key)?.image_quota_reset_at) }}{{ legacyT('重置') }}
-                          </span>
-                        </div>
+                        <ProviderQuotaProgressRow
+                          :label="legacyT('剩余额度')"
+                          :used-percent="getChatGPTWebQuotaUsedPercent(key)"
+                          :remaining-percent="getChatGPTWebQuotaRemainingPercent(key)"
+                          :meter-class="getQuotaRemainingClass(getChatGPTWebQuotaUsedPercent(key))"
+                          :bar-class="getQuotaRemainingBarColor(getChatGPTWebQuotaUsedPercent(key))"
+                        >
+                          <template #footer>
+                            <div class="flex items-center justify-between text-[9px] text-muted-foreground/70 mt-0.5">
+                              <span>
+                                {{ formatChatGPTWebUsage(getChatGPTWebQuotaDisplay(key)?.image_quota_remaining) }} /
+                                {{ formatChatGPTWebUsage(getChatGPTWebQuotaDisplay(key)?.image_quota_total) }}
+                              </span>
+                              <span v-if="getChatGPTWebQuotaDisplay(key)?.image_quota_reset_at">
+                                {{ formatKiroResetTime(getChatGPTWebQuotaDisplay(key)?.image_quota_reset_at) }}{{ legacyT('重置') }}
+                              </span>
+                            </div>
+                          </template>
+                        </ProviderQuotaProgressRow>
                       </div>
                     </div>
                     <!-- 第二行：优先级 + API 格式（展开显示） + 统计信息 -->
@@ -1328,6 +1128,9 @@ import AlertDialog from '@/components/common/AlertDialog.vue'
 import AntigravityQuotaDialog from '@/features/providers/components/AntigravityQuotaDialog.vue'
 import FailoverRulesDialog from '@/features/providers/components/FailoverRulesDialog.vue'
 import ProviderDetailHeader from '@/features/providers/components/ProviderDetailHeader.vue'
+import ProviderMonthlyQuotaCard from '@/features/providers/components/ProviderMonthlyQuotaCard.vue'
+import ProviderQuotaProgressRow from '@/features/providers/components/ProviderQuotaProgressRow.vue'
+import ProviderQuotaSectionHeader from '@/features/providers/components/ProviderQuotaSectionHeader.vue'
 import ProxyNodeSelect from '@/features/providers/components/ProxyNodeSelect.vue'
 import { useProxyNodesStore } from '@/stores/proxy-nodes'
 import {
@@ -3761,6 +3564,18 @@ function getResetCountdownText(
   )
   if (!status) return ''
   return status.isExpired ? legacyT(status.text) : `${legacyT(status.text)} ${legacyT('后重置')}`
+}
+
+function getCodexQuotaResetText(
+  resetAt: number | null | undefined,
+  resetSecs: number | null | undefined,
+  updatedAt: number | null | undefined,
+  usedPercent: number | null | undefined
+): string {
+  if (resetAt || resetSecs) {
+    return getResetCountdownText(resetAt, resetSecs, updatedAt, usedPercent)
+  }
+  return legacyT('已重置')
 }
 
 function getResetCountdownClass(
