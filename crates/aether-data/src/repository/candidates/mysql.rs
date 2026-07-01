@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use sqlx::{mysql::MySqlRow, MySql, QueryBuilder, Row};
 
 use super::{
-    PublicHealthStatusCount, PublicHealthTimelineBucket, RequestCandidateReadRepository,
-    RequestCandidateStatus, RequestCandidateWriteRepository, StoredRequestCandidate,
-    UpsertRequestCandidateRecord,
+    request_candidate_lifecycle_would_regress, PublicHealthStatusCount, PublicHealthTimelineBucket,
+    RequestCandidateReadRepository, RequestCandidateStatus, RequestCandidateWriteRepository,
+    StoredRequestCandidate, UpsertRequestCandidateRecord,
 };
 use crate::driver::mysql::MysqlPool;
 use crate::error::SqlResultExt;
@@ -523,26 +523,6 @@ fn merge_candidate(
         .map(|value| u64_to_i64(value, "request candidate finished_at"))
         .transpose()?,
     )
-}
-
-fn request_candidate_lifecycle_would_regress(
-    existing: RequestCandidateStatus,
-    incoming: RequestCandidateStatus,
-) -> bool {
-    matches!(
-        existing,
-        RequestCandidateStatus::Success
-            | RequestCandidateStatus::Failed
-            | RequestCandidateStatus::Cancelled
-            | RequestCandidateStatus::Skipped
-    ) && matches!(
-        incoming,
-        RequestCandidateStatus::Available
-            | RequestCandidateStatus::Unused
-            | RequestCandidateStatus::Pending
-            | RequestCandidateStatus::Streaming
-    ) || existing == RequestCandidateStatus::Streaming
-        && incoming == RequestCandidateStatus::Pending
 }
 
 fn aggregate_timeline(
