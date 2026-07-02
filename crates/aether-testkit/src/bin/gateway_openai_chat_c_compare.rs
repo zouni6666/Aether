@@ -386,6 +386,7 @@ fn load_config(
         warmup_url: Some(gateway_health_url.to_string()),
         method: Method::POST,
         headers,
+        header_sets: Vec::new(),
         body: Some(
             serde_json::json!({
                 "model": "gpt-5",

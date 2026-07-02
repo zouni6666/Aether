@@ -276,8 +276,10 @@ dependencies = [
  "sha2",
  "socket2 0.6.3",
  "sqlx",
+ "sysinfo",
  "tar",
  "thiserror 2.0.18",
+ "tikv-jemalloc-sys",
  "tikv-jemallocator",
  "tokio",
  "tokio-util",
@@ -477,10 +479,12 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "sysinfo",
  "tokio",
  "tokio-tungstenite 0.28.0",
+ "uuid",
 ]
 
 [[package]]

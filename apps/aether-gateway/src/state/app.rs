@@ -20,8 +20,10 @@ use super::super::cache::{
 };
 use super::super::data::GatewayDataState;
 use super::super::fallback_metrics;
+use super::super::maintenance::UsageCounterFlushRuntimeMetrics;
 use super::super::rate_limit::FrontdoorUserRpmLimiter;
 use super::super::request_candidate_queue::RequestCandidateQueueRuntime;
+use super::super::task_runtime::TaskSupervisorMetrics;
 use super::super::{provider_transport, usage};
 use super::{
     AdminBillingCollectorRecord, AdminBillingRuleRecord, AdminPaymentCallbackRecord,
@@ -40,18 +42,22 @@ const MIN_LOCAL_EXECUTION_PLANNING_TIMEOUT_MS: u64 = 500;
 const MAX_LOCAL_EXECUTION_PLANNING_TIMEOUT_MS: u64 = 120_000;
 const LOCAL_EXECUTION_PLANNING_TIMEOUT_MS_ENV: &str =
     "AETHER_GATEWAY_LOCAL_EXECUTION_PLANNING_TIMEOUT_MS";
+const DEFAULT_AUTH_SNAPSHOT_LOAD_GATE_LIMIT: usize = 64;
 const DEFAULT_CANDIDATE_PLANNING_GATE_LIMIT: usize = 1024;
 const DEFAULT_UPSTREAM_EXECUTION_GATE_LIMIT: usize = 10_000;
 const DEFAULT_UPSTREAM_TARGET_GATE_LIMIT: usize = 10_000;
+const MAX_AUTH_SNAPSHOT_LOAD_GATE_LIMIT: usize = 1024;
 const MAX_CANDIDATE_PLANNING_GATE_LIMIT: usize = 8192;
 const MAX_UPSTREAM_EXECUTION_GATE_LIMIT: usize = 16_384;
 const MAX_UPSTREAM_TARGET_GATE_LIMIT: usize = 16_384;
+const AUTH_SNAPSHOT_LOAD_GATE_LIMIT_PER_CPU: usize = 16;
 const CANDIDATE_PLANNING_GATE_LIMIT_PER_CPU: usize = 256;
 const UPSTREAM_EXECUTION_GATE_LIMIT_PER_CPU: usize = 1024;
 const UPSTREAM_TARGET_GATE_LIMIT_PER_CPU: usize = 1024;
 const GATE_LIMIT_FD_RESERVE: usize = 128;
 const DEFAULT_INTERNAL_GATE_QUEUE_BUDGET_MS: u64 = 250;
 const MAX_INTERNAL_GATE_QUEUE_BUDGET_MS: u64 = 5_000;
+const AUTH_SNAPSHOT_LOAD_GATE_LIMIT_ENV: &str = "AETHER_GATEWAY_AUTH_SNAPSHOT_LOAD_GATE_LIMIT";
 const CANDIDATE_PLANNING_GATE_LIMIT_ENV: &str = "AETHER_GATEWAY_CANDIDATE_PLANNING_GATE_LIMIT";
 const UPSTREAM_EXECUTION_GATE_LIMIT_ENV: &str = "AETHER_GATEWAY_UPSTREAM_EXECUTION_GATE_LIMIT";
 const UPSTREAM_TARGET_GATE_LIMIT_ENV: &str = "AETHER_GATEWAY_UPSTREAM_TARGET_GATE_LIMIT";
@@ -87,6 +93,7 @@ pub(crate) struct FrontdoorRuntimeGuardConfig {
     pub(crate) local_execution_planning_timeout: Duration,
     pub(crate) internal_gate_queue_budget: Duration,
     pub(crate) auth_capacity_cache_ttl: Duration,
+    pub(crate) auth_snapshot_load_gate_limit: Option<usize>,
     pub(crate) candidate_planning_gate_limit: Option<usize>,
     pub(crate) upstream_execution_gate_limit: Option<usize>,
     pub(crate) upstream_target_gate_limit: Option<usize>,
@@ -119,6 +126,7 @@ impl FrontdoorRuntimeGuardConfig {
                 MIN_AUTH_CAPACITY_CACHE_TTL_MS,
                 MAX_AUTH_CAPACITY_CACHE_TTL_MS,
             ),
+            auth_snapshot_load_gate_limit: auth_snapshot_load_gate_limit_from_env(),
             candidate_planning_gate_limit: candidate_planning_gate_limit_from_env(),
             upstream_execution_gate_limit: upstream_execution_gate_limit_from_env(),
             upstream_target_gate_limit: upstream_target_gate_limit_from_env(),
@@ -137,6 +145,7 @@ impl FrontdoorRuntimeGuardConfig {
                 DEFAULT_INTERNAL_GATE_QUEUE_BUDGET_MS,
             ),
             auth_capacity_cache_ttl: Duration::from_millis(DEFAULT_AUTH_CAPACITY_CACHE_TTL_MS),
+            auth_snapshot_load_gate_limit: Some(DEFAULT_AUTH_SNAPSHOT_LOAD_GATE_LIMIT),
             candidate_planning_gate_limit: Some(DEFAULT_CANDIDATE_PLANNING_GATE_LIMIT),
             upstream_execution_gate_limit: Some(DEFAULT_UPSTREAM_EXECUTION_GATE_LIMIT),
             upstream_target_gate_limit: Some(DEFAULT_UPSTREAM_TARGET_GATE_LIMIT),
@@ -192,6 +201,13 @@ const CANDIDATE_PLANNING_GATE_AUTO_PROFILE: GateAutoProfile = GateAutoProfile {
     fd_divisor: None,
 };
 
+const AUTH_SNAPSHOT_LOAD_GATE_AUTO_PROFILE: GateAutoProfile = GateAutoProfile {
+    floor: DEFAULT_AUTH_SNAPSHOT_LOAD_GATE_LIMIT,
+    cap: MAX_AUTH_SNAPSHOT_LOAD_GATE_LIMIT,
+    per_cpu: AUTH_SNAPSHOT_LOAD_GATE_LIMIT_PER_CPU,
+    fd_divisor: None,
+};
+
 const UPSTREAM_EXECUTION_GATE_AUTO_PROFILE: GateAutoProfile = GateAutoProfile {
     floor: DEFAULT_UPSTREAM_EXECUTION_GATE_LIMIT,
     cap: MAX_UPSTREAM_EXECUTION_GATE_LIMIT,
@@ -210,6 +226,13 @@ fn candidate_planning_gate_limit_from_env() -> Option<usize> {
     env_gate_limit(
         CANDIDATE_PLANNING_GATE_LIMIT_ENV,
         CANDIDATE_PLANNING_GATE_AUTO_PROFILE,
+    )
+}
+
+fn auth_snapshot_load_gate_limit_from_env() -> Option<usize> {
+    env_gate_limit(
+        AUTH_SNAPSHOT_LOAD_GATE_LIMIT_ENV,
+        AUTH_SNAPSHOT_LOAD_GATE_AUTO_PROFILE,
     )
 }
 
@@ -315,6 +338,7 @@ pub struct AppState {
     pub(crate) video_task_poller: Option<VideoTaskPollerConfig>,
     pub(crate) frontdoor_runtime_guards: Arc<FrontdoorRuntimeGuardConfig>,
     pub(crate) request_gate: Option<Arc<ConcurrencyGate>>,
+    pub(crate) auth_snapshot_load_gate: Option<Arc<ConcurrencyGate>>,
     pub(crate) candidate_planning_gate: Option<Arc<ConcurrencyGate>>,
     pub(crate) upstream_execution_gate: Option<Arc<ConcurrencyGate>>,
     pub(crate) upstream_target_admission: Arc<crate::upstream_admission::UpstreamTargetAdmission>,
@@ -349,6 +373,9 @@ pub struct AppState {
     pub(crate) chat_pii_redaction_runtime_config_cache:
         crate::privacy::ChatPiiRedactionRuntimeConfigCacheHandle,
     pub(crate) fallback_metrics: Arc<fallback_metrics::GatewayFallbackMetrics>,
+    pub(crate) usage_counter_flush_metrics: Arc<UsageCounterFlushRuntimeMetrics>,
+    pub(crate) task_supervisor_metrics: TaskSupervisorMetrics,
+    pub(crate) process_resource_monitor: Arc<crate::process_metrics::GatewayProcessResourceMonitor>,
     pub(crate) request_candidate_queue: Option<Arc<RequestCandidateQueueRuntime>>,
     pub(crate) frontdoor_cors: Option<Arc<FrontdoorCorsConfig>>,
     pub(crate) frontdoor_user_rpm: Arc<FrontdoorUserRpmLimiter>,
@@ -451,6 +478,18 @@ mod tests {
         assert_eq!(
             parse_gate_limit_value(Some("  AUTO  "), TEST_PROFILE, TEST_CAPACITY),
             Some(12_288)
+        );
+    }
+
+    #[test]
+    fn auth_snapshot_load_gate_auto_limit_uses_smaller_frontdoor_profile() {
+        assert_eq!(
+            parse_gate_limit_value(
+                Some("auto"),
+                AUTH_SNAPSHOT_LOAD_GATE_AUTO_PROFILE,
+                TEST_CAPACITY
+            ),
+            Some(192)
         );
     }
 

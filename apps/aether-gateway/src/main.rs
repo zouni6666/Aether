@@ -250,6 +250,8 @@ const AUTO_USAGE_QUEUE_WORKERS_MIN: usize = 2;
 const AUTO_USAGE_QUEUE_WORKERS_REQUESTS_PER_WORKER: usize = 128;
 const AUTO_USAGE_QUEUE_WORKERS_DB_SHARE_ALL: usize = 4;
 const AUTO_USAGE_QUEUE_WORKERS_DB_SHARE_BACKGROUND: usize = 2;
+const AUTO_USAGE_WORKER_RECORD_DB_SHARE_ALL: usize = 8;
+const AUTO_USAGE_WORKER_RECORD_DB_SHARE_BACKGROUND: usize = 4;
 const MAX_USAGE_QUEUE_WORKERS: usize = 64;
 const DEFAULT_GATEWAY_LISTEN_BACKLOG: i32 = 65_535;
 const MIN_GATEWAY_LISTEN_BACKLOG: i32 = 128;
@@ -323,6 +325,29 @@ fn usage_queue_worker_database_cap(
         .checked_div(divisor)
         .unwrap_or(1)
         .clamp(1, MAX_USAGE_QUEUE_WORKERS)
+}
+
+fn usage_worker_record_concurrency_database_cap(
+    node_role: NodeRoleArg,
+    database: Option<&SqlDatabaseConfig>,
+) -> Option<usize> {
+    let database = database?;
+    if database.driver == DatabaseDriver::Sqlite {
+        return Some(1);
+    }
+
+    let divisor = if matches!(node_role, NodeRoleArg::Background) {
+        AUTO_USAGE_WORKER_RECORD_DB_SHARE_BACKGROUND
+    } else {
+        AUTO_USAGE_WORKER_RECORD_DB_SHARE_ALL
+    };
+    let max_connections = database.pool.max_connections.max(1) as usize;
+    Some(
+        max_connections
+            .checked_div(divisor.max(1))
+            .unwrap_or(1)
+            .clamp(1, MAX_USAGE_QUEUE_WORKERS),
+    )
 }
 
 fn automatic_usage_queue_workers_for_parallelism(
@@ -631,9 +656,18 @@ struct GatewayUsageArgs {
     #[arg(
         long,
         env = "AETHER_GATEWAY_USAGE_QUEUE_WORKER_MAX_COUNT",
-        value_name = "COUNT"
+        value_name = "COUNT",
+        default_value = "32"
     )]
     queue_worker_max_count: Option<usize>,
+
+    #[arg(
+        long,
+        env = "AETHER_GATEWAY_USAGE_WORKER_RECORD_CONCURRENCY_LIMIT",
+        value_name = "COUNT",
+        default_value = "32"
+    )]
+    worker_record_concurrency_limit: Option<usize>,
 
     #[arg(
         long,
@@ -680,7 +714,7 @@ struct GatewayUsageArgs {
     #[arg(
         long,
         env = "AETHER_GATEWAY_USAGE_QUEUE_BATCH_SIZE",
-        default_value_t = 500
+        default_value_t = 128
     )]
     queue_batch_size: usize,
 
@@ -694,14 +728,14 @@ struct GatewayUsageArgs {
     #[arg(
         long,
         env = "AETHER_GATEWAY_USAGE_QUEUE_RECLAIM_IDLE_MS",
-        default_value_t = 30_000
+        default_value_t = 60_000
     )]
     queue_reclaim_idle_ms: u64,
 
     #[arg(
         long,
         env = "AETHER_GATEWAY_USAGE_QUEUE_RECLAIM_COUNT",
-        default_value_t = 500
+        default_value_t = 128
     )]
     queue_reclaim_count: usize,
 
@@ -715,21 +749,28 @@ struct GatewayUsageArgs {
     #[arg(
         long,
         env = "AETHER_GATEWAY_USAGE_TERMINAL_ENQUEUE_MAX_IN_FLIGHT",
-        default_value_t = 256
+        default_value_t = 1_024
     )]
     terminal_enqueue_max_in_flight: u64,
 
     #[arg(
         long,
         env = "AETHER_GATEWAY_USAGE_LIFECYCLE_ENQUEUE_MAX_IN_FLIGHT",
-        default_value_t = 128
+        default_value_t = 512
     )]
     lifecycle_enqueue_max_in_flight: u64,
 
     #[arg(
         long,
+        env = "AETHER_GATEWAY_USAGE_LIFECYCLE_ENQUEUE_DELAY_MS",
+        default_value_t = 1_000
+    )]
+    lifecycle_enqueue_delay_ms: u64,
+
+    #[arg(
+        long,
         env = "AETHER_GATEWAY_USAGE_RETRY_DEFERRED_LIFECYCLE_EVENTS",
-        default_value_t = false
+        default_value_t = true
     )]
     retry_deferred_lifecycle_events: bool,
 
@@ -743,7 +784,7 @@ struct GatewayUsageArgs {
     #[arg(
         long,
         env = "AETHER_GATEWAY_USAGE_ENQUEUE_RETRY_WORKERS",
-        default_value_t = 4
+        default_value_t = 8
     )]
     enqueue_retry_workers: usize,
 
@@ -791,10 +832,12 @@ impl GatewayUsageArgs {
         worker_count: usize,
     ) -> usize {
         if !self.queue_worker_autoscale_enabled {
-            return worker_count.max(1).min(MAX_USAGE_QUEUE_WORKERS);
+            return worker_count.clamp(1, MAX_USAGE_QUEUE_WORKERS);
         }
         self.queue_worker_max_count
             .unwrap_or_else(|| usage_queue_worker_database_cap(node_role, database))
+            .max(1)
+            .min(usage_queue_worker_database_cap(node_role, database))
             .clamp(worker_count.max(1), MAX_USAGE_QUEUE_WORKERS)
     }
 
@@ -813,7 +856,39 @@ impl GatewayUsageArgs {
         Some(worker_max_count.clamp(1, MAX_USAGE_QUEUE_WORKERS))
     }
 
-    fn to_config(&self, worker_count: usize, worker_max_count: usize) -> UsageRuntimeConfig {
+    fn effective_worker_record_concurrency_limit(
+        &self,
+        node_role: NodeRoleArg,
+        database: Option<&SqlDatabaseConfig>,
+    ) -> Option<usize> {
+        if let Some(limit) = self.worker_record_concurrency_limit {
+            if limit == 0 {
+                return None;
+            }
+            return Some(
+                limit
+                    .min(MAX_USAGE_QUEUE_WORKERS)
+                    .min(
+                        usage_worker_record_concurrency_database_cap(node_role, database)
+                            .unwrap_or(MAX_USAGE_QUEUE_WORKERS),
+                    )
+                    .max(1),
+            );
+        }
+        if !node_role.spawns_background_tasks()
+            || (!self.queue_terminal_events && !self.queue_lifecycle_events)
+        {
+            return None;
+        }
+        usage_worker_record_concurrency_database_cap(node_role, database)
+    }
+
+    fn to_config(
+        &self,
+        worker_count: usize,
+        worker_max_count: usize,
+        worker_record_concurrency_limit: Option<usize>,
+    ) -> UsageRuntimeConfig {
         UsageRuntimeConfig {
             enabled: true,
             queue_terminal_events: self.queue_terminal_events,
@@ -821,6 +896,7 @@ impl GatewayUsageArgs {
             worker_count: worker_count.clamp(1, MAX_USAGE_QUEUE_WORKERS),
             worker_autoscale_enabled: self.queue_worker_autoscale_enabled,
             worker_max_count: worker_max_count.clamp(worker_count.max(1), MAX_USAGE_QUEUE_WORKERS),
+            worker_record_concurrency_limit,
             worker_scale_interval_ms: self.queue_worker_scale_interval_ms.max(1),
             worker_idle_scale_down_ticks: self.queue_worker_idle_scale_down_ticks.max(1),
             stream_key: self.queue_stream_key.trim().to_string(),
@@ -834,6 +910,7 @@ impl GatewayUsageArgs {
             reclaim_interval_ms: self.queue_reclaim_interval_ms.max(1),
             terminal_enqueue_max_in_flight: self.terminal_enqueue_max_in_flight.max(1),
             lifecycle_enqueue_max_in_flight: self.lifecycle_enqueue_max_in_flight.max(1),
+            lifecycle_enqueue_delay_ms: self.lifecycle_enqueue_delay_ms,
             retry_deferred_lifecycle_events: self.retry_deferred_lifecycle_events,
             enqueue_retry_buffer_capacity: self.enqueue_retry_buffer_capacity.max(1),
             enqueue_retry_workers: self.enqueue_retry_workers.clamp(1, 64),
@@ -1593,9 +1670,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         sql_database_config.as_ref(),
         usage_queue_workers,
     );
-    let usage_config = args
+    let usage_worker_record_concurrency_limit = args
         .usage
-        .to_config(usage_queue_workers, usage_queue_worker_max_count);
+        .effective_worker_record_concurrency_limit(args.node_role, sql_database_config.as_ref());
+    let usage_config = args.usage.to_config(
+        usage_queue_workers,
+        usage_queue_worker_max_count,
+        usage_worker_record_concurrency_limit,
+    );
     let usage_blocking_stream_lanes = args.usage.runtime_state_blocking_stream_lanes(
         args.node_role,
         sql_database_config.as_ref(),
@@ -1634,6 +1716,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         usage_queue_workers = usage_config.worker_count,
         usage_queue_worker_autoscale_enabled = usage_config.worker_autoscale_enabled,
         usage_queue_worker_max_count = usage_config.worker_max_count,
+        usage_worker_record_concurrency_limit = usage_config
+            .worker_record_concurrency_limit
+            .unwrap_or_default(),
         usage_queue_request_concurrency_hint =
             usage_queue_request_concurrency_hint.unwrap_or_default(),
         usage_queue_request_concurrency_hint_source = if usage_queue_request_concurrency_hint.is_some() {
@@ -1672,6 +1757,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         },
         usage_queue_worker_autoscale_enabled = usage_config.worker_autoscale_enabled,
         usage_queue_worker_max_count = usage_config.worker_max_count,
+        usage_worker_record_concurrency_limit = usage_config
+            .worker_record_concurrency_limit
+            .unwrap_or_default(),
         usage_queue_request_concurrency_hint =
             usage_queue_request_concurrency_hint.unwrap_or_default(),
         usage_queue_request_concurrency_hint_source =
@@ -2292,23 +2380,25 @@ mod tests {
                 queue_lifecycle_events: true,
                 queue_workers: Some(4),
                 queue_worker_autoscale_enabled: true,
-                queue_worker_max_count: None,
+                queue_worker_max_count: Some(32),
+                worker_record_concurrency_limit: Some(32),
                 queue_worker_scale_interval_ms: 1_000,
                 queue_worker_idle_scale_down_ticks: 30,
                 queue_stream_key: "usage:events".to_string(),
                 queue_group: "usage_consumers".to_string(),
                 queue_dlq_stream_key: "usage:events:dlq".to_string(),
                 queue_stream_maxlen: 200_000,
-                queue_batch_size: 500,
+                queue_batch_size: 128,
                 queue_block_ms: 500,
-                queue_reclaim_idle_ms: 30_000,
-                queue_reclaim_count: 500,
+                queue_reclaim_idle_ms: 60_000,
+                queue_reclaim_count: 128,
                 queue_reclaim_interval_ms: 5_000,
-                terminal_enqueue_max_in_flight: 256,
-                lifecycle_enqueue_max_in_flight: 128,
-                retry_deferred_lifecycle_events: false,
+                terminal_enqueue_max_in_flight: 1_024,
+                lifecycle_enqueue_max_in_flight: 512,
+                lifecycle_enqueue_delay_ms: 1_000,
+                retry_deferred_lifecycle_events: true,
                 enqueue_retry_buffer_capacity: 131_072,
-                enqueue_retry_workers: 4,
+                enqueue_retry_workers: 8,
                 enqueue_retry_initial_backoff_ms: 3_000,
                 enqueue_retry_max_backoff_ms: 10_000,
             },
@@ -2526,7 +2616,7 @@ mod tests {
         );
 
         assert_eq!(workers, 64);
-        assert_eq!(args.usage.to_config(workers, 64).worker_count, 64);
+        assert_eq!(args.usage.to_config(workers, 64, Some(8)).worker_count, 64);
     }
 
     #[test]
@@ -2566,7 +2656,7 @@ mod tests {
         let mut args = test_args();
         args.usage.queue_workers = None;
         args.usage.queue_worker_max_count = Some(32);
-        let database = test_database(DatabaseDriver::Postgres, 100);
+        let database = test_database(DatabaseDriver::Postgres, 200);
 
         let workers =
             args.usage
@@ -2577,6 +2667,38 @@ mod tests {
 
         assert_eq!(workers, 8);
         assert_eq!(max_workers, 32);
+    }
+
+    #[test]
+    fn gateway_usage_worker_record_concurrency_defaults_to_pool_reserve_share() {
+        let args = test_args();
+        let database = test_database(DatabaseDriver::Postgres, 64);
+
+        assert_eq!(
+            args.usage
+                .effective_worker_record_concurrency_limit(NodeRoleArg::All, Some(&database)),
+            Some(8)
+        );
+        assert_eq!(
+            args.usage.effective_worker_record_concurrency_limit(
+                NodeRoleArg::Background,
+                Some(&database)
+            ),
+            Some(16)
+        );
+    }
+
+    #[test]
+    fn gateway_usage_worker_record_concurrency_can_be_explicitly_disabled() {
+        let mut args = test_args();
+        args.usage.worker_record_concurrency_limit = Some(0);
+        let database = test_database(DatabaseDriver::Postgres, 64);
+
+        assert_eq!(
+            args.usage
+                .effective_worker_record_concurrency_limit(NodeRoleArg::All, Some(&database)),
+            None
+        );
     }
 
     #[test]

@@ -27,6 +27,7 @@
 
 mod admin_api;
 mod ai_serving;
+mod allocator_metrics;
 mod api;
 mod async_task;
 mod audit;
@@ -58,6 +59,7 @@ mod model_fetch;
 mod oauth;
 mod orchestration;
 mod privacy;
+mod process_metrics;
 mod provider_key_auth;
 mod provider_pool_demand;
 pub(crate) use aether_provider_transport as provider_transport;
@@ -76,6 +78,7 @@ mod system_features;
 mod task_runtime;
 #[cfg(feature = "testkit")]
 pub mod testkit;
+mod tokio_metrics;
 mod tunnel;
 mod upstream_admission;
 mod usage;

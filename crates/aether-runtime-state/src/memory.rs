@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
-use crate::{DataLayerError, RuntimeQueueEntry, RuntimeQueueReclaimConfig};
+use crate::{DataLayerError, RuntimeQueueEntry, RuntimeQueueReclaimConfig, RuntimeQueueStats};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryRuntimeStateConfig {
@@ -799,6 +799,48 @@ impl MemoryRuntimeBackend {
             remove_pending_from_all_groups(stream_state, id);
         }
         before.saturating_sub(stream_state.entries.len())
+    }
+
+    pub(crate) async fn queue_stats(&self, stream: &str, group: Option<&str>) -> RuntimeQueueStats {
+        let mut queues = self.queues.lock().await;
+        let now = Instant::now();
+        prune_memory_key(&mut queues, stream, now);
+        let Some(stream_state) = queues.get(stream) else {
+            return RuntimeQueueStats::default();
+        };
+        let stream_length = stream_state.entries.len() as u64;
+        let Some(group_name) = group else {
+            return RuntimeQueueStats {
+                stream_length,
+                ..RuntimeQueueStats::default()
+            };
+        };
+        let Some(group_state) = stream_state.groups.get(group_name) else {
+            return RuntimeQueueStats {
+                stream_length,
+                ..RuntimeQueueStats::default()
+            };
+        };
+        let group_lag = stream_state
+            .entries
+            .iter()
+            .filter(|entry| entry.sequence > group_state.last_delivered_sequence)
+            .count() as u64;
+        let oldest_pending_idle_ms = group_state
+            .pending
+            .values()
+            .map(|entry| {
+                now.saturating_duration_since(entry.delivered_at)
+                    .as_millis() as u64
+            })
+            .max();
+
+        RuntimeQueueStats {
+            stream_length,
+            group_pending: group_state.pending.len() as u64,
+            group_lag: Some(group_lag),
+            oldest_pending_idle_ms,
+        }
     }
 
     pub(crate) async fn lock_try_acquire(

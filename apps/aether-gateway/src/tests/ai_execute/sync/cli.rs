@@ -1257,25 +1257,27 @@ async fn gateway_executes_openai_responses_sync_after_api_key_concurrency_wait_b
             .await
             .expect("inflight request should complete")
     });
-    wait_until(1_000, || {
+    wait_until(5_000, || {
         *execution_runtime_hits.lock().expect("mutex should lock") >= 1
     })
     .await;
-    let pending_deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(1_000);
+    let active_deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(5_000);
     loop {
         let inflight_candidates = request_candidate_repository
             .list_by_request_id("trace-openai-cli-local-timeout-inflight-123")
             .await
             .expect("inflight request candidate trace should read");
-        if inflight_candidates
-            .iter()
-            .any(|candidate| candidate.status == RequestCandidateStatus::Pending)
-        {
+        if inflight_candidates.iter().any(|candidate| {
+            matches!(
+                candidate.status,
+                RequestCandidateStatus::Pending | RequestCandidateStatus::Streaming
+            ) && candidate.started_at_unix_ms.is_some()
+        }) {
             break;
         }
         assert!(
-            tokio::time::Instant::now() < pending_deadline,
-            "inflight request candidate did not become pending"
+            tokio::time::Instant::now() < active_deadline,
+            "inflight request candidate did not become active: {inflight_candidates:?}"
         );
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }

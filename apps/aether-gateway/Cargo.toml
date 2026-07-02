@@ -8,7 +8,12 @@ description = "Rust ingress gateway for Aether phase 3a transparent proxy"
 
 [features]
 default = []
-jemalloc = ["dep:tikv-jemallocator"]
+jemalloc = [
+    "dep:tikv-jemallocator",
+    "dep:tikv-jemalloc-sys",
+    "tikv-jemallocator/stats",
+    "tikv-jemalloc-sys/stats",
+]
 testkit = []
 
 [dependencies]
@@ -70,6 +75,7 @@ sha2 = { workspace = true, features = ["oid"] }
 socket2.workspace = true
 tar.workspace = true
 sqlx.workspace = true
+sysinfo = "0.32"
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
@@ -85,6 +91,7 @@ zstd.workspace = true
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = { version = "0.6", optional = true }
+tikv-jemalloc-sys = { version = "0.6", optional = true }
 
 [dev-dependencies]
 aether-testkit.workspace = true

@@ -2373,12 +2373,27 @@ async fn gateway_retries_next_local_openai_chat_stream_candidate_after_retryable
     assert_eq!(stored_candidates.len(), 2);
     let failed_candidate = stored_candidates
         .iter()
-        .find(|candidate| candidate.candidate_index == 0)
-        .expect("primary failed candidate should be stored");
+        .find(|candidate| {
+            candidate.status == RequestCandidateStatus::Failed && candidate.status_code == Some(429)
+        })
+        .expect("retryable 429 failed candidate should be stored");
     let success_candidate = stored_candidates
         .iter()
-        .find(|candidate| candidate.candidate_index == 1)
+        .find(|candidate| {
+            candidate.status == RequestCandidateStatus::Success
+                && candidate.status_code == Some(200)
+        })
         .expect("backup success candidate should be stored");
+    assert_ne!(
+        (
+            failed_candidate.candidate_index,
+            failed_candidate.retry_index
+        ),
+        (
+            success_candidate.candidate_index,
+            success_candidate.retry_index
+        )
+    );
     assert_eq!(failed_candidate.status, RequestCandidateStatus::Failed);
     assert_eq!(failed_candidate.status_code, Some(429));
     assert_eq!(

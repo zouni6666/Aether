@@ -1420,9 +1420,10 @@ impl DirectPassthroughFinalizerCore {
         }
         if !self.pending_recorded {
             self.pending_recorded = true;
+            let usage_data = self.state.data.as_ref().clone();
             self.state
                 .usage_runtime
-                .record_pending_direct(self.state.data.as_ref(), self.lifecycle_seed.clone())
+                .record_pending_direct(&usage_data, self.lifecycle_seed.clone())
                 .await;
         }
         self.stream_started_recorded = true;
@@ -2016,9 +2017,10 @@ async fn record_stream_pending_lifecycle(
     stage_trace: &mut RequestStageTrace,
 ) {
     let usage_pending_started_at = Instant::now();
+    let usage_data = state.data.as_ref().clone();
     state
         .usage_runtime
-        .record_pending_direct(state.data.as_ref(), lifecycle_seed.clone())
+        .record_pending_direct(&usage_data, lifecycle_seed.clone())
         .await;
     observe_gateway_stage_trace_ms(
         stage_trace,
@@ -5250,10 +5252,11 @@ async fn execute_stream_from_frame_stream(
                             telemetry.as_ref(),
                             &mut usage_stream_telemetry,
                         ) {
+                            let usage_data = state_for_report.data.as_ref().clone();
                             state_for_report
                                 .usage_runtime
                                 .record_stream_started_direct(
-                                    state_for_report.data.as_ref(),
+                                    &usage_data,
                                     &lifecycle_seed_for_report,
                                     status_code,
                                     usage_stream_telemetry.as_ref(),
@@ -5458,10 +5461,11 @@ async fn execute_stream_from_frame_stream(
                         );
                         if should_refresh_stream_usage {
                             if usage_frame_telemetry.ttfb_ms.is_some() {
+                                let usage_data = state_for_report.data.as_ref().clone();
                                 state_for_report
                                     .usage_runtime
                                     .record_stream_started_direct(
-                                        state_for_report.data.as_ref(),
+                                        &usage_data,
                                         &lifecycle_seed_for_report,
                                         status_code,
                                         Some(&usage_frame_telemetry),

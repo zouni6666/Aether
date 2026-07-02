@@ -748,6 +748,14 @@ pub struct RuntimeQueueEntry {
     pub fields: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RuntimeQueueStats {
+    pub stream_length: u64,
+    pub group_pending: u64,
+    pub group_lag: Option<u64>,
+    pub oldest_pending_idle_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeQueueReclaimConfig {
     pub min_idle_ms: u64,
@@ -817,6 +825,12 @@ pub trait RuntimeQueueStore: Send + Sync {
         -> Result<usize, DataLayerError>;
 
     async fn delete(&self, stream: &str, ids: &[String]) -> Result<usize, DataLayerError>;
+
+    async fn stats(
+        &self,
+        stream: &str,
+        group: Option<&str>,
+    ) -> Result<RuntimeQueueStats, DataLayerError>;
 }
 
 #[async_trait]
@@ -995,6 +1009,31 @@ impl RuntimeQueueStore for RuntimeState {
                 redis
                     .stream
                     .delete(&RedisStreamName(stream.to_string()), ids)
+                    .await
+            }
+        }
+    }
+
+    async fn stats(
+        &self,
+        stream: &str,
+        group: Option<&str>,
+    ) -> Result<RuntimeQueueStats, DataLayerError> {
+        validate_runtime_queue_name(stream, "runtime queue stream")?;
+        if let Some(group) = group {
+            validate_runtime_queue_name(group, "runtime queue group")?;
+        }
+        match self.backend.as_ref() {
+            RuntimeStateBackend::Memory(memory) => Ok(memory.queue_stats(stream, group).await),
+            RuntimeStateBackend::Redis(redis) => {
+                redis
+                    .stream
+                    .stats(
+                        &RedisStreamName(stream.to_string()),
+                        group
+                            .map(|value| RedisConsumerGroup(value.to_string()))
+                            .as_ref(),
+                    )
                     .await
             }
         }
@@ -1921,6 +1960,12 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![first.clone(), second.clone()]
         );
+        let stats = RuntimeQueueStore::stats(runtime, "contract:stream", Some("workers"))
+            .await
+            .expect("queue stats");
+        assert_eq!(stats.stream_length, 2);
+        assert_eq!(stats.group_pending, 2);
+        assert_eq!(stats.group_lag, Some(0));
         assert!(RuntimeQueueStore::read_group(
             runtime,
             "contract:stream",
@@ -1951,6 +1996,11 @@ mod tests {
             .map(|entry| entry.id.clone())
             .collect::<Vec<_>>();
         assert_eq!(ids, vec![first.clone(), second.clone()]);
+        let stats = RuntimeQueueStore::stats(runtime, "contract:stream", Some("workers"))
+            .await
+            .expect("queue stats after claim");
+        assert_eq!(stats.group_pending, 2);
+        assert!(stats.oldest_pending_idle_ms.unwrap_or_default() <= 5000);
         assert_eq!(
             RuntimeQueueStore::ack(runtime, "contract:stream", "workers", &ids)
                 .await
@@ -1963,6 +2013,12 @@ mod tests {
                 .expect("delete"),
             2
         );
+        let stats = RuntimeQueueStore::stats(runtime, "contract:stream", Some("workers"))
+            .await
+            .expect("queue stats after delete");
+        assert_eq!(stats.stream_length, 0);
+        assert_eq!(stats.group_pending, 0);
+        assert_eq!(stats.group_lag, Some(0));
         assert!(RuntimeQueueStore::read_group(
             runtime,
             "contract:stream",

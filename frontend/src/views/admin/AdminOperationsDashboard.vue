@@ -166,6 +166,480 @@
       </Card>
     </div>
 
+    <div class="grid grid-cols-1 gap-4 xl:grid-cols-4 2xl:grid-cols-5">
+      <Card class="overflow-hidden">
+        <div class="border-b border-border/70 bg-muted/20 px-4 py-3">
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <h2 class="text-sm font-semibold">
+                Admission
+              </h2>
+              <p class="text-xs text-muted-foreground">
+                本机、分布式、候选与上游执行 Gate
+              </p>
+            </div>
+            <Badge :variant="admissionStatusVariant">
+              {{ admissionStatusText }}
+            </Badge>
+          </div>
+        </div>
+        <div class="space-y-4 p-4">
+          <div class="grid grid-cols-2 gap-3">
+            <MetricCell
+              label="本机 Gate"
+              :value="localGateUtilizationText"
+              :value-class="capacityPercentClass(localGateUtilization)"
+            />
+            <MetricCell
+              label="分布式 Gate"
+              :value="distributedGateUtilizationText"
+              :value-class="capacityPercentClass(distributedGateUtilization)"
+            />
+            <MetricCell
+              label="候选规划"
+              :value="candidatePlanningGateUtilizationText"
+              :value-class="capacityPercentClass(candidatePlanningGateUtilization)"
+            />
+            <MetricCell
+              label="上游执行"
+              :value="upstreamExecutionGateUtilizationText"
+              :value-class="capacityPercentClass(upstreamExecutionGateUtilization)"
+            />
+          </div>
+          <div class="grid grid-cols-2 gap-2 text-xs text-muted-foreground">
+            <span>本机拒绝 {{ formatMetricNumber(gatewayMetrics?.local.rejectedTotal) }}</span>
+            <span>上游拒绝 {{ formatMetricNumber(gatewayMetrics?.upstreamExecution.rejectedTotal) }}</span>
+          </div>
+        </div>
+      </Card>
+
+      <Card class="overflow-hidden">
+        <div class="border-b border-border/70 bg-muted/20 px-4 py-3">
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <h2 class="text-sm font-semibold">
+                DB Pool
+              </h2>
+              <p class="text-xs text-muted-foreground">
+                前台路径共享连接预算
+              </p>
+            </div>
+            <Badge :variant="databasePoolStatusVariant">
+              {{ databasePoolStatusText }}
+            </Badge>
+          </div>
+        </div>
+        <div class="space-y-4 p-4">
+          <div class="grid grid-cols-2 gap-3">
+            <MetricCell
+              label="使用率"
+              :value="databasePoolUsageText"
+              :value-class="capacityPercentClass(databasePoolUsagePercent)"
+            />
+            <MetricCell
+              label="占用 / 上限"
+              :value="databasePoolCheckedOutText"
+            />
+            <MetricCell
+              label="空闲连接"
+              :value="formatMetricNumber(gatewayMetrics?.databasePool.idle)"
+            />
+            <MetricCell
+              label="预留空闲"
+              :value="formatMetricNumber(gatewayMetrics?.databasePool.idleReserve)"
+            />
+            <MetricCell
+              label="PG 等待"
+              :value="postgresWaitingText"
+              :value-class="counterRiskClass(gatewayMetrics?.postgres.waitingConnections)"
+            />
+            <MetricCell
+              label="PG 锁等待"
+              :value="formatMetricNumber(gatewayMetrics?.postgres.lockWaitingConnections)"
+              :value-class="counterRiskClass(gatewayMetrics?.postgres.lockWaitingConnections)"
+            />
+            <MetricCell
+              label="最长查询"
+              :value="postgresOldestActiveQueryText"
+              :value-class="latencyToneClass(gatewayMetrics?.postgres.oldestActiveQueryAgeMs)"
+            />
+            <MetricCell
+              label="最长事务"
+              :value="postgresOldestTransactionText"
+              :value-class="latencyToneClass(gatewayMetrics?.postgres.oldestTransactionAgeMs)"
+            />
+            <MetricCell
+              label="PG 命中"
+              :value="postgresCacheHitText"
+              :value-class="postgresCacheHitClass"
+            />
+            <MetricCell
+              label="临时写"
+              :value="formatBytes(gatewayMetrics?.postgres.tempBytesTotal)"
+            />
+            <MetricCell
+              label="WAL"
+              :value="postgresWalText"
+              :value-class="postgresWalClass"
+            />
+            <MetricCell
+              label="Checkpoint"
+              :value="postgresCheckpointText"
+              :value-class="postgresCheckpointClass"
+            />
+            <MetricCell
+              label="Top SQL"
+              :value="postgresTopStatementText"
+              :value-class="postgresStatementClass"
+            />
+            <MetricCell
+              label="PG 回滚"
+              :value="formatMetricNumber(gatewayMetrics?.postgres.xactRollbackTotal)"
+              :value-class="counterRiskClass(gatewayMetrics?.postgres.xactRollbackTotal)"
+            />
+          </div>
+          <div class="text-xs text-muted-foreground">
+            Driver {{ gatewayMetrics?.databasePool.driver || '-' }} · Pool size {{ formatMetricNumber(gatewayMetrics?.databasePool.size) }} · PG active {{ formatMetricNumber(gatewayMetrics?.postgres.activeConnections) }} · idle tx {{ formatMetricNumber(gatewayMetrics?.postgres.idleInTransactionConnections) }} · deadlocks {{ formatMetricNumber(gatewayMetrics?.postgres.deadlocksTotal) }} · top calls {{ formatMetricNumber(gatewayMetrics?.postgres.statementTopCallsTotal) }}
+          </div>
+        </div>
+      </Card>
+
+      <Card class="overflow-hidden">
+        <div class="border-b border-border/70 bg-muted/20 px-4 py-3">
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <h2 class="text-sm font-semibold">
+                Gateway 进程
+              </h2>
+              <p class="text-xs text-muted-foreground">
+                CPU、RSS、FD 与 TCP 连接边界
+              </p>
+            </div>
+            <Badge :variant="gatewayProcessStatusVariant">
+              {{ gatewayProcessStatusText }}
+            </Badge>
+          </div>
+        </div>
+        <div class="space-y-4 p-4">
+          <div class="grid grid-cols-2 gap-3">
+            <MetricCell
+              label="进程 CPU"
+              :value="formatBasisPointsPercent(gatewayMetrics?.process.processCpuUsageBasisPoints)"
+            />
+            <MetricCell
+              label="RSS"
+              :value="formatBytes(gatewayMetrics?.process.processMemoryBytes)"
+              :value-class="resourceToneClass(gatewayProcessMemoryPercent, 70, 90)"
+            />
+            <MetricCell
+              label="Heap allocated"
+              :value="formatBytes(gatewayMetrics?.allocator.allocatedBytes)"
+            />
+            <MetricCell
+              label="Heap resident"
+              :value="formatBytes(gatewayMetrics?.allocator.residentBytes)"
+            />
+            <MetricCell
+              label="Heap active"
+              :value="formatBasisPointsPercent(gatewayAllocatorActivePercentBasisPoints)"
+              :value-class="resourceToneClass(gatewayAllocatorActivePercent, 125, 200)"
+            />
+            <MetricCell
+              label="线程"
+              :value="formatMetricNumber(gatewayMetrics?.process.processThreads)"
+            />
+            <MetricCell
+              label="后台任务"
+              :value="gatewayBackgroundTaskText"
+            />
+            <MetricCell
+              label="Tokio 任务"
+              :value="formatMetricNumber(gatewayMetrics?.tokioRuntime.aliveTasks)"
+            />
+            <MetricCell
+              label="Runtime 队列"
+              :value="formatMetricNumber(gatewayMetrics?.tokioRuntime.globalQueueDepth)"
+            />
+            <MetricCell
+              label="任务退出"
+              :value="formatMetricNumber(gatewayBackgroundTaskUnexpectedExits)"
+              :value-class="counterRiskClass(gatewayBackgroundTaskUnexpectedExits)"
+            />
+            <MetricCell
+              label="FD 使用"
+              :value="gatewayProcessFdText"
+              :value-class="resourceToneClass(gatewayProcessFdPercent, 60, 70)"
+            />
+            <MetricCell
+              label="Socket FD"
+              :value="gatewayProcessSocketFdText"
+            />
+            <MetricCell
+              label="TCP 连接"
+              :value="gatewayProcessTcpText"
+            />
+            <MetricCell
+              label="CLOSE_WAIT"
+              :value="formatMetricNumber(gatewayMetrics?.process.processTcpCloseWaitConnections)"
+              :value-class="counterRiskClass(gatewayMetrics?.process.processTcpCloseWaitConnections)"
+            />
+            <MetricCell
+              label="系统内存"
+              :value="formatBasisPointsPercent(gatewayMetrics?.process.systemMemoryUsageBasisPoints)"
+              :value-class="resourceToneClass(gatewaySystemMemoryPercent, 75, 90)"
+            />
+            <MetricCell
+              label="网卡流量"
+              :value="gatewayNetworkTrafficText"
+            />
+          </div>
+          <div class="text-xs text-muted-foreground">
+            运行 {{ gatewayProcessUptimeText }} · 虚拟内存 {{ formatBytes(gatewayMetrics?.process.processVirtualMemoryBytes) }} · TCP {{ gatewayTcpStateText }} · allocator {{ gatewayAllocatorStatusText }} · supervisor {{ formatMetricNumber(gatewayMetrics?.backgroundTasks.supervisedTotal) }} · Tokio workers {{ formatMetricNumber(gatewayMetrics?.tokioRuntime.workers) }}
+          </div>
+        </div>
+      </Card>
+
+      <Card class="overflow-hidden">
+        <div class="border-b border-border/70 bg-muted/20 px-4 py-3">
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <h2 class="text-sm font-semibold">
+                Usage 与队列
+              </h2>
+              <p class="text-xs text-muted-foreground">
+                账务写入和 request candidate 削峰
+              </p>
+            </div>
+            <Badge :variant="queueStatusVariant">
+              {{ queueStatusText }}
+            </Badge>
+          </div>
+        </div>
+        <div class="space-y-4 p-4">
+          <div class="grid grid-cols-2 gap-3">
+            <MetricCell
+              label="Usage Worker"
+              :value="usageWorkerText"
+            />
+            <MetricCell
+              label="Usage ACK"
+              :value="formatMetricNumber(gatewayMetrics?.usageRuntime.workerAckedEntriesTotal)"
+            />
+            <MetricCell
+              label="Usage Lag"
+              :value="formatMetricNumber(gatewayMetrics?.usageQueue.groupLag)"
+              :value-class="counterRiskClass(gatewayMetrics?.usageQueue.groupLag)"
+            />
+            <MetricCell
+              label="Usage DLQ"
+              :value="formatMetricNumber(gatewayMetrics?.usageQueue.dlqLength)"
+              :value-class="counterRiskClass(gatewayMetrics?.usageQueue.dlqLength)"
+            />
+            <MetricCell
+              label="Outbox 待处理"
+              :value="formatMetricNumber(gatewayMetrics?.usageCounter.pendingRows)"
+              :value-class="counterRiskClass(gatewayMetrics?.usageCounter.pendingRows)"
+            />
+            <MetricCell
+              label="Outbox 已刷"
+              :value="formatMetricNumber(gatewayMetrics?.usageCounter.flushRowsClaimedTotal)"
+            />
+            <MetricCell
+              label="最老待处理"
+              :value="usageCounterOldestPendingAgeText"
+              :value-class="usageCounterOldestPendingAgeClass"
+            />
+            <MetricCell
+              label="Outbox 失败"
+              :value="formatMetricNumber(usageCounterOutboxFailures)"
+              :value-class="counterRiskClass(usageCounterOutboxFailures)"
+            />
+            <MetricCell
+              label="Terminal 失败"
+              :value="formatMetricNumber(gatewayMetrics?.usageRuntime.terminalEnqueueFailedTotal)"
+              :value-class="counterRiskClass(gatewayMetrics?.usageRuntime.terminalEnqueueFailedTotal)"
+            />
+            <MetricCell
+              label="Worker 异常"
+              :value="formatMetricNumber(usageRuntimeWorkerFaults)"
+              :value-class="counterRiskClass(usageRuntimeWorkerFaults)"
+            />
+            <MetricCell
+              label="Candidate 水位"
+              :value="candidateQueueUtilizationText"
+              :value-class="capacityPercentClass(candidateQueueUtilization)"
+            />
+            <MetricCell
+              label="Candidate 待刷"
+              :value="formatMetricNumber(gatewayMetrics?.requestCandidateQueue.pendingDepth)"
+            />
+            <MetricCell
+              label="Candidate 已刷"
+              :value="formatMetricNumber(gatewayMetrics?.requestCandidateQueue.flushedTotal)"
+            />
+            <MetricCell
+              label="Candidate 合并"
+              :value="formatMetricNumber(gatewayMetrics?.requestCandidateQueue.compactedTotal)"
+            />
+          </div>
+          <div class="rounded-lg border border-border/60 bg-background/45 px-3 py-3">
+            <div class="flex items-center justify-between gap-3 text-xs">
+              <span class="text-muted-foreground">Candidate depth</span>
+              <span class="font-medium tabular-nums">{{ candidateQueueDepthText }}</span>
+            </div>
+            <div class="mt-2 h-2 overflow-hidden rounded-full bg-muted">
+              <div
+                class="h-full rounded-full bg-primary"
+                :style="{ width: candidateQueueUtilizationWidth }"
+              />
+            </div>
+            <div class="mt-3 grid grid-cols-2 gap-2 text-xs text-muted-foreground">
+              <span>Outbox processed {{ formatMetricNumber(gatewayMetrics?.usageCounter.processedRows) }}</span>
+              <span>Outbox health {{ usageCounterHealthText }}</span>
+              <span>Flush batches {{ formatMetricNumber(gatewayMetrics?.usageCounter.flushBatchesTotal) }}</span>
+              <span>Flush targets {{ formatMetricNumber(gatewayMetrics?.usageCounter.flushTargetsTotal) }}</span>
+              <span>Worker read {{ formatMetricNumber(gatewayMetrics?.usageRuntime.workerReadEntriesTotal) }}</span>
+              <span>Worker reclaim {{ formatMetricNumber(gatewayMetrics?.usageRuntime.workerReclaimedEntriesTotal) }}</span>
+              <span>Usage pending {{ formatMetricNumber(gatewayMetrics?.usageQueue.groupPending) }}</span>
+              <span>Pending idle {{ usageQueueOldestPendingIdleText }}</span>
+              <span>Drop {{ formatMetricNumber(gatewayMetrics?.requestCandidateQueue.droppedTotal) }}</span>
+              <span>Fallback {{ formatMetricNumber(gatewayMetrics?.requestCandidateQueue.syncFallbackTotal) }}</span>
+              <span>Flush batches {{ formatMetricNumber(gatewayMetrics?.requestCandidateQueue.flushBatchesTotal) }}</span>
+              <span>SQL ops {{ formatMetricNumber(gatewayMetrics?.requestCandidateQueue.flushSqlOpsTotal) }}</span>
+            </div>
+          </div>
+        </div>
+      </Card>
+
+      <Card class="overflow-hidden">
+        <div class="border-b border-border/70 bg-muted/20 px-4 py-3">
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <h2 class="text-sm font-semibold">
+                Upstream Target
+              </h2>
+              <p class="text-xs text-muted-foreground">
+                单 target 饱和隔离和选择压力
+              </p>
+            </div>
+            <Badge :variant="upstreamTargetStatusVariant">
+              {{ upstreamTargetStatusText }}
+            </Badge>
+          </div>
+        </div>
+        <div class="space-y-4 p-4">
+          <div class="grid grid-cols-2 gap-3">
+            <MetricCell
+              label="活跃 Target"
+              :value="formatMetricNumber(gatewayMetrics?.upstreamTargets.activeTargets)"
+            />
+            <MetricCell
+              label="单 Target 上限"
+              :value="formatMetricNumber(gatewayMetrics?.upstreamTargets.limit)"
+            />
+            <MetricCell
+              label="饱和累计"
+              :value="formatMetricNumber(gatewayMetrics?.upstreamTargets.saturatedTotal)"
+              :value-class="counterRiskClass(gatewayMetrics?.upstreamTargets.saturatedTotal)"
+            />
+            <MetricCell
+              label="拒绝累计"
+              :value="formatMetricNumber(gatewayMetrics?.upstreamTargets.rejectedTotal)"
+              :value-class="counterRiskClass(gatewayMetrics?.upstreamTargets.rejectedTotal)"
+            />
+          </div>
+          <div class="space-y-2">
+            <div
+              v-for="target in upstreamTargetRows"
+              :key="target.target"
+              class="rounded-lg border border-border/50 bg-background/45 px-3 py-2 text-xs"
+            >
+              <div class="flex items-center justify-between gap-3">
+                <span class="min-w-0 truncate font-medium">{{ target.target }}</span>
+                <span class="shrink-0 tabular-nums">{{ formatMetricNumber(target.inFlight) }} in-flight</span>
+              </div>
+              <div class="mt-1 flex items-center justify-between gap-3 text-muted-foreground">
+                <span>available {{ formatMetricNumber(target.availablePermits) }}</span>
+                <span>saturated {{ formatMetricNumber(target.saturatedTotal) }}</span>
+              </div>
+            </div>
+            <div
+              v-if="upstreamTargetRows.length === 0"
+              class="rounded-lg border border-dashed border-border/60 px-3 py-6 text-center text-xs text-muted-foreground"
+            >
+              暂无 target 样本
+            </div>
+          </div>
+        </div>
+      </Card>
+    </div>
+
+    <Card class="overflow-hidden">
+      <div class="border-b border-border/70 bg-muted/20 px-4 py-3">
+        <div class="flex items-center justify-between gap-3">
+          <div>
+            <h2 class="text-sm font-semibold">
+              关键路径 Stage
+            </h2>
+            <p class="text-xs text-muted-foreground">
+              入口排队、候选规划、上游 Gate 和流式总耗时
+            </p>
+          </div>
+          <Badge variant="outline">
+            Gateway latency
+          </Badge>
+        </div>
+      </div>
+      <div class="overflow-x-auto">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Stage</TableHead>
+              <TableHead class="text-right">
+                样本
+              </TableHead>
+              <TableHead class="text-right">
+                平均
+              </TableHead>
+              <TableHead class="text-right">
+                最大
+              </TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            <TableRow
+              v-for="stage in stageLatencyRows"
+              :key="stage.stage"
+            >
+              <TableCell>
+                <div class="text-sm font-medium">
+                  {{ stage.label }}
+                </div>
+                <div class="text-xs text-muted-foreground">
+                  {{ stage.stage }}
+                </div>
+              </TableCell>
+              <TableCell class="text-right tabular-nums">
+                {{ formatMetricNumber(stage.count) }}
+              </TableCell>
+              <TableCell
+                class="text-right tabular-nums"
+                :class="latencyToneClass(stage.avgMs)"
+              >
+                {{ formatMs(stage.avgMs) }}
+              </TableCell>
+              <TableCell
+                class="text-right tabular-nums"
+                :class="latencyToneClass(stage.maxMs)"
+              >
+                {{ formatMs(stage.maxMs) }}
+              </TableCell>
+            </TableRow>
+          </TableBody>
+        </Table>
+      </div>
+    </Card>
+
     <div class="grid grid-cols-1 gap-4 xl:grid-cols-3">
       <Card class="overflow-hidden xl:col-span-2">
         <div class="border-b border-border/70 bg-muted/20 px-4 py-3">
@@ -387,9 +861,41 @@
               :value="formatBytes(resourceSnapshot?.wsOutBytes)"
             />
             <MetricCell
+              label="网关 TCP"
+              :value="gatewayProcessTcpText"
+            />
+            <MetricCell
+              label="网络异常"
+              :value="formatMetricNumber(gatewayNetworkFaults)"
+              :value-class="counterRiskClass(gatewayNetworkFaults)"
+            />
+            <MetricCell
               label="Redis 状态"
               :value="redisStatusText"
               :value-class="redisStatusClass"
+            />
+            <MetricCell
+              label="Redis 内存"
+              :value="redisRuntimeMemoryText"
+              :value-class="capacityPercentClass(redisRuntimeMemoryPercent)"
+            />
+            <MetricCell
+              label="Redis OPS"
+              :value="redisRuntimeOpsText"
+            />
+            <MetricCell
+              label="Redis 延迟"
+              :value="redisRuntimeLatencyText"
+              :value-class="latencyToneClass(gatewayMetrics?.redisRuntime.nonblockingCommandLatencyMaxMs)"
+            />
+            <MetricCell
+              label="Redis 客户端"
+              :value="redisRuntimeClientsText"
+            />
+            <MetricCell
+              label="Redis 命令异常"
+              :value="formatMetricNumber(redisRuntimeCommandFaults)"
+              :value-class="counterRiskClass(redisRuntimeCommandFaults)"
             />
             <MetricCell
               label="Redis Keys"
@@ -710,9 +1216,26 @@ function formatPercentResource(value: number | null | undefined): string {
   return `${value.toFixed(value < 10 ? 1 : 0)}%`
 }
 
+function basisPointsPercent(value: number | null | undefined): number | null {
+  if (value == null || Number.isNaN(value)) return null
+  return value / 100
+}
+
+function formatBasisPointsPercent(value: number | null | undefined): string {
+  return formatPercentResource(basisPointsPercent(value))
+}
+
 function formatBytes(value: number | null | undefined): string {
   if (value == null || Number.isNaN(value)) return '-'
   return formatByteSize(value)
+}
+
+function formatDurationSeconds(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(value)) return '-'
+  if (value < 60) return `${Math.round(value)}s`
+  if (value < 3600) return `${Math.round(value / 60)}m`
+  if (value < 86_400) return `${(value / 3600).toFixed(value < 36_000 ? 1 : 0)}h`
+  return `${(value / 86_400).toFixed(1)}d`
 }
 
 function resourceToneClass(value: number | null | undefined, warning: number, critical: number): string {
@@ -720,6 +1243,44 @@ function resourceToneClass(value: number | null | undefined, warning: number, cr
   if (value >= critical) return 'text-red-600 dark:text-red-400'
   if (value >= warning) return 'text-amber-600 dark:text-amber-400'
   return 'text-green-600 dark:text-green-400'
+}
+
+function capacityPercentClass(value: number | null | undefined): string {
+  return resourceToneClass(value, 80, 90)
+}
+
+function counterRiskClass(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(value)) return ''
+  return value > 0 ? 'text-amber-600 dark:text-amber-400' : 'text-green-600 dark:text-green-400'
+}
+
+function latencyToneClass(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(value)) return ''
+  if (value >= 5_000) return 'text-red-600 dark:text-red-400'
+  if (value >= 1_000) return 'text-amber-600 dark:text-amber-400'
+  return ''
+}
+
+function formatCapacityPercent(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(value)) return '-'
+  return `${value.toFixed(value < 10 ? 1 : 0)}%`
+}
+
+function formatMetricRatio(current: number | null | undefined, max: number | null | undefined): string {
+  return `${formatMetricNumber(current)} / ${formatMetricNumber(max)}`
+}
+
+function gateUtilization(gate: GatewayMetricsSummary['local'] | null | undefined): number | null {
+  const inFlight = gate?.inFlight
+  const available = gate?.availablePermits
+  if (inFlight == null || available == null) return null
+  const total = inFlight + available
+  if (total <= 0) return null
+  return Math.max(0, Math.min(100, inFlight / total * 100))
+}
+
+function hasCapacitySignal(...values: Array<number | null | undefined>): boolean {
+  return values.some(value => typeof value === 'number' && Number.isFinite(value))
 }
 
 function formatShortDate(value?: string | null): string {
@@ -1049,6 +1610,365 @@ const distributedGateText = computed(() => (
 ))
 const currentActiveStreams = computed(() => gatewayMetrics.value?.tunnel.activeStreams ?? systemStatus.value?.tunnel.active_streams ?? null)
 const currentProxyConnections = computed(() => gatewayMetrics.value?.tunnel.proxyConnections ?? systemStatus.value?.tunnel.proxy_connections ?? null)
+const localGateUtilization = computed(() => gateUtilization(gatewayMetrics.value?.local))
+const distributedGateUtilization = computed(() => gateUtilization(gatewayMetrics.value?.distributed))
+const candidatePlanningGateUtilization = computed(() => gateUtilization(gatewayMetrics.value?.candidatePlanning))
+const upstreamExecutionGateUtilization = computed(() => gateUtilization(gatewayMetrics.value?.upstreamExecution))
+const localGateUtilizationText = computed(() => formatCapacityPercent(localGateUtilization.value))
+const distributedGateUtilizationText = computed(() => formatCapacityPercent(distributedGateUtilization.value))
+const candidatePlanningGateUtilizationText = computed(() => formatCapacityPercent(candidatePlanningGateUtilization.value))
+const upstreamExecutionGateUtilizationText = computed(() => formatCapacityPercent(upstreamExecutionGateUtilization.value))
+const admissionStatusVariant = computed<'success' | 'warning' | 'destructive' | 'outline'>(() => {
+  if (!gatewayMetrics.value) return 'outline'
+  if (gatewayMetrics.value.distributed.unavailable) return 'destructive'
+  if (
+    (localGateUtilization.value ?? 0) >= 90
+    || (distributedGateUtilization.value ?? 0) >= 90
+    || (candidatePlanningGateUtilization.value ?? 0) >= 90
+    || (upstreamExecutionGateUtilization.value ?? 0) >= 90
+  ) return 'warning'
+  return 'success'
+})
+const admissionStatusText = computed(() => {
+  if (!gatewayMetrics.value) return '未接入'
+  if (gatewayMetrics.value.distributed.unavailable) return '分布式异常'
+  if (admissionStatusVariant.value === 'warning') return '接近上限'
+  return '正常'
+})
+const databasePoolUsagePercent = computed(() => {
+  const basisPoints = gatewayMetrics.value?.databasePool.usageBasisPoints
+  return basisPoints == null ? null : basisPoints / 100
+})
+const databasePoolUsageText = computed(() => formatCapacityPercent(databasePoolUsagePercent.value))
+const databasePoolCheckedOutText = computed(() => formatMetricRatio(
+  gatewayMetrics.value?.databasePool.checkedOut,
+  gatewayMetrics.value?.databasePool.max
+))
+const postgresWaitingText = computed(() => formatMetricRatio(
+  gatewayMetrics.value?.postgres.waitingConnections,
+  gatewayMetrics.value?.postgres.activeConnections
+))
+const postgresOldestActiveQueryText = computed(() => formatMs(
+  gatewayMetrics.value?.postgres.oldestActiveQueryAgeMs
+))
+const postgresOldestTransactionText = computed(() => formatMs(
+  gatewayMetrics.value?.postgres.oldestTransactionAgeMs
+))
+const postgresCacheHitPercent = computed(() => (
+  basisPointsPercent(gatewayMetrics.value?.postgres.blockCacheHitRateBasisPoints)
+))
+const postgresCacheHitText = computed(() => formatBasisPointsPercent(
+  gatewayMetrics.value?.postgres.blockCacheHitRateBasisPoints
+))
+const postgresCacheHitClass = computed(() => {
+  const value = postgresCacheHitPercent.value
+  if (value == null || Number.isNaN(value)) return ''
+  if (value < 90) return 'text-red-600 dark:text-red-400'
+  if (value < 95) return 'text-amber-600 dark:text-amber-400'
+  return 'text-green-600 dark:text-green-400'
+})
+function postgresOptionalText(
+  available: boolean | null | undefined,
+  unavailable: boolean | null | undefined,
+  value: string,
+): string {
+  if (unavailable) return '异常'
+  if (available === false) return '未接入'
+  return value
+}
+const postgresWalText = computed(() => {
+  const postgres = gatewayMetrics.value?.postgres
+  return postgresOptionalText(
+    postgres?.walAvailable,
+    postgres?.walUnavailable,
+    formatBytes(postgres?.walBytesTotal),
+  )
+})
+const postgresWalClass = computed(() => (
+  gatewayMetrics.value?.postgres.walUnavailable ? 'text-red-600 dark:text-red-400' : ''
+))
+const postgresCheckpointText = computed(() => {
+  const postgres = gatewayMetrics.value?.postgres
+  const value = `${formatMs(postgres?.checkpointWriteTimeMsTotal)} / ${formatMs(postgres?.checkpointSyncTimeMsTotal)}`
+  return postgresOptionalText(postgres?.checkpointAvailable, postgres?.checkpointUnavailable, value)
+})
+const postgresCheckpointClass = computed(() => (
+  gatewayMetrics.value?.postgres.checkpointUnavailable ? 'text-red-600 dark:text-red-400' : ''
+))
+const postgresTopStatementText = computed(() => {
+  const postgres = gatewayMetrics.value?.postgres
+  return postgresOptionalText(
+    postgres?.statementAvailable,
+    postgres?.statementUnavailable,
+    formatMs(postgres?.statementTopMaxExecTimeMs),
+  )
+})
+const postgresStatementClass = computed(() => {
+  const postgres = gatewayMetrics.value?.postgres
+  if (postgres?.statementUnavailable) return 'text-red-600 dark:text-red-400'
+  return latencyToneClass(postgres?.statementTopMaxExecTimeMs)
+})
+const databasePoolStatusVariant = computed<'success' | 'warning' | 'destructive' | 'outline'>(() => {
+  const pool = gatewayMetrics.value?.databasePool
+  const postgres = gatewayMetrics.value?.postgres
+  if (!pool || pool.max == null) return postgres?.unavailable ? 'destructive' : 'outline'
+  if (
+    pool.underMaintenancePressure
+    || postgres?.unavailable
+    || (postgres?.lockWaitingConnections ?? 0) > 0
+    || (postgres?.idleInTransactionConnections ?? 0) > 0
+    || (postgres?.oldestActiveQueryAgeMs ?? 0) >= 60_000
+    || (postgres?.oldestTransactionAgeMs ?? 0) >= 60_000
+    || (postgres?.walUnavailable ?? false)
+    || (postgres?.checkpointUnavailable ?? false)
+    || (postgres?.statementUnavailable ?? false)
+    || (postgres?.statementTopMaxExecTimeMs ?? 0) >= 60_000
+    || (databasePoolUsagePercent.value ?? 0) >= 90
+  ) return 'destructive'
+  if ((postgres?.waitingConnections ?? 0) > 0 || (databasePoolUsagePercent.value ?? 0) >= 80) return 'warning'
+  return 'success'
+})
+const databasePoolStatusText = computed(() => {
+  const pool = gatewayMetrics.value?.databasePool
+  const postgres = gatewayMetrics.value?.postgres
+  if (!pool || pool.max == null) return postgres?.unavailable ? 'PG 异常' : '未接入'
+  if (postgres?.unavailable) return 'PG 异常'
+  if ((postgres?.lockWaitingConnections ?? 0) > 0) return '锁等待'
+  if ((postgres?.idleInTransactionConnections ?? 0) > 0) return '长事务'
+  if (postgres?.walUnavailable) return 'WAL 异常'
+  if (postgres?.checkpointUnavailable) return 'Checkpoint 异常'
+  if (postgres?.statementUnavailable) return 'Top SQL 异常'
+  if ((postgres?.statementTopMaxExecTimeMs ?? 0) >= 60_000) return '慢 SQL'
+  if (pool.underMaintenancePressure) return '维护压力'
+  if (databasePoolStatusVariant.value === 'destructive') return '高压'
+  if (databasePoolStatusVariant.value === 'warning') return '偏高'
+  return '正常'
+})
+const gatewayProcessCpuPercent = computed(() => basisPointsPercent(gatewayMetrics.value?.process.processCpuUsageBasisPoints))
+const gatewaySystemCpuPercent = computed(() => basisPointsPercent(gatewayMetrics.value?.process.systemCpuUsageBasisPoints))
+const gatewayProcessMemoryPercent = computed(() => basisPointsPercent(gatewayMetrics.value?.process.processMemoryBasisPoints))
+const gatewaySystemMemoryPercent = computed(() => basisPointsPercent(gatewayMetrics.value?.process.systemMemoryUsageBasisPoints))
+const gatewayProcessFdPercent = computed(() => basisPointsPercent(gatewayMetrics.value?.process.fdUsageBasisPoints))
+const gatewayAllocatorActivePercent = computed(() => basisPointsPercent(gatewayMetrics.value?.allocator.activeToAllocatedBasisPoints))
+const gatewayAllocatorActivePercentBasisPoints = computed(() => gatewayMetrics.value?.allocator.activeToAllocatedBasisPoints ?? null)
+const gatewayProcessFdText = computed(() => formatMetricRatio(
+  gatewayMetrics.value?.process.openFds,
+  gatewayMetrics.value?.process.fdLimit
+))
+const gatewayProcessSocketFdText = computed(() => formatMetricRatio(
+  gatewayMetrics.value?.process.socketFds,
+  gatewayMetrics.value?.process.openFds
+))
+const gatewayProcessTcpText = computed(() => formatMetricRatio(
+  gatewayMetrics.value?.process.processTcpEstablishedConnections,
+  gatewayMetrics.value?.process.processTcpConnections
+))
+const gatewayBackgroundTaskText = computed(() => formatMetricRatio(
+  gatewayMetrics.value?.backgroundTasks.active,
+  gatewayMetrics.value?.backgroundTasks.supervisedTotal
+))
+const gatewayBackgroundTaskUnexpectedExits = computed(() => {
+  const tasks = gatewayMetrics.value?.backgroundTasks
+  if (!tasks) return null
+  return tasks.unexpectedExitsTotal
+})
+const gatewayNetworkTrafficText = computed(() => {
+  const process = gatewayMetrics.value?.process
+  if (process?.networkReceivedBytesTotal == null && process?.networkTransmittedBytesTotal == null) return '-'
+  return `RX ${formatBytes(process?.networkReceivedBytesTotal)} / TX ${formatBytes(process?.networkTransmittedBytesTotal)}`
+})
+const gatewayNetworkFaults = computed(() => {
+  const process = gatewayMetrics.value?.process
+  if (!process) return null
+  return (process.networkReceiveErrorsTotal ?? 0)
+    + (process.networkTransmitErrorsTotal ?? 0)
+    + (process.networkReceiveDroppedTotal ?? 0)
+    + (process.networkTransmitDroppedTotal ?? 0)
+})
+const gatewayTcpStateText = computed(() => {
+  const process = gatewayMetrics.value?.process
+  if (!process || process.tcpStateAvailable == null) return '-'
+  if (!process.tcpStateAvailable) return '未采集'
+  return `host ${formatMetricNumber(process.hostTcpEstablishedConnections)} established · ${formatMetricNumber(process.hostTcpTimeWaitConnections)} time-wait`
+})
+const gatewayProcessUptimeText = computed(() => formatDurationSeconds(gatewayMetrics.value?.process.processUptimeSeconds))
+const gatewayAllocatorStatusText = computed(() => {
+  const allocator = gatewayMetrics.value?.allocator
+  if (!allocator || allocator.available == null) return '-'
+  if (!allocator.available) return 'unavailable'
+  return `allocated ${formatBytes(allocator.allocatedBytes)}`
+})
+const gatewayProcessStatusVariant = computed<'success' | 'warning' | 'destructive' | 'outline'>(() => {
+  const process = gatewayMetrics.value?.process
+  const backgroundTasks = gatewayMetrics.value?.backgroundTasks
+  const tokioRuntime = gatewayMetrics.value?.tokioRuntime
+  if (!process || !hasCapacitySignal(
+    process.processCpuUsageBasisPoints,
+    process.processMemoryBytes,
+    process.fdUsageBasisPoints,
+    process.socketFds,
+    process.processTcpConnections,
+    backgroundTasks?.active,
+    backgroundTasks?.supervisedTotal,
+    tokioRuntime?.aliveTasks,
+    tokioRuntime?.globalQueueDepth,
+  )) return 'outline'
+  if (
+    (process.processTcpCloseWaitConnections ?? 0) > 0
+    || tokioRuntime?.available === false
+    || (backgroundTasks?.unexpectedExitsTotal ?? 0) > 0
+    || (backgroundTasks?.panickedTotal ?? 0) > 0
+    || (backgroundTasks?.abortedTotal ?? 0) > 0
+    || (gatewayProcessFdPercent.value ?? 0) >= 70
+    || (gatewaySystemCpuPercent.value ?? 0) >= 90
+    || (gatewayProcessMemoryPercent.value ?? 0) >= 90
+  ) return 'destructive'
+  if (
+    (gatewayProcessFdPercent.value ?? 0) >= 60
+    || (gatewaySystemCpuPercent.value ?? 0) >= 70
+    || (gatewayProcessMemoryPercent.value ?? 0) >= 70
+  ) return 'warning'
+  return 'success'
+})
+const gatewayProcessStatusText = computed(() => {
+  if (gatewayProcessStatusVariant.value === 'outline') return '未接入'
+  if ((gatewayMetrics.value?.process.processTcpCloseWaitConnections ?? 0) > 0) return '连接泄漏'
+  if (gatewayMetrics.value?.tokioRuntime.available === false) return 'Runtime 异常'
+  if ((gatewayMetrics.value?.backgroundTasks.unexpectedExitsTotal ?? 0) > 0) return '任务退出'
+  if (gatewayProcessStatusVariant.value === 'destructive') return '超阈值'
+  if (gatewayProcessStatusVariant.value === 'warning') return '接近上限'
+  return '正常'
+})
+const usageWorkerText = computed(() => {
+  const usage = gatewayMetrics.value?.usageRuntime
+  return formatMetricRatio(
+    usage?.workerActiveCount ?? usage?.workerCount,
+    usage?.workerMaxCount
+  )
+})
+const usageRuntimeWorkerFaults = computed(() => {
+  const usage = gatewayMetrics.value?.usageRuntime
+  if (!usage) return null
+  const values = [
+    usage.workerDeadLetteredEntriesTotal,
+    usage.workerProcessFailuresTotal,
+    usage.workerReadFailuresTotal,
+    usage.workerReclaimFailuresTotal,
+  ]
+  if (!values.some(value => value != null)) return null
+  return values.reduce((total, value) => total + (value ?? 0), 0)
+})
+const usageQueueOldestPendingIdleText = computed(() => (
+  formatDurationSeconds((gatewayMetrics.value?.usageQueue.oldestPendingIdleMs ?? null) == null
+    ? null
+    : (gatewayMetrics.value?.usageQueue.oldestPendingIdleMs ?? 0) / 1000)
+))
+const usageCounterOldestPendingAgeText = computed(() => (
+  formatDurationSeconds(gatewayMetrics.value?.usageCounter.oldestPendingAgeSeconds)
+))
+const usageCounterOldestPendingAgeClass = computed(() => {
+  const age = gatewayMetrics.value?.usageCounter.oldestPendingAgeSeconds
+  if (age == null || Number.isNaN(age)) return ''
+  if (age >= 60) return 'text-red-600 dark:text-red-400'
+  if (age > 0) return 'text-amber-600 dark:text-amber-400'
+  return 'text-green-600 dark:text-green-400'
+})
+const usageCounterHealthText = computed(() => {
+  const counter = gatewayMetrics.value?.usageCounter
+  if (!counter || counter.unavailable == null) return '-'
+  if (counter.unavailable) return 'unavailable'
+  if ((counter.oldestPendingAgeSeconds ?? 0) >= 60) return 'backlogged'
+  if ((counter.pendingRows ?? 0) > 0) return 'catching-up'
+  return 'ok'
+})
+const usageCounterOutboxFailures = computed(() => {
+  const counter = gatewayMetrics.value?.usageCounter
+  if (!counter) return null
+  const values = [
+    counter.flushFailedBatchesTotal,
+    counter.cleanupFailedBatchesTotal,
+  ]
+  if (!values.some(value => value != null)) return null
+  return values.reduce((total, value) => total + (value ?? 0), 0)
+})
+const candidateQueueUtilization = computed(() => {
+  const depth = gatewayMetrics.value?.requestCandidateQueue.depth
+  const capacity = gatewayMetrics.value?.requestCandidateQueue.capacity
+  if (depth == null || capacity == null || capacity <= 0) return null
+  return Math.max(0, Math.min(100, depth / capacity * 100))
+})
+const candidateQueueUtilizationText = computed(() => formatCapacityPercent(candidateQueueUtilization.value))
+const candidateQueueUtilizationWidth = computed(() => (
+  candidateQueueUtilization.value == null ? '0%' : `${candidateQueueUtilization.value}%`
+))
+const candidateQueueDepthText = computed(() => formatMetricRatio(
+  gatewayMetrics.value?.requestCandidateQueue.depth,
+  gatewayMetrics.value?.requestCandidateQueue.capacity
+))
+const queueStatusVariant = computed<'success' | 'warning' | 'destructive' | 'outline'>(() => {
+  const usage = gatewayMetrics.value?.usageRuntime
+  const queue = gatewayMetrics.value?.requestCandidateQueue
+  const usageQueue = gatewayMetrics.value?.usageQueue
+  const counter = gatewayMetrics.value?.usageCounter
+  const hasUsageQueueSignal = usageQueue?.unavailable != null || hasCapacitySignal(
+    usageQueue?.groupPending,
+    usageQueue?.groupLag,
+    usageQueue?.dlqLength,
+  )
+  const hasUsageCounterSignal = counter?.unavailable != null || hasCapacitySignal(
+    counter?.pendingRows,
+    counter?.processedRows,
+    counter?.oldestPendingAgeSeconds,
+  )
+  if (!gatewayMetrics.value || (!hasUsageQueueSignal && !hasUsageCounterSignal && !hasCapacitySignal(
+    usage?.workerActiveCount,
+    queue?.depth,
+    queue?.capacity,
+  ))) return 'outline'
+  const hardFailures = (usage?.terminalEnqueueFailedTotal ?? 0)
+    + (usage?.lifecycleEnqueueFailedTotal ?? 0)
+    + (queue?.flushFailedTotal ?? 0)
+    + (queue?.syncFallbackTotal ?? 0)
+    + (usageRuntimeWorkerFaults.value ?? 0)
+  if (
+    hardFailures > 0
+    || usageQueue?.unavailable
+    || (usageQueue?.dlqLength ?? 0) > 0
+    || (usageQueue?.oldestPendingIdleMs ?? 0) >= 60_000
+    || counter?.unavailable
+    || (usageCounterOutboxFailures.value ?? 0) > 0
+    || (counter?.oldestPendingAgeSeconds ?? 0) >= 60
+  ) return 'destructive'
+  if (
+    (candidateQueueUtilization.value ?? 0) >= 80
+    || (usage?.lifecycleEnqueueDeferredDroppedTotal ?? 0) > 0
+    || (usageQueue?.groupPending ?? 0) > 0
+    || (usageQueue?.groupLag ?? 0) > 0
+    || (counter?.pendingRows ?? 0) > 0
+  ) return 'warning'
+  return 'success'
+})
+const queueStatusText = computed(() => {
+  if (queueStatusVariant.value === 'outline') return '未接入'
+  if (queueStatusVariant.value === 'destructive') return '异常'
+  if (queueStatusVariant.value === 'warning') return '积压'
+  return '正常'
+})
+const upstreamTargetRows = computed(() => gatewayMetrics.value?.upstreamTargets.rows ?? [])
+const upstreamTargetStatusVariant = computed<'success' | 'warning' | 'destructive' | 'outline'>(() => {
+  const targets = gatewayMetrics.value?.upstreamTargets
+  if (!targets || targets.activeTargets == null) return 'outline'
+  if (targets.rejectedTotal > 0) return 'destructive'
+  if (targets.saturatedTotal > 0) return 'warning'
+  return 'success'
+})
+const upstreamTargetStatusText = computed(() => {
+  if (upstreamTargetStatusVariant.value === 'outline') return '未接入'
+  if (upstreamTargetStatusVariant.value === 'destructive') return '有拒绝'
+  if (upstreamTargetStatusVariant.value === 'warning') return '有饱和'
+  return '正常'
+})
+const stageLatencyRows = computed(() => gatewayMetrics.value?.stageLatency.rows ?? [])
 const tunnelQueueRejectedTotal = computed(() => (
   (gatewayMetrics.value?.tunnel.outboundQueueRejectedFullTotal ?? 0)
   + (gatewayMetrics.value?.tunnel.outboundQueueRejectedClosedTotal ?? 0)
@@ -1085,12 +2005,59 @@ const errorRateValueClass = computed(() => {
 const providerRows = computed(() => providerPerformance.value?.providers.slice(0, 8) ?? [])
 const cacheHitRate = computed(() => cacheStats.value?.affinity_stats.cache_hit_rate ?? null)
 const redisStatusText = computed(() => {
+  const runtime = gatewayMetrics.value?.redisRuntime
+  if (runtime?.unavailable) return '异常'
+  if (runtime?.enabled) return '在线'
   if (!redisCategories.value) return '-'
   return redisCategories.value.available ? '在线' : '未启用'
 })
 const redisStatusClass = computed(() => {
+  const runtime = gatewayMetrics.value?.redisRuntime
+  if (runtime?.unavailable) return 'text-red-600 dark:text-red-400'
+  if (
+    (redisRuntimeCommandFaults.value ?? 0) > 0
+    || (redisRuntimeMemoryPercent.value ?? 0) >= 90
+    || (gatewayMetrics.value?.redisRuntime.nonblockingCommandLatencyMaxMs ?? 0) >= 500
+  ) {
+    return 'text-red-600 dark:text-red-400'
+  }
+  if (
+    (redisRuntimeMemoryPercent.value ?? 0) >= 80
+    || (gatewayMetrics.value?.redisRuntime.nonblockingCommandLatencyMaxMs ?? 0) >= 100
+  ) return 'text-amber-600 dark:text-amber-400'
+  if (runtime?.enabled) return 'text-green-600 dark:text-green-400'
   if (!redisCategories.value) return ''
   return redisCategories.value.available ? 'text-green-600 dark:text-green-400' : 'text-amber-600 dark:text-amber-400'
+})
+const redisRuntimeMemoryPercent = computed(() => basisPointsPercent(gatewayMetrics.value?.redisRuntime.memoryUsageBasisPoints))
+const redisRuntimeMemoryText = computed(() => {
+  const runtime = gatewayMetrics.value?.redisRuntime
+  if (runtime?.usedMemoryBytes == null) return '-'
+  if ((runtime.maxmemoryBytes ?? 0) > 0) {
+    return `${formatBytes(runtime.usedMemoryBytes)} / ${formatBytes(runtime.maxmemoryBytes)}`
+  }
+  return formatBytes(runtime.usedMemoryBytes)
+})
+const redisRuntimeOpsText = computed(() => {
+  const ops = gatewayMetrics.value?.redisRuntime.instantaneousOpsPerSec
+  if (ops == null || Number.isNaN(ops)) return '-'
+  return `${formatMetricNumber(ops)}/s`
+})
+const redisRuntimeLatencyText = computed(() => formatMs(
+  gatewayMetrics.value?.redisRuntime.nonblockingCommandLatencyMaxMs
+))
+const redisRuntimeClientsText = computed(() => formatMetricRatio(
+  gatewayMetrics.value?.redisRuntime.connectedClients,
+  gatewayMetrics.value?.redisRuntime.blockedClients
+))
+const redisRuntimeCommandFaults = computed(() => {
+  const runtime = gatewayMetrics.value?.redisRuntime
+  if (!runtime) return null
+  return (runtime.laneCommandErrorsTotal ?? 0)
+    + (runtime.laneCommandTimeoutsTotal ?? 0)
+    + (runtime.totalErrorReplies ?? 0)
+    + (runtime.rejectedConnectionsTotal ?? 0)
+    + (runtime.evictedKeysTotal ?? 0)
 })
 const redisCategoryRows = computed(() => (
   redisCategories.value?.categories

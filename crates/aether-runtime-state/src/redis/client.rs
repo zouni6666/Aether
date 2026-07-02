@@ -12,6 +12,9 @@ pub(crate) type RedisManagedConnection = redis::aio::ConnectionManager;
 const DEFAULT_BLOCKING_STREAM_LANES_FALLBACK: usize = 4;
 const DEFAULT_BLOCKING_STREAM_LANES_CAP: usize = 16;
 const MAX_BLOCKING_STREAM_LANES_CAP: usize = 64;
+pub(crate) const REDIS_COMMAND_LATENCY_BUCKETS_MS: [u64; 12] =
+    [1, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000];
+const REDIS_COMMAND_LATENCY_BUCKET_COUNT: usize = REDIS_COMMAND_LATENCY_BUCKETS_MS.len() + 1;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct RedisClientConfig {
@@ -190,6 +193,10 @@ impl RedisConnectionRouter {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    pub(crate) fn record_latency(&self, lane: RedisConnectionLane, elapsed: Duration) {
+        self.metrics.for_lane(lane).record_latency(elapsed);
+    }
+
     pub(crate) fn lane_diagnostics(&self) -> Vec<RedisLaneDiagnostics> {
         [
             RedisConnectionLane::Fast,
@@ -204,6 +211,10 @@ impl RedisConnectionRouter {
                 lane: lane.as_str(),
                 command_errors: metrics.errors.load(Ordering::Relaxed),
                 command_timeouts: metrics.timeouts.load(Ordering::Relaxed),
+                command_count: metrics.command_count.load(Ordering::Relaxed),
+                command_latency_total_ms: metrics.latency_total_ms.load(Ordering::Relaxed),
+                command_latency_max_ms: metrics.latency_max_ms.load(Ordering::Relaxed),
+                command_latency_buckets: metrics.latency_buckets(),
             }
         })
         .collect()
@@ -215,6 +226,16 @@ pub struct RedisLaneDiagnostics {
     pub lane: &'static str,
     pub command_errors: u64,
     pub command_timeouts: u64,
+    pub command_count: u64,
+    pub command_latency_total_ms: u64,
+    pub command_latency_max_ms: u64,
+    pub command_latency_buckets: Vec<RedisCommandLatencyBucket>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RedisCommandLatencyBucket {
+    pub le_ms: Option<u64>,
+    pub count: u64,
 }
 
 #[derive(Default)]
@@ -236,10 +257,74 @@ impl RedisConnectionMetrics {
     }
 }
 
-#[derive(Default)]
 struct RedisLaneMetrics {
     errors: AtomicU64,
     timeouts: AtomicU64,
+    command_count: AtomicU64,
+    latency_total_ms: AtomicU64,
+    latency_max_ms: AtomicU64,
+    latency_bucket_counts: [AtomicU64; REDIS_COMMAND_LATENCY_BUCKET_COUNT],
+}
+
+impl Default for RedisLaneMetrics {
+    fn default() -> Self {
+        Self {
+            errors: AtomicU64::new(0),
+            timeouts: AtomicU64::new(0),
+            command_count: AtomicU64::new(0),
+            latency_total_ms: AtomicU64::new(0),
+            latency_max_ms: AtomicU64::new(0),
+            latency_bucket_counts: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+}
+
+impl RedisLaneMetrics {
+    fn record_latency(&self, elapsed: Duration) {
+        let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+        self.command_count.fetch_add(1, Ordering::Relaxed);
+        self.latency_total_ms
+            .fetch_add(elapsed_ms, Ordering::Relaxed);
+        update_atomic_max(&self.latency_max_ms, elapsed_ms);
+
+        let bucket_index = REDIS_COMMAND_LATENCY_BUCKETS_MS
+            .iter()
+            .position(|upper_bound_ms| elapsed_ms <= *upper_bound_ms)
+            .unwrap_or(REDIS_COMMAND_LATENCY_BUCKETS_MS.len());
+        self.latency_bucket_counts[bucket_index].fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn latency_buckets(&self) -> Vec<RedisCommandLatencyBucket> {
+        let mut cumulative = 0u64;
+        let mut buckets = Vec::with_capacity(REDIS_COMMAND_LATENCY_BUCKET_COUNT);
+        for (index, upper_bound_ms) in REDIS_COMMAND_LATENCY_BUCKETS_MS.iter().enumerate() {
+            cumulative = cumulative
+                .saturating_add(self.latency_bucket_counts[index].load(Ordering::Relaxed));
+            buckets.push(RedisCommandLatencyBucket {
+                le_ms: Some(*upper_bound_ms),
+                count: cumulative,
+            });
+        }
+        cumulative = cumulative.saturating_add(
+            self.latency_bucket_counts[REDIS_COMMAND_LATENCY_BUCKETS_MS.len()]
+                .load(Ordering::Relaxed),
+        );
+        buckets.push(RedisCommandLatencyBucket {
+            le_ms: None,
+            count: cumulative,
+        });
+        buckets
+    }
+}
+
+fn update_atomic_max(target: &AtomicU64, value: u64) {
+    let mut current = target.load(Ordering::Relaxed);
+    while value > current {
+        match target.compare_exchange_weak(current, value, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(next) => current = next,
+        }
+    }
 }
 
 fn connection_manager_config(
@@ -330,8 +415,11 @@ async fn connect_lane(
 mod tests {
     use super::{
         blocking_stream_lane_count, default_blocking_stream_lane_count, RedisClientConfig,
-        RedisClientFactory, MAX_BLOCKING_STREAM_LANES_CAP,
+        RedisClientFactory, RedisLaneMetrics, MAX_BLOCKING_STREAM_LANES_CAP,
+        REDIS_COMMAND_LATENCY_BUCKETS_MS,
     };
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
 
     #[test]
     fn factory_builds_lazy_client_from_valid_config() {
@@ -369,5 +457,35 @@ mod tests {
             MAX_BLOCKING_STREAM_LANES_CAP
         );
         assert!(blocking_stream_lane_count(Some(0)).is_err());
+    }
+
+    #[test]
+    fn lane_metrics_record_cumulative_latency_buckets() {
+        let metrics = RedisLaneMetrics::default();
+
+        metrics.record_latency(Duration::from_millis(0));
+        metrics.record_latency(Duration::from_millis(12));
+        metrics.record_latency(Duration::from_millis(12_345));
+
+        assert_eq!(metrics.command_count.load(Ordering::Relaxed), 3);
+        assert_eq!(metrics.latency_total_ms.load(Ordering::Relaxed), 12_357);
+        assert_eq!(metrics.latency_max_ms.load(Ordering::Relaxed), 12_345);
+
+        let buckets = metrics.latency_buckets();
+        let le_1 = buckets
+            .iter()
+            .find(|bucket| bucket.le_ms == Some(1))
+            .expect("1ms bucket");
+        let le_25 = buckets
+            .iter()
+            .find(|bucket| bucket.le_ms == Some(25))
+            .expect("25ms bucket");
+        let plus_inf = buckets.last().expect("+Inf bucket");
+
+        assert_eq!(buckets.len(), REDIS_COMMAND_LATENCY_BUCKETS_MS.len() + 1);
+        assert_eq!(le_1.count, 1);
+        assert_eq!(le_25.count, 2);
+        assert_eq!(plus_inf.le_ms, None);
+        assert_eq!(plus_inf.count, 3);
     }
 }

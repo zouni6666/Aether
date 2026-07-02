@@ -608,6 +608,12 @@ pub(crate) struct DirectUpstreamStreamExecution {
     pub(crate) upstream_target_permit: Option<UpstreamTargetAdmissionPermit>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct DirectSyncResponseStarted {
+    pub(crate) status_code: u16,
+    pub(crate) ttfb_ms: u64,
+}
+
 impl DirectSyncExecutionRuntime {
     pub(crate) const fn new() -> Self {
         Self
@@ -617,6 +623,17 @@ impl DirectSyncExecutionRuntime {
         &self,
         plan: &ExecutionPlan,
     ) -> Result<ExecutionResult, ExecutionRuntimeTransportError> {
+        self.execute_sync_with_response_started(plan, |_| {}).await
+    }
+
+    pub(crate) async fn execute_sync_with_response_started<F>(
+        &self,
+        plan: &ExecutionPlan,
+        on_response_started: F,
+    ) -> Result<ExecutionResult, ExecutionRuntimeTransportError>
+    where
+        F: FnOnce(DirectSyncResponseStarted),
+    {
         let body_bytes = build_request_body(plan)?;
 
         let started_at = Instant::now();
@@ -625,6 +642,10 @@ impl DirectSyncExecutionRuntime {
             let ttfb_ms = started_at.elapsed().as_millis() as u64;
             let status_code = response.status_code();
             let headers = response.headers();
+            on_response_started(DirectSyncResponseStarted {
+                status_code,
+                ttfb_ms,
+            });
             let (body_bytes, stream_ttfb_ms) =
                 response.bytes_with_stream_timeout(plan, started_at).await?;
             let decoded_body_bytes = decode_response_body_bytes(&headers, &body_bytes)

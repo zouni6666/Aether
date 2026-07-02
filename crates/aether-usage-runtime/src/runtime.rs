@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -7,20 +7,21 @@ use std::time::{Duration, Instant};
 
 use aether_contracts::ExecutionTelemetry;
 use aether_data_contracts::DataLayerError;
-use aether_runtime_state::RuntimeQueueStore;
+use aether_runtime_state::{RuntimeQueueStats, RuntimeQueueStore};
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::executor::spawn_on_usage_background_runtime;
-use crate::worker::{UsageWorkerControl, UsageWorkerObservation};
+use crate::worker::{
+    build_usage_queue_worker_with_record_gate, UsageWorkerControl, UsageWorkerObservation,
+};
 use crate::{
     apply_usage_body_capture_policy_to_event, build_stream_terminal_usage_seed,
     build_sync_terminal_usage_seed, build_terminal_usage_event_from_seed,
-    build_upsert_usage_record_from_event, build_usage_queue_worker, settle_usage_if_needed,
-    LifecycleUsageSeed, StreamTerminalUsagePayloadSeed, SyncTerminalUsagePayloadSeed,
-    TerminalUsageContextSeed, UsageEvent, UsageQueue, UsageRecordWriter, UsageRuntimeConfig,
-    UsageSettlementWriter,
+    build_upsert_usage_record_from_event, settle_usage_if_needed, LifecycleUsageSeed,
+    StreamTerminalUsagePayloadSeed, SyncTerminalUsagePayloadSeed, TerminalUsageContextSeed,
+    UsageEvent, UsageQueue, UsageRecordWriter, UsageRuntimeConfig, UsageSettlementWriter,
 };
 
 #[async_trait]
@@ -67,6 +68,9 @@ pub trait UsageRuntimeAccess:
     fn has_usage_writer(&self) -> bool;
     fn has_usage_worker_queue(&self) -> bool;
     fn usage_worker_queue(&self) -> Option<Arc<dyn RuntimeQueueStore>>;
+    fn usage_worker_should_defer_for_database_pressure(&self) -> bool {
+        false
+    }
 
     async fn body_capture_policy(&self) -> Result<UsageBodyCapturePolicy, DataLayerError> {
         Ok(UsageBodyCapturePolicy::default())
@@ -83,14 +87,136 @@ pub struct UsageRuntime {
     body_policy_cache: Arc<tokio::sync::Mutex<Option<UsageBodyCapturePolicyCacheEntry>>>,
     enqueue_retry: Arc<UsageEnqueueRetryDispatcher>,
     worker_supervisor_state: Arc<UsageWorkerSupervisorState>,
+    worker_record_gate: Option<Arc<UsageWorkerRecordConcurrencyGate>>,
     terminal_enqueue_state: Arc<LifecycleEnqueueState>,
     lifecycle_enqueue_state: Arc<LifecycleEnqueueState>,
+    lifecycle_coalescer: Arc<LifecycleEventCoalescer>,
+    lifecycle_delay: Arc<LifecycleDelayDispatcher>,
 }
 
 #[derive(Debug, Default)]
 struct UsageWorkerSupervisorState {
     active_count: AtomicUsize,
     desired_count: AtomicUsize,
+    read_batches_total: AtomicU64,
+    read_entries_total: AtomicU64,
+    reclaimed_entries_total: AtomicU64,
+    acked_entries_total: AtomicU64,
+    dead_lettered_entries_total: AtomicU64,
+    process_failures_total: AtomicU64,
+    read_failures_total: AtomicU64,
+    reclaim_failures_total: AtomicU64,
+}
+
+#[derive(Debug)]
+pub(crate) struct UsageWorkerRecordConcurrencyGate {
+    semaphore: tokio::sync::Semaphore,
+    limit: usize,
+    in_flight: AtomicUsize,
+    max_in_flight: AtomicUsize,
+    wait_total: AtomicU64,
+    deferred_total: AtomicU64,
+}
+
+impl UsageWorkerRecordConcurrencyGate {
+    pub(crate) fn new(limit: usize) -> Self {
+        Self {
+            semaphore: tokio::sync::Semaphore::new(limit.max(1)),
+            limit: limit.max(1),
+            in_flight: AtomicUsize::new(0),
+            max_in_flight: AtomicUsize::new(0),
+            wait_total: AtomicU64::new(0),
+            deferred_total: AtomicU64::new(0),
+        }
+    }
+
+    pub(crate) fn limit(&self) -> usize {
+        self.limit
+    }
+
+    pub(crate) fn in_flight(&self) -> usize {
+        self.in_flight.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn max_in_flight(&self) -> usize {
+        self.max_in_flight.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn wait_total(&self) -> u64 {
+        self.wait_total.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn deferred_total(&self) -> u64 {
+        self.deferred_total.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn record_deferred(&self) {
+        self.deferred_total.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub(crate) async fn acquire(&self) -> UsageWorkerRecordConcurrencyPermit<'_> {
+        if self.semaphore.available_permits() == 0 {
+            self.wait_total.fetch_add(1, Ordering::AcqRel);
+        }
+        let permit = self
+            .semaphore
+            .acquire()
+            .await
+            .expect("usage worker record gate semaphore should not be closed");
+        let active = self.in_flight.fetch_add(1, Ordering::AcqRel) + 1;
+        self.max_in_flight.fetch_max(active, Ordering::AcqRel);
+        UsageWorkerRecordConcurrencyPermit {
+            gate: self,
+            _permit: permit,
+        }
+    }
+}
+
+pub(crate) struct UsageWorkerRecordConcurrencyPermit<'a> {
+    gate: &'a UsageWorkerRecordConcurrencyGate,
+    _permit: tokio::sync::SemaphorePermit<'a>,
+}
+
+impl Drop for UsageWorkerRecordConcurrencyPermit<'_> {
+    fn drop(&mut self) {
+        self.gate.in_flight.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl UsageWorkerSupervisorState {
+    fn record_observation(&self, observation: UsageWorkerObservation) {
+        if observation.entries_read > 0 || observation.batch_size > 0 {
+            self.read_batches_total.fetch_add(1, Ordering::AcqRel);
+            self.read_entries_total.fetch_add(
+                u64::try_from(observation.entries_read).unwrap_or(u64::MAX),
+                Ordering::AcqRel,
+            );
+        }
+        self.reclaimed_entries_total.fetch_add(
+            u64::try_from(observation.reclaimed_entries).unwrap_or(u64::MAX),
+            Ordering::AcqRel,
+        );
+        self.acked_entries_total.fetch_add(
+            u64::try_from(observation.acked_entries).unwrap_or(u64::MAX),
+            Ordering::AcqRel,
+        );
+        self.dead_lettered_entries_total.fetch_add(
+            u64::try_from(observation.dead_lettered_entries).unwrap_or(u64::MAX),
+            Ordering::AcqRel,
+        );
+        self.process_failures_total.fetch_add(
+            u64::try_from(observation.process_failures).unwrap_or(u64::MAX),
+            Ordering::AcqRel,
+        );
+        self.read_failures_total.fetch_add(
+            u64::try_from(observation.read_failures).unwrap_or(u64::MAX),
+            Ordering::AcqRel,
+        );
+        self.reclaim_failures_total.fetch_add(
+            u64::try_from(observation.reclaim_failures).unwrap_or(u64::MAX),
+            Ordering::AcqRel,
+        );
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -101,8 +227,21 @@ pub struct UsageRuntimeMetricsSnapshot {
     pub worker_count: usize,
     pub worker_autoscale_enabled: bool,
     pub worker_max_count: usize,
+    pub worker_record_concurrency_limit: Option<usize>,
+    pub worker_record_concurrency_in_flight: usize,
+    pub worker_record_concurrency_max_in_flight: usize,
+    pub worker_record_concurrency_wait_total: u64,
+    pub worker_record_deferred_total: u64,
     pub worker_active_count: usize,
     pub worker_desired_count: usize,
+    pub worker_read_batches_total: u64,
+    pub worker_read_entries_total: u64,
+    pub worker_reclaimed_entries_total: u64,
+    pub worker_acked_entries_total: u64,
+    pub worker_dead_lettered_entries_total: u64,
+    pub worker_process_failures_total: u64,
+    pub worker_read_failures_total: u64,
+    pub worker_reclaim_failures_total: u64,
     pub retry_deferred_lifecycle_events: bool,
     pub terminal_enqueue_in_flight: u64,
     pub terminal_enqueue_deferred_total: u64,
@@ -116,9 +255,95 @@ pub struct UsageRuntimeMetricsSnapshot {
     pub enqueue_retry_scheduled_total: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageQueueHealthSnapshot {
+    pub enabled: bool,
+    pub configured: bool,
+    pub stream_key: String,
+    pub consumer_group: String,
+    pub dlq_stream_key: String,
+    pub stream_length: u64,
+    pub group_pending: u64,
+    pub group_lag: Option<u64>,
+    pub oldest_pending_idle_ms: Option<u64>,
+    pub dlq_length: u64,
+}
+
 const USAGE_BODY_CAPTURE_POLICY_CACHE_TTL: Duration = Duration::from_secs(30);
 const USAGE_BODY_CAPTURE_POLICY_ERROR_CACHE_TTL: Duration = Duration::from_secs(1);
 const LIFECYCLE_ENQUEUE_CIRCUIT_OPEN_MS: u64 = 1_000;
+const LIFECYCLE_TERMINAL_CANCEL_TTL: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Default)]
+struct LifecycleEventCoalescer {
+    entries: tokio::sync::Mutex<HashMap<String, LifecycleEventCoalescerEntry>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LifecycleEventCoalescerEntry {
+    generation: u64,
+    terminal_seen_at: Option<Instant>,
+}
+
+impl LifecycleEventCoalescer {
+    async fn register(&self, request_id: String) -> Option<u64> {
+        let now = Instant::now();
+        let mut entries = self.entries.lock().await;
+        Self::compact_locked(&mut entries, now);
+        let entry = entries
+            .entry(request_id)
+            .or_insert(LifecycleEventCoalescerEntry {
+                generation: 0,
+                terminal_seen_at: None,
+            });
+        if terminal_cancel_is_active(entry, now) {
+            return None;
+        }
+        entry.generation = entry.generation.saturating_add(1);
+        entry.terminal_seen_at = None;
+        Some(entry.generation)
+    }
+
+    async fn cancel(&self, request_id: &str) {
+        let now = Instant::now();
+        let mut entries = self.entries.lock().await;
+        Self::compact_locked(&mut entries, now);
+        let entry = entries
+            .entry(request_id.to_string())
+            .or_insert(LifecycleEventCoalescerEntry {
+                generation: 0,
+                terminal_seen_at: None,
+            });
+        entry.generation = entry.generation.saturating_add(1);
+        entry.terminal_seen_at = Some(now);
+    }
+
+    async fn should_emit(&self, request_id: &str, generation: u64) -> bool {
+        let now = Instant::now();
+        let mut entries = self.entries.lock().await;
+        let Some(entry) = entries.get(request_id).copied() else {
+            return false;
+        };
+        let should_emit = entry.generation == generation && !terminal_cancel_is_active(&entry, now);
+        if should_emit || !terminal_cancel_is_active(&entry, now) {
+            entries.remove(request_id);
+        }
+        Self::compact_locked(&mut entries, now);
+        should_emit
+    }
+
+    fn compact_locked(entries: &mut HashMap<String, LifecycleEventCoalescerEntry>, now: Instant) {
+        entries.retain(|_, entry| {
+            entry.terminal_seen_at.is_none() || terminal_cancel_is_active(entry, now)
+        });
+    }
+}
+
+fn terminal_cancel_is_active(entry: &LifecycleEventCoalescerEntry, now: Instant) -> bool {
+    entry
+        .terminal_seen_at
+        .is_some_and(|seen_at| now.duration_since(seen_at) <= LIFECYCLE_TERMINAL_CANCEL_TTL)
+}
 
 impl Default for UsageRuntime {
     fn default() -> Self {
@@ -133,21 +358,39 @@ impl UsageRuntime {
             body_policy_cache: Arc::new(tokio::sync::Mutex::new(None)),
             enqueue_retry: UsageEnqueueRetryDispatcher::disabled(),
             worker_supervisor_state: Arc::new(UsageWorkerSupervisorState::default()),
+            worker_record_gate: None,
             terminal_enqueue_state: Arc::new(LifecycleEnqueueState::default()),
             lifecycle_enqueue_state: Arc::new(LifecycleEnqueueState::default()),
+            lifecycle_coalescer: Arc::new(LifecycleEventCoalescer::default()),
+            lifecycle_delay: LifecycleDelayDispatcher::disabled(),
         }
     }
 
     pub fn new(config: UsageRuntimeConfig) -> Result<Self, DataLayerError> {
         config.validate()?;
         let enqueue_retry = UsageEnqueueRetryDispatcher::spawn(config.clone());
+        let worker_record_gate = config
+            .worker_record_concurrency_limit
+            .map(UsageWorkerRecordConcurrencyGate::new)
+            .map(Arc::new);
+        let lifecycle_enqueue_state = Arc::new(LifecycleEnqueueState::default());
+        let lifecycle_coalescer = Arc::new(LifecycleEventCoalescer::default());
+        let lifecycle_delay = LifecycleDelayDispatcher::spawn(
+            config.clone(),
+            Arc::clone(&lifecycle_coalescer),
+            Arc::clone(&lifecycle_enqueue_state),
+            Arc::clone(&enqueue_retry),
+        );
         Ok(Self {
             config,
             body_policy_cache: Arc::new(tokio::sync::Mutex::new(None)),
             enqueue_retry,
             worker_supervisor_state: Arc::new(UsageWorkerSupervisorState::default()),
+            worker_record_gate,
             terminal_enqueue_state: Arc::new(LifecycleEnqueueState::default()),
-            lifecycle_enqueue_state: Arc::new(LifecycleEnqueueState::default()),
+            lifecycle_enqueue_state,
+            lifecycle_coalescer,
+            lifecycle_delay,
         })
     }
 
@@ -163,6 +406,30 @@ impl UsageRuntime {
             worker_count: self.config.worker_count,
             worker_autoscale_enabled: self.config.worker_autoscale_enabled,
             worker_max_count: self.config.worker_max_count,
+            worker_record_concurrency_limit: self
+                .worker_record_gate
+                .as_ref()
+                .map(|gate| gate.limit()),
+            worker_record_concurrency_in_flight: self
+                .worker_record_gate
+                .as_ref()
+                .map(|gate| gate.in_flight())
+                .unwrap_or_default(),
+            worker_record_concurrency_max_in_flight: self
+                .worker_record_gate
+                .as_ref()
+                .map(|gate| gate.max_in_flight())
+                .unwrap_or_default(),
+            worker_record_concurrency_wait_total: self
+                .worker_record_gate
+                .as_ref()
+                .map(|gate| gate.wait_total())
+                .unwrap_or_default(),
+            worker_record_deferred_total: self
+                .worker_record_gate
+                .as_ref()
+                .map(|gate| gate.deferred_total())
+                .unwrap_or_default(),
             worker_active_count: self
                 .worker_supervisor_state
                 .active_count
@@ -170,6 +437,38 @@ impl UsageRuntime {
             worker_desired_count: self
                 .worker_supervisor_state
                 .desired_count
+                .load(Ordering::Acquire),
+            worker_read_batches_total: self
+                .worker_supervisor_state
+                .read_batches_total
+                .load(Ordering::Acquire),
+            worker_read_entries_total: self
+                .worker_supervisor_state
+                .read_entries_total
+                .load(Ordering::Acquire),
+            worker_reclaimed_entries_total: self
+                .worker_supervisor_state
+                .reclaimed_entries_total
+                .load(Ordering::Acquire),
+            worker_acked_entries_total: self
+                .worker_supervisor_state
+                .acked_entries_total
+                .load(Ordering::Acquire),
+            worker_dead_lettered_entries_total: self
+                .worker_supervisor_state
+                .dead_lettered_entries_total
+                .load(Ordering::Acquire),
+            worker_process_failures_total: self
+                .worker_supervisor_state
+                .process_failures_total
+                .load(Ordering::Acquire),
+            worker_read_failures_total: self
+                .worker_supervisor_state
+                .read_failures_total
+                .load(Ordering::Acquire),
+            worker_reclaim_failures_total: self
+                .worker_supervisor_state
+                .reclaim_failures_total
                 .load(Ordering::Acquire),
             retry_deferred_lifecycle_events: self.config.retry_deferred_lifecycle_events,
             terminal_enqueue_in_flight: self.terminal_enqueue_state.in_flight(),
@@ -191,6 +490,41 @@ impl UsageRuntime {
         }
     }
 
+    pub async fn queue_health_snapshot<T>(
+        &self,
+        data: &T,
+    ) -> Result<UsageQueueHealthSnapshot, DataLayerError>
+    where
+        T: UsageRuntimeAccess,
+    {
+        let mut snapshot = UsageQueueHealthSnapshot {
+            enabled: self.config.enabled,
+            configured: false,
+            stream_key: self.config.stream_key.clone(),
+            consumer_group: self.config.consumer_group.clone(),
+            dlq_stream_key: self.config.dlq_stream_key.clone(),
+            stream_length: 0,
+            group_pending: 0,
+            group_lag: None,
+            oldest_pending_idle_ms: None,
+            dlq_length: 0,
+        };
+        if !self.config.enabled {
+            return Ok(snapshot);
+        }
+        let Some(runner) = data.usage_worker_queue() else {
+            return Ok(snapshot);
+        };
+        snapshot.configured = true;
+        let stream_stats = runner
+            .stats(&self.config.stream_key, Some(&self.config.consumer_group))
+            .await?;
+        let dlq_stats = runner.stats(&self.config.dlq_stream_key, None).await?;
+        snapshot.apply_stream_stats(stream_stats);
+        snapshot.dlq_length = dlq_stats.stream_length;
+        Ok(snapshot)
+    }
+
     pub fn can_spawn_worker<T>(&self, data: &T) -> bool
     where
         T: UsageRuntimeAccess,
@@ -209,7 +543,14 @@ impl UsageRuntime {
             return None;
         }
         let runner = data.usage_worker_queue()?;
-        let worker = build_usage_queue_worker(runner, data, self.config.clone(), None).ok()?;
+        let worker = build_usage_queue_worker_with_record_gate(
+            runner,
+            data,
+            self.config.clone(),
+            self.worker_record_gate.clone(),
+            None,
+        )
+        .ok()?;
         Some(worker.spawn())
     }
 
@@ -227,10 +568,11 @@ impl UsageRuntime {
         let worker_count = self.config.worker_count.max(1);
         let mut handles = Vec::with_capacity(worker_count);
         for worker_index in 0..worker_count {
-            let Ok(worker) = build_usage_queue_worker(
+            let Ok(worker) = build_usage_queue_worker_with_record_gate(
                 Arc::clone(&runner),
                 Arc::clone(&data),
                 self.config.clone(),
+                self.worker_record_gate.clone(),
                 Some(worker_index),
             ) else {
                 warn!(
@@ -259,6 +601,7 @@ impl UsageRuntime {
                 runner,
                 data,
                 self.config.clone(),
+                self.worker_record_gate.clone(),
                 Arc::clone(&self.worker_supervisor_state),
             ),
         ))
@@ -280,7 +623,7 @@ impl UsageRuntime {
 
     pub async fn record_pending_direct<T>(&self, data: &T, seed: LifecycleUsageSeed)
     where
-        T: UsageRuntimeAccess,
+        T: UsageRuntimeAccess + Clone + 'static,
     {
         if !self.is_enabled() {
             return;
@@ -353,7 +696,7 @@ impl UsageRuntime {
         status_code: u16,
         telemetry: Option<&ExecutionTelemetry>,
     ) where
-        T: UsageRuntimeAccess,
+        T: UsageRuntimeAccess + Clone + 'static,
     {
         if !self.is_enabled() {
             return;
@@ -368,7 +711,7 @@ impl UsageRuntime {
             Ok(mut event) => {
                 self.apply_body_capture_policy_from_data(data, &mut event)
                     .await;
-                self.write_event_direct(data, &event).await;
+                self.enqueue_or_write_lifecycle(data, event).await;
             }
             Err(err) => {
                 warn!(
@@ -380,6 +723,77 @@ impl UsageRuntime {
                 )
             }
         }
+    }
+
+    pub fn record_sync_active_immediate_async<T>(&self, data: &T, seed: LifecycleUsageSeed)
+    where
+        T: UsageRuntimeAccess + Clone + 'static,
+    {
+        if !self.is_enabled() {
+            return;
+        }
+        let runtime = self.clone();
+        let data = T::clone(data);
+        let request_id = seed.request_id.clone();
+        spawn_on_usage_background_runtime(boxed_usage_task(async move {
+            let now_unix_secs = now_unix_secs();
+            match build_active_usage_event_offthread(seed, now_unix_secs).await {
+                Ok(mut event) => {
+                    runtime
+                        .apply_body_capture_policy_from_data(&data, &mut event)
+                        .await;
+                    runtime.write_event_direct(&data, &event).await;
+                }
+                Err(err) => {
+                    warn!(
+                        event_name = "usage_active_event_build_failed",
+                        log_type = "event",
+                        request_id = %request_id,
+                        error = %err,
+                        "usage runtime failed to build active usage event"
+                    )
+                }
+            }
+        }));
+    }
+
+    pub fn record_stream_started_immediate_async<T>(
+        &self,
+        data: &T,
+        seed: LifecycleUsageSeed,
+        status_code: u16,
+        telemetry: Option<ExecutionTelemetry>,
+    ) where
+        T: UsageRuntimeAccess + Clone + 'static,
+    {
+        if !self.is_enabled() {
+            return;
+        }
+        let runtime = self.clone();
+        let data = T::clone(data);
+        let request_id = seed.request_id.clone();
+        spawn_on_usage_background_runtime(boxed_usage_task(async move {
+            let now_unix_secs = now_unix_secs();
+            match build_streaming_usage_event_offthread(seed, status_code, telemetry, now_unix_secs)
+                .await
+            {
+                Ok(mut event) => {
+                    runtime
+                        .apply_body_capture_policy_from_data(&data, &mut event)
+                        .await;
+                    runtime.write_event_direct(&data, &event).await;
+                }
+                Err(err) => {
+                    warn!(
+                        event_name = "usage_stream_event_build_failed",
+                        log_type = "event",
+                        request_id = %request_id,
+                        error = %err,
+                        "usage runtime failed to build stream usage event"
+                    )
+                }
+            }
+        }));
     }
 
     pub fn record_sync_terminal<T>(
@@ -499,6 +913,7 @@ impl UsageRuntime {
                 "usage runtime failed to enrich terminal usage event with billing"
             );
         }
+        self.lifecycle_coalescer.cancel(&event.request_id).await;
         self.write_event_direct(data, &event).await;
     }
 
@@ -566,18 +981,40 @@ impl UsageRuntime {
     where
         T: UsageRuntimeAccess,
     {
+        self.lifecycle_coalescer.cancel(&event.request_id).await;
         self.enqueue_or_write_event(data, event, "terminal", self.config.queue_terminal_events)
             .await;
     }
 
     async fn enqueue_or_write_lifecycle<T>(&self, data: &T, event: UsageEvent)
     where
-        T: UsageRuntimeAccess,
+        T: UsageRuntimeAccess + Clone + 'static,
     {
         if self.config.queue_lifecycle_events {
-            self.enqueue_lifecycle_event(data, event).await;
+            self.enqueue_lifecycle_event_with_config_delay(data, event)
+                .await;
         } else {
             self.write_event_direct(data, &event).await;
+        }
+    }
+
+    async fn enqueue_lifecycle_event_with_config_delay<T>(&self, data: &T, event: UsageEvent)
+    where
+        T: UsageRuntimeAccess + Clone + 'static,
+    {
+        let delay = Duration::from_millis(self.config.lifecycle_enqueue_delay_ms);
+        if delay.is_zero() {
+            self.enqueue_lifecycle_event(data, event).await;
+            return;
+        }
+
+        let request_id = event.request_id.clone();
+        let Some(generation) = self.lifecycle_coalescer.register(request_id.clone()).await else {
+            return;
+        };
+        let data = T::clone(data);
+        if !self.lifecycle_delay.schedule(data, event, generation).await {
+            self.lifecycle_coalescer.cancel(&request_id).await;
         }
     }
 
@@ -596,99 +1033,14 @@ impl UsageRuntime {
             );
             return;
         }
-
-        let Some(runner) = data.usage_worker_queue() else {
-            warn!(
-                event_name = "usage_lifecycle_event_queue_unavailable",
-                log_type = "event",
-                usage_event_type = ?event.event_type,
-                request_id = %event.request_id,
-                fallback = "none",
-                "usage runtime lifecycle queue is unavailable; lifecycle event will not be written directly"
-            );
-            return;
-        };
-
-        let queue = match UsageQueue::new(runner, self.config.clone()) {
-            Ok(queue) => queue,
-            Err(err) => {
-                warn!(
-                    event_name = "usage_lifecycle_event_queue_init_failed",
-                    log_type = "event",
-                    usage_event_type = ?event.event_type,
-                    request_id = %event.request_id,
-                    fallback = "none",
-                    error = %err,
-                    "usage runtime failed to build lifecycle queue; lifecycle event will not be written directly"
-                );
-                return;
-            }
-        };
-
-        let now_ms = now_unix_ms();
-        if self.lifecycle_enqueue_state.is_circuit_open(now_ms) {
-            let retry_enabled = self.config.retry_deferred_lifecycle_events;
-            self.lifecycle_enqueue_state.record_deferred(
-                "usage_lifecycle_event_enqueue_deferred",
-                "circuit_open",
-                &event,
-                retry_enabled,
-            );
-            if retry_enabled {
-                self.enqueue_retry
-                    .schedule(
-                        queue,
-                        event,
-                        "lifecycle",
-                        DataLayerError::TimedOut("lifecycle enqueue circuit is open".to_string()),
-                    )
-                    .await;
-            }
-            return;
-        }
-
-        let Some(_guard) = self
-            .lifecycle_enqueue_state
-            .try_acquire_in_flight(self.config.lifecycle_enqueue_max_in_flight)
-        else {
-            let retry_enabled = self.config.retry_deferred_lifecycle_events;
-            self.lifecycle_enqueue_state.record_deferred(
-                "usage_lifecycle_event_enqueue_deferred",
-                "in_flight_limit",
-                &event,
-                retry_enabled,
-            );
-            if retry_enabled {
-                self.enqueue_retry
-                    .schedule(
-                        queue,
-                        event,
-                        "lifecycle",
-                        DataLayerError::TimedOut("lifecycle enqueue in-flight limit".to_string()),
-                    )
-                    .await;
-            }
-            return;
-        };
-
-        if let Err(err) = queue.enqueue(&event).await {
-            self.lifecycle_enqueue_state
-                .open_circuit(now_unix_ms().saturating_add(LIFECYCLE_ENQUEUE_CIRCUIT_OPEN_MS));
-            let failures = self.lifecycle_enqueue_state.increment_failed_total();
-            if should_log_usage_retry_counter(failures) {
-                warn!(
-                    event_name = "usage_lifecycle_event_enqueue_failed",
-                    log_type = "event",
-                    usage_event_type = ?event.event_type,
-                    request_id = %event.request_id,
-                    fallback = "none",
-                    failure_total = failures,
-                    circuit_open_ms = LIFECYCLE_ENQUEUE_CIRCUIT_OPEN_MS,
-                    error = %err,
-                    "usage runtime failed to enqueue lifecycle event; lifecycle enqueue circuit opened"
-                );
-            }
-        }
+        enqueue_lifecycle_event_now(
+            data,
+            event,
+            self.config.clone(),
+            Arc::clone(&self.lifecycle_enqueue_state),
+            Arc::clone(&self.enqueue_retry),
+        )
+        .await;
     }
 
     async fn enqueue_or_write_event<T>(
@@ -848,6 +1200,15 @@ impl UsageRuntime {
     }
 }
 
+impl UsageQueueHealthSnapshot {
+    fn apply_stream_stats(&mut self, stats: RuntimeQueueStats) {
+        self.stream_length = stats.stream_length;
+        self.group_pending = stats.group_pending;
+        self.group_lag = stats.group_lag;
+        self.oldest_pending_idle_ms = stats.oldest_pending_idle_ms;
+    }
+}
+
 async fn enrich_terminal_event<T>(data: &T, event: &mut UsageEvent)
 where
     T: UsageBillingEventEnricher + Send + Sync,
@@ -868,10 +1229,26 @@ struct ManagedUsageWorker {
     stopping: bool,
 }
 
+struct UsageWorkerReconcileInputs<'a, T> {
+    runner: &'a Arc<dyn RuntimeQueueStore>,
+    data: &'a Arc<T>,
+    config: &'a UsageRuntimeConfig,
+    worker_record_gate: &'a Option<Arc<UsageWorkerRecordConcurrencyGate>>,
+    telemetry_tx: &'a mpsc::Sender<UsageWorkerObservation>,
+}
+
+struct UsageWorkerReconcileState<'a> {
+    join_set: &'a mut tokio::task::JoinSet<usize>,
+    worker_task_indexes: &'a mut BTreeMap<tokio::task::Id, usize>,
+    workers: &'a mut BTreeMap<usize, ManagedUsageWorker>,
+    next_worker_index: &'a mut usize,
+}
+
 async fn run_usage_worker_supervisor<T>(
     runner: Arc<dyn RuntimeQueueStore>,
     data: Arc<T>,
     config: UsageRuntimeConfig,
+    worker_record_gate: Option<Arc<UsageWorkerRecordConcurrencyGate>>,
     state: Arc<UsageWorkerSupervisorState>,
 ) where
     T: UsageRuntimeAccess + 'static,
@@ -901,15 +1278,21 @@ async fn run_usage_worker_supervisor<T>(
     state
         .desired_count
         .store(desired_workers, Ordering::Release);
+    let reconcile_inputs = UsageWorkerReconcileInputs {
+        runner: &runner,
+        data: &data,
+        config: &config,
+        worker_record_gate: &worker_record_gate,
+        telemetry_tx: &telemetry_tx,
+    };
     reconcile_usage_workers(
-        &runner,
-        &data,
-        &config,
-        &telemetry_tx,
-        &mut join_set,
-        &mut worker_task_indexes,
-        &mut workers,
-        &mut next_worker_index,
+        &reconcile_inputs,
+        UsageWorkerReconcileState {
+            join_set: &mut join_set,
+            worker_task_indexes: &mut worker_task_indexes,
+            workers: &mut workers,
+            next_worker_index: &mut next_worker_index,
+        },
         desired_workers,
     );
     state.active_count.store(workers.len(), Ordering::Release);
@@ -917,6 +1300,7 @@ async fn run_usage_worker_supervisor<T>(
     loop {
         tokio::select! {
             Some(observation) = telemetry_rx.recv() => {
+                state.record_observation(observation);
                 if observation.entries_read == 0 {
                     idle_reads = idle_reads.saturating_add(1);
                 } else {
@@ -937,7 +1321,7 @@ async fn run_usage_worker_supervisor<T>(
                     let high_pressure = full_reads > 0
                         || (busy_reads >= active_workers.saturating_mul(2) && idle_reads == 0);
                     if high_pressure && desired_workers < max_workers {
-                        let grow_by = (active_workers + 1) / 2;
+                        let grow_by = active_workers.div_ceil(2);
                         let next = desired_workers
                             .saturating_add(grow_by.max(1))
                             .clamp(min_workers, max_workers);
@@ -965,7 +1349,7 @@ async fn run_usage_worker_supervisor<T>(
                         idle_ticks = idle_ticks.saturating_add(1);
                         if idle_ticks >= config.worker_idle_scale_down_ticks {
                             let next = desired_workers
-                                .saturating_sub((desired_workers + 1) / 2)
+                                .saturating_sub(desired_workers.div_ceil(2))
                                 .max(min_workers);
                             if next < desired_workers {
                                 info!(
@@ -989,14 +1373,13 @@ async fn run_usage_worker_supervisor<T>(
 
                 state.desired_count.store(desired_workers, Ordering::Release);
                 reconcile_usage_workers(
-                    &runner,
-                    &data,
-                    &config,
-                    &telemetry_tx,
-                    &mut join_set,
-                    &mut worker_task_indexes,
-                    &mut workers,
-                    &mut next_worker_index,
+                    &reconcile_inputs,
+                    UsageWorkerReconcileState {
+                        join_set: &mut join_set,
+                        worker_task_indexes: &mut worker_task_indexes,
+                        workers: &mut workers,
+                        next_worker_index: &mut next_worker_index,
+                    },
                     desired_workers,
                 );
                 state
@@ -1011,26 +1394,28 @@ async fn run_usage_worker_supervisor<T>(
 }
 
 fn reconcile_usage_workers<T>(
-    runner: &Arc<dyn RuntimeQueueStore>,
-    data: &Arc<T>,
-    config: &UsageRuntimeConfig,
-    telemetry_tx: &mpsc::Sender<UsageWorkerObservation>,
-    join_set: &mut tokio::task::JoinSet<usize>,
-    worker_task_indexes: &mut BTreeMap<tokio::task::Id, usize>,
-    workers: &mut BTreeMap<usize, ManagedUsageWorker>,
-    next_worker_index: &mut usize,
+    inputs: &UsageWorkerReconcileInputs<'_, T>,
+    state: UsageWorkerReconcileState<'_>,
     desired_workers: usize,
 ) where
     T: UsageRuntimeAccess + 'static,
 {
+    let UsageWorkerReconcileState {
+        join_set,
+        worker_task_indexes,
+        workers,
+        next_worker_index,
+    } = state;
+
     while workers.len() < desired_workers {
         let worker_index = *next_worker_index;
         *next_worker_index = (*next_worker_index).saturating_add(1);
         let control = UsageWorkerControl::default();
-        let Ok(worker) = build_usage_queue_worker(
-            Arc::clone(runner),
-            Arc::clone(data),
-            config.clone(),
+        let Ok(worker) = build_usage_queue_worker_with_record_gate(
+            Arc::clone(inputs.runner),
+            Arc::clone(inputs.data),
+            inputs.config.clone(),
+            inputs.worker_record_gate.clone(),
             Some(worker_index),
         ) else {
             warn!(
@@ -1041,7 +1426,7 @@ fn reconcile_usage_workers<T>(
             );
             break;
         };
-        let worker = worker.with_supervisor(control.clone(), telemetry_tx.clone());
+        let worker = worker.with_supervisor(control.clone(), inputs.telemetry_tx.clone());
         let handle = join_set.spawn(async move {
             worker.run().await;
             worker_index
@@ -1263,6 +1648,323 @@ struct LifecycleEnqueueInFlightGuard<'a> {
 impl Drop for LifecycleEnqueueInFlightGuard<'_> {
     fn drop(&mut self) {
         self.state.in_flight.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+#[async_trait]
+trait DelayedLifecycleEvent: Send {
+    async fn enqueue(
+        self: Box<Self>,
+        config: UsageRuntimeConfig,
+        coalescer: Arc<LifecycleEventCoalescer>,
+        enqueue_state: Arc<LifecycleEnqueueState>,
+        enqueue_retry: Arc<UsageEnqueueRetryDispatcher>,
+    );
+}
+
+struct DelayedLifecycleEventItem<T> {
+    data: T,
+    event: UsageEvent,
+    generation: u64,
+}
+
+#[async_trait]
+impl<T> DelayedLifecycleEvent for DelayedLifecycleEventItem<T>
+where
+    T: UsageRuntimeAccess + Clone + 'static,
+{
+    async fn enqueue(
+        self: Box<Self>,
+        config: UsageRuntimeConfig,
+        coalescer: Arc<LifecycleEventCoalescer>,
+        enqueue_state: Arc<LifecycleEnqueueState>,
+        enqueue_retry: Arc<UsageEnqueueRetryDispatcher>,
+    ) {
+        if !coalescer
+            .should_emit(&self.event.request_id, self.generation)
+            .await
+        {
+            return;
+        }
+        enqueue_lifecycle_event_now(&self.data, self.event, config, enqueue_state, enqueue_retry)
+            .await;
+    }
+}
+
+struct DelayedLifecycleQueueItem {
+    due_at: tokio::time::Instant,
+    item: Box<dyn DelayedLifecycleEvent>,
+}
+
+#[derive(Debug)]
+struct LifecycleDelayDispatcher {
+    delay: Duration,
+    sender: Option<mpsc::Sender<DelayedLifecycleQueueItem>>,
+}
+
+impl LifecycleDelayDispatcher {
+    fn disabled() -> Arc<Self> {
+        Arc::new(Self {
+            delay: Duration::ZERO,
+            sender: None,
+        })
+    }
+
+    fn spawn(
+        config: UsageRuntimeConfig,
+        coalescer: Arc<LifecycleEventCoalescer>,
+        enqueue_state: Arc<LifecycleEnqueueState>,
+        enqueue_retry: Arc<UsageEnqueueRetryDispatcher>,
+    ) -> Arc<Self> {
+        if !config.enabled
+            || !config.queue_lifecycle_events
+            || config.lifecycle_enqueue_delay_ms == 0
+        {
+            return Self::disabled();
+        }
+
+        let capacity = config.enqueue_retry_buffer_capacity.clamp(1024, 1_048_576);
+        let delay = Duration::from_millis(config.lifecycle_enqueue_delay_ms.max(1));
+        let (sender, receiver) = mpsc::channel(capacity);
+        spawn_on_usage_background_runtime(run_lifecycle_delay_worker(
+            config,
+            coalescer,
+            enqueue_state,
+            enqueue_retry,
+            receiver,
+        ));
+        Arc::new(Self {
+            delay,
+            sender: Some(sender),
+        })
+    }
+
+    async fn schedule<T>(&self, data: T, event: UsageEvent, generation: u64) -> bool
+    where
+        T: UsageRuntimeAccess + Clone + 'static,
+    {
+        let Some(sender) = &self.sender else {
+            return false;
+        };
+        sender
+            .try_send(DelayedLifecycleQueueItem {
+                due_at: tokio::time::Instant::now() + self.delay,
+                item: Box::new(DelayedLifecycleEventItem {
+                    data,
+                    event,
+                    generation,
+                }),
+            })
+            .is_ok()
+    }
+}
+
+async fn run_lifecycle_delay_worker(
+    config: UsageRuntimeConfig,
+    coalescer: Arc<LifecycleEventCoalescer>,
+    enqueue_state: Arc<LifecycleEnqueueState>,
+    enqueue_retry: Arc<UsageEnqueueRetryDispatcher>,
+    mut receiver: mpsc::Receiver<DelayedLifecycleQueueItem>,
+) {
+    let mut pending = BTreeMap::<tokio::time::Instant, Vec<DelayedLifecycleQueueItem>>::new();
+    let mut receiver_open = true;
+
+    loop {
+        if !pending.is_empty() {
+            enqueue_due_lifecycle_items(
+                &mut pending,
+                tokio::time::Instant::now(),
+                &config,
+                &coalescer,
+                &enqueue_state,
+                &enqueue_retry,
+            )
+            .await;
+        }
+
+        if pending.is_empty() {
+            if !receiver_open {
+                break;
+            }
+            match receiver.recv().await {
+                Some(item) => {
+                    pending.entry(item.due_at).or_default().push(item);
+                    continue;
+                }
+                None => break,
+            }
+        }
+
+        let next_due_at = *pending
+            .first_key_value()
+            .map(|(due_at, _)| due_at)
+            .expect("pending lifecycle delay item should exist");
+
+        if receiver_open {
+            tokio::select! {
+                maybe_item = receiver.recv() => {
+                    match maybe_item {
+                        Some(item) => {
+                            pending.entry(item.due_at).or_default().push(item);
+                        }
+                        None => {
+                            receiver_open = false;
+                        }
+                    }
+                }
+                _ = tokio::time::sleep_until(next_due_at) => {
+                    enqueue_due_lifecycle_items(
+                        &mut pending,
+                        tokio::time::Instant::now(),
+                        &config,
+                        &coalescer,
+                        &enqueue_state,
+                        &enqueue_retry,
+                    ).await;
+                }
+            }
+        } else {
+            tokio::time::sleep_until(next_due_at).await;
+            enqueue_due_lifecycle_items(
+                &mut pending,
+                tokio::time::Instant::now(),
+                &config,
+                &coalescer,
+                &enqueue_state,
+                &enqueue_retry,
+            )
+            .await;
+        }
+    }
+}
+
+async fn enqueue_due_lifecycle_items(
+    pending: &mut BTreeMap<tokio::time::Instant, Vec<DelayedLifecycleQueueItem>>,
+    now: tokio::time::Instant,
+    config: &UsageRuntimeConfig,
+    coalescer: &Arc<LifecycleEventCoalescer>,
+    enqueue_state: &Arc<LifecycleEnqueueState>,
+    enqueue_retry: &Arc<UsageEnqueueRetryDispatcher>,
+) {
+    let mut ready = Vec::new();
+    while let Some((&due_at, _)) = pending.first_key_value() {
+        if due_at > now {
+            break;
+        }
+        if let Some(mut items) = pending.remove(&due_at) {
+            ready.append(&mut items);
+        }
+    }
+
+    for item in ready {
+        item.item
+            .enqueue(
+                config.clone(),
+                Arc::clone(coalescer),
+                Arc::clone(enqueue_state),
+                Arc::clone(enqueue_retry),
+            )
+            .await;
+    }
+}
+
+async fn enqueue_lifecycle_event_now<T>(
+    data: &T,
+    event: UsageEvent,
+    config: UsageRuntimeConfig,
+    enqueue_state: Arc<LifecycleEnqueueState>,
+    enqueue_retry: Arc<UsageEnqueueRetryDispatcher>,
+) where
+    T: UsageRuntimeAccess,
+{
+    let Some(runner) = data.usage_worker_queue() else {
+        warn!(
+            event_name = "usage_lifecycle_event_queue_unavailable",
+            log_type = "event",
+            usage_event_type = ?event.event_type,
+            request_id = %event.request_id,
+            fallback = "none",
+            "usage runtime lifecycle queue is unavailable; lifecycle event will not be written directly"
+        );
+        return;
+    };
+
+    let queue = match UsageQueue::new(runner, config.clone()) {
+        Ok(queue) => queue,
+        Err(err) => {
+            warn!(
+                event_name = "usage_lifecycle_event_queue_init_failed",
+                log_type = "event",
+                usage_event_type = ?event.event_type,
+                request_id = %event.request_id,
+                fallback = "none",
+                error = %err,
+                "usage runtime failed to build lifecycle queue; lifecycle event will not be written directly"
+            );
+            return;
+        }
+    };
+
+    let now_ms = now_unix_ms();
+    if enqueue_state.is_circuit_open(now_ms) {
+        let retry_enabled = config.retry_deferred_lifecycle_events;
+        enqueue_state.record_deferred(
+            "usage_lifecycle_event_enqueue_deferred",
+            "circuit_open",
+            &event,
+            retry_enabled,
+        );
+        if retry_enabled {
+            enqueue_retry
+                .schedule(
+                    queue,
+                    event,
+                    "lifecycle",
+                    DataLayerError::TimedOut("lifecycle enqueue circuit is open".to_string()),
+                )
+                .await;
+        }
+        return;
+    }
+
+    let Some(_guard) = enqueue_state.try_acquire_in_flight(config.lifecycle_enqueue_max_in_flight)
+    else {
+        let retry_enabled = config.retry_deferred_lifecycle_events;
+        enqueue_state.record_deferred(
+            "usage_lifecycle_event_enqueue_deferred",
+            "in_flight_limit",
+            &event,
+            retry_enabled,
+        );
+        if retry_enabled {
+            enqueue_retry
+                .schedule(
+                    queue,
+                    event,
+                    "lifecycle",
+                    DataLayerError::TimedOut("lifecycle enqueue in-flight limit".to_string()),
+                )
+                .await;
+        }
+        return;
+    };
+
+    if let Err(err) = queue.enqueue(&event).await {
+        enqueue_state.open_circuit(now_unix_ms().saturating_add(LIFECYCLE_ENQUEUE_CIRCUIT_OPEN_MS));
+        let failures = enqueue_state.increment_failed_total();
+        if should_log_usage_retry_counter(failures) {
+            warn!(
+                event_name = "usage_lifecycle_event_enqueue_failed",
+                log_type = "event",
+                usage_event_type = ?event.event_type,
+                request_id = %event.request_id,
+                fallback = "none",
+                failure_total = failures,
+                circuit_open_ms = LIFECYCLE_ENQUEUE_CIRCUIT_OPEN_MS,
+                error = %err,
+                "usage runtime failed to enqueue lifecycle event; lifecycle enqueue circuit opened"
+            );
+        }
     }
 }
 
@@ -1517,6 +2219,17 @@ async fn build_pending_usage_event_offthread(
     .map_err(join_error_to_data_layer)?
 }
 
+async fn build_active_usage_event_offthread(
+    seed: LifecycleUsageSeed,
+    now_unix_secs: u64,
+) -> Result<UsageEvent, DataLayerError> {
+    tokio::task::spawn_blocking(move || {
+        crate::write::build_active_usage_event_from_owned_seed(seed, now_unix_secs)
+    })
+    .await
+    .map_err(join_error_to_data_layer)?
+}
+
 async fn build_streaming_usage_event_offthread(
     seed: LifecycleUsageSeed,
     status_code: u16,
@@ -1593,7 +2306,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
-    use aether_contracts::{ExecutionPlan, RequestBody};
+    use aether_contracts::{ExecutionPlan, ExecutionTelemetry, RequestBody};
     use aether_data_contracts::repository::settlement::{
         StoredUsageSettlement, UsageSettlementInput,
     };
@@ -1606,7 +2319,7 @@ mod tests {
 
     use super::{
         UsageBillingEventEnricher, UsageBodyCapturePolicy, UsageRequestRecordLevel,
-        UsageRuntimeAccess,
+        UsageRuntimeAccess, UsageWorkerObservation, UsageWorkerSupervisorState,
     };
     use crate::worker::ManualProxyNodeCounter;
     use crate::{
@@ -2096,6 +2809,14 @@ mod tests {
         async fn delete(&self, stream: &str, ids: &[String]) -> Result<usize, DataLayerError> {
             self.inner.delete(stream, ids).await
         }
+
+        async fn stats(
+            &self,
+            stream: &str,
+            group: Option<&str>,
+        ) -> Result<aether_runtime_state::RuntimeQueueStats, DataLayerError> {
+            self.inner.stats(stream, group).await
+        }
     }
 
     #[tokio::test]
@@ -2233,6 +2954,380 @@ mod tests {
         panic!("pending lifecycle usage event was not enqueued");
     }
 
+    #[tokio::test]
+    async fn pending_lifecycle_enqueue_can_be_delayed() {
+        let config = UsageRuntimeConfig {
+            enabled: true,
+            queue_lifecycle_events: true,
+            lifecycle_enqueue_delay_ms: 30,
+            stream_key: "usage:events:test:pending-delay".to_string(),
+            consumer_group: "usage_consumers_test_pending_delay".to_string(),
+            consumer_block_ms: 1,
+            ..UsageRuntimeConfig::default()
+        };
+        let queue_runner: Arc<dyn RuntimeQueueStore> =
+            Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+        let queue = UsageQueue::new(Arc::clone(&queue_runner), config.clone())
+            .expect("usage queue should build");
+        queue
+            .ensure_consumer_group()
+            .await
+            .expect("consumer group should initialize");
+        let store = CloneQueueConfiguredUsageStore {
+            records: Arc::new(Mutex::new(Vec::new())),
+            queue: queue_runner,
+        };
+        let runtime = UsageRuntime::new(config).expect("usage runtime should build");
+        let event = UsageEvent::new(
+            UsageEventType::Pending,
+            "req-lifecycle-delay",
+            UsageEventData {
+                provider_name: "openai".to_string(),
+                model: "gpt-5".to_string(),
+                ..UsageEventData::default()
+            },
+        );
+
+        runtime.enqueue_or_write_lifecycle(&store, event).await;
+
+        let immediate = queue
+            .read_group("usage-test-consumer-delay")
+            .await
+            .expect("queue read should succeed");
+        assert!(
+            immediate.is_empty(),
+            "lifecycle event should not enqueue before the delay"
+        );
+
+        sleep(Duration::from_millis(60)).await;
+        let entries = queue
+            .read_group("usage-test-consumer-delay")
+            .await
+            .expect("queue read should succeed");
+        assert_eq!(entries.len(), 1);
+        let event = UsageEvent::from_stream_fields(&entries[0].fields)
+            .expect("queued usage event should parse");
+        assert_eq!(event.request_id, "req-lifecycle-delay");
+        assert_eq!(event.event_type, UsageEventType::Pending);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_delay_worker_respects_each_item_due_time() {
+        let config = UsageRuntimeConfig {
+            enabled: true,
+            queue_lifecycle_events: true,
+            lifecycle_enqueue_delay_ms: 60,
+            stream_key: "usage:events:test:per-item-delay".to_string(),
+            consumer_group: "usage_consumers_test_per_item_delay".to_string(),
+            consumer_block_ms: 1,
+            ..UsageRuntimeConfig::default()
+        };
+        let queue_runner: Arc<dyn RuntimeQueueStore> =
+            Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+        let queue = UsageQueue::new(Arc::clone(&queue_runner), config.clone())
+            .expect("usage queue should build");
+        queue
+            .ensure_consumer_group()
+            .await
+            .expect("consumer group should initialize");
+        let store = CloneQueueConfiguredUsageStore {
+            records: Arc::new(Mutex::new(Vec::new())),
+            queue: queue_runner,
+        };
+        let runtime = UsageRuntime::new(config).expect("usage runtime should build");
+
+        runtime
+            .enqueue_or_write_lifecycle(
+                &store,
+                UsageEvent::new(
+                    UsageEventType::Pending,
+                    "req-per-item-delay-1",
+                    UsageEventData {
+                        provider_name: "openai".to_string(),
+                        model: "gpt-5".to_string(),
+                        ..UsageEventData::default()
+                    },
+                ),
+            )
+            .await;
+        sleep(Duration::from_millis(40)).await;
+        runtime
+            .enqueue_or_write_lifecycle(
+                &store,
+                UsageEvent::new(
+                    UsageEventType::Pending,
+                    "req-per-item-delay-2",
+                    UsageEventData {
+                        provider_name: "openai".to_string(),
+                        model: "gpt-5".to_string(),
+                        ..UsageEventData::default()
+                    },
+                ),
+            )
+            .await;
+
+        sleep(Duration::from_millis(50)).await;
+        runtime
+            .lifecycle_coalescer
+            .cancel("req-per-item-delay-2")
+            .await;
+
+        let entries = queue
+            .read_group("usage-test-consumer-per-item-delay-first")
+            .await
+            .expect("queue read should succeed");
+        assert_eq!(
+            entries.len(),
+            1,
+            "only the first lifecycle event should be due"
+        );
+        let event = UsageEvent::from_stream_fields(&entries[0].fields)
+            .expect("queued usage event should parse");
+        assert_eq!(event.request_id, "req-per-item-delay-1");
+
+        let premature_second = queue
+            .read_group("usage-test-consumer-per-item-delay-premature-second")
+            .await
+            .expect("queue read should succeed");
+        assert!(
+            premature_second.is_empty(),
+            "second lifecycle event should not be emitted before its own delay"
+        );
+
+        sleep(Duration::from_millis(50)).await;
+        let entries = queue
+            .read_group("usage-test-consumer-per-item-delay-second")
+            .await
+            .expect("queue read should succeed");
+        assert!(
+            entries.is_empty(),
+            "second lifecycle event should still be cancellable until its own due time"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_event_cancels_delayed_lifecycle_enqueue() {
+        let config = UsageRuntimeConfig {
+            enabled: true,
+            queue_terminal_events: true,
+            queue_lifecycle_events: true,
+            lifecycle_enqueue_delay_ms: 50,
+            stream_key: "usage:events:test:pending-cancel".to_string(),
+            consumer_group: "usage_consumers_test_pending_cancel".to_string(),
+            consumer_block_ms: 1,
+            ..UsageRuntimeConfig::default()
+        };
+        let queue_runner: Arc<dyn RuntimeQueueStore> =
+            Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+        let queue = UsageQueue::new(Arc::clone(&queue_runner), config.clone())
+            .expect("usage queue should build");
+        queue
+            .ensure_consumer_group()
+            .await
+            .expect("consumer group should initialize");
+        let store = CloneQueueConfiguredUsageStore {
+            records: Arc::new(Mutex::new(Vec::new())),
+            queue: queue_runner,
+        };
+        let runtime = UsageRuntime::new(config).expect("usage runtime should build");
+        runtime
+            .enqueue_or_write_lifecycle(
+                &store,
+                UsageEvent::new(
+                    UsageEventType::Pending,
+                    "req-lifecycle-cancel",
+                    UsageEventData {
+                        provider_name: "openai".to_string(),
+                        model: "gpt-5".to_string(),
+                        ..UsageEventData::default()
+                    },
+                ),
+            )
+            .await;
+        runtime
+            .record_terminal_event(
+                &store,
+                UsageEvent::new(
+                    UsageEventType::Completed,
+                    "req-lifecycle-cancel",
+                    UsageEventData {
+                        provider_name: "openai".to_string(),
+                        model: "gpt-5".to_string(),
+                        total_tokens: Some(12),
+                        status_code: Some(200),
+                        ..UsageEventData::default()
+                    },
+                ),
+            )
+            .await;
+
+        sleep(Duration::from_millis(80)).await;
+        let entries = queue
+            .read_group("usage-test-consumer-cancel")
+            .await
+            .expect("queue read should succeed");
+        assert_eq!(entries.len(), 1);
+        let event = UsageEvent::from_stream_fields(&entries[0].fields)
+            .expect("queued usage event should parse");
+        assert_eq!(event.request_id, "req-lifecycle-cancel");
+        assert_eq!(event.event_type, UsageEventType::Completed);
+    }
+
+    #[tokio::test]
+    async fn stream_started_direct_lifecycle_enqueue_can_be_delayed() {
+        let config = UsageRuntimeConfig {
+            enabled: true,
+            queue_lifecycle_events: true,
+            lifecycle_enqueue_delay_ms: 30,
+            stream_key: "usage:events:test:stream-direct-delay".to_string(),
+            consumer_group: "usage_consumers_test_stream_direct_delay".to_string(),
+            consumer_block_ms: 1,
+            ..UsageRuntimeConfig::default()
+        };
+        let queue_runner: Arc<dyn RuntimeQueueStore> =
+            Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+        let queue = UsageQueue::new(Arc::clone(&queue_runner), config.clone())
+            .expect("usage queue should build");
+        queue
+            .ensure_consumer_group()
+            .await
+            .expect("consumer group should initialize");
+        let store = CloneQueueConfiguredUsageStore {
+            records: Arc::new(Mutex::new(Vec::new())),
+            queue: queue_runner,
+        };
+        let runtime = UsageRuntime::new(config).expect("usage runtime should build");
+        let plan = ExecutionPlan {
+            request_id: "req-stream-direct-delay".to_string(),
+            candidate_id: Some("cand-stream-direct-delay".to_string()),
+            provider_name: Some("openai".to_string()),
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            key_id: "key-1".to_string(),
+            method: "POST".to_string(),
+            url: "https://example.com/v1/chat/completions".to_string(),
+            headers: BTreeMap::new(),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({"model": "gpt-5"})),
+            stream: true,
+            client_api_format: "openai:chat".to_string(),
+            provider_api_format: "openai:chat".to_string(),
+            model_name: Some("gpt-5".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+        let lifecycle_seed = build_lifecycle_usage_seed(&plan, None);
+
+        runtime
+            .record_stream_started_direct(
+                &store,
+                &lifecycle_seed,
+                200,
+                Some(&ExecutionTelemetry {
+                    ttfb_ms: Some(12),
+                    elapsed_ms: Some(34),
+                    upstream_bytes: Some(56),
+                }),
+            )
+            .await;
+
+        let immediate = queue
+            .read_group("usage-test-consumer-stream-direct-delay")
+            .await
+            .expect("queue read should succeed");
+        assert!(
+            immediate.is_empty(),
+            "stream started direct lifecycle event should not enqueue before the delay"
+        );
+        assert!(
+            store.records.lock().expect("records lock").is_empty(),
+            "stream started direct lifecycle event should not write directly when queue succeeds"
+        );
+
+        sleep(Duration::from_millis(60)).await;
+        let entries = queue
+            .read_group("usage-test-consumer-stream-direct-delay")
+            .await
+            .expect("queue read should succeed");
+        assert_eq!(entries.len(), 1);
+        let event = UsageEvent::from_stream_fields(&entries[0].fields)
+            .expect("queued usage event should parse");
+        assert_eq!(event.request_id, "req-stream-direct-delay");
+        assert_eq!(event.event_type, UsageEventType::Streaming);
+    }
+
+    #[tokio::test]
+    async fn direct_terminal_event_cancels_delayed_lifecycle_enqueue() {
+        let config = UsageRuntimeConfig {
+            enabled: true,
+            queue_lifecycle_events: true,
+            lifecycle_enqueue_delay_ms: 50,
+            stream_key: "usage:events:test:direct-terminal-cancel".to_string(),
+            consumer_group: "usage_consumers_test_direct_terminal_cancel".to_string(),
+            consumer_block_ms: 1,
+            ..UsageRuntimeConfig::default()
+        };
+        let queue_runner: Arc<dyn RuntimeQueueStore> =
+            Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+        let queue = UsageQueue::new(Arc::clone(&queue_runner), config.clone())
+            .expect("usage queue should build");
+        queue
+            .ensure_consumer_group()
+            .await
+            .expect("consumer group should initialize");
+        let store = CloneQueueConfiguredUsageStore {
+            records: Arc::new(Mutex::new(Vec::new())),
+            queue: queue_runner,
+        };
+        let runtime = UsageRuntime::new(config).expect("usage runtime should build");
+        runtime
+            .enqueue_or_write_lifecycle(
+                &store,
+                UsageEvent::new(
+                    UsageEventType::Pending,
+                    "req-direct-terminal-cancel",
+                    UsageEventData {
+                        provider_name: "openai".to_string(),
+                        model: "gpt-5".to_string(),
+                        ..UsageEventData::default()
+                    },
+                ),
+            )
+            .await;
+        runtime
+            .record_terminal_event_direct(
+                &store,
+                UsageEvent::new(
+                    UsageEventType::Completed,
+                    "req-direct-terminal-cancel",
+                    UsageEventData {
+                        provider_name: "openai".to_string(),
+                        model: "gpt-5".to_string(),
+                        total_tokens: Some(12),
+                        status_code: Some(200),
+                        ..UsageEventData::default()
+                    },
+                ),
+            )
+            .await;
+
+        sleep(Duration::from_millis(80)).await;
+        let entries = queue
+            .read_group("usage-test-consumer-direct-terminal-cancel")
+            .await
+            .expect("queue read should succeed");
+        assert!(
+            entries.is_empty(),
+            "direct terminal usage should cancel delayed lifecycle queue writes"
+        );
+        let records = store.records.lock().expect("records lock");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].request_id, "req-direct-terminal-cancel");
+        assert_eq!(records[0].status, "completed");
+    }
+
     #[test]
     fn spawn_workers_uses_configured_worker_count() {
         let config = UsageRuntimeConfig {
@@ -2254,6 +3349,32 @@ mod tests {
         for handle in handles {
             handle.abort();
         }
+    }
+
+    #[test]
+    fn worker_supervisor_state_records_worker_observations() {
+        let state = UsageWorkerSupervisorState::default();
+
+        state.record_observation(UsageWorkerObservation {
+            worker_index: Some(1),
+            entries_read: 2,
+            batch_size: 16,
+            reclaimed_entries: 1,
+            acked_entries: 2,
+            dead_lettered_entries: 1,
+            process_failures: 1,
+            read_failures: 1,
+            reclaim_failures: 1,
+        });
+
+        assert_eq!(state.read_batches_total.load(Ordering::Acquire), 1);
+        assert_eq!(state.read_entries_total.load(Ordering::Acquire), 2);
+        assert_eq!(state.reclaimed_entries_total.load(Ordering::Acquire), 1);
+        assert_eq!(state.acked_entries_total.load(Ordering::Acquire), 2);
+        assert_eq!(state.dead_lettered_entries_total.load(Ordering::Acquire), 1);
+        assert_eq!(state.process_failures_total.load(Ordering::Acquire), 1);
+        assert_eq!(state.read_failures_total.load(Ordering::Acquire), 1);
+        assert_eq!(state.reclaim_failures_total.load(Ordering::Acquire), 1);
     }
 
     #[tokio::test]
@@ -2487,6 +3608,7 @@ mod tests {
         let config = UsageRuntimeConfig {
             enabled: true,
             queue_lifecycle_events: true,
+            retry_deferred_lifecycle_events: false,
             stream_key: "usage:events:test:lifecycle-circuit".to_string(),
             consumer_group: "usage_consumers_test_lifecycle_circuit".to_string(),
             consumer_block_ms: 1,
@@ -2529,7 +3651,7 @@ mod tests {
         );
         assert_eq!(
             snapshot.lifecycle_enqueue_deferred_dropped_total, 9,
-            "deferred lifecycle events should be dropped by default instead of entering retry"
+            "deferred lifecycle events should be dropped when retry is disabled"
         );
         assert_eq!(
             snapshot.enqueue_retry_scheduled_total, 0,
