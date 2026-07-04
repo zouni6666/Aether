@@ -23,6 +23,30 @@ use crate::constants::{
 };
 use crate::data::GatewayDataState;
 
+const PROVIDER_QUOTA_TEST_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+fn run_provider_quota_test<F, Fut>(test_name: &'static str, make_future: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(test_name.to_string())
+        .stack_size(PROVIDER_QUOTA_TEST_STACK_BYTES)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime should build");
+            runtime.block_on(make_future());
+        })
+        .expect("provider quota test thread should spawn");
+
+    if let Err(payload) = handle.join() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
 #[tokio::test]
 async fn gateway_refreshes_admin_provider_quota_locally_for_codex_with_trusted_admin_principal() {
     #[derive(Debug, Clone)]
@@ -1748,8 +1772,15 @@ async fn gateway_reports_codex_quota_runtime_failures_locally_without_falling_ba
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_refreshes_admin_provider_quota_locally_for_antigravity_with_trusted_admin_principal(
+#[test]
+fn gateway_refreshes_admin_provider_quota_locally_for_antigravity_with_trusted_admin_principal() {
+    run_provider_quota_test(
+        "gateway_refreshes_admin_provider_quota_locally_for_antigravity_with_trusted_admin_principal",
+        gateway_refreshes_admin_provider_quota_locally_for_antigravity_with_trusted_admin_principal_inner,
+    );
+}
+
+async fn gateway_refreshes_admin_provider_quota_locally_for_antigravity_with_trusted_admin_principal_inner(
 ) {
     #[derive(Debug, Clone)]
     struct SeenExecutionRuntimeRequest {

@@ -577,6 +577,29 @@ fn model_quota_window_snapshot(
     Some(Value::Object(window))
 }
 
+fn canonical_antigravity_model_label(model_name: &str) -> Option<&'static str> {
+    match model_name.trim() {
+        "gemini-3.5-flash-extra-low" => Some("Gemini 3.5 Flash Extra Low"),
+        "gemini-3.5-flash-low" => Some("Gemini 3.5 Flash Low"),
+        "gemini-3-flash-agent" => Some("Gemini 3 Flash Agent"),
+        _ => None,
+    }
+}
+
+fn antigravity_model_quota_window_snapshot(
+    model_name: &str,
+    item: &Map<String, Value>,
+    observed_at_unix_secs: Option<u64>,
+) -> Option<Value> {
+    let mut window = model_quota_window_snapshot(model_name, item, observed_at_unix_secs)?;
+    if let Some(label) = canonical_antigravity_model_label(model_name) {
+        if let Some(window) = window.as_object_mut() {
+            window.insert("label".to_string(), json!(label));
+        }
+    }
+    Some(window)
+}
+
 fn provider_quota_metadata_string(
     metadata: &Map<String, Value>,
     fields: &[&str],
@@ -1466,7 +1489,7 @@ fn build_antigravity_quota_status_snapshot(
             models
                 .iter()
                 .filter_map(|(model_name, item)| {
-                    model_quota_window_snapshot(
+                    antigravity_model_quota_window_snapshot(
                         model_name,
                         item.as_object()?,
                         observed_at_unix_secs,
@@ -3712,6 +3735,52 @@ mod tests {
         assert_eq!(
             quota.get("windows").and_then(Value::as_array).map(Vec::len),
             Some(2usize)
+        );
+    }
+
+    #[test]
+    fn sync_provider_key_quota_status_snapshot_labels_antigravity_flash_tiers_by_model_id() {
+        let upstream_metadata = json!({
+            "antigravity": {
+                "updated_at": 1_775_553_285u64,
+                "quota_by_model": {
+                    "gemini-3.5-flash-extra-low": { "remaining_fraction": 1.0 },
+                    "gemini-3.5-flash-low": { "remaining_fraction": 0.75 },
+                    "gemini-3-flash-agent": { "remaining_fraction": 0.5 }
+                }
+            }
+        });
+
+        let payload = sync_provider_key_quota_status_snapshot(
+            None,
+            "antigravity",
+            Some(&upstream_metadata),
+            "refresh_api",
+        )
+        .expect("quota snapshot should sync");
+        let windows = payload["quota"]["windows"]
+            .as_array()
+            .expect("quota windows should exist");
+        let label_for_model = |model: &str| {
+            windows
+                .iter()
+                .filter_map(Value::as_object)
+                .find(|window| window.get("model") == Some(&json!(model)))
+                .and_then(|window| window.get("label"))
+                .cloned()
+        };
+
+        assert_eq!(
+            label_for_model("gemini-3.5-flash-extra-low"),
+            Some(json!("Gemini 3.5 Flash Extra Low"))
+        );
+        assert_eq!(
+            label_for_model("gemini-3.5-flash-low"),
+            Some(json!("Gemini 3.5 Flash Low"))
+        );
+        assert_eq!(
+            label_for_model("gemini-3-flash-agent"),
+            Some(json!("Gemini 3 Flash Agent"))
         );
     }
 
