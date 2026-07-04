@@ -21,9 +21,12 @@
           />
         </button>
       </TableCell>
-      <TableCell class="py-4">
-        <div class="flex items-center gap-1.5">
-          <span class="text-sm font-semibold">{{ node.name }}</span>
+      <TableCell class="py-4 min-w-0">
+        <div class="flex items-center gap-1.5 min-w-0">
+          <span
+            class="min-w-0 truncate text-sm font-semibold"
+            :title="node.name"
+          >{{ node.name }}</span>
           <Badge
             v-if="node.is_manual"
             variant="outline"
@@ -48,11 +51,17 @@
           <HardwareTooltip :node="node" />
         </div>
       </TableCell>
-      <TableCell class="py-4">
-        <code class="text-xs text-muted-foreground">{{ proxyNodeAddress(node) }}</code>
+      <TableCell class="py-4 min-w-0">
+        <code
+          class="block min-w-0 truncate text-xs text-muted-foreground"
+          :title="proxyNodeAddress(node)"
+        >{{ proxyNodeAddress(node) }}</code>
       </TableCell>
-      <TableCell class="py-4">
-        <span class="text-sm text-muted-foreground">{{ legacyT(formatProxyNodeRegion(node.region)) }}</span>
+      <TableCell class="py-4 min-w-0">
+        <span
+          class="block min-w-0 truncate text-sm text-muted-foreground"
+          :title="legacyT(formatProxyNodeRegion(node.region))"
+        >{{ legacyT(formatProxyNodeRegion(node.region)) }}</span>
       </TableCell>
       <TableCell class="py-4 text-center">
         <Badge
@@ -78,8 +87,8 @@
       <TableCell class="py-4 text-center">
         <span class="text-sm tabular-nums">{{ node.is_manual ? '-' : proxyNodeVersion(node) }}</span>
       </TableCell>
-      <TableCell class="py-4">
-        <span class="text-xs text-muted-foreground">{{ formatProxyNodeTime(node.last_heartbeat_at, locale) }}</span>
+      <TableCell class="py-4 min-w-0">
+        <span class="block min-w-0 truncate text-xs text-muted-foreground">{{ formatProxyNodeTime(node.last_heartbeat_at, locale) }}</span>
       </TableCell>
       <TableCell class="py-4 text-center">
         <div class="flex items-center justify-center gap-0.5">

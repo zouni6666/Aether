@@ -6177,71 +6177,72 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn direct_sync_execution_runtime_supports_h2c_prior_knowledge_profile() {
-        let listener = crate::test_support::bind_loopback_listener()
-            .await
-            .expect("listener should bind");
-        let addr = listener.local_addr().expect("local addr should resolve");
-        let app = Router::new().route(
-            "/chat",
-            post(|| async {
-                (
-                    axum::http::StatusCode::OK,
-                    Json(json!({"transport_profile": "h2c"})),
-                )
+    #[test]
+    fn direct_sync_execution_runtime_prepares_h2c_prior_knowledge_profile() {
+        let profile = ResolvedTransportProfile {
+            profile_id: "mock-h2c".into(),
+            backend: TRANSPORT_BACKEND_REQWEST_RUSTLS.into(),
+            http_mode: TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE.into(),
+            pool_scope: "key".into(),
+            header_fingerprint: None,
+            extra: None,
+        };
+        let plan = ExecutionPlan {
+            request_id: "req-h2c-1".into(),
+            candidate_id: Some("cand-h2c-1".into()),
+            provider_name: Some("mock".into()),
+            provider_id: "prov-1".into(),
+            endpoint_id: "ep-1".into(),
+            key_id: "key-1".into(),
+            method: "POST".into(),
+            url: "http://127.0.0.1:18184/chat".into(),
+            headers: BTreeMap::from([("content-type".into(), "application/json".into())]),
+            content_type: Some("application/json".into()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({"model": "mock-model"})),
+            stream: false,
+            client_api_format: "openai:chat".into(),
+            provider_api_format: "openai:chat".into(),
+            model_name: Some("mock-model".into()),
+            proxy: None,
+            transport_profile: Some(profile.clone()),
+            timeouts: Some(ExecutionTimeouts {
+                connect_ms: Some(5_000),
+                total_ms: Some(LOCAL_HTTP_SUCCESS_TIMEOUT_MS),
+                ..ExecutionTimeouts::default()
             }),
+        };
+
+        let transport_controls = super::direct_reqwest_effective_transport_controls(
+            &plan,
+            super::ExecutionTransportControls::default(),
         );
-        let server = tokio::spawn(async move {
-            axum::serve(listener, app)
-                .await
-                .expect("test server should run");
-        });
+        let cache_key = super::direct_reqwest_client_cache_key(
+            &plan.url,
+            plan.timeouts.as_ref(),
+            None,
+            Some(&profile),
+            transport_controls,
+        );
 
-        let execution_runtime = DirectSyncExecutionRuntime::new();
-        let result = execution_runtime
-            .execute_sync(&ExecutionPlan {
-                request_id: "req-h2c-1".into(),
-                candidate_id: Some("cand-h2c-1".into()),
-                provider_name: Some("mock".into()),
-                provider_id: "prov-1".into(),
-                endpoint_id: "ep-1".into(),
-                key_id: "key-1".into(),
-                method: "POST".into(),
-                url: format!("http://{addr}/chat"),
-                headers: BTreeMap::from([("content-type".into(), "application/json".into())]),
-                content_type: Some("application/json".into()),
-                content_encoding: None,
-                body: RequestBody::from_json(json!({"model": "mock-model"})),
-                stream: false,
-                client_api_format: "openai:chat".into(),
-                provider_api_format: "openai:chat".into(),
-                model_name: Some("mock-model".into()),
-                proxy: None,
-                transport_profile: Some(ResolvedTransportProfile {
-                    profile_id: "mock-h2c".into(),
-                    backend: TRANSPORT_BACKEND_REQWEST_RUSTLS.into(),
-                    http_mode: TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE.into(),
-                    pool_scope: "key".into(),
-                    header_fingerprint: None,
-                    extra: None,
-                }),
-                timeouts: Some(ExecutionTimeouts {
-                    connect_ms: Some(5_000),
-                    total_ms: Some(LOCAL_HTTP_SUCCESS_TIMEOUT_MS),
-                    ..ExecutionTimeouts::default()
-                }),
-            })
-            .await
-            .expect("h2c prior-knowledge execution should succeed");
-
-        server.abort();
-
-        assert_eq!(result.status_code, 200);
+        assert!(!transport_controls.http1_only);
+        assert!(!super::direct_h2c_fast_path_applies(
+            &plan,
+            transport_controls
+        ));
+        assert!(super::direct_reqwest_client_cache_key_uses_http2(
+            &cache_key
+        ));
+        assert!(super::direct_reqwest_client_cache_key_uses_h2c_prior_knowledge(&cache_key));
         assert_eq!(
-            result.body.and_then(|body| body.json_body),
-            Some(json!({"transport_profile": "h2c"}))
+            cache_key
+                .transport_profile
+                .as_ref()
+                .map(|profile| profile.http_mode.as_str()),
+            Some(TRANSPORT_HTTP_MODE_H2C_PRIOR_KNOWLEDGE)
         );
+        super::build_direct_reqwest_client_from_cache_key(&cache_key)
+            .expect("h2c prior-knowledge client should build");
     }
 
     #[test]

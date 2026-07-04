@@ -2642,7 +2642,7 @@ mod tests {
 
         let workers =
             args.usage
-                .effective_queue_workers(args.node_role, None, None, Some(&database));
+                .effective_queue_workers(args.node_role, Some(1_024), None, Some(&database));
         let max_workers =
             args.usage
                 .effective_queue_worker_max_count(args.node_role, Some(&database), workers);
@@ -2660,7 +2660,7 @@ mod tests {
 
         let workers =
             args.usage
-                .effective_queue_workers(args.node_role, None, None, Some(&database));
+                .effective_queue_workers(args.node_role, Some(1_024), None, Some(&database));
         let max_workers =
             args.usage
                 .effective_queue_worker_max_count(args.node_role, Some(&database), workers);

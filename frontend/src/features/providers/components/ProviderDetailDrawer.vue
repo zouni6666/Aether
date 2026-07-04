@@ -181,6 +181,7 @@
                           v-if="getCodexQuotaDisplay(key)?.primary_used_percent !== undefined"
                           :label="legacyT('周限额')"
                           :used-percent="getCodexQuotaDisplay(key)?.primary_used_percent || 0"
+                          :remaining-percent="toCodexRemainingPercent(getCodexQuotaDisplay(key)?.primary_used_percent)"
                           :meter-class="getQuotaRemainingClass(getCodexQuotaDisplay(key)?.primary_used_percent || 0)"
                           :bar-class="getQuotaRemainingBarColor(getCodexQuotaDisplay(key)?.primary_used_percent || 0)"
                           :reset-text="(getCodexQuotaDisplay(key)?.primary_reset_at || getCodexQuotaDisplay(key)?.primary_reset_seconds) && shouldStartCodexResetCountdown(getCodexQuotaDisplay(key)?.primary_used_percent || 0)
@@ -203,6 +204,7 @@
                           v-if="isCodexTeamPlan(key) && getCodexQuotaDisplay(key)?.secondary_used_percent !== undefined"
                           :label="legacyT('5H限额')"
                           :used-percent="getCodexQuotaDisplay(key)?.secondary_used_percent || 0"
+                          :remaining-percent="toCodexRemainingPercent(getCodexQuotaDisplay(key)?.secondary_used_percent)"
                           :meter-class="getQuotaRemainingClass(getCodexQuotaDisplay(key)?.secondary_used_percent || 0)"
                           :bar-class="getQuotaRemainingBarColor(getCodexQuotaDisplay(key)?.secondary_used_percent || 0)"
                           :reset-text="shouldStartCodexResetCountdown(getCodexQuotaDisplay(key)?.secondary_used_percent || 0)
@@ -234,6 +236,7 @@
                             v-if="getCodexQuotaDisplay(key)?.spark_secondary_used_percent !== undefined"
                             :label="legacyT('Spark 周')"
                             :used-percent="getCodexQuotaDisplay(key)?.spark_secondary_used_percent || 0"
+                            :remaining-percent="toCodexRemainingPercent(getCodexQuotaDisplay(key)?.spark_secondary_used_percent)"
                             :meter-class="getQuotaRemainingClass(getCodexQuotaDisplay(key)?.spark_secondary_used_percent || 0)"
                             :bar-class="getQuotaRemainingBarColor(getCodexQuotaDisplay(key)?.spark_secondary_used_percent || 0)"
                             :reset-text="shouldStartCodexResetCountdown(getCodexQuotaDisplay(key)?.spark_secondary_used_percent || 0)
@@ -255,6 +258,7 @@
                             v-if="getCodexQuotaDisplay(key)?.spark_primary_used_percent !== undefined"
                             :label="legacyT('Spark 5H')"
                             :used-percent="getCodexQuotaDisplay(key)?.spark_primary_used_percent || 0"
+                            :remaining-percent="toCodexRemainingPercent(getCodexQuotaDisplay(key)?.spark_primary_used_percent)"
                             :meter-class="getQuotaRemainingClass(getCodexQuotaDisplay(key)?.spark_primary_used_percent || 0)"
                             :bar-class="getQuotaRemainingBarColor(getCodexQuotaDisplay(key)?.spark_primary_used_percent || 0)"
                             :reset-text="shouldStartCodexResetCountdown(getCodexQuotaDisplay(key)?.spark_primary_used_percent || 0)
@@ -1717,8 +1721,54 @@ function getQuotaWindowLiveResetSeconds(
   return null
 }
 
-function getCodexQuotaDisplay(key: EndpointAPIKey): CodexUpstreamMetadata | null {
-  const quota = getQuotaSnapshotForProvider(key, 'codex')
+function copyCodexNumberField(
+  target: CodexUpstreamMetadata,
+  source: CodexUpstreamMetadata,
+  field: keyof CodexUpstreamMetadata,
+) {
+  const value = source[field]
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    ;(target[field] as number | undefined) = value
+  }
+}
+
+function getCodexQuotaDisplayFromMetadata(metadata: CodexUpstreamMetadata | null | undefined): CodexUpstreamMetadata | null {
+  if (!metadata) return null
+
+  const display: CodexUpstreamMetadata = {}
+  if (metadata.plan_type) display.plan_type = metadata.plan_type
+
+  const numberFields: (keyof CodexUpstreamMetadata)[] = [
+    'updated_at',
+    'primary_used_percent',
+    'primary_reset_seconds',
+    'primary_reset_after_seconds',
+    'primary_reset_at',
+    'primary_window_minutes',
+    'secondary_used_percent',
+    'secondary_reset_seconds',
+    'secondary_reset_after_seconds',
+    'secondary_reset_at',
+    'secondary_window_minutes',
+    'spark_primary_used_percent',
+    'spark_primary_reset_seconds',
+    'spark_primary_reset_after_seconds',
+    'spark_primary_reset_at',
+    'spark_primary_window_minutes',
+    'spark_secondary_used_percent',
+    'spark_secondary_reset_seconds',
+    'spark_secondary_reset_after_seconds',
+    'spark_secondary_reset_at',
+    'spark_secondary_window_minutes',
+    'credits_balance',
+  ]
+  numberFields.forEach(field => copyCodexNumberField(display, metadata, field))
+  if (metadata.has_credits !== undefined) display.has_credits = metadata.has_credits
+
+  return Object.keys(display).length > 0 ? display : null
+}
+
+function getCodexQuotaDisplayFromSnapshot(quota: QuotaStatusSnapshot | null | undefined): CodexUpstreamMetadata | null {
   if (!quota) return null
 
   const display: CodexUpstreamMetadata = {}
@@ -1771,6 +1821,39 @@ function getCodexQuotaDisplay(key: EndpointAPIKey): CodexUpstreamMetadata | null
   }
 
   return Object.keys(display).length > 0 ? display : null
+}
+
+function getCodexQuotaDisplayUpdatedAt(display: CodexUpstreamMetadata | null | undefined): number | null {
+  const updatedAt = Number(display?.updated_at)
+  return Number.isFinite(updatedAt) ? updatedAt : null
+}
+
+function codexDisplayHasUsage(display: CodexUpstreamMetadata | null | undefined): boolean {
+  return !!display && (
+    display.primary_used_percent !== undefined
+    || display.secondary_used_percent !== undefined
+    || display.spark_primary_used_percent !== undefined
+    || display.spark_secondary_used_percent !== undefined
+  )
+}
+
+function getCodexQuotaDisplay(key: EndpointAPIKey): CodexUpstreamMetadata | null {
+  const snapshotDisplay = getCodexQuotaDisplayFromSnapshot(getQuotaSnapshotForProvider(key, 'codex'))
+  const metadataDisplay = getCodexQuotaDisplayFromMetadata(key.upstream_metadata?.codex)
+
+  if (!snapshotDisplay) return metadataDisplay
+  if (!metadataDisplay) return snapshotDisplay
+  if (!codexDisplayHasUsage(snapshotDisplay) && codexDisplayHasUsage(metadataDisplay)) {
+    return metadataDisplay
+  }
+
+  const snapshotUpdatedAt = getCodexQuotaDisplayUpdatedAt(snapshotDisplay)
+  const metadataUpdatedAt = getCodexQuotaDisplayUpdatedAt(metadataDisplay)
+  if (metadataUpdatedAt !== null && (snapshotUpdatedAt === null || metadataUpdatedAt > snapshotUpdatedAt)) {
+    return metadataDisplay
+  }
+
+  return snapshotDisplay
 }
 
 function hasCodexQuotaDisplayData(key: EndpointAPIKey): boolean {
