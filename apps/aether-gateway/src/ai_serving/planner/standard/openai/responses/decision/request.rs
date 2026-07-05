@@ -5,6 +5,10 @@ use aether_contracts::ResolvedTransportProfile;
 use serde_json::{json, Value};
 use tracing::debug;
 
+use crate::ai_serving::planner::antigravity::{
+    build_antigravity_v1internal_provider_request, AntigravityV1InternalRequestError,
+    AntigravityV1InternalRequestInput, ANTIGRAVITY_V1INTERNAL_ENVELOPE_NAME,
+};
 use crate::ai_serving::planner::candidate_preparation::{
     prepare_header_authenticated_candidate, prepare_header_authenticated_candidate_from_auth,
     OauthPreparationContext,
@@ -29,13 +33,7 @@ use crate::ai_serving::planner::standard::{
     build_local_openai_responses_upstream_url, request_body_build_failure_extra_data,
     request_conversion_failure_extra_data,
 };
-use crate::ai_serving::transport::antigravity::{
-    build_antigravity_safe_v1internal_request, build_antigravity_static_identity_headers,
-    classify_local_antigravity_request_support, is_antigravity_provider_transport,
-    AntigravityEnvelopeRequestType, AntigravityRequestAuthUnsupportedReason,
-    AntigravityRequestEnvelopeSupport, AntigravityRequestSideSupport,
-    AntigravityRequestSideUnsupportedReason,
-};
+use crate::ai_serving::transport::antigravity::is_antigravity_provider_transport;
 use crate::ai_serving::transport::auth::{
     resolve_local_gemini_auth, resolve_local_openai_bearer_auth, resolve_local_standard_auth,
 };
@@ -72,8 +70,6 @@ use super::support::{
     LocalOpenAiResponsesDecisionInput,
 };
 use super::LocalOpenAiResponsesSpec;
-
-const ANTIGRAVITY_ENVELOPE_NAME: &str = "antigravity:v1internal";
 
 fn is_grok_text_provider_api_format(provider_api_format: &str) -> bool {
     matches!(
@@ -120,7 +116,7 @@ pub(crate) async fn resolve_local_openai_responses_candidate_payload_parts(
     let provider_api_format = eligible.provider_api_format.as_str();
     let normalized_provider_api_format =
         crate::ai_serving::normalize_api_format_alias(provider_api_format);
-    let mut transport = Arc::clone(&eligible.transport);
+    let transport = Arc::clone(&eligible.transport);
     let transport_profile = crate::ai_serving::transport::resolve_transport_profile(&transport);
     let is_antigravity = is_antigravity_provider_transport(&transport);
     let is_gemini_cli = is_gemini_cli_provider_transport(&transport);
@@ -415,82 +411,7 @@ pub(crate) async fn resolve_local_openai_responses_candidate_payload_parts(
         provider_api_format,
         Some(body_json),
     );
-    let antigravity_auth = if is_antigravity {
-        let mut antigravity_support = classify_local_antigravity_request_support(
-            &transport,
-            &base_provider_request_body,
-            AntigravityEnvelopeRequestType::Agent,
-        );
-        if matches!(
-            antigravity_support,
-            AntigravityRequestSideSupport::Unsupported(
-                AntigravityRequestSideUnsupportedReason::UnsupportedAuth(
-                    AntigravityRequestAuthUnsupportedReason::MissingProjectId
-                )
-            )
-        ) {
-            if let Some(hydrated) = state
-                .hydrate_antigravity_project_metadata_for_transport(&transport)
-                .await
-            {
-                transport = Arc::new(hydrated);
-                antigravity_support = classify_local_antigravity_request_support(
-                    &transport,
-                    &base_provider_request_body,
-                    AntigravityEnvelopeRequestType::Agent,
-                );
-            }
-        }
-        match antigravity_support {
-            AntigravityRequestSideSupport::Supported(spec) => Some(spec.auth),
-            AntigravityRequestSideSupport::Unsupported(_) => {
-                mark_skipped_local_openai_responses_candidate(
-                    state,
-                    input,
-                    trace_id,
-                    candidate,
-                    candidate_index,
-                    candidate_id,
-                    "transport_unsupported",
-                )
-                .await;
-                return Ok(None);
-            }
-        }
-    } else {
-        None
-    };
-    let provider_request_body = if let Some(antigravity_auth) = antigravity_auth.as_ref() {
-        match build_antigravity_safe_v1internal_request(
-            antigravity_auth,
-            trace_id,
-            &mapped_model,
-            &base_provider_request_body,
-            AntigravityEnvelopeRequestType::Agent,
-        ) {
-            AntigravityRequestEnvelopeSupport::Supported(envelope) => envelope,
-            AntigravityRequestEnvelopeSupport::Unsupported(_) => {
-                mark_skipped_local_openai_responses_candidate_with_failure_diagnostic(
-                    state,
-                    input,
-                    trace_id,
-                    candidate,
-                    candidate_index,
-                    candidate_id,
-                    "provider_request_body_build_failed",
-                    CandidateFailureDiagnostic::envelope_build_failed(
-                        spec_metadata.api_format,
-                        provider_api_format,
-                        "openai_responses_antigravity_envelope",
-                    ),
-                )
-                .await;
-                return Ok(None);
-            }
-        }
-    } else {
-        base_provider_request_body
-    };
+    let provider_request_body = base_provider_request_body;
 
     if let Some(kiro_auth) = kiro_auth.as_ref() {
         return build_kiro_openai_responses_payload_parts(
@@ -562,6 +483,28 @@ pub(crate) async fn resolve_local_openai_responses_candidate_payload_parts(
         )
         .await);
     }
+    if is_antigravity {
+        return Ok(build_antigravity_openai_responses_payload_parts(
+            state,
+            parts,
+            trace_id,
+            body_json,
+            input,
+            eligible,
+            candidate_index,
+            candidate_id,
+            spec_metadata.api_format,
+            &transport,
+            provider_api_format,
+            mapped_model,
+            auth_header,
+            auth_value,
+            provider_request_body,
+            upstream_is_stream,
+            redaction.redacted,
+        )
+        .await);
+    }
 
     let Some(upstream_url) = (if is_grok && is_grok_text_provider_api_format(provider_api_format) {
         Some(build_grok_upstream_url(&transport, GROK_CHAT_PATH))
@@ -598,10 +541,7 @@ pub(crate) async fn resolve_local_openai_responses_candidate_payload_parts(
         .await;
         return Ok(None);
     };
-    let extra_headers = antigravity_auth
-        .as_ref()
-        .map(build_antigravity_static_identity_headers)
-        .unwrap_or_default();
+    let extra_headers = BTreeMap::new();
     let resolved_headers = if is_grok && is_grok_text_provider_api_format(provider_api_format) {
         let Some(headers) = build_grok_browser_headers(GrokHeaderInput {
             transport: &transport,
@@ -728,19 +668,168 @@ pub(crate) async fn resolve_local_openai_responses_candidate_payload_parts(
         upstream_url,
         execution_strategy,
         conversion_mode,
-        is_antigravity: is_antigravity
-            || antigravity_auth.is_some() && ANTIGRAVITY_ENVELOPE_NAME == "antigravity:v1internal",
-        envelope_name: if is_antigravity || antigravity_auth.is_some() {
-            Some(ANTIGRAVITY_ENVELOPE_NAME)
-        } else {
-            None
-        },
+        is_antigravity: false,
+        envelope_name: None,
         upstream_is_stream,
         transport: Arc::clone(&transport),
         transport_profile,
         image_request_summary: None,
         request_redacted: redaction.redacted,
     }))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_antigravity_openai_responses_payload_parts(
+    state: &AppState,
+    parts: &http::request::Parts,
+    trace_id: &str,
+    original_body_json: &serde_json::Value,
+    input: &LocalOpenAiResponsesDecisionInput,
+    eligible: &EligibleLocalExecutionCandidate,
+    candidate_index: u32,
+    candidate_id: &str,
+    client_api_format: &str,
+    transport: &Arc<GatewayProviderTransportSnapshot>,
+    provider_api_format: &str,
+    mapped_model: String,
+    auth_header: String,
+    auth_value: String,
+    gemini_request_body: Value,
+    upstream_is_stream: bool,
+    request_redacted: bool,
+) -> Option<LocalOpenAiResponsesCandidatePayloadParts> {
+    let candidate = &eligible.candidate;
+    let effective_headers = input.effective_headers(&parts.headers);
+    let resolved =
+        match build_antigravity_v1internal_provider_request(AntigravityV1InternalRequestInput {
+            state,
+            parts,
+            transport,
+            trace_id,
+            mapped_model: &mapped_model,
+            provider_api_format,
+            auth_header: &auth_header,
+            auth_value: &auth_value,
+            request_headers: effective_headers,
+            original_request_body: original_body_json,
+            gemini_request_body: &gemini_request_body,
+            upstream_is_stream,
+            same_format: api_format_alias_matches(provider_api_format, client_api_format),
+        })
+        .await
+        {
+            Ok(resolved) => resolved,
+            Err(AntigravityV1InternalRequestError::TransportUnsupported) => {
+                mark_skipped_local_openai_responses_candidate(
+                    state,
+                    input,
+                    trace_id,
+                    candidate,
+                    candidate_index,
+                    candidate_id,
+                    "transport_unsupported",
+                )
+                .await;
+                return None;
+            }
+            Err(AntigravityV1InternalRequestError::EnvelopeUnsupported) => {
+                mark_skipped_local_openai_responses_candidate_with_failure_diagnostic(
+                    state,
+                    input,
+                    trace_id,
+                    candidate,
+                    candidate_index,
+                    candidate_id,
+                    "provider_request_body_build_failed",
+                    CandidateFailureDiagnostic::envelope_build_failed(
+                        client_api_format,
+                        provider_api_format,
+                        "openai_responses_antigravity_envelope",
+                    ),
+                )
+                .await;
+                return None;
+            }
+            Err(AntigravityV1InternalRequestError::UpstreamUrlUnavailable) => {
+                mark_skipped_local_openai_responses_candidate_with_failure_diagnostic(
+                    state,
+                    input,
+                    trace_id,
+                    candidate,
+                    candidate_index,
+                    candidate_id,
+                    "upstream_url_missing",
+                    CandidateFailureDiagnostic::upstream_url_missing(
+                        client_api_format,
+                        provider_api_format,
+                        "openai_responses_antigravity_url",
+                    ),
+                )
+                .await;
+                return None;
+            }
+            Err(AntigravityV1InternalRequestError::HeaderRulesApplyFailed) => {
+                mark_skipped_local_openai_responses_candidate_with_failure_diagnostic(
+                    state,
+                    input,
+                    trace_id,
+                    candidate,
+                    candidate_index,
+                    candidate_id,
+                    "transport_header_rules_apply_failed",
+                    CandidateFailureDiagnostic::header_rules_apply_failed(
+                        client_api_format,
+                        provider_api_format,
+                        "openai_responses_antigravity_headers",
+                    ),
+                )
+                .await;
+                return None;
+            }
+        };
+    let mut provider_request_headers = resolved.headers.headers;
+    apply_codex_openai_responses_special_headers(
+        &mut provider_request_headers,
+        &resolved.body,
+        effective_headers,
+        resolved.transport.provider.provider_type.as_str(),
+        provider_api_format,
+        Some(trace_id),
+        resolved.transport.key.decrypted_auth_config.as_deref(),
+    );
+    apply_local_auth_config_header_overrides(
+        &mut provider_request_headers,
+        resolved.transport.key.decrypted_auth_config.as_deref(),
+    );
+    provider_request_headers.insert("accept".to_string(), "text/event-stream".to_string());
+    request_identity_response_encoding_when_redacted(
+        &mut provider_request_headers,
+        request_redacted,
+    );
+
+    let (execution_strategy, conversion_mode) =
+        ai_local_execution_contract_for_formats(client_api_format, provider_api_format);
+
+    Some(LocalOpenAiResponsesCandidatePayloadParts {
+        auth_header: resolved.headers.auth_header,
+        auth_value: resolved.headers.auth_value,
+        mapped_model,
+        provider_api_format: provider_api_format.to_string(),
+        provider_request_body: resolved.body,
+        provider_request_headers,
+        upstream_url: resolved.upstream_url,
+        execution_strategy,
+        conversion_mode,
+        is_antigravity: true,
+        envelope_name: Some(ANTIGRAVITY_V1INTERNAL_ENVELOPE_NAME),
+        upstream_is_stream,
+        transport: Arc::clone(&resolved.transport),
+        transport_profile: crate::ai_serving::transport::resolve_transport_profile(
+            &resolved.transport,
+        ),
+        image_request_summary: None,
+        request_redacted,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -4,6 +4,10 @@ use std::sync::Arc;
 use aether_contracts::ResolvedTransportProfile;
 use serde_json::{json, Value};
 
+use crate::ai_serving::planner::antigravity::{
+    build_antigravity_v1internal_provider_request, AntigravityV1InternalRequestError,
+    AntigravityV1InternalRequestInput, ANTIGRAVITY_V1INTERNAL_ENVELOPE_NAME,
+};
 use crate::ai_serving::planner::candidate_preparation::{
     prepare_header_authenticated_candidate, prepare_header_authenticated_candidate_from_auth,
     OauthPreparationContext,
@@ -27,6 +31,7 @@ use crate::ai_serving::planner::standard::{
     build_local_openai_chat_upstream_url, request_body_build_failure_extra_data,
     request_conversion_failure_extra_data,
 };
+use crate::ai_serving::transport::antigravity::is_antigravity_provider_transport;
 use crate::ai_serving::transport::auth::resolve_local_openai_bearer_auth;
 use crate::ai_serving::transport::kiro::{
     build_kiro_provider_headers, build_kiro_provider_request_body,
@@ -183,6 +188,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
         .provider_type
         .trim()
         .eq_ignore_ascii_case("grok");
+    let is_antigravity = is_antigravity_provider_transport(transport);
     let is_gemini_cli = is_gemini_cli_provider_transport(transport);
 
     if is_grok && is_grok_text_provider_api_format(provider_api_format) {
@@ -549,7 +555,9 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
         transport,
         conversion_kind,
     ) {
-        if !(is_gemini_cli && normalized_provider_api_format == "gemini:generate_content") {
+        if !((is_antigravity || is_gemini_cli)
+            && normalized_provider_api_format == "gemini:generate_content")
+        {
             mark_skipped_local_openai_chat_candidate(
                 state,
                 input,
@@ -757,6 +765,28 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
         )
         .await);
     }
+    if provider_api_format == "gemini:generate_content" && is_antigravity {
+        return Ok(build_antigravity_openai_chat_cross_format_payload_parts(
+            state,
+            parts,
+            trace_id,
+            body_json,
+            input,
+            eligible,
+            candidate_index,
+            candidate_id,
+            decision_kind,
+            transport,
+            provider_api_format.as_str(),
+            prepared_candidate.mapped_model,
+            prepared_candidate.auth_header,
+            prepared_candidate.auth_value,
+            provider_request_body,
+            upstream_is_stream,
+            redaction.redacted,
+        )
+        .await);
+    }
 
     let Some(upstream_url) = build_cross_format_openai_chat_upstream_url(
         parts,
@@ -855,6 +885,158 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
         transport_profile: None,
         image_request_summary: None,
     }))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_antigravity_openai_chat_cross_format_payload_parts(
+    state: &AppState,
+    parts: &http::request::Parts,
+    trace_id: &str,
+    original_body_json: &serde_json::Value,
+    input: &LocalOpenAiChatDecisionInput,
+    eligible: &EligibleLocalExecutionCandidate,
+    candidate_index: u32,
+    candidate_id: &str,
+    decision_kind: &str,
+    transport: &Arc<GatewayProviderTransportSnapshot>,
+    provider_api_format: &str,
+    mapped_model: String,
+    auth_header: String,
+    auth_value: String,
+    gemini_request_body: Value,
+    upstream_is_stream: bool,
+    request_redacted: bool,
+) -> Option<LocalOpenAiChatCandidatePayloadParts> {
+    let candidate = &eligible.candidate;
+    let effective_headers = input.effective_headers(&parts.headers);
+    let resolved =
+        match build_antigravity_v1internal_provider_request(AntigravityV1InternalRequestInput {
+            state,
+            parts,
+            transport,
+            trace_id,
+            mapped_model: &mapped_model,
+            provider_api_format,
+            auth_header: &auth_header,
+            auth_value: &auth_value,
+            request_headers: effective_headers,
+            original_request_body: original_body_json,
+            gemini_request_body: &gemini_request_body,
+            upstream_is_stream,
+            same_format: false,
+        })
+        .await
+        {
+            Ok(resolved) => resolved,
+            Err(AntigravityV1InternalRequestError::TransportUnsupported) => {
+                mark_skipped_local_openai_chat_candidate(
+                    state,
+                    input,
+                    trace_id,
+                    candidate,
+                    candidate_index,
+                    candidate_id,
+                    "transport_unsupported",
+                )
+                .await;
+                return None;
+            }
+            Err(AntigravityV1InternalRequestError::EnvelopeUnsupported) => {
+                mark_skipped_local_openai_chat_candidate_with_failure_diagnostic(
+                    state,
+                    input,
+                    trace_id,
+                    candidate,
+                    candidate_index,
+                    candidate_id,
+                    "provider_request_body_build_failed",
+                    CandidateFailureDiagnostic::envelope_build_failed(
+                        "openai:chat",
+                        provider_api_format,
+                        "openai_chat_antigravity_envelope",
+                    ),
+                )
+                .await;
+                return None;
+            }
+            Err(AntigravityV1InternalRequestError::UpstreamUrlUnavailable) => {
+                mark_skipped_local_openai_chat_candidate_with_failure_diagnostic(
+                    state,
+                    input,
+                    trace_id,
+                    candidate,
+                    candidate_index,
+                    candidate_id,
+                    "upstream_url_missing",
+                    CandidateFailureDiagnostic::upstream_url_missing(
+                        "openai:chat",
+                        provider_api_format,
+                        "openai_chat_antigravity_url",
+                    ),
+                )
+                .await;
+                return None;
+            }
+            Err(AntigravityV1InternalRequestError::HeaderRulesApplyFailed) => {
+                mark_skipped_local_openai_chat_candidate_with_failure_diagnostic(
+                    state,
+                    input,
+                    trace_id,
+                    candidate,
+                    candidate_index,
+                    candidate_id,
+                    "transport_header_rules_apply_failed",
+                    CandidateFailureDiagnostic::header_rules_apply_failed(
+                        "openai:chat",
+                        provider_api_format,
+                        "openai_chat_antigravity_headers",
+                    ),
+                )
+                .await;
+                return None;
+            }
+        };
+    let mut provider_request_headers = resolved.headers.headers;
+    apply_codex_openai_responses_special_headers(
+        &mut provider_request_headers,
+        &resolved.body,
+        effective_headers,
+        resolved.transport.provider.provider_type.as_str(),
+        provider_api_format,
+        Some(trace_id),
+        resolved.transport.key.decrypted_auth_config.as_deref(),
+    );
+    request_identity_response_encoding_when_redacted(
+        &mut provider_request_headers,
+        request_redacted,
+    );
+
+    let resolved_report_kind = if decision_kind == OPENAI_CHAT_STREAM_PLAN_KIND {
+        "openai_chat_stream_success".to_string()
+    } else {
+        "openai_chat_sync_finalize".to_string()
+    };
+    let (execution_strategy, conversion_mode) =
+        ai_local_execution_contract_for_formats("openai:chat", provider_api_format);
+
+    Some(LocalOpenAiChatCandidatePayloadParts {
+        client_api_format: "openai:chat".to_string(),
+        auth_header: resolved.headers.auth_header,
+        auth_value: resolved.headers.auth_value,
+        mapped_model,
+        provider_api_format: provider_api_format.to_string(),
+        provider_request_body: resolved.body,
+        provider_request_headers,
+        upstream_url: resolved.upstream_url,
+        execution_strategy,
+        conversion_mode,
+        report_kind: resolved_report_kind,
+        envelope_name: Some(ANTIGRAVITY_V1INTERNAL_ENVELOPE_NAME),
+        transport: resolved.transport,
+        request_redacted,
+        transport_profile: None,
+        image_request_summary: None,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1923,6 +2105,39 @@ mod tests {
         }
     }
 
+    fn sample_antigravity_transport() -> GatewayProviderTransportSnapshot {
+        let mut transport = sample_gemini_cli_transport();
+        transport.provider.name = "antigravity".to_string();
+        transport.provider.provider_type = "antigravity".to_string();
+        transport.endpoint.base_url = "https://antigravity.googleapis.com".to_string();
+        transport.endpoint.custom_path = None;
+        transport.key.auth_type = "oauth".to_string();
+        transport.key.decrypted_api_key = "__placeholder__".to_string();
+        transport.key.upstream_metadata = None;
+        transport.key.decrypted_auth_config = Some(
+            json!({
+                "provider_type": "antigravity",
+                "project_id": "test-antigravity-project",
+                "client_version": "1.2.3",
+                "session_id": "sess-antigravity-chat",
+                "access_token_import_temporary": true,
+                "headers": {
+                    "Authorization": "Bearer imported-antigravity-token"
+                }
+            })
+            .to_string(),
+        );
+        transport
+    }
+
+    fn sample_antigravity_eligible() -> EligibleLocalExecutionCandidate {
+        let mut eligible = sample_gemini_cli_eligible();
+        eligible.candidate.provider_name = "antigravity".to_string();
+        eligible.candidate.provider_type = "antigravity".to_string();
+        eligible.transport = Arc::new(sample_antigravity_transport());
+        eligible
+    }
+
     #[tokio::test]
     async fn openai_chat_to_gemini_cli_wraps_cross_format_body_in_v1internal_envelope() {
         let state = AppState::new().expect("state should build");
@@ -1987,6 +2202,93 @@ mod tests {
         assert!(payload.provider_request_body["request"]
             .get("contents")
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn openai_chat_to_antigravity_wraps_cross_format_body_in_v1internal_envelope() {
+        let state = AppState::new().expect("state should build");
+        let request = http::Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(())
+            .expect("request should build");
+        let (parts, _) = request.into_parts();
+        let body_json = json!({
+            "model": "gemini-3.5-flash",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": true
+        });
+
+        let payload = resolve_local_openai_chat_candidate_payload_parts(
+            &state,
+            &parts,
+            "trace-openai-chat-antigravity",
+            &body_json,
+            &sample_input(),
+            None,
+            &sample_antigravity_eligible(),
+            0,
+            "candidate-0",
+            OPENAI_CHAT_STREAM_PLAN_KIND,
+            "openai_chat_stream_success",
+            true,
+        )
+        .await
+        .expect("candidate resolution should not fail")
+        .expect("antigravity candidate should build a payload");
+
+        assert_eq!(
+            payload.upstream_url,
+            "https://antigravity.googleapis.com/v1internal:streamGenerateContent?alt=sse"
+        );
+        assert_eq!(payload.envelope_name, Some("antigravity:v1internal"));
+        assert_eq!(
+            payload
+                .provider_request_headers
+                .get("authorization")
+                .map(String::as_str),
+            Some("Bearer imported-antigravity-token")
+        );
+        assert_eq!(
+            payload
+                .provider_request_headers
+                .get("x-client-name")
+                .map(String::as_str),
+            Some("antigravity")
+        );
+        assert_eq!(
+            payload
+                .provider_request_headers
+                .get("x-client-version")
+                .map(String::as_str),
+            Some("1.2.3")
+        );
+        assert_eq!(
+            payload
+                .provider_request_headers
+                .get("x-vscode-sessionid")
+                .map(String::as_str),
+            Some("sess-antigravity-chat")
+        );
+        assert_eq!(
+            payload.provider_request_body["project"],
+            "test-antigravity-project"
+        );
+        assert_eq!(
+            payload.provider_request_body["requestId"],
+            "trace-openai-chat-antigravity"
+        );
+        assert_eq!(payload.provider_request_body["model"], "gemini-2.5-pro");
+        assert_eq!(payload.provider_request_body["userAgent"], "antigravity");
+        assert_eq!(payload.provider_request_body["requestType"], "agent");
+        assert!(payload.provider_request_body.get("contents").is_none());
+        assert!(payload.provider_request_body["request"]
+            .get("contents")
+            .is_some());
+        assert!(payload.provider_request_body["request"]
+            .get("model")
+            .is_none());
     }
 
     #[test]
