@@ -100,7 +100,6 @@ const props = withDefaults(defineProps<Props>(), {
 })
 
 const emit = defineEmits<Emits>()
-const { legacyT } = useI18n()
 
 const jumpPageInput = ref('')
 const locale = useI18n().locale

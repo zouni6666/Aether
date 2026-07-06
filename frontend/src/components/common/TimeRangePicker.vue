@@ -85,7 +85,8 @@ const props = withDefaults(defineProps<{
   presetOptions?: SelectablePreset[]
   presetTriggerClass?: string
 }>(), {
-  presetOptions: () => ['today', 'yesterday', 'last7days', 'last30days', 'last90days', 'custom']
+  presetOptions: () => ['today', 'yesterday', 'last7days', 'last30days', 'last90days', 'custom'],
+  presetTriggerClass: undefined,
 })
 const emit = defineEmits<{
   'update:modelValue': [value: DateRangeParams]

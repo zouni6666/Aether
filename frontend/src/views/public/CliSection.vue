@@ -128,11 +128,11 @@ import { useI18n } from '@/i18n'
 const props = withDefaults(defineProps<Props>(), {
   contentPosition: 'left'
 })
-const { t } = useI18n()
 defineEmits<{
   copy: [text: string]
   'update:platformValue': [value: string]
 }>()
+const { t } = useI18n()
 // Expose section element for parent scroll tracking
 const sectionRef = ref<HTMLElement | null>(null)
 defineExpose({ sectionEl: sectionRef })

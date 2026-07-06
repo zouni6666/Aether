@@ -2016,12 +2016,14 @@ function refreshOverviewInBackground(): void {
 }
 
 function applyQuotaRefreshResultToCurrentPage(result: Awaited<ReturnType<typeof refreshProviderQuota>>): void {
-  const successfulResults = Array.isArray(result.results)
-    ? result.results.filter((item) => item.status === 'success' && item.quota_snapshot)
-    : []
-  if (successfulResults.length === 0) return
+  const quotaByKeyId = new Map<string, NonNullable<NonNullable<typeof result.results>[number]['quota_snapshot']>>()
+  for (const item of result.results) {
+    if (item.status === 'success' && item.quota_snapshot) {
+      quotaByKeyId.set(item.key_id, item.quota_snapshot)
+    }
+  }
+  if (quotaByKeyId.size === 0) return
 
-  const quotaByKeyId = new Map(successfulResults.map((item) => [item.key_id, item.quota_snapshot!]))
   keyPage.value.keys = keyPage.value.keys.map((key) => {
     const quotaSnapshot = quotaByKeyId.get(key.key_id)
     if (!quotaSnapshot) return key

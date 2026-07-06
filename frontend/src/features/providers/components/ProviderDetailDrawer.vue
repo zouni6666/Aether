@@ -948,7 +948,6 @@ import {
   canExportOAuthCredential,
   canRefreshOAuthCredential,
   isOAuthManagedCredential,
-  isServiceAccountCredential,
   getProviderMaskedSecretLabel,
   shouldShowOAuthRefreshControl,
 } from '@/utils/providerKeyAuth'
@@ -1299,14 +1298,6 @@ async function toggleFormatConversion() {
     emit('refresh')
   } catch {
     showError(legacyT('切换格式转换失败'))
-  }
-}
-
-// Provider 级别代理配置
-function handleProviderProxyPopoverToggle(open: boolean) {
-  providerProxyPopoverOpen.value = open
-  if (open) {
-    proxyNodesStore.ensureLoaded()
   }
 }
 

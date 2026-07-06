@@ -13,9 +13,9 @@
           </Badge>
           <span
             v-else
+            class="font-semibold tabular-nums"
             :class="[
               mobile ? 'text-base leading-none' : 'text-sm',
-              'font-semibold tabular-nums',
               row.isNegativeBalance ? 'text-rose-600' : 'text-foreground',
             ]"
           >

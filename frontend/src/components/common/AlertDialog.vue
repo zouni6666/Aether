@@ -24,12 +24,14 @@
     <template #default>
       <!-- 描述 -->
       <div class="space-y-3">
+        <!-- eslint-disable vue/no-v-html -->
         <p
           v-for="(line, index) in descriptionLines"
           :key="index"
           :class="getLineClass(index)"
           v-html="renderLine(line)"
         />
+        <!-- eslint-enable vue/no-v-html -->
       </div>
 
       <!-- 自定义内容插槽 -->
