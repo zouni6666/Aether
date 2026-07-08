@@ -4125,7 +4125,7 @@ async fn gateway_reports_transport_unsupported_reason_for_non_kiro_provider_impl
     assert_eq!(
         payload["error"],
         json!(
-            "Rust local provider-query model test cannot execute endpoint format gemini:generate_content (transport_antigravity_auth_unsupported)"
+            "Rust local provider-query model test cannot execute endpoint format gemini:generate_content (transport_antigravity_auth_config_missing)"
         )
     );
 
@@ -4299,6 +4299,204 @@ async fn gateway_handles_antigravity_endpoint_test_model_locally_impl() {
     assert_eq!(
         payload["data"]["response"]["choices"][0]["message"]["content"],
         json!("Hello from Antigravity EndpointTest")
+    );
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[test]
+fn gateway_hydrates_antigravity_project_id_from_load_code_assist_for_test_model() {
+    run_provider_query_test(
+        "gateway_hydrates_antigravity_project_id_from_load_code_assist_for_test_model",
+        gateway_hydrates_antigravity_project_id_from_load_code_assist_for_test_model_impl,
+    );
+}
+
+async fn gateway_hydrates_antigravity_project_id_from_load_code_assist_for_test_model_impl() {
+    let seen_urls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen_urls_clone = Arc::clone(&seen_urls);
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| {
+            let seen_urls_inner = Arc::clone(&seen_urls_clone);
+            async move {
+                seen_urls_inner
+                    .lock()
+                    .expect("mutex should lock")
+                    .push(plan.url.clone());
+                if plan.url == "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
+                {
+                    assert_eq!(plan.model_name.as_deref(), Some("loadCodeAssist"));
+                    assert_eq!(
+                        plan.headers.get("authorization").map(String::as_str),
+                        Some("Bearer cached-antigravity-token")
+                    );
+                    assert_eq!(
+                        plan.body.json_body.as_ref().and_then(|body| body
+                            .get("metadata")
+                            .and_then(|metadata| metadata.get("pluginType"))),
+                        Some(&json!("GEMINI"))
+                    );
+                    return Json(json!({
+                        "request_id": plan.request_id,
+                        "candidate_id": plan.candidate_id,
+                        "status_code": 200,
+                        "headers": {
+                            "content-type": "application/json"
+                        },
+                        "body": {
+                            "json_body": {
+                                "cloudaicompanionProject": {
+                                    "id": "project-from-antigravity-load-code-assist"
+                                },
+                                "currentTier": {
+                                    "id": "free"
+                                }
+                            }
+                        }
+                    }));
+                }
+
+                assert_eq!(
+                    plan.url,
+                    "https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent"
+                );
+                assert_eq!(plan.provider_id, "provider-antigravity");
+                assert_eq!(plan.endpoint_id, "endpoint-antigravity-gemini");
+                assert_eq!(plan.key_id, "key-antigravity-gemini");
+                assert_eq!(plan.provider_api_format, "gemini:generate_content");
+                assert!(!plan.stream);
+                assert_eq!(
+                    plan.body.json_body.as_ref().unwrap()["project"],
+                    json!("project-from-antigravity-load-code-assist")
+                );
+                assert_eq!(
+                    plan.body.json_body.as_ref().unwrap()["requestType"],
+                    json!("endpoint_test")
+                );
+                assert_eq!(
+                    plan.body.json_body.as_ref().unwrap()["model"],
+                    json!("gemini-3.1-flash-lite")
+                );
+                Json(json!({
+                    "request_id": plan.request_id,
+                    "candidate_id": plan.candidate_id,
+                    "status_code": 200,
+                    "headers": {
+                        "content-type": "application/json"
+                    },
+                    "body": {
+                        "json_body": {
+                            "response": {
+                                "candidates": [{
+                                    "content": {
+                                        "parts": [
+                                            {"text": "Hello from hydrated Antigravity"}
+                                        ],
+                                        "role": "model"
+                                    },
+                                    "finishReason": "STOP",
+                                    "index": 0
+                                }],
+                                "modelVersion": "gemini-3.1-flash-lite",
+                                "usageMetadata": {
+                                    "promptTokenCount": 2,
+                                    "candidatesTokenCount": 4,
+                                    "totalTokenCount": 6
+                                }
+                            },
+                            "responseId": "resp-antigravity-hydrated-test-123"
+                        }
+                    },
+                    "telemetry": {
+                        "elapsed_ms": 23
+                    }
+                }))
+            }
+        }),
+    );
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let mut provider = sample_provider("provider-antigravity", "Antigravity", 10);
+    provider.provider_type = "antigravity".to_string();
+    let mut key = sample_key(
+        "key-antigravity-gemini",
+        "provider-antigravity",
+        "gemini:generate_content",
+        "cached-antigravity-token",
+    );
+    key.auth_type = "oauth".to_string();
+    key.encrypted_auth_config = Some(
+        aether_crypto::encrypt_python_fernet_plaintext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            r#"{"provider_type":"antigravity","refresh_token":"rt-antigravity-123"}"#,
+        )
+        .expect("auth config should encrypt"),
+    );
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![sample_endpoint(
+            "endpoint-antigravity-gemini",
+            "provider-antigravity",
+            "gemini:generate_content",
+            "https://daily-cloudcode-pa.googleapis.com",
+        )],
+        vec![key],
+    ));
+
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(Arc::clone(
+                    &provider_catalog_repository,
+                ))
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/provider-query/test-model"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-antigravity",
+            "model": "gemini-3.1-flash-lite",
+            "api_format": "gemini:generate_content",
+            "message": "Say hello"
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], json!(true));
+    assert_eq!(
+        payload["data"]["response"]["choices"][0]["message"]["content"],
+        json!("Hello from hydrated Antigravity")
+    );
+    assert_eq!(
+        *seen_urls.lock().expect("mutex should lock"),
+        vec![
+            "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist".to_string(),
+            "https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent".to_string(),
+        ]
+    );
+    let reloaded = provider_catalog_repository
+        .list_keys_by_ids(&["key-antigravity-gemini".to_string()])
+        .await
+        .expect("key should reload");
+    assert_eq!(
+        reloaded[0]
+            .upstream_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("antigravity"))
+            .and_then(|metadata| metadata.get("project_id")),
+        Some(&json!("project-from-antigravity-load-code-assist"))
     );
 
     gateway_handle.abort();

@@ -2,7 +2,8 @@ use super::DEFAULT_PROVIDER_QUERY_TEST_MESSAGE;
 use crate::handlers::admin::request::{AdminAppState, AdminGatewayProviderTransportSnapshot};
 use crate::provider_transport::antigravity::{
     classify_local_antigravity_request_support, AntigravityEnvelopeRequestType,
-    AntigravityRequestSideSupport, AntigravityRequestSideUnsupportedReason,
+    AntigravityRequestAuthUnsupportedReason, AntigravityRequestSideSupport,
+    AntigravityRequestSideUnsupportedReason,
 };
 use crate::provider_transport::kiro::supports_local_kiro_request_transport_with_network;
 use serde_json::{json, Value};
@@ -130,9 +131,21 @@ pub(super) fn provider_query_antigravity_unsupported_reason(
         AntigravityRequestSideUnsupportedReason::UnsupportedNetworkConfig => {
             "transport_network_config_unsupported"
         }
-        AntigravityRequestSideUnsupportedReason::UnsupportedAuth(_) => {
-            "transport_antigravity_auth_unsupported"
-        }
+        AntigravityRequestSideUnsupportedReason::UnsupportedAuth(
+            AntigravityRequestAuthUnsupportedReason::WrongProviderType,
+        ) => "transport_provider_type_unsupported",
+        AntigravityRequestSideUnsupportedReason::UnsupportedAuth(
+            AntigravityRequestAuthUnsupportedReason::MissingAuthConfig,
+        ) => "transport_antigravity_auth_config_missing",
+        AntigravityRequestSideUnsupportedReason::UnsupportedAuth(
+            AntigravityRequestAuthUnsupportedReason::InvalidAuthConfigJson,
+        ) => "transport_antigravity_auth_config_invalid",
+        AntigravityRequestSideUnsupportedReason::UnsupportedAuth(
+            AntigravityRequestAuthUnsupportedReason::ComplexDynamicAuthConfig,
+        ) => "transport_antigravity_auth_config_unsupported",
+        AntigravityRequestSideUnsupportedReason::UnsupportedAuth(
+            AntigravityRequestAuthUnsupportedReason::MissingProjectId,
+        ) => "transport_antigravity_project_id_missing",
         AntigravityRequestSideUnsupportedReason::UnsupportedEnvelope(_) => {
             "transport_antigravity_envelope_unsupported"
         }
