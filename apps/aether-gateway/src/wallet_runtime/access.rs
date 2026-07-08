@@ -257,6 +257,44 @@ mod tests {
         assert_eq!(decision.remaining, Some(4.0));
     }
 
+    #[tokio::test]
+    async fn admin_wallet_recharge_invalidates_cached_auth_capacity_state() {
+        let wallet = empty_user_wallet();
+        let state =
+            state_with_wallet_and_quota(wallet.clone(), None).with_auth_wallets_for_tests([wallet]);
+        let auth_snapshot = ordinary_user_api_key_snapshot();
+
+        let denied = resolve_wallet_auth_gate(&state, &auth_snapshot)
+            .await
+            .expect("wallet gate should resolve")
+            .expect("wallet gate should return a decision");
+
+        assert!(!denied.allowed);
+        assert_eq!(denied.failure, Some(WalletAccessFailure::BalanceDenied));
+
+        let recharge = state
+            .admin_create_manual_wallet_recharge(
+                "wallet-user-1",
+                10.0,
+                "admin_manual",
+                Some("admin-1"),
+                Some("manual recharge"),
+            )
+            .await
+            .expect("wallet recharge should complete");
+
+        assert!(recharge.is_some());
+
+        let refreshed = resolve_wallet_auth_gate(&state, &auth_snapshot)
+            .await
+            .expect("wallet gate should resolve after recharge")
+            .expect("wallet gate should return a decision after recharge");
+
+        assert!(refreshed.allowed);
+        assert_eq!(refreshed.failure, None);
+        assert_eq!(refreshed.remaining, Some(10.0));
+    }
+
     fn state_with_wallet_and_quota(
         wallet: StoredWalletSnapshot,
         quota: Option<UserDailyQuotaAvailabilityRecord>,

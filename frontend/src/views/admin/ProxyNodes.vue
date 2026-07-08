@@ -650,10 +650,6 @@ function updateNodeDetailState(nodeId: string, patch: Partial<ProxyNodeDetailSta
   }
 }
 
-function isNodeExpanded(nodeId: string) {
-  return expandedNodeIds.value.has(nodeId)
-}
-
 function toggleNodeDetails(node: ProxyNode) {
   const next = new Set(expandedNodeIds.value)
   if (next.has(node.id)) {

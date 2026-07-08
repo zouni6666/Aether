@@ -135,8 +135,6 @@ import { formatBillingType } from '@/utils/format'
 import type { BalanceExtraItem } from '@/features/providers/auth-templates'
 import { useI18n } from '@/i18n'
 
-const { legacyT } = useI18n()
-
 defineProps<{
   provider: ProviderWithEndpointsSummary
   isBalanceLoading: (providerId: string) => boolean
@@ -150,4 +148,6 @@ defineProps<{
   formatResetCountdown: (resetsAt: number) => string
   getQuotaUsedColorClass: (provider: ProviderWithEndpointsSummary) => string
 }>()
+
+const { legacyT } = useI18n()
 </script>

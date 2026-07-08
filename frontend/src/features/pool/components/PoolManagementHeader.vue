@@ -216,8 +216,8 @@
 
         <Button
           v-for="action in desktopPostProxyActions"
-          :key="action.key"
           v-show="hasSelectedProvider"
+          :key="action.key"
           variant="ghost"
           size="icon"
           class="h-8 w-8"

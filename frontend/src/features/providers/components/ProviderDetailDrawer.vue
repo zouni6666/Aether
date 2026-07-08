@@ -278,6 +278,48 @@
                           />
                         </div>
                       </div>
+                      <div
+                        v-if="getCodexResetCreditsDisplay(key)"
+                        class="mt-3 border-t border-border/60 pt-2"
+                      >
+                        <div class="flex flex-wrap items-center gap-x-1 gap-y-1 text-[10px] leading-4 text-muted-foreground">
+                          <button
+                            v-if="canConsumeCodexResetCredit(key)"
+                            type="button"
+                            class="font-medium text-primary underline-offset-2 transition-colors hover:text-primary/80 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 disabled:pointer-events-none disabled:opacity-60"
+                            :disabled="consumingCodexResetCreditKeyId === key.id"
+                            @click="handleConsumeCodexResetCredit(key)"
+                          >
+                            {{ consumingCodexResetCreditKeyId === key.id ? legacyT('重置中...') : legacyT('点击以进行重置') }}
+                          </button>
+                          <span
+                            v-else
+                            class="font-medium"
+                          >
+                            {{ legacyT('点击以进行重置') }}
+                          </span>
+                          <span>{{ formatCodexResetCreditCount(key) }}</span>
+                          <template v-if="getVisibleCodexResetCreditItems(key).length > 0">
+                            <span aria-hidden="true">|</span>
+                            <span>{{ legacyT('临近过期') }}</span>
+                            <template
+                              v-for="(item, itemIndex) in getVisibleCodexResetCreditItems(key)"
+                              :key="item.id || `${item.displayKey}-${item.expiresAt}`"
+                            >
+                              <span
+                                :title="item.title"
+                                class="tabular-nums"
+                              >
+                                {{ item.displayKey }} {{ formatCodexResetCreditDays(item.remainingSeconds) }}
+                              </span>
+                              <span
+                                v-if="itemIndex < getVisibleCodexResetCreditItems(key).length - 1"
+                                aria-hidden="true"
+                              >·</span>
+                            </template>
+                          </template>
+                        </div>
+                      </div>
                     </div>
                     <!-- Antigravity 上游额度摘要（按家族分组展示关键配额） -->
                     <div
@@ -916,6 +958,7 @@ import {
   exportKey,
   refreshProviderOAuth,
   refreshProviderQuota,
+  consumeCodexResetCredit,
   clearOAuthInvalid,
   type ProviderEndpoint,
   type EndpointAPIKey,
@@ -931,6 +974,7 @@ import type {
   GrokUpstreamMetadata,
   KiroUpstreamMetadata,
   WindsurfUpstreamMetadata,
+  QuotaResetCreditsSnapshot,
   QuotaStatusSnapshot,
   QuotaWindowSnapshot,
 } from '@/api/endpoints/types'
@@ -948,7 +992,6 @@ import {
   canExportOAuthCredential,
   canRefreshOAuthCredential,
   isOAuthManagedCredential,
-  isServiceAccountCredential,
   getProviderMaskedSecretLabel,
   shouldShowOAuthRefreshControl,
 } from '@/utils/providerKeyAuth'
@@ -961,6 +1004,12 @@ import {
   getOAuthStatusTitle as resolveOAuthStatusTitle,
 } from '@/utils/providerKeyStatus'
 import { getGeminiCliAccountCreditsText } from '@/utils/providerKeyQuota'
+import {
+  formatCodexResetCreditCount as formatCodexResetCreditCountLabel,
+  formatCodexResetCreditDays,
+  getCodexResetCreditAvailableCount as getCodexResetCreditAvailableCountFromSnapshot,
+  getVisibleCodexResetCreditItems as getVisibleCodexResetCreditItemsFromSnapshot,
+} from './codex-reset-credit-display'
 
 // 扩展端点类型,包含密钥列表
 interface ProviderEndpointWithKeys extends ProviderEndpoint {
@@ -1059,6 +1108,9 @@ const refreshingOAuthKeyId = ref<string | null>(null)
 
 // OAuth 失效清除状态
 const clearingOAuthInvalidKeyId = ref<string | null>(null)
+
+// Codex reset credit 消费状态
+const consumingCodexResetCreditKeyId = ref<string | null>(null)
 
 // 限额刷新状态（Codex / Antigravity）
 const refreshingQuota = ref(false)
@@ -1299,14 +1351,6 @@ async function toggleFormatConversion() {
     emit('refresh')
   } catch {
     showError(legacyT('切换格式转换失败'))
-  }
-}
-
-// Provider 级别代理配置
-function handleProviderProxyPopoverToggle(open: boolean) {
-  providerProxyPopoverOpen.value = open
-  if (open) {
-    proxyNodesStore.ensureLoaded()
   }
 }
 
@@ -1616,6 +1660,75 @@ async function handleClearOAuthInvalid(key: EndpointAPIKey) {
   }
 }
 
+function createCodexResetCreditIdempotencyKey(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  throw new Error('浏览器不支持 crypto.randomUUID，无法生成安全幂等 ID')
+}
+
+function codexResetCreditOutcomeFeedback(
+  result: Awaited<ReturnType<typeof consumeCodexResetCredit>>,
+): { tone: 'success' | 'warning'; message: string } {
+  switch (result.outcome) {
+    case 'reset':
+      return { tone: 'success', message: '已使用 Codex 重置机会，并刷新账号配额' }
+    case 'already_redeemed':
+      return { tone: 'success', message: '本次重置请求已处理，账号配额已刷新' }
+    case 'nothing_to_reset':
+      return { tone: 'warning', message: '当前没有需要重置的 Codex 额度窗口' }
+    case 'no_credit':
+      return { tone: 'warning', message: '当前没有可用的 Codex 重置机会' }
+    default:
+      return { tone: 'warning', message: '重置请求已返回，但结果类型未知，请查看最新账号配额' }
+  }
+}
+
+async function handleConsumeCodexResetCredit(key: EndpointAPIKey) {
+  if (!canConsumeCodexResetCredit(key)) return
+
+  const earliest = getVisibleCodexResetCreditItems(key)[0]
+  const detailMessage = earliest
+    ? `\n当前最早过期项：${earliest.displayKey}，约 ${formatCodexResetCreditDays(earliest.remainingSeconds)} 后过期。`
+    : ''
+  const confirmed = await confirm({
+    title: legacyT('确认使用 Codex 重置机会'),
+    message: `${legacyT('将消耗 1 次 Codex 重置机会。操作完成后会重新刷新账号配额状态。')}${detailMessage}`,
+    confirmText: legacyT('确认重置'),
+    cancelText: legacyT('取消'),
+    variant: 'warning',
+  })
+  if (!confirmed) return
+
+  consumingCodexResetCreditKeyId.value = key.id
+  try {
+    const idempotencyKey = createCodexResetCreditIdempotencyKey()
+    const result = await consumeCodexResetCredit(key.id, {
+      idempotency_key: idempotencyKey,
+    })
+    applyQuotaResults([{
+      key_id: result.key_id,
+      status: result.refresh_status === 'success' ? 'success' : result.status,
+      metadata: result.metadata,
+      quota_snapshot: result.quota_snapshot,
+    }])
+
+    const feedback = codexResetCreditOutcomeFeedback(result)
+    if (feedback.tone === 'success') {
+      showSuccess(legacyT(feedback.message))
+    } else {
+      showWarning(legacyT(feedback.message))
+    }
+    if (result.refresh_status === 'failed') {
+      showWarning(legacyT(result.refresh_error || '重置请求已处理，但最新配额刷新失败'))
+    }
+  } catch (err: unknown) {
+    showError(localizedApiError(err, 'Codex 重置机会使用失败'), legacyT('错误'))
+  } finally {
+    consumingCodexResetCreditKeyId.value = null
+  }
+}
+
 // Codex / Gemini CLI / Antigravity / Kiro / Windsurf / ChatGPT Web：打开抽屉后自动后台刷新（配额缓存缺失/过期，或 Token 即将过期时触发）
 const AUTO_QUOTA_REFRESH_STALE_SECONDS = 5 * 60
 // 与后端 OAuth 懒刷新阈值对齐：到期前 2 分钟内视为需要刷新
@@ -1764,6 +1877,7 @@ function getCodexQuotaDisplayFromMetadata(metadata: CodexUpstreamMetadata | null
   ]
   numberFields.forEach(field => copyCodexNumberField(display, metadata, field))
   if (metadata.has_credits !== undefined) display.has_credits = metadata.has_credits
+  if (metadata.reset_credits) display.reset_credits = metadata.reset_credits
 
   return Object.keys(display).length > 0 ? display : null
 }
@@ -1819,6 +1933,7 @@ function getCodexQuotaDisplayFromSnapshot(quota: QuotaStatusSnapshot | null | un
   if (typeof sparkSecondaryWindow?.window_minutes === 'number') {
     display.spark_secondary_window_minutes = sparkSecondaryWindow.window_minutes
   }
+  if (quota.reset_credits) display.reset_credits = quota.reset_credits
 
   return Object.keys(display).length > 0 ? display : null
 }
@@ -1835,6 +1950,11 @@ function codexDisplayHasUsage(display: CodexUpstreamMetadata | null | undefined)
     || display.spark_primary_used_percent !== undefined
     || display.spark_secondary_used_percent !== undefined
   )
+}
+
+function codexDisplayHasResetCredits(display: CodexUpstreamMetadata | null | undefined): boolean {
+  const count = display?.reset_credits?.available_count
+  return typeof count === 'number' && Number.isFinite(count)
 }
 
 function getCodexQuotaDisplay(key: EndpointAPIKey): CodexUpstreamMetadata | null {
@@ -1863,6 +1983,7 @@ function hasCodexQuotaDisplayData(key: EndpointAPIKey): boolean {
     || codex.secondary_used_percent !== undefined
     || codex.spark_primary_used_percent !== undefined
     || codex.spark_secondary_used_percent !== undefined
+    || codexDisplayHasResetCredits(codex)
   )
 }
 
@@ -1872,6 +1993,29 @@ function hasCodexSparkQuotaDisplayData(key: EndpointAPIKey): boolean {
     codex.spark_primary_used_percent !== undefined
     || codex.spark_secondary_used_percent !== undefined
   )
+}
+
+function getCodexResetCreditsDisplay(key: EndpointAPIKey): QuotaResetCreditsSnapshot | null {
+  return getCodexQuotaDisplay(key)?.reset_credits ?? null
+}
+
+function getCodexResetCreditAvailableCount(key: EndpointAPIKey): number | null {
+  return getCodexResetCreditAvailableCountFromSnapshot(getCodexResetCreditsDisplay(key))
+}
+
+function formatCodexResetCreditCount(key: EndpointAPIKey): string {
+  return formatCodexResetCreditCountLabel(getCodexResetCreditAvailableCount(key))
+}
+
+function getVisibleCodexResetCreditItems(key: EndpointAPIKey) {
+  return getVisibleCodexResetCreditItemsFromSnapshot(getCodexResetCreditsDisplay(key))
+}
+
+function canConsumeCodexResetCredit(key: EndpointAPIKey): boolean {
+  return provider.value?.provider_type === 'codex'
+    && getCodexResetCreditAvailableCount(key) !== null
+    && (getCodexResetCreditAvailableCount(key) ?? 0) > 0
+    && !consumingCodexResetCreditKeyId.value
 }
 
 function getKiroQuotaDisplay(key: EndpointAPIKey): KiroUpstreamMetadata | null {

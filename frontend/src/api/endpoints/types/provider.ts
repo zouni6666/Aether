@@ -1,4 +1,4 @@
-import type { ProviderKeyStatusSnapshot } from './statusSnapshot'
+import type { ProviderKeyStatusSnapshot, QuotaResetCreditsSnapshot } from './statusSnapshot'
 
 /**
  * 代理配置类型
@@ -340,6 +340,7 @@ export interface CodexUpstreamMetadata {
   spark_secondary_window_minutes?: number  // Spark 周限额窗口大小（分钟）
   has_credits?: boolean  // 是否有积分
   credits_balance?: number  // 积分余额
+  reset_credits?: QuotaResetCreditsSnapshot | null  // Codex earned rate-limit reset credits
 }
 
 export interface AntigravityModelQuota {

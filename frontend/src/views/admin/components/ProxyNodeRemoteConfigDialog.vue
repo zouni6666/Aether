@@ -26,11 +26,21 @@
         <Select v-model="logLevel">
           <SelectTrigger><SelectValue /></SelectTrigger>
           <SelectContent>
-            <SelectItem value="trace">trace</SelectItem>
-            <SelectItem value="debug">debug</SelectItem>
-            <SelectItem value="info">info</SelectItem>
-            <SelectItem value="warn">warn</SelectItem>
-            <SelectItem value="error">error</SelectItem>
+            <SelectItem value="trace">
+              trace
+            </SelectItem>
+            <SelectItem value="debug">
+              debug
+            </SelectItem>
+            <SelectItem value="info">
+              info
+            </SelectItem>
+            <SelectItem value="warn">
+              warn
+            </SelectItem>
+            <SelectItem value="error">
+              error
+            </SelectItem>
           </SelectContent>
         </Select>
       </div>
@@ -49,9 +59,15 @@
           <Select v-model="schedulingState">
             <SelectTrigger><SelectValue /></SelectTrigger>
             <SelectContent>
-              <SelectItem value="active">active</SelectItem>
-              <SelectItem value="draining">draining</SelectItem>
-              <SelectItem value="cordoned">cordoned</SelectItem>
+              <SelectItem value="active">
+                active
+              </SelectItem>
+              <SelectItem value="draining">
+                draining
+              </SelectItem>
+              <SelectItem value="cordoned">
+                cordoned
+              </SelectItem>
             </SelectContent>
           </Select>
           <p class="text-xs text-muted-foreground">

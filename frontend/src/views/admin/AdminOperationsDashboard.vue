@@ -325,6 +325,7 @@
             <MetricCell
               label="进程 CPU"
               :value="formatBasisPointsPercent(gatewayMetrics?.process.processCpuUsageBasisPoints)"
+              :value-class="resourceToneClass(gatewayProcessCpuPercent, 70, 90)"
             />
             <MetricCell
               label="RSS"

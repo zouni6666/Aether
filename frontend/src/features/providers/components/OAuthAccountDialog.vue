@@ -597,9 +597,9 @@
                 : 'text-muted-foreground hover:text-foreground'"
               :disabled="importing"
               @click="setWindsurfImportMethod(method.key)"
-                >
-                  {{ legacyT(method.label) }}
-                </button>
+            >
+              {{ legacyT(method.label) }}
+            </button>
           </div>
 
           <div
