@@ -105,6 +105,10 @@ fn resolve_core_error_background_report_kind_maps_all_core_finalize_kinds() {
         ("claude_chat_sync_finalize", Some("claude_chat_sync_error")),
         ("gemini_chat_sync_finalize", Some("gemini_chat_sync_error")),
         (
+            "gemini_interactions_sync_finalize",
+            Some("gemini_interactions_sync_error"),
+        ),
+        (
             "openai_responses_sync_finalize",
             Some("openai_responses_sync_error"),
         ),
@@ -150,6 +154,10 @@ fn resolve_core_success_background_report_kind_maps_all_core_finalize_kinds() {
         (
             "gemini_chat_sync_finalize",
             Some("gemini_chat_sync_success"),
+        ),
+        (
+            "gemini_interactions_sync_finalize",
+            Some("gemini_interactions_sync_success"),
         ),
         (
             "openai_responses_sync_finalize",

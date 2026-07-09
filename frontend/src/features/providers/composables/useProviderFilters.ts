@@ -32,6 +32,7 @@ export function useProviderFilters(
     { value: 'openai:embedding', label: 'OpenAI Embedding' },
     { value: 'openai:rerank', label: 'OpenAI Rerank' },
     { value: 'gemini:generate_content', label: 'Gemini Generate Content' },
+    { value: 'gemini:interactions', label: 'Gemini Interactions' },
     { value: 'gemini:embedding', label: 'Gemini Embedding' },
     { value: 'jina:embedding', label: 'Jina Embedding' },
     { value: 'jina:rerank', label: 'Jina Rerank' },

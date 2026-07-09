@@ -344,9 +344,16 @@ export interface CodexUpstreamMetadata {
 }
 
 export interface AntigravityModelQuota {
-  remaining_fraction: number  // 剩余比例 (0.0-1.0)
-  used_percent: number  // 已用百分比 (0.0-100.0)
-  reset_time?: string  // RFC3339
+  remaining_fraction?: number | string | null  // 剩余比例 (0.0-1.0)
+  used_percent?: number | string | null  // 已用百分比 (0.0-100.0)
+  remaining?: number | string | null
+  total?: number | string | null
+  reset_time?: string | null  // RFC3339
+  reset_at?: number | string | null
+  display_name?: string | null
+  model_id?: string | null
+  token_type?: string | null
+  is_exhausted?: boolean | null
 }
 
 export interface AntigravityUpstreamMetadata {

@@ -12,6 +12,7 @@ const ENDPOINT_SORT_ORDER = [
   'openai:embedding',
   'openai:rerank',
   'gemini:generate_content',
+  'gemini:interactions',
   'gemini:embedding',
   'openai:video',
   'gemini:video',

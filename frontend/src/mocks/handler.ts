@@ -533,6 +533,7 @@ function mockApiFormatDisplayName(apiFormat: string) {
   const labels: Record<string, string> = {
     'claude:messages': 'Claude Messages',
     'gemini:generate_content': 'Gemini Generate Content',
+    'gemini:interactions': 'Gemini Interactions',
     'openai:chat': 'OpenAI Chat',
     'openai:embedding': 'OpenAI Embedding'
   }

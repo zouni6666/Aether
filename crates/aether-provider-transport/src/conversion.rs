@@ -4,6 +4,7 @@ use aether_ai_formats::formats::matrix::{
 };
 use aether_ai_formats::normalize_api_format_alias;
 
+use crate::antigravity::is_antigravity_provider_transport;
 use crate::auth::{
     resolve_local_gemini_auth, resolve_local_openai_bearer_auth, resolve_local_standard_auth,
 };
@@ -131,6 +132,11 @@ pub fn request_conversion_transport_unsupported_reason(
         && normalize_api_format_alias(&transport.endpoint.api_format) == "openai:chat"
     {
         return local_windsurf_request_transport_unsupported_reason_with_network(transport);
+    }
+    if is_antigravity_provider_transport(transport)
+        && normalize_api_format_alias(&transport.endpoint.api_format) == "gemini:generate_content"
+    {
+        return None;
     }
 
     match normalize_api_format_alias(&transport.endpoint.api_format).as_str() {
@@ -656,6 +662,32 @@ mod tests {
             request_conversion_direct_auth(&transport, RequestConversionKind::ToGeminiStandard),
             Some(("key".to_string(), "secret".to_string()))
         );
+    }
+
+    #[test]
+    fn antigravity_gemini_transport_supports_standard_cross_format_conversion_via_envelope() {
+        let transport = transport_snapshot(
+            "antigravity",
+            "gemini:generate_content",
+            "oauth",
+            true,
+            None,
+        );
+
+        assert!(request_pair_allowed_for_transport(
+            &transport,
+            "openai:chat",
+            "gemini:generate_content"
+        ));
+        assert!(request_pair_allowed_for_transport(
+            &transport,
+            "openai:responses",
+            "gemini:generate_content"
+        ));
+        assert!(request_conversion_transport_supported(
+            &transport,
+            RequestConversionKind::ToGeminiStandard
+        ));
     }
 
     #[test]

@@ -6,14 +6,16 @@ use crate::contracts::{
     CLAUDE_CLI_SYNC_PLAN_KIND, GEMINI_CHAT_STREAM_PLAN_KIND, GEMINI_CHAT_SYNC_PLAN_KIND,
     GEMINI_CLI_STREAM_PLAN_KIND, GEMINI_CLI_SYNC_PLAN_KIND, GEMINI_EMBEDDING_SYNC_PLAN_KIND,
     GEMINI_FILES_DELETE_PLAN_KIND, GEMINI_FILES_DOWNLOAD_PLAN_KIND, GEMINI_FILES_GET_PLAN_KIND,
-    GEMINI_FILES_LIST_PLAN_KIND, GEMINI_FILES_UPLOAD_PLAN_KIND, GEMINI_VIDEO_CANCEL_SYNC_PLAN_KIND,
-    GEMINI_VIDEO_CREATE_SYNC_PLAN_KIND, OPENAI_CHAT_STREAM_PLAN_KIND, OPENAI_CHAT_SYNC_PLAN_KIND,
-    OPENAI_EMBEDDING_SYNC_PLAN_KIND, OPENAI_IMAGE_STREAM_PLAN_KIND, OPENAI_IMAGE_SYNC_PLAN_KIND,
-    OPENAI_RERANK_SYNC_PLAN_KIND, OPENAI_RESPONSES_COMPACT_STREAM_PLAN_KIND,
-    OPENAI_RESPONSES_COMPACT_SYNC_PLAN_KIND, OPENAI_RESPONSES_STREAM_PLAN_KIND,
-    OPENAI_RESPONSES_SYNC_PLAN_KIND, OPENAI_VIDEO_CANCEL_SYNC_PLAN_KIND,
-    OPENAI_VIDEO_CONTENT_PLAN_KIND, OPENAI_VIDEO_CREATE_SYNC_PLAN_KIND,
-    OPENAI_VIDEO_DELETE_SYNC_PLAN_KIND, OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND,
+    GEMINI_FILES_LIST_PLAN_KIND, GEMINI_FILES_UPLOAD_PLAN_KIND,
+    GEMINI_INTERACTIONS_STREAM_PLAN_KIND, GEMINI_INTERACTIONS_SYNC_PLAN_KIND,
+    GEMINI_VIDEO_CANCEL_SYNC_PLAN_KIND, GEMINI_VIDEO_CREATE_SYNC_PLAN_KIND,
+    OPENAI_CHAT_STREAM_PLAN_KIND, OPENAI_CHAT_SYNC_PLAN_KIND, OPENAI_EMBEDDING_SYNC_PLAN_KIND,
+    OPENAI_IMAGE_STREAM_PLAN_KIND, OPENAI_IMAGE_SYNC_PLAN_KIND, OPENAI_RERANK_SYNC_PLAN_KIND,
+    OPENAI_RESPONSES_COMPACT_STREAM_PLAN_KIND, OPENAI_RESPONSES_COMPACT_SYNC_PLAN_KIND,
+    OPENAI_RESPONSES_STREAM_PLAN_KIND, OPENAI_RESPONSES_SYNC_PLAN_KIND,
+    OPENAI_VIDEO_CANCEL_SYNC_PLAN_KIND, OPENAI_VIDEO_CONTENT_PLAN_KIND,
+    OPENAI_VIDEO_CREATE_SYNC_PLAN_KIND, OPENAI_VIDEO_DELETE_SYNC_PLAN_KIND,
+    OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND,
 };
 use crate::formats::openai::image::request::is_openai_image_stream_request;
 
@@ -67,6 +69,14 @@ pub fn resolve_execution_runtime_stream_plan_kind(
             GEMINI_CHAT_STREAM_PLAN_KIND,
             GEMINI_CLI_STREAM_PLAN_KIND,
         ));
+    }
+
+    if route_family == Some("gemini")
+        && route_kind == Some("interactions")
+        && *method == Method::POST
+        && matches!(path, "/v1/interactions" | "/v1beta/interactions")
+    {
+        return Some(GEMINI_INTERACTIONS_STREAM_PLAN_KIND);
     }
 
     if route_family == Some("antigravity")
@@ -180,6 +190,14 @@ pub fn resolve_execution_runtime_sync_plan_kind(
         && (path.ends_with(":embedContent") || path.ends_with(":batchEmbedContents"))
     {
         return Some(GEMINI_EMBEDDING_SYNC_PLAN_KIND);
+    }
+
+    if route_family == Some("gemini")
+        && route_kind == Some("interactions")
+        && *method == Method::POST
+        && matches!(path, "/v1/interactions" | "/v1beta/interactions")
+    {
+        return Some(GEMINI_INTERACTIONS_SYNC_PLAN_KIND);
     }
 
     if route_family == Some("openai")
@@ -390,7 +408,8 @@ pub fn is_matching_stream_request(
         | OPENAI_RESPONSES_STREAM_PLAN_KIND
         | OPENAI_RESPONSES_COMPACT_STREAM_PLAN_KIND
         | CLAUDE_CLI_STREAM_PLAN_KIND
-        | OPENAI_IMAGE_STREAM_PLAN_KIND => body_json
+        | OPENAI_IMAGE_STREAM_PLAN_KIND
+        | GEMINI_INTERACTIONS_STREAM_PLAN_KIND => body_json
             .get("stream")
             .and_then(|value| value.as_bool())
             .unwrap_or(false),
@@ -428,6 +447,7 @@ pub fn supports_sync_execution_decision_kind(plan_kind: &str) -> bool {
             | GEMINI_CHAT_SYNC_PLAN_KIND
             | GEMINI_CLI_SYNC_PLAN_KIND
             | GEMINI_EMBEDDING_SYNC_PLAN_KIND
+            | GEMINI_INTERACTIONS_SYNC_PLAN_KIND
             | GEMINI_FILES_UPLOAD_PLAN_KIND
             | OPENAI_VIDEO_CREATE_SYNC_PLAN_KIND
             | OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND
@@ -452,6 +472,7 @@ pub fn supports_stream_execution_decision_kind(plan_kind: &str) -> bool {
             | OPENAI_IMAGE_STREAM_PLAN_KIND
             | CLAUDE_CLI_STREAM_PLAN_KIND
             | GEMINI_CLI_STREAM_PLAN_KIND
+            | GEMINI_INTERACTIONS_STREAM_PLAN_KIND
             | GEMINI_FILES_DOWNLOAD_PLAN_KIND
             | OPENAI_VIDEO_CONTENT_PLAN_KIND
     )
@@ -473,6 +494,7 @@ mod tests {
         CLAUDE_CHAT_STREAM_PLAN_KIND, CLAUDE_CHAT_SYNC_PLAN_KIND, CLAUDE_CLI_STREAM_PLAN_KIND,
         CLAUDE_CLI_SYNC_PLAN_KIND, GEMINI_CHAT_STREAM_PLAN_KIND, GEMINI_CHAT_SYNC_PLAN_KIND,
         GEMINI_CLI_STREAM_PLAN_KIND, GEMINI_CLI_SYNC_PLAN_KIND, GEMINI_EMBEDDING_SYNC_PLAN_KIND,
+        GEMINI_INTERACTIONS_STREAM_PLAN_KIND, GEMINI_INTERACTIONS_SYNC_PLAN_KIND,
         OPENAI_CHAT_STREAM_PLAN_KIND, OPENAI_CHAT_SYNC_PLAN_KIND, OPENAI_EMBEDDING_SYNC_PLAN_KIND,
         OPENAI_IMAGE_STREAM_PLAN_KIND, OPENAI_IMAGE_SYNC_PLAN_KIND, OPENAI_RERANK_SYNC_PLAN_KIND,
         OPENAI_RESPONSES_COMPACT_STREAM_PLAN_KIND, OPENAI_RESPONSES_COMPACT_SYNC_PLAN_KIND,
@@ -852,6 +874,62 @@ mod tests {
         );
         assert!(supports_sync_execution_decision_kind(
             GEMINI_EMBEDDING_SYNC_PLAN_KIND
+        ));
+    }
+
+    #[test]
+    fn resolves_gemini_interactions_plan_kinds() {
+        assert_eq!(
+            resolve_execution_runtime_sync_plan_kind(
+                Some("ai_public"),
+                Some("gemini"),
+                Some("interactions"),
+                Some("api_key"),
+                &Method::POST,
+                "/v1/interactions",
+            ),
+            Some(GEMINI_INTERACTIONS_SYNC_PLAN_KIND)
+        );
+        assert_eq!(
+            resolve_execution_runtime_stream_plan_kind(
+                Some("ai_public"),
+                Some("gemini"),
+                Some("interactions"),
+                Some("api_key"),
+                &Method::POST,
+                "/v1/interactions",
+            ),
+            Some(GEMINI_INTERACTIONS_STREAM_PLAN_KIND)
+        );
+        assert_eq!(
+            resolve_execution_runtime_sync_plan_kind(
+                Some("ai_public"),
+                Some("gemini"),
+                Some("interactions"),
+                Some("api_key"),
+                &Method::POST,
+                "/v1beta/interactions",
+            ),
+            Some(GEMINI_INTERACTIONS_SYNC_PLAN_KIND)
+        );
+    }
+
+    #[test]
+    fn gemini_interactions_stream_plan_requires_body_stream_true() {
+        assert!(is_matching_stream_request(
+            GEMINI_INTERACTIONS_STREAM_PLAN_KIND,
+            "/v1/interactions",
+            &serde_json::json!({"stream": true})
+        ));
+        assert!(!is_matching_stream_request(
+            GEMINI_INTERACTIONS_STREAM_PLAN_KIND,
+            "/v1/interactions",
+            &serde_json::json!({"stream": false})
+        ));
+        assert!(!is_matching_stream_request(
+            GEMINI_INTERACTIONS_STREAM_PLAN_KIND,
+            "/v1/interactions",
+            &serde_json::json!({})
         ));
     }
 

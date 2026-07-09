@@ -1,6 +1,7 @@
 use crate::ai_serving::{AiExecutionDecision, AiExecutionPlanPayload, GatewayControlDecision};
 use crate::{AppState, GatewayError};
 
+mod antigravity;
 mod candidate_affinity_cache;
 mod candidate_materialization;
 mod candidate_metadata;

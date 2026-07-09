@@ -926,6 +926,9 @@ fn maybe_build_local_antigravity_v1internal_response(
         "fetch_available_models" => {
             Some(Json(build_antigravity_fetch_available_models_payload()).into_response())
         }
+        "retrieve_user_quota_summary" => {
+            Some(Json(build_antigravity_retrieve_user_quota_summary_payload()).into_response())
+        }
         "fetch_user_info" => {
             Some(Json(build_antigravity_fetch_user_info_payload()).into_response())
         }
@@ -938,6 +941,7 @@ fn maybe_build_local_antigravity_v1internal_response(
             .into_response(),
         ),
         "record_code_assist_metrics" => Some(Json(json!({})).into_response()),
+        "write_trajectory_acls" => Some(Json(json!({})).into_response()),
         "set_user_settings" => Some(build_antigravity_set_user_settings_response(request_body)),
         "stream_generate_content" => None,
         _ => None,
@@ -1042,27 +1046,42 @@ fn build_antigravity_fetch_user_info_payload() -> Value {
     })
 }
 
+fn build_antigravity_retrieve_user_quota_summary_payload() -> Value {
+    json!({
+        "description": "",
+        "groups": []
+    })
+}
+
 fn build_antigravity_default_user_settings_payload() -> Value {
     json!({
-        "preferredModelId": "gemini-3.1-flash-lite"
+        "preferredModelId": "gemini-3.5-flash-low"
     })
 }
 
 fn build_antigravity_fetch_available_models_payload() -> Value {
     json!({
         "models": {
-            "gemini-3.5-flash-low": antigravity_model_payload("gemini-3.5-flash-low", "Gemini 3.5 Flash Low"),
-            "gemini-3-flash-agent": antigravity_model_payload("gemini-3-flash-agent", "Gemini 3 Flash Agent"),
+            "gemini-pro-agent": antigravity_model_payload("gemini-pro-agent", "Gemini 3.1 Pro (High)"),
+            "gemini-3.1-pro-low": antigravity_model_payload("gemini-3.1-pro-low", "Gemini 3.1 Pro (Low)"),
+            "gemini-3-flash-agent": antigravity_model_payload("gemini-3-flash-agent", "Gemini 3.5 Flash (High)"),
+            "gemini-3.5-flash-low": antigravity_model_payload("gemini-3.5-flash-low", "Gemini 3.5 Flash (Medium)"),
+            "gemini-3.5-flash-extra-low": antigravity_model_payload("gemini-3.5-flash-extra-low", "Gemini 3.5 Flash (Low)"),
+            "claude-opus-4-6-thinking": antigravity_model_payload("claude-opus-4-6-thinking", "Claude Opus 4.6 (Thinking)"),
+            "claude-sonnet-4-6": antigravity_model_payload("claude-sonnet-4-6", "Claude Sonnet 4.6 (Thinking)"),
+            "gpt-oss-120b-medium": antigravity_model_payload("gpt-oss-120b-medium", "GPT-OSS 120B (Medium)"),
             "gemini-3.1-flash-lite": antigravity_model_payload("gemini-3.1-flash-lite", "Gemini 3.1 Flash Lite"),
-            "gemini-3.1-pro-low": antigravity_model_payload("gemini-3.1-pro-low", "Gemini 3.1 Pro Low"),
             "gemini-3-flash": antigravity_model_payload("gemini-3-flash", "Gemini 3 Flash"),
-            "gemini-2.5-flash": antigravity_model_payload("gemini-2.5-flash", "Gemini 2.5 Flash"),
-            "gemini-2.5-flash-lite": antigravity_model_payload("gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite"),
-            "gemini-2.5-flash-thinking": antigravity_model_payload("gemini-2.5-flash-thinking", "Gemini 2.5 Flash Thinking"),
+            "gemini-2.5-flash": antigravity_model_payload("gemini-2.5-flash", "Gemini 3.1 Flash Lite"),
+            "gemini-2.5-flash-lite": antigravity_model_payload("gemini-2.5-flash-lite", "Gemini 3.1 Flash Lite"),
+            "gemini-2.5-flash-thinking": antigravity_model_payload("gemini-2.5-flash-thinking", "Gemini 3.1 Flash Lite"),
             "gemini-2.5-pro": antigravity_model_payload("gemini-2.5-pro", "Gemini 2.5 Pro"),
             "gemini-3.1-flash-image": antigravity_model_payload("gemini-3.1-flash-image", "Gemini 3.1 Flash Image"),
-            "tab_flash_lite_preview": antigravity_model_payload("tab_flash_lite_preview", "Tab Flash Lite Preview"),
-            "tab_jump_flash_lite_preview": antigravity_model_payload("tab_jump_flash_lite_preview", "Tab Jump Flash Lite Preview"),
+            "gemini-3.1-pro-high": antigravity_model_payload("gemini-3.1-pro-high", "Gemini 3.1 Pro (High)"),
+            "chat_20706": antigravity_model_payload("chat_20706", ""),
+            "chat_23310": antigravity_model_payload("chat_23310", ""),
+            "tab_flash_lite_preview": antigravity_model_payload("tab_flash_lite_preview", ""),
+            "tab_jump_flash_lite_preview": antigravity_model_payload("tab_jump_flash_lite_preview", ""),
             "models/proactive-observer": antigravity_model_payload("models/proactive-observer", "Proactive Observer")
         },
         "agentModelSorts": [
@@ -1071,10 +1090,14 @@ fn build_antigravity_fetch_available_models_payload() -> Value {
                 "groups": [
                     {
                         "modelIds": [
-                            "gemini-3.1-flash-lite",
+                            "gemini-3.5-flash-low",
                             "gemini-3-flash-agent",
+                            "gemini-3.5-flash-extra-low",
                             "gemini-3.1-pro-low",
-                            "gemini-3.5-flash-low"
+                            "gemini-pro-agent",
+                            "claude-sonnet-4-6",
+                            "claude-opus-4-6-thinking",
+                            "gpt-oss-120b-medium"
                         ]
                     }
                 ]
@@ -1083,12 +1106,18 @@ fn build_antigravity_fetch_available_models_payload() -> Value {
         "audioTranscriptionModelIds": ["models/proactive-observer"],
         "commandModelIds": ["gemini-3-flash"],
         "commitMessageModelIds": ["gemini-3.1-flash-lite"],
-        "defaultAgentModelId": "gemini-3.1-flash-lite",
-        "deprecatedModelIds": {},
+        "defaultAgentModelId": "gemini-3.5-flash-low",
+        "deprecatedModelIds": {
+            "gemini-3.1-pro-high": {
+                "newModelEnum": "MODEL_PLACEHOLDER_M16",
+                "newModelId": "gemini-pro-agent",
+                "oldModelEnum": "MODEL_PLACEHOLDER_M37"
+            }
+        },
         "experimentIds": [],
         "imageGenerationModelIds": ["gemini-3.1-flash-image"],
         "mqueryModelIds": ["gemini-3.1-flash-lite"],
-        "tabModelIds": ["tab_flash_lite_preview", "tab_jump_flash_lite_preview"],
+        "tabModelIds": ["chat_20706", "chat_23310"],
         "tieredModelIds": {
             "flash": ["gemini-3-flash-agent"],
             "flashLite": ["gemini-3.1-flash-lite"],
@@ -1100,6 +1129,11 @@ fn build_antigravity_fetch_available_models_payload() -> Value {
 
 fn antigravity_model_payload(id: &str, display_name: &str) -> Value {
     let model = match id {
+        "chat_20706" => "MODEL_CHAT_20706",
+        "chat_23310" => "MODEL_CHAT_23310",
+        "claude-opus-4-6-thinking" => "MODEL_PLACEHOLDER_M26",
+        "claude-sonnet-4-6" => "MODEL_PLACEHOLDER_M35",
+        "gpt-oss-120b-medium" => "MODEL_OPENAI_GPT_OSS_120B_MEDIUM",
         "gemini-2.5-flash" => "MODEL_GOOGLE_GEMINI_2_5_FLASH",
         "gemini-2.5-flash-lite" => "MODEL_GOOGLE_GEMINI_2_5_FLASH_LITE",
         "gemini-2.5-flash-thinking" => "MODEL_GOOGLE_GEMINI_2_5_FLASH_THINKING",
@@ -1108,22 +1142,43 @@ fn antigravity_model_payload(id: &str, display_name: &str) -> Value {
         "gemini-3-flash-agent" => "MODEL_PLACEHOLDER_M132",
         "gemini-3.1-flash-image" => "MODEL_PLACEHOLDER_M21",
         "gemini-3.1-flash-lite" => "MODEL_PLACEHOLDER_M50",
+        "gemini-pro-agent" => "MODEL_PLACEHOLDER_M16",
+        "gemini-3.1-pro-high" => "MODEL_PLACEHOLDER_M37",
         "gemini-3.1-pro-low" => "MODEL_PLACEHOLDER_M36",
         "gemini-3.5-flash-low" => "MODEL_PLACEHOLDER_M20",
+        "gemini-3.5-flash-extra-low" => "MODEL_PLACEHOLDER_M187",
         "models/proactive-observer" => "MODEL_PLACEHOLDER_M70",
         "tab_flash_lite_preview" => "MODEL_PLACEHOLDER_M19",
         "tab_jump_flash_lite_preview" => "MODEL_PLACEHOLDER_M28",
         _ => "MODEL_PLACEHOLDER_M20",
     };
-    json!({
-        "apiProvider": "API_PROVIDER_GOOGLE_GEMINI",
+    let (api_provider, model_provider) = match id {
+        "claude-opus-4-6-thinking" | "claude-sonnet-4-6" => {
+            ("API_PROVIDER_ANTHROPIC_VERTEX", "MODEL_PROVIDER_ANTHROPIC")
+        }
+        "gpt-oss-120b-medium" => ("API_PROVIDER_OPENAI_VERTEX", "MODEL_PROVIDER_OPENAI"),
+        "chat_20706" | "chat_23310" => ("API_PROVIDER_INTERNAL", "MODEL_PROVIDER_GOOGLE"),
+        _ => ("API_PROVIDER_GOOGLE_GEMINI", "MODEL_PROVIDER_GOOGLE"),
+    };
+    let mut payload = json!({
+        "apiProvider": api_provider,
         "displayName": display_name,
         "maxOutputTokens": 65536,
         "maxTokens": 1048576,
         "minThinkingBudget": 32,
         "model": model,
-        "modelProvider": "MODEL_PROVIDER_GOOGLE",
-        "recommended": id == "gemini-3.1-flash-lite",
+        "modelProvider": model_provider,
+        "recommended": matches!(
+            id,
+            "gemini-3.5-flash-low"
+                | "gemini-3-flash-agent"
+                | "gemini-3.5-flash-extra-low"
+                | "gemini-3.1-pro-low"
+                | "gemini-pro-agent"
+                | "claude-sonnet-4-6"
+                | "claude-opus-4-6-thinking"
+                | "gpt-oss-120b-medium"
+        ),
         "supportedMimeTypes": {
             "application/json": true,
             "application/pdf": true,
@@ -1137,7 +1192,88 @@ fn antigravity_model_payload(id: &str, display_name: &str) -> Value {
         "supportsVideo": true,
         "thinkingBudget": 4000,
         "tokenizerType": "LLAMA_WITH_SPECIAL"
-    })
+    });
+    if let Some(object) = payload.as_object_mut() {
+        match id {
+            "gemini-3-flash-agent" => {
+                object.insert("thinkingBudget".to_string(), json!(10000));
+            }
+            "gemini-pro-agent" => {
+                object.insert("maxOutputTokens".to_string(), json!(65535));
+                object.insert("thinkingBudget".to_string(), json!(10001));
+            }
+            "gemini-3.1-pro-high" => {
+                object.insert("maxOutputTokens".to_string(), json!(65535));
+                object.insert("minThinkingBudget".to_string(), json!(128));
+                object.insert("thinkingBudget".to_string(), json!(10001));
+            }
+            "gemini-3.5-flash-extra-low" => {
+                object.insert("thinkingBudget".to_string(), json!(1000));
+                object.insert("maxOutputTokens".to_string(), json!(65536));
+            }
+            "gemini-3.1-pro-low" => {
+                object.insert("maxOutputTokens".to_string(), json!(65535));
+                object.insert("minThinkingBudget".to_string(), json!(128));
+                object.insert("thinkingBudget".to_string(), json!(1001));
+            }
+            "claude-sonnet-4-6" | "claude-opus-4-6-thinking" => {
+                object.insert("maxTokens".to_string(), json!(250000));
+                object.insert("maxOutputTokens".to_string(), json!(64000));
+                object.insert("thinkingBudget".to_string(), json!(1024));
+                object.remove("minThinkingBudget");
+                object.remove("supportsVideo");
+            }
+            "gpt-oss-120b-medium" => {
+                object.insert("maxTokens".to_string(), json!(131072));
+                object.insert("maxOutputTokens".to_string(), json!(32768));
+                object.insert("thinkingBudget".to_string(), json!(8192));
+                object.remove("minThinkingBudget");
+                object.remove("supportsImages");
+                object.remove("supportsVideo");
+            }
+            "chat_20706" => {
+                object.insert("maxTokens".to_string(), json!(16384));
+                object.remove("displayName");
+                object.remove("maxOutputTokens");
+                object.remove("minThinkingBudget");
+                object.remove("recommended");
+                object.remove("supportsImages");
+                object.remove("supportsThinking");
+                object.remove("supportsVideo");
+                object.remove("thinkingBudget");
+                object.remove("tokenizerType");
+                object.remove("supportedMimeTypes");
+            }
+            "chat_23310" => {
+                object.insert("maxTokens".to_string(), json!(32768));
+                object.remove("displayName");
+                object.remove("maxOutputTokens");
+                object.remove("minThinkingBudget");
+                object.remove("recommended");
+                object.remove("supportsImages");
+                object.remove("supportsThinking");
+                object.remove("supportsVideo");
+                object.remove("thinkingBudget");
+                object.remove("tokenizerType");
+                object.remove("supportedMimeTypes");
+            }
+            "tab_flash_lite_preview" | "tab_jump_flash_lite_preview" => {
+                object.insert("maxTokens".to_string(), json!(16384));
+                object.insert("maxOutputTokens".to_string(), json!(4096));
+                object.remove("displayName");
+                object.remove("minThinkingBudget");
+                object.remove("recommended");
+                object.remove("supportsImages");
+                object.remove("supportsThinking");
+                object.remove("supportsVideo");
+                object.remove("thinkingBudget");
+                object.remove("tokenizerType");
+                object.remove("supportedMimeTypes");
+            }
+            _ => {}
+        }
+    }
+    payload
 }
 
 async fn maybe_build_local_gemini_video_operations_response(

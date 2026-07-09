@@ -265,13 +265,39 @@ fn build_same_format_provider_request_body_inner(
             }
         }
         SameFormatProviderFamily::Gemini => {
-            if provider_request_body.remove("model").is_some() {
-                record_compatibility_edit(
-                    &mut compatibility_edits,
-                    "model",
-                    SameFormatProviderCompatibilityEditAction::RuntimeRewrite,
-                    "removed top-level model because Gemini model is carried by the upstream URL",
+            if aether_ai_formats::api_format_alias_matches(
+                input.provider_api_format,
+                "gemini:interactions",
+            ) {
+                let rewrite_field = if provider_request_body.contains_key("model") {
+                    "model"
+                } else if provider_request_body.contains_key("agent") {
+                    "agent"
+                } else {
+                    "model"
+                };
+                let previous_value = provider_request_body.get(rewrite_field).cloned();
+                provider_request_body.insert(
+                    rewrite_field.to_string(),
+                    Value::String(input.mapped_model.to_string()),
                 );
+                if previous_value != Some(Value::String(input.mapped_model.to_string())) {
+                    record_compatibility_edit(
+                        &mut compatibility_edits,
+                        rewrite_field,
+                        SameFormatProviderCompatibilityEditAction::RuntimeRewrite,
+                        "rewrote Gemini Interactions routing field to mapped upstream target",
+                    );
+                }
+            } else {
+                if provider_request_body.remove("model").is_some() {
+                    record_compatibility_edit(
+                        &mut compatibility_edits,
+                        "model",
+                        SameFormatProviderCompatibilityEditAction::RuntimeRewrite,
+                        "removed top-level model because Gemini model is carried by the upstream URL",
+                    );
+                }
             }
         }
     }
@@ -577,6 +603,7 @@ pub fn same_format_provider_transport_unsupported_reason_for_trace(
             "openai:responses:compact" => "openai:responses:compact",
             "claude:messages" => "claude:messages",
             "gemini:generate_content" => "gemini:generate_content",
+            "gemini:interactions" => "gemini:interactions",
             _ => return Some("transport_api_format_unsupported"),
         };
     let behavior = classify_same_format_provider_request_behavior(
@@ -1208,6 +1235,62 @@ mod tests {
         .expect("body should build");
 
         assert!(body.get("stream").is_none());
+    }
+
+    #[test]
+    fn same_format_gemini_interactions_body_keeps_body_routing_target() {
+        let body = build_same_format_provider_request_body(SameFormatProviderRequestBodyInput {
+            body_json: &json!({
+                "model": "client-model",
+                "input": [{"role": "user", "content": "hello"}],
+                "stream": true
+            }),
+            mapped_model: "gemini-3.5-flash",
+            client_api_format: "gemini:interactions",
+            provider_api_format: "gemini:interactions",
+            source_model: Some("client-model"),
+            family: SameFormatProviderFamily::Gemini,
+            body_rules: None,
+            request_headers: None,
+            upstream_is_stream: true,
+            force_body_stream_field: false,
+            kiro_auth_config: None,
+            is_claude_code: false,
+            enable_model_directives: false,
+        })
+        .expect("body should build");
+
+        assert_eq!(body.get("model"), Some(&json!("gemini-3.5-flash")));
+        assert_eq!(body.get("stream"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn same_format_gemini_interactions_body_rewrites_agent_target() {
+        let body = build_same_format_provider_request_body(SameFormatProviderRequestBodyInput {
+            body_json: &json!({
+                "agent": "antigravity-preview-05-2026",
+                "input": "hello"
+            }),
+            mapped_model: "antigravity-preview-05-2026",
+            client_api_format: "gemini:interactions",
+            provider_api_format: "gemini:interactions",
+            source_model: None,
+            family: SameFormatProviderFamily::Gemini,
+            body_rules: None,
+            request_headers: None,
+            upstream_is_stream: false,
+            force_body_stream_field: false,
+            kiro_auth_config: None,
+            is_claude_code: false,
+            enable_model_directives: false,
+        })
+        .expect("body should build");
+
+        assert_eq!(
+            body.get("agent"),
+            Some(&json!("antigravity-preview-05-2026"))
+        );
+        assert!(body.get("model").is_none());
     }
 
     #[test]

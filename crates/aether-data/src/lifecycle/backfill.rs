@@ -312,7 +312,8 @@ mod tests {
                 20260422110000,
                 20260422120000,
                 20260504120000,
-                20260505120000
+                20260505120000,
+                20260517012000
             ]
         );
     }
@@ -328,7 +329,12 @@ mod tests {
         .collect::<Vec<_>>();
         assert_eq!(
             versions,
-            vec![20260422120000, 20260504120000, 20260505120000]
+            vec![
+                20260422120000,
+                20260504120000,
+                20260505120000,
+                20260517012000
+            ]
         );
     }
 
@@ -697,11 +703,12 @@ mod tests {
         let pending_before = pending_backfills(&pool)
             .await
             .expect("pending backfills should load");
-        assert_eq!(pending_before.len(), 4);
+        assert_eq!(pending_before.len(), 5);
         assert_eq!(pending_before[0].version, 20260422110000);
         assert_eq!(pending_before[1].version, 20260422120000);
         assert_eq!(pending_before[2].version, 20260504120000);
         assert_eq!(pending_before[3].version, 20260505120000);
+        assert_eq!(pending_before[4].version, 20260517012000);
 
         run_backfills(&pool)
             .await
@@ -723,7 +730,8 @@ mod tests {
                 20260422110000,
                 20260422120000,
                 20260504120000,
-                20260505120000
+                20260505120000,
+                20260517012000
             ]
         );
 
@@ -1385,6 +1393,6 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .expect("backfill count should load");
-        assert_eq!(applied_count, 3);
+        assert_eq!(applied_count, 5);
     }
 }

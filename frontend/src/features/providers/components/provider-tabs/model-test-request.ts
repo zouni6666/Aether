@@ -196,6 +196,14 @@ export function buildDefaultModelTestRequestBody(
     }, null, 2)
   }
 
+  if (normalizedApiFormat === 'gemini:interactions') {
+    return JSON.stringify({
+      model: modelName,
+      input: DEFAULT_MODEL_TEST_MESSAGE,
+      stream: true,
+    }, null, 2)
+  }
+
   if (normalizedApiFormat === 'openai:responses' && modelSupportsImageGeneration(model)) {
     return JSON.stringify({
       model: modelName,

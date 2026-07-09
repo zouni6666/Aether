@@ -41,7 +41,11 @@ pub fn build_antigravity_v1internal_url(
         for (key, value) in query {
             let key = key.trim();
             let value = value.trim();
-            if key.is_empty() || value.is_empty() || key.eq_ignore_ascii_case("beta") {
+            if key.is_empty()
+                || value.is_empty()
+                || key.eq_ignore_ascii_case("beta")
+                || key.eq_ignore_ascii_case("key")
+            {
                 continue;
             }
             params.insert(key.to_string(), value.to_string());

@@ -17,13 +17,17 @@ const AI_POST_ROUTE_PATTERNS: &[&str] = &[
     "/v1/responses/compact",
     "/v1/images/generations",
     "/v1/images/edits",
+    "/v1/interactions",
+    "/v1beta/interactions",
     "/v1internal:loadCodeAssist",
     "/v1internal:fetchAvailableModels",
+    "/v1internal:retrieveUserQuotaSummary",
     "/v1internal:fetchUserInfo",
     "/v1internal:fetchAdminControls",
     "/v1internal:setUserSettings",
     "/v1internal:listExperiments",
     "/v1internal:recordCodeAssistMetrics",
+    "/v1internal:writeTrajectoryAcls",
     "/v1internal:streamGenerateContent",
 ];
 
@@ -95,6 +99,12 @@ mod tests {
     fn supports_data_api_endpoint_signatures_and_public_paths() {
         for (api_format, family, kind, path) in [
             ("openai:embedding", "openai", "embedding", "/v1/embeddings"),
+            (
+                "gemini:interactions",
+                "gemini",
+                "interactions",
+                "/v1/interactions",
+            ),
             (
                 "gemini:embedding",
                 "gemini",

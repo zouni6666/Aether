@@ -2637,7 +2637,20 @@ async fn execute_execution_runtime_sync_impl(
         candidate_id,
     )?;
     if !usage_payload.report_kind.trim().is_empty() {
-        spawn_sync_report(state.clone(), usage_payload);
+        if status_code >= 400 {
+            let report_kind = usage_payload.report_kind.clone();
+            if let Err(err) = submit_sync_report(state, usage_payload).await {
+                warn!(
+                    event_name = "local_sync_error_report_submit_failed",
+                    log_type = "ops",
+                    trace_id = %trace_id,
+                    report_kind = %report_kind,
+                    "gateway failed to submit local sync error report before returning response: {err:?}"
+                );
+            }
+        } else {
+            spawn_sync_report(state.clone(), usage_payload);
+        }
     }
 
     Ok(Some(response))

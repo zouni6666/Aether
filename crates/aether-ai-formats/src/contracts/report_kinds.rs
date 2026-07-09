@@ -1,13 +1,14 @@
 use crate::contracts::{
     CLAUDE_CHAT_SYNC_PLAN_KIND, CLAUDE_CLI_SYNC_PLAN_KIND, GEMINI_CHAT_SYNC_PLAN_KIND,
-    GEMINI_CLI_SYNC_PLAN_KIND, OPENAI_CHAT_SYNC_PLAN_KIND, OPENAI_EMBEDDING_SYNC_PLAN_KIND,
-    OPENAI_IMAGE_STREAM_PLAN_KIND, OPENAI_IMAGE_SYNC_PLAN_KIND,
+    GEMINI_CLI_SYNC_PLAN_KIND, GEMINI_INTERACTIONS_SYNC_PLAN_KIND, OPENAI_CHAT_SYNC_PLAN_KIND,
+    OPENAI_EMBEDDING_SYNC_PLAN_KIND, OPENAI_IMAGE_STREAM_PLAN_KIND, OPENAI_IMAGE_SYNC_PLAN_KIND,
     OPENAI_RESPONSES_COMPACT_SYNC_PLAN_KIND, OPENAI_RESPONSES_SYNC_PLAN_KIND,
 };
 
 pub const OPENAI_CHAT_SYNC_FINALIZE_REPORT_KIND: &str = "openai_chat_sync_finalize";
 pub const CLAUDE_CHAT_SYNC_FINALIZE_REPORT_KIND: &str = "claude_chat_sync_finalize";
 pub const GEMINI_CHAT_SYNC_FINALIZE_REPORT_KIND: &str = "gemini_chat_sync_finalize";
+pub const GEMINI_INTERACTIONS_SYNC_FINALIZE_REPORT_KIND: &str = "gemini_interactions_sync_finalize";
 pub const OPENAI_RESPONSES_SYNC_FINALIZE_REPORT_KIND: &str = "openai_responses_sync_finalize";
 pub const OPENAI_RESPONSES_COMPACT_SYNC_FINALIZE_REPORT_KIND: &str =
     "openai_responses_compact_sync_finalize";
@@ -23,6 +24,7 @@ const LEGACY_OPENAI_COMPACT_SYNC_FINALIZE_REPORT_KIND: &str = "openai_compact_sy
 pub const OPENAI_CHAT_SYNC_SUCCESS_REPORT_KIND: &str = "openai_chat_sync_success";
 pub const CLAUDE_CHAT_SYNC_SUCCESS_REPORT_KIND: &str = "claude_chat_sync_success";
 pub const GEMINI_CHAT_SYNC_SUCCESS_REPORT_KIND: &str = "gemini_chat_sync_success";
+pub const GEMINI_INTERACTIONS_SYNC_SUCCESS_REPORT_KIND: &str = "gemini_interactions_sync_success";
 pub const OPENAI_RESPONSES_SYNC_SUCCESS_REPORT_KIND: &str = "openai_responses_sync_success";
 pub const OPENAI_RESPONSES_COMPACT_SYNC_SUCCESS_REPORT_KIND: &str =
     "openai_responses_compact_sync_success";
@@ -35,6 +37,8 @@ pub const GEMINI_CLI_SYNC_SUCCESS_REPORT_KIND: &str = "gemini_cli_sync_success";
 pub const OPENAI_CHAT_STREAM_SUCCESS_REPORT_KIND: &str = "openai_chat_stream_success";
 pub const CLAUDE_CHAT_STREAM_SUCCESS_REPORT_KIND: &str = "claude_chat_stream_success";
 pub const GEMINI_CHAT_STREAM_SUCCESS_REPORT_KIND: &str = "gemini_chat_stream_success";
+pub const GEMINI_INTERACTIONS_STREAM_SUCCESS_REPORT_KIND: &str =
+    "gemini_interactions_stream_success";
 pub const OPENAI_RESPONSES_STREAM_SUCCESS_REPORT_KIND: &str = "openai_responses_stream_success";
 pub const OPENAI_RESPONSES_COMPACT_STREAM_SUCCESS_REPORT_KIND: &str =
     "openai_responses_compact_stream_success";
@@ -45,6 +49,7 @@ pub const GEMINI_CLI_STREAM_SUCCESS_REPORT_KIND: &str = "gemini_cli_stream_succe
 pub const OPENAI_CHAT_SYNC_ERROR_REPORT_KIND: &str = "openai_chat_sync_error";
 pub const CLAUDE_CHAT_SYNC_ERROR_REPORT_KIND: &str = "claude_chat_sync_error";
 pub const GEMINI_CHAT_SYNC_ERROR_REPORT_KIND: &str = "gemini_chat_sync_error";
+pub const GEMINI_INTERACTIONS_SYNC_ERROR_REPORT_KIND: &str = "gemini_interactions_sync_error";
 pub const OPENAI_RESPONSES_SYNC_ERROR_REPORT_KIND: &str = "openai_responses_sync_error";
 pub const OPENAI_RESPONSES_COMPACT_SYNC_ERROR_REPORT_KIND: &str =
     "openai_responses_compact_sync_error";
@@ -58,6 +63,7 @@ pub fn implicit_sync_finalize_report_kind(plan_kind: &str) -> Option<&'static st
         OPENAI_CHAT_SYNC_PLAN_KIND => Some(OPENAI_CHAT_SYNC_FINALIZE_REPORT_KIND),
         CLAUDE_CHAT_SYNC_PLAN_KIND => Some(CLAUDE_CHAT_SYNC_FINALIZE_REPORT_KIND),
         GEMINI_CHAT_SYNC_PLAN_KIND => Some(GEMINI_CHAT_SYNC_FINALIZE_REPORT_KIND),
+        GEMINI_INTERACTIONS_SYNC_PLAN_KIND => Some(GEMINI_INTERACTIONS_SYNC_FINALIZE_REPORT_KIND),
         OPENAI_RESPONSES_SYNC_PLAN_KIND => Some(OPENAI_RESPONSES_SYNC_FINALIZE_REPORT_KIND),
         OPENAI_RESPONSES_COMPACT_SYNC_PLAN_KIND => {
             Some(OPENAI_RESPONSES_COMPACT_SYNC_FINALIZE_REPORT_KIND)
@@ -75,6 +81,7 @@ pub fn core_error_default_client_api_format(report_kind: &str) -> Option<&'stati
         OPENAI_CHAT_SYNC_FINALIZE_REPORT_KIND => Some("openai:chat"),
         CLAUDE_CHAT_SYNC_FINALIZE_REPORT_KIND => Some("claude:messages"),
         GEMINI_CHAT_SYNC_FINALIZE_REPORT_KIND => Some("gemini:generate_content"),
+        GEMINI_INTERACTIONS_SYNC_FINALIZE_REPORT_KIND => Some("gemini:interactions"),
         OPENAI_RESPONSES_SYNC_FINALIZE_REPORT_KIND => Some("openai:responses"),
         OPENAI_RESPONSES_COMPACT_SYNC_FINALIZE_REPORT_KIND => Some("openai:responses:compact"),
         OPENAI_EMBEDDING_SYNC_FINALIZE_REPORT_KIND => Some("openai:embedding"),
@@ -92,6 +99,9 @@ pub fn core_error_background_report_kind(report_kind: &str) -> Option<&'static s
         OPENAI_CHAT_SYNC_FINALIZE_REPORT_KIND => Some(OPENAI_CHAT_SYNC_ERROR_REPORT_KIND),
         CLAUDE_CHAT_SYNC_FINALIZE_REPORT_KIND => Some(CLAUDE_CHAT_SYNC_ERROR_REPORT_KIND),
         GEMINI_CHAT_SYNC_FINALIZE_REPORT_KIND => Some(GEMINI_CHAT_SYNC_ERROR_REPORT_KIND),
+        GEMINI_INTERACTIONS_SYNC_FINALIZE_REPORT_KIND => {
+            Some(GEMINI_INTERACTIONS_SYNC_ERROR_REPORT_KIND)
+        }
         OPENAI_RESPONSES_SYNC_FINALIZE_REPORT_KIND => Some(OPENAI_RESPONSES_SYNC_ERROR_REPORT_KIND),
         OPENAI_RESPONSES_COMPACT_SYNC_FINALIZE_REPORT_KIND => {
             Some(OPENAI_RESPONSES_COMPACT_SYNC_ERROR_REPORT_KIND)
@@ -115,6 +125,9 @@ pub fn core_success_background_report_kind(report_kind: &str) -> Option<&'static
         OPENAI_CHAT_SYNC_FINALIZE_REPORT_KIND => Some(OPENAI_CHAT_SYNC_SUCCESS_REPORT_KIND),
         CLAUDE_CHAT_SYNC_FINALIZE_REPORT_KIND => Some(CLAUDE_CHAT_SYNC_SUCCESS_REPORT_KIND),
         GEMINI_CHAT_SYNC_FINALIZE_REPORT_KIND => Some(GEMINI_CHAT_SYNC_SUCCESS_REPORT_KIND),
+        GEMINI_INTERACTIONS_SYNC_FINALIZE_REPORT_KIND => {
+            Some(GEMINI_INTERACTIONS_SYNC_SUCCESS_REPORT_KIND)
+        }
         OPENAI_IMAGE_SYNC_FINALIZE_REPORT_KIND => Some(OPENAI_IMAGE_SYNC_SUCCESS_REPORT_KIND),
         OPENAI_RESPONSES_SYNC_FINALIZE_REPORT_KIND => {
             Some(OPENAI_RESPONSES_SYNC_SUCCESS_REPORT_KIND)

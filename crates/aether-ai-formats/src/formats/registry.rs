@@ -38,6 +38,7 @@ pub fn parse_request(
         FormatId::GeminiEmbedding => gemini::embedding::request::from(body, ctx),
         FormatId::DoubaoEmbedding => doubao::embedding::request::from(body, ctx),
         FormatId::AliyunMultimodalEmbedding => aliyun::embedding::request::from(body, ctx),
+        FormatId::GeminiInteractions => None,
     }
     .ok_or_else(|| FormatError::RequestParseFailed {
         format: source.as_str().to_string(),
@@ -71,6 +72,7 @@ fn emit_request_inner(
         FormatId::GeminiEmbedding => gemini::embedding::request::to(request, ctx),
         FormatId::DoubaoEmbedding => doubao::embedding::request::to(request, ctx),
         FormatId::AliyunMultimodalEmbedding => aliyun::embedding::request::to(request, ctx),
+        FormatId::GeminiInteractions => None,
     }
     .ok_or_else(|| FormatError::RequestEmitFailed {
         format: target.as_str().to_string(),
@@ -194,7 +196,8 @@ pub fn parse_response(
         | FormatId::JinaRerank
         | FormatId::GeminiEmbedding
         | FormatId::DoubaoEmbedding
-        | FormatId::AliyunMultimodalEmbedding => None,
+        | FormatId::AliyunMultimodalEmbedding
+        | FormatId::GeminiInteractions => None,
     }
     .ok_or_else(|| FormatError::ResponseParseFailed {
         format: source.as_str().to_string(),
@@ -231,7 +234,8 @@ fn emit_response_inner(
         | FormatId::JinaRerank
         | FormatId::GeminiEmbedding
         | FormatId::DoubaoEmbedding
-        | FormatId::AliyunMultimodalEmbedding => None,
+        | FormatId::AliyunMultimodalEmbedding
+        | FormatId::GeminiInteractions => None,
     }
     .ok_or_else(|| FormatError::ResponseEmitFailed {
         format: target.as_str().to_string(),
@@ -520,6 +524,24 @@ fn standard_request_root_field_is_audited(source: FormatId, key: &str) -> bool {
                 | "systemInstruction"
                 | "system_instruction"
                 | "toolConfig"
+                | "tool_config"
+                | "tools"
+        ),
+        FormatId::GeminiInteractions => matches!(
+            key,
+            "agent"
+                | "agent_config"
+                | "background"
+                | "generation_config"
+                | "input"
+                | "metadata"
+                | "model"
+                | "previous_interaction_id"
+                | "response_format"
+                | "safety_settings"
+                | "store"
+                | "stream"
+                | "system_instruction"
                 | "tool_config"
                 | "tools"
         ),
@@ -981,6 +1003,7 @@ fn validate_source_response_stop_enums(
         }
         FormatId::ClaudeMessages => validate_claude_response_stop_reason(body),
         FormatId::GeminiGenerateContent => validate_gemini_response_finish_reasons(body, target),
+        FormatId::GeminiInteractions => Ok(()),
         FormatId::OpenAiEmbedding
         | FormatId::OpenAiRerank
         | FormatId::GeminiEmbedding

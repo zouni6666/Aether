@@ -361,31 +361,39 @@
                         />
                         <div class="grid grid-cols-2 gap-3">
                           <ProviderQuotaProgressRow
-                            v-for="group in getAntigravityQuotaSummaryForKey(key)"
-                            :key="group.key"
-                            :label="group.label"
-                            :used-percent="group.usedPercent"
-                            :remaining-percent="group.remainingPercent"
-                            :meter-class="getQuotaRemainingClass(group.usedPercent)"
-                            :bar-class="getQuotaRemainingBarColor(group.usedPercent)"
+                            v-for="item in getAntigravityQuotaPreviewForKey(key)"
+                            :key="item.model"
+                            :label="item.label"
+                            :title="item.model"
+                            :used-percent="item.usedPercent"
+                            :remaining-percent="item.remainingPercent"
+                            :meter-class="getQuotaRemainingClass(item.usedPercent)"
+                            :bar-class="getQuotaRemainingBarColor(item.usedPercent)"
                           >
                             <template #footer>
-                              <div
-                                v-if="group.resetSeconds !== null || group.usedPercent > 0"
-                                class="text-[9px] text-muted-foreground/70 mt-0.5"
-                              >
-                                <template v-if="group.resetSeconds !== null && group.resetSeconds > 0">
-                                  {{ formatResetTime(group.resetSeconds) }}{{ legacyT('后重置') }}
-                                </template>
-                                <template v-else-if="group.resetSeconds !== null && group.resetSeconds <= 0">
-                                  {{ legacyT('已重置') }}
-                                </template>
-                                <template v-else>
-                                  {{ legacyT('重置时间未知') }}
-                                </template>
+                              <div class="mt-0.5 space-y-0.5">
+                                <div
+                                  v-if="item.resetSeconds !== null"
+                                  class="text-[9px] text-muted-foreground/70"
+                                >
+                                  <template v-if="item.resetSeconds !== null && item.resetSeconds > 0">
+                                    {{ formatResetTime(item.resetSeconds) }}{{ legacyT('后重置') }}
+                                  </template>
+                                  <template v-else-if="item.resetSeconds !== null && item.resetSeconds <= 0">
+                                    {{ legacyT('已重置') }}
+                                  </template>
+                                </div>
                               </div>
                             </template>
                           </ProviderQuotaProgressRow>
+                          <button
+                            v-if="getAntigravityQuotaHiddenCountForKey(key) > 0"
+                            type="button"
+                            class="col-span-2 text-left text-[10px] text-muted-foreground hover:text-foreground transition-colors"
+                            @click="openAntigravityQuotaDialog(key)"
+                          >
+                            {{ legacyT('另有') }} {{ getAntigravityQuotaHiddenCountForKey(key) }} {{ legacyT('个模型，查看全部') }}
+                          </button>
                         </div>
                       </template>
                     </div>
@@ -949,6 +957,11 @@ import ProviderMonthlyQuotaCard from '@/features/providers/components/ProviderMo
 import ProviderQuotaProgressRow from '@/features/providers/components/ProviderQuotaProgressRow.vue'
 import ProviderQuotaSectionHeader from '@/features/providers/components/ProviderQuotaSectionHeader.vue'
 import { useProxyNodesStore } from '@/stores/proxy-nodes'
+import {
+  compareAntigravityQuotaItems,
+  dedupeAntigravityQuotaItemsByLabel,
+  resolveAntigravityQuotaLabel,
+} from '@/features/providers/utils/antigravityQuota'
 import {
   deleteEndpointKey,
   recoverKeyHealth,
@@ -3348,53 +3361,72 @@ function secondsUntilReset(resetTime: string): number | null {
   return diff > 0 ? diff : 0
 }
 
+function secondsUntilUnixReset(resetAt: number | string | null | undefined): number | null {
+  const numericResetAt = Number(resetAt)
+  if (!Number.isFinite(numericResetAt) || numericResetAt <= 0) return null
+  const now = Math.floor(Date.now() / 1000)
+  return Math.max(Math.floor(numericResetAt - now), 0)
+}
+
+function coerceAntigravityPercent(value: number | string | null | undefined): number | undefined {
+  const numericValue = Number(value)
+  if (!Number.isFinite(numericValue)) return undefined
+  return Math.min(Math.max(numericValue, 0), 100)
+}
+
+function coerceAntigravityRemainingFraction(value: number | string | null | undefined): number | undefined {
+  const numericValue = Number(value)
+  if (!Number.isFinite(numericValue)) return undefined
+  return Math.min(Math.max(numericValue, 0), 1)
+}
+
 function getAntigravityQuotaItems(metadata: UpstreamMetadata | null | undefined): AntigravityQuotaItem[] {
   const quotaByModel = metadata?.antigravity?.quota_by_model
   if (!quotaByModel || typeof quotaByModel !== 'object') return []
 
   const items: AntigravityQuotaItem[] = []
+  const opaqueDisplayIndex = { value: 1 }
   for (const [model, rawInfo] of Object.entries(quotaByModel)) {
     if (!model) continue
     const info: Partial<AntigravityModelQuota> = rawInfo || {}
 
-    let usedPercent = Number(info.used_percent)
-    if (!Number.isFinite(usedPercent)) {
-      const remainingFraction = Number(info.remaining_fraction)
-      if (Number.isFinite(remainingFraction)) {
+    let usedPercent = coerceAntigravityPercent(info.used_percent)
+    if (usedPercent === undefined) {
+      const remainingFraction = coerceAntigravityRemainingFraction(info.remaining_fraction)
+      if (remainingFraction !== undefined) {
         usedPercent = (1 - remainingFraction) * 100
       } else {
         continue
       }
     }
 
-    if (usedPercent < 0) usedPercent = 0
-    if (usedPercent > 100) usedPercent = 100
+    usedPercent = coerceAntigravityPercent(usedPercent) ?? 0
 
     const remainingPercent = Math.max(100 - usedPercent, 0)
 
-    let resetSeconds: number | null = null
+    let resetSeconds = secondsUntilUnixReset(info.reset_at)
     if (typeof info.reset_time === 'string' && info.reset_time.trim()) {
-      resetSeconds = secondsUntilReset(info.reset_time.trim())
+      resetSeconds = secondsUntilReset(info.reset_time.trim()) ?? resetSeconds
     }
 
     items.push({
       model,
-      label: model,
+      label: resolveAntigravityQuotaLabel(model, info.display_name, opaqueDisplayIndex),
       usedPercent,
       remainingPercent,
       resetSeconds,
     })
   }
 
-  // 按“最紧张”（已用最多）优先排序，便于快速定位额度风险；完整列表通过滚动展示
-  items.sort((a, b) => (b.usedPercent - a.usedPercent) || a.model.localeCompare(b.model))
-  return items
+  items.sort(compareAntigravityQuotaItems)
+  return dedupeAntigravityQuotaItemsByLabel(items)
 }
 
 function getAntigravityQuotaItemsFromSnapshot(key: EndpointAPIKey): AntigravityQuotaItem[] {
   const quota = getQuotaSnapshotForProvider(key, 'antigravity')
   const windows = getQuotaWindowByScope(quota, 'model')
   if (!quota || windows.length === 0) return []
+  const opaqueDisplayIndex = { value: 1 }
 
   const items = windows
     .map((window) => {
@@ -3418,7 +3450,11 @@ function getAntigravityQuotaItemsFromSnapshot(key: EndpointAPIKey): AntigravityQ
 
       return {
         model,
-        label: String(window.label || window.model || model),
+        label: resolveAntigravityQuotaLabel(
+          model,
+          window.label || window.model,
+          opaqueDisplayIndex,
+        ),
         usedPercent: normalizedUsedPercent,
         remainingPercent: normalizedRemainingPercent,
         resetSeconds: getQuotaWindowLiveResetSeconds(quota, window),
@@ -3426,124 +3462,24 @@ function getAntigravityQuotaItemsFromSnapshot(key: EndpointAPIKey): AntigravityQ
     })
     .filter((item): item is AntigravityQuotaItem => item !== null)
 
-  items.sort((a, b) => (b.usedPercent - a.usedPercent) || a.model.localeCompare(b.model))
-  return items
+  items.sort(compareAntigravityQuotaItems)
+  return dedupeAntigravityQuotaItemsByLabel(items)
 }
 
-// Antigravity 配额分组定义（按匹配优先级排列，具体规则在前）
-interface AntigravityQuotaGroup {
-  key: string
-  label: string
-  match: (model: string) => boolean
-}
+const ANTIGRAVITY_QUOTA_PREVIEW_LIMIT = 6
 
-const ANTIGRAVITY_QUOTA_GROUPS: AntigravityQuotaGroup[] = [
-  { key: 'claude', label: 'Claude', match: m => m.includes('claude') },
-  { key: 'gemini-2.5', label: 'Gemini 2.5', match: m => m.includes('gemini-2.5') || m.includes('gemini-2-5') },
-  { key: 'gemini-3', label: 'Gemini 3', match: m => m.includes('gemini-3') && !m.includes('image') },
-  { key: 'gemini-3-image', label: 'Gemini 3 Image', match: m => m.includes('gemini-3') && m.includes('image') },
-]
-
-interface AntigravityQuotaSummaryItem {
-  key: string
-  label: string
-  usedPercent: number       // 组内最高已用百分比（最紧张）
-  remainingPercent: number  // 100 - usedPercent
-  resetSeconds: number | null
-}
-
-function getAntigravityQuotaSummary(metadata: UpstreamMetadata | null | undefined): AntigravityQuotaSummaryItem[] {
-  const items = getAntigravityQuotaItems(metadata)
-  if (!items.length) return []
-
-  // 将每个模型归入分组
-  const groupMap = new Map<string, { label: string, maxUsed: number, resetSeconds: number | null }>()
-
-  for (const item of items) {
-    const model = item.model.toLowerCase()
-    const group = ANTIGRAVITY_QUOTA_GROUPS.find(g => g.match(model))
-    if (!group) continue
-
-    const existing = groupMap.get(group.key)
-    if (!existing) {
-      groupMap.set(group.key, {
-        label: group.label,
-        maxUsed: item.usedPercent,
-        resetSeconds: item.resetSeconds,
-      })
-    } else {
-      if (item.usedPercent > existing.maxUsed) {
-        existing.maxUsed = item.usedPercent
-      }
-      if (existing.resetSeconds === null) {
-        existing.resetSeconds = item.resetSeconds
-      } else if (item.resetSeconds !== null && item.resetSeconds < existing.resetSeconds) {
-        existing.resetSeconds = item.resetSeconds
-      }
-    }
-  }
-
-  // 按 ANTIGRAVITY_QUOTA_GROUPS 定义的顺序输出
-  const result: AntigravityQuotaSummaryItem[] = []
-  for (const group of ANTIGRAVITY_QUOTA_GROUPS) {
-    const data = groupMap.get(group.key)
-    if (!data) continue
-    result.push({
-      key: group.key,
-      label: data.label,
-      usedPercent: data.maxUsed,
-      remainingPercent: Math.max(100 - data.maxUsed, 0),
-      resetSeconds: data.resetSeconds,
-    })
-  }
-  return result
-}
-
-function getAntigravityQuotaSummaryForKey(key: EndpointAPIKey): AntigravityQuotaSummaryItem[] {
+function getAntigravityQuotaItemsForKey(key: EndpointAPIKey): AntigravityQuotaItem[] {
   const snapshotItems = getAntigravityQuotaItemsFromSnapshot(key)
-  if (snapshotItems.length > 0) {
-    const groupMap = new Map<string, { label: string, maxUsed: number, resetSeconds: number | null }>()
+  if (snapshotItems.length > 0) return snapshotItems
+  return getAntigravityQuotaItems(key.upstream_metadata)
+}
 
-    for (const item of snapshotItems) {
-      const model = item.model.toLowerCase()
-      const group = ANTIGRAVITY_QUOTA_GROUPS.find(g => g.match(model))
-      if (!group) continue
+function getAntigravityQuotaPreviewForKey(key: EndpointAPIKey): AntigravityQuotaItem[] {
+  return getAntigravityQuotaItemsForKey(key).slice(0, ANTIGRAVITY_QUOTA_PREVIEW_LIMIT)
+}
 
-      const existing = groupMap.get(group.key)
-      if (!existing) {
-        groupMap.set(group.key, {
-          label: group.label,
-          maxUsed: item.usedPercent,
-          resetSeconds: item.resetSeconds,
-        })
-      } else {
-        if (item.usedPercent > existing.maxUsed) {
-          existing.maxUsed = item.usedPercent
-        }
-        if (existing.resetSeconds === null) {
-          existing.resetSeconds = item.resetSeconds
-        } else if (item.resetSeconds !== null && item.resetSeconds < existing.resetSeconds) {
-          existing.resetSeconds = item.resetSeconds
-        }
-      }
-    }
-
-    const result: AntigravityQuotaSummaryItem[] = []
-    for (const group of ANTIGRAVITY_QUOTA_GROUPS) {
-      const data = groupMap.get(group.key)
-      if (!data) continue
-      result.push({
-        key: group.key,
-        label: data.label,
-        usedPercent: data.maxUsed,
-        remainingPercent: Math.max(100 - data.maxUsed, 0),
-        resetSeconds: data.resetSeconds,
-      })
-    }
-    return result
-  }
-
-  return getAntigravityQuotaSummary(key.upstream_metadata)
+function getAntigravityQuotaHiddenCountForKey(key: EndpointAPIKey): number {
+  return Math.max(getAntigravityQuotaItemsForKey(key).length - ANTIGRAVITY_QUOTA_PREVIEW_LIMIT, 0)
 }
 
 function getResetCountdownText(

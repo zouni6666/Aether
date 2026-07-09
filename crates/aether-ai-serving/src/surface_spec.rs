@@ -142,6 +142,17 @@ pub fn extract_ai_standard_requested_model(body_json: &Value) -> Option<String> 
         .map(ToOwned::to_owned)
 }
 
+pub fn extract_ai_gemini_body_requested_target(body_json: &Value) -> Option<String> {
+    extract_ai_standard_requested_model(body_json).or_else(|| {
+        body_json
+            .get("agent")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
 pub fn extract_ai_requested_model_from_request_path(
     request_path: &str,
     body_json: &Value,
@@ -150,7 +161,7 @@ pub fn extract_ai_requested_model_from_request_path(
     match family {
         AiRequestedModelFamily::Standard => extract_ai_standard_requested_model(body_json),
         AiRequestedModelFamily::Gemini => extract_ai_gemini_model_from_path(request_path)
-            .or_else(|| extract_ai_standard_requested_model(body_json)),
+            .or_else(|| extract_ai_gemini_body_requested_target(body_json)),
     }
 }
 
@@ -244,5 +255,19 @@ mod tests {
         );
 
         assert_eq!(requested_model.as_deref(), Some("gemini-cli"));
+    }
+
+    #[test]
+    fn gemini_requested_model_parser_uses_body_agent_when_path_has_no_model() {
+        let requested_model = extract_ai_requested_model_from_request_path(
+            "/v1/interactions",
+            &serde_json::json!({ "agent": " antigravity-preview-05-2026 " }),
+            AiRequestedModelFamily::Gemini,
+        );
+
+        assert_eq!(
+            requested_model.as_deref(),
+            Some("antigravity-preview-05-2026")
+        );
     }
 }

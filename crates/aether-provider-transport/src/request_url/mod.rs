@@ -150,6 +150,9 @@ fn build_transport_request_url_inner(
             params.request_query,
             gemini_embedding_batch,
         ),
+        "gemini:interactions" => {
+            build_gemini_interactions_url(&transport.endpoint.base_url, params.request_query)
+        }
         "doubao:embedding" => build_passthrough_path_url(
             &transport.endpoint.base_url,
             "/embeddings",
@@ -345,7 +348,9 @@ fn build_transport_hook_url(
         _ => {}
     }
 
-    if is_antigravity_provider_transport(transport) {
+    if is_antigravity_provider_transport(transport)
+        && normalized_provider_api_format == "gemini:generate_content"
+    {
         let query = params.request_query.map(|raw| {
             form_urlencoded::parse(raw.as_bytes())
                 .into_owned()
@@ -398,7 +403,8 @@ fn build_path_params(
     }
     let provider_api_format =
         aether_ai_formats::normalize_api_format_alias(params.provider_api_format);
-    if provider_api_format.starts_with("gemini:") {
+    if provider_api_format == "gemini:generate_content" || provider_api_format == "gemini:embedding"
+    {
         path_params.insert(
             "action",
             if provider_api_format == "gemini:embedding" {
@@ -443,6 +449,10 @@ fn build_aliyun_multimodal_embedding_url(
 
 fn build_provider_rerank_v1_url(upstream_base_url: &str, query: Option<&str>) -> Option<String> {
     build_provider_api_root_url(upstream_base_url, "/rerank", query)
+}
+
+fn build_gemini_interactions_url(upstream_base_url: &str, query: Option<&str>) -> Option<String> {
+    build_passthrough_path_url(upstream_base_url, "/v1/interactions", query, &["key"])
 }
 
 fn build_provider_api_root_url(
@@ -1113,6 +1123,103 @@ mod tests {
             )
             .as_deref(),
             Some("https://dashscope.aliyuncs.com/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding")
+        );
+    }
+
+    #[test]
+    fn gemini_interactions_request_url_uses_stable_v1_endpoint() {
+        let gemini = sample_transport(
+            "gemini",
+            "gemini:interactions",
+            "https://generativelanguage.googleapis.com",
+            None,
+        );
+        let versioned = sample_transport(
+            "gemini",
+            "gemini:interactions",
+            "https://generativelanguage.googleapis.com/v1",
+            None,
+        );
+
+        assert_eq!(
+            build_transport_request_url(
+                &gemini,
+                TransportRequestUrlParams {
+                    provider_api_format: "gemini:interactions",
+                    mapped_model: Some("gemini-3.5-flash"),
+                    upstream_is_stream: false,
+                    request_query: Some("key=client-key&trace=1"),
+                    kiro_api_region: None,
+                },
+            )
+            .as_deref(),
+            Some("https://generativelanguage.googleapis.com/v1/interactions?trace=1")
+        );
+        assert_eq!(
+            build_transport_request_url(
+                &versioned,
+                TransportRequestUrlParams {
+                    provider_api_format: "gemini:interactions",
+                    mapped_model: Some("gemini-3.5-flash"),
+                    upstream_is_stream: true,
+                    request_query: Some("key=client-key&trace=2"),
+                    kiro_api_region: None,
+                },
+            )
+            .as_deref(),
+            Some("https://generativelanguage.googleapis.com/v1/interactions?trace=2")
+        );
+    }
+
+    #[test]
+    fn antigravity_hook_is_limited_to_generate_content() {
+        let transport = sample_transport(
+            "antigravity",
+            "gemini:interactions",
+            "https://daily-cloudcode-pa.googleapis.com",
+            None,
+        );
+
+        assert_eq!(
+            build_transport_request_url(
+                &transport,
+                TransportRequestUrlParams {
+                    provider_api_format: "gemini:interactions",
+                    mapped_model: Some("gemini-3.5-flash"),
+                    upstream_is_stream: false,
+                    request_query: Some("key=client-key"),
+                    kiro_api_region: None,
+                },
+            )
+            .as_deref(),
+            Some("https://daily-cloudcode-pa.googleapis.com/v1/interactions")
+        );
+    }
+
+    #[test]
+    fn antigravity_generate_content_drops_client_api_key_query() {
+        let transport = sample_transport(
+            "antigravity",
+            "gemini:generate_content",
+            "https://daily-cloudcode-pa.googleapis.com",
+            None,
+        );
+
+        assert_eq!(
+            build_transport_request_url(
+                &transport,
+                TransportRequestUrlParams {
+                    provider_api_format: "gemini:generate_content",
+                    mapped_model: Some("gemini-3-flash-agent"),
+                    upstream_is_stream: true,
+                    request_query: Some("key=client-aether-key&trace=1&beta=true"),
+                    kiro_api_region: None,
+                },
+            )
+            .as_deref(),
+            Some(
+                "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse&trace=1"
+            )
         );
     }
 

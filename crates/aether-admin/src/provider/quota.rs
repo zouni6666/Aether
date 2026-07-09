@@ -223,13 +223,19 @@ pub fn parse_antigravity_usage_response(
 ) -> Option<serde_json::Value> {
     let models = value.get("models")?.as_object()?;
     let mut quota_by_model = serde_json::Map::new();
+    let mut opaque_key_display_index = 1usize;
 
     for (model_id, model_value) in models {
         let mut payload = serde_json::Map::new();
-        if let Some(display_name) = coerce_json_string(
+        let upstream_display_name = coerce_json_string(
             model_value
                 .get("displayName")
                 .or_else(|| model_value.get("display_name")),
+        );
+        if let Some(display_name) = friendly_quota_display_name(
+            upstream_display_name,
+            model_id,
+            &mut opaque_key_display_index,
         ) {
             payload.insert("display_name".to_string(), json!(display_name));
         }
@@ -270,6 +276,7 @@ pub fn parse_gemini_cli_retrieve_user_quota_response(
 ) -> Option<serde_json::Value> {
     let buckets = value.get("buckets")?.as_array()?;
     let mut quota_by_model = serde_json::Map::new();
+    let mut opaque_key_display_index = 1usize;
 
     for bucket in buckets {
         if !bucket.is_object() {
@@ -319,6 +326,12 @@ pub fn parse_gemini_cli_retrieve_user_quota_response(
         )
         .or_else(|| model_id.clone())
         .or_else(|| token_type.clone())
+        .unwrap_or_else(|| quota_key.clone());
+        let display_name = friendly_quota_display_name(
+            Some(display_name),
+            &quota_key,
+            &mut opaque_key_display_index,
+        )
         .unwrap_or_else(|| quota_key.clone());
         let remaining_fraction = first_json_f64_by_paths(
             bucket,
@@ -454,6 +467,38 @@ pub fn parse_gemini_cli_retrieve_user_quota_response(
         "updated_at": updated_at_unix_secs,
         "quota_by_model": quota_by_model,
     }))
+}
+
+fn is_opaque_reset_credit_quota_identifier(value: &str) -> bool {
+    value.trim().starts_with("RateLimitResetCredit_")
+}
+
+fn friendly_quota_display_name(
+    candidate: Option<String>,
+    quota_key: &str,
+    opaque_key_display_index: &mut usize,
+) -> Option<String> {
+    let candidate = candidate
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    if let Some(candidate) = candidate.as_deref() {
+        if !is_opaque_reset_credit_quota_identifier(candidate) {
+            return Some(candidate.to_string());
+        }
+    }
+
+    if is_opaque_reset_credit_quota_identifier(quota_key)
+        || candidate
+            .as_deref()
+            .is_some_and(is_opaque_reset_credit_quota_identifier)
+    {
+        let label = format!("Key-{}", *opaque_key_display_index);
+        *opaque_key_display_index += 1;
+        return Some(label);
+    }
+
+    candidate
 }
 
 pub fn parse_gemini_cli_v1internal_credits_response(
@@ -1999,9 +2044,10 @@ pub fn parse_chatgpt_web_conversation_init_response(
 mod tests {
     use super::{
         codex_build_invalid_state, codex_runtime_invalid_reason,
-        normalize_codex_reset_credit_consume_outcome, parse_chatgpt_web_conversation_init_response,
-        parse_codex_backend_me_response, parse_codex_wham_reset_credits_detail_response,
-        parse_codex_wham_usage_response, parse_gemini_cli_retrieve_user_quota_response,
+        normalize_codex_reset_credit_consume_outcome, parse_antigravity_usage_response,
+        parse_chatgpt_web_conversation_init_response, parse_codex_backend_me_response,
+        parse_codex_wham_reset_credits_detail_response, parse_codex_wham_usage_response,
+        parse_gemini_cli_retrieve_user_quota_response,
         parse_gemini_cli_v1internal_credits_response, parse_windsurf_model_configs_response,
         parse_windsurf_rate_limit_response, parse_windsurf_user_status_response,
         provider_auto_remove_quota_exhausted_keys, quota_refresh_success_invalid_state,
@@ -2539,6 +2585,40 @@ mod tests {
     }
 
     #[test]
+    fn parses_antigravity_usage_response_labels_opaque_reset_credit_keys() {
+        let parsed = parse_antigravity_usage_response(
+            &json!({
+                "models": {
+                    "RateLimitResetCredit_05cbb6eeeb9c81918e011d8300f9ebfb": {
+                        "quotaInfo": {
+                            "remainingFraction": 0.75,
+                            "resetTime": "2030-01-01T00:00:00Z"
+                        }
+                    },
+                    "gemini-3-pro-preview": {
+                        "displayName": "Gemini 3 Pro Preview",
+                        "quotaInfo": {
+                            "remainingFraction": 0.25
+                        }
+                    }
+                }
+            }),
+            1_777_000_000,
+        )
+        .expect("antigravity quota should parse");
+
+        assert_eq!(
+            parsed["models"]["RateLimitResetCredit_05cbb6eeeb9c81918e011d8300f9ebfb"]
+                ["display_name"],
+            json!("Key-1")
+        );
+        assert_eq!(
+            parsed["models"]["gemini-3-pro-preview"]["display_name"],
+            json!("Gemini 3 Pro Preview")
+        );
+    }
+
+    #[test]
     fn parses_gemini_cli_retrieve_user_quota_buckets() {
         let parsed = parse_gemini_cli_retrieve_user_quota_response(
             &json!({
@@ -2592,6 +2672,38 @@ mod tests {
         assert_eq!(
             parsed["quota_by_model"]["gemini-2.5-flash"]["used_percent"],
             json!(100.0)
+        );
+    }
+
+    #[test]
+    fn parses_gemini_cli_quota_buckets_labels_opaque_reset_credit_keys() {
+        let parsed = parse_gemini_cli_retrieve_user_quota_response(
+            &json!({
+                "buckets": [
+                    {
+                        "tokenType": "RateLimitResetCredit_05cbb6eeeb9c81918e011d8300f9ebfb",
+                        "remainingFraction": 0.5
+                    },
+                    {
+                        "modelId": "RateLimitResetCredit_d18b8aac4ec2472697ad747a14975ac8",
+                        "displayName": "RateLimitResetCredit_d18b8aac4ec2472697ad747a14975ac8",
+                        "remainingFraction": 0.25
+                    }
+                ]
+            }),
+            1_777_000_000,
+        )
+        .expect("gemini cli quota should parse");
+
+        assert_eq!(
+            parsed["quota_by_model"]["RateLimitResetCredit_05cbb6eeeb9c81918e011d8300f9ebfb"]
+                ["display_name"],
+            json!("Key-1")
+        );
+        assert_eq!(
+            parsed["quota_by_model"]["RateLimitResetCredit_d18b8aac4ec2472697ad747a14975ac8"]
+                ["display_name"],
+            json!("Key-2")
         );
     }
 

@@ -17,6 +17,7 @@ describe('api format display helpers', () => {
     expect(normalizeApiFormatAlias('GEMINI_GENERATE_CONTENT')).toBe(API_FORMATS.GEMINI_GENERATE_CONTENT)
     expect(normalizeApiFormatAlias('OPENAI_EMBEDDING')).toBe(API_FORMATS.OPENAI_EMBEDDING)
     expect(normalizeApiFormatAlias('OPENAI_RERANK')).toBe(API_FORMATS.OPENAI_RERANK)
+    expect(normalizeApiFormatAlias('GEMINI_INTERACTIONS')).toBe(API_FORMATS.GEMINI_INTERACTIONS)
     expect(normalizeApiFormatAlias('GEMINI_EMBEDDING')).toBe(API_FORMATS.GEMINI_EMBEDDING)
     expect(normalizeApiFormatAlias('JINA_EMBEDDING')).toBe(API_FORMATS.JINA_EMBEDDING)
     expect(normalizeApiFormatAlias('JINA_RERANK')).toBe(API_FORMATS.JINA_RERANK)
@@ -33,6 +34,8 @@ describe('api format display helpers', () => {
   })
 
   it('formats embedding api format ids distinctly from chat formats', () => {
+    expect(formatApiFormat(API_FORMATS.GEMINI_INTERACTIONS)).toBe('Gemini Interactions')
+    expect(formatApiFormatShort(API_FORMATS.GEMINI_INTERACTIONS)).toBe('GI')
     expect(formatApiFormat(API_FORMATS.OPENAI_EMBEDDING)).toBe('OpenAI Embedding')
     expect(formatApiFormat(API_FORMATS.GEMINI_EMBEDDING)).toBe('Gemini Embedding')
     expect(formatApiFormat(API_FORMATS.JINA_EMBEDDING)).toBe('Jina Embedding')
@@ -73,6 +76,7 @@ describe('api format display helpers', () => {
       API_FORMATS.OPENAI_RESPONSES,
       API_FORMATS.OPENAI_EMBEDDING,
       API_FORMATS.OPENAI_RERANK,
+      API_FORMATS.GEMINI_INTERACTIONS,
       API_FORMATS.GEMINI_EMBEDDING,
       API_FORMATS.JINA_EMBEDDING,
       API_FORMATS.JINA_RERANK,
@@ -82,6 +86,7 @@ describe('api format display helpers', () => {
       API_FORMATS.OPENAI_RESPONSES,
       API_FORMATS.OPENAI_EMBEDDING,
       API_FORMATS.OPENAI_RERANK,
+      API_FORMATS.GEMINI_INTERACTIONS,
       API_FORMATS.GEMINI_EMBEDDING,
       API_FORMATS.JINA_EMBEDDING,
       API_FORMATS.JINA_RERANK,
@@ -97,12 +102,14 @@ describe('api format display helpers', () => {
       API_FORMATS.OPENAI_EMBEDDING,
       API_FORMATS.OPENAI_RERANK,
       API_FORMATS.GEMINI_GENERATE_CONTENT,
+      API_FORMATS.GEMINI_INTERACTIONS,
       API_FORMATS.OPENAI,
     ])).toEqual([
       API_FORMATS.OPENAI,
       API_FORMATS.OPENAI_EMBEDDING,
       API_FORMATS.OPENAI_RERANK,
       API_FORMATS.GEMINI_GENERATE_CONTENT,
+      API_FORMATS.GEMINI_INTERACTIONS,
       API_FORMATS.GEMINI_EMBEDDING,
     ])
   })

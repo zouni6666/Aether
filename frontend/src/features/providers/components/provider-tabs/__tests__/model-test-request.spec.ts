@@ -86,6 +86,17 @@ describe('buildDefaultModelTestRequestBody', () => {
     expect(body.messages).toBeUndefined()
   })
 
+  it('uses Gemini Interactions payloads for interaction endpoints', () => {
+    const body = JSON.parse(buildDefaultModelTestRequestBody('gemini-3.5-flash', 'gemini:interactions'))
+
+    expect(body).toEqual({
+      model: 'gemini-3.5-flash',
+      input: 'Hello! This is a test message.',
+      stream: true,
+    })
+    expect(body.messages).toBeUndefined()
+  })
+
   it('uses image generation tools for image models on OpenAI Responses endpoints', () => {
     const body = JSON.parse(buildDefaultModelTestRequestBody(
       'gpt-image-2',

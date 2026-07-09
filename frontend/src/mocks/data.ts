@@ -1192,6 +1192,7 @@ export const MOCK_API_FORMATS = {
     { value: 'openai:image', label: 'OpenAI Image', default_path: '/v1/images/generations', aliases: [] },
     { value: 'openai:video', label: 'OpenAI Video', default_path: '/v1/videos', aliases: [] },
     { value: 'gemini:generate_content', label: 'Gemini Generate Content', default_path: '/v1beta/models/{model}:{action}', aliases: [] },
+    { value: 'gemini:interactions', label: 'Gemini Interactions', default_path: '/v1/interactions', aliases: [] },
     { value: 'gemini:embedding', label: 'Gemini Embedding', default_path: '/v1beta/models/{model}:embedContent', aliases: [] },
     { value: 'gemini:video', label: 'Gemini Video', default_path: '/v1beta/models/{model}:predictLongRunning', aliases: [] },
     { value: 'jina:embedding', label: 'Jina Embedding', default_path: '/v1/embeddings', aliases: [] },

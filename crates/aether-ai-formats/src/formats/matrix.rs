@@ -45,6 +45,7 @@ const EMBEDDING_CANDIDATE_API_FORMATS: &[&str] = &[
     "aliyun:multimodal_embedding",
 ];
 const RERANK_CANDIDATE_API_FORMATS: &[&str] = &["openai:rerank", "jina:rerank"];
+const GEMINI_INTERACTIONS_CANDIDATE_API_FORMATS: &[&str] = &["gemini:interactions"];
 
 pub fn request_candidate_api_format_preference(
     client_api_format: &str,
@@ -55,6 +56,9 @@ pub fn request_candidate_api_format_preference(
 
     if client_api_format == "openai:responses:compact" {
         return (provider_api_format == "openai:responses:compact").then_some((0, 0));
+    }
+    if is_gemini_interactions_api_format(client_api_format.as_str()) {
+        return (provider_api_format == "gemini:interactions").then_some((0, 0));
     }
     if is_embedding_api_format(client_api_format.as_str()) {
         return is_embedding_api_format(provider_api_format.as_str()).then_some((
@@ -104,6 +108,9 @@ pub fn request_candidate_api_formats(
     let client_api_format = normalize_api_format_alias(client_api_format);
     if client_api_format == "openai:responses:compact" {
         return vec!["openai:responses:compact"];
+    }
+    if is_gemini_interactions_api_format(client_api_format.as_str()) {
+        return GEMINI_INTERACTIONS_CANDIDATE_API_FORMATS.to_vec();
     }
     if is_embedding_api_format(client_api_format.as_str()) {
         let mut candidate_api_formats = EMBEDDING_CANDIDATE_API_FORMATS.to_vec();
@@ -254,6 +261,10 @@ pub fn is_rerank_api_format(api_format: &str) -> bool {
     )
 }
 
+pub fn is_gemini_interactions_api_format(api_format: &str) -> bool {
+    normalize_api_format_alias(api_format) == "gemini:interactions"
+}
+
 pub fn parse_non_compact_standard_api_format(
     api_format: &str,
 ) -> Option<(&'static str, &'static str)> {
@@ -270,6 +281,7 @@ pub fn api_data_format_id(api_format: &str) -> Option<&'static str> {
     match normalize_api_format_alias(api_format).as_str() {
         "claude:messages" => Some("claude"),
         "gemini:generate_content" => Some("gemini"),
+        "gemini:interactions" => Some("gemini_interactions"),
         "openai:chat" => Some("openai_chat"),
         "openai:responses" | "openai:responses:compact" => Some("openai_responses"),
         "openai:embedding"
@@ -313,11 +325,12 @@ fn rerank_api_format_priority(api_format: &str) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        api_data_format_id, is_embedding_api_format, is_rerank_api_format,
-        request_candidate_api_format_preference, request_candidate_api_formats,
-        request_conversion_kind, request_conversion_requires_enable_flag,
-        sync_chat_response_conversion_kind, sync_cli_response_conversion_kind,
-        RequestConversionKind, SyncChatResponseConversionKind, SyncCliResponseConversionKind,
+        api_data_format_id, is_embedding_api_format, is_gemini_interactions_api_format,
+        is_rerank_api_format, request_candidate_api_format_preference,
+        request_candidate_api_formats, request_conversion_kind,
+        request_conversion_requires_enable_flag, sync_chat_response_conversion_kind,
+        sync_cli_response_conversion_kind, RequestConversionKind, SyncChatResponseConversionKind,
+        SyncCliResponseConversionKind,
     };
 
     fn expected_request_conversion_kind(provider_api_format: &str) -> RequestConversionKind {
@@ -579,6 +592,38 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn gemini_interactions_stays_same_format_only() {
+        assert!(is_gemini_interactions_api_format("gemini:interactions"));
+        assert_eq!(
+            request_candidate_api_formats("gemini:interactions", false),
+            vec!["gemini:interactions"]
+        );
+        assert_eq!(
+            request_candidate_api_format_preference("gemini:interactions", "gemini:interactions"),
+            Some((0, 0))
+        );
+        assert_eq!(
+            request_candidate_api_format_preference(
+                "gemini:interactions",
+                "gemini:generate_content"
+            ),
+            None
+        );
+        assert_eq!(
+            request_conversion_kind("gemini:interactions", "gemini:generate_content"),
+            None
+        );
+        assert_eq!(
+            request_conversion_kind("gemini:generate_content", "gemini:interactions"),
+            None
+        );
+        assert_eq!(
+            api_data_format_id("gemini:interactions"),
+            Some("gemini_interactions")
+        );
     }
 
     #[test]

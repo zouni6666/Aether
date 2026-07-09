@@ -577,6 +577,44 @@ fn model_quota_window_snapshot(
     Some(Value::Object(window))
 }
 
+fn canonical_antigravity_model_label(model_name: &str) -> Option<&'static str> {
+    match model_name.trim() {
+        "claude-opus-4-6-thinking" => Some("Claude Opus 4.6 (Thinking)"),
+        "claude-sonnet-4-6" | "claude-sonnet-4-6-thinking" => Some("Claude Sonnet 4.6 (Thinking)"),
+        "gemini-3-flash-agent" => Some("Gemini 3.5 Flash (High)"),
+        "gemini-3.5-flash-low" => Some("Gemini 3.5 Flash (Medium)"),
+        "gemini-3.5-flash-extra-low" => Some("Gemini 3.5 Flash (Low)"),
+        "gemini-3.1-pro-high" | "gemini-pro-agent" => Some("Gemini 3.1 Pro (High)"),
+        "gemini-3.1-pro-low" => Some("Gemini 3.1 Pro (Low)"),
+        "gemini-3.1-flash-image" => Some("Gemini 3.1 Flash Image"),
+        "gemini-3.1-flash-lite" => Some("Gemini 3.1 Flash Lite"),
+        "gemini-3-flash" => Some("Gemini 3 Flash"),
+        "gemini-2.5-pro" => Some("Gemini 2.5 Pro"),
+        "gemini-2.5-flash-thinking" | "gemini-2.5-flash" | "gemini-2.5-flash-lite" => {
+            Some("Gemini 3.1 Flash Lite")
+        }
+        "gpt-oss-120b-medium" => Some("GPT-OSS 120B (Medium)"),
+        "tab_flash_lite_preview" => Some("Tab Flash Lite Preview"),
+        "tab_jump_flash_lite_preview" => Some("Tab Jump Flash Lite Preview"),
+        "models/proactive-observer" => Some("Proactive Observer"),
+        _ => None,
+    }
+}
+
+fn antigravity_model_quota_window_snapshot(
+    model_name: &str,
+    item: &Map<String, Value>,
+    observed_at_unix_secs: Option<u64>,
+) -> Option<Value> {
+    let mut window = model_quota_window_snapshot(model_name, item, observed_at_unix_secs)?;
+    if let Some(label) = canonical_antigravity_model_label(model_name) {
+        if let Some(window) = window.as_object_mut() {
+            window.insert("label".to_string(), json!(label));
+        }
+    }
+    Some(window)
+}
+
 fn provider_quota_metadata_string(
     metadata: &Map<String, Value>,
     fields: &[&str],
@@ -1466,7 +1504,7 @@ fn build_antigravity_quota_status_snapshot(
             models
                 .iter()
                 .filter_map(|(model_name, item)| {
-                    model_quota_window_snapshot(
+                    antigravity_model_quota_window_snapshot(
                         model_name,
                         item.as_object()?,
                         observed_at_unix_secs,
@@ -2309,7 +2347,7 @@ pub(crate) fn build_admin_provider_key_response(
     let request_count = u64::from(key.request_count.unwrap_or(0));
     let success_count = u64::from(key.success_count.unwrap_or(0));
     let error_count = u64::from(key.error_count.unwrap_or(0));
-    let total_response_time_ms = f64::from(key.total_response_time_ms.unwrap_or(0));
+    let total_response_time_ms = key.total_response_time_ms.unwrap_or(0) as f64;
     let success_rate = if request_count > 0 {
         success_count as f64 / request_count as f64
     } else {
@@ -3712,6 +3750,77 @@ mod tests {
         assert_eq!(
             quota.get("windows").and_then(Value::as_array).map(Vec::len),
             Some(2usize)
+        );
+    }
+
+    #[test]
+    fn sync_provider_key_quota_status_snapshot_labels_antigravity_models_by_model_id() {
+        let upstream_metadata = json!({
+            "antigravity": {
+                "updated_at": 1_775_553_285u64,
+                "quota_by_model": {
+                    "gemini-3.5-flash-extra-low": {
+                        "display_name": "Gemini 3.5 Flash (Low)",
+                        "remaining_fraction": 1.0
+                    },
+                    "gemini-3.5-flash-low": {
+                        "display_name": "Gemini 3.5 Flash (Medium)",
+                        "remaining_fraction": 0.75
+                    },
+                    "gemini-3-flash-agent": {
+                        "display_name": "Gemini 3.5 Flash (High)",
+                        "remaining_fraction": 0.5
+                    },
+                    "gemini-2.5-flash": {
+                        "display_name": "Gemini 3.1 Flash Lite",
+                        "remaining_fraction": 0.4
+                    },
+                    "claude-sonnet-4-6": {
+                        "display_name": "Claude Sonnet 4.6 (Thinking)",
+                        "remaining_fraction": 0.3
+                    }
+                }
+            }
+        });
+
+        let payload = sync_provider_key_quota_status_snapshot(
+            None,
+            "antigravity",
+            Some(&upstream_metadata),
+            "refresh_api",
+        )
+        .expect("quota snapshot should sync");
+        let windows = payload["quota"]["windows"]
+            .as_array()
+            .expect("quota windows should exist");
+        let label_for_model = |model: &str| {
+            windows
+                .iter()
+                .filter_map(Value::as_object)
+                .find(|window| window.get("model") == Some(&json!(model)))
+                .and_then(|window| window.get("label"))
+                .cloned()
+        };
+
+        assert_eq!(
+            label_for_model("gemini-3.5-flash-extra-low"),
+            Some(json!("Gemini 3.5 Flash (Low)"))
+        );
+        assert_eq!(
+            label_for_model("gemini-3.5-flash-low"),
+            Some(json!("Gemini 3.5 Flash (Medium)"))
+        );
+        assert_eq!(
+            label_for_model("gemini-3-flash-agent"),
+            Some(json!("Gemini 3.5 Flash (High)"))
+        );
+        assert_eq!(
+            label_for_model("gemini-2.5-flash"),
+            Some(json!("Gemini 3.1 Flash Lite"))
+        );
+        assert_eq!(
+            label_for_model("claude-sonnet-4-6"),
+            Some(json!("Claude Sonnet 4.6 (Thinking)"))
         );
     }
 

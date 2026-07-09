@@ -727,6 +727,7 @@ mod tests {
         build_gemini_cli_load_code_assist_plan, build_kiro_list_available_models_plan,
         build_models_fetch_execution_plan, build_standard_models_fetch_execution_plan,
         build_vertex_models_fetch_execution_plan, ModelFetchTransportRuntime,
+        ANTIGRAVITY_REQUEST_USER_AGENT,
     };
 
     struct TestRuntime {
@@ -1053,7 +1054,7 @@ mod tests {
         );
         assert_eq!(
             plan.headers.get("user-agent").map(String::as_str),
-            Some("antigravity")
+            Some(ANTIGRAVITY_REQUEST_USER_AGENT)
         );
         assert_eq!(
             plan.headers.get("x-client-name").map(String::as_str),
@@ -1100,7 +1101,7 @@ mod tests {
         );
         assert_eq!(
             plan.headers.get("user-agent").map(String::as_str),
-            Some("antigravity")
+            Some(ANTIGRAVITY_REQUEST_USER_AGENT)
         );
         assert_eq!(
             plan.headers.get("x-client-name").map(String::as_str),

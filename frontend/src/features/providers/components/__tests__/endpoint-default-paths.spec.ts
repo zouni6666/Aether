@@ -5,6 +5,7 @@ import { getDefaultEndpointBaseUrl, getDefaultEndpointPath } from '../endpoint-d
 const apiFormats = [
   { value: 'openai:chat', default_path: '/v1/chat/completions' },
   { value: 'gemini:generate_content', default_path: '/v1beta/models/{model}:{action}' },
+  { value: 'gemini:interactions', default_path: '/v1/interactions' },
   { value: 'gemini:embedding', default_path: '/v1beta/models/{model}:embedContent' },
   { value: 'gemini:video', default_path: '/v1beta/models/{model}:predictLongRunning' },
   { value: 'openai:responses', default_path: '/v1/responses' },
@@ -30,6 +31,12 @@ describe('endpoint default paths', () => {
       providerType: 'custom',
       apiFormats,
     })).toBe('/models/{model}:embedContent')
+
+    expect(getDefaultEndpointPath({
+      apiFormat: 'gemini:interactions',
+      providerType: 'custom',
+      apiFormats,
+    })).toBe('/interactions')
 
     expect(getDefaultEndpointPath({
       apiFormat: 'gemini:video',
@@ -217,6 +224,11 @@ describe('endpoint default paths', () => {
       apiFormat: 'gemini:embedding',
       baseUrl: 'https://generativelanguage.googleapis.com',
     })).toBe('https://generativelanguage.googleapis.com/v1beta')
+
+    expect(getDefaultEndpointBaseUrl({
+      apiFormat: 'gemini:interactions',
+      baseUrl: 'https://generativelanguage.googleapis.com',
+    })).toBe('https://generativelanguage.googleapis.com/v1')
 
     expect(getDefaultEndpointBaseUrl({
       apiFormat: 'gemini:video',

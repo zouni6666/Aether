@@ -141,6 +141,7 @@ mod tests {
         build_antigravity_safe_v1internal_request, classify_antigravity_safe_request_body,
         AntigravityEnvelopeRequestType, AntigravityRequestAuth, AntigravityRequestEnvelopeSupport,
     };
+    use crate::antigravity::ANTIGRAVITY_REQUEST_USER_AGENT;
 
     fn sample_auth() -> AntigravityRequestAuth {
         AntigravityRequestAuth {
@@ -228,7 +229,7 @@ mod tests {
         assert_eq!(envelope["project"], "project-ant-123");
         assert_eq!(envelope["requestId"], "request-ant-agent-123");
         assert_eq!(envelope["model"], "gemini-3.5-flash-low");
-        assert_eq!(envelope["userAgent"], "antigravity");
+        assert_eq!(envelope["userAgent"], ANTIGRAVITY_REQUEST_USER_AGENT);
         assert_eq!(envelope["requestType"], "agent");
         assert!(envelope["request"].get("model").is_none());
         assert!(envelope["request"].get("safetySettings").is_none());

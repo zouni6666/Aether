@@ -36,8 +36,8 @@ use crate::provider_key_auth::{
 use crate::provider_transport::antigravity::{
     build_antigravity_safe_v1internal_request, build_antigravity_static_identity_headers,
     classify_local_antigravity_request_support, AntigravityEnvelopeRequestType,
-    AntigravityRequestEnvelopeSupport, AntigravityRequestSideSupport,
-    AntigravityRequestSideUnsupportedReason,
+    AntigravityRequestAuthUnsupportedReason, AntigravityRequestEnvelopeSupport,
+    AntigravityRequestSideSupport, AntigravityRequestSideUnsupportedReason,
 };
 use crate::provider_transport::kiro::{
     build_kiro_generate_assistant_response_url, build_kiro_provider_headers,
@@ -1202,7 +1202,7 @@ fn provider_query_pool_catalog_key_context(
         .filter(|count| *count > 0)
         .zip(key.total_response_time_ms)
         .map(|(success_count, total_response_time_ms)| {
-            f64::from(total_response_time_ms) / f64::from(success_count)
+            total_response_time_ms as f64 / f64::from(success_count)
         })
         .filter(|value| value.is_finite() && *value >= 0.0);
 
@@ -2061,7 +2061,7 @@ async fn provider_query_execute_openai_image_test_candidate(
     trace_id: &str,
     requested_model: &str,
 ) -> Result<ProviderQueryExecutionOutcome, GatewayError> {
-    let Some(transport) = state
+    let Some(mut transport) = state
         .read_provider_transport_snapshot(&provider.id, &candidate.endpoint.id, &candidate.key.id)
         .await?
     else {
@@ -2429,7 +2429,7 @@ async fn provider_query_execute_antigravity_test_candidate(
     trace_id: &str,
     requested_model: &str,
 ) -> Result<ProviderQueryExecutionOutcome, GatewayError> {
-    let Some(transport) = state
+    let Some(mut transport) = state
         .read_provider_transport_snapshot(&provider.id, &candidate.endpoint.id, &candidate.key.id)
         .await?
     else {
@@ -2463,11 +2463,34 @@ async fn provider_query_execute_antigravity_test_candidate(
         ));
     };
 
-    let antigravity_spec = match classify_local_antigravity_request_support(
+    let mut antigravity_support = classify_local_antigravity_request_support(
         &transport,
         &base_provider_request_body,
         AntigravityEnvelopeRequestType::EndpointTest,
+    );
+    if matches!(
+        antigravity_support,
+        AntigravityRequestSideSupport::Unsupported(
+            AntigravityRequestSideUnsupportedReason::UnsupportedAuth(
+                AntigravityRequestAuthUnsupportedReason::MissingProjectId
+            )
+        )
     ) {
+        if let Some(hydrated) = state
+            .app()
+            .hydrate_antigravity_project_metadata_for_transport(&transport)
+            .await
+        {
+            transport = hydrated;
+            antigravity_support = classify_local_antigravity_request_support(
+                &transport,
+                &base_provider_request_body,
+                AntigravityEnvelopeRequestType::EndpointTest,
+            );
+        }
+    }
+
+    let antigravity_spec = match antigravity_support {
         AntigravityRequestSideSupport::Supported(spec) => spec,
         AntigravityRequestSideSupport::Unsupported(reason) => {
             let reason = provider_query_antigravity_unsupported_reason(reason);

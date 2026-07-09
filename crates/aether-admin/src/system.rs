@@ -806,6 +806,12 @@ const ADMIN_API_FORMAT_DEFINITIONS: &[AdminApiFormatDefinition] = &[
         aliases: &["gemini", "google", "vertex"],
     },
     AdminApiFormatDefinition {
+        value: "gemini:interactions",
+        label: "Gemini Interactions",
+        default_path: "/v1/interactions",
+        aliases: &["gemini_interactions", "interactions"],
+    },
+    AdminApiFormatDefinition {
         value: "gemini:embedding",
         label: "Gemini Embedding",
         default_path: "/v1beta/models/{model}:{action}",

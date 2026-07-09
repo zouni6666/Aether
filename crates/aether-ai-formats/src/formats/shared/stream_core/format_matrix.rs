@@ -274,6 +274,7 @@ impl ProviderStreamParser {
             FormatId::OpenAiEmbedding
             | FormatId::OpenAiRerank
             | FormatId::GeminiEmbedding
+            | FormatId::GeminiInteractions
             | FormatId::JinaEmbedding
             | FormatId::JinaRerank
             | FormatId::DoubaoEmbedding
@@ -365,6 +366,7 @@ impl ClientStreamEmitter {
             FormatId::OpenAiEmbedding
             | FormatId::OpenAiRerank
             | FormatId::GeminiEmbedding
+            | FormatId::GeminiInteractions
             | FormatId::JinaEmbedding
             | FormatId::JinaRerank
             | FormatId::DoubaoEmbedding
@@ -472,7 +474,9 @@ fn parse_provider_error(
             parse_openai_error(payload)
         }
         FormatId::ClaudeMessages => parse_claude_error(payload),
-        FormatId::GeminiGenerateContent => parse_gemini_error(payload),
+        FormatId::GeminiGenerateContent | FormatId::GeminiInteractions => {
+            parse_gemini_error(payload)
+        }
         FormatId::OpenAiEmbedding
         | FormatId::OpenAiRerank
         | FormatId::GeminiEmbedding

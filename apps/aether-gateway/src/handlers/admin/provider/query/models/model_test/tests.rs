@@ -679,6 +679,10 @@ fn provider_query_test_adapter_routes_fixed_provider_endpoint_types() {
         Some(ProviderQueryTestAdapter::Standard)
     );
     assert_eq!(
+        provider_query_test_adapter_for_provider_api_format("custom", "gemini:interactions"),
+        Some(ProviderQueryTestAdapter::Standard)
+    );
+    assert_eq!(
         provider_query_test_adapter_for_provider_api_format(
             "aliyun",
             "aliyun:multimodal_embedding"

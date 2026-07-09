@@ -14,6 +14,7 @@ pub const GEMINI_VIDEO_CANCEL_SYNC_PLAN_KIND: &str = "gemini_video_cancel_sync";
 pub const OPENAI_CHAT_STREAM_PLAN_KIND: &str = "openai_chat_stream";
 pub const CLAUDE_CHAT_STREAM_PLAN_KIND: &str = "claude_chat_stream";
 pub const GEMINI_CHAT_STREAM_PLAN_KIND: &str = "gemini_chat_stream";
+pub const GEMINI_INTERACTIONS_STREAM_PLAN_KIND: &str = "gemini_interactions_stream";
 pub const OPENAI_RESPONSES_STREAM_PLAN_KIND: &str = "openai_responses_stream";
 pub const OPENAI_RESPONSES_COMPACT_STREAM_PLAN_KIND: &str = "openai_responses_compact_stream";
 pub const CLAUDE_CLI_STREAM_PLAN_KIND: &str = "claude_cli_stream";
@@ -27,6 +28,7 @@ pub const OPENAI_RESPONSES_SYNC_PLAN_KIND: &str = "openai_responses_sync";
 pub const OPENAI_RESPONSES_COMPACT_SYNC_PLAN_KIND: &str = "openai_responses_compact_sync";
 pub const CLAUDE_CHAT_SYNC_PLAN_KIND: &str = "claude_chat_sync";
 pub const GEMINI_CHAT_SYNC_PLAN_KIND: &str = "gemini_chat_sync";
+pub const GEMINI_INTERACTIONS_SYNC_PLAN_KIND: &str = "gemini_interactions_sync";
 pub const CLAUDE_CLI_SYNC_PLAN_KIND: &str = "claude_cli_sync";
 pub const GEMINI_CLI_SYNC_PLAN_KIND: &str = "gemini_cli_sync";
 

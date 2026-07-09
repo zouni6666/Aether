@@ -98,11 +98,17 @@ function usesVersionedApiRootByDefault(apiFormat: string): boolean {
     || apiFormat === 'jina:rerank'
     || apiFormat === 'claude:messages'
     || apiFormat === 'gemini:generate_content'
+    || apiFormat === 'gemini:interactions'
     || apiFormat === 'gemini:embedding'
     || apiFormat === 'gemini:video'
 }
 
 function versionedApiRootSuffix(apiFormat: string): '/v1' | '/v1beta' {
+  if (
+    apiFormat === 'gemini:interactions'
+  ) {
+    return '/v1'
+  }
   if (
     apiFormat === 'gemini:generate_content'
     || apiFormat === 'gemini:embedding'
@@ -116,6 +122,7 @@ function versionedApiRootSuffix(apiFormat: string): '/v1' | '/v1beta' {
 function skipsVersionedApiRootDefault(apiFormat: string, baseUrl: string): boolean {
   if (
     apiFormat === 'gemini:generate_content'
+    || apiFormat === 'gemini:interactions'
     || apiFormat === 'gemini:embedding'
     || apiFormat === 'gemini:video'
   ) {

@@ -27,6 +27,7 @@ pub enum FormatId {
     OpenAiRerank,
     ClaudeMessages,
     GeminiGenerateContent,
+    GeminiInteractions,
     GeminiEmbedding,
     JinaEmbedding,
     JinaRerank,
@@ -51,7 +52,9 @@ impl FormatId {
             | Self::OpenAiEmbedding
             | Self::OpenAiRerank => FormatFamily::OpenAi,
             Self::ClaudeMessages => FormatFamily::Claude,
-            Self::GeminiGenerateContent | Self::GeminiEmbedding => FormatFamily::Gemini,
+            Self::GeminiGenerateContent | Self::GeminiInteractions | Self::GeminiEmbedding => {
+                FormatFamily::Gemini
+            }
             Self::JinaEmbedding | Self::JinaRerank => FormatFamily::Jina,
             Self::DoubaoEmbedding => FormatFamily::Doubao,
             Self::AliyunMultimodalEmbedding => FormatFamily::Aliyun,
@@ -74,6 +77,7 @@ impl FormatId {
             Self::OpenAiRerank => "openai:rerank",
             Self::ClaudeMessages => "claude:messages",
             Self::GeminiGenerateContent => "gemini:generate_content",
+            Self::GeminiInteractions => "gemini:interactions",
             Self::GeminiEmbedding => "gemini:embedding",
             Self::JinaEmbedding => "jina:embedding",
             Self::JinaRerank => "jina:rerank",
@@ -103,6 +107,12 @@ impl FromStr for FormatId {
             "openai:rerank" | "/v1/rerank" => Ok(Self::OpenAiRerank),
             "claude:messages" | "/v1/messages" => Ok(Self::ClaudeMessages),
             "gemini:generate_content" => Ok(Self::GeminiGenerateContent),
+            "gemini:interactions"
+            | "gemini:interaction"
+            | "gemini_interactions"
+            | "gemini_interaction"
+            | "/v1/interactions"
+            | "/v1beta/interactions" => Ok(Self::GeminiInteractions),
             "gemini:embedding" => Ok(Self::GeminiEmbedding),
             "jina:embedding" | "/jina/v1/embeddings" => Ok(Self::JinaEmbedding),
             "jina:rerank" | "/jina/v1/rerank" => Ok(Self::JinaRerank),
@@ -157,7 +167,12 @@ pub fn is_openai_responses_family_format(value: &str) -> bool {
 pub fn api_format_uses_body_stream_field(value: &str) -> bool {
     matches!(
         FormatId::parse(value).map(FormatId::canonical),
-        Some(FormatId::OpenAiChat | FormatId::OpenAiResponses | FormatId::ClaudeMessages)
+        Some(
+            FormatId::OpenAiChat
+                | FormatId::OpenAiResponses
+                | FormatId::ClaudeMessages
+                | FormatId::GeminiInteractions,
+        )
     )
 }
 
@@ -238,6 +253,33 @@ mod tests {
     }
 
     #[test]
+    fn parses_gemini_interactions_api_formats() {
+        use super::{FormatFamily, FormatProfile};
+
+        assert_eq!(
+            FormatId::parse("gemini:interactions"),
+            Some(FormatId::GeminiInteractions)
+        );
+        assert_eq!(
+            FormatId::parse("gemini_interactions"),
+            Some(FormatId::GeminiInteractions)
+        );
+        assert_eq!(
+            FormatId::parse("/v1/interactions"),
+            Some(FormatId::GeminiInteractions)
+        );
+        assert_eq!(
+            FormatId::GeminiInteractions.to_string(),
+            "gemini:interactions"
+        );
+        assert_eq!(FormatId::GeminiInteractions.family(), FormatFamily::Gemini);
+        assert_eq!(
+            FormatId::GeminiInteractions.profile(),
+            FormatProfile::Default
+        );
+    }
+
+    #[test]
     fn parses_rerank_api_formats() {
         assert_eq!(
             FormatId::parse("openai:rerank"),
@@ -294,6 +336,10 @@ mod tests {
             "gemini:generate_content"
         );
         assert_eq!(
+            normalize_api_format_alias("GEMINI_INTERACTIONS"),
+            "gemini:interactions"
+        );
+        assert_eq!(
             normalize_api_format_alias("OPENAI:EMBEDDING"),
             "openai:embedding"
         );
@@ -332,6 +378,10 @@ mod tests {
             vec!["gemini:generate_content".to_string()]
         );
         assert_eq!(
+            api_format_storage_aliases("gemini:interactions"),
+            vec!["gemini:interactions".to_string()]
+        );
+        assert_eq!(
             api_format_storage_aliases("openai:embedding"),
             vec!["openai:embedding".to_string()]
         );
@@ -364,6 +414,8 @@ mod tests {
         assert!(api_format_uses_body_stream_field("/v1/responses"));
         assert!(api_format_uses_body_stream_field("claude:messages"));
         assert!(api_format_uses_body_stream_field("/v1/messages"));
+        assert!(api_format_uses_body_stream_field("gemini:interactions"));
+        assert!(api_format_uses_body_stream_field("/v1/interactions"));
         assert!(!api_format_uses_body_stream_field(
             "openai:responses:compact"
         ));

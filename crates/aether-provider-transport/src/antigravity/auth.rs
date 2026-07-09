@@ -5,7 +5,8 @@ use serde_json::Value;
 use super::super::snapshot::GatewayProviderTransportSnapshot;
 
 pub const ANTIGRAVITY_PROVIDER_TYPE: &str = "antigravity";
-pub const ANTIGRAVITY_REQUEST_USER_AGENT: &str = "antigravity";
+pub const ANTIGRAVITY_REQUEST_USER_AGENT: &str =
+    "antigravity/cli/1.0.16 (aidev_client; os_type=linux; arch=arm64; auth_method=consumer)";
 const ANTIGRAVITY_CLIENT_NAME: &str = "antigravity";
 const ANTIGRAVITY_GOOG_API_CLIENT: &str = "gl-node/18.18.2 fire/0.8.6 grpc/1.10.x";
 
@@ -119,6 +120,10 @@ pub fn build_antigravity_static_client_headers(
         (
             String::from("x-goog-api-client"),
             String::from(ANTIGRAVITY_GOOG_API_CLIENT),
+        ),
+        (
+            String::from("user-agent"),
+            String::from(ANTIGRAVITY_REQUEST_USER_AGENT),
         ),
     ]);
 
@@ -267,8 +272,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        resolve_local_antigravity_request_auth, AntigravityRequestAuth,
-        AntigravityRequestAuthSupport,
+        build_antigravity_static_client_headers, resolve_local_antigravity_request_auth,
+        AntigravityRequestAuth, AntigravityRequestAuthSupport, ANTIGRAVITY_REQUEST_USER_AGENT,
     };
     use crate::snapshot::{
         GatewayProviderTransportEndpoint, GatewayProviderTransportKey,
@@ -374,6 +379,28 @@ mod tests {
                 client_version: Some("1.99.0".to_string()),
                 session_id: Some("session-from-metadata".to_string()),
             })
+        );
+    }
+
+    #[test]
+    fn static_client_headers_use_native_antigravity_cli_user_agent() {
+        let headers = build_antigravity_static_client_headers(Some("1.0.16"), Some("session-abc"));
+
+        assert_eq!(
+            headers.get("user-agent").map(String::as_str),
+            Some(ANTIGRAVITY_REQUEST_USER_AGENT)
+        );
+        assert_eq!(
+            headers.get("x-client-name").map(String::as_str),
+            Some("antigravity")
+        );
+        assert_eq!(
+            headers.get("x-client-version").map(String::as_str),
+            Some("1.0.16")
+        );
+        assert_eq!(
+            headers.get("x-vscode-sessionid").map(String::as_str),
+            Some("session-abc")
         );
     }
 }

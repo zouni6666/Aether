@@ -950,6 +950,10 @@ async fn gateway_handles_antigravity_v1internal_control_plane_without_proxying()
             json!({"project": "aether-antigravity-local"}),
         ),
         (
+            "/v1internal:retrieveUserQuotaSummary",
+            json!({"project": "aether-antigravity-local"}),
+        ),
+        (
             "/v1internal:fetchUserInfo",
             json!({"project": "aether-antigravity-local"}),
         ),
@@ -965,6 +969,10 @@ async fn gateway_handles_antigravity_v1internal_control_plane_without_proxying()
                 "requestId": "opaque-request-id",
                 "metrics": []
             }),
+        ),
+        (
+            "/v1internal:writeTrajectoryAcls",
+            json!({"trajectoryId": "trajectory-ant-123"}),
         ),
         (
             "/v1internal:setUserSettings",
@@ -1012,14 +1020,58 @@ async fn gateway_handles_antigravity_v1internal_control_plane_without_proxying()
                 );
             }
             "/v1internal:fetchAvailableModels" => {
-                assert_eq!(payload["defaultAgentModelId"], "gemini-3.1-flash-lite");
+                assert_eq!(payload["defaultAgentModelId"], "gemini-3.5-flash-low");
                 assert_eq!(
                     payload["tieredModelIds"]["flash"],
                     json!(["gemini-3-flash-agent"])
                 );
                 assert_eq!(
+                    payload["tieredModelIds"]["pro"],
+                    json!(["gemini-3.1-pro-low"])
+                );
+                assert_eq!(
+                    payload["models"]["gemini-3-flash-agent"]["displayName"],
+                    "Gemini 3.5 Flash (High)"
+                );
+                assert_eq!(
                     payload["models"]["gemini-3.5-flash-low"]["displayName"],
-                    "Gemini 3.5 Flash Low"
+                    "Gemini 3.5 Flash (Medium)"
+                );
+                assert_eq!(
+                    payload["models"]["gemini-3.5-flash-extra-low"]["displayName"],
+                    "Gemini 3.5 Flash (Low)"
+                );
+                assert_eq!(
+                    payload["models"]["gemini-pro-agent"]["displayName"],
+                    "Gemini 3.1 Pro (High)"
+                );
+                assert_eq!(
+                    payload["models"]["claude-opus-4-6-thinking"]["displayName"],
+                    "Claude Opus 4.6 (Thinking)"
+                );
+                assert_eq!(
+                    payload["models"]["gpt-oss-120b-medium"]["displayName"],
+                    "GPT-OSS 120B (Medium)"
+                );
+                assert_eq!(
+                    payload["models"]["gemini-pro-agent"]["model"],
+                    "MODEL_PLACEHOLDER_M16"
+                );
+                assert_eq!(
+                    payload["models"]["gemini-3.1-pro-high"]["model"],
+                    "MODEL_PLACEHOLDER_M37"
+                );
+                assert_eq!(
+                    payload["models"]["gemini-3.5-flash-extra-low"]["model"],
+                    "MODEL_PLACEHOLDER_M187"
+                );
+                assert_eq!(
+                    payload["models"]["claude-sonnet-4-6"]["apiProvider"],
+                    "API_PROVIDER_ANTHROPIC_VERTEX"
+                );
+                assert_eq!(
+                    payload["models"]["gpt-oss-120b-medium"]["apiProvider"],
+                    "API_PROVIDER_OPENAI_VERTEX"
                 );
                 assert_eq!(
                     payload["models"]["gemini-3.5-flash-low"]["apiProvider"],
@@ -1032,18 +1084,26 @@ async fn gateway_handles_antigravity_v1internal_control_plane_without_proxying()
                 assert_eq!(
                     payload["agentModelSorts"][0]["groups"][0]["modelIds"],
                     json!([
-                        "gemini-3.1-flash-lite",
+                        "gemini-3.5-flash-low",
                         "gemini-3-flash-agent",
+                        "gemini-3.5-flash-extra-low",
                         "gemini-3.1-pro-low",
-                        "gemini-3.5-flash-low"
+                        "gemini-pro-agent",
+                        "claude-sonnet-4-6",
+                        "claude-opus-4-6-thinking",
+                        "gpt-oss-120b-medium"
                     ])
                 );
-                assert_eq!(payload["deprecatedModelIds"], json!({}));
+                assert_eq!(
+                    payload["deprecatedModelIds"]["gemini-3.1-pro-high"]["newModelId"],
+                    "gemini-pro-agent"
+                );
                 assert_eq!(payload["commandModelIds"], json!(["gemini-3-flash"]));
                 assert_eq!(
                     payload["imageGenerationModelIds"],
                     json!(["gemini-3.1-flash-image"])
                 );
+                assert_eq!(payload["tabModelIds"], json!(["chat_20706", "chat_23310"]));
                 assert_eq!(payload["mqueryModelIds"], json!(["gemini-3.1-flash-lite"]));
                 assert_eq!(
                     payload["webSearchModelIds"],
@@ -1058,8 +1118,12 @@ async fn gateway_handles_antigravity_v1internal_control_plane_without_proxying()
                 assert_eq!(payload["regionCode"], "US");
                 assert_eq!(
                     payload["userSettings"]["preferredModelId"],
-                    "gemini-3.1-flash-lite"
+                    "gemini-3.5-flash-low"
                 );
+            }
+            "/v1internal:retrieveUserQuotaSummary" => {
+                assert_eq!(payload["description"], "");
+                assert_eq!(payload["groups"], json!([]));
             }
             "/v1internal:fetchAdminControls" => {
                 assert_eq!(payload, json!({}));
@@ -1069,6 +1133,9 @@ async fn gateway_handles_antigravity_v1internal_control_plane_without_proxying()
                 assert_eq!(payload["flags"], json!([]));
             }
             "/v1internal:recordCodeAssistMetrics" => {
+                assert_eq!(payload, json!({}));
+            }
+            "/v1internal:writeTrajectoryAcls" => {
                 assert_eq!(payload, json!({}));
             }
             "/v1internal:setUserSettings" => {
