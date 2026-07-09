@@ -792,6 +792,25 @@ describe('HorizontalRequestTimeline', () => {
     expect(detailText).not.toContain('未知')
   })
 
+  it('uses latency to display the time range when recorded finish time equals start time', async () => {
+    const trace = buildTrace([
+      buildCandidate({
+        id: 'cand-success-same-time',
+        status: 'success',
+        started_at: '2026-05-06T12:00:00.000Z',
+        finished_at: '2026-05-06T12:00:00.000Z',
+        latency_ms: 22200,
+      }),
+    ])
+
+    const root = mountTimeline(trace)
+    await nextTick()
+
+    const detailText = root.querySelector('.detail-panel')?.textContent ?? ''
+    expect(detailText).toContain('+22.20s')
+    expect(detailText).not.toContain('+0ms')
+  })
+
   it('follows the active key when silent polling updates the trace', async () => {
     const initialTrace = buildTrace([
       buildCandidate({

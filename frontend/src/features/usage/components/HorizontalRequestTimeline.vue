@@ -182,20 +182,20 @@
                 <!-- 核心信息网格 -->
                 <div class="info-grid">
                   <div
-                    v-if="currentAttempt.started_at"
+                    v-if="currentAttemptTimeRange"
                     class="info-item"
                   >
                     <span class="info-label">时间范围</span>
                     <span class="info-value mono time-range-value">
-                      {{ formatTime(currentAttempt.started_at) }}
+                      {{ formatTime(currentAttemptTimeRange.startIso) }}
                       <span class="time-arrow-container">
                         <span
-                          v-if="currentAttempt.finished_at"
+                          v-if="currentAttemptTimeRange.endIso"
                           class="time-duration"
-                        >+{{ formatDuration(currentAttempt.started_at, currentAttempt.finished_at) }}</span>
+                        >+{{ currentAttemptTimeRange.durationLabel }}</span>
                         <span class="time-arrow">→</span>
                       </span>
-                      {{ currentAttempt.finished_at ? formatTime(currentAttempt.finished_at) : '进行中' }}
+                      {{ currentAttemptTimeRange.endIso ? formatTime(currentAttemptTimeRange.endIso) : '进行中' }}
                     </span>
                   </div>
                   <div
@@ -568,6 +568,12 @@ interface NodeGroup {
   hasConversion: boolean  // 组内是否有格式转换候选
   providerApiFormat: string | null  // 提供商 API 格式（如 openai:responses）
   isPoolGroup?: boolean
+}
+
+interface AttemptTimeRange {
+  startIso: string
+  endIso?: string
+  durationLabel?: string
 }
 
 // 用量数据类型
@@ -1058,6 +1064,10 @@ const selectedGroup = computed(() => {
 const currentAttempt = computed(() => {
   if (!selectedGroup.value) return null
   return selectedGroup.value.allAttempts[selectedAttemptIndex.value] || selectedGroup.value.primary
+})
+
+const currentAttemptTimeRange = computed<AttemptTimeRange | null>(() => {
+  return resolveAttemptTimeRange(currentAttempt.value)
 })
 
 const currentAttemptDisplayStatus = computed(() => getDisplayStatus(currentAttempt.value))
@@ -2189,6 +2199,68 @@ onBeforeUnmount(() => {
 
 defineExpose({ refresh: () => loadTrace(true) })
 
+const TERMINAL_TIME_RANGE_STATUSES = new Set([
+  'success',
+  'failed',
+  'cancelled',
+  'stream_interrupted',
+])
+
+const parseTimestampMs = (value?: string | null): number | null => {
+  if (!value) return null
+  const timestamp = new Date(value).getTime()
+  return Number.isFinite(timestamp) ? timestamp : null
+}
+
+const normalizeLatencyMs = (value?: number | null): number | null => {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return null
+  return Math.round(value)
+}
+
+const formatDurationMs = (durationMs: number): string => {
+  const safeDurationMs = Math.max(0, Math.round(durationMs))
+  if (safeDurationMs >= 1000) {
+    return `${(safeDurationMs / 1000).toFixed(2)}s`
+  }
+  return `${safeDurationMs}ms`
+}
+
+const resolveAttemptTimeRange = (attempt: CandidateRecord | null | undefined): AttemptTimeRange | null => {
+  if (!attempt?.started_at) return null
+
+  const startMs = parseTimestampMs(attempt.started_at)
+  if (startMs == null) {
+    return {
+      startIso: attempt.started_at,
+      endIso: attempt.finished_at,
+      durationLabel: attempt.finished_at ? formatDuration(attempt.started_at, attempt.finished_at) : undefined,
+    }
+  }
+
+  const rawEndMs = parseTimestampMs(attempt.finished_at)
+  const latencyMs = normalizeLatencyMs(attempt.latency_ms)
+  let endMs = rawEndMs
+
+  if (
+    latencyMs != null &&
+    latencyMs > 0 &&
+    (endMs == null || endMs <= startMs) &&
+    (attempt.finished_at || TERMINAL_TIME_RANGE_STATUSES.has(attempt.status))
+  ) {
+    endMs = startMs + latencyMs
+  }
+
+  if (endMs == null) {
+    return { startIso: attempt.started_at }
+  }
+
+  return {
+    startIso: attempt.started_at,
+    endIso: new Date(endMs).toISOString(),
+    durationLabel: formatDurationMs(endMs - startMs),
+  }
+}
+
 // 格式化时间（详细）
 const formatTime = (dateStr: string) => {
   const date = new Date(dateStr)
@@ -2206,11 +2278,7 @@ const formatTime = (dateStr: string) => {
 const formatDuration = (startStr: string, endStr: string): string => {
   const start = new Date(startStr).getTime()
   const end = new Date(endStr).getTime()
-  const durationMs = end - start
-  if (durationMs >= 1000) {
-    return `${(durationMs / 1000).toFixed(2)}s`
-  }
-  return `${durationMs}ms`
+  return formatDurationMs(end - start)
 }
 
 // 获取状态标签
