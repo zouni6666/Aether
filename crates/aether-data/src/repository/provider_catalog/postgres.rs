@@ -1301,7 +1301,17 @@ INSERT INTO provider_api_keys (
         .bind(key.total_cost_usd)
         .bind(key.success_count.map(i64::from))
         .bind(key.error_count.map(i64::from))
-        .bind(key.total_response_time_ms.map(i64::from))
+        .bind(
+            key.total_response_time_ms
+                .map(|value| {
+                    i64::try_from(value).map_err(|_| {
+                        DataLayerError::InvalidInput(format!(
+                            "provider catalog key.total_response_time_ms exceeds i64: {value}"
+                        ))
+                    })
+                })
+                .transpose()?,
+        )
         .bind(key.last_used_at_unix_secs.map(|value| value as f64))
         .bind(key.last_models_fetch_at_unix_secs.map(|value| value as f64))
         .bind(&key.last_models_fetch_error)
@@ -2378,7 +2388,7 @@ fn map_key_row(row: &PgRow) -> Result<StoredProviderCatalogKey, DataLayerError> 
         .transpose()?;
     let total_response_time_ms = row_get::<Option<i64>>(row, "total_response_time_ms")?
         .map(|value| {
-            u32::try_from(value).map_err(|_| {
+            u64::try_from(value).map_err(|_| {
                 DataLayerError::UnexpectedValue(format!(
                     "invalid provider_api_keys.total_response_time_ms: {value}"
                 ))
