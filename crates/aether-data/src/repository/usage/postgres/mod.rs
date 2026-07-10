@@ -10461,6 +10461,27 @@ fn prepare_usage_body_storage(value: Option<&Value>) -> Result<UsageBodyStorage,
     })
 }
 
+fn usage_body_capture_state_for_storage(
+    incoming_state: Option<UsageBodyCaptureState>,
+    storage: &UsageBodyStorage,
+    body_ref: Option<&str>,
+) -> Option<UsageBodyCaptureState> {
+    if matches!(
+        incoming_state,
+        Some(
+            UsageBodyCaptureState::Disabled
+                | UsageBodyCaptureState::Unavailable
+                | UsageBodyCaptureState::None
+        )
+    ) {
+        return incoming_state;
+    }
+    if storage.has_detached_blob() || body_ref.is_some() {
+        return Some(UsageBodyCaptureState::Reference);
+    }
+    incoming_state
+}
+
 fn json_bind_text(value: Option<&Value>) -> Result<Option<String>, DataLayerError> {
     value
         .map(|value| {
@@ -10515,10 +10536,26 @@ fn prepare_usage_upsert_context(
         ),
     };
     let http_audit_states = UsageHttpAuditStates {
-        request_body_state: usage.request_body_state,
-        provider_request_body_state: usage.provider_request_body_state,
-        response_body_state: usage.response_body_state,
-        client_response_body_state: usage.client_response_body_state,
+        request_body_state: usage_body_capture_state_for_storage(
+            usage.request_body_state,
+            &request_body_storage,
+            http_audit_refs.request_body_ref.as_deref(),
+        ),
+        provider_request_body_state: usage_body_capture_state_for_storage(
+            usage.provider_request_body_state,
+            &provider_request_body_storage,
+            http_audit_refs.provider_request_body_ref.as_deref(),
+        ),
+        response_body_state: usage_body_capture_state_for_storage(
+            usage.response_body_state,
+            &response_body_storage,
+            http_audit_refs.response_body_ref.as_deref(),
+        ),
+        client_response_body_state: usage_body_capture_state_for_storage(
+            usage.client_response_body_state,
+            &client_response_body_storage,
+            http_audit_refs.client_response_body_ref.as_deref(),
+        ),
     };
     let request_metadata_value = prepare_request_metadata_for_body_storage(
         usage.request_metadata.clone(),

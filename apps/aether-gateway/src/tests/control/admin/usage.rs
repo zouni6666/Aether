@@ -12,7 +12,7 @@ use aether_data::repository::users::{
 use aether_data_contracts::repository::candidates::{
     RequestCandidateStatus, StoredRequestCandidate,
 };
-use aether_data_contracts::repository::usage::StoredRequestUsageAudit;
+use aether_data_contracts::repository::usage::{StoredRequestUsageAudit, UsageBodyCaptureState};
 use axum::body::{Body, Bytes};
 use axum::routing::{any, get, post};
 use axum::{extract::Request, Router};
@@ -2282,6 +2282,84 @@ async fn gateway_handles_admin_usage_detail_with_ref_backed_bodies() {
         payload["client_response_body"]["output_text"],
         "hello from ref"
     );
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_resolves_admin_usage_detail_when_inline_state_has_body_ref() {
+    let (_upstream_url, upstream_hits, upstream_handle) =
+        start_usage_upstream("/api/admin/usage/usage-inline-state-ref-detail").await;
+
+    let mut usage = sample_usage_row(
+        "usage-inline-state-ref-detail",
+        "req-inline-state-ref-detail",
+        Some("user-1"),
+        Some("key-1"),
+        Some("primary"),
+        "Gemini",
+        "gemini-3.5-flash",
+        "completed",
+        120,
+        30,
+        0.3,
+        0.36,
+        DAY_1_UNIX_SECS,
+    );
+    usage.request_body = Some(json!({
+        "contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+    }));
+    usage.provider_request_body = Some(json!({
+        "model": "gemini-3-flash-agent",
+        "request": {"contents": [{"role": "user", "parts": [{"text": "hello"}]}]},
+    }));
+    usage.response_body = Some(json!({
+        "chunks": [{"candidates": [{"content": {"parts": [{"text": "hello back"}]}}]}],
+    }));
+    usage.client_response_body = Some(json!({
+        "candidates": [{"content": {"parts": [{"text": "hello back"}]}}],
+    }));
+    usage.request_body_state = Some(UsageBodyCaptureState::Inline);
+    usage.provider_request_body_state = Some(UsageBodyCaptureState::Inline);
+    usage.response_body_state = Some(UsageBodyCaptureState::Inline);
+    usage.client_response_body_state = Some(UsageBodyCaptureState::Inline);
+
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed_with_detached_bodies(
+        vec![usage],
+    ));
+    let data_state = GatewayDataState::with_usage_reader_for_tests(usage_repository);
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(data_state),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = admin_request(reqwest::Client::new().get(format!(
+        "{gateway_url}/api/admin/usage/usage-inline-state-ref-detail"
+    )))
+    .send()
+    .await
+    .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["request_body"]["contents"][0]["role"], "user");
+    assert_eq!(
+        payload["provider_request_body"]["model"],
+        "gemini-3-flash-agent"
+    );
+    assert_eq!(
+        payload["response_body"]["chunks"][0]["candidates"][0]["content"]["parts"][0]["text"],
+        "hello back"
+    );
+    assert_eq!(
+        payload["client_response_body"]["candidates"][0]["content"]["parts"][0]["text"],
+        "hello back"
+    );
+    assert!(payload["body_load_errors"].is_null());
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

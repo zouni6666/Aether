@@ -101,25 +101,66 @@ pub fn normalize_provider_private_response_value(
             }
         }
         Some(ANTIGRAVITY_V1INTERNAL_ENVELOPE_NAME) => {
-            if let Some(response) = data
-                .get("response")
-                .and_then(Value::as_object)
-                .filter(|response| !response.contains_key("response"))
-            {
-                let mut unwrapped = response.clone();
-                if let Some(response_id) = data.get("responseId").cloned() {
-                    unwrapped.insert("_v1internal_response_id".to_string(), response_id);
-                }
-                Value::Object(unwrapped)
-            } else {
-                data
-            }
+            normalize_antigravity_sync_response_value(data, provider_api_format)
         }
         Some(WINDSURF_ENVELOPE_NAME) => normalize_windsurf_sync_response_value(data)?,
         _ => return None,
     };
     postprocess_private_response_value(&mut unwrapped, report_context);
     Some(unwrapped)
+}
+
+fn normalize_antigravity_sync_response_value(data: Value, provider_api_format: &str) -> Value {
+    if crate::normalize_api_format_alias(provider_api_format) == "gemini:generate_content" {
+        if let Some(aggregated) = aggregate_antigravity_gemini_chunks(&data) {
+            return aggregated;
+        }
+    }
+    if let Some(response) = data
+        .get("response")
+        .and_then(Value::as_object)
+        .filter(|response| !response.contains_key("response"))
+    {
+        let mut unwrapped = response.clone();
+        if let Some(response_id) = data.get("responseId").cloned() {
+            unwrapped.insert("_v1internal_response_id".to_string(), response_id);
+        }
+        Value::Object(unwrapped)
+    } else {
+        data
+    }
+}
+
+fn aggregate_antigravity_gemini_chunks(data: &Value) -> Option<Value> {
+    let chunks = data.get("chunks").and_then(Value::as_array)?;
+    if chunks.is_empty() {
+        return None;
+    }
+    let body = serde_json::to_vec(chunks).ok()?;
+    let mut aggregated =
+        crate::formats::shared::sync_products::aggregate_gemini_stream_sync_response(&body)?;
+    if let Some(response_id) = antigravity_chunks_response_id(chunks) {
+        if let Some(object) = aggregated.as_object_mut() {
+            if object.get("responseId").is_none_or(|value| value.is_null()) {
+                object.insert("responseId".to_string(), response_id);
+            }
+        }
+    }
+    Some(aggregated)
+}
+
+fn antigravity_chunks_response_id(chunks: &[Value]) -> Option<Value> {
+    chunks.iter().find_map(|chunk| {
+        chunk
+            .get("responseId")
+            .or_else(|| {
+                chunk
+                    .get("response")
+                    .and_then(|response| response.get("responseId"))
+            })
+            .cloned()
+            .filter(|value| !value.is_null())
+    })
 }
 
 pub fn transform_provider_private_stream_line(
@@ -912,6 +953,69 @@ mod tests {
             normalized["candidates"][0]["content"]["parts"][0]["functionCall"]["id"],
             json!("call_get_weather_0")
         );
+    }
+
+    #[test]
+    fn unwraps_antigravity_chunks_sync_response() {
+        let report_context = json!({
+            "has_envelope": true,
+            "provider_api_format": "gemini:generate_content",
+            "envelope_name": "antigravity:v1internal",
+            "mapped_model": "gemini-3-flash-agent",
+        });
+        let body = json!({
+            "chunks": [{
+                "response": {
+                    "responseId": "resp_antigravity_chunks_123",
+                    "candidates": [{
+                        "content": {
+                            "parts": [{"text": "Hello "}],
+                            "role": "model"
+                        },
+                        "index": 0
+                    }],
+                    "modelVersion": "gemini-3-flash-agent"
+                },
+                "traceId": "trace-antigravity-chunks"
+            }, {
+                "response": {
+                    "responseId": "resp_antigravity_chunks_123",
+                    "candidates": [{
+                        "content": {
+                            "parts": [{"text": "Gemini"}],
+                            "role": "model"
+                        },
+                        "finishReason": "STOP",
+                        "index": 0
+                    }],
+                    "modelVersion": "gemini-3-flash-agent",
+                    "usageMetadata": {
+                        "promptTokenCount": 2,
+                        "candidatesTokenCount": 2,
+                        "totalTokenCount": 4
+                    }
+                },
+                "traceId": "trace-antigravity-chunks"
+            }],
+            "metadata": {
+                "stream": true,
+                "stored_chunks": 2,
+                "total_chunks": 2
+            }
+        });
+
+        let normalized = normalize_provider_private_response_value(body, &report_context)
+            .expect("chunks should normalize");
+
+        assert_eq!(
+            normalized["candidates"][0]["content"]["parts"][0]["text"],
+            json!("Hello Gemini")
+        );
+        assert_eq!(
+            normalized["_v1internal_response_id"],
+            json!("resp_antigravity_chunks_123")
+        );
+        assert_eq!(normalized["usageMetadata"]["totalTokenCount"], json!(4));
     }
 
     #[test]

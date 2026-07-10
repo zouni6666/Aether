@@ -6,15 +6,16 @@ use super::{
     attach_usage_routing_snapshot_metadata, attach_usage_settlement_pricing_snapshot_metadata,
     inflate_usage_json_value, prepare_request_metadata_for_body_storage,
     prepare_usage_body_storage, resolved_read_usage_body_ref, resolved_write_usage_body_ref,
-    split_dashboard_daily_aggregate_range, split_dashboard_hourly_aggregate_range, usage_body_ref,
-    usage_http_audit_body_refs, usage_http_audit_capture_mode, usage_routing_snapshot_from_usage,
+    split_dashboard_daily_aggregate_range, split_dashboard_hourly_aggregate_range,
+    usage_body_capture_state_for_storage, usage_body_ref, usage_http_audit_body_refs,
+    usage_http_audit_capture_mode, usage_routing_snapshot_from_usage,
     usage_settlement_pricing_snapshot_from_usage, AggregateRangeSplit, SqlxUsageReadRepository,
     UsageHttpAuditRefs, UsageRoutingSnapshot, UsageSettlementPricingSnapshot,
     MAX_INLINE_USAGE_BODY_BYTES,
 };
 use crate::driver::postgres::{PostgresPoolConfig, PostgresPoolFactory};
 use crate::repository::usage::UpsertUsageRecord;
-use aether_data_contracts::repository::usage::UsageBodyField;
+use aether_data_contracts::repository::usage::{UsageBodyCaptureState, UsageBodyField};
 
 #[tokio::test]
 async fn repository_constructs_from_lazy_pool() {
@@ -1036,6 +1037,45 @@ fn prepare_usage_body_storage_compresses_large_payloads() {
     assert_eq!(
         inflate_usage_json_value(compressed).expect("payload should inflate"),
         payload
+    );
+}
+
+#[test]
+fn usage_body_capture_state_for_storage_marks_detached_bodies_as_reference() {
+    let payload = json!({"message": "hello"});
+    let storage = prepare_usage_body_storage(Some(&payload)).expect("storage should serialize");
+
+    assert!(storage.has_detached_blob());
+    assert_eq!(
+        usage_body_capture_state_for_storage(Some(UsageBodyCaptureState::Inline), &storage, None,),
+        Some(UsageBodyCaptureState::Reference)
+    );
+    assert_eq!(
+        usage_body_capture_state_for_storage(None, &storage, None),
+        Some(UsageBodyCaptureState::Reference)
+    );
+}
+
+#[test]
+fn usage_body_capture_state_for_storage_preserves_unavailable_states() {
+    let payload = json!({"message": "hello"});
+    let storage = prepare_usage_body_storage(Some(&payload)).expect("storage should serialize");
+
+    assert_eq!(
+        usage_body_capture_state_for_storage(
+            Some(UsageBodyCaptureState::Disabled),
+            &storage,
+            Some("usage://request/req-1/request_body"),
+        ),
+        Some(UsageBodyCaptureState::Disabled)
+    );
+    assert_eq!(
+        usage_body_capture_state_for_storage(
+            Some(UsageBodyCaptureState::Unavailable),
+            &storage,
+            Some("usage://request/req-1/request_body"),
+        ),
+        Some(UsageBodyCaptureState::Unavailable)
     );
 }
 

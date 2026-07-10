@@ -510,6 +510,11 @@ fn maybe_build_standard_same_format_sync_body(
     if is_error_like_sync_body(body_json) {
         return None;
     }
+    if api_format_is_gemini_generate_content(expected_api_format)
+        && !gemini_generate_content_body_has_visible_output(body_json)
+    {
+        return None;
+    }
 
     let mut body_json = body_json.clone();
     if expected_api_format == "claude:messages" {
@@ -578,6 +583,11 @@ fn maybe_build_standard_same_format_stream_sync_body(
     else {
         return Ok(None);
     };
+    if api_format_is_gemini_generate_content(&provider_stream_event_api_format)
+        && !gemini_generate_content_body_has_visible_output(&body)
+    {
+        return Ok(None);
+    }
     let Some(client_body) = convert_aggregated_stream_body_to_client_sync_response(
         report_kind,
         body,
@@ -750,6 +760,14 @@ fn is_error_like_sync_body(value: &Value) -> bool {
                     })
                 })
             })
+}
+
+fn gemini_generate_content_body_has_visible_output(value: &Value) -> bool {
+    crate::formats::gemini::generate_content::response::from_raw(value).is_some()
+}
+
+fn api_format_is_gemini_generate_content(api_format: &str) -> bool {
+    aether_ai_formats::normalize_api_format_alias(api_format) == "gemini:generate_content"
 }
 
 pub fn maybe_build_standard_cross_format_sync_product(
@@ -5413,6 +5431,34 @@ mod tests {
         };
         assert_eq!(body_json["object"], "chat.completion");
         assert_eq!(body_json["choices"][0]["message"]["content"], "pong");
+    }
+
+    #[test]
+    fn standard_same_format_gemini_finalize_rejects_usage_only_body() {
+        let report_context = json!({
+            "provider_api_format": "gemini:generate_content",
+            "client_api_format": "gemini:generate_content",
+            "needs_conversion": false,
+        });
+        let provider_body_json = json!({
+            "responseId": "resp-empty-visible-output",
+            "modelVersion": "gemini-3-flash-preview",
+            "usageMetadata": {
+                "promptTokenCount": 8,
+                "totalTokenCount": 8
+            }
+        });
+
+        let product = maybe_build_standard_sync_finalize_product_from_normalized_payload(
+            "gemini_chat_sync_finalize",
+            200,
+            Some(&report_context),
+            Some(&provider_body_json),
+            None,
+        )
+        .expect("dispatch should succeed");
+
+        assert_eq!(product, None);
     }
 
     #[test]

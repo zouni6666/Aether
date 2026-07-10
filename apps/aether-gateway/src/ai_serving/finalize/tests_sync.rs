@@ -1440,6 +1440,57 @@ fn local_finalize_handles_openai_responses_cross_format_stream_response_from_gem
 }
 
 #[test]
+fn local_finalize_rejects_antigravity_usage_only_gemini_wrapper() {
+    let payload = GatewaySyncReportRequest {
+        trace_id: "trace-antigravity-empty-gemini-wrapper".to_string(),
+        report_kind: "gemini_chat_sync_finalize".to_string(),
+        report_context: Some(json!({
+            "client_api_format": "gemini:generate_content",
+            "provider_api_format": "gemini:generate_content",
+            "model": "gemini-3.5-flash",
+            "mapped_model": "gemini-3-flash-agent",
+            "needs_conversion": false,
+            "has_envelope": true,
+            "envelope_name": "antigravity:v1internal",
+            "upstream_is_stream": true,
+        })),
+        status_code: 200,
+        headers: BTreeMap::from([("content-type".to_string(), "application/json".to_string())]),
+        body_json: Some(json!({
+            "chunks": [{
+                "response": {
+                    "responseId": "resp-usage-only",
+                    "modelVersion": "gemini-3-flash-agent",
+                    "usageMetadata": {
+                        "promptTokenCount": 5528,
+                        "totalTokenCount": 5528
+                    }
+                },
+                "metadata": {},
+                "traceId": "trace-antigravity-empty-gemini-wrapper"
+            }],
+            "metadata": {
+                "stream": true,
+                "stored_chunks": 1,
+                "total_chunks": 1
+            }
+        })),
+        client_body_json: None,
+        body_base64: None,
+        telemetry: None,
+    };
+
+    let outcome = maybe_build_local_core_sync_finalize_response(
+        "trace-antigravity-empty-gemini-wrapper",
+        &test_decision(),
+        &payload,
+    )
+    .expect("local finalize should evaluate payload");
+
+    assert!(outcome.is_none());
+}
+
+#[test]
 fn local_finalize_handles_openai_responses_compact_openai_family_stream_response_even_when_conversion_flagged(
 ) {
     let body = concat!(
