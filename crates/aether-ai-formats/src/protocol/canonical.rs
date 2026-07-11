@@ -6577,6 +6577,23 @@ pub(crate) fn openai_responses_extension(extensions: &BTreeMap<String, Value>) -
         .or_else(|| extensions.get(OPENAI_RESPONSES_LEGACY_EXTENSION_NAMESPACE))
 }
 
+pub(crate) fn openai_service_tier_extension(
+    extensions: &BTreeMap<String, Value>,
+) -> Option<&Value> {
+    [
+        OPENAI_RESPONSES_EXTENSION_NAMESPACE,
+        OPENAI_RESPONSES_LEGACY_EXTENSION_NAMESPACE,
+        "openai",
+    ]
+    .into_iter()
+    .find_map(|namespace| {
+        extensions
+            .get(namespace)
+            .and_then(Value::as_object)
+            .and_then(|object| object.get("service_tier"))
+    })
+}
+
 pub(crate) fn openai_responses_item_extension_object(
     extensions: &BTreeMap<String, Value>,
     existing: &Map<String, Value>,

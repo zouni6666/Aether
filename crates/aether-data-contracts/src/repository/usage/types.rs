@@ -4,6 +4,7 @@ use serde_json::Value;
 
 pub const PROVIDER_REASONING_EFFORT_METADATA_KEY: &str = "provider_reasoning_effort";
 pub const PROVIDER_SERVICE_TIER_METADATA_KEY: &str = "provider_service_tier";
+pub const PROVIDER_ACTUAL_SERVICE_TIER_METADATA_KEY: &str = "provider_actual_service_tier";
 
 pub fn extract_provider_reasoning_effort_from_body(value: Option<&Value>) -> Option<String> {
     let object = value.and_then(Value::as_object)?;
@@ -43,7 +44,26 @@ pub fn extract_provider_service_tier_from_body(value: Option<&Value>) -> Option<
         .and_then(normalize_provider_service_tier)
 }
 
-fn normalize_provider_service_tier(value: &str) -> Option<String> {
+pub fn extract_provider_actual_service_tier_from_response(value: Option<&Value>) -> Option<String> {
+    let value = value?;
+    value
+        .get("chunks")
+        .and_then(Value::as_array)
+        .and_then(|chunks| {
+            chunks
+                .iter()
+                .rev()
+                .find_map(|chunk| extract_provider_actual_service_tier_from_response(Some(chunk)))
+        })
+        .or_else(|| {
+            value
+                .get("response")
+                .and_then(|response| extract_provider_service_tier_from_body(Some(response)))
+        })
+        .or_else(|| extract_provider_service_tier_from_body(Some(value)))
+}
+
+pub fn normalize_provider_service_tier(value: &str) -> Option<String> {
     let normalized = value.trim().to_ascii_lowercase();
     if normalized.is_empty() || normalized.len() > 64 {
         return None;
@@ -452,6 +472,14 @@ impl StoredRequestUsageAudit {
 
         self.request_metadata_string(PROVIDER_SERVICE_TIER_METADATA_KEY)
             .and_then(normalize_provider_service_tier)
+    }
+
+    pub fn provider_actual_service_tier(&self) -> Option<String> {
+        self.request_metadata_string(PROVIDER_ACTUAL_SERVICE_TIER_METADATA_KEY)
+            .and_then(normalize_provider_service_tier)
+            .or_else(|| {
+                extract_provider_actual_service_tier_from_response(self.response_body.as_ref())
+            })
     }
 
     pub fn body_ref(&self, field: UsageBodyField) -> Option<&str> {
@@ -2069,8 +2097,8 @@ fn parse_timestamp(value: i64, field_name: &str) -> Result<u64, crate::DataLayer
 #[cfg(test)]
 mod tests {
     use super::{
-        StoredRequestUsageAudit, UpsertUsageRecord, UsageBodyCaptureState, UsageBodyCaptureStorage,
-        UsageBodyField,
+        extract_provider_actual_service_tier_from_response, StoredRequestUsageAudit,
+        UpsertUsageRecord, UsageBodyCaptureState, UsageBodyCaptureStorage, UsageBodyField,
     };
     use serde_json::{json, Value};
 
@@ -2484,6 +2512,67 @@ mod tests {
 
         assert_eq!(usage.provider_reasoning_effort(), None);
         assert_eq!(usage.provider_service_tier(), None);
+    }
+
+    #[test]
+    fn actual_service_tier_is_independent_from_requested_tier() {
+        let mut usage = sample_usage();
+        usage.request_metadata = Some(json!({
+            "provider_service_tier": "priority",
+            "provider_actual_service_tier": "Default"
+        }));
+
+        assert_eq!(usage.provider_service_tier().as_deref(), Some("priority"));
+        assert_eq!(
+            usage.provider_actual_service_tier().as_deref(),
+            Some("default")
+        );
+
+        usage.response_body = Some(json!({"service_tier": "flex"}));
+        assert_eq!(
+            usage.provider_actual_service_tier().as_deref(),
+            Some("default")
+        );
+
+        usage.request_metadata = Some(json!({"provider_service_tier": "priority"}));
+        assert_eq!(
+            usage.provider_actual_service_tier().as_deref(),
+            Some("flex")
+        );
+    }
+
+    #[test]
+    fn extracts_terminal_actual_service_tier_from_sync_and_stream_responses() {
+        let sync = json!({"id": "resp_1", "service_tier": "Priority"});
+        let chat_stream = json!({
+            "service_tier": "priority",
+            "chunks": [
+                {"service_tier": "priority"},
+                {"service_tier": "Default", "usage": {"total_tokens": 12}}
+            ]
+        });
+        let responses_stream = json!({
+            "chunks": [
+                {"type": "response.created", "response": {"service_tier": "priority"}},
+                {
+                    "type": "response.completed",
+                    "response": {"service_tier": "Flex", "status": "completed"}
+                }
+            ]
+        });
+
+        assert_eq!(
+            extract_provider_actual_service_tier_from_response(Some(&sync)).as_deref(),
+            Some("priority")
+        );
+        assert_eq!(
+            extract_provider_actual_service_tier_from_response(Some(&chat_stream)).as_deref(),
+            Some("default")
+        );
+        assert_eq!(
+            extract_provider_actual_service_tier_from_response(Some(&responses_stream)).as_deref(),
+            Some("flex")
+        );
     }
 
     #[test]

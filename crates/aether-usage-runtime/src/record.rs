@@ -185,6 +185,9 @@ mod tests {
                     "reasoning": { "effort": "max" },
                     "service_tier": "priority"
                 })),
+                request_metadata: Some(serde_json::json!({
+                    "provider_actual_service_tier": "default"
+                })),
                 ..UsageEventData::default()
             },
         })
@@ -209,6 +212,14 @@ mod tests {
                 .and_then(|value| value.get("provider_service_tier"))
                 .and_then(serde_json::Value::as_str),
             Some("priority")
+        );
+        assert_eq!(
+            record
+                .request_metadata
+                .as_ref()
+                .and_then(|value| value.get("provider_actual_service_tier"))
+                .and_then(serde_json::Value::as_str),
+            Some("default")
         );
         assert_eq!(record.finalized_at_unix_secs, Some(1_700_000_000));
     }

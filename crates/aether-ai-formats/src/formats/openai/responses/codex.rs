@@ -1118,7 +1118,11 @@ fn ensure_codex_reasoning_defaults(
             .get_mut("reasoning")
             .and_then(Value::as_object_mut)
             .and_then(|reasoning| {
-                if !capabilities.supports_reasoning_summary_parameter {
+                if !capabilities.supports_reasoning_summary_parameter
+                    || reasoning
+                        .get("summary")
+                        .is_some_and(codex_reasoning_summary_is_disabled)
+                {
                     reasoning.remove("summary");
                 }
                 reasoning.get("summary")
@@ -1154,7 +1158,9 @@ fn ensure_codex_reasoning_defaults(
         }
     }
     if !capabilities.supports_reasoning_summary_parameter
-        || reasoning_object.get("summary").is_some_and(Value::is_null)
+        || reasoning_object
+            .get("summary")
+            .is_some_and(codex_reasoning_summary_is_disabled)
     {
         reasoning_object.remove("summary");
     } else if !reasoning_object.contains_key("summary") {
@@ -1171,6 +1177,13 @@ fn ensure_codex_reasoning_defaults(
     if !has_summary {
         remove_codex_reasoning_summary_delivery(body_object);
     }
+}
+
+fn codex_reasoning_summary_is_disabled(value: &Value) -> bool {
+    value.is_null()
+        || value
+            .as_str()
+            .is_some_and(|summary| summary.eq_ignore_ascii_case("none"))
 }
 
 fn remove_codex_reasoning_summary_delivery(body_object: &mut serde_json::Map<String, Value>) {
@@ -2363,6 +2376,34 @@ mod tests {
         );
         assert_eq!(provider_request_body["parallel_tool_calls"], json!(true));
         assert!(provider_request_body.get("instructions").is_none());
+    }
+
+    #[test]
+    fn codex_responses_body_edits_omit_disabled_reasoning_summary_and_delivery() {
+        let mut provider_request_body = json!({
+            "input": [{"role": "user", "content": "hello"}],
+            "model": "gpt-5.6-sol",
+            "stream": true,
+            "reasoning": {"effort": "high", "summary": "none"},
+            "stream_options": {
+                "reasoning_summary_delivery": "sequential_cutoff",
+                "future_option": true
+            }
+        });
+
+        apply_codex_openai_responses_special_body_edits(
+            &mut provider_request_body,
+            "codex",
+            "openai:responses",
+            None,
+            None,
+        );
+
+        assert!(provider_request_body["reasoning"].get("summary").is_none());
+        assert_eq!(
+            provider_request_body["stream_options"],
+            json!({"future_option": true})
+        );
     }
 
     #[test]

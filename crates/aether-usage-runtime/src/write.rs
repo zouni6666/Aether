@@ -13,7 +13,8 @@ use crate::body_capture::{
     RuntimeBodyCaptureMetadataInput,
 };
 use crate::request_metadata::{
-    attach_provider_request_body_metadata, build_usage_request_metadata_seed,
+    attach_provider_actual_service_tier_metadata, attach_provider_request_body_metadata,
+    attach_provider_response_body_metadata, build_usage_request_metadata_seed,
     merge_usage_request_metadata, merge_usage_request_metadata_owned,
     sanitize_usage_request_metadata, sanitize_usage_request_metadata_ref,
 };
@@ -163,6 +164,7 @@ pub struct StreamTerminalUsagePayloadSeed {
     pub client_response: Option<Value>,
     pub client_response_body_state: Option<UsageBodyCaptureState>,
     pub standardized_usage: Option<StandardizedUsage>,
+    pub provider_actual_service_tier: Option<String>,
     pub observed_stream_finish: Option<bool>,
     pub terminal_error_message: Option<String>,
     pub capture_metadata: Option<Value>,
@@ -965,6 +967,10 @@ pub fn build_stream_terminal_usage_payload_seed(
             .terminal_summary
             .as_ref()
             .and_then(|summary| summary.standardized_usage.clone()),
+        provider_actual_service_tier: payload
+            .terminal_summary
+            .as_ref()
+            .and_then(|summary| summary.provider_actual_service_tier.clone()),
         observed_stream_finish,
         terminal_error_message,
         capture_metadata: build_payload_body_capture_metadata(
@@ -1002,6 +1008,10 @@ pub fn build_sync_terminal_usage_seed(
     let terminal_state = infer_sync_terminal_state(
         report_kind.as_str(),
         status_code,
+        provider_response_full.as_ref(),
+    );
+    let request_metadata = attach_provider_response_body_metadata(
+        context_seed.request_metadata,
         provider_response_full.as_ref(),
     );
 
@@ -1046,7 +1056,7 @@ pub fn build_sync_terminal_usage_seed(
         provider_response: provider_response_full,
         client_response_headers,
         client_response,
-        request_metadata: context_seed.request_metadata,
+        request_metadata,
         audit_payload: capture_metadata,
         standardized_usage,
     }
@@ -1088,6 +1098,7 @@ pub fn build_stream_terminal_usage_seed(
         mut client_response,
         mut client_response_body_state,
         standardized_usage,
+        provider_actual_service_tier,
         observed_stream_finish,
         terminal_error_message,
         capture_metadata,
@@ -1177,6 +1188,12 @@ pub fn build_stream_terminal_usage_seed(
         missing_observed_finish,
         terminal_error_message.is_some(),
     );
+    let request_metadata = attach_provider_actual_service_tier_metadata(
+        context_seed.request_metadata,
+        provider_actual_service_tier.as_deref(),
+    );
+    let request_metadata =
+        attach_provider_response_body_metadata(request_metadata, provider_response_full.as_ref());
 
     TerminalUsageSeed {
         terminal_state,
@@ -1219,7 +1236,7 @@ pub fn build_stream_terminal_usage_seed(
         provider_response: provider_response_full,
         client_response_headers,
         client_response,
-        request_metadata: context_seed.request_metadata,
+        request_metadata,
         audit_payload: capture_metadata,
         standardized_usage,
     }
@@ -4588,7 +4605,7 @@ mod tests {
                 finish_reason: Some("stop".to_string()),
                 response_id: Some("resp_summary_1".to_string()),
                 model: Some("gpt-5.4".to_string()),
-                provider_actual_service_tier: None,
+                provider_actual_service_tier: Some("Default".to_string()),
                 observed_finish: true,
                 unknown_event_count: 0,
                 parser_error: None,
@@ -4607,6 +4624,15 @@ mod tests {
         assert_eq!(event.data.cache_read_input_tokens, Some(3));
         assert!(event.data.response_body.is_none());
         assert!(event.data.client_response_body.is_none());
+        assert_eq!(
+            event
+                .data
+                .request_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("provider_actual_service_tier"))
+                .and_then(Value::as_str),
+            Some("default")
+        );
     }
 
     #[test]

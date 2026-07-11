@@ -13,8 +13,8 @@ use crate::{
         flush_openai_responses_message_item, is_openai_responses_raw_block,
         is_openai_thinking_block, namespace_extension_object, openai_responses_extensions,
         openai_responses_item_extension_object, openai_responses_output_to_canonical,
-        openai_responses_usage_to_canonical, CanonicalContentBlock, CanonicalResponse,
-        CanonicalResponseOutput, CanonicalRole, CanonicalStopReason,
+        openai_responses_usage_to_canonical, openai_service_tier_extension, CanonicalContentBlock,
+        CanonicalResponse, CanonicalResponseOutput, CanonicalRole, CanonicalStopReason,
         OPENAI_RESPONSES_EXTENSION_NAMESPACE, OPENAI_RESPONSES_LEGACY_EXTENSION_NAMESPACE,
     },
 };
@@ -371,9 +371,9 @@ pub fn to_raw(canonical: &CanonicalResponse, report_context: &Value, compact: bo
                 response.insert(key.to_string(), value.clone());
             }
         }
-        if let Some(service_tier) = request_object.get("service_tier").cloned() {
-            response.insert("service_tier".to_string(), service_tier);
-        }
+    }
+    if let Some(service_tier) = openai_service_tier_extension(&canonical.extensions).cloned() {
+        response.insert("service_tier".to_string(), service_tier);
     }
     let mut extension_fields = namespace_extension_object(
         &canonical.extensions,

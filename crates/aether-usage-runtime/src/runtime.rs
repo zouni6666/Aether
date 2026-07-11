@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::executor::spawn_on_usage_background_runtime;
+use crate::request_metadata::attach_provider_response_body_metadata;
 use crate::worker::{
     build_usage_queue_worker_with_record_gate, UsageWorkerControl, UsageWorkerObservation,
 };
@@ -921,6 +922,7 @@ impl UsageRuntime {
     where
         T: UsageRuntimeAccess,
     {
+        preserve_provider_response_facts(event);
         match self.cached_body_capture_policy(data).await {
             Ok(policy) => apply_usage_body_capture_policy_to_event(policy, event),
             Err(err) => {
@@ -1198,6 +1200,12 @@ impl UsageRuntime {
             }
         }
     }
+}
+
+fn preserve_provider_response_facts(event: &mut UsageEvent) {
+    let metadata = event.data.request_metadata.take();
+    event.data.request_metadata =
+        attach_provider_response_body_metadata(metadata, event.data.response_body.as_ref());
 }
 
 impl UsageQueueHealthSnapshot {
@@ -2318,8 +2326,9 @@ mod tests {
     use tokio::time::{sleep, Duration};
 
     use super::{
-        UsageBillingEventEnricher, UsageBodyCapturePolicy, UsageRequestRecordLevel,
-        UsageRuntimeAccess, UsageWorkerObservation, UsageWorkerSupervisorState,
+        preserve_provider_response_facts, UsageBillingEventEnricher, UsageBodyCapturePolicy,
+        UsageRequestRecordLevel, UsageRuntimeAccess, UsageWorkerObservation,
+        UsageWorkerSupervisorState,
     };
     use crate::worker::ManualProxyNodeCounter;
     use crate::{
@@ -4010,16 +4019,21 @@ mod tests {
                 provider_request_body_ref: Some(
                     "usage://request/req-basic-1/provider_request_body".to_string(),
                 ),
-                response_body: Some(json!({"error":{"message":"bad gateway"}})),
+                response_body: Some(json!({
+                    "error":{"message":"bad gateway"},
+                    "service_tier": "Default"
+                })),
                 response_body_ref: Some("usage://request/req-basic-1/response_body".to_string()),
                 client_response_body: Some(json!({"detail":"bad gateway"})),
                 client_response_body_ref: Some(
                     "usage://request/req-basic-1/client_response_body".to_string(),
                 ),
+                request_metadata: Some(json!({"provider_service_tier": "priority"})),
                 ..UsageEventData::default()
             },
         );
 
+        preserve_provider_response_facts(&mut event);
         apply_usage_body_capture_policy_to_event(
             UsageBodyCapturePolicy {
                 record_level: UsageRequestRecordLevel::Basic,
@@ -4038,5 +4052,14 @@ mod tests {
         assert!(event.data.response_body_ref.is_none());
         assert!(event.data.client_response_body.is_none());
         assert!(event.data.client_response_body_ref.is_none());
+        assert_eq!(
+            event
+                .data
+                .request_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("provider_actual_service_tier"))
+                .and_then(serde_json::Value::as_str),
+            Some("default")
+        );
     }
 }

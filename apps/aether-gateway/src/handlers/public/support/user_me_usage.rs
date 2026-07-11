@@ -515,6 +515,9 @@ fn build_users_me_usage_record_payload(
     if let Some(service_tier) = item.provider_service_tier() {
         payload["service_tier"] = json!(service_tier);
     }
+    if let Some(actual_service_tier) = item.provider_actual_service_tier() {
+        payload["actual_service_tier"] = json!(actual_service_tier);
+    }
     if include_actual_cost {
         payload["actual_cost"] = json!(round_to(item.actual_total_cost_usd, 6));
         payload["rate_multiplier"] = json!(rate_multiplier);
@@ -581,6 +584,9 @@ fn build_users_me_usage_active_payload(item: &StoredRequestUsageAudit) -> serde_
     }
     if let Some(service_tier) = item.provider_service_tier() {
         payload["service_tier"] = json!(service_tier);
+    }
+    if let Some(actual_service_tier) = item.provider_actual_service_tier() {
+        payload["actual_service_tier"] = json!(actual_service_tier);
     }
     payload
 }

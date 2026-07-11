@@ -93,14 +93,33 @@ pub fn maybe_bridge_standard_sync_json_to_stream(
     ) else {
         return Ok(None);
     };
-    let terminal_summary =
-        build_terminal_summary_from_openai_responses_response(&openai_responses_response);
+    let provider_actual_service_tier = provider_actual_service_tier_from_sync_response(
+        provider_body_json,
+        provider_api_format.as_str(),
+    );
+    let terminal_summary = build_terminal_summary_from_openai_responses_response(
+        &openai_responses_response,
+        provider_actual_service_tier.clone(),
+    );
     let canonical_frames = build_canonical_frames_from_openai_responses_response(
         &openai_responses_response,
         &bridge_context,
     )?;
-    let sse_body =
-        emit_client_stream_from_canonical_frames(canonical_frames, client_api_format.as_str())?;
+    let sse_body = if is_openai_responses_family_api_format(client_api_format.as_str()) {
+        emit_openai_responses_stream_with_authoritative_terminal(
+            canonical_frames,
+            &openai_responses_response,
+            openai_responses_terminal_event_type(&openai_responses_response)
+                .unwrap_or("response.completed"),
+            provider_actual_service_tier.as_deref(),
+        )?
+    } else {
+        emit_client_stream_from_canonical_frames(
+            canonical_frames,
+            client_api_format.as_str(),
+            provider_actual_service_tier.as_deref(),
+        )?
+    };
 
     Ok(Some(SyncToStreamBridgeOutcome {
         sse_body,
@@ -140,11 +159,15 @@ fn bridge_openai_responses_same_family_sync_json_to_stream(
         canonical_frames,
         response,
         terminal_event_type,
+        provider_actual_service_tier_from_sync_response(response, provider_api_format).as_deref(),
     )?;
 
     Ok(Some(SyncToStreamBridgeOutcome {
         sse_body,
-        terminal_summary: build_terminal_summary_from_openai_responses_response(response),
+        terminal_summary: build_terminal_summary_from_openai_responses_response(
+            response,
+            provider_actual_service_tier_from_sync_response(response, provider_api_format),
+        ),
     }))
 }
 
@@ -1010,14 +1033,17 @@ fn openai_responses_terminal_event_type(response: &Value) -> Option<&'static str
 fn emit_client_stream_from_canonical_frames(
     canonical_frames: Vec<CanonicalStreamFrame>,
     client_api_format: &str,
+    provider_actual_service_tier: Option<&str>,
 ) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
     match client_api_format {
         "openai:chat" => {
             let mut emitter = OpenAIChatClientEmitter::default();
+            emitter.set_actual_service_tier(provider_actual_service_tier);
             emit_with_openai_chat_emitter(&mut emitter, canonical_frames)
         }
         "openai:responses" | "openai:responses:compact" => {
             let mut emitter = OpenAIResponsesClientEmitter::default();
+            emitter.set_actual_service_tier(provider_actual_service_tier);
             emit_with_openai_responses_emitter(&mut emitter, canonical_frames)
         }
         "claude:messages" => {
@@ -1076,8 +1102,10 @@ fn emit_openai_responses_stream_with_authoritative_terminal(
     canonical_frames: Vec<CanonicalStreamFrame>,
     authoritative_response: &Value,
     terminal_event_type: &'static str,
+    provider_actual_service_tier: Option<&str>,
 ) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
     let mut emitter = OpenAIResponsesClientEmitter::default();
+    emitter.set_actual_service_tier(provider_actual_service_tier);
     let mut output = Vec::new();
     for frame in canonical_frames {
         if matches!(
@@ -1145,6 +1173,7 @@ fn emit_with_gemini_emitter(
 
 fn build_terminal_summary_from_openai_responses_response(
     openai_responses_response: &Value,
+    provider_actual_service_tier: Option<String>,
 ) -> Option<ExecutionStreamTerminalSummary> {
     let response = openai_responses_response.as_object()?;
     let response_id = response
@@ -1168,16 +1197,32 @@ fn build_terminal_summary_from_openai_responses_response(
         finish_reason,
         response_id,
         model,
-        provider_actual_service_tier: response
-            .get("service_tier")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty() && value.len() <= 64)
-            .map(str::to_ascii_lowercase),
+        provider_actual_service_tier,
         observed_finish: true,
         unknown_event_count: 0,
         parser_error: None,
     })
+}
+
+fn provider_actual_service_tier_from_sync_response(
+    provider_response: &Value,
+    provider_api_format: &str,
+) -> Option<String> {
+    if !matches!(
+        normalize_api_format(provider_api_format).as_str(),
+        "openai:chat" | "openai:responses" | "openai:responses:compact"
+    ) {
+        return None;
+    }
+    provider_response
+        .get("response")
+        .and_then(Value::as_object)
+        .and_then(|response| response.get("service_tier"))
+        .or_else(|| provider_response.get("service_tier"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 64)
+        .map(str::to_ascii_lowercase)
 }
 
 fn resolve_openai_responses_finish_reason(output: &[Value]) -> String {
@@ -1365,6 +1410,112 @@ mod tests {
         assert_eq!(events.last(), Some(event));
         assert_eq!(event["type"], "response.completed");
         assert_eq!(event["response"], response);
+    }
+
+    #[test]
+    fn cross_format_bridge_keeps_provider_actual_service_tier_authoritative() {
+        let provider_response = json!({
+            "id": "chatcmpl_actual_tier",
+            "object": "chat.completion",
+            "model": "gpt-5.6-sol",
+            "service_tier": "Default",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "done"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12}
+        });
+        let report_context = json!({
+            "original_request_body": {
+                "model": "gpt-5.6-sol",
+                "service_tier": "priority"
+            }
+        });
+
+        let outcome = maybe_bridge_standard_sync_json_to_stream(
+            &provider_response,
+            "openai:chat",
+            "openai:responses",
+            Some(&report_context),
+        )
+        .expect("cross-format bridge should succeed")
+        .expect("cross-format bridge should emit terminal SSE");
+
+        assert_eq!(
+            outcome
+                .terminal_summary
+                .as_ref()
+                .and_then(|summary| summary.provider_actual_service_tier.as_deref()),
+            Some("default")
+        );
+        let events = json_sse_events(&utf8(outcome.sse_body));
+        let terminal = events
+            .iter()
+            .find(|event| event["type"] == "response.completed")
+            .expect("terminal event should exist");
+        assert_eq!(terminal["response"]["service_tier"], "Default");
+        let response_events = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.get("type").and_then(Value::as_str),
+                    Some("response.created" | "response.in_progress" | "response.completed")
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(!response_events.is_empty());
+        assert!(response_events.iter().all(|event| {
+            event
+                .pointer("/response/service_tier")
+                .and_then(Value::as_str)
+                .is_some_and(|tier| tier.eq_ignore_ascii_case("default"))
+        }));
+    }
+
+    #[test]
+    fn sync_bridge_does_not_echo_requested_service_tier_as_provider_actual() {
+        let provider_response = json!({
+            "id": "chatcmpl_without_actual_tier",
+            "object": "chat.completion",
+            "model": "gpt-5.6-sol",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "done"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12}
+        });
+        let report_context = json!({
+            "original_request_body": {
+                "model": "gpt-5.6-sol",
+                "service_tier": "priority"
+            }
+        });
+
+        let outcome = maybe_bridge_standard_sync_json_to_stream(
+            &provider_response,
+            "openai:chat",
+            "openai:responses",
+            Some(&report_context),
+        )
+        .expect("cross-format bridge should succeed")
+        .expect("cross-format bridge should emit terminal SSE");
+
+        assert_eq!(
+            outcome
+                .terminal_summary
+                .as_ref()
+                .and_then(|summary| summary.provider_actual_service_tier.as_deref()),
+            None
+        );
+        let events = json_sse_events(&utf8(outcome.sse_body));
+        assert!(events.iter().all(|event| {
+            event
+                .get("response")
+                .and_then(|response| response.get("service_tier"))
+                .is_none()
+        }));
     }
 
     #[test]

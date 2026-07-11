@@ -709,6 +709,7 @@ impl AppState {
         self.data.clear_minimal_candidate_selection_cache();
         self.data.clear_routing_group_cache();
         self.data.clear_provider_catalog_cache();
+        self.auth_request_cost_upper_bound_cache.clear();
         self.routing_group_selection_cache.clear();
         self.candidate_row_page_cache.clear();
         self.candidate_page_cache.clear();

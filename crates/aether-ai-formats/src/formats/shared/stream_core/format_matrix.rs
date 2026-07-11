@@ -23,6 +23,7 @@ use crate::formats::shared::AiSurfaceFinalizeError;
 pub struct StreamingStandardFormatMatrix {
     provider: Option<ProviderStreamParser>,
     client: Option<ClientStreamEmitter>,
+    propagated_actual_service_tier: Option<String>,
     terminated: bool,
 }
 
@@ -40,10 +41,21 @@ impl StreamingStandardFormatMatrix {
             self.terminated = true;
             return self.emit_error(error_body);
         }
-        let Some(provider) = self.provider.as_mut() else {
+        let (provider, client, propagated_actual_service_tier) = (
+            &mut self.provider,
+            &mut self.client,
+            &mut self.propagated_actual_service_tier,
+        );
+        let Some(provider) = provider.as_mut() else {
             return Ok(Vec::new());
         };
         let frames = provider.push_line(report_context, line)?;
+        if provider.actual_service_tier() != propagated_actual_service_tier.as_deref() {
+            *propagated_actual_service_tier = provider.actual_service_tier().map(ToOwned::to_owned);
+            if let Some(client) = client.as_mut() {
+                client.set_actual_service_tier(propagated_actual_service_tier.as_deref());
+            }
+        }
         self.emit_frames(frames)
     }
 
@@ -52,10 +64,21 @@ impl StreamingStandardFormatMatrix {
             return Ok(Vec::new());
         }
         self.ensure_initialized(report_context);
-        let Some(provider) = self.provider.as_mut() else {
+        let (provider, client, propagated_actual_service_tier) = (
+            &mut self.provider,
+            &mut self.client,
+            &mut self.propagated_actual_service_tier,
+        );
+        let Some(provider) = provider.as_mut() else {
             return Ok(Vec::new());
         };
         let frames = provider.finish(report_context)?;
+        if provider.actual_service_tier() != propagated_actual_service_tier.as_deref() {
+            *propagated_actual_service_tier = provider.actual_service_tier().map(ToOwned::to_owned);
+            if let Some(client) = client.as_mut() {
+                client.set_actual_service_tier(propagated_actual_service_tier.as_deref());
+            }
+        }
         let mut out = self.emit_frames(frames)?;
         if let Some(client) = self.client.as_mut() {
             out.extend(client.finish()?);
@@ -133,14 +156,6 @@ impl StreamingStandardTerminalObserver {
         report_context: &Value,
         line: Vec<u8>,
     ) -> Result<(), AiSurfaceFinalizeError> {
-        if let Some(service_tier) = decode_json_data_line(&line)
-            .as_ref()
-            .and_then(provider_actual_service_tier_from_stream_event)
-        {
-            self.latest_summary
-                .get_or_insert_with(ExecutionStreamTerminalSummary::default)
-                .provider_actual_service_tier = Some(service_tier);
-        }
         self.ensure_initialized(report_context);
         let Some(provider) = self.provider.as_mut() else {
             return Ok(());
@@ -148,7 +163,13 @@ impl StreamingStandardTerminalObserver {
         match provider {
             TerminalStreamParser::Standard(provider) => {
                 let frames = provider.push_line(report_context, line)?;
+                let actual_service_tier = provider.actual_service_tier().map(ToOwned::to_owned);
                 self.observe_frames(frames);
+                if let Some(actual_service_tier) = actual_service_tier {
+                    self.latest_summary
+                        .get_or_insert_with(ExecutionStreamTerminalSummary::default)
+                        .provider_actual_service_tier = Some(actual_service_tier);
+                }
             }
             TerminalStreamParser::OpenAIImage(provider) => {
                 if let Some(summary) = provider.push_line(report_context, line)? {
@@ -254,17 +275,6 @@ impl StreamingStandardTerminalObserver {
     }
 }
 
-fn provider_actual_service_tier_from_stream_event(event: &Value) -> Option<String> {
-    event
-        .get("response")
-        .and_then(|response| response.get("service_tier"))
-        .or_else(|| event.get("service_tier"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && value.len() <= 64)
-        .map(str::to_ascii_lowercase)
-}
-
 enum TerminalStreamParser {
     Standard(ProviderStreamParser),
     OpenAIImage(OpenAiImageStreamTerminalState),
@@ -331,6 +341,14 @@ impl ProviderStreamParser {
             ProviderStreamParser::OpenAIResponses(state) => state.finish(report_context),
             ProviderStreamParser::Claude(state) => state.finish(report_context),
             ProviderStreamParser::Gemini(state) => state.finish(report_context),
+        }
+    }
+
+    fn actual_service_tier(&self) -> Option<&str> {
+        match self {
+            ProviderStreamParser::OpenAIChat(state) => state.actual_service_tier(),
+            ProviderStreamParser::OpenAIResponses(state) => state.actual_service_tier(),
+            ProviderStreamParser::Claude(_) | ProviderStreamParser::Gemini(_) => None,
         }
     }
 }
@@ -407,6 +425,14 @@ impl ClientStreamEmitter {
             ClientStreamEmitter::OpenAIResponses(state) => state.emit(frame),
             ClientStreamEmitter::Claude(state) => state.emit(frame),
             ClientStreamEmitter::Gemini(state) => state.emit(frame),
+        }
+    }
+
+    fn set_actual_service_tier(&mut self, value: Option<&str>) {
+        match self {
+            ClientStreamEmitter::OpenAIChat(state) => state.set_actual_service_tier(value),
+            ClientStreamEmitter::OpenAIResponses(state) => state.set_actual_service_tier(value),
+            ClientStreamEmitter::Claude(_) | ClientStreamEmitter::Gemini(_) => {}
         }
     }
 
@@ -602,6 +628,15 @@ mod tests {
 
     fn data_line(value: Value) -> Vec<u8> {
         format!("data: {}\n", value).into_bytes()
+    }
+
+    fn json_data_events(bytes: &[u8]) -> Vec<Value> {
+        String::from_utf8_lossy(bytes)
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter(|payload| *payload != "[DONE]")
+            .filter_map(|payload| serde_json::from_str(payload).ok())
+            .collect()
     }
 
     #[test]
@@ -1895,6 +1930,7 @@ mod tests {
                     "model": "gpt-5.6",
                     "service_tier": "Default",
                     "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
                 })),
             )
             .expect("Chat terminal tier should be observed");
@@ -1903,6 +1939,17 @@ mod tests {
                 .latest_summary()
                 .and_then(|summary| summary.provider_actual_service_tier.as_deref()),
             Some("default")
+        );
+        let chat_summary = chat_observer
+            .latest_summary()
+            .expect("Chat summary should exist");
+        assert!(chat_summary.observed_finish);
+        assert_eq!(
+            chat_summary
+                .standardized_usage
+                .as_ref()
+                .map(|usage| (usage.input_tokens, usage.output_tokens)),
+            Some((10, 2))
         );
 
         let responses_context = report_context("openai:responses", "openai:responses");
@@ -1918,6 +1965,7 @@ mod tests {
                         "status": "completed",
                         "service_tier": "Flex",
                         "output": [],
+                        "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
                     },
                     "sequence_number": 1,
                 })),
@@ -1929,6 +1977,85 @@ mod tests {
                 .and_then(|summary| summary.provider_actual_service_tier.as_deref()),
             Some("flex")
         );
+        let responses_summary = responses_observer
+            .latest_summary()
+            .expect("Responses summary should exist");
+        assert!(responses_summary.observed_finish);
+        assert_eq!(
+            responses_summary
+                .standardized_usage
+                .as_ref()
+                .map(|usage| (usage.input_tokens, usage.output_tokens)),
+            Some((10, 2))
+        );
+    }
+
+    #[test]
+    fn openai_chat_client_chunks_carry_provider_actual_service_tier() {
+        let context = report_context("openai:chat", "openai:chat");
+        let mut matrix = StreamingStandardFormatMatrix::default();
+        let output = matrix
+            .transform_line(
+                &context,
+                data_line(json!({
+                    "id": "chatcmpl_tier_stream",
+                    "object": "chat.completion.chunk",
+                    "model": "gpt-5.6",
+                    "service_tier": "Default",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": "done"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12}
+                })),
+            )
+            .expect("Chat stream should transform");
+        let events = json_data_events(&output);
+
+        assert!(!events.is_empty());
+        assert!(events
+            .iter()
+            .all(|event| event.get("service_tier") == Some(&json!("default"))));
+    }
+
+    #[test]
+    fn responses_actual_service_tier_reaches_transformed_chat_chunks() {
+        let context = report_context("openai:responses", "openai:chat");
+        let mut matrix = StreamingStandardFormatMatrix::default();
+        let output = matrix
+            .transform_line(
+                &context,
+                data_line(json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_tier_stream",
+                        "object": "response",
+                        "model": "gpt-5.6",
+                        "status": "completed",
+                        "service_tier": "Flex",
+                        "output": [{
+                            "type": "message",
+                            "id": "msg_tier_stream",
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [{
+                                "type": "output_text",
+                                "text": "done",
+                                "annotations": []
+                            }]
+                        }],
+                        "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}
+                    }
+                })),
+            )
+            .expect("Responses stream should transform");
+        let events = json_data_events(&output);
+
+        assert!(!events.is_empty());
+        assert!(events
+            .iter()
+            .all(|event| event.get("service_tier") == Some(&json!("flex"))));
     }
 
     #[test]

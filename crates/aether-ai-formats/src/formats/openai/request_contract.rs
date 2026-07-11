@@ -146,7 +146,7 @@ fn validate_openai_provider_request_contract_with_codex_model_capabilities(
         provider_model,
         source_model,
         body,
-        model_capabilities.is_some(),
+        model_capabilities.map(|capabilities| capabilities.supported_reasoning_efforts.as_slice()),
         None,
     )
     .map_err(OpenAiProviderRequestContractViolation::Reasoning)
@@ -210,6 +210,40 @@ mod tests {
             &body,
         )
         .is_err());
+    }
+
+    #[test]
+    fn codex_finalization_enforces_model_card_reasoning_efforts() {
+        let mut body = json!({
+            "model": "gpt-5.6-sol",
+            "input": [],
+            "reasoning": {"effort": "minimal"}
+        });
+
+        let error = finalize_openai_provider_request(
+            &mut body,
+            OpenAiProviderRequestFinalization {
+                source_api_format: "openai:responses",
+                provider_api_format: "openai:responses",
+                provider_type: "codex",
+                provider_model: "gpt-5.6-sol",
+                source_model: "gpt-5.6-sol",
+                body_rules: None,
+                upstream_is_stream: false,
+                require_body_stream_field: true,
+            },
+        )
+        .expect_err("GPT-5.6 Codex model card should reject minimal");
+
+        assert!(matches!(
+            error,
+            super::OpenAiProviderRequestContractViolation::Reasoning(
+                super::OpenAiReasoningContractViolation {
+                    kind: crate::formats::openai::reasoning::OpenAiReasoningViolationKind::UnsupportedForModel,
+                    ..
+                }
+            )
+        ));
     }
 
     #[test]
@@ -419,26 +453,32 @@ mod tests {
             "input": [],
             "reasoning": {"effort": "vendoreffortx"}
         });
-        finalize_openai_provider_request_with_codex_model_capabilities(
+        let error = finalize_openai_provider_request_with_codex_model_capabilities(
             &mut custom,
             finalization,
             Some(&capabilities),
         )
-        .expect("Codex custom reasoning efforts should remain exact");
-        assert_eq!(custom["reasoning"]["effort"], "vendoreffortx");
+        .expect_err("custom reasoning efforts should match the model card exactly");
+        assert!(matches!(
+            error,
+            super::OpenAiProviderRequestContractViolation::Reasoning(_)
+        ));
 
         let mut ultra = json!({
             "model": "codex-custom",
             "input": [],
             "reasoning": {"effort": "ultra"}
         });
-        finalize_openai_provider_request_with_codex_model_capabilities(
+        let error = finalize_openai_provider_request_with_codex_model_capabilities(
             &mut ultra,
             finalization,
             Some(&capabilities),
         )
-        .expect("ultra should use max on the OpenAI wire contract");
-        assert_eq!(ultra["reasoning"]["effort"], "max");
+        .expect_err("ultra should require model-card support before mapping to max");
+        assert!(matches!(
+            error,
+            super::OpenAiProviderRequestContractViolation::Reasoning(_)
+        ));
     }
 
     #[test]
@@ -626,7 +666,7 @@ mod tests {
                 "stream_options": {"include_usage": true},
                 "tool_choice": "auto",
                 "parallel_tool_calls": true,
-                "reasoning": {"effort": "future"},
+                "reasoning": {"effort": "max"},
                 "text": {"verbosity": "medium"},
                 "tools": [{"type": "function", "name": "lookup", "parameters": {}}]
             });
@@ -656,7 +696,7 @@ mod tests {
                 assert!(body.get(field).is_none(), "{field} must not reach Compact");
             }
             assert_eq!(body["parallel_tool_calls"], false);
-            assert_eq!(body["reasoning"]["effort"], "future");
+            assert_eq!(body["reasoning"]["effort"], "max");
             assert_eq!(body["reasoning"]["context"], "all_turns");
             assert_eq!(body["text"]["verbosity"], "medium");
             assert!(body.get("tools").is_none());

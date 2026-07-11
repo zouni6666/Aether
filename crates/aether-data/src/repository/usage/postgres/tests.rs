@@ -733,6 +733,8 @@ fn usage_sql_uses_json_null_placeholders_for_usage_payload_columns() {
         assert!(sql.contains("request_metadata->>'client_ip'"));
         assert!(sql.contains("'user_agent'"));
         assert!(sql.contains("request_metadata->>'user_agent'"));
+        assert!(sql.contains("request_metadata->>'provider_service_tier'"));
+        assert!(sql.contains("request_metadata->>'provider_actual_service_tier'"));
         assert!(sql.contains("AS client_family"));
         assert!(sql.contains("request_metadata->'client_session_affinity'->>'client_family'"));
         assert!(sql.contains("request_metadata->>'client_family'"));

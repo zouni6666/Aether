@@ -7,8 +7,8 @@ use crate::{
     protocol::canonical::{
         canonical_blocks_to_openai_chat_message, canonical_stop_reason_to_openai,
         canonical_usage_to_openai, openai_extensions, openai_finish_reason_to_canonical,
-        openai_message_content_blocks, openai_usage_to_canonical, CanonicalContentBlock,
-        CanonicalResponse, CanonicalResponseOutput, CanonicalRole,
+        openai_message_content_blocks, openai_service_tier_extension, openai_usage_to_canonical,
+        CanonicalContentBlock, CanonicalResponse, CanonicalResponseOutput, CanonicalRole,
         OPENAI_RESPONSES_EXTENSION_NAMESPACE, OPENAI_RESPONSES_LEGACY_EXTENSION_NAMESPACE,
     },
 };
@@ -17,20 +17,8 @@ pub fn from(body: &Value, _ctx: &FormatContext) -> Option<CanonicalResponse> {
     from_raw(body)
 }
 
-pub fn to(response: &CanonicalResponse, ctx: &FormatContext) -> Option<Value> {
-    let mut body = to_raw(response);
-    if body.get("service_tier").is_none() {
-        if let Some(service_tier) = ctx
-            .report_context_value()
-            .get("original_request_body")
-            .and_then(Value::as_object)
-            .and_then(|request| request.get("service_tier"))
-            .cloned()
-        {
-            body["service_tier"] = service_tier;
-        }
-    }
-    Some(body)
+pub fn to(response: &CanonicalResponse, _ctx: &FormatContext) -> Option<Value> {
+    Some(to_raw(response))
 }
 
 pub fn from_raw(body_json: &Value) -> Option<CanonicalResponse> {
@@ -186,17 +174,7 @@ pub fn to_raw(canonical: &CanonicalResponse) -> Value {
     {
         response["created"] = Value::from(created_at);
     }
-    if let Some(service_tier) = canonical
-        .extensions
-        .get(OPENAI_RESPONSES_EXTENSION_NAMESPACE)
-        .or_else(|| {
-            canonical
-                .extensions
-                .get(OPENAI_RESPONSES_LEGACY_EXTENSION_NAMESPACE)
-        })
-        .and_then(|value| value.get("service_tier"))
-        .cloned()
-    {
+    if let Some(service_tier) = openai_service_tier_extension(&canonical.extensions).cloned() {
         response["service_tier"] = service_tier;
     }
     response

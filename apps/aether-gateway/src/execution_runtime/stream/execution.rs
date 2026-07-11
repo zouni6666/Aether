@@ -5487,9 +5487,8 @@ async fn execute_stream_from_frame_stream(
                         telemetry = Some(frame_telemetry);
                     }
                     StreamFramePayload::Eof { summary } => {
-                        if summary.is_some() {
-                            stream_terminal_summary = summary;
-                        }
+                        stream_terminal_summary =
+                            merge_stream_terminal_summary(stream_terminal_summary.take(), summary);
                         break;
                     }
                     StreamFramePayload::Error { error } => {
@@ -6296,12 +6295,14 @@ mod tests {
             Some(ExecutionStreamTerminalSummary {
                 standardized_usage: Some(runtime_usage),
                 model: Some("gpt-5.5".to_string()),
+                provider_actual_service_tier: Some("priority".to_string()),
                 unknown_event_count: 1,
                 ..ExecutionStreamTerminalSummary::default()
             }),
             Some(ExecutionStreamTerminalSummary {
                 standardized_usage: Some(observed_usage),
                 response_id: Some("resp_123".to_string()),
+                provider_actual_service_tier: Some("default".to_string()),
                 observed_finish: true,
                 unknown_event_count: 2,
                 ..ExecutionStreamTerminalSummary::default()
@@ -6316,6 +6317,10 @@ mod tests {
         assert_eq!(usage.output_tokens, 137);
         assert_eq!(merged.model.as_deref(), Some("gpt-5.5"));
         assert_eq!(merged.response_id.as_deref(), Some("resp_123"));
+        assert_eq!(
+            merged.provider_actual_service_tier.as_deref(),
+            Some("default")
+        );
         assert!(merged.observed_finish);
         assert_eq!(merged.unknown_event_count, 3);
     }

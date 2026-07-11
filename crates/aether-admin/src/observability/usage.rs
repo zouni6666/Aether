@@ -1240,6 +1240,9 @@ fn admin_usage_active_request_json(
     if let Some(service_tier) = item.provider_service_tier() {
         value["service_tier"] = json!(service_tier);
     }
+    if let Some(actual_service_tier) = item.provider_actual_service_tier() {
+        value["actual_service_tier"] = json!(actual_service_tier);
+    }
     if let Some(image_progress) = image_progress {
         value["image_progress"] = image_progress.clone();
     }
@@ -1358,6 +1361,12 @@ pub fn admin_usage_record_json(
     }
     if let Some(service_tier) = item.provider_service_tier() {
         object.insert("service_tier".to_string(), json!(service_tier));
+    }
+    if let Some(actual_service_tier) = item.provider_actual_service_tier() {
+        object.insert(
+            "actual_service_tier".to_string(),
+            json!(actual_service_tier),
+        );
     }
     payload
 }

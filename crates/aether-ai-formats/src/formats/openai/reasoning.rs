@@ -49,7 +49,7 @@ pub(crate) fn validate_openai_reasoning_request_with_source_model(
         provider_model,
         source_model,
         body,
-        false,
+        None,
         None,
     )
 }
@@ -60,7 +60,7 @@ pub(crate) fn validate_openai_reasoning_request_with_model_profile(
     provider_model: &str,
     source_model: &str,
     body: &Value,
-    use_model_card_reasoning_contract: bool,
+    model_card_reasoning_efforts: Option<&[String]>,
     supports_reasoning_mode: Option<bool>,
 ) -> Result<(), OpenAiReasoningContractViolation> {
     let Some(object) = body.as_object() else {
@@ -106,7 +106,7 @@ pub(crate) fn validate_openai_reasoning_request_with_model_profile(
             provider_api_format,
             provider_model,
             source_model,
-            use_model_card_reasoning_contract,
+            model_card_reasoning_efforts,
         )?;
     }
 
@@ -122,6 +122,12 @@ pub(crate) fn validate_openai_reasoning_request_with_model_profile(
     {
         validate_reasoning_context(context)?;
     }
+    if let Some(summary) = reasoning
+        .and_then(|reasoning| reasoning.get("summary"))
+        .filter(|value| !value.is_null())
+    {
+        validate_reasoning_summary(summary)?;
+    }
 
     Ok(())
 }
@@ -132,7 +138,7 @@ fn validate_reasoning_effort(
     provider_api_format: &str,
     provider_model: &str,
     source_model: &str,
-    use_model_card_reasoning_contract: bool,
+    model_card_reasoning_efforts: Option<&[String]>,
 ) -> Result<(), OpenAiReasoningContractViolation> {
     let field = if source_api_format == "openai:chat" {
         "reasoning_effort"
@@ -163,8 +169,22 @@ fn validate_reasoning_effort(
             reason: "ultra is a Codex client preset, not an OpenAI wire effort".to_string(),
         });
     }
-    if use_model_card_reasoning_contract {
-        return Ok(());
+    if let Some(supported_efforts) =
+        model_card_reasoning_efforts.filter(|values| !values.is_empty())
+    {
+        if supported_efforts
+            .iter()
+            .any(|effort| effort == raw.trim() || (raw.trim() == "max" && effort == "ultra"))
+        {
+            return Ok(());
+        }
+        return Err(OpenAiReasoningContractViolation {
+            kind: OpenAiReasoningViolationKind::UnsupportedForModel,
+            field: field.to_string(),
+            value: Some(raw.to_string()),
+            reason: "provider model card does not support the requested reasoning effort"
+                .to_string(),
+        });
     }
     let Some(effort) = ReasoningEffort::parse(raw) else {
         return Ok(());
@@ -249,6 +269,26 @@ fn validate_reasoning_context(value: &Value) -> Result<(), OpenAiReasoningContra
         field: "reasoning.context".to_string(),
         value: Some(context.to_string()),
         reason: "reasoning context is not a supported wire value".to_string(),
+    })
+}
+
+fn validate_reasoning_summary(value: &Value) -> Result<(), OpenAiReasoningContractViolation> {
+    let Some(summary) = value.as_str() else {
+        return Err(OpenAiReasoningContractViolation {
+            kind: OpenAiReasoningViolationKind::InvalidType,
+            field: "reasoning.summary".to_string(),
+            value: Some(value.to_string()),
+            reason: "reasoning summary must be a string".to_string(),
+        });
+    };
+    if matches!(summary, "auto" | "concise" | "detailed") {
+        return Ok(());
+    }
+    Err(OpenAiReasoningContractViolation {
+        kind: OpenAiReasoningViolationKind::InvalidEnum,
+        field: "reasoning.summary".to_string(),
+        value: Some(summary.to_string()),
+        reason: "reasoning summary is not a supported wire value".to_string(),
     })
 }
 
@@ -404,6 +444,33 @@ mod tests {
         )
         .expect_err("unknown reasoning context should be rejected");
         assert_eq!(invalid.kind, OpenAiReasoningViolationKind::InvalidEnum);
+    }
+
+    #[test]
+    fn reasoning_summary_accepts_only_openai_wire_values() {
+        for summary in ["auto", "concise", "detailed"] {
+            validate_openai_reasoning_request(
+                "openai:responses",
+                "openai:responses",
+                "gpt-5.6-sol",
+                &json!({"reasoning": {"summary": summary}}),
+            )
+            .expect("documented reasoning summary should be accepted");
+        }
+
+        for (summary, expected_kind) in [
+            (json!("none"), OpenAiReasoningViolationKind::InvalidEnum),
+            (json!(true), OpenAiReasoningViolationKind::InvalidType),
+        ] {
+            let error = validate_openai_reasoning_request(
+                "openai:responses",
+                "openai:responses",
+                "gpt-5.6-sol",
+                &json!({"reasoning": {"summary": summary}}),
+            )
+            .expect_err("invalid reasoning summary should be rejected");
+            assert_eq!(error.kind, expected_kind);
+        }
     }
 
     #[test]

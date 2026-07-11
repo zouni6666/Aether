@@ -10,6 +10,13 @@ use crate::formats::shared::sse::{encode_done_sse, encode_json_sse};
 use crate::formats::shared::stream_core::common::*;
 use crate::formats::shared::AiSurfaceFinalizeError;
 
+fn normalize_openai_service_tier(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 64)
+        .map(str::to_ascii_lowercase)
+}
+
 #[derive(Default)]
 struct OpenAIChatProviderToolState {
     id: Option<String>,
@@ -21,6 +28,7 @@ struct OpenAIChatProviderToolState {
 pub struct OpenAIChatProviderState {
     response_id: Option<String>,
     model: Option<String>,
+    actual_service_tier: Option<String>,
     started: bool,
     finished: bool,
     pending_finish_reason: Option<String>,
@@ -46,6 +54,7 @@ struct OpenAIResponsesProviderToolResultState {
 pub struct OpenAIResponsesProviderState {
     response_id: Option<String>,
     model: Option<String>,
+    actual_service_tier: Option<String>,
     started: bool,
     finished: bool,
     text_parts: BTreeMap<String, String>,
@@ -60,6 +69,10 @@ pub struct OpenAIResponsesProviderState {
 }
 
 impl OpenAIChatProviderState {
+    pub(crate) fn actual_service_tier(&self) -> Option<&str> {
+        self.actual_service_tier.as_deref()
+    }
+
     fn finish_usage(value: Option<&Value>) -> Option<CanonicalUsage> {
         let usage_object = value?.as_object()?;
         let has_token_fields = [
@@ -129,6 +142,11 @@ impl OpenAIChatProviderState {
             .and_then(Value::as_str)
             .map(ToOwned::to_owned)
             .or_else(|| self.model.clone());
+        if let Some(service_tier) =
+            normalize_openai_service_tier(chunk_object.get("service_tier").and_then(Value::as_str))
+        {
+            self.actual_service_tier = Some(service_tier);
+        }
 
         let mut out = Vec::new();
         let Some(chunk_choices) = chunk_object.get("choices").and_then(Value::as_array) else {
@@ -369,6 +387,10 @@ impl OpenAIChatProviderState {
 }
 
 impl OpenAIResponsesProviderState {
+    pub(crate) fn actual_service_tier(&self) -> Option<&str> {
+        self.actual_service_tier.as_deref()
+    }
+
     fn identity(&self, report_context: &Value) -> (String, String) {
         resolve_identity(
             self.response_id.as_deref(),
@@ -1229,6 +1251,11 @@ impl OpenAIResponsesProviderState {
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned)
                 .or_else(|| self.model.clone());
+            if let Some(service_tier) =
+                normalize_openai_service_tier(response.get("service_tier").and_then(Value::as_str))
+            {
+                self.actual_service_tier = Some(service_tier);
+            }
         }
 
         match value
@@ -1781,6 +1808,7 @@ impl OpenAIResponsesProviderState {
 pub struct OpenAIChatClientEmitter {
     response_id: Option<String>,
     model: Option<String>,
+    actual_service_tier: Option<String>,
     started: bool,
     finished: bool,
     next_tool_call_index: usize,
@@ -1826,6 +1854,7 @@ fn web_search_query_from_arguments(arguments: &str) -> String {
 pub struct OpenAIResponsesClientEmitter {
     response_id: Option<String>,
     model: Option<String>,
+    actual_service_tier: Option<String>,
     created_at: Option<i64>,
     message_item_id: Option<String>,
     reasoning_item_id: Option<String>,
@@ -1851,6 +1880,31 @@ pub struct OpenAIResponsesClientEmitter {
 }
 
 impl OpenAIChatClientEmitter {
+    pub(crate) fn set_actual_service_tier(&mut self, value: Option<&str>) {
+        if value.is_some_and(|value| {
+            self.actual_service_tier
+                .as_deref()
+                .is_some_and(|current| current.eq_ignore_ascii_case(value.trim()))
+        }) {
+            return;
+        }
+        if let Some(value) = normalize_openai_service_tier(value) {
+            self.actual_service_tier = Some(value);
+        }
+    }
+
+    fn encode_chunk(&self, mut chunk: Value) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
+        if let (Some(service_tier), Some(object)) =
+            (self.actual_service_tier.as_ref(), chunk.as_object_mut())
+        {
+            object.insert(
+                "service_tier".to_string(),
+                Value::String(service_tier.clone()),
+            );
+        }
+        encode_json_sse(None, &chunk)
+    }
+
     fn update_identity(&mut self, frame: &CanonicalStreamFrame) {
         self.response_id = Some(frame.id.clone());
         self.model = Some(frame.model.clone());
@@ -1861,15 +1915,12 @@ impl OpenAIChatClientEmitter {
             return Ok(Vec::new());
         }
         self.started = true;
-        encode_json_sse(
-            None,
-            &build_openai_chat_role_chunk(
-                self.response_id
-                    .as_deref()
-                    .unwrap_or("chatcmpl-local-stream"),
-                self.model.as_deref().unwrap_or("unknown"),
-            ),
-        )
+        self.encode_chunk(build_openai_chat_role_chunk(
+            self.response_id
+                .as_deref()
+                .unwrap_or("chatcmpl-local-stream"),
+            self.model.as_deref().unwrap_or("unknown"),
+        ))
     }
 
     fn chat_tool_call_index(&mut self, canonical_index: usize) -> usize {
@@ -1889,9 +1940,8 @@ impl OpenAIChatClientEmitter {
             CanonicalStreamEvent::Start => self.ensure_started(),
             CanonicalStreamEvent::TextDelta(text) => {
                 let mut out = self.ensure_started()?;
-                out.extend(encode_json_sse(
-                    None,
-                    &build_openai_chat_chunk(
+                out.extend(
+                    self.encode_chunk(build_openai_chat_chunk(
                         self.response_id
                             .as_deref()
                             .unwrap_or("chatcmpl-local-stream"),
@@ -1899,61 +1949,54 @@ impl OpenAIChatClientEmitter {
                         text,
                         None,
                         None,
-                    ),
-                )?);
+                    ))?,
+                );
                 Ok(out)
             }
             CanonicalStreamEvent::ReasoningDelta(text) => {
                 let mut out = self.ensure_started()?;
-                out.extend(encode_json_sse(
-                    None,
-                    &json!({
-                        "id": self.response_id
-                            .as_deref()
-                            .unwrap_or("chatcmpl-local-stream"),
-                        "object": "chat.completion.chunk",
-                        "model": self.model.as_deref().unwrap_or("unknown"),
-                        "choices": [{
-                            "index": 0,
-                            "delta": {
-                                "reasoning_content": text,
-                            },
-                            "finish_reason": Value::Null
-                        }]
-                    }),
-                )?);
+                out.extend(self.encode_chunk(json!({
+                    "id": self.response_id
+                        .as_deref()
+                        .unwrap_or("chatcmpl-local-stream"),
+                    "object": "chat.completion.chunk",
+                    "model": self.model.as_deref().unwrap_or("unknown"),
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "reasoning_content": text,
+                        },
+                        "finish_reason": Value::Null
+                    }]
+                }))?);
                 Ok(out)
             }
             CanonicalStreamEvent::ReasoningSummaryDone => {
                 // CPA strategy: emit "\n\n" as paragraph separator between
                 // reasoning sections, matching CPA's Chat downstream behavior.
                 let mut out = self.ensure_started()?;
-                out.extend(encode_json_sse(
-                    None,
-                    &json!({
-                        "id": self.response_id
-                            .as_deref()
-                            .unwrap_or("chatcmpl-local-stream"),
-                        "object": "chat.completion.chunk",
-                        "model": self.model.as_deref().unwrap_or("unknown"),
-                        "choices": [{
-                            "index": 0,
-                            "delta": {
-                                "reasoning_content": "\n\n",
-                            },
-                            "finish_reason": Value::Null
-                        }]
-                    }),
-                )?);
+                out.extend(self.encode_chunk(json!({
+                    "id": self.response_id
+                        .as_deref()
+                        .unwrap_or("chatcmpl-local-stream"),
+                    "object": "chat.completion.chunk",
+                    "model": self.model.as_deref().unwrap_or("unknown"),
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "reasoning_content": "\n\n",
+                        },
+                        "finish_reason": Value::Null
+                    }]
+                }))?);
                 Ok(out)
             }
             CanonicalStreamEvent::ReasoningSignature(_) => Ok(Vec::new()),
             CanonicalStreamEvent::ContentPart(part) => {
                 let placeholder = openai_stream_placeholder_for_content_part(&part);
                 let mut out = self.ensure_started()?;
-                out.extend(encode_json_sse(
-                    None,
-                    &build_openai_chat_chunk(
+                out.extend(
+                    self.encode_chunk(build_openai_chat_chunk(
                         self.response_id
                             .as_deref()
                             .unwrap_or("chatcmpl-local-stream"),
@@ -1961,8 +2004,8 @@ impl OpenAIChatClientEmitter {
                         placeholder,
                         None,
                         None,
-                    ),
-                )?);
+                    ))?,
+                );
                 Ok(out)
             }
             CanonicalStreamEvent::ImageGenerationCall { item, .. } => {
@@ -1971,9 +2014,8 @@ impl OpenAIChatClientEmitter {
                 };
                 let placeholder = openai_stream_placeholder_for_content_part(&part);
                 let mut out = self.ensure_started()?;
-                out.extend(encode_json_sse(
-                    None,
-                    &build_openai_chat_chunk(
+                out.extend(
+                    self.encode_chunk(build_openai_chat_chunk(
                         self.response_id
                             .as_deref()
                             .unwrap_or("chatcmpl-local-stream"),
@@ -1981,8 +2023,8 @@ impl OpenAIChatClientEmitter {
                         placeholder,
                         None,
                         None,
-                    ),
-                )?);
+                    ))?,
+                );
                 Ok(out)
             }
             CanonicalStreamEvent::OpenAiResponsesOutputItem { .. } => {
@@ -1997,9 +2039,8 @@ impl OpenAIChatClientEmitter {
             } => {
                 let mut out = self.ensure_started()?;
                 let chat_index = self.chat_tool_call_index(index);
-                out.extend(encode_json_sse(
-                    None,
-                    &build_openai_chat_chunk(
+                out.extend(
+                    self.encode_chunk(build_openai_chat_chunk(
                         self.response_id
                             .as_deref()
                             .unwrap_or("chatcmpl-local-stream"),
@@ -2015,35 +2056,32 @@ impl OpenAIChatClientEmitter {
                             }
                         })]),
                         None,
-                    ),
-                )?);
+                    ))?,
+                );
                 Ok(out)
             }
             CanonicalStreamEvent::ToolCallArgumentsDelta { index, arguments } => {
                 let mut out = self.ensure_started()?;
                 let chat_index = self.chat_tool_call_index(index);
-                out.extend(encode_json_sse(
-                    None,
-                    &json!({
-                        "id": self.response_id
-                            .as_deref()
-                            .unwrap_or("chatcmpl-local-stream"),
-                        "object": "chat.completion.chunk",
-                        "model": self.model.as_deref().unwrap_or("unknown"),
-                        "choices": [{
-                            "index": 0,
-                            "delta": {
-                                "tool_calls": [{
-                                    "index": chat_index,
-                                    "function": {
-                                        "arguments": arguments,
-                                    }
-                                }]
-                            },
-                            "finish_reason": Value::Null
-                        }]
-                    }),
-                )?);
+                out.extend(self.encode_chunk(json!({
+                    "id": self.response_id
+                        .as_deref()
+                        .unwrap_or("chatcmpl-local-stream"),
+                    "object": "chat.completion.chunk",
+                    "model": self.model.as_deref().unwrap_or("unknown"),
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [{
+                                "index": chat_index,
+                                "function": {
+                                    "arguments": arguments,
+                                }
+                            }]
+                        },
+                        "finish_reason": Value::Null
+                    }]
+                }))?);
                 Ok(out)
             }
             CanonicalStreamEvent::ToolResultDelta {
@@ -2060,21 +2098,18 @@ impl OpenAIChatClientEmitter {
                     delta.insert("name".to_string(), Value::String(name));
                 }
                 delta.insert("content".to_string(), Value::String(content));
-                out.extend(encode_json_sse(
-                    None,
-                    &json!({
-                        "id": self.response_id
-                            .as_deref()
-                            .unwrap_or("chatcmpl-local-stream"),
-                        "object": "chat.completion.chunk",
-                        "model": self.model.as_deref().unwrap_or("unknown"),
-                        "choices": [{
-                            "index": 0,
-                            "delta": Value::Object(delta),
-                            "finish_reason": Value::Null
-                        }]
-                    }),
-                )?);
+                out.extend(self.encode_chunk(json!({
+                    "id": self.response_id
+                        .as_deref()
+                        .unwrap_or("chatcmpl-local-stream"),
+                    "object": "chat.completion.chunk",
+                    "model": self.model.as_deref().unwrap_or("unknown"),
+                    "choices": [{
+                        "index": 0,
+                        "delta": Value::Object(delta),
+                        "finish_reason": Value::Null
+                    }]
+                }))?);
                 Ok(out)
             }
             CanonicalStreamEvent::UnknownEvent(payload)
@@ -2093,27 +2128,25 @@ impl OpenAIChatClientEmitter {
                     return Ok(Vec::new());
                 }
                 let mut out = self.ensure_started()?;
-                out.extend(encode_json_sse(
-                    None,
-                    &build_openai_chat_finish_chunk(
+                out.extend(
+                    self.encode_chunk(build_openai_chat_finish_chunk(
                         self.response_id
                             .as_deref()
                             .unwrap_or("chatcmpl-local-stream"),
                         self.model.as_deref().unwrap_or("unknown"),
                         finish_reason.as_deref(),
-                    ),
-                )?);
+                    ))?,
+                );
                 if let Some(usage) = usage {
-                    out.extend(encode_json_sse(
-                        None,
-                        &build_openai_chat_usage_chunk_from_usage(
+                    out.extend(
+                        self.encode_chunk(build_openai_chat_usage_chunk_from_usage(
                             self.response_id
                                 .as_deref()
                                 .unwrap_or("chatcmpl-local-stream"),
                             self.model.as_deref().unwrap_or("unknown"),
                             &usage,
-                        ),
-                    )?);
+                        ))?,
+                    );
                 }
                 out.extend(encode_done_sse());
                 self.finished = true;
@@ -2126,16 +2159,13 @@ impl OpenAIChatClientEmitter {
         if !self.started || self.finished {
             return Ok(Vec::new());
         }
-        let out = encode_json_sse(
+        let out = self.encode_chunk(build_openai_chat_finish_chunk(
+            self.response_id
+                .as_deref()
+                .unwrap_or("chatcmpl-local-stream"),
+            self.model.as_deref().unwrap_or("unknown"),
             None,
-            &build_openai_chat_finish_chunk(
-                self.response_id
-                    .as_deref()
-                    .unwrap_or("chatcmpl-local-stream"),
-                self.model.as_deref().unwrap_or("unknown"),
-                None,
-            ),
-        )?;
+        ))?;
         self.finished = true;
         let mut bytes = out;
         bytes.extend(encode_done_sse());
@@ -2144,6 +2174,19 @@ impl OpenAIChatClientEmitter {
 }
 
 impl OpenAIResponsesClientEmitter {
+    pub(crate) fn set_actual_service_tier(&mut self, value: Option<&str>) {
+        if value.is_some_and(|value| {
+            self.actual_service_tier
+                .as_deref()
+                .is_some_and(|current| current.eq_ignore_ascii_case(value.trim()))
+        }) {
+            return;
+        }
+        if let Some(value) = normalize_openai_service_tier(value) {
+            self.actual_service_tier = Some(value);
+        }
+    }
+
     fn response_id(&self) -> &str {
         self.response_id.as_deref().unwrap_or("resp-local-stream")
     }
@@ -2190,6 +2233,14 @@ impl OpenAIResponsesClientEmitter {
             (self.created_at, response.as_object_mut())
         {
             response_object.insert("created_at".to_string(), Value::from(created_at));
+        }
+        if let (Some(service_tier), Some(response_object)) =
+            (self.actual_service_tier.as_ref(), response.as_object_mut())
+        {
+            response_object.insert(
+                "service_tier".to_string(),
+                Value::String(service_tier.clone()),
+            );
         }
         response
     }
@@ -2815,6 +2866,12 @@ impl OpenAIResponsesClientEmitter {
                 response_object.insert("created_at".to_string(), Value::from(created_at));
             }
             ensure_modern_openai_responses_response_fields(response_object);
+            if let Some(service_tier) = self.actual_service_tier.as_ref() {
+                response_object.insert(
+                    "service_tier".to_string(),
+                    Value::String(service_tier.clone()),
+                );
+            }
         }
         response
     }
@@ -2848,6 +2905,7 @@ impl OpenAIResponsesClientEmitter {
                 "authoritative OpenAI Responses terminal payload must be an object",
             )
         })?;
+        self.set_actual_service_tier(response_object.get("service_tier").and_then(Value::as_str));
         if let Some(response_id) = response_object
             .get("id")
             .and_then(Value::as_str)
