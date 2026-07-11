@@ -861,8 +861,8 @@ async fn gateway_updates_admin_provider_locally_with_trusted_admin_principal() {
     assert_eq!(payload["is_active"], false);
     assert_eq!(payload["max_retries"], 6);
     assert_eq!(
-        payload["request_timeout"],
-        aether_contracts::MAX_EXECUTION_REQUEST_TIMEOUT_SECS
+        payload["request_timeout"].as_f64(),
+        Some(aether_contracts::MAX_EXECUTION_REQUEST_TIMEOUT_SECS as f64)
     );
     assert_eq!(payload["stream_first_byte_timeout"], 11.0);
     assert_eq!(payload["proxy"], json!({"url": "https://proxy.example"}));
