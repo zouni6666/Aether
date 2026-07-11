@@ -103,7 +103,6 @@ fn complete_codex_model_card(source_model_name: &str) -> serde_json::Value {
         "upgrade": null,
         "base_instructions": "Use the current Codex instructions.",
         "model_messages": null,
-        "supports_reasoning_summaries": true,
         "support_verbosity": true,
         "default_verbosity": "low",
         "apply_patch_tool_type": "freeform",

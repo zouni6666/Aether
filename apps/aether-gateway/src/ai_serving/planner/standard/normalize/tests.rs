@@ -195,7 +195,7 @@ fn local_codex_compact_wrapper_applies_the_complete_request_projection() {
         "stream_options": {"reasoning_summary_delivery": "sequential_cutoff"},
         "tool_choice": "auto",
         "parallel_tool_calls": true,
-        "reasoning": {"effort": "max", "context": "all_turns"},
+        "reasoning": {"effort": "max", "summary": "auto", "context": "all_turns"},
         "text": {"verbosity": "medium"},
         "tools": [{
             "type": "function",

@@ -134,9 +134,8 @@ fn codex_model_card_is_complete(card: &serde_json::Map<String, Value>) -> bool {
             .and_then(Value::as_str)
             .is_some()
         && card
-            .get("supports_reasoning_summaries")
-            .and_then(Value::as_bool)
-            .is_some()
+            .get("supports_reasoning_summary_parameter")
+            .is_none_or(Value::is_boolean)
         && card
             .get("support_verbosity")
             .and_then(Value::as_bool)

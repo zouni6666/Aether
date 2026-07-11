@@ -71,7 +71,7 @@ enum CodexOpenAiEndpointKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodexResponsesModelCapabilities {
     pub use_responses_lite: bool,
-    pub supports_reasoning_summaries: bool,
+    pub supports_reasoning_summary_parameter: bool,
     pub default_reasoning_effort: Option<String>,
     pub default_reasoning_summary: Option<String>,
     pub supported_reasoning_efforts: Vec<String>,
@@ -111,7 +111,7 @@ fn codex_namespaced_model_suffix(model: &str) -> Option<&str> {
 fn conservative_codex_responses_model_capabilities() -> CodexResponsesModelCapabilities {
     CodexResponsesModelCapabilities {
         use_responses_lite: false,
-        supports_reasoning_summaries: false,
+        supports_reasoning_summary_parameter: true,
         default_reasoning_effort: None,
         default_reasoning_summary: None,
         supported_reasoning_efforts: Vec::new(),
@@ -136,12 +136,10 @@ pub fn codex_responses_model_capabilities_from_card(
     if let Some(value) = card.get("use_responses_lite").and_then(Value::as_bool) {
         capabilities.use_responses_lite = value;
     }
-    if let Some(value) = card
-        .get("supports_reasoning_summaries")
+    capabilities.supports_reasoning_summary_parameter = card
+        .get("supports_reasoning_summary_parameter")
         .and_then(Value::as_bool)
-    {
-        capabilities.supports_reasoning_summaries = value;
-    }
+        .unwrap_or(true);
     if let Some(value) = card
         .get("default_reasoning_level")
         .and_then(Value::as_str)
@@ -334,7 +332,6 @@ fn bundled_codex_model_card(spec: BundledCodexModelCardSpec<'_>) -> Value {
         "default_reasoning_level": spec.default_reasoning_level,
         "supported_reasoning_levels": reasoning_level_cards(spec.efforts),
         "default_reasoning_summary": spec.default_reasoning_summary,
-        "supports_reasoning_summaries": true,
         "support_verbosity": true,
         "default_verbosity": spec.default_verbosity,
         "supports_parallel_tool_calls": true,
@@ -909,7 +906,6 @@ pub fn apply_codex_openai_responses_compact_body_edits(
     let Some(body_object) = provider_request_body.as_object_mut() else {
         return;
     };
-    strip_codex_input_item_ids(body_object);
     body_object
         .retain(|field, _| CODEX_OPENAI_RESPONSES_COMPACT_BODY_FIELDS.contains(&field.as_str()));
     body_object
@@ -1113,54 +1109,80 @@ fn apply_codex_model_request_capabilities(
 
 fn ensure_codex_reasoning_defaults(
     body_object: &mut serde_json::Map<String, Value>,
-    provider_api_format: &str,
     capabilities: &CodexResponsesModelCapabilities,
+    supports_reasoning_mode: bool,
     body_rules: Option<&Value>,
 ) {
-    if !capabilities.supports_reasoning_summaries {
-        if !body_rules_handle_path(body_rules, "reasoning") {
-            if is_openai_responses_compact_request(provider_api_format) {
-                body_object.remove("reasoning");
-            } else {
-                body_object.insert("reasoning".to_string(), Value::Null);
-            }
-        }
-        return;
-    }
     if body_rules_handle_path(body_rules, "reasoning") && !capabilities.use_responses_lite {
+        let has_summary = body_object
+            .get_mut("reasoning")
+            .and_then(Value::as_object_mut)
+            .and_then(|reasoning| {
+                if !capabilities.supports_reasoning_summary_parameter {
+                    reasoning.remove("summary");
+                }
+                reasoning.get("summary")
+            })
+            .is_some_and(|summary| !summary.is_null());
+        if !has_summary {
+            remove_codex_reasoning_summary_delivery(body_object);
+        }
         return;
     }
     let reasoning = body_object
         .entry("reasoning".to_string())
         .or_insert_with(|| json!({}));
+    if reasoning.is_null() {
+        *reasoning = json!({});
+    }
     let Some(reasoning_object) = reasoning.as_object_mut() else {
         return;
     };
     if reasoning_object.get("effort").is_none_or(Value::is_null) {
-        let default_effort = if capabilities.use_responses_lite
+        let default_effort = if supports_reasoning_mode
             && reasoning_object
                 .get("mode")
                 .and_then(Value::as_str)
                 .is_some_and(|mode| matches!(mode, "standard" | "pro"))
         {
-            CODEX_DEFAULT_REASONING_EFFORT
-        } else if let Some(default_effort) = capabilities.default_reasoning_effort.as_deref() {
-            default_effort
+            Some(CODEX_DEFAULT_REASONING_EFFORT)
         } else {
-            return;
+            capabilities.default_reasoning_effort.as_deref()
         };
-        reasoning_object.insert("effort".to_string(), json!(default_effort));
+        if let Some(default_effort) = default_effort {
+            reasoning_object.insert("effort".to_string(), json!(default_effort));
+        }
     }
-    if reasoning_object.get("summary").is_some_and(Value::is_null) {
+    if !capabilities.supports_reasoning_summary_parameter {
         reasoning_object.remove("summary");
-    }
-    if capabilities.supports_reasoning_summaries && !reasoning_object.contains_key("summary") {
+    } else if reasoning_object.get("summary").is_some_and(Value::is_null) {
+        reasoning_object.remove("summary");
+    } else if !reasoning_object.contains_key("summary") {
         if let Some(summary) = capabilities.default_reasoning_summary.as_deref() {
             reasoning_object.insert("summary".to_string(), json!(summary));
         }
     }
     if capabilities.use_responses_lite {
         reasoning_object.insert("context".to_string(), json!("all_turns"));
+    }
+    let has_summary = reasoning_object
+        .get("summary")
+        .is_some_and(|summary| !summary.is_null());
+    if !has_summary {
+        remove_codex_reasoning_summary_delivery(body_object);
+    }
+}
+
+fn remove_codex_reasoning_summary_delivery(body_object: &mut serde_json::Map<String, Value>) {
+    let remove_stream_options = body_object
+        .get_mut("stream_options")
+        .and_then(Value::as_object_mut)
+        .is_some_and(|stream_options| {
+            stream_options.remove("reasoning_summary_delivery");
+            stream_options.is_empty()
+        });
+    if remove_stream_options {
+        body_object.remove("stream_options");
     }
 }
 
@@ -1346,24 +1368,6 @@ fn apply_codex_responses_lite_body_contract(
         strip_codex_responses_lite_image_details(item);
     }
     body_object.insert("parallel_tool_calls".to_string(), json!(false));
-}
-
-fn strip_codex_input_item_ids(body_object: &mut serde_json::Map<String, Value>) {
-    let Some(input) = body_object.get_mut("input").and_then(Value::as_array_mut) else {
-        return;
-    };
-    for item in input {
-        if let Some(item) = item.as_object_mut() {
-            item.remove("id");
-        }
-    }
-}
-
-fn strip_codex_unstored_input_item_ids(body_object: &mut serde_json::Map<String, Value>) {
-    if body_object.get("store").and_then(Value::as_bool) == Some(true) {
-        return;
-    }
-    strip_codex_input_item_ids(body_object);
 }
 
 fn remove_empty_codex_instructions(body_object: &mut serde_json::Map<String, Value>) {
@@ -1555,7 +1559,17 @@ pub fn apply_codex_openai_responses_special_body_edits_with_source_model_and_cap
         );
         &bundled_capabilities
     };
-    ensure_codex_reasoning_defaults(body_object, provider_api_format, capabilities, body_rules);
+    let supports_reasoning_mode =
+        crate::formats::shared::model_directives::openai_model_resolves_to_gpt_5_6(
+            effective_provider_model.as_str(),
+            source_model,
+        );
+    ensure_codex_reasoning_defaults(
+        body_object,
+        capabilities,
+        supports_reasoning_mode,
+        body_rules,
+    );
     normalize_codex_reasoning_effort(body_object);
     apply_codex_model_request_capabilities(
         body_object,
@@ -1564,8 +1578,6 @@ pub fn apply_codex_openai_responses_special_body_edits_with_source_model_and_cap
         body_rules,
     );
     apply_codex_responses_lite_body_contract(body_object, capabilities);
-    strip_codex_unstored_input_item_ids(body_object);
-
     strip_codex_cache_control_fields(provider_request_body);
     apply_codex_openai_responses_compact_body_edits(
         provider_request_body,
@@ -1772,7 +1784,6 @@ mod tests {
             "id": "gpt-future-agent",
             "slug": "gpt-future-agent",
             "use_responses_lite": true,
-            "supports_reasoning_summaries": true,
             "default_reasoning_level": "low",
             "default_reasoning_summary": "auto",
             "supports_parallel_tool_calls": true,
@@ -1803,6 +1814,7 @@ mod tests {
             "gpt-future-agent",
             Some(&metadata),
         );
+        assert!(capabilities.supports_reasoning_summary_parameter);
         assert_eq!(
             capabilities.default_reasoning_effort.as_deref(),
             Some("low")
@@ -1839,6 +1851,7 @@ mod tests {
         assert!(body.get("tools").is_none());
         assert_eq!(body["input"][0]["type"], "additional_tools");
         assert!(body["input"][1].get("id").is_none());
+        assert_eq!(body["input"][2]["id"], "msg-1");
         assert_eq!(body["parallel_tool_calls"], false);
         assert_eq!(body["service_tier"], "priority");
         assert_eq!(body["text"]["verbosity"], "low");
@@ -1858,6 +1871,109 @@ mod tests {
             headers.get("x-openai-internal-codex-responses-lite"),
             Some(&"true".to_string())
         );
+    }
+
+    #[test]
+    fn model_card_without_summary_parameter_support_keeps_reasoning_and_ids() {
+        let metadata = build_codex_model_catalog_metadata(&[json!({
+            "slug": "gpt-no-summary",
+            "supports_reasoning_summary_parameter": false,
+            "default_reasoning_level": "high",
+            "default_reasoning_summary": "detailed",
+            "supported_reasoning_levels": [{"effort": "high"}],
+            "supports_parallel_tool_calls": true
+        })]);
+        let capabilities = resolve_codex_responses_model_capabilities(
+            "gpt-no-summary",
+            "gpt-no-summary",
+            Some(&metadata),
+        );
+        assert!(!capabilities.supports_reasoning_summary_parameter);
+
+        let mut body = json!({
+            "model": "gpt-no-summary",
+            "input": [{
+                "id": "msg-client",
+                "type": "message",
+                "role": "user",
+                "content": []
+            }],
+            "reasoning": {"effort": "high", "summary": "detailed"},
+            "stream_options": {
+                "reasoning_summary_delivery": "sequential_cutoff",
+                "future_option": true
+            }
+        });
+        apply_codex_openai_responses_special_body_edits_with_source_model_and_capabilities(
+            &mut body,
+            "codex",
+            "openai:responses",
+            "gpt-no-summary",
+            "gpt-no-summary",
+            Some(&capabilities),
+            None,
+        );
+
+        assert_eq!(body["reasoning"], json!({"effort": "high"}));
+        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+        assert_eq!(body["stream_options"], json!({"future_option": true}));
+        assert_eq!(body["input"][0]["id"], "msg-client");
+    }
+
+    #[test]
+    fn codex_request_normalizes_the_reasoning_envelope_without_model_defaults() {
+        let capabilities = resolve_codex_responses_model_capabilities(
+            "gpt-future-agent",
+            "gpt-future-agent",
+            None,
+        );
+        for initial_reasoning in [None, Some(Value::Null)] {
+            let mut body = json!({
+                "model": "gpt-future-agent",
+                "input": [],
+                "stream_options": {
+                    "reasoning_summary_delivery": "sequential_cutoff"
+                }
+            });
+            if let Some(initial_reasoning) = initial_reasoning {
+                body["reasoning"] = initial_reasoning;
+            }
+
+            apply_codex_openai_responses_special_body_edits_with_source_model_and_capabilities(
+                &mut body,
+                "codex",
+                "openai:responses",
+                "gpt-future-agent",
+                "gpt-future-agent",
+                Some(&capabilities),
+                None,
+            );
+
+            assert_eq!(body["reasoning"], json!({}));
+            assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+            assert!(body.get("stream_options").is_none());
+        }
+
+        let mut compact = json!({
+            "model": "gpt-future-agent",
+            "input": [],
+            "reasoning": null,
+            "include": ["reasoning.encrypted_content"],
+            "store": true
+        });
+        apply_codex_openai_responses_special_body_edits_with_source_model_and_capabilities(
+            &mut compact,
+            "codex",
+            "openai:responses:compact",
+            "gpt-future-agent",
+            "gpt-future-agent",
+            Some(&capabilities),
+            None,
+        );
+
+        assert_eq!(compact["reasoning"], json!({}));
+        assert!(compact.get("include").is_none());
+        assert!(compact.get("store").is_none());
     }
 
     #[test]
@@ -1909,7 +2025,7 @@ mod tests {
     fn populated_remote_catalog_is_authoritative_and_matches_model_variants() {
         let metadata = build_codex_model_catalog_metadata(&[json!({
             "slug": "gpt-future-agent",
-            "supports_reasoning_summaries": true,
+            "supports_reasoning_summary_parameter": true,
             "default_reasoning_level": "high",
             "supported_reasoning_levels": [{"effort": "high"}],
             "supports_parallel_tool_calls": true
@@ -1956,7 +2072,7 @@ mod tests {
             Some(&metadata),
         );
         assert!(!missing.use_responses_lite);
-        assert!(!missing.supports_reasoning_summaries);
+        assert!(missing.supports_reasoning_summary_parameter);
         assert!(!missing.supports_parallel_tool_calls);
         assert_eq!(missing.default_reasoning_effort, None);
 
@@ -1980,8 +2096,8 @@ mod tests {
             Some(&missing),
             None,
         );
-        assert_eq!(body["reasoning"], Value::Null);
-        assert_eq!(body["include"], json!([]));
+        assert_eq!(body["reasoning"]["effort"], "high");
+        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
         assert_eq!(body["parallel_tool_calls"], false);
         assert!(body.get("service_tier").is_none());
         assert!(body["text"].get("verbosity").is_none());
@@ -2001,7 +2117,7 @@ mod tests {
             Some(&missing),
             None,
         );
-        assert!(compact.get("reasoning").is_none());
+        assert_eq!(compact["reasoning"]["effort"], "high");
     }
 
     #[test]
@@ -2048,7 +2164,7 @@ mod tests {
     fn bare_gpt_5_6_requires_an_explicit_model_card() {
         let conservative = resolve_codex_responses_model_capabilities("gpt-5.6", "gpt-5.6", None);
         assert!(!conservative.use_responses_lite);
-        assert!(!conservative.supports_reasoning_summaries);
+        assert!(conservative.supports_reasoning_summary_parameter);
         assert!(!conservative.supports_parallel_tool_calls);
         assert_eq!(conservative.default_reasoning_effort, None);
         assert_eq!(conservative.default_verbosity, None);
@@ -2057,7 +2173,7 @@ mod tests {
         let metadata = build_codex_model_catalog_metadata(&[json!({
             "slug": "gpt-5.6",
             "use_responses_lite": true,
-            "supports_reasoning_summaries": true,
+            "supports_reasoning_summary_parameter": true,
             "default_reasoning_level": "medium",
             "supported_reasoning_levels": [{"effort": "medium"}],
             "supports_parallel_tool_calls": true,
@@ -2091,7 +2207,7 @@ mod tests {
     fn model_card_preserves_custom_reasoning_effort_values() {
         let metadata = build_codex_model_catalog_metadata(&[json!({
             "slug": "codex-custom",
-            "supports_reasoning_summaries": true,
+            "supports_reasoning_summary_parameter": true,
             "default_reasoning_level": "VendorEffortX",
             "supported_reasoning_levels": [
                 {"effort": "VendorEffortX"},
@@ -2404,11 +2520,8 @@ mod tests {
                 "{field} must be stripped"
             );
         }
-        assert_eq!(
-            provider_request_body["stream_options"],
-            json!({"reasoning_summary_delivery": "sequential_cutoff"})
-        );
-        assert!(provider_request_body["input"][0].get("id").is_none());
+        assert!(provider_request_body.get("stream_options").is_none());
+        assert_eq!(provider_request_body["input"][0]["id"], "msg-1");
         assert_eq!(
             provider_request_body["input"][0]["content"][0]["id"],
             json!("content-1")
@@ -2416,7 +2529,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_responses_body_edits_preserve_input_item_ids_when_store_is_enabled() {
+    fn codex_responses_body_edits_preserve_client_selected_input_item_ids() {
         let body_rules = json!([{"action":"set","path":"store","value":true}]);
         let mut provider_request_body = json!({
             "model": "gpt-5.4",
@@ -2910,6 +3023,7 @@ mod tests {
                 "model": "gpt-5.6-sol",
                 "input": [
                     {
+                        "id": "msg-1",
                         "type": "message",
                         "role": "user",
                         "content": [{
@@ -2918,8 +3032,8 @@ mod tests {
                             "text": "hello"
                         }]
                     },
-                    {"type": "function_call", "name": "lookup"},
-                    {"type": "future_item", "value": true}
+                    {"id": "call-1", "type": "function_call", "name": "lookup"},
+                    {"id": "future-1", "type": "future_item", "value": true}
                 ],
                 "parallel_tool_calls": true,
                 "service_tier": "priority",

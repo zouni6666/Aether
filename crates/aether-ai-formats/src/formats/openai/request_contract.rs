@@ -147,7 +147,7 @@ fn validate_openai_provider_request_contract_with_codex_model_capabilities(
         source_model,
         body,
         model_capabilities.is_some(),
-        model_capabilities.map(|capabilities| capabilities.use_responses_lite),
+        None,
     )
     .map_err(OpenAiProviderRequestContractViolation::Reasoning)
 }
@@ -315,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_codex_card_controls_default_effort_mode_and_final_validation() {
+    fn dynamic_codex_card_controls_default_effort_and_keeps_mode_model_specific() {
         let finalization = OpenAiProviderRequestFinalization {
             source_api_format: "openai:responses",
             provider_api_format: "openai:responses",
@@ -328,7 +328,7 @@ mod tests {
         };
         let capabilities = CodexResponsesModelCapabilities {
             use_responses_lite: true,
-            supports_reasoning_summaries: true,
+            supports_reasoning_summary_parameter: true,
             default_reasoning_effort: Some("ultra".to_string()),
             default_reasoning_summary: None,
             supported_reasoning_efforts: vec!["max".to_string(), "ultra".to_string()],
@@ -352,12 +352,16 @@ mod tests {
             "input": [],
             "reasoning": {"effort": "max", "mode": "pro"}
         });
-        finalize_openai_provider_request_with_codex_model_capabilities(
+        let mode_error = finalize_openai_provider_request_with_codex_model_capabilities(
             &mut mode_body,
             finalization,
             Some(&capabilities),
         )
-        .expect("Responses Lite card should allow the current reasoning mode contract");
+        .expect_err("Responses Lite alone must not enable GPT-5.6 reasoning modes");
+        assert!(matches!(
+            mode_error,
+            super::OpenAiProviderRequestContractViolation::Reasoning(_)
+        ));
 
         let ultra_only = CodexResponsesModelCapabilities {
             supported_reasoning_efforts: vec!["ultra".to_string()],
@@ -391,7 +395,7 @@ mod tests {
         };
         let capabilities = CodexResponsesModelCapabilities {
             use_responses_lite: false,
-            supports_reasoning_summaries: true,
+            supports_reasoning_summary_parameter: true,
             default_reasoning_effort: Some("VendorEffortX".to_string()),
             default_reasoning_summary: None,
             supported_reasoning_efforts: vec!["VendorEffortX".to_string()],

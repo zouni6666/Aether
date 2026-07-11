@@ -40,7 +40,7 @@ pub use formats::openai::responses::codex::{
     build_codex_model_catalog_metadata, bundled_codex_model_cards, effective_codex_model_cards,
     parse_codex_auth_identity, resolve_codex_responses_model_capabilities, CodexAuthIdentity,
     CodexResponsesModelCapabilities, CODEX_CLIENT_ORIGINATOR, CODEX_CLIENT_USER_AGENT,
-    CODEX_CLIENT_VERSION, CODEX_MODEL_CATALOG_METADATA_FIELD,
+    CODEX_CLIENT_VERSION, CODEX_MODEL_CATALOG_METADATA_FIELD, CODEX_RESPONSES_LITE_HEADER,
 };
 pub use formats::openai::responses::request::{
     validate_openai_responses_request_contract, OpenAiResponsesRequestContractViolation,

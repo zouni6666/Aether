@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use aether_ai_formats::CODEX_RESPONSES_LITE_HEADER;
 use aether_ai_serving::{run_ai_authenticated_decision_input, AiAuthenticatedDecisionInputPort};
 use aether_routing_core::{
     rank_vector_for_candidate, CandidateKind, ResolvedRoutingPolicy, RoutingCandidateFacts,
@@ -32,7 +33,6 @@ use crate::{AiExecutionDecision, AppState, GatewayError};
 const ROUTING_GROUP_SELECTION_CACHE_TTL: Duration = Duration::from_secs(30);
 const CODEX_ACCOUNT_ID_HEADER: &str = "chatgpt-account-id";
 const CODEX_FEDRAMP_HEADER: &str = "x-openai-fedramp";
-const CODEX_RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
 
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedLocalDecisionAuthInput {
@@ -1035,7 +1035,7 @@ mod tests {
             "id": "gpt-future-agent",
             "slug": "gpt-future-agent",
             "use_responses_lite": true,
-            "supports_reasoning_summaries": true,
+            "supports_reasoning_summary_parameter": true,
             "default_reasoning_level": "low",
             "default_reasoning_summary": "none",
             "supported_reasoning_levels": [{"effort": "low"}, {"effort": "high"}]
