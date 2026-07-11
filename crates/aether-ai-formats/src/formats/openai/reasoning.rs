@@ -68,19 +68,21 @@ pub(crate) fn validate_openai_reasoning_request_with_model_profile(
     };
     let source_api_format = crate::normalize_api_format_alias(source_api_format);
     let reasoning = match source_api_format.as_str() {
-        "openai:responses" | "openai:responses:compact" => match object.get("reasoning") {
-            Some(Value::Object(reasoning)) => Some(reasoning),
-            Some(Value::Null) => None,
-            Some(value) => {
-                return Err(OpenAiReasoningContractViolation {
-                    kind: OpenAiReasoningViolationKind::InvalidType,
-                    field: "reasoning".to_string(),
-                    value: Some(value.to_string()),
-                    reason: "reasoning must be an object".to_string(),
-                });
+        "openai:responses" | "openai:responses:compact" | "openai:search" => {
+            match object.get("reasoning") {
+                Some(Value::Object(reasoning)) => Some(reasoning),
+                Some(Value::Null) => None,
+                Some(value) => {
+                    return Err(OpenAiReasoningContractViolation {
+                        kind: OpenAiReasoningViolationKind::InvalidType,
+                        field: "reasoning".to_string(),
+                        value: Some(value.to_string()),
+                        reason: "reasoning must be an object".to_string(),
+                    });
+                }
+                None => None,
             }
-            None => None,
-        },
+        }
         "openai:chat" => None,
         _ => return Ok(()),
     };
@@ -94,7 +96,7 @@ pub(crate) fn validate_openai_reasoning_request_with_model_profile(
 
     let effort = match source_api_format.as_str() {
         "openai:chat" => object.get("reasoning_effort"),
-        "openai:responses" | "openai:responses:compact" => {
+        "openai:responses" | "openai:responses:compact" | "openai:search" => {
             reasoning.and_then(|reasoning| reasoning.get("effort"))
         }
         _ => None,
@@ -110,11 +112,13 @@ pub(crate) fn validate_openai_reasoning_request_with_model_profile(
         )?;
     }
 
-    if let Some(mode) = reasoning
-        .and_then(|reasoning| reasoning.get("mode"))
-        .filter(|value| !value.is_null())
-    {
-        validate_reasoning_mode(mode, provider_model, source_model, supports_reasoning_mode)?;
+    if source_api_format != "openai:search" {
+        if let Some(mode) = reasoning
+            .and_then(|reasoning| reasoning.get("mode"))
+            .filter(|value| !value.is_null())
+        {
+            validate_reasoning_mode(mode, provider_model, source_model, supports_reasoning_mode)?;
+        }
     }
     if let Some(context) = reasoning
         .and_then(|reasoning| reasoning.get("context"))

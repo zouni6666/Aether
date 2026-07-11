@@ -65,6 +65,7 @@ fn is_openai_image_request(provider_api_format: &str) -> bool {
 enum CodexOpenAiEndpointKind {
     Responses,
     Compact,
+    Search,
     Images,
 }
 
@@ -601,6 +602,8 @@ fn codex_openai_endpoint_kind(
         Some(CodexOpenAiEndpointKind::Compact)
     } else if aether_ai_formats::is_openai_responses_format(provider_api_format) {
         Some(CodexOpenAiEndpointKind::Responses)
+    } else if aether_ai_formats::api_format_alias_matches(provider_api_format, "openai:search") {
+        Some(CodexOpenAiEndpointKind::Search)
     } else if is_openai_image_request(provider_api_format) {
         Some(CodexOpenAiEndpointKind::Images)
     } else {
@@ -784,6 +787,16 @@ fn strip_codex_cache_control_fields(value: &mut Value) {
 
 fn remove_btree_header(headers: &mut BTreeMap<String, String>, header_name: &str) {
     headers.retain(|name, _| !name.trim().eq_ignore_ascii_case(header_name));
+}
+
+fn header_value_contains_media_type(value: &str, media_type: &str) -> bool {
+    value.split(',').any(|media_range| {
+        media_range
+            .split(';')
+            .next()
+            .map(str::trim)
+            .is_some_and(|value| value.eq_ignore_ascii_case(media_type))
+    })
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1177,6 +1190,23 @@ fn normalize_codex_reasoning_effort(body_object: &mut serde_json::Map<String, Va
     if is_ultra {
         reasoning.insert("effort".to_string(), json!("max"));
     }
+}
+
+pub fn normalize_codex_openai_reasoning_wire_effort(
+    provider_request_body: &mut Value,
+    provider_type: &str,
+    provider_api_format: &str,
+) {
+    if !provider_type.trim().eq_ignore_ascii_case("codex")
+        || !(aether_ai_formats::is_openai_responses_family_format(provider_api_format)
+            || aether_ai_formats::api_format_alias_matches(provider_api_format, "openai:search"))
+    {
+        return;
+    }
+    let Some(body_object) = provider_request_body.as_object_mut() else {
+        return;
+    };
+    normalize_codex_reasoning_effort(body_object);
 }
 
 fn is_codex_responses_lite_additional_tools_item(value: &Value) -> bool {
@@ -1719,6 +1749,17 @@ pub fn apply_codex_openai_special_headers(
         "originator",
         CODEX_CLIENT_ORIGINATOR,
     );
+    if endpoint_kind == CodexOpenAiEndpointKind::Search {
+        remove_btree_header(provider_request_headers, CODEX_RESPONSES_LITE_HEADER);
+        remove_btree_header(provider_request_headers, "openai-beta");
+        if provider_request_headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("accept")
+                && header_value_contains_media_type(value, "text/event-stream")
+        }) {
+            remove_btree_header(provider_request_headers, "accept");
+        }
+        return;
+    }
     if endpoint_kind == CodexOpenAiEndpointKind::Images {
         return;
     }
@@ -1753,8 +1794,9 @@ mod tests {
         apply_codex_openai_special_headers, apply_openai_responses_compact_special_body_edits,
         build_codex_model_catalog_metadata, bundled_codex_model_cards, effective_codex_model_cards,
         resolve_codex_responses_model_capabilities,
-        validate_codex_openai_responses_compact_request_contract,
-        CODEX_OPENAI_IMAGE_INTERNAL_MODEL, CODEX_OPENAI_RESPONSES_UNSUPPORTED_BODY_FIELDS,
+        validate_codex_openai_responses_compact_request_contract, CODEX_CLIENT_ORIGINATOR,
+        CODEX_CLIENT_USER_AGENT, CODEX_OPENAI_IMAGE_INTERNAL_MODEL,
+        CODEX_OPENAI_RESPONSES_UNSUPPORTED_BODY_FIELDS, CODEX_RESPONSES_LITE_HEADER,
     };
     use serde_json::{json, Value};
 
@@ -2263,6 +2305,51 @@ mod tests {
                 .map(String::as_str),
             Some("true")
         );
+    }
+
+    #[test]
+    fn codex_search_uses_identity_headers_without_responses_protocol_headers() {
+        let mut headers = std::collections::BTreeMap::from([
+            (
+                "x-openai-internal-codex-responses-lite".to_string(),
+                "true".to_string(),
+            ),
+            ("openai-beta".to_string(), "responses=v1".to_string()),
+            (
+                "accept".to_string(),
+                "application/json, Text/Event-Stream; q=0.9".to_string(),
+            ),
+        ]);
+
+        apply_codex_openai_special_headers(
+            &mut headers,
+            &json!({"id": "session-1", "model": "gpt-5.6-luna"}),
+            &http::HeaderMap::new(),
+            "codex",
+            "openai:search",
+            Some("request-search"),
+            Some(r#"{"account_id":"account-1","is_fedramp":true}"#),
+        );
+
+        assert_eq!(
+            headers.get("chatgpt-account-id").map(String::as_str),
+            Some("account-1")
+        );
+        assert_eq!(
+            headers.get("x-openai-fedramp").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            headers.get("user-agent").map(String::as_str),
+            Some(CODEX_CLIENT_USER_AGENT)
+        );
+        assert_eq!(
+            headers.get("originator").map(String::as_str),
+            Some(CODEX_CLIENT_ORIGINATOR)
+        );
+        assert!(!headers.contains_key(CODEX_RESPONSES_LITE_HEADER));
+        assert!(!headers.contains_key("openai-beta"));
+        assert!(!headers.contains_key("accept"));
     }
 
     #[test]

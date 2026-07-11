@@ -38,7 +38,7 @@ pub fn parse_request(
         FormatId::GeminiEmbedding => gemini::embedding::request::from(body, ctx),
         FormatId::DoubaoEmbedding => doubao::embedding::request::from(body, ctx),
         FormatId::AliyunMultimodalEmbedding => aliyun::embedding::request::from(body, ctx),
-        FormatId::GeminiInteractions => None,
+        FormatId::OpenAiSearch | FormatId::GeminiInteractions => None,
     }
     .ok_or_else(|| FormatError::RequestParseFailed {
         format: source.as_str().to_string(),
@@ -72,7 +72,7 @@ fn emit_request_inner(
         FormatId::GeminiEmbedding => gemini::embedding::request::to(request, ctx),
         FormatId::DoubaoEmbedding => doubao::embedding::request::to(request, ctx),
         FormatId::AliyunMultimodalEmbedding => aliyun::embedding::request::to(request, ctx),
-        FormatId::GeminiInteractions => None,
+        FormatId::OpenAiSearch | FormatId::GeminiInteractions => None,
     }
     .ok_or_else(|| FormatError::RequestEmitFailed {
         format: target.as_str().to_string(),
@@ -280,6 +280,7 @@ pub fn parse_response(
         FormatId::ClaudeMessages => claude_messages::response::from(body, ctx),
         FormatId::GeminiGenerateContent => gemini_generate_content::response::from(body, ctx),
         FormatId::OpenAiEmbedding
+        | FormatId::OpenAiSearch
         | FormatId::JinaEmbedding
         | FormatId::OpenAiRerank
         | FormatId::JinaRerank
@@ -318,6 +319,7 @@ fn emit_response_inner(
         FormatId::ClaudeMessages => claude_messages::response::to(response, ctx),
         FormatId::GeminiGenerateContent => gemini_generate_content::response::to(response, ctx),
         FormatId::OpenAiEmbedding
+        | FormatId::OpenAiSearch
         | FormatId::JinaEmbedding
         | FormatId::OpenAiRerank
         | FormatId::JinaRerank
@@ -1055,6 +1057,7 @@ fn standard_request_root_field_is_audited(source: FormatId, key: &str) -> bool {
                 | "tools"
         ),
         FormatId::OpenAiEmbedding
+        | FormatId::OpenAiSearch
         | FormatId::OpenAiRerank
         | FormatId::GeminiEmbedding
         | FormatId::JinaEmbedding
@@ -1535,6 +1538,7 @@ fn validate_source_response_stop_enums(
         FormatId::GeminiGenerateContent => validate_gemini_response_finish_reasons(body, target),
         FormatId::GeminiInteractions => Ok(()),
         FormatId::OpenAiEmbedding
+        | FormatId::OpenAiSearch
         | FormatId::OpenAiRerank
         | FormatId::GeminiEmbedding
         | FormatId::JinaEmbedding

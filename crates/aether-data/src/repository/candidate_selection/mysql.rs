@@ -409,7 +409,7 @@ fn mapping_scope_matches(
     mapping.api_formats.as_ref().is_none_or(|formats| {
         formats
             .iter()
-            .any(|value| api_format_matches(value, api_format))
+            .any(|value| api_format_scope_covers(value, api_format))
     }) && mapping.endpoint_ids.as_ref().is_none_or(|endpoint_ids| {
         endpoint_ids
             .iter()
@@ -426,7 +426,10 @@ fn key_auth_channel_matches(row: &CandidateSelectionRow, api_format: &str) -> bo
             auth_type == "oauth"
                 && matches!(
                     api_format.as_str(),
-                    "openai:responses" | "openai:responses:compact" | "openai:image"
+                    "openai:responses"
+                        | "openai:responses:compact"
+                        | "openai:search"
+                        | "openai:image"
                 )
         }
         "chatgpt_web" => {
@@ -761,6 +764,10 @@ fn normalize_api_format(api_format: &str) -> String {
 
 fn api_format_matches(left: &str, right: &str) -> bool {
     aether_ai_formats::api_format_alias_matches(left, right)
+}
+
+fn api_format_scope_covers(allowed: &str, requested: &str) -> bool {
+    aether_ai_formats::api_format_permission_covers(allowed, requested)
 }
 
 fn sql_match_aliases(api_formats: &[String]) -> Vec<String> {

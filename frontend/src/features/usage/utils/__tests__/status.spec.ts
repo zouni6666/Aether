@@ -198,6 +198,14 @@ describe('usage status helpers', () => {
     }))).toBe('标准->流式')
 
     expect(formatUsageStreamLabel(buildUsageRecord({
+      api_format: 'openai:search',
+      is_stream: false,
+      upstream_is_stream: false,
+      client_requested_stream: undefined,
+      client_is_stream: undefined,
+    }))).toBe('标准')
+
+    expect(formatUsageStreamLabel(buildUsageRecord({
       api_format: 'claude:messages',
       is_stream: false,
       upstream_is_stream: false,

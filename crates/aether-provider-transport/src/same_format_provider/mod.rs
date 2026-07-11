@@ -149,9 +149,11 @@ pub fn classify_same_format_provider_request_behavior(
         params.require_streaming,
         is_kiro || is_antigravity || gemini_cli_requires_upstream_streaming,
     );
-    let force_body_stream_field = aether_ai_formats::endpoint_config_forces_upstream_stream_policy(
-        transport.endpoint.config.as_ref(),
-    );
+    let force_body_stream_field =
+        aether_ai_formats::api_format_uses_body_stream_field(params.provider_api_format)
+            && aether_ai_formats::endpoint_config_forces_upstream_stream_policy(
+                transport.endpoint.config.as_ref(),
+            );
     let report_kind = if is_kiro && !params.require_streaming {
         "claude_cli_sync_finalize"
     } else if (is_gemini_cli || is_antigravity) && !params.require_streaming {
@@ -622,6 +624,7 @@ pub fn same_format_provider_transport_unsupported_reason_for_trace(
             "openai:chat" => "openai:chat",
             "openai:responses" => "openai:responses",
             "openai:responses:compact" => "openai:responses:compact",
+            "openai:search" => "openai:search",
             "claude:messages" => "claude:messages",
             "gemini:generate_content" => "gemini:generate_content",
             "gemini:interactions" => "gemini:interactions",
@@ -702,7 +705,9 @@ fn resolve_same_format_standard_direct_auth(
     transport: &GatewayProviderTransportSnapshot,
     provider_api_format: &str,
 ) -> Option<(String, String)> {
-    if aether_ai_formats::api_format_alias_matches(provider_api_format, "openai:embedding") {
+    if aether_ai_formats::api_format_alias_matches(provider_api_format, "openai:embedding")
+        || aether_ai_formats::api_format_alias_matches(provider_api_format, "openai:search")
+    {
         resolve_local_openai_bearer_auth(transport)
     } else {
         resolve_local_standard_auth(transport)
@@ -886,6 +891,21 @@ mod tests {
             },
         );
         assert!(!compact_behavior.upstream_is_stream);
+
+        let mut search = sample_transport("codex");
+        search.endpoint.config = Some(json!({
+            "upstream_stream_policy": "force_stream"
+        }));
+        let search_behavior = classify_same_format_provider_request_behavior(
+            &search,
+            SameFormatProviderRequestBehaviorParams {
+                require_streaming: true,
+                provider_api_format: "openai:search",
+                report_kind: "openai_search_sync_success",
+            },
+        );
+        assert!(!search_behavior.upstream_is_stream);
+        assert!(!search_behavior.force_body_stream_field);
     }
 
     #[test]
@@ -1030,6 +1050,31 @@ mod tests {
                 &transport,
                 SameFormatProviderFamily::Standard,
                 "openai:embedding",
+            ),
+            Some(("authorization".to_string(), "Bearer secret".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolves_openai_search_direct_auth_with_bearer_header() {
+        let mut transport = sample_transport("custom");
+        transport.endpoint.api_format = "openai:search".to_string();
+        transport.key.auth_type = "api_key".to_string();
+        let behavior = classify_same_format_provider_request_behavior(
+            &transport,
+            SameFormatProviderRequestBehaviorParams {
+                require_streaming: false,
+                provider_api_format: "openai:search",
+                report_kind: "openai_search_sync_success",
+            },
+        );
+
+        assert_eq!(
+            resolve_same_format_provider_direct_auth(
+                &behavior,
+                &transport,
+                SameFormatProviderFamily::Standard,
+                "openai:search",
             ),
             Some(("authorization".to_string(), "Bearer secret".to_string()))
         );
@@ -1768,6 +1813,44 @@ mod tests {
         assert_eq!(body["model"], "upstream-model");
         assert_eq!(body["reasoning_effort"], "high");
         assert_eq!(body["metadata"]["body_rule_seen"], true);
+    }
+
+    #[test]
+    fn search_body_projects_the_protocol_contract_and_keeps_fast_routing_only() {
+        let body = build_same_format_provider_request_body(SameFormatProviderRequestBodyInput {
+            body_json: &json!({
+                "id": "session-1",
+                "model": "gpt-5.6-luna-high-fast",
+                "commands": {"search_query": [{"q": "Aether"}]},
+                "settings": {"allowed_callers": ["direct"]},
+                "store": false,
+                "future_extension": {"enabled": true},
+                "stream": true
+            }),
+            mapped_model: "gpt-5.6-luna",
+            client_api_format: "openai:search",
+            provider_api_format: "openai:search",
+            source_model: Some("gpt-5.6-luna-high-fast"),
+            family: SameFormatProviderFamily::Standard,
+            body_rules: None,
+            request_headers: None,
+            upstream_is_stream: false,
+            force_body_stream_field: false,
+            kiro_auth_config: None,
+            is_claude_code: false,
+            enable_model_directives: true,
+        })
+        .expect("search body should build");
+
+        assert_eq!(body["id"], "session-1");
+        assert_eq!(body["model"], "gpt-5.6-luna");
+        assert_eq!(body["commands"]["search_query"][0]["q"], "Aether");
+        assert_eq!(body["settings"]["allowed_callers"][0], "direct");
+        assert_eq!(body["reasoning"]["effort"], "high");
+        assert!(body.get("store").is_none());
+        assert!(body.get("future_extension").is_none());
+        assert!(body.get("service_tier").is_none());
+        assert!(body.get("stream").is_none());
     }
 
     #[test]

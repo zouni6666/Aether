@@ -39,7 +39,8 @@ pub use crate::contracts::{
     OPENAI_RESPONSES_COMPACT_SYNC_SUCCESS_REPORT_KIND, OPENAI_RESPONSES_STREAM_PLAN_KIND,
     OPENAI_RESPONSES_STREAM_SUCCESS_REPORT_KIND, OPENAI_RESPONSES_SYNC_ERROR_REPORT_KIND,
     OPENAI_RESPONSES_SYNC_FINALIZE_REPORT_KIND, OPENAI_RESPONSES_SYNC_PLAN_KIND,
-    OPENAI_RESPONSES_SYNC_SUCCESS_REPORT_KIND, OPENAI_VIDEO_CANCEL_SYNC_PLAN_KIND,
+    OPENAI_RESPONSES_SYNC_SUCCESS_REPORT_KIND, OPENAI_SEARCH_SYNC_PLAN_KIND,
+    OPENAI_SEARCH_SYNC_SUCCESS_REPORT_KIND, OPENAI_VIDEO_CANCEL_SYNC_PLAN_KIND,
     OPENAI_VIDEO_CONTENT_PLAN_KIND, OPENAI_VIDEO_CREATE_SYNC_FINALIZE_REPORT_KIND,
     OPENAI_VIDEO_CREATE_SYNC_PLAN_KIND, OPENAI_VIDEO_DELETE_SYNC_PLAN_KIND,
     OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND,
@@ -274,8 +275,10 @@ pub use aether_ai_formats::formats::conversion::response::{
     convert_openai_responses_response_to_openai_chat, OpenAiResponsesResponseUsage,
 };
 pub use aether_ai_formats::{
-    api_format_alias_matches, api_format_storage_aliases, is_openai_responses_compact_format,
-    is_openai_responses_family_format, is_openai_responses_format, normalize_api_format_alias,
+    api_format_alias_matches, api_format_permission_covers, api_format_permission_storage_aliases,
+    api_format_storage_aliases, intersect_api_format_allowed_lists,
+    is_openai_responses_compact_format, is_openai_responses_family_format,
+    is_openai_responses_format, normalize_api_format_alias,
 };
 pub use aether_ai_formats::{
     canonical_request_unknown_block_count, canonical_response_unknown_block_count,

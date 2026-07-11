@@ -1,9 +1,10 @@
 use serde_json::{json, Value};
 
-pub const MODEL_DIRECTIVE_API_FORMATS: [&str; 5] = [
+pub const MODEL_DIRECTIVE_API_FORMATS: [&str; 6] = [
     "openai:chat",
     "openai:responses",
     "openai:responses:compact",
+    "openai:search",
     "claude:messages",
     "gemini:generate_content",
 ];
@@ -433,7 +434,7 @@ pub fn default_model_directive_mapping_patch(
 
 pub fn default_model_directive_suffixes(provider_api_format: &str) -> &'static [&'static str] {
     match crate::normalize_api_format_alias(provider_api_format).as_str() {
-        "openai:chat" | "openai:responses" | "openai:responses:compact" => {
+        "openai:chat" | "openai:responses" | "openai:responses:compact" | "openai:search" => {
             &OPENAI_MODEL_DIRECTIVE_SUFFIXES
         }
         "claude:messages" | "gemini:generate_content" => &CROSS_PROVIDER_MODEL_DIRECTIVE_SUFFIXES,
@@ -503,7 +504,7 @@ fn apply_reasoning_effort_override(
             "reasoning_effort",
             effort.as_openai_model_directive_value(),
         ),
-        "openai:responses" | "openai:responses:compact" => {
+        "openai:responses" | "openai:responses:compact" | "openai:search" => {
             set_openai_responses_reasoning_effort(provider_request_body, effort)
         }
         "claude:messages" => {
@@ -525,7 +526,7 @@ fn apply_codex_reasoning_preset_override(
         "openai:chat" => {
             set_object_string(provider_request_body, "reasoning_effort", preset.as_str())
         }
-        "openai:responses" | "openai:responses:compact" => {
+        "openai:responses" | "openai:responses:compact" | "openai:search" => {
             let object = provider_request_body.as_object_mut()?;
             let reasoning = object
                 .entry("reasoning".to_string())
@@ -550,6 +551,7 @@ fn apply_service_tier_override(
             "service_tier",
             tier.as_openai_value(),
         ),
+        "openai:search" => Some(()),
         _ => None,
     }
 }
@@ -710,7 +712,7 @@ pub fn reasoning_effort_supported_for_model(
     effort: ReasoningEffort,
 ) -> bool {
     match crate::normalize_api_format_alias(provider_api_format).as_str() {
-        "openai:chat" | "openai:responses" | "openai:responses:compact" => {
+        "openai:chat" | "openai:responses" | "openai:responses:compact" | "openai:search" => {
             match resolved_openai_model_identity(provider_model, source_model).0 {
                 OpenAiModelIdentity::Gpt56 => effort != ReasoningEffort::Minimal,
                 OpenAiModelIdentity::ConcreteOther => effort != ReasoningEffort::Max,

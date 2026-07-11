@@ -247,7 +247,7 @@ impl ResolvedAuthApiKeySnapshot {
             &mut self.user_allowed_providers,
             &mut self.api_key_allowed_providers,
         );
-        constrain_api_key_list_policy_to_user_policy(
+        constrain_api_key_api_format_policy_to_user_policy(
             &mut self.user_allowed_api_formats,
             &mut self.api_key_allowed_api_formats,
         );
@@ -273,6 +273,22 @@ fn constrain_api_key_list_policy_to_user_policy(
         return;
     };
     let effective = intersect_allowed_lists(api_key_values, &user_values);
+    *user_policy = Some(effective.clone());
+    *api_key_policy = Some(effective);
+}
+
+fn constrain_api_key_api_format_policy_to_user_policy(
+    user_policy: &mut Option<Vec<String>>,
+    api_key_policy: &mut Option<Vec<String>>,
+) {
+    let Some(api_key_values) = api_key_policy.as_ref() else {
+        return;
+    };
+    let Some(user_values) = user_policy.as_ref() else {
+        return;
+    };
+    let effective =
+        aether_ai_formats::intersect_api_format_allowed_lists(api_key_values, user_values);
     *user_policy = Some(effective.clone());
     *api_key_policy = Some(effective);
 }
@@ -809,6 +825,29 @@ mod tests {
         ResolvedAuthApiKeySnapshot, ResolvedAuthApiKeySnapshotReader, StoredAuthApiKeyExportRecord,
         StoredAuthApiKeySnapshot,
     };
+
+    #[test]
+    fn api_format_policy_intersection_preserves_search_companion_scope() {
+        assert_eq!(
+            aether_ai_formats::intersect_api_format_allowed_lists(
+                &["openai:search".to_string()],
+                &["openai:responses".to_string()],
+            ),
+            vec!["openai:search".to_string()]
+        );
+        assert_eq!(
+            aether_ai_formats::intersect_api_format_allowed_lists(
+                &["openai:responses".to_string()],
+                &["openai:search".to_string()],
+            ),
+            vec!["openai:search".to_string()]
+        );
+        assert!(aether_ai_formats::intersect_api_format_allowed_lists(
+            &["openai:search".to_string()],
+            &["openai:chat".to_string()],
+        )
+        .is_empty());
+    }
 
     #[test]
     fn rejects_non_array_allowed_providers() {

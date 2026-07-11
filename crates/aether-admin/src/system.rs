@@ -770,6 +770,12 @@ const ADMIN_API_FORMAT_DEFINITIONS: &[AdminApiFormatDefinition] = &[
         aliases: &["responses_compact"],
     },
     AdminApiFormatDefinition {
+        value: "openai:search",
+        label: "OpenAI Search",
+        default_path: "/v1/alpha/search",
+        aliases: &["openai_search", "search"],
+    },
+    AdminApiFormatDefinition {
         value: "openai:embedding",
         label: "OpenAI Embedding",
         default_path: "/v1/embeddings",

@@ -64,6 +64,11 @@ export const MODEL_DIRECTIVE_API_FORMATS = [
     parameter: 'reasoning.effort',
   },
   {
+    key: 'openai:search',
+    label: 'OpenAI Search',
+    parameter: 'reasoning.effort',
+  },
+  {
     key: 'claude:messages',
     label: 'Claude Messages',
     parameter: 'output_config.effort + thinking',
@@ -90,6 +95,7 @@ export function defaultModelDirectiveSuffixesForApiFormat(
     case 'openai:chat':
     case 'openai:responses':
     case 'openai:responses:compact':
+    case 'openai:search':
       return MODEL_DIRECTIVE_SUFFIXES
     case 'claude:messages':
     case 'gemini:generate_content':

@@ -230,7 +230,7 @@ fn row_matches_requested_model(
                     mapping.api_formats.as_ref().is_none_or(|formats| {
                         formats
                             .iter()
-                            .any(|value| api_format_matches(value, api_format))
+                            .any(|value| api_format_scope_covers(value, api_format))
                     }) && mapping.endpoint_ids.as_ref().is_none_or(|endpoint_ids| {
                         endpoint_ids
                             .iter()
@@ -286,12 +286,16 @@ fn mapping_scope_matches(
     mapping.api_formats.as_ref().is_none_or(|formats| {
         formats
             .iter()
-            .any(|value| api_format_matches(value, api_format))
+            .any(|value| api_format_scope_covers(value, api_format))
     }) && mapping.endpoint_ids.as_ref().is_none_or(|endpoint_ids| {
         endpoint_ids
             .iter()
             .any(|endpoint_id| endpoint_id == &row.endpoint_id)
     })
+}
+
+fn api_format_scope_covers(allowed: &str, requested: &str) -> bool {
+    aether_ai_formats::api_format_permission_covers(allowed, requested)
 }
 
 fn key_auth_channel_matches(row: &StoredMinimalCandidateSelectionRow, api_format: &str) -> bool {
@@ -303,7 +307,10 @@ fn key_auth_channel_matches(row: &StoredMinimalCandidateSelectionRow, api_format
             auth_type == "oauth"
                 && matches!(
                     api_format.as_str(),
-                    "openai:responses" | "openai:responses:compact" | "openai:image"
+                    "openai:responses"
+                        | "openai:responses:compact"
+                        | "openai:search"
+                        | "openai:image"
                 )
         }
         "chatgpt_web" => {
@@ -432,6 +439,47 @@ mod tests {
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].provider_id, "provider-1");
+    }
+
+    #[tokio::test]
+    async fn search_uses_responses_key_and_model_permissions_with_exact_endpoint_identity() {
+        let mut search = sample_row(
+            "provider-search",
+            "openai:search",
+            "global-search-model",
+            10,
+        );
+        search.provider_type = "codex".to_string();
+        search.key_auth_type = "oauth".to_string();
+        search.key_api_formats = Some(vec!["openai:responses".to_string()]);
+        search.model_provider_model_name = "upstream-search-model".to_string();
+        search.model_provider_model_mappings = Some(vec![StoredProviderModelMapping {
+            name: "gpt-5.6-sol".to_string(),
+            priority: 0,
+            api_formats: Some(vec!["openai:responses".to_string()]),
+            endpoint_ids: None,
+        }]);
+
+        let mut responses = search.clone();
+        responses.provider_id = "provider-responses".to_string();
+        responses.endpoint_id = "endpoint-responses".to_string();
+        responses.endpoint_api_format = "openai:responses".to_string();
+        responses.key_id = "key-responses".to_string();
+        responses.model_id = "model-responses".to_string();
+
+        let repository =
+            InMemoryMinimalCandidateSelectionReadRepository::seed(vec![responses, search]);
+        let rows = repository
+            .list_for_exact_api_format_and_requested_model("openai:search", "gpt-5.6-sol")
+            .await
+            .expect("Search candidate should load");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].endpoint_api_format, "openai:search");
+        assert_eq!(
+            rows[0].key_api_formats,
+            Some(vec!["openai:responses".to_string()])
+        );
     }
 
     #[tokio::test]

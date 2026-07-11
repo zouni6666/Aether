@@ -279,7 +279,7 @@ fn mapping_scope_matches(
     let api_format_matches_scope = mapping.api_formats.as_ref().is_none_or(|api_formats| {
         api_formats
             .iter()
-            .any(|value| api_format_matches(value, api_format))
+            .any(|value| api_format_scope_covers(value, api_format))
     });
     if !api_format_matches_scope {
         return false;
@@ -417,6 +417,10 @@ fn row_has_candidate_model_name(
 
 fn api_format_matches(left: &str, right: &str) -> bool {
     normalize_api_format(left) == normalize_api_format(right)
+}
+
+fn api_format_scope_covers(allowed: &str, requested: &str) -> bool {
+    aether_ai_formats::api_format_permission_covers(allowed, requested)
 }
 
 fn requested_model_name_candidates(
@@ -566,6 +570,41 @@ mod tests {
             .as_deref(),
             Some("gpt-5.4")
         );
+    }
+
+    #[test]
+    fn responses_model_mapping_scope_covers_search_in_one_direction() {
+        let mut row = sample_row("search-global", "search-default");
+        row.endpoint_api_format = "openai:search".to_string();
+        row.model_provider_model_mappings = Some(vec![StoredProviderModelMapping {
+            name: "gpt-5.6-sol".to_string(),
+            priority: 1,
+            api_formats: Some(vec!["openai:responses".to_string()]),
+            endpoint_ids: None,
+        }]);
+
+        assert!(row_supports_requested_model(
+            &row,
+            "gpt-5.6-sol",
+            "openai:search"
+        ));
+        assert_eq!(
+            resolve_provider_model_name(&row, "gpt-5.6-sol", "openai:search")
+                .map(|resolved| resolved.0),
+            Some("gpt-5.6-sol".to_string())
+        );
+
+        row.model_provider_model_mappings = Some(vec![StoredProviderModelMapping {
+            name: "search-only".to_string(),
+            priority: 1,
+            api_formats: Some(vec!["openai:search".to_string()]),
+            endpoint_ids: None,
+        }]);
+        assert!(!row_supports_requested_model(
+            &row,
+            "search-only",
+            "openai:responses"
+        ));
     }
 
     #[test]

@@ -23,6 +23,7 @@ pub enum FormatId {
     OpenAiChat,
     OpenAiResponses,
     OpenAiResponsesCompact,
+    OpenAiSearch,
     OpenAiEmbedding,
     OpenAiRerank,
     ClaudeMessages,
@@ -49,6 +50,7 @@ impl FormatId {
             Self::OpenAiChat
             | Self::OpenAiResponses
             | Self::OpenAiResponsesCompact
+            | Self::OpenAiSearch
             | Self::OpenAiEmbedding
             | Self::OpenAiRerank => FormatFamily::OpenAi,
             Self::ClaudeMessages => FormatFamily::Claude,
@@ -73,6 +75,7 @@ impl FormatId {
             Self::OpenAiChat => "openai:chat",
             Self::OpenAiResponses => "openai:responses",
             Self::OpenAiResponsesCompact => "openai:responses:compact",
+            Self::OpenAiSearch => "openai:search",
             Self::OpenAiEmbedding => "openai:embedding",
             Self::OpenAiRerank => "openai:rerank",
             Self::ClaudeMessages => "claude:messages",
@@ -102,6 +105,9 @@ impl FromStr for FormatId {
             "openai:responses" | "/v1/responses" => Ok(Self::OpenAiResponses),
             "openai:responses:compact" | "/v1/responses/compact" => {
                 Ok(Self::OpenAiResponsesCompact)
+            }
+            "openai:search" | "openai_search" | "search" | "/v1/alpha/search" => {
+                Ok(Self::OpenAiSearch)
             }
             "openai:embedding" | "/v1/embeddings" => Ok(Self::OpenAiEmbedding),
             "openai:rerank" | "/v1/rerank" => Ok(Self::OpenAiRerank),
@@ -139,6 +145,56 @@ pub fn api_format_alias_matches(left: &str, right: &str) -> bool {
     normalize_api_format_alias(left) == normalize_api_format_alias(right)
 }
 
+pub fn api_format_defaults_to_non_stream(value: &str) -> bool {
+    matches!(
+        normalize_api_format_alias(value).as_str(),
+        "openai:chat"
+            | "openai:responses"
+            | "openai:responses:compact"
+            | "openai:search"
+            | "openai:image"
+            | "claude:messages"
+    )
+}
+
+pub fn api_format_defaults_to_client_error_failover(value: &str) -> bool {
+    !matches!(
+        FormatId::parse(value).map(FormatId::canonical),
+        Some(FormatId::OpenAiSearch)
+    )
+}
+
+pub fn api_format_permission_covers(allowed_value: &str, requested_api_format: &str) -> bool {
+    let allowed_value = normalize_api_format_alias(allowed_value);
+    let requested_api_format = normalize_api_format_alias(requested_api_format);
+    !allowed_value.is_empty()
+        && !requested_api_format.is_empty()
+        && (allowed_value == requested_api_format
+            || allowed_value == "openai:responses" && requested_api_format == "openai:search")
+}
+
+pub fn intersect_api_format_allowed_lists(left: &[String], right: &[String]) -> Vec<String> {
+    let mut effective = Vec::new();
+    for left_value in left {
+        for right_value in right {
+            let intersection = if api_format_permission_covers(right_value, left_value) {
+                Some(left_value)
+            } else if api_format_permission_covers(left_value, right_value) {
+                Some(right_value)
+            } else {
+                None
+            };
+            if let Some(value) = intersection {
+                let normalized = normalize_api_format_alias(value);
+                if !effective.iter().any(|item| item == &normalized) {
+                    effective.push(normalized);
+                }
+            }
+        }
+    }
+    effective
+}
+
 pub fn api_format_storage_aliases(value: &str) -> Vec<String> {
     match FormatId::parse(value).map(FormatId::canonical) {
         Some(FormatId::AliyunMultimodalEmbedding) => vec![
@@ -147,6 +203,22 @@ pub fn api_format_storage_aliases(value: &str) -> Vec<String> {
         ],
         _ => vec![normalize_api_format_alias(value)],
     }
+}
+
+pub fn api_format_permission_storage_aliases(value: &str) -> Vec<String> {
+    let requested_api_format = normalize_api_format_alias(value);
+    let mut aliases = api_format_storage_aliases(&requested_api_format);
+    for allowed_api_format in [FormatId::OpenAiResponses.as_str()] {
+        if !api_format_permission_covers(allowed_api_format, &requested_api_format) {
+            continue;
+        }
+        for alias in api_format_storage_aliases(allowed_api_format) {
+            if !aliases.iter().any(|existing| existing == &alias) {
+                aliases.push(alias);
+            }
+        }
+    }
+    aliases
 }
 
 pub fn is_openai_responses_format(value: &str) -> bool {
@@ -179,7 +251,10 @@ pub fn api_format_uses_body_stream_field(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        api_format_alias_matches, api_format_storage_aliases, api_format_uses_body_stream_field,
+        api_format_alias_matches, api_format_defaults_to_client_error_failover,
+        api_format_defaults_to_non_stream, api_format_permission_covers,
+        api_format_permission_storage_aliases, api_format_storage_aliases,
+        api_format_uses_body_stream_field, intersect_api_format_allowed_lists,
         normalize_api_format_alias, FormatId,
     };
 
@@ -191,6 +266,102 @@ mod tests {
         assert_eq!(FormatId::parse("claude:cli"), None);
         assert_eq!(FormatId::parse("gemini:chat"), None);
         assert_eq!(FormatId::parse("gemini:cli"), None);
+    }
+
+    #[test]
+    fn responses_permission_covers_only_its_search_companion() {
+        assert!(api_format_permission_covers(
+            "OPENAI:RESPONSES",
+            "openai:search"
+        ));
+        assert!(api_format_permission_covers(
+            "openai:search",
+            "openai:search"
+        ));
+        assert!(!api_format_permission_covers(
+            "openai:search",
+            "openai:responses"
+        ));
+        assert!(!api_format_permission_covers(
+            "openai:responses",
+            "openai:chat"
+        ));
+        assert_eq!(
+            api_format_permission_storage_aliases("openai:search"),
+            vec!["openai:search".to_string(), "openai:responses".to_string()]
+        );
+        assert_eq!(
+            api_format_permission_storage_aliases("openai:responses"),
+            vec!["openai:responses".to_string()]
+        );
+    }
+
+    #[test]
+    fn normalizes_openai_search_aliases() {
+        for alias in [
+            "openai:search",
+            "OPENAI_SEARCH",
+            "search",
+            "/v1/alpha/search",
+        ] {
+            assert_eq!(FormatId::parse(alias), Some(FormatId::OpenAiSearch));
+            assert_eq!(normalize_api_format_alias(alias), "openai:search");
+        }
+        assert!(!api_format_uses_body_stream_field("openai:search"));
+    }
+
+    #[test]
+    fn identifies_default_non_stream_formats_from_aliases() {
+        for format in [
+            "/v1/chat/completions",
+            "/v1/responses",
+            "/v1/responses/compact",
+            "/v1/alpha/search",
+            "openai:image",
+            "/v1/messages",
+        ] {
+            assert!(api_format_defaults_to_non_stream(format), "{format}");
+        }
+        assert!(!api_format_defaults_to_non_stream("gemini:interactions"));
+    }
+
+    #[test]
+    fn search_defaults_to_passthrough_for_client_errors() {
+        for format in ["openai:search", "OPENAI_SEARCH", "/v1/alpha/search"] {
+            assert!(
+                !api_format_defaults_to_client_error_failover(format),
+                "{format}"
+            );
+        }
+        assert!(api_format_defaults_to_client_error_failover(
+            "openai:responses"
+        ));
+        assert!(api_format_defaults_to_client_error_failover(
+            "custom:unknown"
+        ));
+    }
+
+    #[test]
+    fn api_format_policy_intersection_keeps_the_narrowest_companion_scope() {
+        assert_eq!(
+            intersect_api_format_allowed_lists(
+                &["openai:responses".to_string()],
+                &["openai:search".to_string()],
+            ),
+            vec!["openai:search".to_string()]
+        );
+        assert_eq!(
+            intersect_api_format_allowed_lists(
+                &["openai:search".to_string()],
+                &["OPENAI:RESPONSES".to_string()],
+            ),
+            vec!["openai:search".to_string()]
+        );
+        assert!(intersect_api_format_allowed_lists(
+            &["openai:search".to_string()],
+            &["openai:chat".to_string()],
+        )
+        .is_empty());
     }
 
     #[test]

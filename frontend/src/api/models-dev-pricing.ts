@@ -1,4 +1,5 @@
 import type { PricingTier, TieredPricingConfig } from './endpoints/types'
+import { getAuthoritativeModelPricing } from './authoritative-model-pricing'
 
 export interface ModelsDevTokenCost {
   input: number
@@ -89,4 +90,13 @@ export function buildModelsDevTieredPricing(cost: unknown): TieredPricingConfig 
   })))
 
   return { tiers }
+}
+
+export function resolveModelsDevTieredPricing(
+  providerId: string,
+  modelId: string,
+  cost: unknown,
+): TieredPricingConfig | null {
+  return getAuthoritativeModelPricing(providerId, modelId)
+    ?? buildModelsDevTieredPricing(cost)
 }

@@ -1,9 +1,51 @@
 use std::collections::BTreeMap;
 
-use super::{apply_codex_openai_responses_special_body_edits, apply_codex_openai_special_headers};
+use super::{
+    apply_codex_openai_responses_special_body_edits, apply_codex_openai_special_headers,
+    codex_model_capabilities,
+};
 use crate::ai_serving::planner::standard::build_local_openai_responses_request_body;
 use http::{HeaderMap, HeaderValue};
 use serde_json::json;
+
+#[test]
+fn search_uses_live_codex_model_catalog_capabilities() {
+    let metadata = crate::ai_serving::build_codex_model_catalog_metadata(&[json!({
+        "slug": "gpt-search-custom",
+        "default_reasoning_level": "low",
+        "supported_reasoning_levels": [
+            {"effort": "low"},
+            {"effort": "max"}
+        ],
+        "supports_parallel_tool_calls": true
+    })]);
+
+    let capabilities = codex_model_capabilities(
+        "codex",
+        "openai:search",
+        "gpt-search-custom",
+        "gpt-search-custom",
+        Some(&metadata),
+    )
+    .expect("Search should resolve capabilities from the Codex model catalog");
+
+    assert_eq!(
+        capabilities.default_reasoning_effort.as_deref(),
+        Some("low")
+    );
+    assert_eq!(
+        capabilities.supported_reasoning_efforts,
+        vec!["low".to_string(), "max".to_string()]
+    );
+    assert!(codex_model_capabilities(
+        "codex",
+        "openai:chat",
+        "gpt-search-custom",
+        "gpt-search-custom",
+        Some(&metadata),
+    )
+    .is_none());
+}
 
 #[test]
 fn applies_codex_defaults_when_body_rules_do_not_handle_fields() {

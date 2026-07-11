@@ -354,9 +354,9 @@ fn transport_key_supports_api_format(
 
     match transport.key.api_formats.as_deref() {
         None => true,
-        Some(formats) => formats
-            .iter()
-            .any(|value| aether_ai_formats::api_format_alias_matches(value, endpoint_api_format)),
+        Some(formats) => formats.iter().any(|value| {
+            aether_ai_formats::api_format_permission_covers(value, endpoint_api_format)
+        }),
     }
 }
 
@@ -815,6 +815,29 @@ mod tests {
                 None,
             ),
             None
+        );
+    }
+
+    #[test]
+    fn responses_key_permission_covers_search_without_changing_endpoint_identity() {
+        let mut transport = transport_snapshot("custom", "openai:search", "bearer", true, None);
+        transport.key.api_formats = Some(vec!["openai:responses".to_string()]);
+
+        assert_eq!(
+            candidate_common_transport_skip_reason(
+                &transport,
+                candidate_facts("openai:search"),
+                None,
+            ),
+            None
+        );
+        assert_eq!(
+            candidate_common_transport_skip_reason(
+                &transport,
+                candidate_facts("openai:responses"),
+                None,
+            ),
+            Some("endpoint_api_format_changed")
         );
     }
 

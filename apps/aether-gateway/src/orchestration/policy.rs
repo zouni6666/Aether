@@ -7,7 +7,7 @@ use tracing::debug;
 use crate::provider_transport::GatewayProviderTransportSnapshot;
 use crate::AppState;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LocalFailoverPolicy {
     pub(crate) max_retries: Option<u64>,
     pub(crate) stop_status_codes: BTreeSet<u16>,
@@ -15,6 +15,21 @@ pub(crate) struct LocalFailoverPolicy {
     pub(crate) success_failover_patterns: Vec<LocalFailoverRegexRule>,
     pub(crate) error_stop_patterns: Vec<LocalFailoverRegexRule>,
     pub(crate) stop_cyber_policy_errors: bool,
+    pub(crate) retry_client_errors_by_default: bool,
+}
+
+impl Default for LocalFailoverPolicy {
+    fn default() -> Self {
+        Self {
+            max_retries: None,
+            stop_status_codes: BTreeSet::new(),
+            continue_status_codes: BTreeSet::new(),
+            success_failover_patterns: Vec::new(),
+            error_stop_patterns: Vec::new(),
+            stop_cyber_policy_errors: false,
+            retry_client_errors_by_default: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +96,10 @@ pub(crate) fn local_failover_policy_from_transport(
 
     LocalFailoverPolicy {
         max_retries,
+        retry_client_errors_by_default:
+            aether_ai_formats::api_format_defaults_to_client_error_failover(
+                &transport.endpoint.api_format,
+            ),
         stop_cyber_policy_errors: codex_cyber_flag_passthrough_enabled(
             &transport.provider.provider_type,
             transport.provider.config.as_ref(),
@@ -144,6 +163,10 @@ pub(crate) fn local_failover_policy_from_report_context(
             .get("stop_cyber_policy_errors")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        retry_client_errors_by_default: object
+            .get("retry_client_errors_by_default")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
     })
 }
 
@@ -178,6 +201,7 @@ fn local_failover_policy_to_value(policy: &LocalFailoverPolicy) -> Value {
         "success_failover_patterns": policy.success_failover_patterns.iter().map(local_failover_regex_rule_to_value).collect::<Vec<_>>(),
         "error_stop_patterns": policy.error_stop_patterns.iter().map(local_failover_regex_rule_to_value).collect::<Vec<_>>(),
         "stop_cyber_policy_errors": policy.stop_cyber_policy_errors,
+        "retry_client_errors_by_default": policy.retry_client_errors_by_default,
     })
 }
 
@@ -375,7 +399,23 @@ mod tests {
                     status_codes: [422].into_iter().collect(),
                 }],
                 stop_cyber_policy_errors: false,
+                retry_client_errors_by_default: true,
             })
+        );
+    }
+
+    #[test]
+    fn search_transport_disables_default_client_error_failover() {
+        let mut transport = sample_transport(None, None, None);
+        transport.endpoint.api_format = "openai:search".to_string();
+        let policy = local_failover_policy_from_transport(&transport);
+
+        assert!(!policy.retry_client_errors_by_default);
+        let report_context = append_local_failover_policy_to_value(json!({}), &transport);
+        assert_eq!(
+            local_failover_policy_from_report_context(Some(&report_context))
+                .map(|policy| policy.retry_client_errors_by_default),
+            Some(false)
         );
     }
 

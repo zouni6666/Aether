@@ -18,7 +18,7 @@ use crate::ai_serving::{
     ExecutionRuntimeAuthContext, GatewayAuthApiKeySnapshot, GatewayProviderTransportSnapshot,
     PlannerAppState, CODEX_RESPONSES_LITE_HEADER,
 };
-use crate::client_session_affinity::client_session_affinity_from_request;
+use crate::client_session_affinity::client_session_affinity_from_api_request;
 use crate::clock::current_unix_secs;
 use crate::routing::{
     apply_routing_mutation_plan, build_routing_trace_seed, resolve_gateway_routing_policy,
@@ -449,8 +449,11 @@ pub(crate) async fn attach_routing_policy_to_local_requested_model_input(
 
     let Some((group_id, group_version, group_config_json, selection_source)) = selected_group
     else {
-        input.client_session_affinity =
-            client_session_affinity_from_request(&parts.headers, Some(body_json));
+        input.client_session_affinity = client_session_affinity_from_api_request(
+            client_api_format,
+            &parts.headers,
+            Some(body_json),
+        );
         input.routing_policy = None;
         input.routing_trace_seed = None;
         input.routing_context = None;
@@ -527,8 +530,11 @@ pub(crate) async fn attach_routing_policy_to_local_requested_model_input(
     }
 
     let effective_headers_json = headers_to_routing_value(&effective_headers);
-    input.client_session_affinity =
-        client_session_affinity_from_request(&effective_headers, Some(&effective_body_json));
+    input.client_session_affinity = client_session_affinity_from_api_request(
+        client_api_format,
+        &effective_headers,
+        Some(&effective_body_json),
+    );
     let final_policy_resolve_started_at = std::time::Instant::now();
     let mut final_policy = resolve_gateway_routing_policy(GatewayRoutingPolicyInput {
         group_id: group_id.as_deref(),
@@ -595,8 +601,11 @@ fn try_attach_static_default_routing_policy_to_input(
         static_policy_resolve_started_at.elapsed().as_millis() as u64,
     );
 
-    input.client_session_affinity =
-        client_session_affinity_from_request(&parts.headers, Some(body_json));
+    input.client_session_affinity = client_session_affinity_from_api_request(
+        client_api_format,
+        &parts.headers,
+        Some(body_json),
+    );
     input.routing_trace_seed = Some(build_routing_trace_seed(&policy, client_api_format));
     input.routing_policy = Some(policy);
     input.routing_context = None;

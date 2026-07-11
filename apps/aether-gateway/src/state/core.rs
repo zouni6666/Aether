@@ -51,6 +51,7 @@ use super::super::{provider_transport, usage};
 use crate::maintenance::spawn_account_self_check_worker;
 use crate::maintenance::spawn_audit_cleanup_worker;
 use crate::maintenance::spawn_db_maintenance_worker;
+use crate::maintenance::spawn_fixed_provider_reconciliation_task;
 use crate::maintenance::spawn_gemini_file_mapping_cleanup_worker;
 use crate::maintenance::spawn_oauth_token_refresh_worker;
 use crate::maintenance::spawn_pending_cleanup_worker;
@@ -250,6 +251,11 @@ impl AppState {
             http2_adaptive_window: true,
             ..HttpClientConfig::default()
         })?;
+        let owner_forward_client = build_http_client(&HttpClientConfig {
+            connect_timeout_ms: Some(10_000),
+            http2_adaptive_window: true,
+            ..HttpClientConfig::default()
+        })?;
         let frontdoor_runtime_guards = Arc::new(FrontdoorRuntimeGuardConfig::from_env());
         Ok(Self {
             #[cfg(test)]
@@ -284,6 +290,7 @@ impl AppState {
             ),
             distributed_request_gate: None,
             client,
+            owner_forward_client,
             auth_context_cache: Arc::new(AuthContextCache::default()),
             auth_snapshot_cache: Arc::new(AuthSnapshotCache::default()),
             user_model_capability_settings_cache: Arc::new(JsonValueCache::default()),
@@ -1461,6 +1468,13 @@ impl AppState {
         {
             supervisor.supervise_handle(crate::task_runtime::TASK_KEY_USAGE_QUEUE_WORKER, handle);
             record_boot(crate::task_runtime::TASK_KEY_USAGE_QUEUE_WORKER);
+        }
+
+        if let Some(handle) = spawn_fixed_provider_reconciliation_task(self.clone()) {
+            supervisor.supervise_handle(
+                crate::task_runtime::TASK_KEY_FIXED_PROVIDER_RECONCILIATION,
+                handle,
+            );
         }
 
         let mut supervise_worker =

@@ -53,6 +53,7 @@ pub(crate) fn resolve_same_format_provider_transport_unsupported_reason_for_trac
             "openai:chat" => "openai:chat",
             "openai:responses" => "openai:responses",
             "openai:responses:compact" => "openai:responses:compact",
+            "openai:search" => "openai:search",
             "openai:embedding" => "openai:embedding",
             "openai:rerank" => "openai:rerank",
             "claude:messages" => "claude:messages",

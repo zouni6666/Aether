@@ -28,6 +28,7 @@ describe('modelDirectivesConfig', () => {
       'fast',
     ])
     expect(defaultModelDirectiveSuffixesForApiFormat('openai:responses')).toContain('ultra')
+    expect(defaultModelDirectiveSuffixesForApiFormat('openai:search')).toEqual(MODEL_DIRECTIVE_SUFFIXES)
     expect(defaultModelDirectiveSuffixesForApiFormat('claude:messages')).not.toContain('ultra')
     expect(defaultModelDirectiveSuffixesForApiFormat('gemini:generate_content')).not.toContain('ultra')
   })

@@ -109,6 +109,9 @@ pub fn infer_internal_finalize_signature(payload: &GatewaySyncReportRequest) -> 
     if report_kind.starts_with("openai_image_") {
         return Some("openai:image".to_string());
     }
+    if report_kind.starts_with("openai_search_") {
+        return Some("openai:search".to_string());
+    }
     if report_kind.starts_with("openai_cli_") {
         return Some("openai:responses".to_string());
     }
@@ -149,6 +152,11 @@ pub fn resolve_internal_finalize_route(signature: &str) -> Option<InternalFinali
             public_path: "/v1/responses/compact",
             route_family: "openai",
             route_kind: "responses:compact",
+        }),
+        "openai:search" => Some(InternalFinalizeRoute {
+            public_path: "/v1/alpha/search",
+            route_family: "openai",
+            route_kind: "search",
         }),
         "openai:image" => Some(InternalFinalizeRoute {
             public_path: "/v1/images/generations",
@@ -246,6 +254,7 @@ pub fn is_local_ai_sync_report_kind(report_kind: &str) -> bool {
             | "openai_responses_compact_sync_error"
             | "openai_cli_sync_success"
             | "openai_image_sync_success"
+            | "openai_search_sync_success"
             | "openai_image_sync_error"
             | "openai_embedding_sync_success"
             | "openai_embedding_sync_error"
@@ -872,6 +881,7 @@ mod tests {
             "openai_responses_compact_sync_error"
         ));
         assert!(is_local_ai_sync_report_kind("openai_image_sync_success"));
+        assert!(is_local_ai_sync_report_kind("openai_search_sync_success"));
         assert!(is_local_ai_sync_report_kind("openai_image_sync_error"));
         assert!(is_local_ai_sync_report_kind(
             "openai_embedding_sync_success"
@@ -1082,12 +1092,27 @@ mod tests {
             Some("openai:responses:compact".to_string())
         );
 
+        let from_search_report_kind =
+            sample_sync_report_with_context("openai_search_sync_finalize", json!({}));
+        assert_eq!(
+            infer_internal_finalize_signature(&from_search_report_kind),
+            Some("openai:search".to_string())
+        );
+
         let unknown = sample_sync_report("unknown_sync_finalize", 200);
         assert_eq!(infer_internal_finalize_signature(&unknown), None);
     }
 
     #[test]
     fn resolves_internal_finalize_route_for_supported_signatures() {
+        assert_eq!(
+            resolve_internal_finalize_route("openai:search"),
+            Some(InternalFinalizeRoute {
+                public_path: "/v1/alpha/search",
+                route_family: "openai",
+                route_kind: "search",
+            })
+        );
         assert_eq!(
             resolve_internal_finalize_route("openai:responses:compact"),
             Some(InternalFinalizeRoute {

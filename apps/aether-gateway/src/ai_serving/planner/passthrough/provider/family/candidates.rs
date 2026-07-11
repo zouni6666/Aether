@@ -24,7 +24,7 @@ use crate::ai_serving::{
     ai_local_execution_contract_for_formats, extract_pool_sticky_session_token,
     resolve_local_decision_execution_runtime_auth_context, GatewayControlDecision, PlannerAppState,
 };
-use crate::client_session_affinity::client_session_affinity_from_parts;
+use crate::client_session_affinity::client_session_affinity_from_api_request;
 use crate::clock::current_unix_secs;
 use crate::{AppState, GatewayError};
 
@@ -81,7 +81,11 @@ pub(crate) async fn resolve_local_same_format_provider_decision_input(
 
     let mut input = build_local_requested_model_decision_input(resolved_input, requested_model);
     input.request_auth_channel = decision.request_auth_channel.clone();
-    input.client_session_affinity = client_session_affinity_from_parts(parts, Some(body_json));
+    input.client_session_affinity = client_session_affinity_from_api_request(
+        spec_metadata.api_format,
+        &parts.headers,
+        Some(body_json),
+    );
     if let Err(err) = attach_routing_policy_to_local_requested_model_input(
         state,
         parts,

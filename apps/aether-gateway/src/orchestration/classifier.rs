@@ -92,7 +92,10 @@ pub(crate) fn classify_local_failover(
         return LocalFailoverClassification::RetryStatusCode;
     }
 
-    if should_failover_local_upstream_status(input.status_code) {
+    if should_failover_local_upstream_status(
+        input.status_code,
+        policy.retry_client_errors_by_default,
+    ) {
         return LocalFailoverClassification::RetryUpstreamFailure;
     }
 
@@ -109,8 +112,11 @@ pub(crate) fn local_failover_error_message(response_text: Option<&str>) -> Optio
         .filter(|value| !value.is_empty())
 }
 
-fn should_failover_local_upstream_status(status_code: u16) -> bool {
-    status_code >= 400
+fn should_failover_local_upstream_status(
+    status_code: u16,
+    retry_client_errors_by_default: bool,
+) -> bool {
+    status_code >= 500 || status_code >= 400 && retry_client_errors_by_default
 }
 
 fn local_error_response_has_cyber_policy_code(response_text: Option<&str>) -> bool {
@@ -472,6 +478,39 @@ mod tests {
                 LocalFailoverClassification::RetryUpstreamFailure
             );
         }
+    }
+
+    #[test]
+    fn classifier_passes_through_client_errors_when_protocol_default_disables_failover() {
+        let policy = LocalFailoverPolicy {
+            retry_client_errors_by_default: false,
+            ..LocalFailoverPolicy::default()
+        };
+
+        for status_code in [400, 401, 429, 499] {
+            assert_eq!(
+                classify_local_failover(&policy, LocalFailoverInput::new(status_code, None)),
+                LocalFailoverClassification::UseDefault
+            );
+        }
+        assert_eq!(
+            classify_local_failover(&policy, LocalFailoverInput::new(500, None)),
+            LocalFailoverClassification::RetryUpstreamFailure
+        );
+    }
+
+    #[test]
+    fn classifier_explicit_continue_rule_overrides_protocol_client_error_default() {
+        let policy = LocalFailoverPolicy {
+            continue_status_codes: [429].into_iter().collect(),
+            retry_client_errors_by_default: false,
+            ..LocalFailoverPolicy::default()
+        };
+
+        assert_eq!(
+            classify_local_failover(&policy, LocalFailoverInput::new(429, None)),
+            LocalFailoverClassification::RetryStatusCode
+        );
     }
 
     #[test]

@@ -2400,6 +2400,188 @@ async fn gateway_streams_codex_openai_responses_upstream_for_admin_pool_model_te
 }
 
 #[test]
+fn gateway_executes_codex_search_admin_pool_model_test_with_search_contract() {
+    run_provider_query_test(
+        "gateway_executes_codex_search_admin_pool_model_test_with_search_contract",
+        gateway_executes_codex_search_admin_pool_model_test_with_search_contract_impl,
+    );
+}
+
+async fn gateway_executes_codex_search_admin_pool_model_test_with_search_contract_impl() {
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| async move {
+            assert_eq!(plan.provider_id, "provider-codex-search");
+            assert_eq!(plan.endpoint_id, "endpoint-codex-search");
+            assert_eq!(plan.key_id, "key-codex-search");
+            assert_eq!(plan.client_api_format, "openai:search");
+            assert_eq!(plan.provider_api_format, "openai:search");
+            assert_eq!(
+                plan.url,
+                "https://chatgpt.com/backend-api/codex/alpha/search"
+            );
+            assert_eq!(plan.model_name.as_deref(), Some("gpt-5.6-sol"));
+            assert!(!plan.stream, "Codex Search is a synchronous JSON protocol");
+            assert_eq!(
+                plan.timeouts
+                    .as_ref()
+                    .and_then(|timeouts| timeouts.total_ms),
+                Some(900_000)
+            );
+            assert_eq!(
+                plan.headers.get("authorization").map(String::as_str),
+                Some("Bearer codex-search-access-token")
+            );
+            assert_eq!(
+                plan.headers.get("chatgpt-account-id").map(String::as_str),
+                Some("account-search-admin")
+            );
+            assert_eq!(
+                plan.headers.get("x-openai-fedramp").map(String::as_str),
+                Some("true")
+            );
+            assert_eq!(
+                plan.headers.get("originator").map(String::as_str),
+                Some("codex_cli_rs")
+            );
+            assert!(plan
+                .headers
+                .get("user-agent")
+                .is_some_and(|value| value.starts_with("codex_cli_rs/")));
+            assert!(!plan.headers.contains_key("openai-beta"));
+            assert!(!plan
+                .headers
+                .contains_key("x-openai-internal-codex-responses-lite"));
+            assert_ne!(
+                plan.headers.get("accept").map(String::as_str),
+                Some("text/event-stream")
+            );
+
+            let body = plan.body.json_body.as_ref().expect("search json body");
+            assert_eq!(
+                body["id"],
+                json!("aether-model-test-provider-query-search-trace")
+            );
+            assert_eq!(body["model"], json!("gpt-5.6-sol"));
+            assert_eq!(body["input"], json!("find current OpenAI documentation"));
+            assert_eq!(
+                body["commands"]["search_query"][0]["q"],
+                json!("OpenAI Codex Search")
+            );
+            assert!(body.get("stream").is_none());
+            assert!(body.get("store").is_none());
+            assert!(body.get("service_tier").is_none());
+            assert!(body.get("unknown_field").is_none());
+
+            Json(json!({
+                "request_id": plan.request_id,
+                "candidate_id": plan.candidate_id,
+                "status_code": 200,
+                "headers": {
+                    "content-type": "application/json"
+                },
+                "body": {
+                    "json_body": {
+                        "output": "search result"
+                    }
+                },
+                "telemetry": {
+                    "elapsed_ms": 21
+                }
+            }))
+        }),
+    );
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let mut provider = sample_provider("provider-codex-search", "Codex Search", 10);
+    provider.provider_type = "codex".to_string();
+    provider.request_timeout_secs = Some(900.0);
+    let mut endpoint = sample_endpoint(
+        "endpoint-codex-search",
+        "provider-codex-search",
+        "openai:search",
+        "https://chatgpt.com/backend-api/codex",
+    );
+    endpoint.config = Some(json!({"upstream_stream_policy": "force_stream"}));
+    let mut key = sample_key(
+        "key-codex-search",
+        "provider-codex-search",
+        "openai:search",
+        "codex-search-access-token",
+    );
+    key.auth_type = "oauth".to_string();
+    key.encrypted_auth_config = Some(
+        aether_crypto::encrypt_python_fernet_plaintext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            r#"{"provider_type":"codex","account_id":"account-search-admin","is_fedramp":true}"#,
+        )
+        .expect("auth config should encrypt"),
+    );
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![endpoint],
+        vec![key],
+    ));
+
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(GatewayDataState::with_provider_transport_reader_for_tests(
+                provider_catalog_repository,
+                DEVELOPMENT_ENCRYPTION_KEY.to_string(),
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-query/test-model-failover"
+        ))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-codex-search",
+            "mode": "pool",
+            "model": "gpt-5.6-sol",
+            "failover_models": ["gpt-5.6-sol"],
+            "api_format": "openai:search",
+            "endpoint_id": "endpoint-codex-search",
+            "request_id": "provider-query-search-trace",
+            "request_body": {
+                "model": "gpt-5.6-sol",
+                "input": "find current OpenAI documentation",
+                "commands": {
+                    "search_query": [{"q": "OpenAI Codex Search"}]
+                },
+                "max_output_tokens": 256,
+                "stream": true,
+                "store": false,
+                "service_tier": "priority",
+                "unknown_field": true
+            }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], json!(true), "payload={payload}");
+    assert_eq!(
+        payload["attempts"][0]["request_body"]["id"],
+        json!("aether-model-test-provider-query-search-trace")
+    );
+    assert_eq!(
+        payload["attempts"][0]["response_body"]["output"],
+        json!("search result")
+    );
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[test]
 fn gateway_routes_grok_responses_admin_pool_model_test_through_grok_runtime() {
     run_provider_query_test(
         "gateway_routes_grok_responses_admin_pool_model_test_through_grok_runtime",

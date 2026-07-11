@@ -1187,6 +1187,7 @@ export const MOCK_API_FORMATS = {
     { value: 'openai:chat', label: 'OpenAI Chat', default_path: '/v1/chat/completions', aliases: [] },
     { value: 'openai:responses', label: 'OpenAI Responses', default_path: '/v1/responses', aliases: [] },
     { value: 'openai:responses:compact', label: 'OpenAI Responses Compact', default_path: '/v1/responses/compact', aliases: [] },
+    { value: 'openai:search', label: 'OpenAI Search', default_path: '/v1/alpha/search', aliases: ['openai_search', 'search'] },
     { value: 'openai:embedding', label: 'OpenAI Embedding', default_path: '/v1/embeddings', aliases: [] },
     { value: 'openai:rerank', label: 'OpenAI Rerank', default_path: '/v1/rerank', aliases: [] },
     { value: 'openai:image', label: 'OpenAI Image', default_path: '/v1/images/generations', aliases: [] },

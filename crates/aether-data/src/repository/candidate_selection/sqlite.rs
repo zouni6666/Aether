@@ -125,7 +125,8 @@ impl SqliteMinimalCandidateSelectionReadRepository {
     ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
         let canonical_api_format = normalize_api_format(api_format);
         let storage_aliases = api_format_aliases(&canonical_api_format);
-        let match_aliases = sql_match_aliases(&storage_aliases);
+        let match_aliases =
+            sql_match_aliases(&api_format_permission_aliases(&canonical_api_format));
         let mut rows = Vec::new();
 
         for storage_api_format in storage_aliases {
@@ -270,7 +271,8 @@ impl MinimalCandidateSelectionReadRepository for SqliteMinimalCandidateSelection
     ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
         let canonical_api_format = normalize_api_format(&query.api_format);
         let storage_aliases = api_format_aliases(&canonical_api_format);
-        let match_aliases = sql_match_aliases(&storage_aliases);
+        let match_aliases =
+            sql_match_aliases(&api_format_permission_aliases(&canonical_api_format));
         let mut rows = Vec::<CandidateSelectionRow>::new();
         let page_in_sql = !matches!(query.order, StoredPoolKeyCandidateOrder::LoadBalance { .. });
 
@@ -337,7 +339,8 @@ impl MinimalCandidateSelectionReadRepository for SqliteMinimalCandidateSelection
             .collect::<BTreeMap<_, _>>();
         let canonical_api_format = normalize_api_format(&query.api_format);
         let storage_aliases = api_format_aliases(&canonical_api_format);
-        let match_aliases = sql_match_aliases(&storage_aliases);
+        let match_aliases =
+            sql_match_aliases(&api_format_permission_aliases(&canonical_api_format));
         let mut rows = Vec::new();
 
         for storage_api_format in storage_aliases {
@@ -493,7 +496,7 @@ fn push_key_auth_channel_sql_filter(
     );
     builder.push_bind(api_format.clone());
     builder.push(
-        r#" IN ('openai:responses', 'openai:responses:compact', 'openai:image')
+        r#" IN ('openai:responses', 'openai:responses:compact', 'openai:search', 'openai:image')
     )
     OR (
       LOWER(TRIM(p.provider_type)) = 'chatgpt_web'
@@ -808,7 +811,7 @@ fn mapping_scope_matches(
     mapping.api_formats.as_ref().is_none_or(|formats| {
         formats
             .iter()
-            .any(|value| api_format_matches(value, api_format))
+            .any(|value| api_format_scope_covers(value, api_format))
     }) && mapping.endpoint_ids.as_ref().is_none_or(|endpoint_ids| {
         endpoint_ids
             .iter()
@@ -825,7 +828,10 @@ fn key_auth_channel_matches(row: &CandidateSelectionRow, api_format: &str) -> bo
             auth_type == "oauth"
                 && matches!(
                     api_format.as_str(),
-                    "openai:responses" | "openai:responses:compact" | "openai:image"
+                    "openai:responses"
+                        | "openai:responses:compact"
+                        | "openai:search"
+                        | "openai:image"
                 )
         }
         "chatgpt_web" => {
@@ -1145,12 +1151,20 @@ fn api_format_aliases(api_format: &str) -> Vec<String> {
     aether_ai_formats::api_format_storage_aliases(api_format)
 }
 
+fn api_format_permission_aliases(api_format: &str) -> Vec<String> {
+    aether_ai_formats::api_format_permission_storage_aliases(api_format)
+}
+
 fn normalize_api_format(api_format: &str) -> String {
     aether_ai_formats::normalize_api_format_alias(api_format)
 }
 
 fn api_format_matches(left: &str, right: &str) -> bool {
     aether_ai_formats::api_format_alias_matches(left, right)
+}
+
+fn api_format_scope_covers(allowed: &str, requested: &str) -> bool {
+    aether_ai_formats::api_format_permission_covers(allowed, requested)
 }
 
 fn sql_match_aliases(api_formats: &[String]) -> Vec<String> {
@@ -1264,6 +1278,21 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["key-chatgpt-web-oauth", "key-chatgpt-web-bearer"]
         );
+
+        let search_rows = repository
+            .list_for_exact_api_format_and_requested_model_page(
+                &StoredRequestedModelCandidateRowsQuery {
+                    api_format: "openai:search".to_string(),
+                    requested_model_name: "gpt-5.6-sol".to_string(),
+                    offset: 0,
+                    limit: 10,
+                },
+            )
+            .await
+            .expect("Codex Search rows should load through Responses permissions");
+        assert_eq!(search_rows.len(), 1);
+        assert_eq!(search_rows[0].key_id, "key-codex-search");
+        assert_eq!(search_rows[0].endpoint_api_format, "openai:search");
     }
 
     async fn seed_candidate_selection(pool: &sqlx::SqlitePool) {
@@ -1296,6 +1325,11 @@ INSERT INTO providers (
 )
 VALUES ('provider-windsurf', 'Windsurf', 'windsurf', 15, 1, 1, 1);
 
+INSERT INTO providers (
+  id, name, provider_type, provider_priority, is_active, created_at, updated_at
+)
+VALUES ('provider-codex-search', 'Codex Search', 'codex', 12, 1, 1, 1);
+
 INSERT INTO provider_endpoints (
   id, provider_id, name, base_url, api_format, is_active, created_at, updated_at
 )
@@ -1310,6 +1344,14 @@ INSERT INTO provider_endpoints (
 VALUES (
   'endpoint-windsurf', 'provider-windsurf', 'Windsurf Chat',
   'https://server.codeium.com', 'openai:chat', 1, 1, 1
+);
+
+INSERT INTO provider_endpoints (
+  id, provider_id, name, base_url, api_format, is_active, created_at, updated_at
+)
+VALUES (
+  'endpoint-codex-search', 'provider-codex-search', 'Codex Search',
+  'https://chatgpt.com/backend-api/codex', 'openai:search', 1, 1, 1
 );
 
 INSERT INTO provider_api_keys (
@@ -1327,13 +1369,22 @@ VALUES (
   'key-windsurf-oauth', 'provider-windsurf', 'OAuth', 'oauth', '["openai:chat"]', 10, 1, 1, 1
 );
 
+INSERT INTO provider_api_keys (
+  id, provider_id, name, auth_type, api_formats, internal_priority, is_active, created_at, updated_at
+)
+VALUES (
+  'key-codex-search', 'provider-codex-search', 'OAuth', 'oauth',
+  '["openai:responses"]', 10, 1, 1, 1
+);
+
 INSERT INTO global_models (
   id, name, config, is_active, created_at, updated_at
 )
 VALUES
   ('global-1', 'gpt-5', '{"model_mappings":["alias-global"],"streaming":true}', 1, 1, 1),
   ('global-image-1', 'gpt-image-2', NULL, 1, 1, 1),
-  ('global-windsurf-1', 'claude-opus-4-7', '{"streaming":true}', 1, 1, 1);
+  ('global-windsurf-1', 'claude-opus-4-7', '{"streaming":true}', 1, 1, 1),
+  ('global-codex-search-1', 'search-global', '{"streaming":false}', 1, 1, 1);
 
 INSERT INTO models (
   id, provider_id, global_model_id, provider_model_name, provider_model_mappings,
@@ -1351,6 +1402,11 @@ VALUES (
 (
   'model-windsurf-opus', 'provider-windsurf', 'global-windsurf-1', 'claude-opus-4-7',
   NULL, NULL, 1, 1, 1, 1
+),
+(
+  'model-codex-search', 'provider-codex-search', 'global-codex-search-1', 'search-upstream',
+  '[{"name":"gpt-5.6-sol","api_formats":["openai:responses"],"priority":1}]',
+  0, 1, 1, 1, 1
 );
 "#,
         )

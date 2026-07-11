@@ -35,20 +35,21 @@ pub fn finalize_openai_provider_request_with_codex_model_capabilities(
     finalization: OpenAiProviderRequestFinalization<'_>,
     model_capabilities: Option<&super::responses::codex::CodexResponsesModelCapabilities>,
 ) -> Result<(), OpenAiProviderRequestContractViolation> {
-    let is_codex_responses = finalization
+    let is_codex_reasoning_endpoint = finalization
         .provider_type
         .trim()
         .eq_ignore_ascii_case("codex")
-        && crate::is_openai_responses_family_format(finalization.provider_api_format);
-    let resolved_model_capabilities =
-        (is_codex_responses && model_capabilities.is_none()).then(|| {
+        && (crate::is_openai_responses_family_format(finalization.provider_api_format)
+            || crate::api_format_alias_matches(finalization.provider_api_format, "openai:search"));
+    let resolved_model_capabilities = (is_codex_reasoning_endpoint && model_capabilities.is_none())
+        .then(|| {
             super::responses::codex::resolve_codex_responses_model_capabilities(
                 finalization.provider_model,
                 finalization.source_model,
                 None,
             )
         });
-    let model_capabilities = is_codex_responses
+    let model_capabilities = is_codex_reasoning_endpoint
         .then(|| model_capabilities.or(resolved_model_capabilities.as_ref()))
         .flatten();
     match crate::normalize_api_format_alias(finalization.source_api_format).as_str() {
@@ -75,6 +76,11 @@ pub fn finalize_openai_provider_request_with_codex_model_capabilities(
             )
         }
     }
+    super::responses::codex::normalize_codex_openai_reasoning_wire_effort(
+        body,
+        finalization.provider_type,
+        finalization.provider_api_format,
+    );
     super::responses::codex::apply_openai_responses_compact_special_body_edits(
         body,
         finalization.provider_api_format,
@@ -85,6 +91,7 @@ pub fn finalize_openai_provider_request_with_codex_model_capabilities(
         finalization.upstream_is_stream,
         finalization.require_body_stream_field,
     );
+    super::search::apply_openai_search_request_projection(body, finalization.provider_api_format);
     let provider_model = body
         .get("model")
         .and_then(Value::as_str)
@@ -413,6 +420,81 @@ mod tests {
         )
         .expect("Codex maps the Ultra preset to max without card-list wire validation");
         assert_eq!(ultra_only_body["reasoning"]["effort"], "max");
+    }
+
+    #[test]
+    fn codex_search_normalizes_reasoning_and_projects_the_typed_request() {
+        let finalization = OpenAiProviderRequestFinalization {
+            source_api_format: "openai:search",
+            provider_api_format: "openai:search",
+            provider_type: "codex",
+            provider_model: "gpt-5.6-sol",
+            source_model: "gpt-5.6-sol",
+            body_rules: None,
+            upstream_is_stream: false,
+            require_body_stream_field: false,
+        };
+        let mut body = json!({
+            "id": "session-1",
+            "model": "gpt-5.6-sol",
+            "reasoning": {
+                "effort": "ultra",
+                "summary": "auto",
+                "context": "current_turn",
+                "future_reasoning_field": true
+            },
+            "commands": {"search_query": [{"q": "Aether"}]},
+            "store": false,
+            "future_request_field": {"enabled": true},
+            "stream": true
+        });
+
+        finalize_openai_provider_request(&mut body, finalization)
+            .expect("Codex Search request should finalize");
+
+        assert_eq!(body["reasoning"]["effort"], "max");
+        assert_eq!(body["reasoning"]["summary"], "auto");
+        assert_eq!(body["reasoning"]["context"], "current_turn");
+        assert!(body["reasoning"].get("future_reasoning_field").is_none());
+        assert_eq!(body["commands"]["search_query"][0]["q"], "Aether");
+        assert!(body.get("store").is_none());
+        assert!(body.get("future_request_field").is_none());
+        assert!(body.get("stream").is_none());
+        assert!(body.get("tool_choice").is_none());
+        assert!(body.get("include").is_none());
+    }
+
+    #[test]
+    fn codex_search_validates_reasoning_effort_against_model_card() {
+        let finalization = OpenAiProviderRequestFinalization {
+            source_api_format: "openai:search",
+            provider_api_format: "openai:search",
+            provider_type: "codex",
+            provider_model: "gpt-5.6-sol",
+            source_model: "gpt-5.6-sol",
+            body_rules: None,
+            upstream_is_stream: false,
+            require_body_stream_field: false,
+        };
+        let mut supported = json!({
+            "id": "session-1",
+            "model": "gpt-5.6-sol",
+            "reasoning": {"effort": "high"}
+        });
+        finalize_openai_provider_request(&mut supported, finalization)
+            .expect("published Search effort should pass");
+
+        let mut unsupported = json!({
+            "id": "session-1",
+            "model": "gpt-5.6-sol",
+            "reasoning": {"effort": "none"}
+        });
+        let error = finalize_openai_provider_request(&mut unsupported, finalization)
+            .expect_err("unpublished Search effort should be rejected");
+        assert!(matches!(
+            error,
+            super::OpenAiProviderRequestContractViolation::Reasoning(_)
+        ));
     }
 
     #[test]

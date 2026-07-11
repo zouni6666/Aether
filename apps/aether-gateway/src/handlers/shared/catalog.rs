@@ -38,7 +38,7 @@ pub(crate) fn provider_catalog_key_supports_format(
     }
     formats
         .iter()
-        .any(|candidate| crate::ai_serving::api_format_alias_matches(candidate, api_format))
+        .any(|candidate| aether_ai_formats::api_format_permission_covers(candidate, api_format))
 }
 
 pub(crate) fn decrypt_catalog_secret_with_fallbacks(
@@ -2730,6 +2730,25 @@ mod tests {
             None,
         )
         .expect("key transport should build")
+    }
+
+    #[test]
+    fn responses_key_scope_covers_search_in_one_direction() {
+        let mut responses_key = sample_catalog_key();
+        responses_key.api_formats = Some(json!(["openai:responses"]));
+        assert!(provider_catalog_key_supports_format(
+            &responses_key,
+            "codex",
+            "openai:search",
+        ));
+
+        let mut search_key = sample_catalog_key();
+        search_key.api_formats = Some(json!(["openai:search"]));
+        assert!(!provider_catalog_key_supports_format(
+            &search_key,
+            "codex",
+            "openai:responses",
+        ));
     }
 
     #[test]

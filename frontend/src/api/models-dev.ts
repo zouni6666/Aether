@@ -5,7 +5,7 @@
 
 import api from './client'
 import {
-  buildModelsDevTieredPricing,
+  resolveModelsDevTieredPricing,
   type ModelsDevCost,
 } from './models-dev-pricing'
 import type { TieredPricingConfig } from './endpoints/types'
@@ -166,15 +166,16 @@ export async function getModelsDevList(officialOnly: boolean = true): Promise<Mo
       if (!provider.models) continue
 
       for (const [modelId, model] of Object.entries(provider.models)) {
-        const tieredPricing = buildModelsDevTieredPricing(model.cost)
+        const tieredPricing = resolveModelsDevTieredPricing(providerId, modelId, model.cost)
+        const basePricingTier = tieredPricing?.tiers[0]
         items.push({
           providerId,
           providerName: provider.name,
           modelId,
           modelName: model.name || modelId,
           family: model.family,
-          inputPrice: model.cost?.input,
-          outputPrice: model.cost?.output,
+          inputPrice: basePricingTier?.input_price_per_1m ?? model.cost?.input,
+          outputPrice: basePricingTier?.output_price_per_1m ?? model.cost?.output,
           tieredPricing: tieredPricing ?? undefined,
           contextLimit: model.limit?.context,
           outputLimit: model.limit?.output,

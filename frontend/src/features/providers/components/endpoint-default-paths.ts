@@ -90,6 +90,7 @@ function usesVersionedApiRootByDefault(apiFormat: string): boolean {
   return apiFormat === 'openai:chat'
     || apiFormat === 'openai:responses'
     || apiFormat === 'openai:responses:compact'
+    || apiFormat === 'openai:search'
     || apiFormat === 'openai:embedding'
     || apiFormat === 'openai:rerank'
     || apiFormat === 'openai:image'
@@ -129,6 +130,7 @@ function skipsVersionedApiRootDefault(apiFormat: string, baseUrl: string): boole
     return false
   }
   return isDeepSeekApiRoot(baseUrl)
+    || isCodexUrl(baseUrl)
     || isBigModelCodingApiRoot(baseUrl)
     || isGoogleOpenAiCompatApiRoot(baseUrl)
     || isVertexOpenAiCompatApiRoot(baseUrl)
@@ -197,6 +199,9 @@ export function getDefaultEndpointPath(params: {
     : (!!params.baseUrl && isCodexUrl(params.baseUrl))
   if (normalizedApiFormat === 'openai:responses' && isCodex) {
     return '/responses'
+  }
+  if (normalizedApiFormat === 'openai:search' && isCodex) {
+    return '/alpha/search'
   }
   if (usesVersionedApiRootByDefault(normalizedApiFormat)) {
     return stripVersionPrefixForApiRoot(defaultPath)

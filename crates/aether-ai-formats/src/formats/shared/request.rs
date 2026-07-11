@@ -50,7 +50,8 @@ pub fn forbid_upstream_streaming_for_provider(
     provider_type: &str,
     provider_api_format: &str,
 ) -> bool {
-    aether_ai_formats::is_openai_responses_compact_format(provider_api_format)
+    aether_ai_formats::api_format_alias_matches(provider_api_format, "openai:search")
+        || aether_ai_formats::is_openai_responses_compact_format(provider_api_format)
         || (provider_type.trim().eq_ignore_ascii_case("codex")
             && provider_api_format
                 .trim()
@@ -258,7 +259,15 @@ mod tests {
     }
 
     #[test]
-    fn forbids_streaming_for_compact_and_codex_images() {
+    fn forbids_streaming_for_sync_only_openai_formats() {
+        assert!(forbid_upstream_streaming_for_provider(
+            "codex",
+            "openai:search"
+        ));
+        assert!(forbid_upstream_streaming_for_provider(
+            "custom",
+            "/v1/alpha/search"
+        ));
         assert!(forbid_upstream_streaming_for_provider(
             "codex",
             "openai:responses:compact"
@@ -461,6 +470,13 @@ mod tests {
     #[test]
     fn provider_policy_gives_non_stream_contracts_precedence() {
         let force_stream = json!({"upstream_stream_policy": "force_stream"});
+        assert!(!resolve_upstream_is_stream_for_provider(
+            Some(&force_stream),
+            "codex",
+            "openai:search",
+            true,
+            true,
+        ));
         assert!(!resolve_upstream_is_stream_for_provider(
             Some(&force_stream),
             "codex",

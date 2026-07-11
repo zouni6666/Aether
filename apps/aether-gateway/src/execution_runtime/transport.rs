@@ -59,7 +59,6 @@ const DEFAULT_STREAM_FIRST_BYTE_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_NON_STREAM_TOTAL_TIMEOUT_MS: u64 = 300_000;
 const DEFAULT_CODEX_COMPACT_TOTAL_TIMEOUT_MS: u64 = 1_200_000;
 const MIN_TUNNEL_TIMEOUT_SECS: u64 = 1;
-const MAX_TUNNEL_TIMEOUT_SECS: u64 = 1_200;
 const DIRECT_REQWEST_H2_CLIENT_SHARDS_ENV: &str = "AETHER_GATEWAY_DIRECT_REQWEST_H2_CLIENT_SHARDS";
 const DIRECT_REQWEST_CLIENT_SHARDS_ENV: &str = "AETHER_GATEWAY_DIRECT_REQWEST_CLIENT_SHARDS";
 const DIRECT_REQWEST_H2_TARGET_STREAMS_PER_CLIENT_ENV: &str =
@@ -2216,34 +2215,49 @@ fn resolve_tunnel_first_byte_timeout(plan: &ExecutionPlan) -> Option<Duration> {
     })
 }
 
-fn resolve_non_stream_total_timeout(plan: &ExecutionPlan) -> Option<Duration> {
-    if plan.stream {
+pub(crate) fn resolve_non_stream_total_timeout_for_request(
+    is_stream: bool,
+    provider_api_format: &str,
+    timeouts: Option<&aether_contracts::ExecutionTimeouts>,
+) -> Option<Duration> {
+    if is_stream {
         return None;
     }
     let default_timeout_ms =
-        if crate::ai_serving::is_openai_responses_compact_format(&plan.provider_api_format) {
+        if crate::ai_serving::is_openai_responses_compact_format(provider_api_format) {
             DEFAULT_CODEX_COMPACT_TOTAL_TIMEOUT_MS
         } else {
             DEFAULT_NON_STREAM_TOTAL_TIMEOUT_MS
         };
-    let timeout_ms = plan
-        .timeouts
-        .as_ref()
+    let timeout_ms = timeouts
         .and_then(|timeouts| timeouts.total_ms)
         .unwrap_or(default_timeout_ms);
     Some(Duration::from_millis(timeout_ms.max(1)))
 }
 
-pub(crate) fn resolve_stream_first_byte_timeout(plan: &ExecutionPlan) -> Option<Duration> {
-    if !plan.stream {
+fn resolve_non_stream_total_timeout(plan: &ExecutionPlan) -> Option<Duration> {
+    resolve_non_stream_total_timeout_for_request(
+        plan.stream,
+        &plan.provider_api_format,
+        plan.timeouts.as_ref(),
+    )
+}
+
+pub(crate) fn resolve_stream_first_byte_timeout_for_request(
+    is_stream: bool,
+    timeouts: Option<&aether_contracts::ExecutionTimeouts>,
+) -> Option<Duration> {
+    if !is_stream {
         return None;
     }
-    let timeout_ms = plan
-        .timeouts
-        .as_ref()
+    let timeout_ms = timeouts
         .and_then(|timeouts| timeouts.first_byte_ms)
         .unwrap_or(DEFAULT_STREAM_FIRST_BYTE_TIMEOUT_MS);
     Some(Duration::from_millis(timeout_ms.max(1)))
+}
+
+pub(crate) fn resolve_stream_first_byte_timeout(plan: &ExecutionPlan) -> Option<Duration> {
+    resolve_stream_first_byte_timeout_for_request(plan.stream, plan.timeouts.as_ref())
 }
 
 pub(crate) async fn with_non_stream_total_timeout<T, F>(
@@ -2363,7 +2377,10 @@ fn resolve_tunnel_timeout_metadata(plan: &ExecutionPlan) -> TunnelTimeoutMetadat
 
 fn timeout_ms_to_secs(ms: u64) -> u64 {
     let secs = ms.div_ceil(1_000);
-    secs.clamp(MIN_TUNNEL_TIMEOUT_SECS, MAX_TUNNEL_TIMEOUT_SECS)
+    secs.clamp(
+        MIN_TUNNEL_TIMEOUT_SECS,
+        aether_contracts::MAX_EXECUTION_REQUEST_TIMEOUT_SECS,
+    )
 }
 
 fn resolve_tunnel_node_id(proxy: Option<&ProxySnapshot>) -> Option<String> {

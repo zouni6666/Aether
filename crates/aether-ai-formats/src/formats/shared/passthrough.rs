@@ -5,7 +5,8 @@ use crate::contracts::{
     GEMINI_EMBEDDING_SYNC_SUCCESS_REPORT_KIND, GEMINI_INTERACTIONS_STREAM_PLAN_KIND,
     GEMINI_INTERACTIONS_STREAM_SUCCESS_REPORT_KIND, GEMINI_INTERACTIONS_SYNC_PLAN_KIND,
     GEMINI_INTERACTIONS_SYNC_SUCCESS_REPORT_KIND, OPENAI_EMBEDDING_SYNC_PLAN_KIND,
-    OPENAI_RERANK_SYNC_PLAN_KIND,
+    OPENAI_RERANK_SYNC_PLAN_KIND, OPENAI_SEARCH_SYNC_PLAN_KIND,
+    OPENAI_SEARCH_SYNC_SUCCESS_REPORT_KIND,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +79,13 @@ pub fn resolve_sync_spec(plan_kind: &str) -> Option<LocalSameFormatProviderSpec>
             api_format: "openai:rerank",
             decision_kind: OPENAI_RERANK_SYNC_PLAN_KIND,
             report_kind: "openai_rerank_sync_success",
+            family: LocalSameFormatProviderFamily::Standard,
+            require_streaming: false,
+        }),
+        OPENAI_SEARCH_SYNC_PLAN_KIND => Some(LocalSameFormatProviderSpec {
+            api_format: "openai:search",
+            decision_kind: OPENAI_SEARCH_SYNC_PLAN_KIND,
+            report_kind: OPENAI_SEARCH_SYNC_SUCCESS_REPORT_KIND,
             family: LocalSameFormatProviderFamily::Standard,
             require_streaming: false,
         }),
@@ -183,6 +191,14 @@ mod tests {
         let spec = resolve_sync_spec("openai_rerank_sync").expect("spec");
         assert_eq!(spec.api_format, "openai:rerank");
         assert_eq!(spec.report_kind, "openai_rerank_sync_success");
+        assert!(!spec.require_streaming);
+    }
+
+    #[test]
+    fn resolves_openai_search_sync_spec() {
+        let spec = resolve_sync_spec("openai_search_sync").expect("spec");
+        assert_eq!(spec.api_format, "openai:search");
+        assert_eq!(spec.report_kind, "openai_search_sync_success");
         assert!(!spec.require_streaming);
     }
 }

@@ -101,8 +101,7 @@ fn provider_query_model_mapping_matches_endpoint(
 ) -> bool {
     let api_format_matches = mapping.api_formats.as_ref().is_none_or(|api_formats| {
         api_formats.iter().any(|value| {
-            aether_scheduler_core::normalize_api_format(value)
-                == aether_scheduler_core::normalize_api_format(&endpoint.api_format)
+            aether_ai_formats::api_format_permission_covers(value, &endpoint.api_format)
         })
     });
     if !api_format_matches {
@@ -366,4 +365,42 @@ fn provider_query_parse_mapping_string_list_array(
         }
     }
     Ok(parsed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_endpoint(api_format: &str) -> StoredProviderCatalogEndpoint {
+        StoredProviderCatalogEndpoint::new(
+            "endpoint-1".to_string(),
+            "provider-1".to_string(),
+            api_format.to_string(),
+            None,
+            None,
+            true,
+        )
+        .expect("endpoint should build")
+    }
+
+    fn sample_mapping(api_format: &str) -> StoredProviderModelMapping {
+        StoredProviderModelMapping {
+            name: "gpt-5.6-luna".to_string(),
+            priority: 1,
+            api_formats: Some(vec![api_format.to_string()]),
+            endpoint_ids: None,
+        }
+    }
+
+    #[test]
+    fn responses_mapping_scope_covers_search_in_one_direction() {
+        assert!(provider_query_model_mapping_matches_endpoint(
+            &sample_mapping("openai:responses"),
+            &sample_endpoint("openai:search"),
+        ));
+        assert!(!provider_query_model_mapping_matches_endpoint(
+            &sample_mapping("openai:search"),
+            &sample_endpoint("openai:responses"),
+        ));
+    }
 }

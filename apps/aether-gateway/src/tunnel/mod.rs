@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use aether_contracts::tunnel::{
+    resolve_tunnel_request_timeouts, try_decode_tunnel_relay_request_meta, RequestMeta,
     TUNNEL_RELAY_FORWARDED_BY_HEADER, TUNNEL_RELAY_OWNER_INSTANCE_HEADER,
 };
 use aether_data::repository::proxy_nodes::{
@@ -21,6 +22,7 @@ use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
+use bytes::BytesMut;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -60,6 +62,22 @@ const TUNNEL_ATTACHMENT_REDIS_KEY_PREFIX: &str = "tunnel:attachments:";
 const TUNNEL_INSTANCE_ID_ENV: &str = "AETHER_GATEWAY_INSTANCE_ID";
 const TUNNEL_RELAY_BASE_URL_ENV: &str = "AETHER_TUNNEL_RELAY_BASE_URL";
 const TUNNEL_ATTACHMENT_TTL_ENV: &str = "AETHER_TUNNEL_ATTACHMENT_TTL_SECS";
+
+pub(crate) async fn send_owner_forward_request(
+    request: reqwest::RequestBuilder,
+    first_byte_timeout: Option<Duration>,
+) -> Result<reqwest::Response, String> {
+    match first_byte_timeout {
+        Some(timeout) => match tokio::time::timeout(timeout, request.send()).await {
+            Ok(result) => result.map_err(|error| error.to_string()),
+            Err(_) => Err(format!(
+                "owner gateway first byte timeout after {} ms",
+                timeout.as_millis()
+            )),
+        },
+        None => request.send().await.map_err(|error| error.to_string()),
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct InternalTunnelHeartbeatRequest {
@@ -776,8 +794,29 @@ async fn forward_relay_request_to_owner(
         );
     }
     let limit_exceeded = Arc::new(AtomicBool::new(false));
+    let prepared_body =
+        match prepare_owner_relay_request_body(body, body_limit, Arc::clone(&limit_exceeded)).await
+        {
+            Ok(prepared_body) => prepared_body,
+            Err(_) if limit_exceeded.load(Ordering::SeqCst) => {
+                return build_local_http_error_response(
+                    trace_id,
+                    None,
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    &format!("tunnel relay body exceeds {body_limit} bytes"),
+                );
+            }
+            Err(error) => {
+                return build_local_http_error_response(
+                    trace_id,
+                    None,
+                    StatusCode::BAD_REQUEST,
+                    &error,
+                );
+            }
+        };
 
-    let mut upstream_request = state.client.post(owner_url);
+    let mut upstream_request = state.owner_forward_client.post(owner_url);
     for (name, value) in &parts.headers {
         if should_skip_request_header(name.as_str()) || name == http::header::HOST {
             continue;
@@ -793,18 +832,23 @@ async fn forward_relay_request_to_owner(
             TUNNEL_RELAY_OWNER_INSTANCE_HEADER,
             owner.gateway_instance_id.as_str(),
         );
+    let resolved_timeouts = resolve_tunnel_request_timeouts(&prepared_body.meta);
+    if let Some(timeout_ms) = resolved_timeouts.response_body_ms {
+        upstream_request = upstream_request.timeout(Duration::from_millis(timeout_ms));
+    }
     if !parts.headers.contains_key(TRACE_ID_HEADER) {
         upstream_request = upstream_request.header(TRACE_ID_HEADER, trace_id);
     }
 
-    let upstream_response = match upstream_request
-        .body(build_owner_relay_request_body(
-            body,
-            body_limit,
-            Arc::clone(&limit_exceeded),
-        ))
-        .send()
-        .await
+    let first_byte_timeout = prepared_body
+        .meta
+        .stream
+        .then_some(Duration::from_millis(resolved_timeouts.first_byte_ms));
+    let upstream_response = match send_owner_forward_request(
+        upstream_request.body(prepared_body.body),
+        first_byte_timeout,
+    )
+    .await
     {
         Ok(response) => response,
         Err(err) if limit_exceeded.load(Ordering::SeqCst) => {
@@ -862,14 +906,53 @@ fn request_content_length_exceeds_limit(headers: &HeaderMap, body_limit: usize) 
         .is_some_and(|value| value > body_limit)
 }
 
-fn build_owner_relay_request_body(
+struct PreparedOwnerRelayRequestBody {
+    body: reqwest::Body,
+    meta: RequestMeta,
+}
+
+async fn prepare_owner_relay_request_body(
     body: Body,
     body_limit: usize,
     limit_exceeded: Arc<AtomicBool>,
-) -> reqwest::Body {
+) -> Result<PreparedOwnerRelayRequestBody, String> {
     let mut body_stream = body.into_data_stream();
-    reqwest::Body::wrap_stream(stream! {
-        let mut forwarded = 0usize;
+    let mut buffered_chunks = Vec::new();
+    let mut meta_buffer = BytesMut::new();
+    let mut forwarded = 0usize;
+    let mut meta = None;
+
+    while meta.is_none() {
+        let Some(next_chunk) = body_stream.next().await else {
+            return Err("incomplete tunnel relay metadata".to_string());
+        };
+        match next_chunk {
+            Ok(chunk) => {
+                let next_forwarded = forwarded.saturating_add(chunk.len());
+                if next_forwarded > body_limit {
+                    limit_exceeded.store(true, Ordering::SeqCst);
+                    return Err(format!("tunnel relay body exceeds {body_limit} bytes"));
+                }
+                forwarded = next_forwarded;
+                meta_buffer.extend_from_slice(&chunk);
+                buffered_chunks.push(chunk);
+                match try_decode_tunnel_relay_request_meta(&meta_buffer) {
+                    Ok(Some((parsed, _))) => meta = Some(parsed),
+                    Ok(None) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(error) => {
+                return Err(format!("tunnel relay body read failed: {error}"));
+            }
+        }
+    }
+    let meta = meta.ok_or_else(|| "incomplete tunnel relay metadata".to_string())?;
+
+    let forwarded_body = reqwest::Body::wrap_stream(stream! {
+        for chunk in buffered_chunks {
+            yield Ok::<Bytes, io::Error>(chunk);
+        }
         while let Some(next_chunk) = body_stream.next().await {
             match next_chunk {
                 Ok(chunk) => {
@@ -884,12 +967,17 @@ fn build_owner_relay_request_body(
                     }
                     yield Ok::<Bytes, io::Error>(chunk);
                 }
-                Err(err) => {
-                    yield Err::<Bytes, io::Error>(io::Error::other(err));
+                Err(error) => {
+                    yield Err::<Bytes, io::Error>(io::Error::other(error));
                     break;
                 }
             }
         }
+    });
+
+    Ok(PreparedOwnerRelayRequestBody {
+        body: forwarded_body,
+        meta,
     })
 }
 
@@ -1047,12 +1135,15 @@ fn parse_embedded_tunnel_heartbeat_request(
 mod tests {
     use super::{
         apply_embedded_tunnel_heartbeat, apply_embedded_tunnel_node_status, current_unix_secs,
-        tunnel_attachment_key, GatewayDataState, TunnelAttachmentDirectory, TunnelAttachmentRecord,
+        prepare_owner_relay_request_body, tunnel_attachment_key, GatewayDataState,
+        TunnelAttachmentDirectory, TunnelAttachmentRecord,
     };
     use aether_data::repository::proxy_nodes::{
         InMemoryProxyNodeRepository, ProxyNodeReadRepository, StoredProxyNode,
     };
+    use axum::body::Body;
     use serde_json::json;
+    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
 
     fn sample_proxy_node(node_id: &str) -> StoredProxyNode {
@@ -1090,6 +1181,24 @@ mod tests {
             Some(1_700_000_000),
             Some(1_700_000_001),
         )
+    }
+
+    #[tokio::test]
+    async fn owner_relay_body_preparation_rejects_invalid_metadata() {
+        let mut envelope = Vec::new();
+        envelope.extend_from_slice(&1u32.to_be_bytes());
+        envelope.push(b'{');
+
+        let error = prepare_owner_relay_request_body(
+            Body::from(envelope),
+            1024,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .err()
+        .expect("invalid metadata should fail");
+
+        assert!(error.contains("invalid relay metadata"));
     }
 
     #[tokio::test]

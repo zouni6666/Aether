@@ -71,7 +71,7 @@ INNER JOIN LATERAL (
       (
         LOWER(BTRIM(p.provider_type)) = 'codex'
         AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
-        AND LOWER($3) IN ('openai:responses', 'openai:responses:compact', 'openai:image')
+        AND LOWER($3) IN ('openai:responses', 'openai:responses:compact', 'openai:search', 'openai:image')
       )
       OR (
         LOWER(BTRIM(p.provider_type)) = 'chatgpt_web'
@@ -164,7 +164,7 @@ WHERE p.is_active = TRUE
     (
       LOWER(BTRIM(p.provider_type)) = 'codex'
       AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
-      AND LOWER($3) IN ('openai:responses', 'openai:responses:compact', 'openai:image')
+      AND LOWER($3) IN ('openai:responses', 'openai:responses:compact', 'openai:search', 'openai:image')
     )
     OR (
       LOWER(BTRIM(p.provider_type)) = 'chatgpt_web'
@@ -350,7 +350,7 @@ INNER JOIN LATERAL (
       (
         LOWER(BTRIM(p.provider_type)) = 'codex'
         AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
-        AND LOWER($4) IN ('openai:responses', 'openai:responses:compact', 'openai:image')
+        AND LOWER($4) IN ('openai:responses', 'openai:responses:compact', 'openai:search', 'openai:image')
       )
       OR (
         LOWER(BTRIM(p.provider_type)) = 'chatgpt_web'
@@ -444,7 +444,7 @@ WHERE p.is_active = TRUE
     (
       LOWER(BTRIM(p.provider_type)) = 'codex'
       AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
-      AND LOWER($4) IN ('openai:responses', 'openai:responses:compact', 'openai:image')
+      AND LOWER($4) IN ('openai:responses', 'openai:responses:compact', 'openai:search', 'openai:image')
     )
     OR (
       LOWER(BTRIM(p.provider_type)) = 'chatgpt_web'
@@ -638,7 +638,7 @@ WHERE p.is_active = TRUE
     (
       LOWER(BTRIM(p.provider_type)) = 'codex'
       AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
-      AND LOWER($6) IN ('openai:responses', 'openai:responses:compact', 'openai:image')
+      AND LOWER($6) IN ('openai:responses', 'openai:responses:compact', 'openai:search', 'openai:image')
     )
     OR (
       LOWER(BTRIM(p.provider_type)) = 'chatgpt_web'
@@ -784,7 +784,8 @@ impl SqlxMinimalCandidateSelectionReadRepository {
         let mut rows = Vec::new();
         let canonical_api_format = normalize_api_format(api_format);
         let storage_aliases = api_format_aliases(&canonical_api_format);
-        let sql_match_aliases = sql_match_aliases(&storage_aliases);
+        let sql_match_aliases =
+            sql_match_aliases(&api_format_permission_aliases(&canonical_api_format));
         for api_format in storage_aliases {
             rows.extend(
                 Self::collect_query_rows(
@@ -809,7 +810,8 @@ impl SqlxMinimalCandidateSelectionReadRepository {
         let mut rows = Vec::new();
         let canonical_api_format = normalize_api_format(api_format);
         let storage_aliases = api_format_aliases(&canonical_api_format);
-        let sql_match_aliases = sql_match_aliases(&storage_aliases);
+        let sql_match_aliases =
+            sql_match_aliases(&api_format_permission_aliases(&canonical_api_format));
         for api_format in storage_aliases {
             rows.extend(
                 Self::collect_query_rows(
@@ -835,7 +837,8 @@ impl SqlxMinimalCandidateSelectionReadRepository {
         let mut rows = Vec::new();
         let canonical_api_format = normalize_api_format(api_format);
         let storage_aliases = api_format_aliases(&canonical_api_format);
-        let sql_match_aliases = sql_match_aliases(&storage_aliases);
+        let sql_match_aliases =
+            sql_match_aliases(&api_format_permission_aliases(&canonical_api_format));
         let sql = requested_model_selection_sql();
         for api_format in storage_aliases {
             rows.extend(
@@ -861,7 +864,8 @@ impl SqlxMinimalCandidateSelectionReadRepository {
         let mut rows = Vec::new();
         let canonical_api_format = normalize_api_format(&query.api_format);
         let storage_aliases = api_format_aliases(&canonical_api_format);
-        let sql_match_aliases = sql_match_aliases(&storage_aliases);
+        let sql_match_aliases =
+            sql_match_aliases(&api_format_permission_aliases(&canonical_api_format));
         let limit = i64::from(query.limit.max(1));
         let offset = i64::from(query.offset);
         let sql = requested_model_selection_page_sql();
@@ -891,7 +895,8 @@ impl SqlxMinimalCandidateSelectionReadRepository {
         let mut rows = Vec::new();
         let canonical_api_format = normalize_api_format(&query.api_format);
         let storage_aliases = api_format_aliases(&canonical_api_format);
-        let sql_match_aliases = sql_match_aliases(&storage_aliases);
+        let sql_match_aliases =
+            sql_match_aliases(&api_format_permission_aliases(&canonical_api_format));
         let limit = i64::from(query.limit.max(1));
         let offset = i64::from(query.offset);
         let sql = pool_key_candidate_selection_sql(&query.order);
@@ -929,7 +934,8 @@ impl SqlxMinimalCandidateSelectionReadRepository {
         let mut rows = Vec::new();
         let canonical_api_format = normalize_api_format(&query.api_format);
         let storage_aliases = api_format_aliases(&canonical_api_format);
-        let sql_match_aliases = sql_match_aliases(&storage_aliases);
+        let sql_match_aliases =
+            sql_match_aliases(&api_format_permission_aliases(&canonical_api_format));
         let sql = pool_key_candidate_selection_by_key_ids_sql();
         for api_format in storage_aliases {
             rows.extend(
@@ -1109,6 +1115,10 @@ fn requested_model_selection_page_sql() -> String {
 
 fn api_format_aliases(api_format: &str) -> Vec<String> {
     aether_ai_formats::api_format_storage_aliases(api_format)
+}
+
+fn api_format_permission_aliases(api_format: &str) -> Vec<String> {
+    aether_ai_formats::api_format_permission_storage_aliases(api_format)
 }
 
 fn normalize_api_format(api_format: &str) -> String {

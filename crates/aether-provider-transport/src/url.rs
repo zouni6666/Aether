@@ -28,6 +28,14 @@ pub fn build_openai_responses_url(
     url
 }
 
+pub fn build_openai_search_url(upstream_base_url: &str, query: Option<&str>) -> String {
+    let (trimmed, base_query) = split_base_url_query(upstream_base_url);
+    let trimmed = trimmed.trim_end_matches('/');
+    let mut url = format!("{trimmed}/alpha/search");
+    append_merged_query(&mut url, base_query, None, query, &[]);
+    url
+}
+
 pub fn build_openai_image_url(
     upstream_base_url: &str,
     request_path: Option<&str>,
@@ -424,7 +432,7 @@ mod tests {
         build_bigmodel_coding_models_url, build_claude_messages_url, build_gemini_content_url,
         build_gemini_files_passthrough_url, build_gemini_video_predict_long_running_url,
         build_openai_chat_url, build_openai_compatible_models_url, build_openai_image_url,
-        build_openai_responses_url, build_passthrough_path_url,
+        build_openai_responses_url, build_openai_search_url, build_passthrough_path_url,
         normalize_gemini_content_action_path,
     };
 
@@ -570,6 +578,21 @@ mod tests {
         assert_eq!(
             build_openai_responses_url("https://tiger.bookapi.cc/codex?tenant=demo", None, true),
             "https://tiger.bookapi.cc/codex/responses/compact?tenant=demo"
+        );
+    }
+
+    #[test]
+    fn openai_search_url_preserves_api_and_codex_roots() {
+        assert_eq!(
+            build_openai_search_url(
+                "https://api.openai.com/v1?tenant=base",
+                Some("trace=1&tenant=request")
+            ),
+            "https://api.openai.com/v1/alpha/search?tenant=request&trace=1"
+        );
+        assert_eq!(
+            build_openai_search_url("https://chatgpt.com/backend-api/codex/", None),
+            "https://chatgpt.com/backend-api/codex/alpha/search"
         );
     }
 

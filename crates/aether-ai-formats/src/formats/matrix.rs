@@ -57,6 +57,9 @@ pub fn request_candidate_api_format_preference(
     if client_api_format == "openai:responses:compact" {
         return (provider_api_format == "openai:responses:compact").then_some((0, 0));
     }
+    if client_api_format == "openai:search" {
+        return (provider_api_format == "openai:search").then_some((0, 0));
+    }
     if is_gemini_interactions_api_format(client_api_format.as_str()) {
         return (provider_api_format == "gemini:interactions").then_some((0, 0));
     }
@@ -108,6 +111,9 @@ pub fn request_candidate_api_formats(
     let client_api_format = normalize_api_format_alias(client_api_format);
     if client_api_format == "openai:responses:compact" {
         return vec!["openai:responses:compact"];
+    }
+    if client_api_format == "openai:search" {
+        return vec!["openai:search"];
     }
     if is_gemini_interactions_api_format(client_api_format.as_str()) {
         return GEMINI_INTERACTIONS_CANDIDATE_API_FORMATS.to_vec();
@@ -378,6 +384,10 @@ mod tests {
             None
         );
         assert_eq!(
+            request_conversion_kind("openai:search", "openai:responses"),
+            None
+        );
+        assert_eq!(
             request_conversion_kind("gemini:generate_content", "claude:messages"),
             Some(RequestConversionKind::ToClaudeStandard)
         );
@@ -407,6 +417,26 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn search_candidate_registry_keeps_exact_protocol_identity() {
+        assert_eq!(
+            request_candidate_api_formats("openai:search", false),
+            vec!["openai:search"]
+        );
+        assert_eq!(
+            request_candidate_api_formats("/v1/alpha/search", true),
+            vec!["openai:search"]
+        );
+        assert_eq!(
+            request_candidate_api_format_preference("openai:search", "openai:search"),
+            Some((0, 0))
+        );
+        assert_eq!(
+            request_candidate_api_format_preference("openai:search", "openai:responses"),
+            None
+        );
     }
 
     #[test]

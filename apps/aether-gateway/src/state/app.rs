@@ -344,6 +344,7 @@ pub struct AppState {
     pub(crate) upstream_target_admission: Arc<crate::upstream_admission::UpstreamTargetAdmission>,
     pub(crate) distributed_request_gate: Option<Arc<RuntimeSemaphore>>,
     pub(crate) client: reqwest::Client,
+    pub(crate) owner_forward_client: reqwest::Client,
     pub(crate) auth_context_cache: Arc<AuthContextCache>,
     pub(crate) auth_snapshot_cache: Arc<AuthSnapshotCache>,
     pub(crate) user_model_capability_settings_cache: Arc<JsonValueCache<String>>,

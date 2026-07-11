@@ -951,14 +951,7 @@ fn admin_usage_api_format_defaults_to_non_stream(item: &StoredRequestUsageAudit)
     let Some(value) = api_format else {
         return false;
     };
-    matches!(
-        aether_ai_formats::normalize_api_format_alias(value).as_str(),
-        "openai:chat"
-            | "openai:responses"
-            | "openai:responses:compact"
-            | "openai:image"
-            | "claude:messages"
-    )
+    aether_ai_formats::api_format_defaults_to_non_stream(value)
 }
 
 fn admin_usage_request_body_implies_default_non_stream(item: &StoredRequestUsageAudit) -> bool {
@@ -2805,6 +2798,33 @@ mod tests {
         );
         assert_eq!(record["is_stream"], true);
         assert_eq!(record["upstream_is_stream"], true);
+        assert_eq!(record["client_requested_stream"], false);
+        assert_eq!(record["client_is_stream"], false);
+    }
+
+    #[test]
+    fn client_requested_stream_defaults_to_non_stream_for_openai_search() {
+        let item = StoredRequestUsageAudit {
+            is_stream: true,
+            api_format: Some("openai:search".to_string()),
+            request_body: Some(json!({
+                "id": "session-search-1",
+                "model": "gpt-5.6-sol",
+                "input": "current documentation"
+            })),
+            ..sample_usage("completed", Some(200), None)
+        };
+
+        assert!(!admin_usage_client_is_stream(&item));
+
+        let record = admin_usage_record_json(
+            &item,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            false,
+            false,
+            None,
+        );
         assert_eq!(record["client_requested_stream"], false);
         assert_eq!(record["client_is_stream"], false);
     }

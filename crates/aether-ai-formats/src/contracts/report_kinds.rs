@@ -29,6 +29,7 @@ pub const OPENAI_RESPONSES_SYNC_SUCCESS_REPORT_KIND: &str = "openai_responses_sy
 pub const OPENAI_RESPONSES_COMPACT_SYNC_SUCCESS_REPORT_KIND: &str =
     "openai_responses_compact_sync_success";
 pub const OPENAI_EMBEDDING_SYNC_SUCCESS_REPORT_KIND: &str = "openai_embedding_sync_success";
+pub const OPENAI_SEARCH_SYNC_SUCCESS_REPORT_KIND: &str = "openai_search_sync_success";
 pub const GEMINI_EMBEDDING_SYNC_SUCCESS_REPORT_KIND: &str = "gemini_embedding_sync_success";
 pub const OPENAI_IMAGE_SYNC_SUCCESS_REPORT_KIND: &str = "openai_image_sync_success";
 pub const CLAUDE_CLI_SYNC_SUCCESS_REPORT_KIND: &str = "claude_cli_sync_success";

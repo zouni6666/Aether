@@ -220,14 +220,7 @@ fn users_me_usage_api_format_defaults_to_non_stream(item: &StoredRequestUsageAud
     let Some(value) = api_format else {
         return false;
     };
-    matches!(
-        crate::ai_serving::normalize_api_format_alias(value).as_str(),
-        "openai:chat"
-            | "openai:responses"
-            | "openai:responses:compact"
-            | "openai:image"
-            | "claude:messages"
-    )
+    aether_ai_formats::api_format_defaults_to_non_stream(value)
 }
 
 fn users_me_usage_request_body_implies_default_non_stream(item: &StoredRequestUsageAudit) -> bool {
@@ -1844,6 +1837,27 @@ mod tests {
         assert_eq!(active_payload["upstream_is_stream"], true);
         assert_eq!(active_payload["client_requested_stream"], false);
         assert_eq!(active_payload["client_is_stream"], false);
+    }
+
+    #[test]
+    fn user_usage_stream_defaults_to_non_stream_for_openai_search() {
+        let item = StoredRequestUsageAudit {
+            is_stream: false,
+            api_format: Some("openai:search".to_string()),
+            request_body: Some(json!({
+                "id": "session-search-1",
+                "model": "gpt-5.6-sol",
+                "input": "current documentation"
+            })),
+            ..sample_usage("completed")
+        };
+
+        assert!(!users_me_usage_client_is_stream(&item));
+
+        let record_payload =
+            build_users_me_usage_record_payload(&item, false, &BTreeMap::new(), false);
+        assert_eq!(record_payload["client_requested_stream"], false);
+        assert_eq!(record_payload["client_is_stream"], false);
     }
 
     #[test]

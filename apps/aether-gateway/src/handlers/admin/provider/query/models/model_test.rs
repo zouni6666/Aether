@@ -29,10 +29,7 @@ use crate::handlers::shared::{
     provider_key_status_snapshot_payload,
 };
 use crate::model_fetch::ModelFetchRuntimeState;
-use crate::provider_key_auth::{
-    provider_key_auth_semantics, provider_key_configured_api_formats,
-    provider_key_inherits_provider_api_formats,
-};
+use crate::provider_key_auth::provider_key_auth_semantics;
 use crate::provider_transport::antigravity::{
     build_antigravity_safe_v1internal_request, build_antigravity_static_identity_headers,
     classify_local_antigravity_request_support, AntigravityEnvelopeRequestType,
@@ -544,6 +541,22 @@ fn provider_query_build_test_request_body_for_api_format(
     route_path: &str,
     client_api_format: &str,
 ) -> Value {
+    provider_query_build_test_request_body_for_api_format_with_search_session(
+        payload,
+        model,
+        route_path,
+        client_api_format,
+        None,
+    )
+}
+
+fn provider_query_build_test_request_body_for_api_format_with_search_session(
+    payload: &Value,
+    model: &str,
+    route_path: &str,
+    client_api_format: &str,
+    search_session_id: Option<&str>,
+) -> Value {
     let client_api_format = provider_query_normalize_api_format_alias(client_api_format);
     let override_custom_model = route_path.ends_with("/test-model-failover")
         || provider_query_extract_mapped_model_name(payload).is_some();
@@ -568,7 +581,7 @@ fn provider_query_build_test_request_body_for_api_format(
                 );
             } else if matches!(
                 client_api_format.as_str(),
-                "openai:responses" | "openai:responses:compact"
+                "openai:responses" | "openai:responses:compact" | "openai:search"
             ) && !value_has_non_empty_text(object.get("input"))
             {
                 if let Some(prompt) = object
@@ -580,7 +593,7 @@ fn provider_query_build_test_request_body_for_api_format(
             }
             if matches!(
                 client_api_format.as_str(),
-                "openai:responses" | "openai:responses:compact"
+                "openai:responses" | "openai:responses:compact" | "openai:search"
             ) && value_has_non_empty_text(object.get("input"))
             {
                 object.remove("prompt");
@@ -589,6 +602,9 @@ fn provider_query_build_test_request_body_for_api_format(
                 && value_has_non_empty_text(object.get("input"))
             {
                 object.remove("messages");
+            }
+            if client_api_format == "openai:search" {
+                provider_query_ensure_search_test_fields(object, payload, search_session_id);
             }
         }
         return body;
@@ -619,6 +635,15 @@ fn provider_query_build_test_request_body_for_api_format(
             "max_output_tokens": 30,
             "temperature": 0.7,
             "stream": true,
+        }),
+        "openai:search" => json!({
+            "id": provider_query_search_test_session_id(search_session_id),
+            "model": model,
+            "input": message,
+            "commands": {
+                "search_query": [{"q": message}]
+            },
+            "max_output_tokens": 256,
         }),
         "claude:messages" => json!({
             "model": model,
@@ -680,7 +705,7 @@ fn provider_query_insert_default_test_conversation(
                 .entry("top_n".to_string())
                 .or_insert_with(|| Value::from(4_u64));
         }
-        "openai:responses" | "openai:responses:compact" => {
+        "openai:responses" | "openai:responses:compact" | "openai:search" => {
             object.insert("input".to_string(), Value::String(message));
         }
         "claude:messages" => {
@@ -696,6 +721,48 @@ fn provider_query_insert_default_test_conversation(
             );
         }
     }
+}
+
+fn provider_query_search_test_session_id(search_session_id: Option<&str>) -> String {
+    search_session_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("aether-model-test-{value}"))
+        .unwrap_or_else(|| format!("aether-model-test-{}", Uuid::new_v4().simple()))
+}
+
+fn provider_query_ensure_search_test_fields(
+    object: &mut Map<String, Value>,
+    payload: &Value,
+    search_session_id: Option<&str>,
+) {
+    let query = object
+        .get("input")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| provider_query_extract_message(payload))
+        .unwrap_or_else(|| DEFAULT_PROVIDER_QUERY_TEST_MESSAGE.to_string());
+    let has_session_id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    if !has_session_id {
+        object.insert(
+            "id".to_string(),
+            provider_query_search_test_session_id(search_session_id).into(),
+        );
+    }
+    object
+        .entry("input".to_string())
+        .or_insert_with(|| Value::String(query.clone()));
+    object
+        .entry("commands".to_string())
+        .or_insert_with(|| json!({"search_query": [{"q": query}]}));
+    object
+        .entry("max_output_tokens".to_string())
+        .or_insert_with(|| Value::from(256_u64));
 }
 
 fn provider_query_grok_test_client_api_format(provider_api_format: &str) -> &'static str {
@@ -767,7 +834,7 @@ fn provider_query_request_body_has_conversation_for_api_format(
     client_api_format: &str,
 ) -> bool {
     match provider_query_normalize_api_format_alias(client_api_format).as_str() {
-        "openai:responses" | "openai:responses:compact" => {
+        "openai:responses" | "openai:responses:compact" | "openai:search" => {
             value_has_non_empty_text(body.get("input"))
                 || value_has_non_empty_text(body.get("prompt"))
         }
@@ -874,15 +941,11 @@ fn provider_query_key_supports_endpoint(
     provider_type: &str,
     endpoint_api_format: &str,
 ) -> bool {
-    if provider_key_inherits_provider_api_formats(key, provider_type) {
-        return true;
-    }
-    let formats = provider_key_configured_api_formats(key);
-    let endpoint_api_format = provider_query_normalize_api_format_alias(endpoint_api_format);
-    formats.is_empty()
-        || formats
-            .iter()
-            .any(|value| provider_query_normalize_api_format_alias(value) == endpoint_api_format)
+    crate::handlers::shared::provider_catalog_key_supports_format(
+        key,
+        provider_type,
+        endpoint_api_format,
+    )
 }
 
 async fn provider_query_select_preferred_non_kiro_endpoint(
@@ -1621,6 +1684,15 @@ fn provider_query_standard_execution_response_body(
         && provider_query_normalize_api_format_alias(provider_api_format)
             == "gemini:generate_content"
         && !crate::ai_serving::gemini_generate_content_response_has_visible_output(&body)
+    {
+        return None;
+    }
+    if result.status_code < 400
+        && provider_query_normalize_api_format_alias(provider_api_format) == "openai:search"
+        && !body
+            .get("output")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
     {
         return None;
     }
@@ -2864,12 +2936,14 @@ async fn provider_query_execute_standard_test_candidate(
         crate::ai_serving::normalize_api_format_alias(provider_api_format);
     let client_api_format =
         provider_query_standard_test_client_api_format(normalized_provider_api_format.as_str());
-    let original_request_body = provider_query_build_test_request_body_for_api_format(
-        payload,
-        &candidate.effective_model,
-        route_path,
-        client_api_format,
-    );
+    let original_request_body =
+        provider_query_build_test_request_body_for_api_format_with_search_session(
+            payload,
+            &candidate.effective_model,
+            route_path,
+            client_api_format,
+            Some(trace_id),
+        );
     if crate::provider_transport::is_windsurf_provider_transport(&transport)
         && provider_query_normalize_api_format_alias(candidate.endpoint.api_format.as_str())
             == "openai:chat"
@@ -3014,6 +3088,45 @@ async fn provider_query_execute_standard_test_candidate(
             );
             provider_request_body
         }
+        "openai:search" => {
+            let Some(mut provider_request_body) =
+                crate::provider_transport::build_same_format_provider_request_body(
+                    crate::provider_transport::SameFormatProviderRequestBodyInput {
+                        body_json: &request_body,
+                        mapped_model: request_model,
+                        client_api_format,
+                        provider_api_format,
+                        source_model: request_body.get("model").and_then(Value::as_str),
+                        family: crate::provider_transport::SameFormatProviderFamily::Standard,
+                        body_rules: transport.endpoint.body_rules.as_ref(),
+                        request_headers: Some(&incoming_request_headers),
+                        upstream_is_stream,
+                        force_body_stream_field: require_body_stream_field,
+                        kiro_auth_config: None,
+                        is_claude_code: false,
+                        enable_model_directives: false,
+                    },
+                )
+            else {
+                return Ok(provider_query_skipped_execution_outcome(
+                    request_body.clone(),
+                    format!("Provider request body could not be built for {provider_api_format}"),
+                ));
+            };
+            if let Err(err) = crate::provider_transport::apply_transport_request_body_semantics(
+                &mut provider_request_body,
+                &transport,
+                normalized_provider_api_format.as_str(),
+            ) {
+                return Ok(provider_query_skipped_execution_outcome(
+                    provider_request_body,
+                    format!(
+                        "Provider request body is not compatible with transport semantics: {err}"
+                    ),
+                ));
+            }
+            provider_request_body
+        }
         "openai:embedding"
         | "gemini:embedding"
         | "jina:embedding"
@@ -3077,7 +3190,7 @@ async fn provider_query_execute_standard_test_candidate(
     );
     if matches!(
         normalized_provider_api_format.as_str(),
-        "openai:chat" | "openai:responses" | "openai:responses:compact"
+        "openai:chat" | "openai:responses" | "openai:responses:compact" | "openai:search"
     ) && crate::ai_serving::finalize_openai_provider_request_with_codex_model_capabilities(
         &mut provider_request_body,
         crate::ai_serving::OpenAiProviderRequestFinalization {
@@ -3175,6 +3288,7 @@ async fn provider_query_execute_standard_test_candidate(
             "openai:chat"
             | "openai:responses"
             | "openai:responses:compact"
+            | "openai:search"
             | "claude:messages"
             | "gemini:generate_content"
             | "openai:embedding"
@@ -3190,6 +3304,7 @@ async fn provider_query_execute_standard_test_candidate(
         "openai:chat"
         | "openai:responses"
         | "openai:responses:compact"
+        | "openai:search"
         | "openai:embedding"
         | "jina:embedding"
         | "doubao:embedding"
@@ -3255,7 +3370,7 @@ async fn provider_query_execute_standard_test_candidate(
             &BTreeMap::new(),
             Some("application/json"),
         ),
-        "openai:responses" | "openai:responses:compact" => {
+        "openai:responses" | "openai:responses:compact" | "openai:search" => {
             crate::provider_transport::auth::build_complete_passthrough_headers_with_auth(
                 &parts.headers,
                 auth_header.as_deref().unwrap_or_default(),
@@ -3321,7 +3436,9 @@ async fn provider_query_execute_standard_test_candidate(
             response_body: None,
         });
     }
-    if crate::ai_serving::is_openai_responses_family_format(provider_api_format) {
+    if crate::ai_serving::is_openai_responses_family_format(provider_api_format)
+        || crate::ai_serving::api_format_alias_matches(provider_api_format, "openai:search")
+    {
         crate::ai_serving::apply_codex_openai_special_headers(
             &mut request_headers,
             &provider_request_body,

@@ -83,6 +83,8 @@ const OPENAI_RESPONSES_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL: &str =
     "当前 OpenAI Responses 请求无法在本地执行：没有匹配到可用的执行路径";
 const OPENAI_RESPONSES_COMPACT_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL: &str =
     "当前 OpenAI Responses Compact 请求无法在本地执行：没有匹配到可用的执行路径";
+const OPENAI_SEARCH_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL: &str =
+    "当前 OpenAI Search 请求无法在本地执行：没有匹配到可用的执行路径";
 const OPENAI_VIDEO_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL: &str =
     "当前 OpenAI Video 请求无法在本地执行：没有匹配到可用的执行路径";
 const CLAUDE_MESSAGES_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL: &str =
@@ -565,8 +567,9 @@ async fn maybe_forward_public_request_to_tunnel_owner(
         serde_json::from_slice::<serde_json::Value>(body.as_ref()).ok()
     });
     let client_session_affinity =
-        crate::client_session_affinity::client_session_affinity_from_parts(
-            parts,
+        crate::client_session_affinity::client_session_affinity_from_api_request(
+            api_format,
+            &parts.headers,
             body_json.as_ref(),
         );
     let Some(target) = crate::scheduler::affinity::read_cached_scheduler_affinity_target(
@@ -636,7 +639,27 @@ async fn maybe_forward_public_request_to_tunnel_owner(
         owner.relay_base_url.trim_end_matches('/'),
         request_context.request_path_and_query()
     );
-    let mut upstream_request = state.client.request(parts.method.clone(), owner_url);
+    let is_stream =
+        owner_forward_request_is_stream(parts, decision, buffered_body.unwrap_or(&empty_body));
+    let transport_timeouts =
+        crate::provider_transport::resolve_transport_execution_timeouts(&transport);
+    let non_stream_timeout =
+        crate::execution_runtime::transport::resolve_non_stream_total_timeout_for_request(
+            is_stream,
+            &transport.endpoint.api_format,
+            transport_timeouts.as_ref(),
+        );
+    let stream_first_byte_timeout =
+        crate::execution_runtime::transport::resolve_stream_first_byte_timeout_for_request(
+            is_stream,
+            transport_timeouts.as_ref(),
+        );
+    let mut upstream_request = state
+        .owner_forward_client
+        .request(parts.method.clone(), owner_url);
+    if let Some(timeout) = non_stream_timeout {
+        upstream_request = upstream_request.timeout(timeout);
+    }
     for (name, value) in &parts.headers {
         if should_skip_request_header(name.as_str()) || name == http::header::HOST {
             continue;
@@ -682,14 +705,15 @@ async fn maybe_forward_public_request_to_tunnel_owner(
             upstream_request.header(TRUSTED_AUTH_BALANCE_HEADER, balance_remaining.to_string());
     }
 
-    let upstream_response = upstream_request
-        .body(buffered_body.cloned().unwrap_or_default())
-        .send()
-        .await
-        .map_err(|err| GatewayError::UpstreamUnavailable {
-            trace_id: request_context.trace_id.clone(),
-            message: format!("owner gateway affinity forward failed: {err}"),
-        })?;
+    let upstream_response = crate::tunnel::send_owner_forward_request(
+        upstream_request.body(buffered_body.cloned().unwrap_or_default()),
+        stream_first_byte_timeout,
+    )
+    .await
+    .map_err(|message| GatewayError::UpstreamUnavailable {
+        trace_id: request_context.trace_id.clone(),
+        message: format!("owner gateway affinity forward failed: {message}"),
+    })?;
 
     let mut response = build_sync_aware_affinity_forward_response(
         request_context,
@@ -705,6 +729,29 @@ async fn maybe_forward_public_request_to_tunnel_owner(
             .map_err(|err| GatewayError::Internal(err.to_string()))?,
     );
     Ok(Some(response))
+}
+
+fn owner_forward_request_is_stream(
+    parts: &http::request::Parts,
+    decision: &GatewayControlDecision,
+    body_bytes: &Bytes,
+) -> bool {
+    let Some(plan_kind) =
+        crate::ai_serving::api::resolve_execution_runtime_stream_plan_kind(parts, decision)
+    else {
+        return false;
+    };
+    let Some((body_json, body_base64)) =
+        crate::ai_serving::api::parse_direct_request_body(parts, body_bytes)
+    else {
+        return false;
+    };
+    crate::ai_serving::api::is_matching_stream_request(
+        plan_kind,
+        parts,
+        &body_json,
+        body_base64.as_deref(),
+    )
 }
 
 fn upstream_response_is_sse(headers: &reqwest::header::HeaderMap) -> bool {
@@ -2372,6 +2419,7 @@ fn local_execution_runtime_miss_route_label(
         "/v1/chat/completions" => "OpenAI Chat Completions",
         "/v1/responses" => "OpenAI Responses",
         "/v1/responses/compact" => "OpenAI Responses Compact",
+        "/v1/alpha/search" => "OpenAI Search",
         "/v1/messages" => "Claude Messages",
         path if path.starts_with("/v1/videos") => "OpenAI Video",
         path if path.starts_with("/upload/v1beta/files") || path.starts_with("/v1beta/files") => {
@@ -2414,6 +2462,7 @@ fn local_execution_runtime_miss_route_detail(
         "/v1/responses/compact" => {
             Some(OPENAI_RESPONSES_COMPACT_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL)
         }
+        "/v1/alpha/search" => Some(OPENAI_SEARCH_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL),
         "/v1/messages" => Some(CLAUDE_MESSAGES_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL),
         path if path.starts_with("/v1/videos") => {
             Some(OPENAI_VIDEO_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL)
@@ -2437,13 +2486,127 @@ mod tests {
     use super::{
         api_key_remote_ip_allowed, buffer_and_normalize_request_body,
         diagnostic_is_auth_api_key_concurrency_limited, local_execution_runtime_miss_detail,
-        restore_redacted_stream_execution_response, restore_redacted_sync_execution_response,
-        GatewayControlDecision, LocalExecutionRuntimeMissDiagnostic, RequestBodyBufferError,
-        RequestBodyBufferPolicy,
+        owner_forward_request_is_stream, restore_redacted_stream_execution_response,
+        restore_redacted_sync_execution_response, GatewayControlDecision,
+        LocalExecutionRuntimeMissDiagnostic, RequestBodyBufferError, RequestBodyBufferPolicy,
     };
     use axum::body::{to_bytes, Body, Bytes};
     use axum::http::{header, HeaderMap, Method, Response};
     use serde_json::json;
+
+    #[test]
+    fn owner_forward_uses_search_protocol_timeout_semantics() {
+        let request = http::Request::builder()
+            .method(Method::POST)
+            .uri("/v1/alpha/search")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(())
+            .expect("request should build");
+        let (parts, _) = request.into_parts();
+        let decision = GatewayControlDecision::synthetic(
+            "/v1/alpha/search",
+            Some("ai_public".to_string()),
+            Some("openai".to_string()),
+            Some("search".to_string()),
+            Some("openai:search".to_string()),
+        );
+        let body =
+            Bytes::from_static(br#"{"model":"gpt-5.6-sol","input":"find docs","stream":true}"#);
+        let is_stream = owner_forward_request_is_stream(&parts, &decision, &body);
+        let timeouts = aether_contracts::ExecutionTimeouts {
+            total_ms: Some(aether_contracts::MAX_EXECUTION_REQUEST_TIMEOUT_MS),
+            first_byte_ms: Some(10),
+            ..aether_contracts::ExecutionTimeouts::default()
+        };
+
+        assert!(!is_stream);
+        assert_eq!(
+            crate::execution_runtime::transport::resolve_non_stream_total_timeout_for_request(
+                is_stream,
+                "openai:search",
+                Some(&timeouts),
+            ),
+            Some(Duration::from_millis(
+                aether_contracts::MAX_EXECUTION_REQUEST_TIMEOUT_MS
+            ))
+        );
+        assert_eq!(
+            crate::execution_runtime::transport::resolve_stream_first_byte_timeout_for_request(
+                is_stream,
+                Some(&timeouts),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn owner_forward_keeps_streaming_for_stream_capable_protocols() {
+        let chat_request = http::Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(())
+            .expect("request should build");
+        let (chat_parts, _) = chat_request.into_parts();
+        let chat_decision = GatewayControlDecision::synthetic(
+            "/v1/chat/completions",
+            Some("ai_public".to_string()),
+            Some("openai".to_string()),
+            Some("chat".to_string()),
+            Some("openai:chat".to_string()),
+        );
+
+        assert!(owner_forward_request_is_stream(
+            &chat_parts,
+            &chat_decision,
+            &Bytes::from_static(br#"{"model":"gpt-5.6-sol","stream":true}"#),
+        ));
+        assert!(!owner_forward_request_is_stream(
+            &chat_parts,
+            &chat_decision,
+            &Bytes::from_static(br#"{"model":"gpt-5.6-sol","stream":false}"#),
+        ));
+
+        let image_request = http::Request::builder()
+            .method(Method::POST)
+            .uri("/v1/images/generations")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(())
+            .expect("request should build");
+        let (image_parts, _) = image_request.into_parts();
+        let image_decision = GatewayControlDecision::synthetic(
+            "/v1/images/generations",
+            Some("ai_public".to_string()),
+            Some("openai".to_string()),
+            Some("image".to_string()),
+            Some("openai:image".to_string()),
+        );
+        assert!(owner_forward_request_is_stream(
+            &image_parts,
+            &image_decision,
+            &Bytes::from_static(br#"{"model":"gpt-image-1","stream":true}"#),
+        ));
+
+        let compact_request = http::Request::builder()
+            .method(Method::POST)
+            .uri("/v1/responses/compact")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(())
+            .expect("request should build");
+        let (compact_parts, _) = compact_request.into_parts();
+        let compact_decision = GatewayControlDecision::synthetic(
+            "/v1/responses/compact",
+            Some("ai_public".to_string()),
+            Some("openai".to_string()),
+            Some("responses:compact".to_string()),
+            Some("openai:responses:compact".to_string()),
+        );
+        assert!(!owner_forward_request_is_stream(
+            &compact_parts,
+            &compact_decision,
+            &Bytes::from_static(br#"{"model":"gpt-5.6-sol","stream":true}"#),
+        ));
+    }
 
     #[test]
     fn api_key_remote_ip_allows_unrestricted_keys() {

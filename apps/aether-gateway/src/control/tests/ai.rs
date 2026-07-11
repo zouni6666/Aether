@@ -57,6 +57,28 @@ fn classifies_openai_rerank_as_rerank_not_chat() {
 }
 
 #[test]
+fn classifies_openai_search_as_its_own_sync_endpoint() {
+    let headers = headers(&[("authorization", "Bearer sk-test")]);
+    let uri: Uri = "/v1/alpha/search".parse().expect("uri should parse");
+    let decision =
+        classify_control_route(&http::Method::POST, &uri, &headers).expect("route should classify");
+
+    assert_eq!(decision.route_family.as_deref(), Some("openai"));
+    assert_eq!(decision.route_kind.as_deref(), Some("search"));
+    assert_eq!(
+        decision.auth_endpoint_signature.as_deref(),
+        Some("openai:search")
+    );
+    assert!(decision.is_execution_runtime_candidate());
+    assert!(classify_control_route(&http::Method::GET, &uri, &headers).is_none());
+
+    let upstream_uri: Uri = "/backend-api/codex/alpha/search"
+        .parse()
+        .expect("uri should parse");
+    assert!(classify_control_route(&http::Method::POST, &upstream_uri, &headers).is_none());
+}
+
+#[test]
 fn classifies_openai_chat_and_responses_separately_from_embedding() {
     let headers = headers(&[("authorization", "Bearer sk-test")]);
     let chat_uri: Uri = "/v1/chat/completions".parse().expect("uri should parse");

@@ -38,7 +38,11 @@ pub fn build_core_error_body_for_client_format(
     error_object.insert("message".to_string(), Value::String(message.to_string()));
 
     match aether_ai_formats::normalize_api_format_alias(client_api_format).as_str() {
-        "openai:chat" | "openai:responses" | "openai:responses:compact" | "openai:embedding" => {
+        "openai:chat"
+        | "openai:responses"
+        | "openai:responses:compact"
+        | "openai:search"
+        | "openai:embedding" => {
             error_object.insert(
                 "type".to_string(),
                 Value::String(map_local_sync_error_kind_to_openai_type(kind).to_string()),
@@ -155,6 +159,21 @@ mod tests {
         assert_eq!(body["error"]["message"], "bad request");
         assert_eq!(body["error"]["type"], "invalid_request_error");
         assert_eq!(body["error"]["code"], "invalid_request");
+    }
+
+    #[test]
+    fn builds_openai_search_core_error_body() {
+        let body = build_core_error_body_for_client_format(
+            "openai:search",
+            "search unavailable",
+            Some("upstream_unavailable"),
+            LocalCoreSyncErrorKind::ServerError,
+        )
+        .expect("body should build");
+
+        assert_eq!(body["error"]["message"], "search unavailable");
+        assert_eq!(body["error"]["type"], "server_error");
+        assert_eq!(body["error"]["code"], "upstream_unavailable");
     }
 
     #[test]

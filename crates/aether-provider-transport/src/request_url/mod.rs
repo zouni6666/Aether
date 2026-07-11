@@ -16,7 +16,8 @@ use crate::gemini_cli::{
 use crate::snapshot::GatewayProviderTransportSnapshot;
 use crate::url::{
     build_claude_messages_url, build_gemini_content_url, build_openai_chat_url,
-    build_openai_responses_url, build_passthrough_path_url, normalize_gemini_content_action_path,
+    build_openai_responses_url, build_openai_search_url, build_passthrough_path_url,
+    normalize_gemini_content_action_path,
 };
 use crate::vertex::{
     build_vertex_api_key_gemini_content_url, build_vertex_api_key_gemini_embedding_url,
@@ -123,6 +124,10 @@ fn build_transport_request_url_inner(
             &transport.endpoint.base_url,
             params.request_query,
             true,
+        )),
+        "openai:search" => Some(build_openai_search_url(
+            &transport.endpoint.base_url,
+            params.request_query,
         )),
         "openai:embedding" | "jina:embedding" => {
             build_provider_embedding_v1_url(&transport.endpoint.base_url, params.request_query)
@@ -866,6 +871,33 @@ mod tests {
         .expect("openai responses url");
 
         assert_eq!(url, "https://api.openai.example/v1/responses?tenant=demo");
+    }
+
+    #[test]
+    fn builds_openai_search_url_for_codex_provider_root() {
+        let transport = sample_transport(
+            "codex",
+            "openai:search",
+            "https://chatgpt.com/backend-api/codex",
+            None,
+        );
+
+        let url = build_transport_request_url(
+            &transport,
+            TransportRequestUrlParams {
+                provider_api_format: "openai:search",
+                mapped_model: Some("gpt-5.6-luna"),
+                upstream_is_stream: false,
+                request_query: Some("tenant=demo"),
+                kiro_api_region: None,
+            },
+        )
+        .expect("openai search url");
+
+        assert_eq!(
+            url,
+            "https://chatgpt.com/backend-api/codex/alpha/search?tenant=demo"
+        );
     }
 
     #[test]

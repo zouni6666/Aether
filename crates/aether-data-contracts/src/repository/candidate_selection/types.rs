@@ -97,13 +97,13 @@ impl StoredMinimalCandidateSelectionRow {
             None => true,
             Some(formats) => formats
                 .iter()
-                .any(|value| api_format_matches(value, api_format)),
+                .any(|value| api_format_permission_covers(value, api_format)),
         }
     }
 }
 
-fn api_format_matches(left: &str, right: &str) -> bool {
-    aether_ai_formats::api_format_alias_matches(left, right)
+fn api_format_permission_covers(allowed: &str, requested: &str) -> bool {
+    aether_ai_formats::api_format_permission_covers(allowed, requested)
 }
 
 #[async_trait]

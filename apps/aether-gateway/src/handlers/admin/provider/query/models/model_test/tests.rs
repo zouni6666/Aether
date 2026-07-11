@@ -476,6 +476,118 @@ fn provider_query_compact_test_request_body_defaults_to_responses_input() {
 }
 
 #[test]
+fn provider_query_search_test_request_body_defaults_to_typed_search_input() {
+    let payload = json!({"message": "find current documentation"});
+
+    let client_api_format = provider_query_standard_test_client_api_format("openai:search");
+    let body = provider_query_build_test_request_body_for_api_format(
+        &payload,
+        "gpt-5.6-sol",
+        "/api/admin/provider-query/test-model",
+        client_api_format,
+    );
+
+    assert_eq!(client_api_format, "openai:search");
+    assert!(body["id"]
+        .as_str()
+        .is_some_and(|value| value.starts_with("aether-model-test-")));
+    assert_eq!(body["model"], json!("gpt-5.6-sol"));
+    assert_eq!(body["input"], json!("find current documentation"));
+    assert_eq!(
+        body["commands"]["search_query"][0]["q"],
+        json!("find current documentation")
+    );
+    assert_eq!(body["max_output_tokens"], json!(256));
+    assert!(body.get("messages").is_none());
+    assert!(body.get("stream").is_none());
+}
+
+#[test]
+fn provider_query_search_test_completes_missing_protocol_fields() {
+    let payload = json!({
+        "request_body": {
+            "model": "gpt-5.6-luna",
+            "input": "find release notes"
+        }
+    });
+
+    let body = provider_query_build_test_request_body_for_api_format_with_search_session(
+        &payload,
+        "gpt-5.6-luna",
+        "/api/admin/provider-query/test-model",
+        "openai:search",
+        Some("trace-model-test-1"),
+    );
+
+    assert_eq!(body["id"], json!("aether-model-test-trace-model-test-1"));
+    assert_eq!(
+        body["commands"]["search_query"][0]["q"],
+        json!("find release notes")
+    );
+    assert_eq!(body["max_output_tokens"], json!(256));
+}
+
+#[test]
+fn provider_query_search_test_preserves_a_non_empty_client_session_id() {
+    let payload = json!({
+        "request_body": {
+            "id": "client-search-session",
+            "model": "gpt-5.6-luna",
+            "input": "find release notes"
+        }
+    });
+
+    let body = provider_query_build_test_request_body_for_api_format_with_search_session(
+        &payload,
+        "gpt-5.6-luna",
+        "/api/admin/provider-query/test-model",
+        "openai:search",
+        Some("trace-model-test-1"),
+    );
+
+    assert_eq!(body["id"], json!("client-search-session"));
+}
+
+#[test]
+fn provider_query_search_success_requires_non_empty_output() {
+    fn result(body: Value) -> aether_contracts::ExecutionResult {
+        aether_contracts::ExecutionResult {
+            request_id: "provider-search-test".to_string(),
+            candidate_id: Some("candidate-0".to_string()),
+            status_code: 200,
+            headers: BTreeMap::new(),
+            body: Some(aether_contracts::ResponseBody {
+                json_body: Some(body),
+                body_bytes_b64: None,
+            }),
+            telemetry: None,
+            error: None,
+        }
+    }
+
+    assert!(provider_query_standard_execution_response_body(
+        "openai:search",
+        &result(json!({})),
+        None,
+    )
+    .is_none());
+    assert!(provider_query_standard_execution_response_body(
+        "openai:search",
+        &result(json!({"output": "  "})),
+        None,
+    )
+    .is_none());
+    assert_eq!(
+        provider_query_standard_execution_response_body(
+            "openai:search",
+            &result(json!({"output": "search result", "encrypted_output": "ciphertext"})),
+            None,
+        ),
+        Some(json!({"output": "search result", "encrypted_output": "ciphertext"}))
+    );
+}
+
+#[test]
 fn provider_query_embedding_test_request_body_defaults_to_embedding_input() {
     let payload = json!({"message": "hello from embedding"});
 
@@ -638,6 +750,10 @@ fn provider_query_test_adapter_routes_fixed_provider_endpoint_types() {
         Some(ProviderQueryTestAdapter::Standard)
     );
     assert_eq!(
+        provider_query_test_adapter_for_provider_api_format("codex", "openai:search"),
+        Some(ProviderQueryTestAdapter::Standard)
+    );
+    assert_eq!(
         provider_query_test_adapter_for_provider_api_format("chatgpt_web", "openai:image"),
         Some(ProviderQueryTestAdapter::OpenAiImage)
     );
@@ -720,6 +836,10 @@ fn provider_query_endpoint_priority_prefers_text_before_cli_and_image() {
     );
     assert_eq!(
         provider_query_model_test_endpoint_priority("codex", "openai:responses:compact"),
+        Some(1)
+    );
+    assert_eq!(
+        provider_query_model_test_endpoint_priority("codex", "openai:search"),
         Some(1)
     );
     assert_eq!(

@@ -32,6 +32,8 @@ pub(crate) const TASK_KEY_DB_MAINTENANCE: &str = "maintenance.database";
 pub(crate) const TASK_KEY_PENDING_CLEANUP: &str = "maintenance.pending.cleanup";
 pub(crate) const TASK_KEY_REQUEST_CANDIDATE_CLEANUP: &str = "maintenance.request.candidate.cleanup";
 pub(crate) const TASK_KEY_GEMINI_FILES_CLEANUP: &str = "maintenance.gemini.files.cleanup";
+pub(crate) const TASK_KEY_FIXED_PROVIDER_RECONCILIATION: &str =
+    "maintenance.provider.fixed_template.reconcile";
 pub(crate) const TASK_KEY_OAUTH_TOKEN_REFRESH: &str = "maintenance.oauth.token.refresh";
 pub(crate) const TASK_KEY_PROXY_NODE_STALE_CLEANUP: &str = "maintenance.proxy.node.stale.cleanup";
 pub(crate) const TASK_KEY_PROXY_NODE_METRICS_CLEANUP: &str =
@@ -49,6 +51,7 @@ pub(crate) const TASK_KEY_PROVIDER_BALANCE_REFRESH: &str = "provider.ops.balance
 const PROVIDER_DELETE_LOCK_TTL_SECS: u64 = 60 * 60 * 6;
 
 const RETRY_ONCE: RetryPolicy = RetryPolicy { max_attempts: 1 };
+const RETRY_THREE: RetryPolicy = RetryPolicy { max_attempts: 3 };
 
 const TASK_DEFINITIONS: &[TaskDefinition] = &[
     TaskDefinition::new(
@@ -186,6 +189,14 @@ const TASK_DEFINITIONS: &[TaskDefinition] = &[
         true,
         true,
         RETRY_ONCE,
+    ),
+    TaskDefinition::new(
+        TASK_KEY_FIXED_PROVIDER_RECONCILIATION,
+        TaskKind::FireAndForget,
+        "startup",
+        true,
+        false,
+        RETRY_THREE,
     ),
     TaskDefinition::new(
         TASK_KEY_OAUTH_TOKEN_REFRESH,

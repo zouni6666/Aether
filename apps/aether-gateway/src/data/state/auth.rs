@@ -1816,7 +1816,7 @@ impl GatewayDataState {
                 )
             });
         let mut allowed_api_formats =
-            resolve_effective_list_policy(None, "unrestricted", &groups, |group| {
+            resolve_effective_api_format_policy(None, "unrestricted", &groups, |group| {
                 (
                     &group.allowed_api_formats_mode,
                     group.allowed_api_formats.clone(),
@@ -1832,7 +1832,7 @@ impl GatewayDataState {
                 &mut allowed_providers,
                 &mut snapshot.api_key_allowed_providers,
             );
-            constrain_api_key_list_policy_to_user_policy(
+            constrain_api_key_api_format_policy_to_user_policy(
                 &mut allowed_api_formats,
                 &mut snapshot.api_key_allowed_api_formats,
             );
@@ -1875,7 +1875,7 @@ impl GatewayDataState {
                     )
                 },
             ),
-            allowed_api_formats: resolve_effective_list_policy(
+            allowed_api_formats: resolve_effective_api_format_policy(
                 user.allowed_api_formats.clone(),
                 &user.allowed_api_formats_mode,
                 &groups,
@@ -1995,6 +1995,19 @@ fn resolve_effective_list_policy(
     intersect_list_policies(group_policy, user_policy)
 }
 
+fn resolve_effective_api_format_policy(
+    user_values: Option<Vec<String>>,
+    user_mode: &str,
+    groups: &[aether_data::repository::users::StoredUserGroup],
+    group_field: impl Fn(
+        &aether_data::repository::users::StoredUserGroup,
+    ) -> (&str, Option<Vec<String>>),
+) -> Option<Vec<String>> {
+    let group_policy = union_group_list_policies(groups, group_field);
+    let user_policy = list_restriction_from_mode(user_mode, user_values);
+    intersect_api_format_list_policies(group_policy, user_policy)
+}
+
 fn union_group_list_policies(
     groups: &[aether_data::repository::users::StoredUserGroup],
     group_field: impl Fn(
@@ -2089,6 +2102,19 @@ fn intersect_list_policies(
     }
 }
 
+fn intersect_api_format_list_policies(
+    left: Option<Vec<String>>,
+    right: Option<Vec<String>>,
+) -> Option<Vec<String>> {
+    match (left, right) {
+        (None, None) => None,
+        (Some(values), None) | (None, Some(values)) => Some(values),
+        (Some(left_values), Some(right_values)) => Some(
+            aether_ai_formats::intersect_api_format_allowed_lists(&left_values, &right_values),
+        ),
+    }
+}
+
 fn intersect_rate_limit_policies(
     left: Option<RateLimitRestriction>,
     right: Option<RateLimitRestriction>,
@@ -2145,6 +2171,22 @@ fn constrain_api_key_list_policy_to_user_policy(
     };
     let effective = intersect_list_policies(Some(api_key_values.to_vec()), Some(user_values))
         .unwrap_or_default();
+    *user_policy = Some(effective.clone());
+    *api_key_policy = Some(effective);
+}
+
+fn constrain_api_key_api_format_policy_to_user_policy(
+    user_policy: &mut Option<Vec<String>>,
+    api_key_policy: &mut Option<Vec<String>>,
+) {
+    let Some(api_key_values) = api_key_policy.as_ref().filter(|values| !values.is_empty()) else {
+        return;
+    };
+    let Some(user_values) = user_policy.as_ref() else {
+        return;
+    };
+    let effective =
+        aether_ai_formats::intersect_api_format_allowed_lists(api_key_values, user_values);
     *user_policy = Some(effective.clone());
     *api_key_policy = Some(effective);
 }
@@ -2277,6 +2319,41 @@ mod tests {
             policy,
             Some(vec!["gpt-4.1".to_string(), "gemini-2.5-pro".to_string()])
         );
+    }
+
+    #[test]
+    fn api_format_policy_intersection_preserves_search_companion_scope() {
+        let mut responses_group =
+            sample_group("responses", 10, None, "unrestricted", None, "system");
+        responses_group.allowed_api_formats = Some(vec!["openai:responses".to_string()]);
+        responses_group.allowed_api_formats_mode = "specific".to_string();
+
+        let search_policy = resolve_effective_api_format_policy(
+            Some(vec!["openai:search".to_string()]),
+            "specific",
+            std::slice::from_ref(&responses_group),
+            |group| {
+                (
+                    &group.allowed_api_formats_mode,
+                    group.allowed_api_formats.clone(),
+                )
+            },
+        );
+        assert_eq!(search_policy, Some(vec!["openai:search".to_string()]));
+
+        responses_group.allowed_api_formats = Some(vec!["openai:search".to_string()]);
+        let responses_policy = resolve_effective_api_format_policy(
+            Some(vec!["openai:responses".to_string()]),
+            "specific",
+            &[responses_group],
+            |group| {
+                (
+                    &group.allowed_api_formats_mode,
+                    group.allowed_api_formats.clone(),
+                )
+            },
+        );
+        assert_eq!(responses_policy, Some(vec!["openai:search".to_string()]));
     }
 
     #[test]
@@ -2575,6 +2652,53 @@ mod tests {
             Some(&["claude-sonnet-4-5".to_string()][..])
         );
         assert_eq!(resolved.user_rate_limit, Some(30));
+    }
+
+    #[tokio::test]
+    async fn group_responses_permission_and_key_search_scope_resolve_to_search() {
+        let mut snapshot = sample_snapshot("key-search", "user-search");
+        snapshot.api_key_allowed_api_formats = Some(vec!["openai:search".to_string()]);
+        let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+            Some("hash-search".to_string()),
+            snapshot,
+        )]));
+        let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![
+            sample_auth_user("user-search", "user"),
+        ]));
+        let group = user_repository
+            .create_user_group(UpsertUserGroupRecord {
+                name: "Responses".to_string(),
+                description: None,
+                priority: 10,
+                allowed_providers: None,
+                allowed_providers_mode: "unrestricted".to_string(),
+                allowed_api_formats: Some(vec!["openai:responses".to_string()]),
+                allowed_api_formats_mode: "specific".to_string(),
+                allowed_models: None,
+                allowed_models_mode: "unrestricted".to_string(),
+                rate_limit: None,
+                rate_limit_mode: "system".to_string(),
+            })
+            .await
+            .expect("group should create")
+            .expect("group should exist");
+        user_repository
+            .add_user_to_group(&group.id, "user-search")
+            .await
+            .expect("group membership should create");
+
+        let state = GatewayDataState::with_auth_api_key_reader_for_tests(auth_repository)
+            .with_user_reader(user_repository);
+        let resolved = state
+            .read_auth_api_key_snapshot_by_key_hash("hash-search", 100)
+            .await
+            .expect("snapshot should resolve")
+            .expect("snapshot should exist");
+
+        assert_eq!(
+            resolved.effective_allowed_api_formats(),
+            Some(&["openai:search".to_string()][..])
+        );
     }
 
     #[tokio::test]

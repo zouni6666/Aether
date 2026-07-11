@@ -455,6 +455,21 @@ mod tests {
     }
 
     #[test]
+    fn transport_execution_timeouts_preserve_the_configurable_maximum() {
+        let mut transport = sample_transport();
+        transport.provider.request_timeout_secs =
+            Some(aether_contracts::MAX_EXECUTION_REQUEST_TIMEOUT_SECS as f64);
+
+        let timeouts = resolve_transport_execution_timeouts(&transport)
+            .expect("provider timeouts should resolve");
+
+        assert_eq!(
+            timeouts.total_ms,
+            Some(aether_contracts::MAX_EXECUTION_REQUEST_TIMEOUT_MS)
+        );
+    }
+
+    #[test]
     fn transport_execution_timeouts_preserve_configured_first_byte_value() {
         let mut transport = sample_transport();
         transport.provider.stream_first_byte_timeout_secs = Some(7.5);

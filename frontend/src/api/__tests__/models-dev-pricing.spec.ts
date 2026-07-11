@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 
-import { buildModelsDevTieredPricing } from '@/api/models-dev-pricing'
+import {
+  buildModelsDevTieredPricing,
+  resolveModelsDevTieredPricing,
+} from '@/api/models-dev-pricing'
 
 describe('buildModelsDevTieredPricing', () => {
   it('maps context bands and cache prices without flattening them', () => {
@@ -97,5 +100,77 @@ describe('buildModelsDevTieredPricing', () => {
     },
   ])('fails closed for malformed structured pricing', (cost) => {
     expect(buildModelsDevTieredPricing(cost)).toBeNull()
+  })
+})
+
+describe('resolveModelsDevTieredPricing', () => {
+  it.each([
+    {
+      modelId: 'gpt-5.6-sol',
+      standard: [5, 30, 6.25, 0.5],
+      longContext: [10, 45, 12.5, 1],
+    },
+    {
+      modelId: 'gpt-5.6-terra',
+      standard: [2.5, 15, 3.125, 0.25],
+      longContext: [5, 22.5, 6.25, 0.5],
+    },
+    {
+      modelId: 'gpt-5.6-luna',
+      standard: [1, 6, 1.25, 0.1],
+      longContext: [2, 9, 2.5, 0.2],
+    },
+  ])('uses the complete OpenAI catalog for $modelId', ({ modelId, standard, longContext }) => {
+    const tier = (
+      upTo: number | null,
+      prices: number[],
+      multiplier: number,
+    ) => ({
+      up_to: upTo,
+      input_price_per_1m: prices[0] * multiplier,
+      output_price_per_1m: prices[1] * multiplier,
+      cache_creation_price_per_1m: prices[2] * multiplier,
+      cache_read_price_per_1m: prices[3] * multiplier,
+    })
+
+    expect(resolveModelsDevTieredPricing('openai', modelId, { input: 999, output: 999 }))
+      .toEqual({
+        tiers: [
+          tier(272_000, standard, 1),
+          tier(null, longContext, 1),
+        ],
+        processing_tiers: {
+          flex: {
+            tiers: [
+              tier(272_000, standard, 0.5),
+              tier(null, longContext, 0.5),
+            ],
+          },
+          priority: {
+            tiers: [tier(272_000, standard, 2)],
+          },
+        },
+      })
+  })
+
+  it('keeps the models.dev lower-bound conversion for models outside the catalog', () => {
+    expect(resolveModelsDevTieredPricing('openai', 'other-model', {
+      input: 1,
+      output: 2,
+      tiers: [{ input: 3, output: 4, tier: { type: 'context', size: 272_000 } }],
+    })?.tiers.map(tier => tier.up_to)).toEqual([271_999, null])
+  })
+
+  it.each([
+    ['other-provider', 'gpt-5.6-sol'],
+    ['openai', 'GPT-5.6-SOL'],
+    ['openai', 'gpt-5.6-sol-latest'],
+    ['openai', '__proto__'],
+    ['openai', 'constructor'],
+  ])('matches provider and model identities exactly for %s/%s', (providerId, modelId) => {
+    expect(resolveModelsDevTieredPricing(providerId, modelId, { input: 1, output: 2 }))
+      .toEqual({
+        tiers: [{ up_to: null, input_price_per_1m: 1, output_price_per_1m: 2 }],
+      })
   })
 })

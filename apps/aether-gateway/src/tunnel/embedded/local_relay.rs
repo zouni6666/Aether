@@ -2,7 +2,10 @@ use std::io;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use aether_contracts::tunnel::TUNNEL_RELAY_FORWARDED_BY_HEADER;
+use aether_contracts::tunnel::{
+    resolve_tunnel_request_timeouts, try_decode_tunnel_relay_request_meta,
+    TUNNEL_RELAY_FORWARDED_BY_HEADER,
+};
 use aether_runtime::{maybe_hold_axum_response_permit, AdmissionPermit};
 use async_stream::stream;
 use axum::body::{Body, Bytes};
@@ -23,9 +26,6 @@ use super::protocol;
 use super::AppState;
 
 pub const TUNNEL_ERROR_HEADER: &str = "x-aether-tunnel-error";
-const MAX_RELAY_META_LEN: usize = 256 * 1024;
-const MIN_RELAY_TIMEOUT_MS: u64 = 1;
-const MAX_RELAY_TIMEOUT_MS: u64 = 300_000;
 
 struct StreamGuard {
     hub: std::sync::Arc<super::hub::HubRouter>,
@@ -156,15 +156,7 @@ fn map_request_admission_error(error: super::RequestAdmissionError) -> String {
 }
 
 fn relay_header_timeout(meta: &protocol::RequestMeta) -> Duration {
-    let timeout_ms = if meta.stream {
-        meta.stream_first_byte_timeout_ms
-            .unwrap_or_else(|| meta.timeout.saturating_mul(1_000))
-    } else {
-        meta.request_timeout_ms
-            .or(meta.stream_first_byte_timeout_ms)
-            .unwrap_or_else(|| meta.timeout.saturating_mul(1_000))
-    };
-    Duration::from_millis(timeout_ms.clamp(MIN_RELAY_TIMEOUT_MS, MAX_RELAY_TIMEOUT_MS))
+    Duration::from_millis(resolve_tunnel_request_timeouts(meta).first_byte_ms)
 }
 
 pub async fn relay_request(
@@ -252,15 +244,17 @@ pub async fn relay_request(
 
         if stream.is_none() {
             envelope_buf.extend_from_slice(&chunk);
-            let Some((parsed_meta, body_offset)) = (match try_decode_envelope_meta(&envelope_buf) {
-                Ok(result) => result,
-                Err(error) => {
-                    return release_permit_response(
-                        tunnel_error_response(StatusCode::BAD_REQUEST, "bad_request", &error),
-                        request_permit,
-                    );
-                }
-            }) else {
+            let Some((parsed_meta, body_offset)) =
+                (match try_decode_tunnel_relay_request_meta(&envelope_buf) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        return release_permit_response(
+                            tunnel_error_response(StatusCode::BAD_REQUEST, "bad_request", &error),
+                            request_permit,
+                        );
+                    }
+                })
+            else {
                 continue;
             };
 
@@ -427,27 +421,6 @@ fn release_permit_response(
     response
 }
 
-fn try_decode_envelope_meta(
-    buffer: &BytesMut,
-) -> Result<Option<(protocol::RequestMeta, usize)>, String> {
-    if buffer.len() < 4 {
-        return Ok(None);
-    }
-    let meta_len = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
-    if meta_len > MAX_RELAY_META_LEN {
-        return Err("relay metadata too large".to_string());
-    }
-    let meta_end = 4usize
-        .checked_add(meta_len)
-        .ok_or_else(|| "relay envelope length overflow".to_string())?;
-    if buffer.len() < meta_end {
-        return Ok(None);
-    }
-    let meta = serde_json::from_slice::<protocol::RequestMeta>(&buffer[4..meta_end])
-        .map_err(|e| format!("invalid relay metadata: {e}"))?;
-    Ok(Some((meta, meta_end)))
-}
-
 fn append_headers(target: &mut HeaderMap, headers: &[(String, String)]) {
     for (name, value) in headers {
         if should_skip_local_relay_response_header(name) {
@@ -540,6 +513,30 @@ mod tests {
         };
 
         assert_eq!(relay_header_timeout(&meta), Duration::from_secs(7));
+    }
+
+    #[test]
+    fn relay_header_timeout_keeps_the_protocol_maximum_for_non_stream_requests() {
+        let meta = protocol::RequestMeta {
+            provider_id: None,
+            endpoint_id: None,
+            key_id: None,
+            method: "POST".to_string(),
+            url: "https://example.com/responses".to_string(),
+            headers: HashMap::new(),
+            stream: false,
+            request_timeout_ms: Some(aether_contracts::MAX_EXECUTION_REQUEST_TIMEOUT_MS),
+            stream_first_byte_timeout_ms: None,
+            timeout: 60,
+            follow_redirects: None,
+            http1_only: false,
+            transport_profile: None,
+        };
+
+        assert_eq!(
+            relay_header_timeout(&meta),
+            Duration::from_millis(aether_contracts::MAX_EXECUTION_REQUEST_TIMEOUT_MS)
+        );
     }
 
     fn sample_connected_proxy_node(node_id: &str) -> StoredProxyNode {
