@@ -583,10 +583,7 @@ pub(crate) fn incoming_usage_can_recover_terminal_failure(
     incoming_status: &str,
     incoming_billing_status: &str,
 ) -> bool {
-    incoming_billing_status == "pending"
-        // Late pending placeholders are not authoritative enough to reopen a void terminal row;
-        // they can otherwise regress a real failure back to pending when background writes race.
-        && matches!(incoming_status, "streaming" | "completed")
+    incoming_billing_status == "pending" && incoming_status == "completed"
 }
 
 pub(crate) fn usage_can_recover_terminal_failure(
@@ -827,52 +824,58 @@ mod tests {
     }
 
     #[test]
-    fn incoming_usage_recovery_requires_streaming_or_completed_state() {
+    fn incoming_usage_recovery_requires_completed_state() {
         assert!(incoming_usage_can_recover_terminal_failure(
             "completed",
-            "pending"
+            "pending",
         ));
-        assert!(incoming_usage_can_recover_terminal_failure(
+        assert!(!incoming_usage_can_recover_terminal_failure(
             "streaming",
-            "pending"
+            "pending",
         ));
         assert!(!incoming_usage_can_recover_terminal_failure(
-            "pending", "pending"
+            "pending", "pending",
         ));
         assert!(!incoming_usage_can_recover_terminal_failure(
-            "failed", "void"
+            "failed", "void",
         ));
         assert!(!incoming_usage_can_recover_terminal_failure(
             "completed",
-            "settled"
+            "settled",
         ));
     }
 
     #[test]
-    fn usage_recovery_requires_void_failure_to_be_followed_by_streaming_or_completed_state() {
+    fn usage_recovery_requires_void_failure_and_completed_state() {
         assert!(usage_can_recover_terminal_failure(
             "failed",
             "void",
             "completed",
-            "pending"
+            "pending",
         ));
         assert!(usage_can_recover_terminal_failure(
             "cancelled",
             "void",
-            "streaming",
-            "pending"
+            "completed",
+            "pending",
         ));
         assert!(!usage_can_recover_terminal_failure(
-            "failed", "void", "pending", "pending"
+            "failed",
+            "void",
+            "streaming",
+            "pending",
+        ));
+        assert!(!usage_can_recover_terminal_failure(
+            "failed", "void", "pending", "pending",
         ));
         assert!(!usage_can_recover_terminal_failure(
             "completed",
             "pending",
             "completed",
-            "pending"
+            "pending",
         ));
         assert!(!usage_can_recover_terminal_failure(
-            "failed", "void", "failed", "void"
+            "failed", "void", "failed", "void",
         ));
     }
 

@@ -2761,14 +2761,18 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
             })
             .unwrap_or_default();
         if existing.as_ref().is_some_and(|existing| {
-            usage_status_is_finalized(existing.status.as_str())
-                && usage_status_is_lifecycle(usage.status.as_str())
-                && !usage_can_recover_terminal_failure(
-                    existing.status.as_str(),
-                    existing.billing_status.as_str(),
-                    usage.status.as_str(),
-                    usage.billing_status.as_str(),
-                )
+            let can_recover = usage_can_recover_terminal_failure(
+                existing.status.as_str(),
+                existing.billing_status.as_str(),
+                usage.status.as_str(),
+                usage.billing_status.as_str(),
+            );
+            let finalized_lifecycle_regression = usage_status_is_finalized(&existing.status)
+                && usage_status_is_lifecycle(&usage.status);
+            let completed_terminal_failure_recovery = existing.billing_status == "void"
+                && matches!(existing.status.as_str(), "failed" | "cancelled")
+                && usage.status == "completed";
+            (finalized_lifecycle_regression || completed_terminal_failure_recovery) && !can_recover
         }) {
             return Ok(existing.expect("existing usage should be present").clone());
         }
@@ -3589,7 +3593,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upsert_allows_streaming_recovery_after_void_failure() {
+    async fn upsert_allows_completed_recovery_after_void_failure() {
         let repository = InMemoryUsageReadRepository::default();
         repository
             .upsert(UpsertUsageRecord {
@@ -3698,12 +3702,12 @@ mod tests {
                 output_price_per_1m: None,
                 total_cost_usd: None,
                 actual_total_cost_usd: None,
-                status_code: None,
+                status_code: Some(200),
                 error_message: None,
                 error_category: None,
                 response_time_ms: Some(45),
                 first_byte_time_ms: Some(12),
-                status: "streaming".to_string(),
+                status: "completed".to_string(),
                 billing_status: "pending".to_string(),
                 request_headers: None,
                 request_body: None,
@@ -3732,7 +3736,7 @@ mod tests {
                 request_metadata: Some(json!({
                     "trace_id": "trace-recovered"
                 })),
-                finalized_at_unix_secs: None,
+                finalized_at_unix_secs: Some(102),
                 created_at_unix_ms: Some(100),
                 updated_at_unix_secs: 102,
             })
@@ -3744,16 +3748,65 @@ mod tests {
             .await
             .expect("usage lookup should succeed")
             .expect("usage should exist");
-        assert_eq!(stored.status, "streaming");
+        assert_eq!(stored.status, "completed");
         assert_eq!(stored.billing_status, "pending");
-        assert_eq!(stored.status_code, None);
+        assert_eq!(stored.status_code, Some(200));
         assert_eq!(stored.error_message, None);
-        assert_eq!(stored.finalized_at_unix_secs, None);
+        assert_eq!(stored.finalized_at_unix_secs, Some(102));
         assert_eq!(
             stored.request_metadata,
             Some(json!({ "trace_id": "trace-recovered" }))
         );
         assert_eq!(stored.total_tokens, 10);
+    }
+
+    #[tokio::test]
+    async fn upsert_rejects_non_authoritative_void_failure_recovery() {
+        let repository = InMemoryUsageReadRepository::default();
+        for (request_id, status, billing_status, status_code) in [
+            ("req-late-active-1", "streaming", "pending", None),
+            (
+                "req-late-response-start-1",
+                "streaming",
+                "pending",
+                Some(200),
+            ),
+            (
+                "req-settled-completion-1",
+                "completed",
+                "settled",
+                Some(200),
+            ),
+        ] {
+            repository
+                .upsert(UpsertUsageRecord {
+                    status: "failed".to_string(),
+                    billing_status: "void".to_string(),
+                    status_code: Some(503),
+                    finalized_at_unix_secs: Some(101),
+                    updated_at_unix_secs: 101,
+                    ..sample_upsert_usage_record(request_id)
+                })
+                .await
+                .expect("failed usage should upsert");
+
+            let stored = repository
+                .upsert(UpsertUsageRecord {
+                    status: status.to_string(),
+                    billing_status: billing_status.to_string(),
+                    status_code,
+                    finalized_at_unix_secs: None,
+                    updated_at_unix_secs: 102,
+                    ..sample_upsert_usage_record(request_id)
+                })
+                .await
+                .expect("non-authoritative recovery should be ignored");
+
+            assert_eq!(stored.status, "failed");
+            assert_eq!(stored.billing_status, "void");
+            assert_eq!(stored.status_code, Some(503));
+            assert_eq!(stored.finalized_at_unix_secs, Some(101));
+        }
     }
 
     #[tokio::test]

@@ -4599,6 +4599,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_usage_write_repository_does_not_reopen_void_failure_from_late_streaming() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool should connect");
+        run_sqlite_migrations(&pool)
+            .await
+            .expect("sqlite migrations should run");
+        seed_stats_targets(&pool).await;
+
+        let repository = SqliteUsageWriteRepository::new(pool);
+        for (request_id, status_code) in [
+            ("request-late-active", None),
+            ("request-late-response-start", Some(200)),
+        ] {
+            let mut failed = sample_usage(request_id, "failed", "void", 1_000);
+            failed.status_code = Some(503);
+            repository
+                .upsert(failed)
+                .await
+                .expect("failed usage should upsert");
+
+            let mut late_streaming = sample_usage(request_id, "streaming", "pending", 1_001);
+            late_streaming.status_code = status_code;
+            late_streaming.finalized_at_unix_secs = None;
+            let current = repository
+                .upsert(late_streaming)
+                .await
+                .expect("late streaming usage should be ignored");
+
+            assert_eq!(current.status, "failed");
+            assert_eq!(current.billing_status, "void");
+            assert_eq!(current.status_code, Some(503));
+            assert_eq!(current.finalized_at_unix_secs, Some(1_000));
+        }
+    }
+
+    #[tokio::test]
     async fn sqlite_usage_write_repository_does_not_regress_terminal_usage_from_late_streaming() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
