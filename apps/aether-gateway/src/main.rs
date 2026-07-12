@@ -286,6 +286,7 @@ fn available_parallelism_usize() -> usize {
         .max(1)
 }
 
+#[cfg(test)]
 fn automatic_gateway_request_concurrency_for_parallelism(parallelism: usize) -> usize {
     automatic_gateway_request_concurrency_for_capacity(parallelism, None)
 }
