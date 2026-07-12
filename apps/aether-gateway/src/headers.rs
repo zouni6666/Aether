@@ -15,6 +15,10 @@ use uuid::Uuid;
 
 const DEFAULT_MAX_REQUEST_BODY_MB: u64 = 64;
 const MAX_REQUEST_BODY_MB_ENV: &str = "AETHER_MAX_REQUEST_BODY_MB";
+const DEFAULT_MAX_REDACTED_SYNC_RESPONSE_BODY_MB: u64 = 64;
+const MAX_REDACTED_SYNC_RESPONSE_BODY_MB_ENV: &str = "AETHER_MAX_REDACTED_SYNC_RESPONSE_BODY_MB";
+const DEFAULT_MAX_INTERNAL_BUFFERED_BODY_MB: u64 = 128;
+const MAX_INTERNAL_BUFFERED_BODY_MB_ENV: &str = "AETHER_MAX_INTERNAL_BUFFERED_BODY_MB";
 const TRUSTED_PROXY_CIDRS_ENV: &str = "AETHER_TRUSTED_PROXY_CIDRS";
 
 /// Upper bound applied to a request body after Content-Encoding decoding, and to
@@ -26,6 +30,24 @@ static MAX_REQUEST_BODY_BYTES: LazyLock<u64> = LazyLock::new(|| {
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_MAX_REQUEST_BODY_MB)
+        .saturating_mul(1024 * 1024)
+});
+
+static MAX_REDACTED_SYNC_RESPONSE_BODY_BYTES: LazyLock<u64> = LazyLock::new(|| {
+    std::env::var(MAX_REDACTED_SYNC_RESPONSE_BODY_MB_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_MAX_REDACTED_SYNC_RESPONSE_BODY_MB)
+        .saturating_mul(1024 * 1024)
+});
+
+static MAX_INTERNAL_BUFFERED_BODY_BYTES: LazyLock<u64> = LazyLock::new(|| {
+    std::env::var(MAX_INTERNAL_BUFFERED_BODY_MB_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_MAX_INTERNAL_BUFFERED_BODY_MB)
         .saturating_mul(1024 * 1024)
 });
 
@@ -41,6 +63,14 @@ static TRUSTED_PROXY_CIDRS: LazyLock<Vec<String>> = LazyLock::new(|| {
 
 pub(crate) fn max_request_body_bytes() -> u64 {
     *MAX_REQUEST_BODY_BYTES
+}
+
+pub(crate) fn max_redacted_sync_response_body_bytes() -> u64 {
+    *MAX_REDACTED_SYNC_RESPONSE_BODY_BYTES
+}
+
+pub(crate) fn max_internal_buffered_body_bytes() -> usize {
+    usize::try_from(*MAX_INTERNAL_BUFFERED_BODY_BYTES).unwrap_or(usize::MAX)
 }
 
 pub(crate) fn extract_or_generate_trace_id(headers: &http::HeaderMap) -> String {

@@ -12,6 +12,59 @@ fn production_workspace_source(path: &Path) -> String {
 }
 
 #[test]
+fn gateway_production_body_collection_stays_bounded() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    collect_rust_files(&root, &mut files);
+    let forbidden = [
+        "to_bytes(body, usize::MAX)",
+        "to_bytes(request.into_body(), usize::MAX)",
+        "to_bytes(response.into_body(), usize::MAX)",
+        "into_body(),\n        usize::MAX",
+    ];
+    let violations = files
+        .into_iter()
+        .filter(|path| {
+            !path
+                .components()
+                .any(|component| component.as_os_str() == "tests")
+        })
+        .filter_map(|path| {
+            let source = production_workspace_source(&path);
+            let hits = forbidden
+                .iter()
+                .filter(|pattern| source.contains(**pattern))
+                .copied()
+                .collect::<Vec<_>>();
+            if hits.is_empty() {
+                None
+            } else {
+                Some(format!("{} -> {}", path.display(), hits.join(", ")))
+            }
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        violations.is_empty(),
+        "production body collection must use explicit limits:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn tunnel_node_status_delivery_stays_bounded() {
+    let source = read_workspace_file("apps/aether-gateway/src/tunnel/embedded/hub.rs");
+    assert!(
+        !source.contains("unbounded_channel::<NodeStatusEvent>"),
+        "tunnel node status delivery must not use an unbounded channel"
+    );
+    assert!(
+        source.contains("bounded_queue::<NodeStatusEvent>"),
+        "tunnel node status delivery must use the tracked bounded queue"
+    );
+}
+
+#[test]
 fn gateway_small_runtime_shims_stay_deleted() {
     for path in [
         "apps/aether-gateway/src/hooks/audit.rs",

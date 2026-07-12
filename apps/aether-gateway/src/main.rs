@@ -261,6 +261,11 @@ const MAX_GATEWAY_LISTENER_SHARDS: usize = 64;
 const DEFAULT_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS: u32 = 16_384;
 const MIN_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS: u32 = 200;
 const MAX_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS: u32 = 1_000_000;
+const AUTO_GATEWAY_REQUESTS_PER_CPU: usize = 1_024;
+const MIN_AUTO_GATEWAY_REQUEST_CONCURRENCY: usize = 512;
+const MAX_AUTO_GATEWAY_REQUEST_CONCURRENCY: usize = 65_536;
+const AUTO_GATEWAY_REQUEST_FD_DIVISOR: usize = 2;
+const AUTO_GATEWAY_REQUEST_FD_RESERVE: usize = 256;
 fn env_var_trimmed(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -279,6 +284,55 @@ fn available_parallelism_usize() -> usize {
         .map(|value| value.get())
         .unwrap_or(AUTO_SERVER_SQL_POOL_MIN_CONNECTIONS_FLOOR as usize)
         .max(1)
+}
+
+fn automatic_gateway_request_concurrency_for_parallelism(parallelism: usize) -> usize {
+    automatic_gateway_request_concurrency_for_capacity(parallelism, None)
+}
+
+fn automatic_gateway_request_concurrency_for_capacity(
+    parallelism: usize,
+    fd_soft_limit: Option<usize>,
+) -> usize {
+    let cpu_limit = parallelism
+        .max(1)
+        .saturating_mul(AUTO_GATEWAY_REQUESTS_PER_CPU)
+        .clamp(
+            MIN_AUTO_GATEWAY_REQUEST_CONCURRENCY,
+            MAX_AUTO_GATEWAY_REQUEST_CONCURRENCY,
+        );
+    let fd_limit = fd_soft_limit
+        .map(|limit| {
+            limit
+                .saturating_sub(AUTO_GATEWAY_REQUEST_FD_RESERVE)
+                .checked_div(AUTO_GATEWAY_REQUEST_FD_DIVISOR)
+                .unwrap_or(1)
+                .max(1)
+        })
+        .unwrap_or(MAX_AUTO_GATEWAY_REQUEST_CONCURRENCY);
+    cpu_limit.min(fd_limit).max(1)
+}
+
+fn automatic_gateway_request_concurrency() -> usize {
+    automatic_gateway_request_concurrency_for_capacity(
+        available_parallelism_usize(),
+        soft_fd_limit(),
+    )
+}
+
+fn soft_fd_limit() -> Option<usize> {
+    #[cfg(unix)]
+    {
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        let result = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) };
+        if result == 0 {
+            return usize::try_from(limit.rlim_cur).ok();
+        }
+    }
+    None
 }
 
 fn usage_queue_request_concurrency_hint(
@@ -1655,13 +1709,23 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         runtime_redis_url.as_deref(),
         runtime_backend,
     )?;
+    let request_concurrency_limit = args
+        .max_in_flight_requests
+        .filter(|limit| *limit > 0)
+        .unwrap_or_else(automatic_gateway_request_concurrency);
     let usage_queue_request_concurrency_hint = usage_queue_request_concurrency_hint(
-        args.max_in_flight_requests,
+        Some(request_concurrency_limit),
         args.distributed_request_limit,
     );
+    let usage_queue_request_concurrency_hint_source =
+        if args.max_in_flight_requests.is_some() || args.distributed_request_limit.is_some() {
+            "explicit"
+        } else {
+            "auto"
+        };
     let usage_queue_workers = args.usage.effective_queue_workers(
         args.node_role,
-        args.max_in_flight_requests,
+        Some(request_concurrency_limit),
         args.distributed_request_limit,
         sql_database_config.as_ref(),
     );
@@ -1721,11 +1785,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_default(),
         usage_queue_request_concurrency_hint =
             usage_queue_request_concurrency_hint.unwrap_or_default(),
-        usage_queue_request_concurrency_hint_source = if usage_queue_request_concurrency_hint.is_some() {
-            "explicit"
-        } else {
-            "none"
-        },
+        usage_queue_request_concurrency_hint_source,
         frontdoor_mode = "compatibility_frontdoor",
         log_format = ?args.logging.log_format,
         log_destination = args.logging.log_destination.as_str(),
@@ -1762,13 +1822,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_default(),
         usage_queue_request_concurrency_hint =
             usage_queue_request_concurrency_hint.unwrap_or_default(),
-        usage_queue_request_concurrency_hint_source =
-            if usage_queue_request_concurrency_hint.is_some() {
-                "explicit"
-            } else {
-                "none"
-            },
-        max_in_flight_requests = args.max_in_flight_requests.unwrap_or_default(),
+        usage_queue_request_concurrency_hint_source,
+        max_in_flight_requests = request_concurrency_limit,
+        max_in_flight_requests_source = if args.max_in_flight_requests.is_some() {
+            "explicit"
+        } else {
+            "auto"
+        },
         distributed_request_limit = args.distributed_request_limit.unwrap_or_default(),
         distributed_request_redis_configured = args
             .distributed_request_redis_url
@@ -1822,9 +1882,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     {
         state = state.with_video_task_store_path(path)?;
     }
-    if let Some(limit) = args.max_in_flight_requests.filter(|limit| *limit > 0) {
-        state = state.with_request_concurrency_limit(limit);
-    }
+    state = state.with_request_concurrency_limit(request_concurrency_limit);
     if let Some(limit) = args.distributed_request_limit.filter(|limit| *limit > 0) {
         let distributed_gate = state
             .runtime_state()
@@ -2315,12 +2373,14 @@ fn pending_backfills_error(
 #[cfg(test)]
 mod tests {
     use super::{
-        automatic_sql_pool_config, automatic_sql_pool_config_for_parallelism,
-        automatic_usage_queue_workers_for_parallelism, ensure_database_backfills_are_current,
-        ensure_database_schema_is_current, pending_backfills_error, pending_schema_error,
-        resolve_healthcheck_url, Args, DatabaseDriverArg, DeploymentTopologyArg, GatewayDataArgs,
-        GatewayFrontdoorArgs, GatewayLogDestinationArg, GatewayLogFormatArg, GatewayLogRotationArg,
-        GatewayLoggingArgs, GatewayRateLimitArgs, GatewayUsageArgs, NodeRoleArg, RuntimeBackendArg,
+        automatic_gateway_request_concurrency_for_capacity,
+        automatic_gateway_request_concurrency_for_parallelism, automatic_sql_pool_config,
+        automatic_sql_pool_config_for_parallelism, automatic_usage_queue_workers_for_parallelism,
+        ensure_database_backfills_are_current, ensure_database_schema_is_current,
+        pending_backfills_error, pending_schema_error, resolve_healthcheck_url, Args,
+        DatabaseDriverArg, DeploymentTopologyArg, GatewayDataArgs, GatewayFrontdoorArgs,
+        GatewayLogDestinationArg, GatewayLogFormatArg, GatewayLogRotationArg, GatewayLoggingArgs,
+        GatewayRateLimitArgs, GatewayUsageArgs, NodeRoleArg, RuntimeBackendArg,
         VideoTaskTruthSourceArg, DEFAULT_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS,
         DEFAULT_GATEWAY_LISTENER_SHARDS, DEFAULT_GATEWAY_LISTEN_BACKLOG,
         MAX_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS, MAX_GATEWAY_LISTENER_SHARDS,
@@ -2506,6 +2566,38 @@ mod tests {
                 MAX_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS + 1
             ),
             MAX_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS
+        );
+    }
+
+    #[test]
+    fn auto_gateway_request_concurrency_scales_and_clamps() {
+        assert_eq!(
+            automatic_gateway_request_concurrency_for_parallelism(1),
+            1_024
+        );
+        assert_eq!(
+            automatic_gateway_request_concurrency_for_parallelism(4),
+            4_096
+        );
+        assert_eq!(
+            automatic_gateway_request_concurrency_for_parallelism(64),
+            65_536
+        );
+    }
+
+    #[test]
+    fn auto_gateway_request_concurrency_respects_fd_budget() {
+        assert_eq!(
+            automatic_gateway_request_concurrency_for_capacity(64, Some(16_384)),
+            8_064
+        );
+        assert_eq!(
+            automatic_gateway_request_concurrency_for_capacity(64, Some(1_024)),
+            384
+        );
+        assert_eq!(
+            automatic_gateway_request_concurrency_for_capacity(64, None),
+            65_536
         );
     }
 

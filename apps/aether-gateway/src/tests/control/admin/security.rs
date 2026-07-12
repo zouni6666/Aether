@@ -85,6 +85,60 @@ async fn admin_security_whitelist_matches_cidr() {
         .expect("whitelist check should succeed"));
 }
 
+#[tokio::test]
+async fn admin_security_blacklist_cache_tracks_local_mutations() {
+    let state = AppState::new().expect("gateway should build");
+    let ip_address = "203.0.113.9".parse().expect("valid ip");
+
+    assert!(!state
+        .admin_security_ip_blacklisted(ip_address)
+        .await
+        .expect("initial blacklist check should succeed"));
+    state
+        .add_admin_security_blacklist("203.0.113.9", "manual", None)
+        .await
+        .expect("blacklist add should succeed");
+    assert!(state
+        .admin_security_ip_blacklisted(ip_address)
+        .await
+        .expect("cached blacklist check should succeed"));
+    state
+        .remove_admin_security_blacklist("203.0.113.9")
+        .await
+        .expect("blacklist remove should succeed");
+    assert!(!state
+        .admin_security_ip_blacklisted(ip_address)
+        .await
+        .expect("updated blacklist check should succeed"));
+}
+
+#[tokio::test]
+async fn admin_security_whitelist_cache_invalidates_after_mutation() {
+    let state = AppState::new().expect("gateway should build");
+    let ip_address = "203.0.113.10".parse().expect("valid ip");
+
+    assert!(!state
+        .admin_security_ip_whitelisted(ip_address)
+        .await
+        .expect("initial whitelist check should succeed"));
+    state
+        .add_admin_security_whitelist("203.0.113.0/24")
+        .await
+        .expect("whitelist add should succeed");
+    assert!(state
+        .admin_security_ip_whitelisted(ip_address)
+        .await
+        .expect("updated whitelist check should succeed"));
+    state
+        .remove_admin_security_whitelist("203.0.113.0/24")
+        .await
+        .expect("whitelist remove should succeed");
+    assert!(!state
+        .admin_security_ip_whitelisted(ip_address)
+        .await
+        .expect("removed whitelist check should succeed"));
+}
+
 async fn send_admin_security_request(
     gateway: Router,
     method: reqwest::Method,

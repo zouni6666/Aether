@@ -309,11 +309,14 @@ async fn parse_request_json<T>(request: Request) -> Result<T, ExecutionRuntimeAp
 where
     T: serde::de::DeserializeOwned,
 {
-    let body = to_bytes(request.into_body(), usize::MAX)
-        .await
-        .map_err(|err| {
-            ExecutionRuntimeAppError(ExecutionRuntimeServerError::RequestRead(err.to_string()))
-        })?;
+    let body = to_bytes(
+        request.into_body(),
+        usize::try_from(crate::headers::max_request_body_bytes()).unwrap_or(usize::MAX),
+    )
+    .await
+    .map_err(|err| {
+        ExecutionRuntimeAppError(ExecutionRuntimeServerError::RequestRead(err.to_string()))
+    })?;
     serde_json::from_slice(&body).map_err(|err| {
         ExecutionRuntimeAppError(ExecutionRuntimeServerError::InvalidRequestJson(err))
     })

@@ -266,6 +266,9 @@ impl AppState {
             )),
             video_task_poller: None,
             frontdoor_runtime_guards: Arc::clone(&frontdoor_runtime_guards),
+            request_body_buffer_budget: Arc::new(tokio::sync::Semaphore::new(
+                frontdoor_runtime_guards.request_body_buffer_budget_permits,
+            )),
             request_gate: None,
             auth_snapshot_load_gate: frontdoor_runtime_guards
                 .auth_snapshot_load_gate_limit
@@ -286,6 +289,8 @@ impl AppState {
             client,
             auth_context_cache: Arc::new(AuthContextCache::default()),
             auth_snapshot_cache: Arc::new(AuthSnapshotCache::default()),
+            admin_security_blacklist_cache: Arc::new(ValueCache::default()),
+            admin_security_whitelist_cache: Arc::new(ValueCache::default()),
             user_model_capability_settings_cache: Arc::new(JsonValueCache::default()),
             user_feature_settings_cache: Arc::new(JsonValueCache::default()),
             auth_api_key_force_capabilities_cache: Arc::new(JsonValueCache::default()),
@@ -480,6 +485,8 @@ impl AppState {
 
     pub fn with_runtime_state(mut self, runtime_state: Arc<RuntimeState>) -> Self {
         self.runtime_state = runtime_state;
+        self.admin_security_blacklist_cache.clear();
+        self.admin_security_whitelist_cache.clear();
         self.data = Arc::new(
             (*self.data)
                 .clone()
@@ -1062,6 +1069,38 @@ impl AppState {
 
     pub(crate) async fn metric_samples(&self) -> Vec<MetricSample> {
         let mut samples = vec![service_up_sample("aether-gateway")];
+        let request_body_buffer_budget_bytes = self
+            .frontdoor_runtime_guards
+            .request_body_buffer_budget_bytes;
+        let request_body_buffer_available_bytes = self
+            .request_body_buffer_budget
+            .available_permits()
+            .saturating_mul(super::REQUEST_BODY_BUFFER_PERMIT_BYTES)
+            .min(request_body_buffer_budget_bytes);
+        samples.extend([
+            MetricSample::new(
+                "request_body_buffer_budget_bytes",
+                "Configured weighted request body buffering budget in bytes.",
+                MetricKind::Gauge,
+                u64::try_from(request_body_buffer_budget_bytes).unwrap_or(u64::MAX),
+            ),
+            MetricSample::new(
+                "request_body_buffer_available_bytes",
+                "Currently available weighted request body buffering budget in bytes.",
+                MetricKind::Gauge,
+                u64::try_from(request_body_buffer_available_bytes).unwrap_or(u64::MAX),
+            ),
+            MetricSample::new(
+                "request_body_buffer_in_use_bytes",
+                "Currently reserved weighted request body buffering budget in bytes.",
+                MetricKind::Gauge,
+                u64::try_from(
+                    request_body_buffer_budget_bytes
+                        .saturating_sub(request_body_buffer_available_bytes),
+                )
+                .unwrap_or(u64::MAX),
+            ),
+        ]);
         if let Some(snapshot) = self.request_concurrency_snapshot() {
             samples.extend(snapshot.to_metric_samples("gateway_requests"));
         }
@@ -2932,6 +2971,23 @@ mod tests {
                     .labels
                     .iter()
                     .any(|label| label.key == "gate" && label.value == "gateway_auth_snapshot_load")
+        }));
+    }
+
+    #[tokio::test]
+    async fn metric_samples_include_request_body_buffer_budget_usage() {
+        let state = AppState::new().expect("app state should build");
+        let _permit = Arc::clone(&state.request_body_buffer_budget)
+            .acquire_many_owned(2)
+            .await
+            .expect("request body budget should be open");
+        let samples = state.metric_samples().await;
+
+        assert!(samples.iter().any(|sample| {
+            sample.name == "request_body_buffer_in_use_bytes"
+                && sample.value
+                    == u64::try_from(2 * crate::state::REQUEST_BODY_BUFFER_PERMIT_BYTES)
+                        .unwrap_or(u64::MAX)
         }));
     }
 
