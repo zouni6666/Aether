@@ -328,7 +328,20 @@ CASE
   WHEN (
     LOWER(COALESCE(endpoint_api_format, api_format, '')) = 'openai'
     OR LOWER(COALESCE(endpoint_api_format, api_format, '')) LIKE 'openai:%'
-    OR LOWER(COALESCE(endpoint_api_format, api_format, '')) = 'gemini'
+  )
+  AND COALESCE(input_tokens, 0) > 0
+  AND (
+    COALESCE(cache_creation_input_tokens, 0) > 0
+    OR COALESCE(cache_read_input_tokens, 0) > 0
+  )
+  THEN MAX(
+    COALESCE(input_tokens, 0)
+      - COALESCE(cache_creation_input_tokens, 0)
+      - COALESCE(cache_read_input_tokens, 0),
+    0
+  )
+  WHEN (
+    LOWER(COALESCE(endpoint_api_format, api_format, '')) = 'gemini'
     OR LOWER(COALESCE(endpoint_api_format, api_format, '')) LIKE 'gemini:%'
     OR LOWER(COALESCE(endpoint_api_format, api_format, '')) = 'google'
     OR LOWER(COALESCE(endpoint_api_format, api_format, '')) LIKE 'google:%'
@@ -345,7 +358,26 @@ CASE
   WHEN (
     LOWER(COALESCE(endpoint_api_format, api_format, '')) = 'openai'
     OR LOWER(COALESCE(endpoint_api_format, api_format, '')) LIKE 'openai:%'
-    OR LOWER(COALESCE(endpoint_api_format, api_format, '')) = 'gemini'
+  )
+  THEN (
+    CASE
+      WHEN COALESCE(input_tokens, 0) > 0
+           AND (
+             COALESCE(cache_creation_input_tokens, 0) > 0
+             OR COALESCE(cache_read_input_tokens, 0) > 0
+           )
+      THEN MAX(
+        COALESCE(input_tokens, 0)
+          - COALESCE(cache_creation_input_tokens, 0)
+          - COALESCE(cache_read_input_tokens, 0),
+        0
+      )
+      ELSE MAX(COALESCE(input_tokens, 0), 0)
+    END
+  ) + MAX(COALESCE(cache_creation_input_tokens, 0), 0)
+    + MAX(COALESCE(cache_read_input_tokens, 0), 0)
+  WHEN (
+    LOWER(COALESCE(endpoint_api_format, api_format, '')) = 'gemini'
     OR LOWER(COALESCE(endpoint_api_format, api_format, '')) LIKE 'gemini:%'
     OR LOWER(COALESCE(endpoint_api_format, api_format, '')) = 'google'
     OR LOWER(COALESCE(endpoint_api_format, api_format, '')) LIKE 'google:%'

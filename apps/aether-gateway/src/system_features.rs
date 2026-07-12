@@ -355,7 +355,8 @@ fn openai_reasoning_effort_value(suffix: &str) -> Option<&'static str> {
         "low" => Some("low"),
         "medium" => Some("medium"),
         "high" => Some("high"),
-        "xhigh" | "max" => Some("xhigh"),
+        "xhigh" => Some("xhigh"),
+        "max" => Some("max"),
         _ => None,
     }
 }
@@ -454,6 +455,22 @@ mod tests {
         assert_eq!(
             default_reasoning_mapping("gemini:generate_content", "fast"),
             None
+        );
+    }
+
+    #[test]
+    fn default_max_suffix_is_preserved_for_openai_formats() {
+        assert_eq!(
+            default_reasoning_mapping("openai:chat", "max"),
+            Some(json!({ "reasoning_effort": "max" }))
+        );
+        assert_eq!(
+            default_reasoning_mapping("openai:responses", "max"),
+            Some(json!({ "reasoning": { "effort": "max" } }))
+        );
+        assert_eq!(
+            default_reasoning_mapping("openai:responses:compact", "max"),
+            Some(json!({ "reasoning": { "effort": "max" } }))
         );
     }
 

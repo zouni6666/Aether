@@ -4559,7 +4559,7 @@ mod tests {
         assert!(sse.contains("\"prompt_tokens\":1"));
         assert!(sse.contains("\"completion_tokens\":2"));
         assert!(sse.contains("\"completion_tokens_details\":{\"reasoning_tokens\":1}"));
-        assert!(sse.contains("\"cached_creation_tokens\":5"));
+        assert!(sse.contains("\"cache_write_tokens\":5"));
         assert!(sse.contains("\"cached_tokens\":4"));
         assert!(sse.contains("\"total_tokens\":3"));
         assert!(sse.contains("data: [DONE]\n\n"));
@@ -4683,7 +4683,7 @@ mod tests {
         assert!(sse.contains("\"text\":\"because\""));
         assert!(sse.contains("\"output_tokens_details\":{\"reasoning_tokens\":1}"));
         assert!(sse.contains("\"input_tokens_details\""));
-        assert!(sse.contains("\"cached_creation_tokens\":5"));
+        assert!(sse.contains("\"cache_write_tokens\":5"));
         assert!(sse.contains("\"cached_tokens\":4"));
     }
 

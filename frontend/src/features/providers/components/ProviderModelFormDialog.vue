@@ -167,7 +167,6 @@
         <TieredPricingEditor
           ref="tieredPricingEditorRef"
           v-model="tieredPricing"
-          :show-cache1h="showCache1h"
           :show-image-pricing="isImageGenerationEnabled"
         />
 
@@ -379,9 +378,6 @@ const isImageGenerationEnabled = computed(() => {
     : selectedGlobalModelSupportsImageGeneration.value
   return supportsImageGeneration || tieredPricingHasImageOutputPricing(tieredPricing.value)
 })
-
-// 1h 缓存定价始终显示
-const showCache1h = true
 
 // 表单状态
 const submitting = ref(false)

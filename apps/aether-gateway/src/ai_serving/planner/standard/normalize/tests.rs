@@ -239,7 +239,7 @@ fn local_openai_responses_wrapper_applies_model_directive_before_body_rules() {
     )
     .expect("local openai responses body should build");
 
-    assert_eq!(provider_request_body["reasoning"]["effort"], "xhigh");
+    assert_eq!(provider_request_body["reasoning"]["effort"], "max");
     assert_eq!(provider_request_body["reasoning"]["summary"], "auto");
     assert_eq!(provider_request_body["metadata"]["override_seen"], true);
 }

@@ -133,6 +133,7 @@ fn build_dimensions(
     let normalized_input_tokens = normalize_input_tokens_for_billing(
         input.api_format.as_deref(),
         input.input_tokens,
+        input.cache_creation_tokens,
         input.cache_read_tokens,
     );
     let classified_cache_creation_tokens = input
@@ -685,6 +686,48 @@ mod tests {
                 .get("total_input_context"),
             Some(&json!(1_000))
         );
+    }
+
+    #[test]
+    fn openai_cache_write_and_read_are_billed_separately() {
+        let result = BillingService::new()
+            .calculate(
+                &pricing(),
+                &BillingUsageInput {
+                    task_type: "chat".to_string(),
+                    api_format: Some("openai:responses".to_string()),
+                    request_count: 1,
+                    input_tokens: 1_000,
+                    output_tokens: 10,
+                    cache_creation_tokens: 100,
+                    cache_creation_ephemeral_5m_tokens: 0,
+                    cache_creation_ephemeral_1h_tokens: 0,
+                    cache_read_tokens: 800,
+                    image_count: 0,
+                    image_size: None,
+                    image_quality: None,
+                    image_output_format: None,
+                    cache_ttl_minutes: Some(60),
+                },
+            )
+            .expect("billing should calculate");
+
+        let dimensions = &result.cost_result.snapshot.resolved_dimensions;
+        assert_eq!(dimensions.get("input_tokens"), Some(&json!(100)));
+        assert_eq!(dimensions.get("cache_creation_tokens"), Some(&json!(100)));
+        assert_eq!(dimensions.get("cache_read_tokens"), Some(&json!(800)));
+        assert_eq!(dimensions.get("total_input_context"), Some(&json!(1_000)));
+
+        let costs = &result.cost_result.snapshot.cost_breakdown;
+        assert!(costs.get("input_cost").copied().unwrap_or_default() > 0.0);
+        assert!(
+            costs
+                .get("cache_creation_uncategorized_cost")
+                .copied()
+                .unwrap_or_default()
+                > 0.0
+        );
+        assert!(costs.get("cache_read_cost").copied().unwrap_or_default() > 0.0);
     }
 
     #[test]

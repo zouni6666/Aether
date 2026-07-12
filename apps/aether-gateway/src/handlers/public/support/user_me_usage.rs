@@ -133,8 +133,15 @@ fn users_me_usage_effective_input_tokens(item: &StoredRequestUsageAudit) -> u64 
         .as_deref()
         .or(item.api_format.as_deref());
     let input_tokens = i64::try_from(item.input_tokens).unwrap_or(i64::MAX);
+    let cache_creation_tokens =
+        i64::try_from(users_me_usage_cache_creation_tokens(item)).unwrap_or(i64::MAX);
     let cache_read_tokens = i64::try_from(item.cache_read_input_tokens).unwrap_or(i64::MAX);
-    normalize_input_tokens_for_billing(api_format, input_tokens, cache_read_tokens) as u64
+    normalize_input_tokens_for_billing(
+        api_format,
+        input_tokens,
+        cache_creation_tokens,
+        cache_read_tokens,
+    ) as u64
 }
 
 fn users_me_usage_effective_unix_secs(item: &StoredRequestUsageAudit) -> u64 {

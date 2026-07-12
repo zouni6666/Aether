@@ -50,7 +50,7 @@ function defaultMappingsForApiFormat(apiFormat: string): Record<string, unknown>
         medium: { reasoning_effort: 'medium' },
         high: { reasoning_effort: 'high' },
         xhigh: { reasoning_effort: 'xhigh' },
-        max: { reasoning_effort: 'xhigh' },
+        max: { reasoning_effort: 'max' },
       }
     case 'openai:responses':
     case 'openai:responses:compact':
@@ -59,7 +59,7 @@ function defaultMappingsForApiFormat(apiFormat: string): Record<string, unknown>
         medium: { reasoning: { effort: 'medium' } },
         high: { reasoning: { effort: 'high' } },
         xhigh: { reasoning: { effort: 'xhigh' } },
-        max: { reasoning: { effort: 'xhigh' } },
+        max: { reasoning: { effort: 'max' } },
       }
     case 'claude:messages':
       return {

@@ -1747,7 +1747,7 @@ pub fn admin_system_config_default_value(key: &str) -> Option<serde_json::Value>
                             "medium": { "reasoning_effort": "medium" },
                             "high": { "reasoning_effort": "high" },
                             "xhigh": { "reasoning_effort": "xhigh" },
-                            "max": { "reasoning_effort": "xhigh" },
+                            "max": { "reasoning_effort": "max" },
                             "fast": { "service_tier": "priority" }
                         }
                     },
@@ -1758,7 +1758,7 @@ pub fn admin_system_config_default_value(key: &str) -> Option<serde_json::Value>
                             "medium": { "reasoning": { "effort": "medium" } },
                             "high": { "reasoning": { "effort": "high" } },
                             "xhigh": { "reasoning": { "effort": "xhigh" } },
-                            "max": { "reasoning": { "effort": "xhigh" } },
+                            "max": { "reasoning": { "effort": "max" } },
                             "fast": { "service_tier": "priority" }
                         }
                     },
@@ -1769,7 +1769,7 @@ pub fn admin_system_config_default_value(key: &str) -> Option<serde_json::Value>
                             "medium": { "reasoning": { "effort": "medium" } },
                             "high": { "reasoning": { "effort": "high" } },
                             "xhigh": { "reasoning": { "effort": "xhigh" } },
-                            "max": { "reasoning": { "effort": "xhigh" } },
+                            "max": { "reasoning": { "effort": "max" } },
                             "fast": { "service_tier": "priority" }
                         }
                     },

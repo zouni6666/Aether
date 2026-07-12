@@ -44,7 +44,8 @@ impl ReasoningEffort {
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
-            Self::XHigh | Self::Max => "xhigh",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
         }
     }
 
@@ -55,7 +56,8 @@ impl ReasoningEffort {
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
-            Self::XHigh | Self::Max => "xhigh",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
         }
     }
 
@@ -547,8 +549,31 @@ mod tests {
             "gpt-5.4-max",
         )
         .expect("directive should apply");
-        assert_eq!(responses["reasoning"]["effort"], "xhigh");
+        assert_eq!(responses["reasoning"]["effort"], "max");
         assert_eq!(responses["reasoning"]["summary"], "auto");
+
+        let mut compact = json!({
+            "model": "gpt-5-upstream",
+            "reasoning": {"effort": "low"}
+        });
+        apply_model_directive_overrides_from_model(
+            &mut compact,
+            "openai:responses:compact",
+            "gpt-5-upstream",
+            "gpt-5.4-max",
+        )
+        .expect("directive should apply");
+        assert_eq!(compact["reasoning"]["effort"], "max");
+
+        let mut openai_chat_max = json!({"model": "gpt-5-upstream", "reasoning_effort": "low"});
+        apply_model_directive_overrides_from_model(
+            &mut openai_chat_max,
+            "openai:chat",
+            "gpt-5-upstream",
+            "gpt-5.4-max",
+        )
+        .expect("directive should apply");
+        assert_eq!(openai_chat_max["reasoning_effort"], "max");
 
         let mut claude = json!({"model": "claude-sonnet-4-5"});
         apply_model_directive_overrides_from_model(

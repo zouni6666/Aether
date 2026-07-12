@@ -949,19 +949,22 @@ fn usage_api_family(api_format: Option<&str>) -> UsageApiFamily {
 fn normalize_usage_input_tokens(
     api_format: Option<&str>,
     input_tokens: i64,
+    cache_creation_tokens: i64,
     cache_read_tokens: i64,
 ) -> i64 {
     if input_tokens <= 0 {
         return input_tokens.max(0);
     }
-    if cache_read_tokens <= 0 {
+    if cache_creation_tokens <= 0 && cache_read_tokens <= 0 {
         return input_tokens;
     }
 
     match usage_api_family(api_format) {
-        UsageApiFamily::OpenAi | UsageApiFamily::Gemini => {
-            (input_tokens - cache_read_tokens).max(0)
-        }
+        UsageApiFamily::OpenAi => input_tokens
+            .saturating_sub(cache_creation_tokens.max(0))
+            .saturating_sub(cache_read_tokens.max(0))
+            .max(0),
+        UsageApiFamily::Gemini => (input_tokens - cache_read_tokens).max(0),
         UsageApiFamily::Claude | UsageApiFamily::Unknown => input_tokens,
     }
 }
@@ -980,9 +983,17 @@ fn normalize_usage_total_input_context(
         UsageApiFamily::Claude => {
             normalized_input_tokens.saturating_add(normalized_cache_creation_tokens)
         }
-        UsageApiFamily::OpenAi | UsageApiFamily::Gemini => normalize_usage_input_tokens(
+        UsageApiFamily::OpenAi => normalize_usage_input_tokens(
             api_format,
             normalized_input_tokens,
+            normalized_cache_creation_tokens,
+            normalized_cache_read_tokens,
+        )
+        .saturating_add(normalized_cache_creation_tokens),
+        UsageApiFamily::Gemini => normalize_usage_input_tokens(
+            api_format,
+            normalized_input_tokens,
+            0,
             normalized_cache_read_tokens,
         ),
         UsageApiFamily::Unknown => {
@@ -1020,8 +1031,15 @@ fn usage_effective_input_tokens(item: &StoredRequestUsageAudit) -> u64 {
         .as_deref()
         .or(item.api_format.as_deref());
     let input_tokens = i64::try_from(item.input_tokens).unwrap_or(i64::MAX);
+    let cache_creation_tokens =
+        i64::try_from(usage_cache_creation_tokens(item)).unwrap_or(i64::MAX);
     let cache_read_tokens = i64::try_from(item.cache_read_input_tokens).unwrap_or(i64::MAX);
-    normalize_usage_input_tokens(api_format, input_tokens, cache_read_tokens) as u64
+    normalize_usage_input_tokens(
+        api_format,
+        input_tokens,
+        cache_creation_tokens,
+        cache_read_tokens,
+    ) as u64
 }
 
 fn usage_total_tokens(item: &StoredRequestUsageAudit) -> u64 {

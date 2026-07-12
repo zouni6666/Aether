@@ -26,6 +26,7 @@ impl UsageMapper {
             }
         }
 
+        apply_openai_cache_write_tokens(raw_usage, api_format, &mut usage);
         derive_missing_input_tokens(raw_usage, api_format, &mut usage);
         copy_explicit_total_tokens(raw_usage, api_format, &mut usage);
         usage.normalize_cache_creation_breakdown()
@@ -42,6 +43,25 @@ impl UsageMapper {
             apply_openai_image_response_dimensions(response, &mut usage);
         }
         usage
+    }
+}
+
+fn apply_openai_cache_write_tokens(
+    raw_usage: &serde_json::Value,
+    api_format: &str,
+    usage: &mut StandardizedUsage,
+) {
+    if api_family(api_format).as_str() != "openai" {
+        return;
+    }
+    for details_key in ["prompt_tokens_details", "input_tokens_details"] {
+        if let Some(value) = raw_usage
+            .get(details_key)
+            .and_then(|details| details.get("cache_write_tokens"))
+        {
+            usage.set("cache_creation_tokens", value.clone());
+            return;
+        }
     }
 }
 
@@ -149,7 +169,15 @@ fn base_mapping(api_format: &str) -> BTreeMap<String, String> {
                 "cache_creation_tokens".to_string(),
             );
             mapping.insert(
+                "prompt_tokens_details.cache_write_tokens".to_string(),
+                "cache_creation_tokens".to_string(),
+            );
+            mapping.insert(
                 "input_tokens_details.cached_creation_tokens".to_string(),
+                "cache_creation_tokens".to_string(),
+            );
+            mapping.insert(
+                "input_tokens_details.cache_write_tokens".to_string(),
                 "cache_creation_tokens".to_string(),
             );
             mapping.insert(
@@ -368,6 +396,34 @@ mod tests {
         assert_eq!(usage.cache_creation_tokens, 2);
         assert_eq!(usage.cache_read_tokens, 3);
         assert_eq!(usage.reasoning_tokens, 1);
+    }
+
+    #[test]
+    fn maps_openai_responses_cache_write_tokens() {
+        let usage = map_usage_from_response(
+            &serde_json::json!({
+                "usage": {
+                    "input_tokens": 32_963,
+                    "input_tokens_details": {
+                        "cache_write_tokens": 512,
+                        "cached_creation_tokens": 1,
+                        "cached_tokens": 30_336
+                    },
+                    "output_tokens": 129,
+                    "output_tokens_details": {
+                        "reasoning_tokens": 8
+                    },
+                    "total_tokens": 33_092
+                }
+            }),
+            "openai:responses",
+        );
+
+        assert_eq!(usage.input_tokens, 32_963);
+        assert_eq!(usage.output_tokens, 129);
+        assert_eq!(usage.cache_creation_tokens, 512);
+        assert_eq!(usage.cache_read_tokens, 30_336);
+        assert_eq!(usage.reasoning_tokens, 8);
     }
 
     #[test]

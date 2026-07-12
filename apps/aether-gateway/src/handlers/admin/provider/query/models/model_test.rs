@@ -1704,9 +1704,12 @@ async fn provider_query_finalize_kiro_result(
     let Some(outcome) = maybe_build_sync_finalize_outcome(trace_id, &decision, &payload)? else {
         return Ok(None);
     };
-    let bytes = to_bytes(outcome.response.into_body(), usize::MAX)
-        .await
-        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    let bytes = to_bytes(
+        outcome.response.into_body(),
+        crate::headers::max_internal_buffered_body_bytes(),
+    )
+    .await
+    .map_err(|err| GatewayError::Internal(err.to_string()))?;
     serde_json::from_slice::<Value>(&bytes)
         .map(Some)
         .map_err(|err| GatewayError::Internal(err.to_string()))
@@ -1926,9 +1929,12 @@ async fn provider_query_finalize_windsurf_result(
     let Some(outcome) = maybe_build_sync_finalize_outcome(trace_id, &decision, &payload)? else {
         return Ok(None);
     };
-    let bytes = to_bytes(outcome.response.into_body(), usize::MAX)
-        .await
-        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    let bytes = to_bytes(
+        outcome.response.into_body(),
+        crate::headers::max_internal_buffered_body_bytes(),
+    )
+    .await
+    .map_err(|err| GatewayError::Internal(err.to_string()))?;
     serde_json::from_slice::<Value>(&bytes)
         .map(Some)
         .map_err(|err| GatewayError::Internal(err.to_string()))
@@ -2044,9 +2050,12 @@ async fn provider_query_finalize_openai_image_result(
     let Some(outcome) = maybe_build_sync_finalize_outcome(trace_id, &decision, &payload)? else {
         return Ok(None);
     };
-    let bytes = to_bytes(outcome.response.into_body(), usize::MAX)
-        .await
-        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    let bytes = to_bytes(
+        outcome.response.into_body(),
+        crate::headers::max_internal_buffered_body_bytes(),
+    )
+    .await
+    .map_err(|err| GatewayError::Internal(err.to_string()))?;
     serde_json::from_slice::<Value>(&bytes)
         .map(Some)
         .map_err(|err| GatewayError::Internal(err.to_string()))
@@ -2412,9 +2421,12 @@ async fn provider_query_finalize_antigravity_result(
     let Some(outcome) = maybe_build_sync_finalize_outcome(trace_id, &decision, &payload)? else {
         return Ok(None);
     };
-    let bytes = to_bytes(outcome.response.into_body(), usize::MAX)
-        .await
-        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    let bytes = to_bytes(
+        outcome.response.into_body(),
+        crate::headers::max_internal_buffered_body_bytes(),
+    )
+    .await
+    .map_err(|err| GatewayError::Internal(err.to_string()))?;
     serde_json::from_slice::<Value>(&bytes)
         .map(Some)
         .map_err(|err| GatewayError::Internal(err.to_string()))
@@ -3794,9 +3806,12 @@ pub(crate) async fn build_admin_provider_query_test_model_local_response(
     if !response.status().is_success() {
         return Ok(response);
     }
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    let body = to_bytes(
+        response.into_body(),
+        crate::headers::max_internal_buffered_body_bytes(),
+    )
+    .await
+    .map_err(|err| GatewayError::Internal(err.to_string()))?;
     let parsed: Value =
         serde_json::from_slice(&body).map_err(|err| GatewayError::Internal(err.to_string()))?;
 

@@ -5794,7 +5794,8 @@ pub(crate) fn openai_usage_to_canonical(value: Option<&Value>) -> Option<Canonic
         .and_then(Value::as_object)
         .and_then(|details| {
             details
-                .get("cached_creation_tokens")
+                .get("cache_write_tokens")
+                .or_else(|| details.get("cached_creation_tokens"))
                 .or_else(|| details.get("cache_creation_tokens"))
         })
         .and_then(Value::as_u64)
@@ -5957,7 +5958,7 @@ pub(crate) fn canonical_usage_to_openai(value: &CanonicalUsage) -> Value {
         if output.get("prompt_tokens_details").is_none() {
             output["prompt_tokens_details"] = json!({});
         }
-        output["prompt_tokens_details"]["cached_creation_tokens"] =
+        output["prompt_tokens_details"]["cache_write_tokens"] =
             Value::from(value.cache_write_tokens);
     }
     output
@@ -5985,7 +5986,7 @@ pub(crate) fn canonical_usage_to_openai_responses_usage(value: &CanonicalUsage) 
         if output.get("input_tokens_details").is_none() {
             output["input_tokens_details"] = json!({});
         }
-        output["input_tokens_details"]["cached_creation_tokens"] =
+        output["input_tokens_details"]["cache_write_tokens"] =
             Value::from(value.cache_write_tokens);
     }
     output
@@ -7732,7 +7733,10 @@ mod tests {
             ],
             "usage": {
                 "input_tokens": 3,
-                "input_tokens_details": {"cached_tokens": 2},
+                "input_tokens_details": {
+                    "cache_write_tokens": 1,
+                    "cached_tokens": 2
+                },
                 "output_tokens": 5,
                 "output_tokens_details": {"reasoning_tokens": 1},
                 "total_tokens": 8
@@ -7763,6 +7767,7 @@ mod tests {
         ));
         assert_eq!(canonical_response_unknown_block_count(&canonical), 2);
         assert_eq!(canonical.usage.as_ref().unwrap().cache_read_tokens, 2);
+        assert_eq!(canonical.usage.as_ref().unwrap().cache_write_tokens, 1);
         assert_eq!(canonical.usage.as_ref().unwrap().reasoning_tokens, 1);
 
         let rebuilt_chat = canonical_to_openai_chat_response(&canonical);
@@ -7788,6 +7793,10 @@ mod tests {
         assert_eq!(rebuilt["output"][5]["type"], "local_shell_call_output");
         assert_eq!(rebuilt["output"][5]["call_id"], "call_shell_1");
         assert_eq!(rebuilt["usage"]["input_tokens_details"]["cached_tokens"], 2);
+        assert_eq!(
+            rebuilt["usage"]["input_tokens_details"]["cache_write_tokens"],
+            1
+        );
         assert_eq!(
             rebuilt["usage"]["output_tokens_details"]["reasoning_tokens"],
             1
@@ -8156,7 +8165,7 @@ mod tests {
             3
         );
         assert_eq!(
-            rebuilt_openai["usage"]["input_tokens_details"]["cached_creation_tokens"],
+            rebuilt_openai["usage"]["input_tokens_details"]["cache_write_tokens"],
             2
         );
         assert_eq!(rebuilt_openai["usage"]["total_tokens"], 23);

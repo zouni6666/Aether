@@ -852,7 +852,11 @@ fn openai_image_usage_to_standardized_usage(value: &Value) -> Option<Standardize
                 .get("input_tokens_details")
                 .or_else(|| usage.get("prompt_tokens_details"))
                 .and_then(Value::as_object)
-                .and_then(|details| details.get("cached_creation_tokens"))
+                .and_then(|details| {
+                    details
+                        .get("cache_write_tokens")
+                        .or_else(|| details.get("cached_creation_tokens"))
+                })
                 .and_then(Value::as_i64)
         })
         .unwrap_or(0);
@@ -929,7 +933,11 @@ fn openai_image_chat_usage_counts(usage: Option<&Value>) -> Option<(u64, u64, u6
                 .get("input_tokens_details")
                 .or_else(|| usage.get("prompt_tokens_details"))
                 .and_then(Value::as_object)
-                .and_then(|details| details.get("cached_creation_tokens"))
+                .and_then(|details| {
+                    details
+                        .get("cache_write_tokens")
+                        .or_else(|| details.get("cached_creation_tokens"))
+                })
                 .and_then(Value::as_u64)
         })
         .unwrap_or(0);

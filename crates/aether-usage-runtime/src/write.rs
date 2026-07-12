@@ -3242,6 +3242,8 @@ fn apply_explicit_request_cache_usage(value: &Value, usage: &mut EstimatedReques
         &[
             &["cache_creation_input_tokens"],
             &["cache_creation_tokens"],
+            &["input_tokens_details", "cache_write_tokens"],
+            &["prompt_tokens_details", "cache_write_tokens"],
             &["input_tokens_details", "cached_creation_tokens"],
             &["prompt_tokens_details", "cached_creation_tokens"],
         ],

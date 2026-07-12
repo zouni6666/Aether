@@ -1114,6 +1114,36 @@ async fn gateway_handles_admin_user_batch_actions_locally() {
         "不能降级最后一个管理员账户"
     );
 
+    let last_admin_audit_demotion_response = client
+        .post(format!("{gateway_url}/api/admin/users/batch-action"))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "selection": {
+                "user_ids": ["user-1"]
+            },
+            "action": "update_role",
+            "payload": {
+                "role": "audit_admin"
+            }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(last_admin_audit_demotion_response.status(), StatusCode::OK);
+    let last_admin_audit_demotion_payload: serde_json::Value = last_admin_audit_demotion_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(last_admin_audit_demotion_payload["success"], 0);
+    assert_eq!(last_admin_audit_demotion_payload["failed"], 1);
+    assert_eq!(
+        last_admin_audit_demotion_payload["failures"][0]["reason"],
+        "不能降级最后一个管理员账户"
+    );
+
     let detail_response = client
         .get(format!("{gateway_url}/api/admin/users/user-1"))
         .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
@@ -1297,6 +1327,40 @@ async fn gateway_handles_admin_user_detail_routes_locally_with_trusted_admin_pri
 
     gateway_handle.abort();
     upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_rejects_demoting_the_last_active_admin() {
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_auth_users_for_tests([sample_admin_user_with_role(
+                "admin-1",
+                "admin",
+                "admin@example.com",
+                "admin",
+            )]),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+
+    for role in ["user", "audit_admin"] {
+        let response = client
+            .put(format!("{gateway_url}/api/admin/users/admin-1"))
+            .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+            .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+            .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+            .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+            .json(&json!({ "role": role }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let payload: serde_json::Value = response.json().await.expect("json body should parse");
+        assert_eq!(payload["detail"], "不能降级最后一个管理员账户");
+    }
+
+    gateway_handle.abort();
 }
 
 #[tokio::test]

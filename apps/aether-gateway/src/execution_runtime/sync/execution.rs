@@ -1534,7 +1534,12 @@ async fn openai_image_sync_json_heartbeat_final_bytes(
     result: Result<Option<Response<Body>>, GatewayError>,
 ) -> Vec<u8> {
     match result {
-        Ok(Some(response)) => match to_bytes(response.into_body(), usize::MAX).await {
+        Ok(Some(response)) => match to_bytes(
+            response.into_body(),
+            crate::headers::max_internal_buffered_body_bytes(),
+        )
+        .await
+        {
             Ok(bytes) if !bytes.is_empty() => bytes.to_vec(),
             Ok(_) => openai_image_sync_json_heartbeat_error_body("empty sync image response"),
             Err(err) => openai_image_sync_json_heartbeat_error_body(&err.to_string()),

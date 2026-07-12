@@ -776,7 +776,7 @@ mod tests {
 
         assert_eq!(provider_request_body["model"], "gpt-5-upstream");
         assert_eq!(provider_request_body["reasoning"]["summary"], "auto");
-        assert_eq!(provider_request_body["reasoning"]["effort"], "xhigh");
+        assert_eq!(provider_request_body["reasoning"]["effort"], "max");
     }
 
     #[test]

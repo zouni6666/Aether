@@ -148,7 +148,11 @@ pub fn canonical_usage_from_openai_usage(value: Option<&Value>) -> Option<Canoni
                 .get("input_tokens_details")
                 .or_else(|| usage.get("prompt_tokens_details"))
                 .and_then(Value::as_object)
-                .and_then(|details| details.get("cached_creation_tokens"))
+                .and_then(|details| {
+                    details
+                        .get("cache_write_tokens")
+                        .or_else(|| details.get("cached_creation_tokens"))
+                })
                 .and_then(Value::as_u64)
         })
         .unwrap_or(0);
@@ -742,7 +746,7 @@ fn insert_openai_token_details(
     }
     if cache_creation_tokens > 0 {
         details.insert(
-            "cached_creation_tokens".to_string(),
+            "cache_write_tokens".to_string(),
             Value::from(cache_creation_tokens),
         );
     }
