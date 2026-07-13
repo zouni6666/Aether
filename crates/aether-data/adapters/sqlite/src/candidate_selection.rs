@@ -1071,6 +1071,7 @@ fn parse_embedded_provider_model_mappings(
         priority: 1,
         api_formats: None,
         endpoint_ids: None,
+        operations: None,
     }]))
 }
 
@@ -1091,6 +1092,7 @@ fn parse_provider_model_mappings_array(
                     priority: 1,
                     api_formats: None,
                     endpoint_ids: None,
+                    operations: None,
                 });
             }
             _ => {}
@@ -1135,6 +1137,11 @@ fn parse_provider_model_mapping_object_lenient(
         object.get("endpoint_ids").cloned(),
         "models.provider_model_mappings.endpoint_ids",
     )?;
+    let operations = parse_string_list(
+        object.get("operations").cloned(),
+        "models.provider_model_mappings.operations",
+    )?
+    .and_then(normalize_request_operations);
 
     Ok(Some(StoredProviderModelMapping {
         name: name.to_string(),
@@ -1145,7 +1152,17 @@ fn parse_provider_model_mapping_object_lenient(
         })?,
         api_formats,
         endpoint_ids,
+        operations,
     }))
+}
+
+fn normalize_request_operations(values: Vec<String>) -> Option<Vec<String>> {
+    let operations = values
+        .into_iter()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    (!operations.is_empty()).then_some(operations)
 }
 
 fn api_format_aliases(api_format: &str) -> Vec<String> {
@@ -1212,6 +1229,14 @@ mod tests {
             Some(vec!["alias-global".to_string()])
         );
         assert_eq!(rows[1].global_model_supports_streaming, Some(true));
+        assert_eq!(
+            rows[1]
+                .model_provider_model_mappings
+                .as_ref()
+                .and_then(|mappings| mappings.first())
+                .and_then(|mapping| mapping.operations.as_ref()),
+            Some(&vec!["compact".to_string()])
+        );
 
         let requested = repository
             .list_for_exact_api_format_and_requested_model_page(
@@ -1393,7 +1418,7 @@ INSERT INTO models (
 )
 VALUES (
   'model-1', 'provider-1', 'global-1', 'provider-model',
-  '[{"name":"alias-provider","api_formats":["openai:chat"],"priority":1}]',
+  '[{"name":"alias-provider","api_formats":["openai:chat"],"operations":["COMPACT"],"priority":1}]',
   1, 1, 1, 1, 1
 ),
 (

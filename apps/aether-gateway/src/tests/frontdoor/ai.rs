@@ -74,6 +74,7 @@ fn sample_codex_models_candidate_row(
             priority: 1,
             api_formats: Some(vec!["openai:responses".to_string()]),
             endpoint_ids: None,
+            operations: None,
         },
     ]);
     row

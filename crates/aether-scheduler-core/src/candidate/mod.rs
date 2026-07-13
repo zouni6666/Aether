@@ -71,6 +71,7 @@ mod tests {
                 priority: 1,
                 api_formats: Some(vec!["openai:chat".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: None,
             model_is_active: true,
@@ -199,6 +200,7 @@ mod tests {
             super::enumerate_minimal_candidate_selection(EnumerateMinimalCandidateSelectionInput {
                 rows: vec![sample_row("1"), disallowed],
                 normalized_api_format: "openai:chat",
+                request_operation: None,
                 requested_model_name: "gpt-5",
                 resolved_global_model_name: "gpt-5",
                 require_streaming: false,
@@ -221,6 +223,7 @@ mod tests {
             super::enumerate_minimal_candidate_selection(EnumerateMinimalCandidateSelectionInput {
                 rows: vec![row],
                 normalized_api_format: "openai:chat",
+                request_operation: None,
                 requested_model_name: "gpt-5",
                 resolved_global_model_name: "gpt-5",
                 require_streaming: false,
@@ -244,6 +247,7 @@ mod tests {
             super::enumerate_minimal_candidate_selection(EnumerateMinimalCandidateSelectionInput {
                 rows: vec![later_priority, earlier_priority],
                 normalized_api_format: "openai:chat",
+                request_operation: None,
                 requested_model_name: "gpt-5",
                 resolved_global_model_name: "gpt-5",
                 require_streaming: false,
@@ -295,6 +299,7 @@ mod tests {
             super::enumerate_minimal_candidate_selection(EnumerateMinimalCandidateSelectionInput {
                 rows: vec![missing_capability, matching_capability],
                 normalized_api_format: "openai:chat",
+                request_operation: None,
                 requested_model_name: "gpt-5",
                 resolved_global_model_name: "gpt-5",
                 require_streaming: false,

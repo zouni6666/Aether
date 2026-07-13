@@ -1404,6 +1404,7 @@ mod tests {
         let ttl = Duration::from_secs(300);
         let cache_key = CandidatePageCacheKey::new(
             "gpt-5",
+            None,
             "openai:chat",
             true,
             &sample_auth_snapshot(),

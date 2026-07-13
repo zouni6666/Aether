@@ -49,6 +49,9 @@ pub use formats::openai::responses::codex::{
 pub use formats::openai::responses::request::{
     validate_openai_responses_request_contract, OpenAiResponsesRequestContractViolation,
 };
+pub use formats::openai::responses::{
+    openai_responses_request_operation, OPENAI_RESPONSES_OPERATION_COMPACT,
+};
 pub use formats::registry::{
     build_stream_transcoder, convert_request, convert_request_pure,
     convert_request_pure_with_context, convert_response, convert_response_pure, emit_request_pure,

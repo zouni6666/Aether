@@ -119,6 +119,7 @@ async fn gateway_executes_codex_search_with_responses_permission_and_search_cont
                 priority: 1,
                 api_formats: Some(vec!["openai:responses".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(false),
             model_is_active: true,

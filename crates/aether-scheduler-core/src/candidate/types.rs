@@ -32,6 +32,7 @@ pub struct SchedulerMinimalCandidateSelectionCandidate {
 pub struct EnumerateMinimalCandidateSelectionInput<'a> {
     pub rows: Vec<StoredMinimalCandidateSelectionRow>,
     pub normalized_api_format: &'a str,
+    pub request_operation: Option<&'a str>,
     pub requested_model_name: &'a str,
     pub resolved_global_model_name: &'a str,
     pub require_streaming: bool,

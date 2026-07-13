@@ -488,6 +488,7 @@ fn build_users_me_usage_record_payload(
         "cache_read_input_tokens": item.cache_read_input_tokens,
         "status_code": item.status_code,
         "error_message": item.error_message,
+        "request_type": item.request_type,
         "input_price_per_1m": input_price_per_1m,
         "output_price_per_1m": output_price_per_1m,
         "cache_creation_price_per_1m": cache_creation_price_per_1m,
@@ -525,6 +526,7 @@ fn build_users_me_usage_active_payload(item: &StoredRequestUsageAudit) -> serde_
     let mut payload = json!({
         "id": item.id,
         "status": item.status,
+        "request_type": item.request_type,
         "input_tokens": item.input_tokens,
         "effective_input_tokens": users_me_usage_effective_input_tokens(item),
         "output_tokens": item.output_tokens,

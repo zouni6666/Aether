@@ -7,6 +7,10 @@ pub struct StoredProviderModelMapping {
     pub api_formats: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint_ids: Option<Vec<String>>,
+    /// Optional request-operation scope. An omitted scope applies to every
+    /// operation supported by the selected API format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operations: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

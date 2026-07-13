@@ -678,6 +678,7 @@ fn parse_embedded_provider_model_mappings(
         priority: 1,
         api_formats: None,
         endpoint_ids: None,
+        operations: None,
     }]))
 }
 
@@ -698,6 +699,7 @@ fn parse_provider_model_mappings_array(
                     priority: 1,
                     api_formats: None,
                     endpoint_ids: None,
+                    operations: None,
                 });
             }
             _ => {}
@@ -742,6 +744,11 @@ fn parse_provider_model_mapping_object_lenient(
         object.get("endpoint_ids").cloned(),
         "models.provider_model_mappings.endpoint_ids",
     )?;
+    let operations = parse_string_list(
+        object.get("operations").cloned(),
+        "models.provider_model_mappings.operations",
+    )?
+    .and_then(normalize_request_operations);
 
     Ok(Some(StoredProviderModelMapping {
         name: name.to_string(),
@@ -752,7 +759,17 @@ fn parse_provider_model_mapping_object_lenient(
         })?,
         api_formats,
         endpoint_ids,
+        operations,
     }))
+}
+
+fn normalize_request_operations(values: Vec<String>) -> Option<Vec<String>> {
+    let operations = values
+        .into_iter()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    (!operations.is_empty()).then_some(operations)
 }
 
 fn api_format_aliases(api_format: &str) -> Vec<String> {

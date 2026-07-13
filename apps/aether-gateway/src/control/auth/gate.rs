@@ -621,6 +621,7 @@ mod tests {
                 priority: 1,
                 api_formats: Some(vec!["openai:chat".to_string()]),
                 endpoint_ids: None,
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -954,6 +955,7 @@ mod tests {
             priority: 1,
             api_formats: Some(vec!["gemini:generate_content".to_string()]),
             endpoint_ids: None,
+            operations: None,
         }]);
         let state = state_with_rows(vec![row]);
         let decision = decision_with_allowed_models(vec!["gpt-5".to_string()]);

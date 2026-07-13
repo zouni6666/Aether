@@ -31,8 +31,8 @@ use crate::ai_serving::planner::spec_metadata::local_openai_responses_spec_metad
 use crate::ai_serving::planner::CandidateFailureDiagnostic;
 use crate::ai_serving::{
     ai_local_execution_contract_for_formats, extract_pool_sticky_session_token,
-    resolve_local_decision_execution_runtime_auth_context, ExecutionRuntimeAuthContext,
-    GatewayControlDecision, PlannerAppState,
+    openai_responses_request_operation, resolve_local_decision_execution_runtime_auth_context,
+    ExecutionRuntimeAuthContext, GatewayControlDecision, PlannerAppState,
 };
 use crate::client_session_affinity::client_session_affinity_from_parts;
 use crate::{AppState, GatewayError};
@@ -163,6 +163,7 @@ pub(crate) async fn materialize_local_openai_responses_candidate_attempts(
     spec: LocalOpenAiResponsesSpec,
 ) -> Result<(Vec<LocalOpenAiResponsesCandidateAttempt>, usize), GatewayError> {
     let spec_metadata = local_openai_responses_spec_metadata(spec);
+    let request_operation = openai_responses_request_operation(spec_metadata.api_format, body_json);
     let planner_state = PlannerAppState::new(state);
     let sticky_session_token = extract_pool_sticky_session_token(body_json);
     let auth_context: &ExecutionRuntimeAuthContext = &input.auth_context;
@@ -176,6 +177,7 @@ pub(crate) async fn materialize_local_openai_responses_candidate_attempts(
         &input.model_directive_policy,
         spec_metadata.api_format,
         &input.requested_model,
+        request_operation,
         spec_metadata.require_streaming,
         input.required_capabilities.as_ref(),
         &input.auth_snapshot,
@@ -262,6 +264,7 @@ pub(crate) async fn build_local_openai_responses_candidate_attempt_source<'a>(
     spec: LocalOpenAiResponsesSpec,
 ) -> Result<(LocalOpenAiResponsesCandidateAttemptSource<'a>, usize), GatewayError> {
     let spec_metadata = local_openai_responses_spec_metadata(spec);
+    let request_operation = openai_responses_request_operation(spec_metadata.api_format, body_json);
     let planner_state = PlannerAppState::new(state);
     let sticky_session_token = extract_pool_sticky_session_token(body_json);
     let auth_context: &ExecutionRuntimeAuthContext = &input.auth_context;
@@ -287,6 +290,7 @@ pub(crate) async fn build_local_openai_responses_candidate_attempt_source<'a>(
             trace_id,
             spec_metadata.api_format,
             &input.requested_model,
+            request_operation,
             spec_metadata.require_streaming,
             &input.auth_snapshot,
             input.client_session_affinity.as_ref(),
@@ -372,6 +376,7 @@ pub(crate) async fn build_local_openai_responses_image_candidate_attempt_source<
         &input.model_directive_policy,
         spec_metadata.api_format,
         &input.requested_model,
+        None,
         false,
         input.required_capabilities.as_ref(),
         &input.auth_snapshot,

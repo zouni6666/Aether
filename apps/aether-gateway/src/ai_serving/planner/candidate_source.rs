@@ -6,9 +6,10 @@ use aether_routing_core::ResolvedRoutingPolicy;
 use aether_runtime::ConcurrencyPermit;
 use aether_scheduler_core::{
     enumerate_minimal_candidate_selection_with_model_directives, normalize_api_format,
-    resolve_requested_global_model_name_with_model_directives,
-    row_supports_requested_model_with_model_directives, ClientSessionAffinity,
-    EnumerateMinimalCandidateSelectionInput, SchedulerMinimalCandidateSelectionCandidate,
+    resolve_requested_global_model_name_with_model_directives_and_request_operation,
+    row_supports_requested_model_with_model_directives_and_request_operation,
+    ClientSessionAffinity, EnumerateMinimalCandidateSelectionInput,
+    SchedulerMinimalCandidateSelectionCandidate,
 };
 use async_trait::async_trait;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -56,6 +57,7 @@ struct GatewayLocalCandidatePreselectionPort<'a> {
     state: PlannerAppState<'a>,
     client_api_format: &'a str,
     requested_model: &'a str,
+    request_operation: Option<&'a str>,
     require_streaming: bool,
     required_capabilities: Option<&'a serde_json::Value>,
     auth_snapshot: &'a GatewayAuthApiKeySnapshot,
@@ -112,7 +114,7 @@ impl AiCandidatePreselectionPort for GatewayLocalCandidatePreselectionPort<'_> {
         let auth_snapshot = matches_client_format.then_some(self.auth_snapshot);
         let (candidates, skipped_candidates) = self
             .state
-            .list_selectable_candidates_with_skip_reasons(
+            .list_selectable_candidates_with_skip_reasons_for_request_operation(
                 candidate_api_format,
                 self.routing_model(candidate_api_format),
                 self.require_streaming,
@@ -121,6 +123,7 @@ impl AiCandidatePreselectionPort for GatewayLocalCandidatePreselectionPort<'_> {
                 self.client_session_affinity,
                 self.ranking_seed,
                 false,
+                self.request_operation,
             )
             .await?;
 
@@ -197,6 +200,7 @@ pub(crate) async fn preselect_local_execution_candidates_with_serving(
     model_directive_policy: &crate::system_features::ModelDirectivePolicySnapshot,
     client_api_format: &str,
     requested_model: &str,
+    request_operation: Option<&str>,
     require_streaming: bool,
     required_capabilities: Option<&serde_json::Value>,
     auth_snapshot: &GatewayAuthApiKeySnapshot,
@@ -221,6 +225,7 @@ pub(crate) async fn preselect_local_execution_candidates_with_serving(
         model_directive_policy,
         client_api_format,
         requested_model,
+        request_operation,
         require_streaming,
         required_capabilities,
         auth_snapshot,
@@ -239,6 +244,7 @@ pub(crate) async fn preselect_local_execution_candidates_for_api_formats_with_se
     model_directive_policy: &crate::system_features::ModelDirectivePolicySnapshot,
     client_api_format: &str,
     requested_model: &str,
+    request_operation: Option<&str>,
     require_streaming: bool,
     required_capabilities: Option<&serde_json::Value>,
     auth_snapshot: &GatewayAuthApiKeySnapshot,
@@ -263,6 +269,7 @@ pub(crate) async fn preselect_local_execution_candidates_for_api_formats_with_se
         state,
         client_api_format,
         requested_model,
+        request_operation,
         require_streaming,
         required_capabilities,
         auth_snapshot,
@@ -283,6 +290,7 @@ pub(crate) struct LocalCandidatePreselectionPageCursor<'a> {
     trace_id: String,
     client_api_format: String,
     requested_model: String,
+    request_operation: Option<String>,
     require_streaming: bool,
     required_capabilities: Option<serde_json::Value>,
     auth_snapshot: GatewayAuthApiKeySnapshot,
@@ -336,6 +344,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
         model_directive_policy: &crate::system_features::ModelDirectivePolicySnapshot,
         client_api_format: &str,
         requested_model: &str,
+        request_operation: Option<&str>,
         require_streaming: bool,
         required_capabilities: Option<&serde_json::Value>,
         auth_snapshot: &GatewayAuthApiKeySnapshot,
@@ -370,6 +379,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
             trace_id: trace_id.unwrap_or_default().to_string(),
             client_api_format: client_api_format.to_string(),
             requested_model: requested_model.to_string(),
+            request_operation: request_operation.map(str::to_string),
             require_streaming,
             required_capabilities: required_capabilities.cloned(),
             auth_snapshot: auth_snapshot.clone(),
@@ -452,6 +462,10 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
         self.key_mode.cache_key_name()
     }
 
+    pub(crate) fn resolved_page_cache_request_operation(&self) -> Option<&str> {
+        self.request_operation.as_deref()
+    }
+
     pub(crate) fn resolved_page_cache_use_api_format_alias_match(&self) -> bool {
         self.use_api_format_alias_match
     }
@@ -515,6 +529,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
     > {
         let key = CandidatePageCacheKey::new(
             &self.requested_model,
+            self.request_operation.as_deref(),
             &self.client_api_format,
             self.require_streaming,
             &self.auth_snapshot,
@@ -965,11 +980,12 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
             .map_err(|err| GatewayError::Internal(err.to_string()))?
             .into_iter()
             .filter(|row| {
-                row_supports_requested_model_with_model_directives(
+                row_supports_requested_model_with_model_directives_and_request_operation(
                     row,
                     &routing_model,
                     normalized_api_format,
                     false,
+                    self.request_operation.as_deref(),
                 )
             })
             .collect::<Vec<_>>();
@@ -1009,12 +1025,15 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
             if let Some(value) = self.resolved_global_model_names.get(normalized_api_format) {
                 value.clone()
             } else {
-                let Some(value) = resolve_requested_global_model_name_with_model_directives(
-                    &rows,
-                    &routing_model,
-                    normalized_api_format,
-                    false,
-                ) else {
+                let Some(value) =
+                    resolve_requested_global_model_name_with_model_directives_and_request_operation(
+                        &rows,
+                        &routing_model,
+                        normalized_api_format,
+                        false,
+                        self.request_operation.as_deref(),
+                    )
+                else {
                     return Ok(None);
                 };
                 self.resolved_global_model_names
@@ -1037,6 +1056,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
             EnumerateMinimalCandidateSelectionInput {
                 rows,
                 normalized_api_format,
+                request_operation: self.request_operation.as_deref(),
                 requested_model_name: &routing_model,
                 resolved_global_model_name: resolved_global_model_name.as_str(),
                 require_streaming: self.require_streaming,
@@ -1316,6 +1336,7 @@ mod tests {
             &model_directive_policy,
             "openai:chat",
             "gpt-5",
+            None,
             true,
             None,
             &auth_snapshot,
@@ -1531,6 +1552,7 @@ mod tests {
                 priority: 1,
                 api_formats: None,
                 endpoint_ids: Some(vec!["endpoint-opg-openai".to_string()]),
+                operations: None,
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -1561,6 +1583,7 @@ mod tests {
             &model_directive_policy,
             "claude:messages",
             "gpt-5.5-xhigh",
+            None,
             false,
             None,
             &auth_snapshot,
@@ -1587,6 +1610,70 @@ mod tests {
         assert_eq!(
             page.candidates[0].selected_provider_model_name,
             "gpt-5-upstream"
+        );
+    }
+
+    #[tokio::test]
+    async fn paged_preselection_prefers_operation_scoped_mapping_for_compaction() {
+        let mut row = openai_responses_mapping_row();
+        row.global_model_mappings = None;
+        row.global_model_name = "gpt-5.6-sol".to_string();
+        row.model_provider_model_name = "gpt-5.6-sol".to_string();
+        row.model_provider_model_mappings = Some(vec![
+            StoredProviderModelMapping {
+                name: "gpt-5.6-sol".to_string(),
+                priority: 1,
+                api_formats: Some(vec!["openai:responses".to_string()]),
+                endpoint_ids: None,
+                operations: None,
+            },
+            StoredProviderModelMapping {
+                name: "gpt-5.6-terra".to_string(),
+                priority: 1,
+                api_formats: Some(vec!["openai:responses".to_string()]),
+                endpoint_ids: None,
+                operations: Some(vec!["compact".to_string()]),
+            },
+        ]);
+        let repository: Arc<dyn MinimalCandidateSelectionReadRepository> =
+            Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed([row]));
+        let data_state =
+            GatewayDataState::with_minimal_candidate_selection_reader_for_tests(repository);
+        let app = AppState::new()
+            .expect("gateway state should build")
+            .with_data_state_for_tests(data_state);
+        let auth_snapshot = unrestricted_auth_snapshot();
+        let model_directive_policy =
+            crate::system_features::ModelDirectivePolicySnapshot::load(&app).await;
+        let mut cursor = LocalCandidatePreselectionPageCursor::new(
+            PlannerAppState::new(&app),
+            &model_directive_policy,
+            "openai:responses",
+            "gpt-5.6-sol",
+            Some("compact"),
+            false,
+            None,
+            &auth_snapshot,
+            None,
+            None,
+            None,
+            true,
+            LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModelAndApiFormat,
+            true,
+            None,
+        )
+        .await;
+
+        let page = cursor
+            .next_page()
+            .await
+            .expect("preselection should succeed")
+            .expect("compact mapping should find a provider");
+
+        assert_eq!(page.candidates.len(), 1);
+        assert_eq!(
+            page.candidates[0].selected_provider_model_name,
+            "gpt-5.6-terra"
         );
     }
 
@@ -1634,6 +1721,7 @@ mod tests {
             &model_directive_policy,
             "openai:responses",
             "deployment-alias-VendorFuture",
+            None,
             false,
             None,
             &auth_snapshot,
@@ -1695,6 +1783,7 @@ mod tests {
             &model_directive_policy,
             "claude:messages",
             "deepseek-v4-pro",
+            None,
             false,
             None,
             &auth_snapshot,
@@ -1773,6 +1862,7 @@ mod tests {
             &model_directive_policy,
             "claude:messages",
             "gpt-5",
+            None,
             false,
             None,
             &auth_snapshot,

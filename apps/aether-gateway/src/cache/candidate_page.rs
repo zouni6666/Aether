@@ -82,6 +82,7 @@ pub(crate) struct CandidateRowPageCacheKey {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct CandidatePageCacheKey {
     requested_model: String,
+    request_operation: String,
     client_api_format: String,
     auth_identity: CandidatePageAuthIdentity,
     require_streaming: bool,
@@ -131,6 +132,7 @@ impl CandidatePageCacheKey {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         requested_model: &str,
+        request_operation: Option<&str>,
         client_api_format: &str,
         require_streaming: bool,
         auth_snapshot: &GatewayAuthApiKeySnapshot,
@@ -145,6 +147,7 @@ impl CandidatePageCacheKey {
     ) -> Self {
         Self {
             requested_model: normalize_text_key(requested_model),
+            request_operation: normalize_text_key(request_operation.unwrap_or_default()),
             client_api_format: normalize_api_format(client_api_format),
             auth_identity: CandidatePageAuthIdentity::from_auth_snapshot(auth_snapshot),
             require_streaming,
@@ -164,6 +167,7 @@ impl CandidateResolvedPageCacheKey {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         requested_model: &str,
+        request_operation: Option<&str>,
         client_api_format: &str,
         require_streaming: bool,
         auth_snapshot: &GatewayAuthApiKeySnapshot,
@@ -180,6 +184,7 @@ impl CandidateResolvedPageCacheKey {
         Self {
             page_key: CandidatePageCacheKey::new(
                 requested_model,
+                request_operation,
                 client_api_format,
                 require_streaming,
                 auth_snapshot,
@@ -564,6 +569,7 @@ mod tests {
         let auth_b = auth_snapshot("user-b", "key-a");
         let base = CandidatePageCacheKey::new(
             "gpt-4o",
+            None,
             "openai:chat",
             true,
             &auth_a,
@@ -578,6 +584,7 @@ mod tests {
         );
         let different_user = CandidatePageCacheKey::new(
             "gpt-4o",
+            None,
             "openai:chat",
             true,
             &auth_b,
@@ -592,6 +599,22 @@ mod tests {
         );
         let different_model = CandidatePageCacheKey::new(
             "gpt-4.1",
+            None,
+            "openai:chat",
+            true,
+            &auth_a,
+            Some(&json!({"vision": true})),
+            None,
+            Some("bearer"),
+            7,
+            "provider_endpoint_key_model",
+            true,
+            None,
+            "policy-a",
+        );
+        let different_operation = CandidatePageCacheKey::new(
+            "gpt-4o",
+            Some("compact"),
             "openai:chat",
             true,
             &auth_a,
@@ -606,6 +629,7 @@ mod tests {
         );
         let different_format = CandidatePageCacheKey::new(
             "gpt-4o",
+            None,
             "openai:responses",
             true,
             &auth_a,
@@ -620,6 +644,7 @@ mod tests {
         );
         let different_capabilities = CandidatePageCacheKey::new(
             "gpt-4o",
+            None,
             "openai:chat",
             true,
             &auth_a,
@@ -634,6 +659,7 @@ mod tests {
         );
         let same_policy = CandidatePageCacheKey::new(
             "gpt-4o",
+            None,
             "openai:chat",
             true,
             &auth_a,
@@ -648,6 +674,7 @@ mod tests {
         );
         let different_policy = CandidatePageCacheKey::new(
             "gpt-4o",
+            None,
             "openai:chat",
             true,
             &auth_a,
@@ -664,12 +691,14 @@ mod tests {
         assert_eq!(base, same_policy);
         assert_ne!(base, different_user);
         assert_ne!(base, different_model);
+        assert_ne!(base, different_operation);
         assert_ne!(base, different_format);
         assert_ne!(base, different_capabilities);
         assert_ne!(base, different_policy);
 
         let resolved_base = CandidateResolvedPageCacheKey::new(
             "gpt-4o",
+            None,
             "openai:chat",
             true,
             &auth_a,
@@ -685,6 +714,7 @@ mod tests {
         );
         let resolved_same_policy = CandidateResolvedPageCacheKey::new(
             "gpt-4o",
+            None,
             "openai:chat",
             true,
             &auth_a,
@@ -700,6 +730,7 @@ mod tests {
         );
         let resolved_different_policy = CandidateResolvedPageCacheKey::new(
             "gpt-4o",
+            None,
             "openai:chat",
             true,
             &auth_a,

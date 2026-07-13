@@ -590,6 +590,7 @@ fn sample_minimal_candidate_selection_row(
             priority: 1,
             api_formats: Some(vec!["openai:chat".to_string()]),
             endpoint_ids: None,
+            operations: None,
         }]),
         model_supports_streaming: None,
         model_is_active: true,
@@ -907,6 +908,7 @@ async fn data_state_reads_minimal_candidate_selection_with_auth_filters() {
         enumerate_minimal_candidate_selection(EnumerateMinimalCandidateSelectionInput {
             rows,
             normalized_api_format: "openai:chat",
+            request_operation: None,
             requested_model_name: "gpt-4.1",
             resolved_global_model_name: "gpt-4.1",
             require_streaming: false,

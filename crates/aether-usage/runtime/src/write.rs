@@ -254,8 +254,13 @@ pub fn build_lifecycle_usage_seed(
     let model = context_string(context, "model")
         .or_else(|| non_empty_str(plan.model_name.as_deref()))
         .unwrap_or_else(|| "unknown".to_string());
-    let request_type =
-        infer_request_type_from_contracts(api_format.as_deref(), endpoint_api_format.as_deref());
+    let provider_request = context_body_value(context, "provider_request_body")
+        .or_else(|| plan_json_body_capture_for_usage(plan));
+    let request_type = infer_request_type_from_contracts(
+        api_format.as_deref(),
+        endpoint_api_format.as_deref(),
+        provider_request.as_ref(),
+    );
     let api_family = api_format
         .as_deref()
         .and_then(infer_api_family)
@@ -804,6 +809,7 @@ pub fn build_terminal_usage_context_seed(
     let request_type = infer_request_type_from_contracts(
         Some(client_contract.as_str()),
         Some(provider_contract.as_str()),
+        request_capture.provider_request.as_ref(),
     );
     let has_format_conversion = resolve_has_format_conversion(
         context,
@@ -1697,6 +1703,7 @@ fn build_usage_event_data_seed_with_detail(
     let request_type = Some(infer_request_type_from_contracts(
         api_format.as_deref(),
         endpoint_api_format.as_deref(),
+        request_capture.provider_request.as_ref(),
     ));
     let api_family = api_format
         .as_deref()
@@ -2467,7 +2474,20 @@ fn infer_request_type(api_format: Option<&str>) -> String {
 fn infer_request_type_from_contracts(
     client_api_format: Option<&str>,
     provider_api_format: Option<&str>,
+    provider_request: Option<&Value>,
 ) -> String {
+    let empty_body = Value::Null;
+    let provider_request = provider_request.unwrap_or(&empty_body);
+    for api_format in [provider_api_format, client_api_format]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(operation) =
+            aether_ai_formats::openai_responses_request_operation(api_format, provider_request)
+        {
+            return operation.to_string();
+        }
+    }
     if matches!(
         infer_endpoint_kind(provider_api_format.unwrap_or_default()),
         Some("image")
@@ -3711,7 +3731,9 @@ mod tests {
                     "candidate_id": "cand-pending-event-1",
                     "candidate_index": 3,
                     "original_request_body": {"messages": [{"content": "omit me"}]},
-                    "provider_request_body": {"input": "omit me too"}
+                    "provider_request_body": {
+                        "input": [{"type": "compaction_trigger"}]
+                    }
                 })),
             ),
             1_700_000_020,
@@ -3723,6 +3745,7 @@ mod tests {
         assert_eq!(record.request_id, "req-pending-event-1");
         assert_eq!(record.status, "pending");
         assert_eq!(record.billing_status, "pending");
+        assert_eq!(record.request_type.as_deref(), Some("compact"));
         assert_eq!(record.finalized_at_unix_secs, None);
         assert_eq!(record.updated_at_unix_secs, 1_700_000_020);
         assert!(record.request_body.is_none());

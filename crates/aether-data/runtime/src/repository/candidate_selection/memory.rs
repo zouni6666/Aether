@@ -426,6 +426,7 @@ mod tests {
             priority: 0,
             api_formats: Some(vec!["openai:chat".to_string()]),
             endpoint_ids: None,
+            operations: None,
         }]);
         let repository = InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
             mapped,
@@ -458,6 +459,7 @@ mod tests {
             priority: 0,
             api_formats: Some(vec!["openai:responses".to_string()]),
             endpoint_ids: None,
+            operations: None,
         }]);
 
         let mut responses = search.clone();
@@ -521,6 +523,7 @@ mod tests {
             priority: 1,
             api_formats: None,
             endpoint_ids: Some(vec!["endpoint-openai".to_string()]),
+            operations: None,
         }]);
 
         let mut scoped_out = selected.clone();

@@ -1188,6 +1188,7 @@ fn admin_usage_active_request_json(
     let mut value = json!({
         "id": item.id,
         "status": item.status,
+        "request_type": item.request_type,
         "input_tokens": item.input_tokens,
         "effective_input_tokens": admin_usage_effective_input_tokens(item),
         "output_tokens": item.output_tokens,
@@ -1304,6 +1305,7 @@ pub fn admin_usage_record_json(
         "status_code": item.status_code,
         "error_message": item.error_message,
         "status": item.status,
+        "request_type": item.request_type,
         "has_fallback": admin_usage_has_fallback(item),
         "has_retry": false,
         "has_rectified": false,
