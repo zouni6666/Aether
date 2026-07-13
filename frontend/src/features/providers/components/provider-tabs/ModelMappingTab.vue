@@ -39,10 +39,10 @@
       >
         <!-- 行头部（可点击展开） -->
         <div
-          class="flex items-center justify-between px-4 py-3 hover:bg-muted/20 cursor-pointer"
+          class="flex items-start justify-between px-4 py-3 hover:bg-muted/20 cursor-pointer"
           @click="toggleExpand(item.key)"
         >
-          <div class="flex items-center gap-2 flex-1 min-w-0">
+          <div class="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1.5">
             <!-- 展开/收起图标 -->
             <ChevronRight
               class="w-4 h-4 text-muted-foreground shrink-0 transition-transform self-start mt-0.5"
@@ -50,7 +50,7 @@
             />
             <!-- 精确映射 -->
             <template v-if="item.type === 'exact'">
-              <div class="flex flex-col min-w-0">
+              <div class="flex min-w-0 flex-[1_1_12rem] flex-col">
                 <span class="font-semibold text-sm truncate">
                   {{ item.targetModelName }}
                 </span>
@@ -75,21 +75,23 @@
               <Badge
                 v-if="item.group"
                 variant="outline"
-                class="text-xs shrink-0"
+                class="min-w-0 max-w-full text-xs"
+                :title="getGroupEndpointScopeTitle(item.group)"
               >
-                {{ getGroupEndpointScopeLabel(item.group) }}
+                <span class="truncate">{{ getGroupEndpointScopeLabel(item.group) }}</span>
               </Badge>
               <Badge
-                v-if="item.group && item.group.operations.length > 0"
+                v-if="item.group"
                 variant="outline"
-                class="text-xs shrink-0"
+                class="min-w-0 max-w-full text-xs"
+                :title="getGroupOperationScopeLabel(item.group)"
               >
-                {{ getGroupOperationScopeLabel(item.group) }}
+                <span class="truncate">{{ getGroupOperationScopeLabel(item.group) }}</span>
               </Badge>
             </template>
             <!-- 正则映射 -->
             <template v-else>
-              <div class="flex flex-col min-w-0">
+              <div class="flex min-w-0 flex-[1_1_12rem] flex-col">
                 <span class="font-semibold text-sm truncate">
                   {{ item.targetModelName }}
                 </span>
@@ -372,8 +374,15 @@ import {
 } from '@/api/endpoints'
 import { type EndpointAPIKey } from '@/api/endpoints/keys'
 import { updateModel } from '@/api/endpoints/models'
+import { useI18n } from '@/i18n'
 import { parseApiError } from '@/utils/errorParser'
 import type { ProviderWithEndpointsSummary } from '@/api/endpoints'
+import {
+  formatModelMappingEndpointLabel,
+  formatModelMappingRequestScope,
+  modelMappingOperationsKey,
+  normalizeModelMappingOperations,
+} from '../../utils/modelMappingScope'
 import {
   buildDefaultModelTestRequestHeaders,
   buildDefaultModelTestRequestBody,
@@ -424,6 +433,7 @@ const emit = defineEmits<{
 }>()
 
 const { error: showError, success: showSuccess } = useToast()
+const { t } = useI18n()
 
 // 模型测试 composable
 const modelTest = useModelTest({ providerId: () => props.provider.id })
@@ -501,17 +511,46 @@ function getEndpointIdsKey(endpointIds: string[] | undefined): string {
 }
 
 function getOperationsKey(operations: string[] | undefined): string {
-  return getScopeKey(operations)
+  return modelMappingOperationsKey(operations)
 }
 
+const requestScopeLabels = computed(() => ({
+  allRequests: t('providers.modelMapping.scope.allRequests'),
+  sessionCompactionOnly: t('providers.modelMapping.scope.sessionCompactionOnly'),
+  customOperations: (operations: string[]) => t(
+    'providers.modelMapping.scope.customOperations',
+    { operations: operations.join(', ') },
+  ),
+}))
+
 function getGroupEndpointScopeLabel(group: AliasGroup): string {
-  if (!group.endpointIds || group.endpointIds.length === 0) return '全部端点'
-  return `${group.endpointIds.length} 端点`
+  if (!group.endpointIds || group.endpointIds.length === 0) {
+    return t('providers.modelMapping.scope.allEndpoints')
+  }
+  const labels = getGroupEndpointScopeLabels(group)
+  return labels.length === 1
+    ? labels[0]
+    : t('providers.modelMapping.scope.endpointCount', { count: labels.length })
+}
+
+function getGroupEndpointScopeTitle(group: AliasGroup): string {
+  if (!group.endpointIds || group.endpointIds.length === 0) {
+    return t('providers.modelMapping.scope.allEndpoints')
+  }
+  return getGroupEndpointScopeLabels(group).join('、')
+}
+
+function getGroupEndpointScopeLabels(group: AliasGroup): string[] {
+  const endpoints = props.endpoints ?? []
+  return group.endpointIds.map((endpointId) => {
+    const endpoint = endpoints.find(item => item.id === endpointId)
+    if (!endpoint) return endpointId
+    return formatModelMappingEndpointLabel(endpoint, endpoints)
+  })
 }
 
 function getGroupOperationScopeLabel(group: AliasGroup): string {
-  if (group.operations.length === 1 && group.operations[0] === 'compact') return '压缩'
-  return `${group.operations.length} 项操作`
+  return formatModelMappingRequestScope(group.operations, requestScopeLabels.value)
 }
 
 // 精确映射分组（来自 provider_model_mappings）
@@ -536,7 +575,7 @@ const exactMappingGroups = computed<AliasGroup[]>(() => {
           endpointIdsKey,
           endpointIds: normalizeStringList(alias.endpoint_ids),
           operationsKey,
-          operations: normalizeStringList(alias.operations),
+          operations: normalizeModelMappingOperations(alias.operations),
           aliases: []
         }
         groupMap.set(groupKey, group)

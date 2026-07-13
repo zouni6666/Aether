@@ -303,7 +303,7 @@ describe('UsageRecordsTable', () => {
       request_type: 'compact',
     })])
 
-    expect(root.textContent).toContain('压缩')
+    expect(root.textContent).toContain('会话压缩')
   })
 
   it('shows fast badge for priority service tier', () => {

@@ -248,7 +248,7 @@
                 v-if="getRequestTypeLabel(record)"
                 variant="outline"
                 class="h-4 rounded-full border-sky-500/30 bg-sky-500/5 px-1.5 text-[10px] leading-4 text-sky-700 dark:text-sky-300 flex-shrink-0"
-                title="线程压缩"
+                title="会话压缩"
               >
                 {{ getRequestTypeLabel(record) }}
               </Badge>
@@ -765,7 +765,7 @@
                   v-if="getRequestTypeLabel(record)"
                   variant="outline"
                   class="h-4 rounded-full border-sky-500/30 bg-sky-500/5 px-1.5 text-[10px] leading-4 text-sky-700 dark:text-sky-300 flex-shrink-0"
-                  title="线程压缩"
+                  title="会话压缩"
                 >
                   {{ getRequestTypeLabel(record) }}
                 </Badge>
@@ -797,7 +797,7 @@
                 v-if="getRequestTypeLabel(record)"
                 variant="outline"
                 class="h-4 rounded-full border-sky-500/30 bg-sky-500/5 px-1.5 text-[10px] leading-4 text-sky-700 dark:text-sky-300 flex-shrink-0"
-                title="线程压缩"
+                title="会话压缩"
               >
                 {{ getRequestTypeLabel(record) }}
               </Badge>
@@ -1630,7 +1630,7 @@ function getReasoningEffort(record: UsageRecord): string | null {
 }
 
 function getRequestTypeLabel(record: UsageRecord): string | null {
-  return record.request_type?.trim().toLowerCase() === 'compact' ? '压缩' : null
+  return record.request_type?.trim().toLowerCase() === 'compact' ? '会话压缩' : null
 }
 
 function getReasoningEffortTitle(record: UsageRecord): string {

@@ -38,21 +38,21 @@
       >
         <!-- 分组头部（可点击展开） -->
         <div
-          class="flex items-center justify-between px-4 py-3 hover:bg-muted/20 cursor-pointer"
+          class="flex items-start justify-between px-4 py-3 hover:bg-muted/20 cursor-pointer"
           @click="toggleAliasGroupExpand(getAliasGroupKey(group))"
         >
-          <div class="flex items-center gap-2 flex-1 min-w-0">
+          <div class="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1.5">
             <!-- 展开/收起图标 -->
             <ChevronRight
               class="w-4 h-4 text-muted-foreground shrink-0 transition-transform"
               :class="{ 'rotate-90': expandedAliasGroups.has(getAliasGroupKey(group)) }"
             />
             <!-- 模型名称 -->
-            <span class="font-semibold text-sm truncate">
+            <span class="min-w-0 flex-[1_1_12rem] truncate text-sm font-semibold">
               {{ group.model.global_model_display_name || group.model.provider_model_name }}
             </span>
             <!-- 作用域标签 -->
-            <div class="flex items-center gap-1 shrink-0">
+            <div class="flex min-w-0 max-w-full flex-wrap items-center gap-1">
               <Badge
                 v-if="group.apiFormats.length === 0"
                 variant="outline"
@@ -76,11 +76,10 @@
                 {{ getEndpointScopeLabel(group) }}
               </Badge>
               <Badge
-                v-if="group.operations.length > 0"
                 variant="outline"
-                class="text-xs"
+                class="min-w-0 max-w-full text-xs"
               >
-                {{ getOperationScopeLabel(group) }}
+                <span class="truncate">{{ getOperationScopeLabel(group) }}</span>
               </Badge>
             </div>
             <!-- 映射数量 -->
@@ -214,10 +213,16 @@ import {
   type ProviderModelAlias
 } from '@/api/endpoints'
 import { updateModel } from '@/api/endpoints/models'
+import { useI18n } from '@/i18n'
 import { parseApiError, parseTestModelError } from '@/utils/errorParser'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
 import { buildExactModelMappingTestRequest } from './model-test-request'
 import type { ProviderWithEndpointsSummary } from '@/api/endpoints'
+import {
+  formatModelMappingRequestScope,
+  modelMappingOperationsKey,
+  normalizeModelMappingOperations,
+} from '../../utils/modelMappingScope'
 
 const props = defineProps<{
   provider: ProviderWithEndpointsSummary
@@ -228,6 +233,7 @@ const emit = defineEmits<{
 }>()
 
 const { error: showError, success: showSuccess } = useToast()
+const { t } = useI18n()
 
 // 状态
 const loading = ref(false)
@@ -278,21 +284,31 @@ function getEndpointIdsKey(endpointIds: string[] | undefined): string {
 }
 
 function getOperationsKey(operations: string[] | undefined): string {
-  return getScopeKey(operations)
+  return modelMappingOperationsKey(operations)
 }
+
+const requestScopeLabels = computed(() => ({
+  allRequests: t('providers.modelMapping.scope.allRequests'),
+  sessionCompactionOnly: t('providers.modelMapping.scope.sessionCompactionOnly'),
+  customOperations: (operations: string[]) => t(
+    'providers.modelMapping.scope.customOperations',
+    { operations: operations.join(', ') },
+  ),
+}))
 
 function getAliasGroupKey(group: AliasGroup): string {
   return `${group.model.id}-${group.apiFormatsKey}-${group.endpointIdsKey}-${group.operationsKey}`
 }
 
 function getEndpointScopeLabel(group: AliasGroup): string {
-  if (!group.endpointIds || group.endpointIds.length === 0) return '全部端点'
-  return `${group.endpointIds.length} 端点`
+  if (!group.endpointIds || group.endpointIds.length === 0) {
+    return t('providers.modelMapping.scope.allEndpoints')
+  }
+  return t('providers.modelMapping.scope.endpointCount', { count: group.endpointIds.length })
 }
 
 function getOperationScopeLabel(group: AliasGroup): string {
-  if (group.operations.length === 1 && group.operations[0] === 'compact') return '压缩'
-  return `${group.operations.length} 项操作`
+  return formatModelMappingRequestScope(group.operations, requestScopeLabels.value)
 }
 
 // 按"模型+作用域"分组的映射列表
@@ -317,7 +333,7 @@ const aliasGroups = computed<AliasGroup[]>(() => {
           endpointIdsKey,
           endpointIds: normalizeStringList(alias.endpoint_ids),
           operationsKey,
-          operations: normalizeStringList(alias.operations),
+          operations: normalizeModelMappingOperations(alias.operations),
           aliases: []
         }
         groupMap.set(groupKey, group)

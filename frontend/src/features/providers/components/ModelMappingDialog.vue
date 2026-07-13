@@ -37,42 +37,6 @@
         </p>
       </div>
 
-      <!-- 端点限制 -->
-      <div class="space-y-1.5">
-        <div class="flex items-center justify-between gap-2">
-          <Label class="text-xs">限制端点</Label>
-          <span class="text-xs text-muted-foreground">{{ endpointScopeSummary }}</span>
-        </div>
-        <MultiSelect
-          v-model="selectedEndpointIds"
-          :options="endpointOptions"
-          placeholder="全部端点"
-          empty-text="暂无端点"
-          no-results-text="未找到端点"
-          trigger-class="h-9 rounded-md"
-          dropdown-min-width="24rem"
-          :search-threshold="4"
-        />
-        <p class="text-xs text-muted-foreground">
-          默认对全部端点生效；选择端点后，此映射只在选中的端点上生效
-        </p>
-      </div>
-
-      <div class="space-y-1.5">
-        <div class="flex items-center justify-between gap-2">
-          <Label class="text-xs">请求操作</Label>
-          <span class="text-xs text-muted-foreground">{{ operationScopeSummary }}</span>
-        </div>
-        <MultiSelect
-          v-model="selectedOperations"
-          :options="operationOptions"
-          placeholder="全部操作"
-          empty-text="暂无可选操作"
-          no-results-text="未找到操作"
-          trigger-class="h-9 rounded-md"
-        />
-      </div>
-
       <!-- 映射名称选择面板 -->
       <div class="space-y-1.5">
         <Label class="text-xs">提供商模型</Label>
@@ -259,6 +223,67 @@
           </div>
         </div>
       </div>
+
+      <div class="space-y-3 border-t border-border/60 pt-4">
+        <div class="flex flex-col gap-1.5 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+          <div class="min-w-0 space-y-0.5">
+            <h3 class="text-sm font-medium text-foreground">
+              适用范围
+            </h3>
+            <p class="text-xs text-muted-foreground">
+              {{ t('providers.modelMapping.scope.matchHelp') }}
+            </p>
+          </div>
+          <span class="max-w-full break-words text-left text-xs text-muted-foreground sm:max-w-[55%] sm:text-right">
+            {{ mappingScopeSummary }}
+          </span>
+        </div>
+
+        <div class="grid gap-4 sm:grid-cols-2">
+          <div class="min-w-0 space-y-1.5">
+            <Label class="text-xs">适用端点</Label>
+            <MultiSelect
+              v-model="selectedEndpointIds"
+              :options="endpointOptions"
+              :placeholder="t('providers.modelMapping.scope.allEndpoints')"
+              empty-text="暂无端点"
+              no-results-text="未找到端点"
+              trigger-class="h-9 rounded-md"
+              :search-threshold="4"
+            />
+            <p class="text-xs leading-5 text-muted-foreground">
+              {{ t('providers.modelMapping.scope.endpointHelp') }}
+            </p>
+          </div>
+
+          <div class="min-w-0 space-y-1.5">
+            <Label class="text-xs">适用请求</Label>
+            <div
+              class="flex min-h-9 w-full flex-wrap gap-1 rounded-md bg-muted/50 p-1"
+              role="radiogroup"
+              aria-label="适用请求"
+            >
+              <Button
+                v-for="option in requestScopeOptions"
+                :key="option.value"
+                type="button"
+                size="sm"
+                :variant="requestScopeValue === option.value ? 'secondary' : 'ghost'"
+                class="h-7 min-w-0 flex-1 basis-[9rem] px-2.5"
+                role="radio"
+                :aria-checked="requestScopeValue === option.value"
+                :title="option.label"
+                @click="handleRequestScopeChange(option.value)"
+              >
+                <span class="truncate">{{ option.label }}</span>
+              </Button>
+            </div>
+            <p class="text-xs leading-5 text-muted-foreground">
+              {{ requestScopeDescription }}
+            </p>
+          </div>
+        </div>
+      </div>
     </div>
 
     <template #footer>
@@ -276,7 +301,7 @@
           v-if="submitting"
           class="w-4 h-4 mr-2 animate-spin"
         />
-        {{ editingGroup ? '保存' : '添加' }}
+        {{ editingGroup ? '保存映射' : '添加映射' }}
       </Button>
     </template>
   </Dialog>
@@ -298,6 +323,7 @@ import {
 } from '@/components/ui'
 import MultiSelect from '@/components/common/MultiSelect.vue'
 import { useToast } from '@/composables/useToast'
+import { useI18n } from '@/i18n'
 import { parseApiError } from '@/utils/errorParser'
 import {
   type Model,
@@ -306,8 +332,18 @@ import {
   type UpstreamModel,
 } from '@/api/endpoints'
 import { updateModel } from '@/api/endpoints/models'
-import { formatApiFormat } from '@/api/endpoints/types/api-format'
 import { useUpstreamModelsCache } from '../composables/useUpstreamModelsCache'
+import {
+  ALL_REQUESTS_SCOPE_VALUE,
+  COMPACT_REQUEST_SCOPE_VALUE,
+  formatModelMappingEndpointLabel,
+  formatModelMappingRequestScope,
+  modelMappingOperationsKey,
+  modelMappingOperationsFromScopeValue,
+  modelMappingRequestScopeOptions,
+  modelMappingRequestScopeValue,
+  normalizeModelMappingOperations,
+} from '../utils/modelMappingScope'
 
 export interface AliasGroup {
   model: Model
@@ -340,14 +376,10 @@ const emit = defineEmits<{
 }>()
 
 const { error: showError, success: showSuccess, warning: showWarning } = useToast()
+const { t } = useI18n()
 const { fetchModels: fetchCachedModels } = useUpstreamModelsCache()
 
 type EndpointOption = {
-  value: string
-  label: string
-}
-
-type OperationOption = {
   value: string
   label: string
 }
@@ -382,54 +414,77 @@ const selectedEndpointIds = ref<string[]>([])
 
 const selectedOperations = ref<string[]>([])
 
-const operationOptions: OperationOption[] = [
-  { value: 'compact', label: '线程压缩' }
-]
-
 // 自定义名称列表（手动添加的）
 const allCustomNames = ref<string[]>([])
 
 const endpointOptions = computed<EndpointOption[]>(() => {
-  return (props.endpoints ?? []).map((endpoint) => {
-    const status = endpoint.is_active ? '' : '（停用）'
-    return {
-      value: endpoint.id,
-      label: `${formatApiFormat(endpoint.api_format)}${status}`,
-    }
-  })
+  const endpoints = props.endpoints ?? []
+  return endpoints.map(endpoint => ({
+    value: endpoint.id,
+    label: formatModelMappingEndpointLabel(endpoint, endpoints),
+  }))
 })
 
 const normalizedSelectedEndpointIds = computed(() => {
-  const validIds = new Set(endpointOptions.value.map(option => option.value))
   const selected = normalizeStringList(selectedEndpointIds.value)
-  if (selected.length === 0) {
-    return undefined
-  }
-  const invalidSelected = selected.filter(endpointId => !validIds.has(endpointId))
-  const selectedValidCount = selected.filter(endpointId => validIds.has(endpointId)).length
-  if (validIds.size > 0 && invalidSelected.length === 0 && selectedValidCount === validIds.size) {
-    return undefined
-  }
-  return selected
+  return selected.length > 0 ? selected : undefined
 })
 
 const endpointScopeSummary = computed(() => {
   const selected = normalizedSelectedEndpointIds.value
-  if (!selected || selected.length === 0) return '全部端点'
-  return `${selected.length} 个端点`
+  if (!selected || selected.length === 0) {
+    return t('providers.modelMapping.scope.allEndpoints')
+  }
+  if (selected.length === 1) {
+    return endpointOptions.value.find(option => option.value === selected[0])?.label
+      ?? t('providers.modelMapping.scope.endpointCount', { count: 1 })
+  }
+  return t('providers.modelMapping.scope.endpointCount', { count: selected.length })
 })
 
+const requestScopeLabels = computed(() => ({
+  allRequests: t('providers.modelMapping.scope.allRequests'),
+  sessionCompactionOnly: t('providers.modelMapping.scope.sessionCompactionOnly'),
+  customOperations: (operations: string[]) => t(
+    'providers.modelMapping.scope.customOperations',
+    { operations: operations.join(', ') },
+  ),
+}))
+
 const normalizedSelectedOperations = computed(() => {
-  const selected = normalizeStringList(selectedOperations.value)
+  const selected = normalizeModelMappingOperations(selectedOperations.value)
   return selected.length > 0 ? selected : undefined
 })
 
 const operationScopeSummary = computed(() => {
-  const selected = normalizedSelectedOperations.value
-  if (!selected) return '全部操作'
-  return selected.length === 1 && selected[0] === 'compact'
-    ? '线程压缩'
-    : `${selected.length} 项操作`
+  return formatModelMappingRequestScope(
+    normalizedSelectedOperations.value,
+    requestScopeLabels.value,
+  )
+})
+
+const mappingScopeSummary = computed(() => {
+  return `${endpointScopeSummary.value} · ${operationScopeSummary.value}`
+})
+
+const requestScopeValue = computed(() => {
+  return modelMappingRequestScopeValue(selectedOperations.value)
+})
+
+const requestScopeOptions = computed(() => {
+  return modelMappingRequestScopeOptions(selectedOperations.value, requestScopeLabels.value)
+})
+
+const requestScopeDescription = computed(() => {
+  if (requestScopeValue.value === ALL_REQUESTS_SCOPE_VALUE) {
+    return t('providers.modelMapping.scope.allRequestsDescription')
+  }
+  if (requestScopeValue.value === COMPACT_REQUEST_SCOPE_VALUE) {
+    return t('providers.modelMapping.scope.sessionCompactionDescription')
+  }
+  return t('providers.modelMapping.scope.customOperationsDescription', {
+    operations: normalizeModelMappingOperations(selectedOperations.value).join(', '),
+  })
 })
 
 // 所有已知名称集合
@@ -559,6 +614,17 @@ function scopesOverlap(left: string[] | undefined, right: string[] | undefined):
   return leftValues.some(value => rightSet.has(value))
 }
 
+function operationScopesOverlap(
+  left: string[] | undefined,
+  right: string[] | undefined,
+): boolean {
+  const leftValues = normalizeModelMappingOperations(left)
+  const rightValues = normalizeModelMappingOperations(right)
+  if (leftValues.length === 0 || rightValues.length === 0) return true
+  const rightSet = new Set(rightValues)
+  return leftValues.some(value => rightSet.has(value))
+}
+
 function findDuplicateNames(
   existingAliases: ProviderModelAlias[],
   names: string[],
@@ -574,7 +640,7 @@ function findDuplicateNames(
       return alias.name === name
         && scopesOverlap(alias.endpoint_ids, endpointIds)
         && scopesOverlap(alias.api_formats, apiFormats)
-        && scopesOverlap(alias.operations, operations)
+        && operationScopesOverlap(alias.operations, operations)
     })
     if (duplicate) duplicates.add(name)
   }
@@ -640,7 +706,7 @@ function initForm() {
     const existingNames = props.editingGroup.aliases.map(a => a.name)
     selectedNames.value = [...existingNames]
     selectedEndpointIds.value = normalizeStringList(props.editingGroup.endpointIds)
-    selectedOperations.value = normalizeStringList(props.editingGroup.operations)
+    selectedOperations.value = normalizeModelMappingOperations(props.editingGroup.operations)
     allCustomNames.value = [...existingNames]
   } else {
     formData.value = {
@@ -662,6 +728,10 @@ function handleModelChange(value: string) {
   formData.value.modelId = value
 }
 
+function handleRequestScopeChange(value: string) {
+  selectedOperations.value = modelMappingOperationsFromScopeValue(value) ?? []
+}
+
 // 生成作用域唯一键
 function getApiFormatsKey(formats: string[] | undefined): string {
   return getScopeKey(formats)
@@ -672,7 +742,7 @@ function getEndpointIdsKey(endpointIds: string[] | undefined): string {
 }
 
 function getOperationsKey(operations: string[] | undefined): string {
-  return getScopeKey(operations)
+  return modelMappingOperationsKey(operations)
 }
 
 // 提交表单
@@ -712,7 +782,7 @@ async function handleSubmit() {
     if (props.editingGroup) {
       const oldApiFormatsKey = props.editingGroup.apiFormatsKey
       const oldEndpointIdsKey = props.editingGroup.endpointIdsKey
-      const oldOperationsKey = props.editingGroup.operationsKey
+      const oldOperationsKey = modelMappingOperationsKey(props.editingGroup.operations)
       const oldAliasNames = new Set(props.editingGroup.aliases.map(a => a.name))
 
       const filteredAliases = currentAliases.filter((a: ProviderModelAlias) => {

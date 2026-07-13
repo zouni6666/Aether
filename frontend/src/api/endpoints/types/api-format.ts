@@ -235,7 +235,9 @@ export function apiFormatPermissionCovers(
   return Boolean(allowed)
     && Boolean(requested)
     && (allowed === requested
-      || (allowed === API_FORMATS.OPENAI_RESPONSES && requested === API_FORMATS.OPENAI_SEARCH))
+      || (allowed === API_FORMATS.OPENAI_RESPONSES
+        && (requested === API_FORMATS.OPENAI_RESPONSES_COMPACT
+          || requested === API_FORMATS.OPENAI_SEARCH)))
 }
 
 // 工具函数：按 family 分组并排序 API 格式数组
