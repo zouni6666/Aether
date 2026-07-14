@@ -1,7 +1,5 @@
 import type { PoolKeyBatchUpdatePatch } from '@/api/endpoints/pool'
 
-export type PoolKeyBatchModelMode = '' | 'manual' | 'automatic'
-
 export interface PoolKeyBatchEditState {
   applyApiFormats: boolean
   apiFormats: string[]
@@ -19,12 +17,14 @@ export interface PoolKeyBatchEditState {
   maxProbeIntervalMinutes: string
   applyNote: boolean
   note: string
-  applyModels: boolean
-  modelMode: PoolKeyBatchModelMode
-  unrestrictedModels: boolean
-  selectedModels: string[]
+  applyAutoFetchModels: boolean
+  autoFetchModels: boolean
   includePatterns: string
   excludePatterns: string
+  applyAllowedModels: boolean
+  unrestrictedModels: boolean
+  selectedModels: string[]
+  lockSelectedModels: boolean
 }
 
 export interface PoolKeyBatchPatchBuildResult {
@@ -120,27 +120,25 @@ export function buildPoolKeyBatchUpdatePatch(
     fieldLabels.push('备注')
   }
 
-  if (state.applyModels) {
-    if (!state.modelMode) {
-      return { patch: null, fieldLabels, error: '请选择模型权限管理方式' }
-    }
-    const selectedModels = uniqueTrimmed(state.selectedModels)
-    if (state.modelMode === 'manual') {
-      if (!state.unrestrictedModels && selectedModels.length === 0) {
-        return { patch: null, fieldLabels, error: '请至少选择一个允许的模型' }
-      }
-      patch.auto_fetch_models = false
-      patch.allowed_models = state.unrestrictedModels ? null : selectedModels
-      patch.locked_models = []
-      patch.model_include_patterns = []
-      patch.model_exclude_patterns = []
-    } else {
-      patch.auto_fetch_models = true
-      patch.locked_models = selectedModels
+  if (state.applyAutoFetchModels) {
+    patch.auto_fetch_models = state.autoFetchModels
+    if (state.autoFetchModels) {
       patch.model_include_patterns = parsePoolKeyModelPatterns(state.includePatterns)
       patch.model_exclude_patterns = parsePoolKeyModelPatterns(state.excludePatterns)
     }
-    fieldLabels.push('模型权限')
+    fieldLabels.push('自动获取上游可用模型')
+  }
+
+  if (state.applyAllowedModels) {
+    const selectedModels = uniqueTrimmed(state.selectedModels)
+    if (!state.unrestrictedModels && selectedModels.length === 0) {
+      return { patch: null, fieldLabels, error: '请至少选择一个可用模型' }
+    }
+    patch.allowed_models = state.unrestrictedModels ? null : selectedModels
+    patch.locked_models = state.unrestrictedModels || !state.lockSelectedModels
+      ? []
+      : selectedModels
+    fieldLabels.push('可用模型范围')
   }
 
   if (fieldLabels.length === 0) {

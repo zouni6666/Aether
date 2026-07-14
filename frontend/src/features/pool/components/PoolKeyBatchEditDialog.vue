@@ -3,7 +3,7 @@
     :model-value="open"
     title="批量编辑密钥"
     :description="dialogDescription"
-    :icon="ListChecks"
+    :icon="SquarePen"
     size="3xl"
     persistent
     @update:model-value="handleDialogUpdate"
@@ -14,7 +14,7 @@
           密钥配置
         </TabsTrigger>
         <TabsTrigger value="models">
-          模型权限
+          可用模型范围
         </TabsTrigger>
       </TabsList>
 
@@ -157,6 +157,57 @@
           </section>
 
           <section class="space-y-3 py-4">
+            <BatchFieldToggle
+              v-model="form.applyAutoFetchModels"
+              label="应用自动获取设置"
+            >
+              <div class="space-y-3 rounded-md border border-border/60 bg-muted/30 px-3 py-3">
+                <div class="flex items-center justify-between gap-4">
+                  <div class="space-y-0.5">
+                    <Label class="text-sm font-medium">自动获取上游可用模型</Label>
+                    <p class="text-xs text-muted-foreground">
+                      定时更新上游模型，配合模型映射使用
+                    </p>
+                  </div>
+                  <Switch
+                    v-model="form.autoFetchModels"
+                    :disabled="!form.applyAutoFetchModels"
+                  />
+                </div>
+
+                <div
+                  v-if="form.autoFetchModels"
+                  class="space-y-2 border-t border-border/40 pt-3"
+                >
+                  <div class="grid gap-3 sm:grid-cols-2">
+                    <div class="space-y-1.5">
+                      <Label class="text-xs">包含规则</Label>
+                      <Input
+                        v-model="form.includePatterns"
+                        placeholder="gpt-*, claude-*, 留空包含全部"
+                        class="h-9"
+                        :disabled="!form.applyAutoFetchModels"
+                      />
+                    </div>
+                    <div class="space-y-1.5">
+                      <Label class="text-xs">排除规则</Label>
+                      <Input
+                        v-model="form.excludePatterns"
+                        placeholder="*-preview, *-beta"
+                        class="h-9"
+                        :disabled="!form.applyAutoFetchModels"
+                      />
+                    </div>
+                  </div>
+                  <p class="text-xs text-muted-foreground">
+                    逗号分隔，支持 * ? 通配符，不区分大小写
+                  </p>
+                </div>
+              </div>
+            </BatchFieldToggle>
+          </section>
+
+          <section class="space-y-3 py-4">
             <label class="flex items-center gap-2 text-sm font-medium">
               <Checkbox v-model="form.applyNote" />
               <span>备注</span>
@@ -176,38 +227,21 @@
         class="max-h-[min(64vh,40rem)] overflow-y-auto pr-1"
       >
         <div class="space-y-4 py-1">
-          <div class="flex flex-col gap-3 border-b border-border/70 pb-4 sm:flex-row sm:items-center sm:justify-between">
+          <div class="space-y-1 border-b border-border/70 pb-4">
             <label class="flex items-center gap-2 text-sm font-medium">
-              <Checkbox v-model="form.applyModels" />
-              <span>批量管理模型权限</span>
+              <Checkbox v-model="form.applyAllowedModels" />
+              <span>应用可用模型范围</span>
             </label>
-            <Select
-              v-model="form.modelMode"
-              :disabled="!form.applyModels"
-            >
-              <SelectTrigger class="h-9 w-full sm:w-48">
-                <SelectValue placeholder="选择管理方式" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="manual">
-                  手动权限
-                </SelectItem>
-                <SelectItem value="automatic">
-                  自动发现
-                </SelectItem>
-              </SelectContent>
-            </Select>
+            <p class="pl-6 text-xs text-muted-foreground">
+              限制所选账号能够承接的模型；不限制时允许全部模型
+            </p>
           </div>
 
           <div
-            v-if="form.modelMode"
             class="space-y-4"
-            :class="!form.applyModels ? 'pointer-events-none opacity-45' : ''"
+            :class="!form.applyAllowedModels ? 'pointer-events-none opacity-45' : ''"
           >
-            <div
-              v-if="form.modelMode === 'manual'"
-              class="flex items-center justify-between gap-4 border-b border-border/70 pb-4"
-            >
+            <div class="flex items-center justify-between gap-4 border-b border-border/70 pb-4">
               <div class="min-w-0">
                 <p class="text-sm font-medium">
                   允许全部模型
@@ -218,32 +252,8 @@
               </div>
               <Switch
                 v-model="form.unrestrictedModels"
-                :disabled="!form.applyModels"
+                :disabled="!form.applyAllowedModels"
               />
-            </div>
-
-            <div
-              v-else
-              class="grid gap-3 border-b border-border/70 pb-4 sm:grid-cols-2"
-            >
-              <div class="space-y-1.5">
-                <Label class="text-xs">包含规则</Label>
-                <Input
-                  v-model="form.includePatterns"
-                  placeholder="gpt-*, claude-*"
-                  class="h-9"
-                  :disabled="!form.applyModels"
-                />
-              </div>
-              <div class="space-y-1.5">
-                <Label class="text-xs">排除规则</Label>
-                <Input
-                  v-model="form.excludePatterns"
-                  placeholder="*-preview, *-beta"
-                  class="h-9"
-                  :disabled="!form.applyModels"
-                />
-              </div>
             </div>
 
             <div
@@ -275,9 +285,7 @@
               </div>
 
               <div class="flex items-center justify-between gap-3 text-xs text-muted-foreground">
-                <span>
-                  {{ form.modelMode === 'automatic' ? '已锁定' : '已允许' }} {{ form.selectedModels.length }} 个模型
-                </span>
+                <span>已选择 {{ form.selectedModels.length }} 个模型</span>
                 <button
                   v-if="filteredModels.length > 0"
                   type="button"
@@ -334,14 +342,22 @@
                   </div>
                 </div>
               </div>
-            </div>
-          </div>
 
-          <div
-            v-else
-            class="py-12 text-center text-sm text-muted-foreground"
-          >
-            选择模型权限管理方式后继续
+              <div class="flex items-center justify-between gap-4 rounded-md border border-border/60 bg-muted/30 px-3 py-2.5">
+                <div class="min-w-0">
+                  <p class="text-sm font-medium">
+                    锁定已选模型
+                  </p>
+                  <p class="text-xs text-muted-foreground">
+                    自动获取开启时，锁定的模型不会被同步移除
+                  </p>
+                </div>
+                <Switch
+                  v-model="form.lockSelectedModels"
+                  :disabled="modelSelectionDisabled"
+                />
+              </div>
+            </div>
           </div>
         </div>
       </TabsContent>
@@ -390,7 +406,7 @@ import {
   TabsTrigger,
   Textarea,
 } from '@/components/ui'
-import { ListChecks, Loader2, Plus, RefreshCw, Search } from 'lucide-vue-next'
+import { Loader2, Plus, RefreshCw, Search, SquarePen } from 'lucide-vue-next'
 import { getProviderModels } from '@/api/endpoints/models'
 import { batchUpdatePoolKeys } from '@/api/endpoints/pool'
 import { formatApiFormat, sortApiFormats, type UpstreamModel } from '@/api/endpoints/types'
@@ -452,12 +468,14 @@ function createInitialForm(): PoolKeyBatchEditState {
     maxProbeIntervalMinutes: '32',
     applyNote: false,
     note: '',
-    applyModels: false,
-    modelMode: '',
-    unrestrictedModels: true,
-    selectedModels: [],
+    applyAutoFetchModels: false,
+    autoFetchModels: false,
     includePatterns: '',
     excludePatterns: '',
+    applyAllowedModels: false,
+    unrestrictedModels: true,
+    selectedModels: [],
+    lockSelectedModels: true,
   }
 }
 
@@ -472,7 +490,7 @@ const visibleApiFormats = computed(() => sortApiFormats(props.availableApiFormat
 const loadingModels = computed(() => loadingProviderModels.value || fetchingUpstreamModels.value)
 const normalizedModelSearch = computed(() => modelSearch.value.trim())
 const modelSelectionDisabled = computed(() => (
-  !form.applyModels || (form.modelMode === 'manual' && form.unrestrictedModels)
+  !form.applyAllowedModels || form.unrestrictedModels
 ))
 const activeValue = computed({
   get: () => form.isActive ? 'enabled' : 'disabled',
@@ -603,7 +621,7 @@ async function saveChanges(): Promise<void> {
   const build = buildPoolKeyBatchUpdatePatch(form)
   if (!build.patch || build.error) {
     warning(build.error || '批量配置无效')
-    if (form.applyModels && build.error?.includes('模型')) activeTab.value = 'models'
+    if (form.applyAllowedModels && build.error?.includes('模型')) activeTab.value = 'models'
     return
   }
 

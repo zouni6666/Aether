@@ -249,13 +249,13 @@ import {
   Activity,
   ChevronDown,
   Edit,
-  ListChecks,
   Plug,
   Power,
   Search,
   Settings2,
   SlidersHorizontal,
   Upload,
+  Users,
 } from 'lucide-vue-next'
 import {
   Button,
@@ -369,7 +369,7 @@ const mobileActions = computed(() => {
     { key: 'import', title: legacyT('添加账号'), event: 'import', icon: Upload },
     { key: 'providerProxy' },
     { key: 'scheduling', title: legacyT('号池调度'), event: 'scheduling', icon: SlidersHorizontal },
-    { key: 'accountBatch', title: legacyT('密钥批量管理'), event: 'accountBatch', icon: ListChecks },
+    { key: 'accountBatch', title: legacyT('账号批量操作'), event: 'accountBatch', icon: Users },
     { key: 'editProvider', title: legacyT('编辑提供商'), event: 'editProvider', icon: Edit },
     { key: 'editEndpoint', title: legacyT('编辑端点'), event: 'editEndpoint', icon: Plug },
   ]
@@ -394,7 +394,7 @@ const desktopPostProxyActions = computed<HeaderAction[]>(() => {
   }
   actions.push(
     { key: 'advanced', title: legacyT('高级设置'), event: 'advanced', icon: Settings2 },
-    { key: 'accountBatch', title: legacyT('密钥批量管理'), event: 'accountBatch', icon: ListChecks },
+    { key: 'accountBatch', title: legacyT('账号批量操作'), event: 'accountBatch', icon: Users },
     { key: 'toggleProvider', title: props.providerToggleButtonTitle, event: 'toggleProvider', icon: Power },
   )
   return actions

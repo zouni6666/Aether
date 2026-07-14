@@ -1207,7 +1207,6 @@ const legacyExactEnglishMessages: Record<string, string> = {
   '模型管理': 'Model management',
   '提供商管理': 'Provider management',
   '号池管理': 'Pool management',
-  '密钥批量管理': 'Bulk key management',
   '模块管理': 'Module management',
   '系统扩展': 'System extensions',
   'Aether 提供高可插入的模块化管理机制，帮助连接外部服务和授权系统。': 'Aether provides a highly pluggable module management system for connecting external services and authorization systems.',

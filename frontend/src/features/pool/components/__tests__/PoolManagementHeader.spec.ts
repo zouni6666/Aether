@@ -54,7 +54,7 @@ describe('PoolManagementHeader', () => {
 
     root.querySelector<HTMLButtonElement>('[title="添加账号"]')?.click()
     root.querySelector<HTMLButtonElement>('[title="点击调整号池调度"]')?.click()
-    root.querySelector<HTMLButtonElement>('[title="密钥批量管理"]')?.click()
+    root.querySelector<HTMLButtonElement>('[title="账号批量操作"]')?.click()
     root.querySelector<HTMLButtonElement>('[title="查看自适应热池指标"]')?.click()
     root.querySelector<HTMLButtonElement>('[title="刷新"]')?.click()
 

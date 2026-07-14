@@ -1,7 +1,7 @@
 <template>
   <Dialog
     :model-value="modelValue"
-    title="密钥批量管理"
+    title="账号批量操作"
     :description="dialogDescription"
     size="3xl"
     persistent
@@ -372,7 +372,7 @@ const QUICK_SELECT_OPTIONS: Array<{ value: QuickSelectorValue; label: string }> 
 ]
 
 const ACTION_OPTIONS: BatchActionOption[] = [
-  { value: 'edit_config', label: '编辑配置', hint: '统一修改支持 API、调度参数与模型权限。' },
+  { value: 'edit_config', label: '编辑配置', hint: '统一修改支持 API、调度参数与自动获取模型设置。' },
   { value: 'refresh_quota', label: '刷新额度', hint: '调用额度刷新接口，适合核对最新配额状态。' },
   { value: 'refresh_oauth', label: '刷新 OAuth', hint: '仅对 OAuth 账号有效，非 OAuth 账号会自动跳过。' },
   { value: 'set_proxy', label: '配置代理', hint: '为选中账号绑定独立代理节点。' },

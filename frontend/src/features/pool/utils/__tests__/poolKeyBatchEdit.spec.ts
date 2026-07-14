@@ -23,12 +23,14 @@ function state(overrides: Partial<PoolKeyBatchEditState> = {}): PoolKeyBatchEdit
     maxProbeIntervalMinutes: '32',
     applyNote: false,
     note: '',
-    applyModels: false,
-    modelMode: '',
-    unrestrictedModels: true,
-    selectedModels: [],
+    applyAutoFetchModels: false,
+    autoFetchModels: false,
     includePatterns: '',
     excludePatterns: '',
+    applyAllowedModels: false,
+    unrestrictedModels: true,
+    selectedModels: [],
+    lockSelectedModels: true,
     ...overrides,
   }
 }
@@ -49,37 +51,59 @@ describe('buildPoolKeyBatchUpdatePatch', () => {
     })
   })
 
-  it('builds a manual model policy and preserves explicit restrictions while disabling discovery', () => {
+  it('builds an explicit model access range without changing automatic discovery', () => {
     const result = buildPoolKeyBatchUpdatePatch(state({
-      applyModels: true,
-      modelMode: 'manual',
+      applyAllowedModels: true,
       unrestrictedModels: false,
       selectedModels: ['gpt-5.6-sol', 'gpt-5.6-sol', 'gpt-5.6-luna'],
+      lockSelectedModels: false,
     }))
 
     expect(result.patch).toEqual({
-      auto_fetch_models: false,
       allowed_models: ['gpt-5.6-sol', 'gpt-5.6-luna'],
       locked_models: [],
-      model_include_patterns: [],
-      model_exclude_patterns: [],
     })
   })
 
-  it('builds automatic discovery filters and locked models', () => {
+  it('builds automatic discovery filters independently from the model access range', () => {
     const result = buildPoolKeyBatchUpdatePatch(state({
-      applyModels: true,
-      modelMode: 'automatic',
-      selectedModels: ['gpt-5.6-sol'],
+      applyAutoFetchModels: true,
+      autoFetchModels: true,
       includePatterns: 'gpt-*,\nclaude-*',
       excludePatterns: '*-preview, *-beta',
     }))
 
     expect(result.patch).toEqual({
       auto_fetch_models: true,
-      locked_models: ['gpt-5.6-sol'],
       model_include_patterns: ['gpt-*', 'claude-*'],
       model_exclude_patterns: ['*-preview', '*-beta'],
+    })
+  })
+
+  it('disables automatic discovery without rewriting model filters or access limits', () => {
+    const result = buildPoolKeyBatchUpdatePatch(state({
+      applyAutoFetchModels: true,
+      autoFetchModels: false,
+      includePatterns: 'gpt-*',
+      excludePatterns: '*-preview',
+    }))
+
+    expect(result.patch).toEqual({
+      auto_fetch_models: false,
+    })
+  })
+
+  it('locks selected models only when the operator enables locking', () => {
+    const result = buildPoolKeyBatchUpdatePatch(state({
+      applyAllowedModels: true,
+      unrestrictedModels: false,
+      selectedModels: ['gpt-5.6-sol'],
+      lockSelectedModels: true,
+    }))
+
+    expect(result.patch).toEqual({
+      allowed_models: ['gpt-5.6-sol'],
+      locked_models: ['gpt-5.6-sol'],
     })
   })
 
@@ -93,10 +117,9 @@ describe('buildPoolKeyBatchUpdatePatch', () => {
       cacheTtlMinutes: '61',
     })).error).toBe('缓存 TTL 必须是 0-60 的整数')
     expect(buildPoolKeyBatchUpdatePatch(state({
-      applyModels: true,
-      modelMode: 'manual',
+      applyAllowedModels: true,
       unrestrictedModels: false,
-    })).error).toBe('请至少选择一个允许的模型')
+    })).error).toBe('请至少选择一个可用模型')
   })
 })
 
