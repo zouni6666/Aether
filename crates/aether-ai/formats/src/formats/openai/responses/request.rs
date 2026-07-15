@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, VecDeque};
 
 use serde_json::{json, Map, Value};
 
+use super::encode_tool_result_error;
+
 use crate::{
     formats::context::FormatContext,
     formats::openai::shared::map_thinking_budget_to_openai_reasoning_effort,
@@ -449,6 +451,7 @@ fn canonical_messages_to_responses_input(canonical: &CanonicalRequest) -> Option
                     let (tool_output, extra_user_content) = responses_tool_result_payload(
                         output.as_ref(),
                         content_text.as_deref(),
+                        *is_error,
                         extensions,
                     )?;
                     let call_id =
@@ -464,9 +467,6 @@ fn canonical_messages_to_responses_input(canonical: &CanonicalRequest) -> Option
                     );
                     item.insert("call_id".to_string(), Value::String(call_id));
                     item.insert("output".to_string(), tool_output);
-                    if *is_error {
-                        item.insert("is_error".to_string(), Value::Bool(true));
-                    }
                     let extension_fields =
                         openai_responses_item_extension_object(extensions, &item);
                     item.extend(extension_fields);
@@ -1133,18 +1133,19 @@ fn canonical_tool_choice_to_responses(
 fn responses_tool_result_payload(
     output: Option<&Value>,
     content_text: Option<&str>,
+    is_error: bool,
     extensions: &BTreeMap<String, Value>,
 ) -> Option<(Value, Vec<Value>)> {
     if let Some(Value::Array(parts)) = output {
         if is_claude_tool_result(extensions) {
-            return claude_tool_result_parts_to_responses_payload(parts);
+            return claude_tool_result_parts_to_responses_payload(parts, is_error);
         }
         if let Some(output) = openai_chat_tool_result_parts_to_responses_output(parts) {
-            return Some((output, Vec::new()));
+            return Some((encode_tool_result_error(output, is_error), Vec::new()));
         }
     }
     Some((
-        responses_tool_result_output(output, content_text),
+        responses_tool_result_output(output, content_text, is_error),
         Vec::new(),
     ))
 }
@@ -1260,14 +1261,22 @@ fn openai_chat_tool_result_fallback_part(part: &Value) -> Value {
     })
 }
 
-fn responses_tool_result_output(output: Option<&Value>, content_text: Option<&str>) -> Value {
+fn responses_tool_result_output(
+    output: Option<&Value>,
+    content_text: Option<&str>,
+    is_error: bool,
+) -> Value {
     let text = match output {
         Some(Value::String(text)) => text.clone(),
         Some(Value::Null) => String::new(),
         Some(value) => serde_json::to_string(value).unwrap_or_default(),
         None => content_text.unwrap_or_default().to_string(),
     };
-    Value::String(non_empty_responses_tool_output(&text))
+    let output = encode_tool_result_error(Value::String(text), is_error);
+    match output {
+        Value::String(text) => Value::String(non_empty_responses_tool_output(&text)),
+        output => output,
+    }
 }
 
 pub(crate) fn claude_tool_result_parts_are_openai_responses_representable(parts: &[Value]) -> bool {
@@ -1322,7 +1331,10 @@ fn claude_document_block_is_openai_responses_representable(block: &Map<String, V
     }
 }
 
-fn claude_tool_result_parts_to_responses_payload(parts: &[Value]) -> Option<(Value, Vec<Value>)> {
+fn claude_tool_result_parts_to_responses_payload(
+    parts: &[Value],
+    is_error: bool,
+) -> Option<(Value, Vec<Value>)> {
     let mut output_texts = Vec::new();
     let mut extra_user_content = Vec::new();
 
@@ -1365,10 +1377,12 @@ fn claude_tool_result_parts_to_responses_payload(parts: &[Value]) -> Option<(Val
         }
     }
 
-    Some((
-        Value::String(non_empty_responses_tool_output(&output_texts.join("\n\n"))),
-        extra_user_content,
-    ))
+    let output = encode_tool_result_error(Value::String(output_texts.join("\n\n")), is_error);
+    let output = match output {
+        Value::String(text) => Value::String(non_empty_responses_tool_output(&text)),
+        output => output,
+    };
+    Some((output, extra_user_content))
 }
 
 fn claude_image_block_to_responses_input_part(block: &Map<String, Value>) -> Option<Value> {
@@ -1659,6 +1673,37 @@ mod tests {
         assert_eq!(body["input"][0]["type"], "function_call_output");
         assert_eq!(body["input"][0]["call_id"], "call_empty");
         assert_eq!(body["input"][0]["output"], "(empty)");
+    }
+
+    #[test]
+    fn responses_request_encodes_tool_errors_for_regular_and_compact_requests() {
+        let request = CanonicalRequest {
+            model: "gpt-5.6-sol".to_string(),
+            messages: vec![CanonicalMessage {
+                role: CanonicalRole::Tool,
+                content: vec![CanonicalContentBlock::ToolResult {
+                    tool_use_id: "call_error".to_string(),
+                    name: None,
+                    output: Some(json!("command failed")),
+                    content_text: None,
+                    is_error: true,
+                    extensions: Default::default(),
+                }],
+                extensions: Default::default(),
+            }],
+            ..CanonicalRequest::default()
+        };
+
+        for compact in [false, true] {
+            let body =
+                to_raw(&request, "gpt-5.6-sol", false, compact).expect("Responses request body");
+            let item = &body["input"][0];
+
+            assert_eq!(item["type"], "function_call_output");
+            assert_eq!(item["call_id"], "call_error");
+            assert_eq!(item["output"], "[tool error]\ncommand failed");
+            assert!(item.get("is_error").is_none());
+        }
     }
 
     #[test]

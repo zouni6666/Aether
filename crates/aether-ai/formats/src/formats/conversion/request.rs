@@ -1025,6 +1025,74 @@ mod tests {
     }
 
     #[test]
+    fn claude_request_to_responses_encodes_error_tool_results_in_output() {
+        let body = json!({
+            "model": "claude-sonnet",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_error_string",
+                        "content": "lookup failed",
+                        "is_error": true
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_error_empty",
+                        "content": "",
+                        "is_error": true
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_error_object",
+                        "content": {"code": "ENOENT"},
+                        "is_error": true
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_error_image",
+                        "content": [
+                            {"type": "text", "text": "preview failed"},
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/png",
+                                    "data": "AAAA"
+                                }
+                            }
+                        ],
+                        "is_error": true
+                    }
+                ]
+            }],
+            "max_tokens": 128,
+        });
+
+        let converted = registry::convert_request(
+            "claude:messages",
+            "openai:responses",
+            &body,
+            &FormatContext::default(),
+        )
+        .expect("responses request");
+        let input = converted["input"].as_array().expect("responses input");
+
+        assert_eq!(input[0]["output"], "[tool error]\nlookup failed");
+        assert_eq!(input[1]["output"], "[tool error]");
+        assert_eq!(input[2]["output"], "[tool error]\n{\"code\":\"ENOENT\"}");
+        assert_eq!(input[3]["output"], "[tool error]\npreview failed");
+        assert_eq!(input[4]["role"], "user");
+        assert_eq!(input[4]["content"][0]["type"], "input_image");
+        assert_eq!(
+            input[4]["content"][0]["image_url"],
+            "data:image/png;base64,AAAA"
+        );
+        assert!(input.iter().all(|item| item.get("is_error").is_none()));
+    }
+
+    #[test]
     fn claude_request_to_responses_rejects_unrepresentable_tool_result_blocks() {
         let body = json!({
             "model": "claude-sonnet",

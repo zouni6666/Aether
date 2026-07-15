@@ -5,6 +5,8 @@ use std::{
 
 use serde_json::{json, Map, Value};
 
+use super::encode_tool_result_error;
+
 use crate::{
     formats::context::FormatContext,
     protocol::canonical::{
@@ -270,13 +272,13 @@ pub fn to_raw(canonical: &CanonicalResponse, report_context: &Value, compact: bo
                 item.insert("call_id".to_string(), Value::String(tool_use_id.clone()));
                 item.insert(
                     "output".to_string(),
-                    result_output
-                        .clone()
-                        .unwrap_or_else(|| Value::String(content_text.clone().unwrap_or_default())),
+                    encode_tool_result_error(
+                        result_output.clone().unwrap_or_else(|| {
+                            Value::String(content_text.clone().unwrap_or_default())
+                        }),
+                        *is_error,
+                    ),
                 );
-                if *is_error {
-                    item.insert("is_error".to_string(), Value::Bool(true));
-                }
                 let extension_fields = openai_responses_item_extension_object(extensions, &item);
                 item.extend(extension_fields);
                 output.push(Value::Object(item));
@@ -616,6 +618,34 @@ mod tests {
         assert_eq!(body["created_at"], 111);
         assert_eq!(body["completed_at"], 222);
         assert_eq!(body["conversation"]["id"], "conv_123");
+    }
+
+    #[test]
+    fn responses_response_builder_encodes_tool_errors_in_output() {
+        let response = CanonicalResponse {
+            id: "resp_tool_error".to_string(),
+            model: "gpt-5.6-sol".to_string(),
+            content: vec![CanonicalContentBlock::ToolResult {
+                tool_use_id: "call_error".to_string(),
+                name: None,
+                output: Some(json!("command failed")),
+                content_text: None,
+                is_error: true,
+                extensions: BTreeMap::new(),
+            }],
+            outputs: Vec::new(),
+            stop_reason: Some(CanonicalStopReason::EndTurn),
+            usage: None,
+            extensions: BTreeMap::new(),
+        };
+
+        let body = to_raw(&response, &json!({}), false);
+        let item = &body["output"][0];
+
+        assert_eq!(item["type"], "function_call_output");
+        assert_eq!(item["call_id"], "call_error");
+        assert_eq!(item["output"], "[tool error]\ncommand failed");
+        assert!(item.get("is_error").is_none());
     }
 
     #[test]
