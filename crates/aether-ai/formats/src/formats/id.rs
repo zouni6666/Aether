@@ -170,7 +170,11 @@ pub fn api_format_permission_covers(allowed_value: &str, requested_api_format: &
     !allowed_value.is_empty()
         && !requested_api_format.is_empty()
         && (allowed_value == requested_api_format
-            || allowed_value == "openai:responses" && requested_api_format == "openai:search")
+            || allowed_value == "openai:responses"
+                && matches!(
+                    requested_api_format.as_str(),
+                    "openai:responses:compact" | "openai:search"
+                ))
 }
 
 pub fn intersect_api_format_allowed_lists(left: &[String], right: &[String]) -> Vec<String> {
@@ -269,10 +273,14 @@ mod tests {
     }
 
     #[test]
-    fn responses_permission_covers_only_its_search_companion() {
+    fn responses_permission_covers_its_companion_endpoints() {
         assert!(api_format_permission_covers(
             "OPENAI:RESPONSES",
             "openai:search"
+        ));
+        assert!(api_format_permission_covers(
+            "OPENAI:RESPONSES",
+            "openai:responses:compact"
         ));
         assert!(api_format_permission_covers(
             "openai:search",
@@ -283,12 +291,23 @@ mod tests {
             "openai:responses"
         ));
         assert!(!api_format_permission_covers(
+            "openai:responses:compact",
+            "openai:responses"
+        ));
+        assert!(!api_format_permission_covers(
             "openai:responses",
             "openai:chat"
         ));
         assert_eq!(
             api_format_permission_storage_aliases("openai:search"),
             vec!["openai:search".to_string(), "openai:responses".to_string()]
+        );
+        assert_eq!(
+            api_format_permission_storage_aliases("openai:responses:compact"),
+            vec![
+                "openai:responses:compact".to_string(),
+                "openai:responses".to_string(),
+            ]
         );
         assert_eq!(
             api_format_permission_storage_aliases("openai:responses"),
@@ -356,6 +375,13 @@ mod tests {
                 &["OPENAI:RESPONSES".to_string()],
             ),
             vec!["openai:search".to_string()]
+        );
+        assert_eq!(
+            intersect_api_format_allowed_lists(
+                &["openai:responses".to_string()],
+                &["openai:responses:compact".to_string()],
+            ),
+            vec!["openai:responses:compact".to_string()]
         );
         assert!(intersect_api_format_allowed_lists(
             &["openai:search".to_string()],

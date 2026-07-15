@@ -827,7 +827,7 @@ mod tests {
     };
 
     #[test]
-    fn api_format_policy_intersection_preserves_search_companion_scope() {
+    fn api_format_policy_intersection_preserves_companion_scope() {
         assert_eq!(
             aether_ai_formats::intersect_api_format_allowed_lists(
                 &["openai:search".to_string()],
@@ -841,6 +841,20 @@ mod tests {
                 &["openai:search".to_string()],
             ),
             vec!["openai:search".to_string()]
+        );
+        assert_eq!(
+            aether_ai_formats::intersect_api_format_allowed_lists(
+                &["openai:responses".to_string()],
+                &["openai:responses:compact".to_string()],
+            ),
+            vec!["openai:responses:compact".to_string()]
+        );
+        assert_eq!(
+            aether_ai_formats::intersect_api_format_allowed_lists(
+                &["openai:responses:compact".to_string()],
+                &["openai:responses".to_string()],
+            ),
+            vec!["openai:responses:compact".to_string()]
         );
         assert!(aether_ai_formats::intersect_api_format_allowed_lists(
             &["openai:search".to_string()],
