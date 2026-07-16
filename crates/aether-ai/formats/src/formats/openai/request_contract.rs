@@ -607,6 +607,10 @@ mod tests {
                     }
                 }
             }],
+            "context_management": [{
+                "type": "compaction",
+                "compact_threshold": 128000
+            }],
             "parallel_tool_calls": true
         });
 
@@ -629,6 +633,7 @@ mod tests {
         assert_eq!(body, first);
         assert!(body.get("instructions").is_none());
         assert!(body.get("tools").is_none());
+        assert!(body.get("context_management").is_none());
         assert_eq!(body["input"][0]["type"], "additional_tools");
         assert_eq!(body["input"][0]["role"], "developer");
         assert_eq!(body["input"][0]["tools"][0]["name"], "lookup");

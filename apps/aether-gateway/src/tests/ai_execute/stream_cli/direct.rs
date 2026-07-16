@@ -56,6 +56,7 @@ async fn gateway_executes_codex_cli_stream_via_local_decision_gate_after_oauth_r
         reasoning_effort: String,
         reasoning_context: String,
         has_compaction_trigger: bool,
+        has_context_management: bool,
     }
 
     #[derive(Debug, Clone)]
@@ -498,6 +499,10 @@ async fn gateway_executes_codex_cli_stream_via_local_decision_gate_after_oauth_r
                                         == Some("compaction_trigger")
                                 })
                             }),
+                        has_context_management: payload
+                            .get("body")
+                            .and_then(|value| value.get("json_body"))
+                            .is_some_and(|body| body.get("context_management").is_some()),
                     });
                 let frames = concat!(
                     "{\"type\":\"headers\",\"payload\":{\"kind\":\"headers\",\"status_code\":200,\"headers\":{\"content-type\":\"text/event-stream\"}}}\n",
@@ -587,7 +592,7 @@ async fn gateway_executes_codex_cli_stream_via_local_decision_gate_after_oauth_r
         )
         .header(TRACE_ID_HEADER, "trace-codex-cli-stream-local-123")
         .body(
-            r#"{"model":"gpt-5.6-sol","instructions":"Use the configured tools.","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"compact"}]},{"type":"compaction_trigger"}],"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],"parallel_tool_calls":true,"prompt_cache_key":"thread-codex-stream-local-123","client_metadata":{"session_id":"session-codex-stream-local-123","thread_id":"thread-codex-stream-local-123"},"stream":true}"#,
+            r#"{"model":"gpt-5.6-sol","instructions":"Use the configured tools.","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"compact"}]},{"type":"compaction_trigger"}],"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],"context_management":[{"type":"compaction","compact_threshold":128000}],"parallel_tool_calls":true,"prompt_cache_key":"thread-codex-stream-local-123","client_metadata":{"session_id":"session-codex-stream-local-123","thread_id":"thread-codex-stream-local-123"},"stream":true}"#,
         )
         .send()
         .await
@@ -711,6 +716,7 @@ async fn gateway_executes_codex_cli_stream_via_local_decision_gate_after_oauth_r
         "all_turns"
     );
     assert!(seen_execution_runtime_request.has_compaction_trigger);
+    assert!(!seen_execution_runtime_request.has_context_management);
 
     let stored_candidates = request_candidate_repository
         .list_by_request_id("trace-codex-cli-stream-local-123")

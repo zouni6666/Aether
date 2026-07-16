@@ -1298,6 +1298,8 @@ fn apply_codex_responses_lite_body_contract(
         return;
     }
 
+    body_object.remove("context_management");
+
     let tools_are_valid = body_object
         .get("tools")
         .is_none_or(|tools| tools.is_null() || tools.is_array());
