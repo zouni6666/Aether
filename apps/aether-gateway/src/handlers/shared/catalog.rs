@@ -2054,6 +2054,29 @@ fn quota_snapshot_has_materialized_data(
         })
 }
 
+fn codex_upstream_metadata_is_at_least_as_fresh(
+    quota_snapshot: Option<&Map<String, Value>>,
+    upstream_metadata: Option<&Value>,
+) -> bool {
+    let Some(metadata) = provider_quota_metadata_bucket(upstream_metadata, "codex") else {
+        return false;
+    };
+    let Some(metadata_updated_at) = metadata
+        .get("updated_at")
+        .and_then(admin_provider_quota_pure::coerce_json_u64)
+    else {
+        return false;
+    };
+    let snapshot_updated_at = quota_snapshot.and_then(|quota| {
+        quota
+            .get("updated_at")
+            .or_else(|| quota.get("observed_at"))
+            .and_then(admin_provider_quota_pure::coerce_json_u64)
+    });
+
+    snapshot_updated_at.is_none_or(|updated_at| metadata_updated_at >= updated_at)
+}
+
 fn windsurf_quota_snapshot_has_stale_cooldown(quota_snapshot: &Map<String, Value>) -> bool {
     let code = quota_snapshot
         .get("code")
@@ -2121,8 +2144,15 @@ pub(crate) fn provider_key_status_snapshot_payload(
         .and_then(Value::as_object)
         .and_then(|snapshot| snapshot.get("quota"))
         .and_then(Value::as_object);
+    let refresh_codex_snapshot = provider_type.trim().eq_ignore_ascii_case("codex")
+        && codex_upstream_metadata_is_at_least_as_fresh(
+            quota_snapshot,
+            key.upstream_metadata.as_ref(),
+        );
 
-    let payload = if quota_snapshot_has_materialized_data(quota_snapshot, provider_type) {
+    let payload = if quota_snapshot_has_materialized_data(quota_snapshot, provider_type)
+        && !refresh_codex_snapshot
+    {
         status_snapshot
             .cloned()
             .unwrap_or_else(default_provider_key_status_snapshot)
@@ -3509,6 +3539,58 @@ mod tests {
                 .and_then(Value::as_object)
                 .and_then(|window| window.get("used_ratio")),
             Some(&json!(0.25))
+        );
+    }
+
+    #[test]
+    fn provider_key_status_snapshot_payload_restores_complete_codex_cache() {
+        let mut key = sample_catalog_key();
+        key.upstream_metadata = Some(json!({
+            "codex": {
+                "updated_at": 200u64,
+                "plan_type": "plus",
+                "primary_used_percent": 89.0,
+                "primary_reset_at": 1_900_000_000u64,
+                "spark_primary_used_percent": 40.0,
+                "spark_primary_reset_at": 1_900_100_000u64,
+                "reset_credits": {
+                    "available_count": 3,
+                    "updated_at": 200u64,
+                    "detail_status": "available",
+                    "credits": []
+                }
+            }
+        }));
+        key.status_snapshot = Some(json!({
+            "quota": {
+                "version": 2,
+                "provider_type": "codex",
+                "updated_at": 200u64,
+                "windows": [{
+                    "code": "weekly",
+                    "used_ratio": 1.0,
+                    "reset_at": 1_900_000_000u64
+                }]
+            }
+        }));
+
+        let payload = provider_key_status_snapshot_payload(&key, "codex");
+        let windows = payload["quota"]["windows"]
+            .as_array()
+            .expect("quota windows should exist");
+
+        assert_eq!(payload.pointer("/quota/plan_type"), Some(&json!("plus")));
+        assert_eq!(
+            payload.pointer("/quota/reset_credits/available_count"),
+            Some(&json!(3u64))
+        );
+        assert!(windows.iter().any(|window| window["code"] == "spark_5h"));
+        assert_eq!(
+            windows
+                .iter()
+                .find(|window| window["code"] == "weekly")
+                .and_then(|window| window.get("used_ratio")),
+            Some(&json!(0.89))
         );
     }
 

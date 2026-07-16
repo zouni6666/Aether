@@ -57,6 +57,18 @@ export function getCodexResetCreditAvailableCount(
   return typeof count === 'number' && Number.isFinite(count) && count >= 0 ? count : null
 }
 
+export function shouldRefreshMissingCodexResetCredits(
+  snapshot: QuotaResetCreditsSnapshot | null | undefined,
+  nowUnixSecs = Math.floor(Date.now() / 1000),
+  staleSeconds = 5 * 60,
+): boolean {
+  if (getCodexResetCreditAvailableCount(snapshot) !== null) return false
+
+  const updatedAt = Number(snapshot?.updated_at)
+  if (!Number.isFinite(updatedAt)) return true
+  return (nowUnixSecs - updatedAt) > staleSeconds
+}
+
 export function formatCodexResetCreditCount(count: number | null | undefined): string {
   return `共 ${count ?? 0} 次机会`
 }

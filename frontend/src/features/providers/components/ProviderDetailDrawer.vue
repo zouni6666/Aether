@@ -1020,6 +1020,7 @@ import {
   getCodexResetCreditAvailableCount as getCodexResetCreditAvailableCountFromSnapshot,
   getVisibleCodexResetCreditItems as getVisibleCodexResetCreditItemsFromSnapshot,
   mergeCodexQuotaDisplays,
+  shouldRefreshMissingCodexResetCredits,
 } from './codex-reset-credit-display'
 
 // 扩展端点类型,包含密钥列表
@@ -2443,8 +2444,12 @@ function shouldAutoRefreshCodexQuota(): boolean {
 
     if (isTokenExpiringSoon(key, now)) return true
 
-    // 旧缓存可能已有普通配额但没有 reset-credit 数据，仍需补拉一次
-    if (!hasCodexQuotaDisplayData(key) || getCodexResetCreditAvailableCount(key) === null) {
+    // 旧缓存缺少 reset-credit 数据时补拉；近期已检查过则等待缓存过期
+    if (!hasCodexQuotaDisplayData(key) || shouldRefreshMissingCodexResetCredits(
+      getCodexResetCreditsDisplay(key),
+      now,
+      AUTO_QUOTA_REFRESH_STALE_SECONDS,
+    )) {
       return true
     }
     // 配额数据超过 5 分钟未更新，也触发刷新

@@ -7,6 +7,7 @@ import {
   getCodexResetCreditAvailableCount,
   getVisibleCodexResetCreditItems,
   mergeCodexQuotaDisplays,
+  shouldRefreshMissingCodexResetCredits,
 } from '@/features/providers/components/codex-reset-credit-display'
 import type { QuotaResetCreditsSnapshot } from '@/api/endpoints/types'
 
@@ -57,6 +58,21 @@ describe('codex reset credit display helpers', () => {
     expect(getCodexResetCreditAvailableCount(snapshot)).toBe(0)
     expect(formatCodexResetCreditCount(0)).toBe('共 0 次机会')
     expect(getVisibleCodexResetCreditItems(snapshot, 1_700_000_000)).toEqual([])
+  })
+
+  it('retries missing reset credits only when the cached detail check is stale', () => {
+    expect(shouldRefreshMissingCodexResetCredits(null, 1_700_000_000)).toBe(true)
+    expect(shouldRefreshMissingCodexResetCredits({
+      detail_status: 'failed',
+      updated_at: 1_699_999_900,
+    }, 1_700_000_000)).toBe(false)
+    expect(shouldRefreshMissingCodexResetCredits({
+      detail_status: 'failed',
+      updated_at: 1_699_999_600,
+    }, 1_700_000_000)).toBe(true)
+    expect(shouldRefreshMissingCodexResetCredits({
+      available_count: 0,
+    }, 1_700_000_000)).toBe(false)
   })
 
   it('sorts available detail items by remaining time and labels visible items with short ordinal keys', () => {
