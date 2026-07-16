@@ -210,29 +210,227 @@
             <div class="text-xs font-medium text-foreground">
               执行动作
             </div>
-            <div class="text-[11px] text-muted-foreground">
-              代理节点（仅“配置代理”动作生效）
-            </div>
-            <ProxyNodeSelect
-              :model-value="proxyNodeIdForAction"
-              trigger-class="h-8"
-              @update:model-value="(v: string) => proxyNodeIdForAction = v"
-            />
             <div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-1">
               <Button
                 v-for="item in ACTION_OPTIONS"
                 :key="item.value"
-                class="h-8 w-full px-3 text-xs"
+                class="h-9 w-full px-3 text-xs"
                 :variant="getActionButtonVariant(item)"
-                :disabled="!canExecuteSpecifiedAction(item.value)"
-                @click="confirmAndExecuteAction(item.value)"
+                :disabled="!canSelectAction(item.value)"
+                @click="handleActionButtonClick(item.value)"
               >
                 {{ item.label }}
+              </Button>
+            </div>
+
+            <div
+              v-if="selectedAction === 'set_proxy'"
+              class="space-y-2 border-t border-border/60 pt-3"
+            >
+              <div class="text-[11px] text-muted-foreground">选择要绑定的代理节点</div>
+              <ProxyNodeSelect
+                :model-value="proxyNodeIdForAction"
+                trigger-class="h-9"
+                @update:model-value="(v: string) => proxyNodeIdForAction = v"
+              />
+              <Button
+                class="h-9 w-full text-xs"
+                :disabled="!canExecuteSpecifiedAction('set_proxy')"
+                @click="confirmAndExecuteAction('set_proxy')"
+              >
+                应用代理设置
               </Button>
             </div>
           </div>
         </div>
       </div>
+
+      <section
+        v-if="selectedAction === 'update_settings'"
+        class="space-y-3 rounded-lg border border-primary/25 bg-primary/5 p-3 sm:p-4"
+      >
+        <div class="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <h3 class="text-sm font-semibold">更多设置</h3>
+            <p class="text-[11px] text-muted-foreground">仅更新已勾选字段，未勾选配置保持不变</p>
+          </div>
+          <Badge variant="outline" class="tabular-nums">已选 {{ selectedSettingsCount }} 项</Badge>
+        </div>
+
+        <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <div class="space-y-2 rounded-md border bg-background p-3">
+            <div class="flex min-h-6 items-center gap-2">
+              <Checkbox
+                :checked="settingsSelection.internal_priority"
+                @update:checked="settingsSelection.internal_priority = $event === true"
+              />
+              <Label class="text-xs">优先级</Label>
+            </div>
+            <Input
+              v-model.number="settingsDraft.internal_priority"
+              type="number"
+              min="0"
+              class="h-9"
+              :disabled="!settingsSelection.internal_priority"
+            />
+          </div>
+
+          <div class="space-y-2 rounded-md border bg-background p-3">
+            <div class="flex min-h-6 items-center gap-2">
+              <Checkbox
+                :checked="settingsSelection.rpm_limit"
+                @update:checked="settingsSelection.rpm_limit = $event === true"
+              />
+              <Label class="text-xs">RPM 限制</Label>
+            </div>
+            <Input
+              :model-value="settingsDraft.rpm_limit ?? ''"
+              type="number"
+              min="1"
+              max="10000"
+              class="h-9"
+              placeholder="留空为自适应"
+              :disabled="!settingsSelection.rpm_limit"
+              @update:model-value="settingsDraft.rpm_limit = parseNullableNumberInput($event, { min: 1, max: 10000 })"
+            />
+          </div>
+
+          <div class="space-y-2 rounded-md border bg-background p-3">
+            <div class="flex min-h-6 items-center gap-2">
+              <Checkbox
+                :checked="settingsSelection.concurrent_limit"
+                @update:checked="settingsSelection.concurrent_limit = $event === true"
+              />
+              <Label class="text-xs">并发请求上限</Label>
+            </div>
+            <Input
+              :model-value="settingsDraft.concurrent_limit ?? ''"
+              type="number"
+              min="0"
+              class="h-9"
+              placeholder="留空为不限制"
+              :disabled="!settingsSelection.concurrent_limit"
+              @update:model-value="settingsDraft.concurrent_limit = parseNullableNumberInput($event, { min: 0 })"
+            />
+          </div>
+
+          <div class="space-y-2 rounded-md border bg-background p-3">
+            <div class="flex min-h-6 items-center gap-2">
+              <Checkbox
+                :checked="settingsSelection.cache_ttl_minutes"
+                @update:checked="settingsSelection.cache_ttl_minutes = $event === true"
+              />
+              <Label class="text-xs">缓存 TTL（分钟）</Label>
+            </div>
+            <Input
+              :model-value="settingsDraft.cache_ttl_minutes"
+              type="number"
+              min="0"
+              max="60"
+              class="h-9"
+              :disabled="!settingsSelection.cache_ttl_minutes"
+              @update:model-value="settingsDraft.cache_ttl_minutes = parseNumberInput($event, { min: 0, max: 60 }) ?? 5"
+            />
+          </div>
+
+          <div class="space-y-2 rounded-md border bg-background p-3">
+            <div class="flex min-h-6 items-center gap-2">
+              <Checkbox
+                :checked="settingsSelection.max_probe_interval_minutes"
+                @update:checked="settingsSelection.max_probe_interval_minutes = $event === true"
+              />
+              <Label class="text-xs">熔断探测（分钟）</Label>
+            </div>
+            <Input
+              :model-value="settingsDraft.max_probe_interval_minutes"
+              type="number"
+              min="0"
+              max="32"
+              class="h-9"
+              :disabled="!settingsSelection.max_probe_interval_minutes"
+              @update:model-value="settingsDraft.max_probe_interval_minutes = parseNumberInput($event, { min: 0, max: 32 }) ?? 32"
+            />
+          </div>
+
+          <div class="space-y-2 rounded-md border bg-background p-3">
+            <div class="flex min-h-6 items-center gap-2">
+              <Checkbox
+                :checked="settingsSelection.is_active"
+                @update:checked="settingsSelection.is_active = $event === true"
+              />
+              <Label class="text-xs">启用状态</Label>
+            </div>
+            <Select v-model="settingsStatus" :disabled="!settingsSelection.is_active">
+              <SelectTrigger class="h-9"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="enabled">启用</SelectItem>
+                <SelectItem value="disabled">停用</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div class="space-y-2 rounded-md border bg-background p-3 sm:col-span-2">
+            <div class="flex min-h-6 items-center gap-2">
+              <Checkbox
+                :checked="settingsSelection.proxy_node_id"
+                @update:checked="settingsSelection.proxy_node_id = $event === true"
+              />
+              <Label class="text-xs">账号代理</Label>
+            </div>
+            <div class="grid gap-2 sm:grid-cols-[9rem_minmax(0,1fr)]">
+              <Select v-model="settingsDraft.proxy_mode" :disabled="!settingsSelection.proxy_node_id">
+                <SelectTrigger class="h-9"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="set">设置节点</SelectItem>
+                  <SelectItem value="clear">清除代理</SelectItem>
+                </SelectContent>
+              </Select>
+              <ProxyNodeSelect
+                v-if="settingsDraft.proxy_mode === 'set'"
+                :model-value="settingsDraft.proxy_node_id"
+                trigger-class="h-9"
+                :class="!settingsSelection.proxy_node_id ? 'pointer-events-none opacity-50' : ''"
+                @update:model-value="(value: string) => settingsDraft.proxy_node_id = value"
+              />
+              <div
+                v-else
+                class="flex h-9 items-center rounded-md border bg-muted/30 px-3 text-xs text-muted-foreground"
+              >
+                回退到 Provider 默认代理
+              </div>
+            </div>
+          </div>
+
+          <div class="space-y-2 rounded-md border bg-background p-3">
+            <div class="flex min-h-6 items-center gap-2">
+              <Checkbox
+                :checked="settingsSelection.note"
+                @update:checked="settingsSelection.note = $event === true"
+              />
+              <Label class="text-xs">备注</Label>
+            </div>
+            <Input
+              v-model="settingsDraft.note"
+              class="h-9"
+              placeholder="留空清除备注"
+              :disabled="!settingsSelection.note"
+            />
+          </div>
+        </div>
+
+        <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <p class="min-h-5 text-xs text-destructive">
+            {{ settingsErrors[0] || '' }}
+          </p>
+          <Button
+            class="min-h-10 sm:min-w-36"
+            :disabled="!canExecuteSpecifiedAction('update_settings')"
+            @click="confirmAndExecuteAction('update_settings')"
+          >
+            应用更多设置
+          </Button>
+        </div>
+      </section>
 
       <div
         v-if="executing && progressTotal > 0"
@@ -270,8 +468,20 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { Dialog, Button, Input, Checkbox, Badge } from '@/components/ui'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import {
+  Badge,
+  Button,
+  Checkbox,
+  Dialog,
+  Input,
+  Label,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui'
 import ProxyNodeSelect from '@/features/providers/components/ProxyNodeSelect.vue'
 import { RefreshCw, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from 'lucide-vue-next'
 import { useToast } from '@/composables/useToast'
@@ -302,6 +512,13 @@ import {
 } from '@/utils/providerKeyStatus'
 import { getQuotaDisplayText } from '@/utils/providerKeyQuota'
 import { runChunkedBatchAction } from '@/utils/batchAction'
+import { parseNullableNumberInput, parseNumberInput } from '@/utils/form'
+import {
+  buildPoolKeySettingsPatch,
+  createPoolKeyBatchSettingSelection,
+  createPoolKeyBatchSettingsDraft,
+  validatePoolKeyBatchSettings,
+} from '@/features/pool/utils/poolKeyBatchSettings'
 
 type QuickSelectorValue =
   | 'banned'
@@ -322,6 +539,7 @@ type BatchActionValue =
   | 'refresh_quota'
   | 'clear_proxy'
   | 'set_proxy'
+  | 'update_settings'
   | 'enable'
   | 'disable'
 
@@ -373,6 +591,7 @@ const ACTION_OPTIONS: BatchActionOption[] = [
   { value: 'refresh_quota', label: '刷新额度', hint: '调用额度刷新接口，适合核对最新配额状态。' },
   { value: 'refresh_oauth', label: '刷新 OAuth', hint: '仅对 OAuth 账号有效，非 OAuth 账号会自动跳过。' },
   { value: 'set_proxy', label: '配置代理', hint: '为选中账号绑定独立代理节点。' },
+  { value: 'update_settings', label: '更多设置', hint: '选择性修改 RPM、并发、熔断、备注和代理等配置。' },
   { value: 'clear_proxy', label: '清除代理', hint: '移除账号独立代理，回退到提供商默认代理。' },
   { value: 'enable', label: '启用', hint: '批量启用账号，恢复可调度状态。' },
   { value: 'disable', label: '禁用', hint: '批量禁用账号，保留数据但停止调度。' },
@@ -394,6 +613,12 @@ const selectAllFiltered = ref(false)
 const searchText = ref('')
 const selectedAction = ref<BatchActionValue>('refresh_quota')
 const proxyNodeIdForAction = ref('')
+const settingsSelection = reactive(createPoolKeyBatchSettingSelection())
+const settingsDraft = reactive(createPoolKeyBatchSettingsDraft())
+const settingsStatus = computed({
+  get: () => settingsDraft.is_active ? 'enabled' : 'disabled',
+  set: (value: string) => { settingsDraft.is_active = value === 'enabled' },
+})
 const lastResultMessage = ref('')
 const progressTotal = ref(0)
 const progressDone = ref(0)
@@ -448,6 +673,8 @@ const isCurrentPageFullySelected = computed(() => {
 })
 const canClearSelection = computed(() => selectAllFiltered.value || selectedKeyIds.value.length > 0)
 const activeQuickSelectorSet = computed(() => new Set(activeQuickSelectors.value))
+const settingsErrors = computed(() => validatePoolKeyBatchSettings(settingsSelection, settingsDraft))
+const selectedSettingsCount = computed(() => Object.values(settingsSelection).filter(Boolean).length)
 
 function sanitizeFileNamePart(value: unknown, fallback: string): string {
   const sanitized = String(value || '')
@@ -706,12 +933,31 @@ function toggleQuickSelector(selector: QuickSelectorValue): void {
 function canExecuteSpecifiedAction(action: BatchActionValue): boolean {
   if (executing.value || loading.value || selectedCount.value === 0) return false
   if (action === 'set_proxy') return Boolean(proxyNodeIdForAction.value)
+  if (action === 'update_settings') return settingsErrors.value.length === 0
   return true
+}
+
+function canSelectAction(action: BatchActionValue): boolean {
+  if (executing.value || loading.value) return false
+  if (action === 'set_proxy' || action === 'update_settings') return true
+  return selectedCount.value > 0
 }
 
 function getActionButtonVariant(option: BatchActionOption): 'default' | 'destructive' | 'outline' {
   if (option.destructive) return 'destructive'
+  if (
+    option.value === selectedAction.value
+    && (option.value === 'set_proxy' || option.value === 'update_settings')
+  ) return 'default'
   return 'outline'
+}
+
+function handleActionButtonClick(action: BatchActionValue): void {
+  if (action === 'set_proxy' || action === 'update_settings') {
+    selectedAction.value = action
+    return
+  }
+  void confirmAndExecuteAction(action)
 }
 
 async function confirmAndExecuteAction(action: BatchActionValue): Promise<void> {
@@ -722,6 +968,10 @@ async function confirmAndExecuteAction(action: BatchActionValue): Promise<void> 
   }
   if (action === 'set_proxy' && !proxyNodeIdForAction.value) {
     warning('请先选择代理节点')
+    return
+  }
+  if (action === 'update_settings' && settingsErrors.value.length > 0) {
+    warning(settingsErrors.value[0])
     return
   }
   if (!canExecuteSpecifiedAction(action)) return
@@ -807,6 +1057,10 @@ async function executeAction(actionOverride?: BatchActionValue): Promise<void> {
   const requestedCount = selectedCount.value
   if (selectedAction.value === 'set_proxy' && !proxyNodeIdForAction.value) {
     warning('请先选择代理节点')
+    return
+  }
+  if (selectedAction.value === 'update_settings' && settingsErrors.value.length > 0) {
+    warning(settingsErrors.value[0])
     return
   }
 
@@ -930,7 +1184,7 @@ async function executeAction(actionOverride?: BatchActionValue): Promise<void> {
 
         progressDone.value = Math.min(i + BATCH_SIZE, targetIds.length)
       }
-    } else if (['enable', 'disable', 'clear_proxy', 'set_proxy'].includes(selectedAction.value)) {
+    } else if (['enable', 'disable', 'clear_proxy', 'set_proxy', 'update_settings'].includes(selectedAction.value)) {
       const targetIds = selectedKeys.map((key) => key.key_id)
       const BATCH_SIZE = 2000
       const totalBatches = Math.ceil(targetIds.length / BATCH_SIZE)
@@ -944,12 +1198,14 @@ async function executeAction(actionOverride?: BatchActionValue): Promise<void> {
 
         const payload = selectedAction.value === 'set_proxy'
           ? { node_id: proxyNodeIdForAction.value, enabled: true }
-          : undefined
+          : selectedAction.value === 'update_settings'
+            ? buildPoolKeySettingsPatch(settingsSelection, settingsDraft)
+            : undefined
 
         try {
           const result = await batchActionPoolKeys(props.providerId, {
             key_ids: batch,
-            action: selectedAction.value as 'enable' | 'disable' | 'clear_proxy' | 'set_proxy',
+            action: selectedAction.value as 'enable' | 'disable' | 'clear_proxy' | 'set_proxy' | 'update_settings',
             ...(payload ? { payload } : {}),
           })
           successCount += result.affected
@@ -1049,6 +1305,8 @@ watch(
     activeQuickSelectors.value = []
     selectedAction.value = 'refresh_quota'
     proxyNodeIdForAction.value = ''
+    Object.assign(settingsSelection, createPoolKeyBatchSettingSelection())
+    Object.assign(settingsDraft, createPoolKeyBatchSettingsDraft())
     resetSelection(true)
     filteredTotal.value = 0
     pageKeys.value = []

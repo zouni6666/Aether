@@ -60,12 +60,22 @@
                     <h3 class="text-sm font-semibold">
                       {{ legacyT(isKeyManagedProviderType(provider.provider_type) ? '密钥管理' : '账号管理') }}
                     </h3>
-                    <div class="flex items-center gap-2">
+                    <div class="flex flex-wrap items-center justify-end gap-2">
+                      <Button
+                        v-if="endpoints.length > 0 && provider.provider_type === 'custom'"
+                        variant="outline"
+                        size="sm"
+                        class="h-9"
+                        @click="keyBatchImportDialogOpen = true"
+                      >
+                        <ListPlus class="mr-1.5 h-3.5 w-3.5" />
+                        批量导入
+                      </Button>
                       <Button
                         v-if="endpoints.length > 0"
                         variant="outline"
                         size="sm"
-                        class="h-8"
+                        class="h-9"
                         @click="handleAddKeyToFirstEndpoint"
                       >
                         <Plus class="w-3.5 h-3.5 mr-1.5" />
@@ -823,6 +833,16 @@
     @saved="handleKeyChanged"
   />
 
+  <ProviderKeyBatchImportDialog
+    v-if="open && provider?.provider_type === 'custom'"
+    :open="keyBatchImportDialogOpen"
+    :provider-id="provider.id"
+    :provider-name="provider.name"
+    :available-api-formats="availableKeyApiFormats"
+    @close="keyBatchImportDialogOpen = false"
+    @saved="handleKeyChanged"
+  />
+
   <!-- OAuth 账号对话框 -->
   <OAuthAccountDialog
     v-if="open && provider"
@@ -913,6 +933,7 @@ import { ref, watch, computed, nextTick } from 'vue'
 import {
   Plus,
   Key,
+  ListPlus,
   Loader2,
   GripVertical,
   ShieldX,
@@ -951,6 +972,7 @@ import AlertDialog from '@/components/common/AlertDialog.vue'
 import AntigravityQuotaDialog from '@/features/providers/components/AntigravityQuotaDialog.vue'
 import FailoverRulesDialog from '@/features/providers/components/FailoverRulesDialog.vue'
 import ProviderDetailHeader from '@/features/providers/components/ProviderDetailHeader.vue'
+import ProviderKeyBatchImportDialog from '@/features/providers/components/ProviderKeyBatchImportDialog.vue'
 import ProviderKeyActionCluster from '@/features/providers/components/ProviderKeyActionCluster.vue'
 import ProviderKeyIdentityBlock from '@/features/providers/components/ProviderKeyIdentityBlock.vue'
 import ProviderMonthlyQuotaCard from '@/features/providers/components/ProviderMonthlyQuotaCard.vue'
@@ -1083,6 +1105,7 @@ const endpointDialogOpen = ref(false)
 
 // 密钥相关状态
 const keyFormDialogOpen = ref(false)
+const keyBatchImportDialogOpen = ref(false)
 const keyPermissionsDialogOpen = ref(false)
 const oauthAccountDialogOpen = ref(false)
 const oauthKeyEditDialogOpen = ref(false)
@@ -1171,6 +1194,7 @@ const multiplierSaving = ref(false)
 const hasBlockingDialogOpen = computed(() =>
   endpointDialogOpen.value ||
   keyFormDialogOpen.value ||
+  keyBatchImportDialogOpen.value ||
   keyPermissionsDialogOpen.value ||
   oauthAccountDialogOpen.value ||
   oauthKeyEditDialogOpen.value ||
@@ -1317,6 +1341,7 @@ watch(
       // 重置所有对话框状态
       endpointDialogOpen.value = false
       keyFormDialogOpen.value = false
+      keyBatchImportDialogOpen.value = false
       keyPermissionsDialogOpen.value = false
       oauthAccountDialogOpen.value = false
       oauthKeyEditDialogOpen.value = false

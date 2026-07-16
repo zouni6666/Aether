@@ -12,7 +12,8 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use serde_json::json;
+use serde_json::{json, Map, Value};
+use std::collections::BTreeSet;
 
 impl<'a> AdminAppState<'a> {
     pub(crate) async fn clear_admin_provider_pool_cooldown(&self, provider_id: &str, key_id: &str) {
@@ -105,9 +106,9 @@ impl<'a> AdminAppState<'a> {
         let existing_keys = self
             .list_provider_catalog_keys_by_provider_ids(std::slice::from_ref(&provider.id))
             .await?;
-        let api_formats =
+        let available_api_formats =
             admin_provider_pool_pure::admin_pool_resolved_api_formats(&endpoints, &existing_keys);
-        if api_formats.is_empty() {
+        if available_api_formats.is_empty() {
             return Ok((
                 http::StatusCode::BAD_REQUEST,
                 Json(json!({ "detail": "Provider 没有可用 endpoint 或现有 key，无法推断 api_formats" })),
@@ -115,8 +116,74 @@ impl<'a> AdminAppState<'a> {
                 .into_response());
         }
 
-        let proxy =
-            admin_provider_pool_pure::admin_pool_key_proxy_value(payload.proxy_node_id.as_deref());
+        let requested_api_formats = payload
+            .api_formats
+            .iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let available_api_format_set = available_api_formats
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let api_formats = if requested_api_formats.is_empty() {
+            available_api_formats.clone()
+        } else {
+            if let Some(unsupported) = requested_api_formats
+                .iter()
+                .find(|value| !available_api_format_set.contains(*value))
+            {
+                return Ok((
+                    http::StatusCode::BAD_REQUEST,
+                    Json(json!({ "detail": format!("Provider 不支持 api_format: {unsupported}") })),
+                )
+                    .into_response());
+            }
+            requested_api_formats
+        };
+
+        let mut settings_map = match payload.settings {
+            Some(Value::Object(map)) => map,
+            Some(_) => {
+                return Ok((
+                    http::StatusCode::BAD_REQUEST,
+                    Json(json!({ "detail": "settings payload must be an object" })),
+                )
+                    .into_response());
+            }
+            None => Map::new(),
+        };
+        if let Some(proxy_node_id) = payload.proxy_node_id {
+            settings_map
+                .entry("proxy_node_id".to_string())
+                .or_insert(Value::String(proxy_node_id));
+        }
+        let shared_settings = (!settings_map.is_empty()).then_some(Value::Object(settings_map));
+        if let Some(settings) = shared_settings.as_ref() {
+            if let Err(detail) =
+                admin_provider_pool_pure::validate_admin_pool_key_settings_payload(settings)
+            {
+                return Ok((
+                    http::StatusCode::BAD_REQUEST,
+                    Json(json!({ "detail": detail })),
+                )
+                    .into_response());
+            }
+        }
+
+        let mut known_names = existing_keys
+            .iter()
+            .map(|key| key.name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .collect::<BTreeSet<_>>();
+        let mut known_api_keys = existing_keys
+            .iter()
+            .filter_map(|key| key.encrypted_api_key.as_deref())
+            .filter_map(|ciphertext| self.decrypt_catalog_secret_with_fallbacks(ciphertext))
+            .filter(|value| value != "__placeholder__")
+            .collect::<BTreeSet<_>>();
         let mut imported = 0usize;
         let skipped = 0usize;
         let mut errors = Vec::new();
@@ -136,6 +203,79 @@ impl<'a> AdminAppState<'a> {
                 continue;
             }
 
+            let name = item.name.trim();
+            if name.is_empty() {
+                errors.push(json!({
+                    "index": index,
+                    "reason": "name is empty",
+                }));
+                continue;
+            }
+            if known_names.contains(name) {
+                errors.push(json!({
+                    "index": index,
+                    "reason": "该名称已存在于当前 Provider 或本次导入中",
+                }));
+                continue;
+            }
+
+            let auth_type = item.auth_type.trim().to_ascii_lowercase();
+            let auth_type = if auth_type.is_empty() {
+                "api_key".to_string()
+            } else {
+                auth_type
+            };
+            if !matches!(auth_type.as_str(), "api_key" | "bearer") {
+                errors.push(json!({
+                    "index": index,
+                    "reason": "auth_type must be api_key or bearer",
+                }));
+                continue;
+            }
+            let requested_item_api_formats = item
+                .api_formats
+                .iter()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let item_api_formats = if requested_item_api_formats.is_empty() {
+                api_formats.clone()
+            } else {
+                if let Some(unsupported) = requested_item_api_formats
+                    .iter()
+                    .find(|value| !available_api_format_set.contains(*value))
+                {
+                    errors.push(json!({
+                        "index": index,
+                        "reason": format!("Provider 不支持 api_format: {unsupported}"),
+                    }));
+                    continue;
+                }
+                requested_item_api_formats
+            };
+            let item_settings = match admin_provider_pool_pure::resolve_admin_pool_key_settings(
+                shared_settings.as_ref(),
+                item.settings.as_ref(),
+            ) {
+                Ok(value) => value,
+                Err(detail) => {
+                    errors.push(json!({
+                        "index": index,
+                        "reason": detail,
+                    }));
+                    continue;
+                }
+            };
+            if known_api_keys.contains(api_key) {
+                errors.push(json!({
+                    "index": index,
+                    "reason": "该 API Key 已存在于当前 Provider 或本次导入中",
+                }));
+                continue;
+            }
+
             let Some(encrypted_api_key) = self.encrypt_catalog_secret_with_fallbacks(api_key)
             else {
                 errors.push(json!({
@@ -144,26 +284,15 @@ impl<'a> AdminAppState<'a> {
                 }));
                 continue;
             };
-
-            let auth_type = item.auth_type.trim().to_ascii_lowercase();
-            let auth_type = if auth_type.is_empty() {
-                "api_key".to_string()
-            } else {
-                auth_type
-            };
-            let name = item.name.trim();
             let record = match admin_provider_pool_pure::build_admin_pool_batch_import_key_record(
                 uuid::Uuid::new_v4().to_string(),
                 provider.id.clone(),
-                if name.is_empty() {
-                    format!("imported-{index}")
-                } else {
-                    name.to_string()
-                },
+                name.to_string(),
                 auth_type,
-                api_formats.clone(),
+                item_api_formats,
                 encrypted_api_key,
-                proxy.clone(),
+                None,
+                item_settings.as_ref(),
                 now_unix_secs,
             ) {
                 Ok(value) => value,
@@ -175,7 +304,6 @@ impl<'a> AdminAppState<'a> {
                     continue;
                 }
             };
-
             let Some(_) = self.create_provider_catalog_key(&record).await? else {
                 return Ok((
                     http::StatusCode::SERVICE_UNAVAILABLE,
@@ -185,6 +313,8 @@ impl<'a> AdminAppState<'a> {
                 )
                     .into_response());
             };
+            known_names.insert(name.to_string());
+            known_api_keys.insert(api_key.to_string());
             imported += 1;
         }
 
@@ -473,6 +603,12 @@ impl<'a> AdminAppState<'a> {
                 AdminPoolBatchActionKind::Disable => key.is_active = false,
                 AdminPoolBatchActionKind::ClearProxy => key.proxy = None,
                 AdminPoolBatchActionKind::SetProxy => key.proxy = plan.proxy_payload.clone(),
+                AdminPoolBatchActionKind::UpdateSettings => {
+                    if let Some(settings) = plan.settings_payload.as_ref() {
+                        admin_provider_pool_pure::apply_admin_pool_key_settings(&mut key, settings)
+                            .map_err(GatewayError::Internal)?;
+                    }
+                }
                 AdminPoolBatchActionKind::RegenerateFingerprint => {
                     key.fingerprint =
                         Some(aether_provider_transport::claude_code::generate_random_fingerprint())

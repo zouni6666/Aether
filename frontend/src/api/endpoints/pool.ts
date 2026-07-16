@@ -337,7 +337,37 @@ export interface PoolBatchAction {
     | 'delete'
     | 'clear_proxy'
     | 'set_proxy'
+    | 'update_settings'
   payload?: Record<string, unknown> | null
+}
+
+export interface PoolKeySettingsPatch {
+  internal_priority?: number
+  rpm_limit?: number | null
+  concurrent_limit?: number | null
+  cache_ttl_minutes?: number
+  max_probe_interval_minutes?: number
+  is_active?: boolean
+  note?: string | null
+  proxy_node_id?: string | null
+}
+
+export interface PoolBatchImportRequest {
+  keys: Array<{
+    name: string
+    api_key: string
+    auth_type: 'api_key' | 'bearer'
+    api_formats?: string[]
+    settings?: PoolKeySettingsPatch
+  }>
+  api_formats?: string[]
+  settings?: PoolKeySettingsPatch
+}
+
+export interface PoolBatchImportResult {
+  imported: number
+  skipped: number
+  errors: Array<{ index: number; reason: string }>
 }
 
 interface PoolReadOptions {
@@ -436,6 +466,18 @@ export async function batchActionPoolKeys(
 ): Promise<{ affected: number; message: string; task_id?: string }> {
   const response = await client.post(
     `/api/admin/pool/${providerId}/keys/batch-action`,
+    body,
+    { timeout: POOL_BATCH_ACTION_TIMEOUT_MS },
+  )
+  return response.data
+}
+
+export async function batchImportPoolKeys(
+  providerId: string,
+  body: PoolBatchImportRequest,
+): Promise<PoolBatchImportResult> {
+  const response = await client.post<PoolBatchImportResult>(
+    `/api/admin/pool/${providerId}/keys/batch-import`,
     body,
     { timeout: POOL_BATCH_ACTION_TIMEOUT_MS },
   )
