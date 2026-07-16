@@ -7,6 +7,8 @@ use serde_json::{json, Value};
 
 const CODEX_DEFAULT_REASONING_EFFORT: &str = "medium";
 const CODEX_REASONING_ENCRYPTED_CONTENT_INCLUDE: &str = "reasoning.encrypted_content";
+const CODEX_PROMPT_CACHE_IDENTITY_NAMESPACE: &str =
+    "https://github.com/fawney19/Aether/codex/prompt-cache-identity/v1/";
 pub const CODEX_RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
 pub const CODEX_MODEL_CATALOG_METADATA_FIELD: &str = "codex_models";
 const CODEX_OPENAI_RESPONSES_UNSUPPORTED_BODY_FIELDS: &[&str] = &[
@@ -1466,6 +1468,58 @@ fn wrap_codex_responses_string_input_for_backend(
     );
 }
 
+fn adapt_codex_prompt_cache_identity_for_backend(body_object: &mut serde_json::Map<String, Value>) {
+    // The Codex backend scopes prompt caching through client_metadata.session_id, while the
+    // standard OpenAI contract permits arbitrary prompt_cache_key strings. Adapt only requests
+    // that carry a cache key but do not already carry a native Codex session identity.
+    let Some(prompt_cache_key) = body_object
+        .get("prompt_cache_key")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned)
+    else {
+        return;
+    };
+
+    match body_object.get("client_metadata") {
+        Some(Value::Object(metadata)) if metadata.contains_key("session_id") => return,
+        Some(Value::Object(_) | Value::Null) | None => {}
+        Some(_) => return,
+    }
+
+    let cache_identity = uuid::Uuid::parse_str(&prompt_cache_key)
+        .unwrap_or_else(|_| {
+            uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_URL,
+                format!("{CODEX_PROMPT_CACHE_IDENTITY_NAMESPACE}{prompt_cache_key}").as_bytes(),
+            )
+        })
+        .to_string();
+
+    {
+        let metadata = body_object
+            .entry("client_metadata".to_string())
+            .or_insert_with(|| json!({}));
+        if metadata.is_null() {
+            *metadata = json!({});
+        }
+        let Some(metadata) = metadata.as_object_mut() else {
+            return;
+        };
+        metadata
+            .entry("session_id".to_string())
+            .or_insert_with(|| Value::String(cache_identity.clone()));
+        metadata
+            .entry("thread_id".to_string())
+            .or_insert_with(|| Value::String(cache_identity.clone()));
+    }
+
+    body_object.insert(
+        "prompt_cache_key".to_string(),
+        Value::String(cache_identity),
+    );
+}
+
 pub fn apply_codex_openai_responses_special_body_edits(
     provider_request_body: &mut Value,
     provider_type: &str,
@@ -1532,6 +1586,7 @@ pub fn apply_codex_openai_responses_special_body_edits_with_source_model_and_cap
             body_object.remove(*field);
         }
     }
+    adapt_codex_prompt_cache_identity_for_backend(body_object);
     if is_openai_responses_compact_request(provider_api_format) {
         body_object.remove("store");
     } else if !body_rules_handle_path(body_rules, "store") {
