@@ -300,6 +300,134 @@ pub fn maybe_build_openai_responses_cross_format_sync_product_from_normalized_pa
     }))
 }
 
+fn maybe_encode_sync_capture_envelope_stream_body(
+    body_json: Option<&Value>,
+) -> Result<Option<String>, AiSurfaceFinalizeError> {
+    let Some(body_json) = body_json else {
+        return Ok(None);
+    };
+    let Some(body_object) = body_json.as_object() else {
+        return Ok(None);
+    };
+    let Some(chunks) = body_object.get("chunks").and_then(Value::as_array) else {
+        return Ok(None);
+    };
+    if is_error_like_sync_body(body_json) {
+        return Ok(None);
+    }
+    if chunks.is_empty() {
+        return Err(AiSurfaceFinalizeError::new(
+            "Provider stream capture envelope contains no events",
+        ));
+    }
+
+    if body_object
+        .get("raw_response")
+        .is_some_and(|value| !value.is_null())
+    {
+        return Err(AiSurfaceFinalizeError::new(
+            "Provider stream capture envelope contains an unparsed raw response",
+        ));
+    }
+    if let Some(metadata_value) = body_object.get("metadata") {
+        let Some(metadata) = metadata_value.as_object() else {
+            return Err(AiSurfaceFinalizeError::new(
+                "Provider stream capture envelope metadata must be an object",
+            ));
+        };
+        if metadata
+            .get("parse_error")
+            .is_some_and(|value| !value.is_null())
+        {
+            return Err(AiSurfaceFinalizeError::new(
+                "Provider stream capture envelope reports a stream parse error",
+            ));
+        }
+        if let Some(stream) = metadata.get("stream") {
+            if stream.as_bool() != Some(true) {
+                return Err(AiSurfaceFinalizeError::new(
+                    "Provider stream capture envelope metadata.stream must be true",
+                ));
+            }
+        }
+
+        let dropped_chunks = sync_capture_metadata_u64(metadata, "dropped_chunks")?;
+        let stored_chunks = sync_capture_metadata_u64(metadata, "stored_chunks")?;
+        let total_chunks = sync_capture_metadata_u64(metadata, "total_chunks")?;
+        if dropped_chunks.is_some_and(|dropped| dropped > 0) {
+            return Err(incomplete_sync_capture_envelope_error());
+        }
+        match (stored_chunks, total_chunks) {
+            (None, None) => {}
+            (Some(stored), Some(total)) if stored == total && stored == chunks.len() as u64 => {}
+            _ => return Err(incomplete_sync_capture_envelope_error()),
+        }
+    }
+
+    let mut stream_body = Vec::new();
+    for chunk in chunks {
+        if !chunk.is_object() {
+            return Err(AiSurfaceFinalizeError::new(
+                "Provider stream capture envelope contains a non-object event",
+            ));
+        }
+        stream_body.extend_from_slice(b"data: ");
+        serde_json::to_writer(&mut stream_body, chunk)?;
+        stream_body.extend_from_slice(b"\n\n");
+    }
+
+    Ok(Some(
+        base64::engine::general_purpose::STANDARD.encode(stream_body),
+    ))
+}
+
+fn sync_capture_metadata_u64(
+    metadata: &Map<String, Value>,
+    field: &str,
+) -> Result<Option<u64>, AiSurfaceFinalizeError> {
+    let Some(value) = metadata.get(field) else {
+        return Ok(None);
+    };
+    value.as_u64().map(Some).ok_or_else(|| {
+        AiSurfaceFinalizeError::new(format!(
+            "Provider stream capture envelope metadata.{field} must be an unsigned integer"
+        ))
+    })
+}
+
+fn incomplete_sync_capture_envelope_error() -> AiSurfaceFinalizeError {
+    AiSurfaceFinalizeError::new(
+        "Provider stream capture envelope is incomplete and cannot be finalized losslessly",
+    )
+}
+
+fn sync_finalize_supports_capture_envelope(
+    report_kind: &str,
+    report_context: Option<&Value>,
+) -> bool {
+    if !is_standard_chat_finalize_kind(report_kind) && !is_standard_cli_finalize_kind(report_kind) {
+        return false;
+    }
+    let Some(report_context) = report_context else {
+        return false;
+    };
+    let provider_api_format = report_context
+        .get("provider_api_format")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    // Gemini private capture envelopes are normalized by provider_compat before this boundary.
+    matches!(
+        aether_ai_formats::normalize_api_format_alias(
+            &provider_stream_event_api_format_for_report_context(
+                report_context,
+                provider_api_format,
+            )
+        )
+        .as_str(),
+        "openai:chat" | "openai:responses" | "openai:responses:compact" | "claude:messages"
+    )
+}
+
 pub fn maybe_build_standard_sync_finalize_product_from_normalized_payload(
     report_kind: &str,
     status_code: u16,
@@ -307,6 +435,22 @@ pub fn maybe_build_standard_sync_finalize_product_from_normalized_payload(
     body_json: Option<&Value>,
     body_base64: Option<&str>,
 ) -> Result<Option<StandardSyncFinalizeNormalizedProduct>, AiSurfaceFinalizeError> {
+    let capture_stream_body_base64 = if status_code < 400
+        && body_base64.is_none()
+        && sync_finalize_supports_capture_envelope(report_kind, report_context)
+    {
+        maybe_encode_sync_capture_envelope_stream_body(body_json)?
+    } else {
+        None
+    };
+    let capture_envelope_used = capture_stream_body_base64.is_some();
+    let body_json = if capture_envelope_used {
+        None
+    } else {
+        body_json
+    };
+    let body_base64 = body_base64.or(capture_stream_body_base64.as_deref());
+
     if let Some(body_json) = maybe_build_standard_same_format_sync_body_from_normalized_payload(
         report_kind,
         status_code,
@@ -373,16 +517,20 @@ pub fn maybe_build_standard_sync_finalize_product_from_normalized_payload(
         )));
     }
 
-    Ok(
-        maybe_build_standard_cross_format_sync_product_from_normalized_payload(
-            report_kind,
-            status_code,
-            report_context,
-            body_json,
-            body_base64,
-        )?
-        .map(StandardSyncFinalizeNormalizedProduct::CrossFormat),
-    )
+    let product = maybe_build_standard_cross_format_sync_product_from_normalized_payload(
+        report_kind,
+        status_code,
+        report_context,
+        body_json,
+        body_base64,
+    )?
+    .map(StandardSyncFinalizeNormalizedProduct::CrossFormat);
+    if capture_envelope_used && product.is_none() {
+        return Err(AiSurfaceFinalizeError::new(
+            "Provider stream capture envelope cannot be finalized losslessly",
+        ));
+    }
+    Ok(product)
 }
 
 pub fn maybe_build_embedding_cross_format_sync_product_from_normalized_payload(
@@ -5956,6 +6104,376 @@ mod tests {
             Some(StandardSyncFinalizeNormalizedProduct::SuccessBody(
                 provider_body_json
             ))
+        );
+    }
+
+    #[test]
+    fn standard_sync_finalize_aggregates_openai_responses_capture_envelope_for_cross_format() {
+        let report_context = json!({
+            "provider_api_format": "openai:responses",
+            "client_api_format": "openai:chat",
+            "model": "gpt-5.6-luna",
+            "mapped_model": "gpt-5.6-luna",
+            "needs_conversion": true,
+        });
+        let provider_body_json = json!({
+            "chunks": [
+                {
+                    "type": "response.output_text.delta",
+                    "response_id": "resp_capture_123",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "delta": "Hello "
+                },
+                {
+                    "type": "response.output_text.done",
+                    "response_id": "resp_capture_123",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "text": "Hello capture"
+                },
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_capture_123",
+                        "object": "response",
+                        "status": "completed",
+                        "model": "gpt-5.6-luna",
+                        "output": [],
+                        "usage": {
+                            "input_tokens": 2,
+                            "output_tokens": 3,
+                            "total_tokens": 5
+                        }
+                    }
+                }
+            ],
+            "metadata": {}
+        });
+
+        let product = maybe_build_standard_sync_finalize_product_from_normalized_payload(
+            "openai_chat_sync_finalize",
+            200,
+            Some(&report_context),
+            Some(&provider_body_json),
+            None,
+        )
+        .expect("capture envelope aggregation should succeed")
+        .expect("capture envelope should produce a cross-format product");
+
+        let StandardSyncFinalizeNormalizedProduct::CrossFormat(product) = product else {
+            panic!("responses capture envelope should be converted for an OpenAI Chat client")
+        };
+        assert_eq!(product.provider_body_json["id"], "resp_capture_123");
+        assert_eq!(
+            product.provider_body_json["output"][0]["content"][0]["text"],
+            "Hello capture"
+        );
+        assert_eq!(
+            product.client_body_json["choices"][0]["message"]["content"],
+            "Hello capture"
+        );
+        assert_eq!(
+            product.client_body_json["usage"],
+            json!({
+                "prompt_tokens": 2,
+                "completion_tokens": 3,
+                "total_tokens": 5
+            })
+        );
+    }
+
+    #[test]
+    fn standard_sync_finalize_aggregates_openai_responses_capture_envelope_for_same_family() {
+        let report_context = json!({
+            "provider_api_format": "openai:responses",
+            "client_api_format": "openai:responses",
+            "model": "client-model",
+            "mapped_model": "provider-model",
+            "needs_conversion": false,
+        });
+        let provider_body_json = json!({
+            "chunks": [
+                {
+                    "type": "response.output_text.delta",
+                    "response_id": "resp_same_family_capture_123",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "delta": "same family"
+                },
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_same_family_capture_123",
+                        "object": "response",
+                        "status": "completed",
+                        "model": "provider-model",
+                        "output": []
+                    }
+                }
+            ],
+            "metadata": {}
+        });
+
+        let product = maybe_build_standard_sync_finalize_product_from_normalized_payload(
+            "openai_responses_sync_finalize",
+            200,
+            Some(&report_context),
+            Some(&provider_body_json),
+            None,
+        )
+        .expect("capture envelope aggregation should succeed")
+        .expect("capture envelope should produce a same-family body");
+
+        let StandardSyncFinalizeNormalizedProduct::SuccessBody(body_json) = product else {
+            panic!("same-family responses capture should remain a success body")
+        };
+        assert_eq!(body_json["id"], "resp_same_family_capture_123");
+        assert_eq!(body_json["output"][0]["content"][0]["text"], "same family");
+        assert!(body_json.get("chunks").is_none());
+    }
+
+    #[test]
+    fn standard_sync_finalize_rejects_unknown_capture_envelope_events() {
+        let report_context = json!({
+            "provider_api_format": "openai:responses",
+            "client_api_format": "openai:chat",
+            "model": "client-model",
+            "mapped_model": "provider-model",
+            "needs_conversion": true,
+        });
+        let provider_body_json = json!({
+            "chunks": [{
+                "type": "response.future.delta",
+                "response": {
+                    "id": "resp_unknown_capture_123",
+                    "object": "response",
+                    "status": "in_progress",
+                    "model": "provider-model"
+                },
+                "payload": {"kept": true}
+            }],
+            "metadata": {}
+        });
+
+        let error = maybe_build_standard_sync_finalize_product_from_normalized_payload(
+            "openai_chat_sync_finalize",
+            200,
+            Some(&report_context),
+            Some(&provider_body_json),
+            None,
+        )
+        .expect_err("unknown capture event must fail closed instead of returning raw chunks");
+
+        assert!(error
+            .to_string()
+            .contains("Unsupported provider stream event cannot be converted losslessly"));
+        assert!(error
+            .to_string()
+            .contains("field $.type = \"response.future.delta\""));
+    }
+
+    #[test]
+    fn standard_sync_finalize_leaves_capture_error_envelope_to_error_boundary() {
+        let report_context = json!({
+            "provider_api_format": "openai:responses",
+            "client_api_format": "openai:chat",
+            "model": "client-model",
+            "mapped_model": "provider-model",
+            "needs_conversion": true,
+        });
+        let provider_body_json = json!({
+            "chunks": [{
+                "type": "error",
+                "error": {
+                    "type": "server_error",
+                    "message": "provider failed"
+                }
+            }],
+            "metadata": {}
+        });
+
+        let product = maybe_build_standard_sync_finalize_product_from_normalized_payload(
+            "openai_chat_sync_finalize",
+            200,
+            Some(&report_context),
+            Some(&provider_body_json),
+            None,
+        )
+        .expect("known error envelope should remain available to the gateway error boundary");
+
+        assert_eq!(product, None);
+    }
+
+    #[test]
+    fn standard_sync_finalize_rejects_malformed_or_incomplete_capture_envelopes() {
+        let report_context = json!({
+            "provider_api_format": "openai:responses",
+            "client_api_format": "openai:chat",
+            "model": "client-model",
+            "mapped_model": "provider-model",
+            "needs_conversion": true,
+        });
+        let cases = [
+            (json!({"chunks": [], "metadata": {}}), "contains no events"),
+            (
+                json!({
+                    "chunks": [{"type": "response.completed", "response": {}}],
+                    "metadata": {
+                        "stored_chunks": 1,
+                        "total_chunks": 2,
+                        "dropped_chunks": 1
+                    }
+                }),
+                "is incomplete and cannot be finalized losslessly",
+            ),
+            (
+                json!({
+                    "chunks": [{"type": "response.completed", "response": {}}],
+                    "metadata": {"total_chunks": 1}
+                }),
+                "is incomplete and cannot be finalized losslessly",
+            ),
+            (
+                json!({
+                    "chunks": [{"type": "response.completed", "response": {}}],
+                    "metadata": {"dropped_chunks": "1"}
+                }),
+                "metadata.dropped_chunks must be an unsigned integer",
+            ),
+            (
+                json!({
+                    "chunks": [{"type": "response.completed", "response": {}}],
+                    "metadata": false
+                }),
+                "metadata must be an object",
+            ),
+            (
+                json!({
+                    "chunks": [{"type": "response.completed", "response": {}}],
+                    "metadata": {"stream": false}
+                }),
+                "metadata.stream must be true",
+            ),
+            (
+                json!({
+                    "chunks": [{"type": "response.completed", "response": {}}],
+                    "metadata": {"parse_error": "invalid SSE frame"}
+                }),
+                "reports a stream parse error",
+            ),
+            (
+                json!({
+                    "chunks": [{"type": "response.completed", "response": {}}],
+                    "raw_response": "unparsed",
+                    "metadata": {}
+                }),
+                "contains an unparsed raw response",
+            ),
+            (
+                json!({"chunks": ["not-an-event"], "metadata": {}}),
+                "contains a non-object event",
+            ),
+        ];
+
+        for (provider_body_json, expected_message) in cases {
+            let error = maybe_build_standard_sync_finalize_product_from_normalized_payload(
+                "openai_chat_sync_finalize",
+                200,
+                Some(&report_context),
+                Some(&provider_body_json),
+                None,
+            )
+            .expect_err("malformed capture envelope must fail closed");
+
+            assert!(
+                error.to_string().contains(expected_message),
+                "unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn standard_sync_finalize_rejects_capture_envelope_when_target_format_is_unsupported() {
+        let report_context = json!({
+            "provider_api_format": "openai:responses",
+            "client_api_format": "future:chat",
+            "model": "client-model",
+            "mapped_model": "provider-model",
+            "needs_conversion": true,
+        });
+        let provider_body_json = json!({
+            "chunks": [{
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_unsupported_target_123",
+                    "object": "response",
+                    "status": "completed",
+                    "model": "provider-model",
+                    "output": [{
+                        "type": "message",
+                        "id": "msg_unsupported_target_123",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{
+                            "type": "output_text",
+                            "text": "must not leak as raw chunks",
+                            "annotations": []
+                        }]
+                    }]
+                }
+            }],
+            "metadata": {}
+        });
+
+        let error = maybe_build_standard_sync_finalize_product_from_normalized_payload(
+            "openai_cli_sync_finalize",
+            200,
+            Some(&report_context),
+            Some(&provider_body_json),
+            None,
+        )
+        .expect_err("unsupported target must not fall back to the raw capture envelope");
+
+        assert!(error
+            .to_string()
+            .contains("capture envelope cannot be finalized losslessly"));
+    }
+
+    #[test]
+    fn standard_sync_finalize_prefers_explicit_stream_body_over_capture_envelope() {
+        let report_context = json!({
+            "provider_api_format": "openai:responses",
+            "client_api_format": "openai:chat",
+            "model": "client-model",
+            "mapped_model": "provider-model",
+            "needs_conversion": true,
+        });
+        let capture_envelope = json!({
+            "chunks": [{"type": "response.future.delta"}],
+            "metadata": {}
+        });
+        let stream_body = concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"response_id\":\"resp_explicit_stream_123\",\"output_index\":0,\"content_index\":0,\"delta\":\"explicit stream\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_explicit_stream_123\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"provider-model\",\"output\":[]}}\n\n",
+        );
+
+        let product = maybe_build_standard_sync_finalize_product_from_normalized_payload(
+            "openai_chat_sync_finalize",
+            200,
+            Some(&report_context),
+            Some(&capture_envelope),
+            Some(&base64::engine::general_purpose::STANDARD.encode(stream_body)),
+        )
+        .expect("explicit stream body should take precedence")
+        .expect("explicit stream body should produce a product");
+
+        let StandardSyncFinalizeNormalizedProduct::CrossFormat(product) = product else {
+            panic!("explicit Responses stream should convert to OpenAI Chat")
+        };
+        assert_eq!(
+            product.client_body_json["choices"][0]["message"]["content"],
+            "explicit stream"
         );
     }
 
