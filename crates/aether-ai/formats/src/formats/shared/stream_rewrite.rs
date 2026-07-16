@@ -49,12 +49,25 @@ pub fn resolve_finalize_stream_rewrite_mode(
         .unwrap_or_default()
         .trim()
         .to_ascii_lowercase();
+    let provider_stream_event_api_format = report_context
+        .get("provider_stream_event_api_format")
+        .or_else(|| report_context.get("provider_stream_api_format"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_else(|| provider_api_format.clone());
     let client_api_format = report_context
         .get("client_api_format")
         .and_then(Value::as_str)
         .unwrap_or_default()
         .trim()
         .to_ascii_lowercase();
+    let stream_needs_conversion = needs_conversion
+        || !is_same_format_family(
+            provider_stream_event_api_format.as_str(),
+            client_api_format.as_str(),
+        );
 
     if !needs_conversion
         && client_consumes_same_private_stream_envelope(
@@ -87,25 +100,30 @@ pub fn resolve_finalize_stream_rewrite_mode(
         return Some(FinalizeStreamRewriteMode::OpenAiImage);
     }
 
-    if needs_conversion {
+    if stream_needs_conversion {
         // CPA strategy: when provider and client share the same wire format
         // (exact match or same family), pass through the stream verbatim.
         // Parsing→rebuilding only adds overhead and may lose information
         // (encrypted_content, original item IDs, etc.).
-        if is_same_format_family(provider_api_format.as_str(), client_api_format.as_str()) {
-            if is_openai_responses_family(provider_api_format.as_str())
+        if is_same_format_family(
+            provider_stream_event_api_format.as_str(),
+            client_api_format.as_str(),
+        ) {
+            if is_openai_responses_family(provider_stream_event_api_format.as_str())
                 && is_openai_responses_family(client_api_format.as_str())
             {
                 return Some(FinalizeStreamRewriteMode::OpenAiResponsesCompat);
             }
-            if provider_api_format == "claude:messages" && client_api_format == "claude:messages" {
+            if provider_stream_event_api_format == "claude:messages"
+                && client_api_format == "claude:messages"
+            {
                 return Some(FinalizeStreamRewriteMode::ClaudeReadToolSanitize);
             }
             return model_directive_display_model_from_report_context(report_context)
                 .map(|_| FinalizeStreamRewriteMode::ModelDirectiveDisplay);
         }
         return supports_standard_stream_rewrite(
-            provider_api_format.as_str(),
+            provider_stream_event_api_format.as_str(),
             client_api_format.as_str(),
         )
         .then_some(FinalizeStreamRewriteMode::Standard);
@@ -118,25 +136,30 @@ pub fn resolve_finalize_stream_rewrite_mode(
     }
 
     if model_directive_display_model_from_report_context(report_context).is_some()
-        && provider_api_format == client_api_format
-        && is_standard_provider_api_format(provider_api_format.as_str())
+        && provider_stream_event_api_format == client_api_format
+        && is_standard_provider_api_format(provider_stream_event_api_format.as_str())
         && !provider_adaptation_should_unwrap_stream_envelope(
             envelope_name.as_str(),
             provider_api_format.as_str(),
         )
     {
-        if provider_api_format == "claude:messages" {
+        if provider_stream_event_api_format == "claude:messages" {
             return Some(FinalizeStreamRewriteMode::ClaudeReadToolSanitize);
         }
         return Some(FinalizeStreamRewriteMode::ModelDirectiveDisplay);
     }
 
-    if provider_api_format == "claude:messages" && client_api_format == "claude:messages" {
+    if provider_stream_event_api_format == "claude:messages"
+        && client_api_format == "claude:messages"
+    {
         return Some(FinalizeStreamRewriteMode::ClaudeReadToolSanitize);
     }
 
-    if provider_api_format == client_api_format
-        && is_openai_responses_family(provider_api_format.as_str())
+    if is_same_format_family(
+        provider_stream_event_api_format.as_str(),
+        client_api_format.as_str(),
+    ) && is_openai_responses_family(provider_stream_event_api_format.as_str())
+        && is_openai_responses_family(client_api_format.as_str())
     {
         return Some(FinalizeStreamRewriteMode::OpenAiResponsesCompat);
     }
@@ -1009,6 +1032,61 @@ data: {\"type\":\"response.reasoning_summary_text.delta\",\"response_id\":\"resp
         assert!(output.contains("\"reasoning_content\":\"Need to inspect first.\""));
         assert!(!output.contains("\"content\""));
         assert!(!output.contains("data: [DONE]"));
+    }
+
+    #[test]
+    fn explicit_responses_stream_format_preserves_function_call_metadata() {
+        let report_context = json!({
+            "provider_api_format": "openai:chat",
+            "provider_stream_event_api_format": "openai:responses",
+            "client_api_format": "openai:responses",
+            "needs_conversion": true,
+        });
+        assert_eq!(
+            resolve_finalize_stream_rewrite_mode(&report_context),
+            Some(FinalizeStreamRewriteMode::OpenAiResponsesCompat)
+        );
+
+        let mut rewriter = maybe_build_ai_surface_stream_rewriter(Some(&report_context))
+            .expect("responses compat rewriter should exist");
+        let output = rewriter
+            .push_chunk(
+                b"event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_chat_metadata_123\",\"call_id\":\"call_chat_metadata_123\",\"status\":\"completed\",\"arguments\":\"{}\",\"name\":\"lookup\",\"metadata\":{\"source\":\"chat\"},\"internal_chat_message_metadata_passthrough\":{\"turn_id\":\"turn_123\"}}}\n\n",
+            )
+            .expect("responses event should pass through");
+        let output = String::from_utf8(output).expect("output should be utf8");
+
+        assert!(output.contains("event: response.output_item.added"));
+        assert!(output.contains("\"metadata\":{\"source\":\"chat\"}"));
+        assert!(output
+            .contains("\"internal_chat_message_metadata_passthrough\":{\"turn_id\":\"turn_123\"}"));
+    }
+
+    #[test]
+    fn explicit_responses_stream_format_converts_to_chat_even_without_request_conversion() {
+        let report_context = json!({
+            "provider_api_format": "openai:chat",
+            "provider_stream_event_api_format": "openai:responses",
+            "client_api_format": "openai:chat",
+            "needs_conversion": false,
+        });
+        assert_eq!(
+            resolve_finalize_stream_rewrite_mode(&report_context),
+            Some(FinalizeStreamRewriteMode::Standard)
+        );
+
+        let mut rewriter = maybe_build_ai_surface_stream_rewriter(Some(&report_context))
+            .expect("standard rewriter should exist");
+        let output = rewriter
+            .push_chunk(
+                b"event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_chat_metadata_123\",\"call_id\":\"call_chat_metadata_123\",\"status\":\"completed\",\"arguments\":\"{}\",\"name\":\"lookup\",\"metadata\":{\"source\":\"chat\"},\"internal_chat_message_metadata_passthrough\":{\"turn_id\":\"turn_123\"}}}\n\n",
+            )
+            .expect("responses event should convert to chat");
+        let output = String::from_utf8(output).expect("output should be utf8");
+
+        assert!(output.contains("\"object\":\"chat.completion.chunk\""));
+        assert!(output.contains("\"id\":\"call_chat_metadata_123\""));
+        assert!(!output.contains("unsupported_stream_event"));
     }
 
     #[test]

@@ -678,11 +678,30 @@ impl OpenAIResponsesProviderState {
         if item.get("type").and_then(Value::as_str) != Some("function_call") {
             return;
         }
-        const MAPPED_FIELDS: &[&str] = &["type", "id", "call_id", "status", "name", "arguments"];
-        if item
-            .keys()
-            .any(|field| !MAPPED_FIELDS.contains(&field.as_str()))
-        {
+        // Chat-backed Responses implementations may attach transport-only metadata to
+        // function-call items. It does not change the executable tool call, and the
+        // sync Responses aggregator retains the original item verbatim. Treat these
+        // sidecars as recognized while continuing to fail closed for semantic fields
+        // (for example `caller`) that the canonical tool-call events cannot represent.
+        const EXECUTION_FIELDS: &[&str] = &["type", "id", "call_id", "status", "name", "arguments"];
+        let has_chat_metadata_passthrough =
+            item.contains_key("internal_chat_message_metadata_passthrough");
+        let chat_metadata_target_supported = report_context
+            .get("client_api_format")
+            .and_then(Value::as_str)
+            .map(aether_ai_formats::normalize_api_format_alias)
+            .is_none_or(|client_api_format| {
+                matches!(
+                    client_api_format.as_str(),
+                    "openai:chat" | "openai:responses" | "openai:responses:compact"
+                )
+            });
+        if item.keys().any(|field| {
+            !EXECUTION_FIELDS.contains(&field.as_str())
+                && !(chat_metadata_target_supported
+                    && (field == "internal_chat_message_metadata_passthrough"
+                        || (field == "metadata" && has_chat_metadata_passthrough)))
+        }) {
             out.push(self.unknown_frame(report_context, Value::Object(item.clone())));
             return;
         }
@@ -3716,6 +3735,119 @@ mod tests {
             CanonicalStreamEvent::ToolCallStart { .. }
                 | CanonicalStreamEvent::ToolCallArgumentsDelta { .. }
         )));
+    }
+
+    #[test]
+    fn openai_responses_provider_state_accepts_chat_backed_function_call_metadata() {
+        let mut state = OpenAIResponsesProviderState::default();
+        let report_context = json!({});
+        let frames = state
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "type": "response.output_item.added",
+                    "response_id": "resp_chat_metadata_123",
+                    "output_index": 0,
+                    "item": {
+                        "type": "function_call",
+                        "id": "fc_chat_metadata_123",
+                        "call_id": "call_chat_metadata_123",
+                        "status": "completed",
+                        "name": "lookup",
+                        "arguments": "{\"query\":\"aether\"}",
+                        "internal_chat_message_metadata_passthrough": {
+                            "turn_id": "turn_123"
+                        },
+                        "metadata": {
+                            "source": "chat"
+                        }
+                    }
+                })),
+            )
+            .expect("chat-backed function call event should parse");
+
+        assert!(!frames
+            .iter()
+            .any(|frame| matches!(frame.event, CanonicalStreamEvent::UnknownEvent(_))));
+        assert!(frames.iter().any(|frame| matches!(
+            frame.event,
+            CanonicalStreamEvent::ToolCallStart {
+                index: 0,
+                ref call_id,
+                ref name,
+            } if call_id == "call_chat_metadata_123" && name == "lookup"
+        )));
+        assert!(frames.iter().any(|frame| matches!(
+            frame.event,
+            CanonicalStreamEvent::ToolCallArgumentsDelta {
+                index: 0,
+                ref arguments,
+            } if arguments == "{\"query\":\"aether\"}"
+        )));
+    }
+
+    #[test]
+    fn openai_responses_provider_state_rejects_unpaired_function_call_metadata() {
+        let mut state = OpenAIResponsesProviderState::default();
+        let frames = state
+            .push_line(
+                &json!({}),
+                data_line(json!({
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {
+                        "type": "function_call",
+                        "id": "fc_metadata_only_123",
+                        "call_id": "call_metadata_only_123",
+                        "status": "completed",
+                        "name": "lookup",
+                        "arguments": "{}",
+                        "metadata": {"semantic": true}
+                    }
+                })),
+            )
+            .expect("function call event should parse");
+
+        assert!(frames.iter().any(|frame| matches!(
+            frame.event,
+            CanonicalStreamEvent::UnknownEvent(ref payload)
+                if payload.get("metadata").is_some()
+        )));
+        assert!(!frames.iter().any(|frame| matches!(
+            frame.event,
+            CanonicalStreamEvent::ToolCallStart { .. }
+                | CanonicalStreamEvent::ToolCallArgumentsDelta { .. }
+        )));
+    }
+
+    #[test]
+    fn openai_responses_provider_state_rejects_chat_metadata_for_non_openai_clients() {
+        let mut state = OpenAIResponsesProviderState::default();
+        let frames = state
+            .push_line(
+                &json!({"client_api_format": "claude:messages"}),
+                data_line(json!({
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {
+                        "type": "function_call",
+                        "id": "fc_chat_metadata_123",
+                        "call_id": "call_chat_metadata_123",
+                        "status": "completed",
+                        "name": "lookup",
+                        "arguments": "{}",
+                        "metadata": {"source": "chat"},
+                        "internal_chat_message_metadata_passthrough": {
+                            "turn_id": "turn_123"
+                        }
+                    }
+                })),
+            )
+            .expect("function call event should parse");
+
+        assert!(frames
+            .iter()
+            .any(|frame| matches!(frame.event, CanonicalStreamEvent::UnknownEvent(_))));
     }
 
     #[test]

@@ -684,13 +684,17 @@ fn maybe_build_openai_responses_same_family_stream_sync_body(
         .get("needs_conversion")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let provider_stream_event_api_format =
+        provider_stream_event_api_format_for_report_context(report_context, &provider_api_format);
     let normalized_provider_api_format =
-        normalize_openai_responses_family_api_format(&provider_api_format);
+        normalize_openai_responses_family_api_format(&provider_stream_event_api_format);
     let normalized_client_api_format =
         normalize_openai_responses_family_api_format(&client_api_format);
-    if !is_openai_responses_family_api_format(&provider_api_format)
+    if !is_openai_responses_family_api_format(&provider_stream_event_api_format)
         || !is_openai_responses_family_api_format(&client_api_format)
-        || (normalized_provider_api_format == normalized_client_api_format && needs_conversion)
+        || (is_openai_responses_family_api_format(&provider_api_format)
+            && normalized_provider_api_format == normalized_client_api_format
+            && needs_conversion)
     {
         return Ok(None);
     }
@@ -3628,7 +3632,7 @@ mod tests {
         maybe_build_standard_cross_format_sync_product_from_normalized_payload,
         maybe_build_standard_same_format_sync_body_from_normalized_payload,
         maybe_build_standard_sync_finalize_product_from_normalized_payload,
-        StandardSyncFinalizeNormalizedProduct,
+        try_aggregate_openai_responses_stream_sync_response, StandardSyncFinalizeNormalizedProduct,
     };
     use aether_ai_formats::formats::conversion::response::{
         convert_claude_chat_response_to_openai_chat, convert_gemini_chat_response_to_openai_chat,
@@ -4871,6 +4875,28 @@ mod tests {
     }
 
     #[test]
+    fn validates_and_preserves_chat_backed_function_call_metadata() {
+        let body = concat!(
+            "event: response.output_item.added\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_chat_metadata_123\",\"call_id\":\"call_chat_metadata_123\",\"status\":\"completed\",\"arguments\":\"{\\\"query\\\":\\\"aether\\\"}\",\"name\":\"lookup\",\"metadata\":{\"source\":\"chat\"},\"internal_chat_message_metadata_passthrough\":{\"turn_id\":\"turn_123\"}}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_chat_metadata_123\",\"object\":\"response\",\"model\":\"gpt-5\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
+        );
+
+        let result = try_aggregate_openai_responses_stream_sync_response(body.as_bytes())
+            .expect("chat-backed function call metadata should pass stream validation")
+            .expect("chat-backed function call stream should aggregate");
+
+        assert_eq!(result["output"][0]["type"], "function_call");
+        assert_eq!(result["output"][0]["call_id"], "call_chat_metadata_123");
+        assert_eq!(result["output"][0]["metadata"]["source"], "chat");
+        assert_eq!(
+            result["output"][0]["internal_chat_message_metadata_passthrough"]["turn_id"],
+            "turn_123"
+        );
+    }
+
+    #[test]
     fn custom_tool_call_input_events_materialize_custom_tool_call() {
         let body = concat!(
             "event: response.custom_tool_call_input.delta\n",
@@ -5861,6 +5887,80 @@ mod tests {
         };
         assert_eq!(body_json["object"], "chat.completion");
         assert_eq!(body_json["choices"][0]["message"]["content"], "pong");
+    }
+
+    #[test]
+    fn standard_sync_finalize_converts_chat_backed_function_call_metadata() {
+        let body = concat!(
+            "event: response.output_item.added\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_chat_metadata_123\",\"call_id\":\"call_chat_metadata_123\",\"status\":\"completed\",\"arguments\":\"{\\\"query\\\":\\\"aether\\\"}\",\"name\":\"lookup\",\"metadata\":{\"source\":\"chat\"},\"internal_chat_message_metadata_passthrough\":{\"turn_id\":\"turn_123\"}}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_chat_metadata_123\",\"object\":\"response\",\"model\":\"gpt-5\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
+        );
+        let report_context = json!({
+            "provider_api_format": "openai:responses",
+            "client_api_format": "openai:chat",
+            "needs_conversion": true,
+        });
+
+        let product = maybe_build_standard_sync_finalize_product_from_normalized_payload(
+            "openai_chat_sync_finalize",
+            200,
+            Some(&report_context),
+            None,
+            Some(&base64::engine::general_purpose::STANDARD.encode(body)),
+        )
+        .expect("chat-backed function call metadata should convert")
+        .expect("dispatch should produce a body");
+
+        let StandardSyncFinalizeNormalizedProduct::CrossFormat(product) = product else {
+            panic!("Chat-to-Responses conversion should produce a cross-format body");
+        };
+        let body_json = product.client_body_json;
+        let tool_call = &body_json["choices"][0]["message"]["tool_calls"][0];
+        assert_eq!(tool_call["id"], "call_chat_metadata_123");
+        assert_eq!(tool_call["function"]["name"], "lookup");
+        assert_eq!(tool_call["function"]["arguments"], "{\"query\":\"aether\"}");
+        assert!(tool_call.get("metadata").is_none());
+        assert!(tool_call
+            .get("internal_chat_message_metadata_passthrough")
+            .is_none());
+    }
+
+    #[test]
+    fn standard_sync_finalize_preserves_responses_wire_metadata_for_responses_client() {
+        let body = concat!(
+            "event: response.output_item.added\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_chat_metadata_123\",\"call_id\":\"call_chat_metadata_123\",\"status\":\"completed\",\"arguments\":\"{\\\"query\\\":\\\"aether\\\"}\",\"name\":\"lookup\",\"metadata\":{\"source\":\"chat\"},\"internal_chat_message_metadata_passthrough\":{\"turn_id\":\"turn_123\"}}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_chat_metadata_123\",\"object\":\"response\",\"model\":\"gpt-5\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
+        );
+        let report_context = json!({
+            "provider_api_format": "openai:chat",
+            "provider_stream_event_api_format": "openai:responses",
+            "client_api_format": "openai:responses",
+            "needs_conversion": true,
+        });
+
+        let product = maybe_build_standard_sync_finalize_product_from_normalized_payload(
+            "openai_responses_sync_finalize",
+            200,
+            Some(&report_context),
+            None,
+            Some(&base64::engine::general_purpose::STANDARD.encode(body)),
+        )
+        .expect("Responses wire metadata should aggregate")
+        .expect("dispatch should produce a body");
+
+        let StandardSyncFinalizeNormalizedProduct::SuccessBody(body_json) = product else {
+            panic!("matching Responses wire format should produce a success body");
+        };
+        assert_eq!(body_json["output"][0]["type"], "function_call");
+        assert_eq!(body_json["output"][0]["metadata"]["source"], "chat");
+        assert_eq!(
+            body_json["output"][0]["internal_chat_message_metadata_passthrough"]["turn_id"],
+            "turn_123"
+        );
     }
 
     #[test]

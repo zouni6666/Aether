@@ -785,6 +785,58 @@ mod tests {
     }
 
     #[test]
+    fn transforms_chat_backed_function_call_metadata_to_chat_tool_calls() {
+        let report_context = report_context("openai:responses", "openai:chat");
+        let mut matrix = StreamingStandardFormatMatrix::default();
+        let mut output = Vec::new();
+
+        for line in [
+            data_line(json!({
+                "type": "response.output_item.added",
+                "response_id": "resp_chat_metadata_123",
+                "output_index": 0,
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_chat_metadata_123",
+                    "call_id": "call_chat_metadata_123",
+                    "status": "completed",
+                    "arguments": "{\"query\":\"aether\"}",
+                    "name": "lookup",
+                    "metadata": {"source": "chat"},
+                    "internal_chat_message_metadata_passthrough": {
+                        "turn_id": "turn_123"
+                    }
+                }
+            })),
+            data_line(json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_chat_metadata_123",
+                    "object": "response",
+                    "model": "gpt-5",
+                    "status": "completed",
+                    "output": [],
+                },
+            })),
+        ] {
+            output.extend(
+                matrix
+                    .transform_line(&report_context, line)
+                    .expect("chat-backed function call should convert"),
+            );
+        }
+
+        let sse = String::from_utf8(output).expect("sse should be utf8");
+        assert!(!sse.contains("unsupported_stream_event"), "{sse}");
+        assert!(!sse.contains("Unsupported provider stream event"), "{sse}");
+        assert!(sse.contains("\"id\":\"call_chat_metadata_123\""), "{sse}");
+        assert!(sse.contains("\"name\":\"lookup\""), "{sse}");
+        assert!(sse.contains("\\\"query\\\":\\\"aether\\\""), "{sse}");
+        assert!(!sse.contains("internal_chat_message_metadata_passthrough"));
+        assert!(!sse.contains("\"metadata\""));
+    }
+
+    #[test]
     fn ignores_openai_responses_keepalive_events_for_chat_clients() {
         let report_context = report_context("openai:responses", "openai:chat");
         let mut matrix = StreamingStandardFormatMatrix::default();

@@ -680,6 +680,12 @@ fn validate_openai_responses_cross_format_response_extensions(
             }
             CanonicalContentBlock::Unknown { .. } => continue,
         };
+        let has_chat_metadata_passthrough = extensions.iter().any(|(namespace, value)| {
+            matches!(namespace.as_str(), "openai_responses" | "openai_cli")
+                && value.as_object().is_some_and(|object| {
+                    object.contains_key("internal_chat_message_metadata_passthrough")
+                })
+        });
         validate_openai_responses_response_extension_namespace(
             source,
             target,
@@ -693,7 +699,13 @@ fn validate_openai_responses_cross_format_response_extensions(
                 }
                 CanonicalContentBlock::Thinking { .. } => key == "item_type",
                 CanonicalContentBlock::ToolUse { .. } => {
+                    // Codex may attach a private Responses-to-Chat transport sidecar.
+                    // Only a Chat target may intentionally consume the tool call while
+                    // discarding that paired transport metadata.
                     matches!(key, "item_id" | "item_type" | "status")
+                        || (target == FormatId::OpenAiChat
+                            && (key == "internal_chat_message_metadata_passthrough"
+                                || (key == "metadata" && has_chat_metadata_passthrough)))
                 }
                 CanonicalContentBlock::ToolResult { .. } => key == "item_type",
                 CanonicalContentBlock::Image { .. }
@@ -5139,6 +5151,63 @@ mod tests {
                     if field.ends_with(".caller")
             ));
         }
+    }
+
+    #[test]
+    fn chat_backed_function_call_metadata_is_only_droppable_for_chat_targets() {
+        let body = json!({
+            "id": "resp_chat_metadata",
+            "object": "response",
+            "model": "gpt-5",
+            "status": "completed",
+            "output": [{
+                "type": "function_call",
+                "id": "fc_chat_metadata",
+                "call_id": "call_chat_metadata",
+                "status": "completed",
+                "name": "lookup",
+                "arguments": "{}",
+                "metadata": {"source": "chat"},
+                "internal_chat_message_metadata_passthrough": {
+                    "turn_id": "turn_123"
+                }
+            }]
+        });
+
+        let chat = convert_response_pure("openai:responses", "openai:chat", &body)
+            .expect("Chat-backed metadata should be droppable for a Chat client")
+            .value;
+        assert_eq!(
+            chat["choices"][0]["message"]["tool_calls"][0]["id"],
+            "call_chat_metadata"
+        );
+
+        for target in ["claude:messages", "gemini:generate_content"] {
+            let error = convert_response_pure("openai:responses", target, &body)
+                .expect_err("non-Chat targets must reject Chat-private metadata");
+            assert!(
+                matches!(
+                    error,
+                    super::FormatError::LossyConversionBlocked { ref field, .. }
+                        if field.ends_with(".metadata")
+                            || field.contains("internal_chat_message_metadata_passthrough")
+                ),
+                "{target}: {error:?}"
+            );
+        }
+
+        let mut unpaired = body;
+        unpaired["output"][0]
+            .as_object_mut()
+            .expect("function call should be an object")
+            .remove("internal_chat_message_metadata_passthrough");
+        let error = convert_response_pure("openai:responses", "openai:chat", &unpaired)
+            .expect_err("generic metadata without the Chat-private marker must be rejected");
+        assert!(matches!(
+            error,
+            super::FormatError::LossyConversionBlocked { ref field, .. }
+                if field.ends_with(".metadata")
+        ));
     }
 
     #[test]
