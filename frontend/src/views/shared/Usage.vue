@@ -154,6 +154,7 @@ import {
   getDateRangeFromPeriod
 } from '@/features/usage/composables'
 import { reconcileActiveRequestDiscovery } from '@/features/usage/utils/activeRequestDiscovery'
+import { mergeUsageRecordFirstByteTimeMs } from '@/features/usage/utils/recordSync'
 import {
   hasUsageFallback,
   isUsageRecordFailed,
@@ -521,7 +522,10 @@ async function pollActiveRequests() {
         record.actual_cost = update.actual_cost ?? undefined
         record.rate_multiplier = update.rate_multiplier ?? undefined
         record.response_time_ms = update.response_time_ms ?? undefined
-        record.first_byte_time_ms = update.first_byte_time_ms ?? undefined
+        record.first_byte_time_ms = mergeUsageRecordFirstByteTimeMs(
+          record.first_byte_time_ms,
+          update.first_byte_time_ms
+        )
         if ('updated_at' in update) {
           record.updated_at = typeof update.updated_at === 'string' ? update.updated_at : null
         }
@@ -1104,7 +1108,10 @@ function handleDetailRequestState(update: {
     record.response_time_ms = update.responseTimeMs
   }
   if ('firstByteTimeMs' in update) {
-    record.first_byte_time_ms = update.firstByteTimeMs ?? undefined
+    record.first_byte_time_ms = mergeUsageRecordFirstByteTimeMs(
+      record.first_byte_time_ms,
+      update.firstByteTimeMs
+    )
   }
   if ('isStream' in update && typeof update.isStream === 'boolean') {
     record.is_stream = update.isStream

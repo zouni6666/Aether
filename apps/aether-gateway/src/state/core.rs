@@ -2976,6 +2976,30 @@ fn usage_runtime_metric_samples(
             u64::from(snapshot.retry_deferred_lifecycle_events),
         ),
         MetricSample::new(
+            "usage_runtime_terminal_submission_limit",
+            "Maximum concurrent end-to-end terminal usage submissions.",
+            MetricKind::Gauge,
+            snapshot.terminal_submission_limit as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_submission_in_flight",
+            "Current end-to-end terminal usage submissions in flight.",
+            MetricKind::Gauge,
+            snapshot.terminal_submission_in_flight as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_submission_max_in_flight",
+            "Maximum observed concurrent end-to-end terminal usage submissions.",
+            MetricKind::Gauge,
+            snapshot.terminal_submission_max_in_flight as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_submission_rejected_total",
+            "Total terminal usage submissions rejected by bounded ingress admission.",
+            MetricKind::Counter,
+            snapshot.terminal_submission_rejected_total,
+        ),
+        MetricSample::new(
             "usage_runtime_terminal_enqueue_in_flight",
             "Current terminal usage enqueue operations in flight.",
             MetricKind::Gauge,
@@ -2983,9 +3007,21 @@ fn usage_runtime_metric_samples(
         ),
         MetricSample::new(
             "usage_runtime_terminal_enqueue_deferred_total",
-            "Total terminal usage enqueue operations deferred by circuit or in-flight limits.",
+            "Total terminal usage enqueue operations deferred after Redis failure, circuit open, or in-flight saturation.",
             MetricKind::Counter,
             snapshot.terminal_enqueue_deferred_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_enqueue_deferred_direct_write_total",
+            "Total deferred terminal usage events persisted through bounded direct database fallback.",
+            MetricKind::Counter,
+            snapshot.terminal_enqueue_deferred_direct_write_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_enqueue_deferred_dropped_total",
+            "Total deferred terminal usage events dropped after all bounded fallback capacity was exhausted.",
+            MetricKind::Counter,
+            snapshot.terminal_enqueue_deferred_dropped_total,
         ),
         MetricSample::new(
             "usage_runtime_terminal_enqueue_deferred_retry_total",
@@ -2998,6 +3034,42 @@ fn usage_runtime_metric_samples(
             "Total terminal usage enqueue failures that opened the terminal enqueue circuit.",
             MetricKind::Counter,
             snapshot.terminal_enqueue_failed_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_direct_fallback_limit",
+            "Maximum concurrent terminal direct database fallback operations.",
+            MetricKind::Gauge,
+            snapshot.terminal_direct_fallback_limit as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_direct_fallback_in_flight",
+            "Current terminal direct database fallback operations in flight.",
+            MetricKind::Gauge,
+            snapshot.terminal_direct_fallback_in_flight as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_direct_fallback_max_in_flight",
+            "Maximum observed concurrent terminal direct database fallback operations.",
+            MetricKind::Gauge,
+            snapshot.terminal_direct_fallback_max_in_flight as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_direct_fallback_succeeded_total",
+            "Total terminal events persisted through direct database fallback.",
+            MetricKind::Counter,
+            snapshot.terminal_direct_fallback_succeeded_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_direct_fallback_failed_total",
+            "Total terminal direct database fallback operations that failed.",
+            MetricKind::Counter,
+            snapshot.terminal_direct_fallback_failed_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_terminal_direct_fallback_rejected_total",
+            "Total terminal direct database fallback operations rejected because the writer was unavailable, pressured, or saturated.",
+            MetricKind::Counter,
+            snapshot.terminal_direct_fallback_rejected_total,
         ),
         MetricSample::new(
             "usage_runtime_lifecycle_enqueue_in_flight",
@@ -3055,7 +3127,7 @@ fn usage_runtime_metric_samples(
         ),
         MetricSample::new(
             "usage_runtime_enqueue_retry_closed_or_unavailable_total",
-            "Total usage events rejected because the local enqueue dispatcher was closed or unavailable.",
+            "Total usage events rejected because the local enqueue dispatcher was full, closed, or unavailable.",
             MetricKind::Counter,
             snapshot.enqueue_retry_closed_or_unavailable_total,
         ),

@@ -78,6 +78,11 @@ describe('usage status helpers', () => {
       status: 'streaming',
       first_byte_time_ms: 320,
     }))).toBe('streaming')
+
+    expect(resolveDisplayRequestStatus(buildUsageRecord({
+      status: 'streaming',
+      first_byte_time_ms: 0,
+    }))).toBe('streaming')
   })
 
   it('treats active lifecycle records with failure signals as failed for display', () => {

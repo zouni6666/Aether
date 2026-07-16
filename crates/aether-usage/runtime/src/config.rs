@@ -20,6 +20,7 @@ pub struct UsageRuntimeConfig {
     pub reclaim_idle_ms: u64,
     pub reclaim_count: usize,
     pub reclaim_interval_ms: u64,
+    pub terminal_submission_max_in_flight: u64,
     pub terminal_enqueue_max_in_flight: u64,
     pub lifecycle_enqueue_max_in_flight: u64,
     pub lifecycle_enqueue_delay_ms: u64,
@@ -51,6 +52,7 @@ impl Default for UsageRuntimeConfig {
             reclaim_idle_ms: 60_000,
             reclaim_count: 128,
             reclaim_interval_ms: 5_000,
+            terminal_submission_max_in_flight: 1_024,
             terminal_enqueue_max_in_flight: 1_024,
             lifecycle_enqueue_max_in_flight: 512,
             lifecycle_enqueue_delay_ms: 1_000,
@@ -147,6 +149,11 @@ impl UsageRuntimeConfig {
                 "usage runtime reclaim_interval_ms must be positive".to_string(),
             ));
         }
+        if self.terminal_submission_max_in_flight == 0 {
+            return Err(DataLayerError::InvalidConfiguration(
+                "usage runtime terminal_submission_max_in_flight must be positive".to_string(),
+            ));
+        }
         if self.terminal_enqueue_max_in_flight == 0 {
             return Err(DataLayerError::InvalidConfiguration(
                 "usage runtime terminal_enqueue_max_in_flight must be positive".to_string(),
@@ -201,6 +208,16 @@ mod tests {
         let config = UsageRuntimeConfig {
             enabled: true,
             stream_key: String::new(),
+            ..UsageRuntimeConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn enabled_config_rejects_zero_terminal_submission_limit() {
+        let config = UsageRuntimeConfig {
+            enabled: true,
+            terminal_submission_max_in_flight: 0,
             ..UsageRuntimeConfig::default()
         };
         assert!(config.validate().is_err());

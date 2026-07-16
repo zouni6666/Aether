@@ -9,7 +9,7 @@ use aether_contracts::ExecutionTelemetry;
 use aether_data_contracts::DataLayerError;
 use aether_runtime_state::{RuntimeQueueStats, RuntimeQueueStore};
 use async_trait::async_trait;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::executor::spawn_on_usage_background_runtime;
@@ -89,7 +89,9 @@ pub struct UsageRuntime {
     enqueue_retry: Arc<UsageEnqueueRetryDispatcher>,
     worker_supervisor_state: Arc<UsageWorkerSupervisorState>,
     worker_record_gate: Option<Arc<UsageWorkerRecordConcurrencyGate>>,
+    terminal_submission_state: Arc<TerminalSubmissionState>,
     terminal_enqueue_state: Arc<LifecycleEnqueueState>,
+    terminal_direct_fallback_state: Arc<TerminalDirectFallbackState>,
     lifecycle_enqueue_state: Arc<LifecycleEnqueueState>,
     lifecycle_coalescer: Arc<LifecycleEventCoalescer>,
     lifecycle_delay: Arc<LifecycleDelayDispatcher>,
@@ -171,6 +173,16 @@ impl UsageWorkerRecordConcurrencyGate {
             _permit: permit,
         }
     }
+
+    fn try_acquire(&self) -> Option<UsageWorkerRecordConcurrencyPermit<'_>> {
+        let permit = self.semaphore.try_acquire().ok()?;
+        let active = self.in_flight.fetch_add(1, Ordering::AcqRel) + 1;
+        self.max_in_flight.fetch_max(active, Ordering::AcqRel);
+        Some(UsageWorkerRecordConcurrencyPermit {
+            gate: self,
+            _permit: permit,
+        })
+    }
 }
 
 pub(crate) struct UsageWorkerRecordConcurrencyPermit<'a> {
@@ -182,6 +194,173 @@ impl Drop for UsageWorkerRecordConcurrencyPermit<'_> {
     fn drop(&mut self) {
         self.gate.in_flight.fetch_sub(1, Ordering::AcqRel);
     }
+}
+
+#[derive(Debug)]
+struct TerminalSubmissionState {
+    semaphore: Arc<tokio::sync::Semaphore>,
+    limit: usize,
+    in_flight: AtomicUsize,
+    max_in_flight: AtomicUsize,
+    rejected_total: AtomicU64,
+}
+
+impl TerminalSubmissionState {
+    fn new(limit: usize) -> Self {
+        let limit = limit.clamp(1, TERMINAL_SUBMISSION_MAX_LIMIT);
+        Self {
+            semaphore: Arc::new(tokio::sync::Semaphore::new(limit)),
+            limit,
+            in_flight: AtomicUsize::new(0),
+            max_in_flight: AtomicUsize::new(0),
+            rejected_total: AtomicU64::new(0),
+        }
+    }
+
+    fn try_acquire(self: &Arc<Self>) -> Option<TerminalSubmissionPermit> {
+        let permit = match Arc::clone(&self.semaphore).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                self.rejected_total.fetch_add(1, Ordering::AcqRel);
+                return None;
+            }
+        };
+        let active = self.in_flight.fetch_add(1, Ordering::AcqRel) + 1;
+        self.max_in_flight.fetch_max(active, Ordering::AcqRel);
+        Some(TerminalSubmissionPermit {
+            state: Arc::clone(self),
+            _permit: permit,
+        })
+    }
+
+    fn limit(&self) -> usize {
+        self.limit
+    }
+
+    fn in_flight(&self) -> usize {
+        self.in_flight.load(Ordering::Acquire)
+    }
+
+    fn max_in_flight(&self) -> usize {
+        self.max_in_flight.load(Ordering::Acquire)
+    }
+
+    fn rejected_total(&self) -> u64 {
+        self.rejected_total.load(Ordering::Acquire)
+    }
+}
+
+struct TerminalSubmissionPermit {
+    state: Arc<TerminalSubmissionState>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl Drop for TerminalSubmissionPermit {
+    fn drop(&mut self) {
+        self.state.in_flight.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn terminal_submission_limit(config: &UsageRuntimeConfig) -> usize {
+    usize::try_from(config.terminal_submission_max_in_flight)
+        .unwrap_or(TERMINAL_SUBMISSION_MAX_LIMIT)
+        .clamp(1, TERMINAL_SUBMISSION_MAX_LIMIT)
+}
+
+#[derive(Debug)]
+struct TerminalDirectFallbackState {
+    semaphore: tokio::sync::Semaphore,
+    limit: usize,
+    in_flight: AtomicUsize,
+    max_in_flight: AtomicUsize,
+    succeeded_total: AtomicU64,
+    failed_total: AtomicU64,
+    rejected_total: AtomicU64,
+}
+
+impl TerminalDirectFallbackState {
+    fn new(limit: usize) -> Self {
+        let limit = limit.max(1);
+        Self {
+            semaphore: tokio::sync::Semaphore::new(limit),
+            limit,
+            in_flight: AtomicUsize::new(0),
+            max_in_flight: AtomicUsize::new(0),
+            succeeded_total: AtomicU64::new(0),
+            failed_total: AtomicU64::new(0),
+            rejected_total: AtomicU64::new(0),
+        }
+    }
+
+    fn try_acquire(&self) -> Option<TerminalDirectFallbackPermit<'_>> {
+        let permit = match self.semaphore.try_acquire() {
+            Ok(permit) => permit,
+            Err(_) => {
+                self.record_rejected();
+                return None;
+            }
+        };
+        let active = self.in_flight.fetch_add(1, Ordering::AcqRel) + 1;
+        self.max_in_flight.fetch_max(active, Ordering::AcqRel);
+        Some(TerminalDirectFallbackPermit {
+            state: self,
+            _permit: permit,
+        })
+    }
+
+    fn record_succeeded(&self) -> u64 {
+        self.succeeded_total.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    fn record_failed(&self) -> u64 {
+        self.failed_total.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    fn record_rejected(&self) -> u64 {
+        self.rejected_total.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    fn limit(&self) -> usize {
+        self.limit
+    }
+
+    fn in_flight(&self) -> usize {
+        self.in_flight.load(Ordering::Acquire)
+    }
+
+    fn max_in_flight(&self) -> usize {
+        self.max_in_flight.load(Ordering::Acquire)
+    }
+
+    fn succeeded_total(&self) -> u64 {
+        self.succeeded_total.load(Ordering::Acquire)
+    }
+
+    fn failed_total(&self) -> u64 {
+        self.failed_total.load(Ordering::Acquire)
+    }
+
+    fn rejected_total(&self) -> u64 {
+        self.rejected_total.load(Ordering::Acquire)
+    }
+}
+
+struct TerminalDirectFallbackPermit<'a> {
+    state: &'a TerminalDirectFallbackState,
+    _permit: tokio::sync::SemaphorePermit<'a>,
+}
+
+impl Drop for TerminalDirectFallbackPermit<'_> {
+    fn drop(&mut self) {
+        self.state.in_flight.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn terminal_direct_fallback_limit(config: &UsageRuntimeConfig) -> usize {
+    config
+        .worker_record_concurrency_limit
+        .unwrap_or(TERMINAL_DIRECT_FALLBACK_DEFAULT_MAX_IN_FLIGHT)
+        .max(1)
 }
 
 impl UsageWorkerSupervisorState {
@@ -244,10 +423,22 @@ pub struct UsageRuntimeMetricsSnapshot {
     pub worker_read_failures_total: u64,
     pub worker_reclaim_failures_total: u64,
     pub retry_deferred_lifecycle_events: bool,
+    pub terminal_submission_limit: usize,
+    pub terminal_submission_in_flight: usize,
+    pub terminal_submission_max_in_flight: usize,
+    pub terminal_submission_rejected_total: u64,
     pub terminal_enqueue_in_flight: u64,
     pub terminal_enqueue_deferred_total: u64,
+    pub terminal_enqueue_deferred_direct_write_total: u64,
+    pub terminal_enqueue_deferred_dropped_total: u64,
     pub terminal_enqueue_deferred_retry_total: u64,
     pub terminal_enqueue_failed_total: u64,
+    pub terminal_direct_fallback_limit: usize,
+    pub terminal_direct_fallback_in_flight: usize,
+    pub terminal_direct_fallback_max_in_flight: usize,
+    pub terminal_direct_fallback_succeeded_total: u64,
+    pub terminal_direct_fallback_failed_total: u64,
+    pub terminal_direct_fallback_rejected_total: u64,
     pub lifecycle_enqueue_in_flight: u64,
     pub lifecycle_enqueue_deferred_total: u64,
     pub lifecycle_enqueue_deferred_dropped_total: u64,
@@ -277,17 +468,21 @@ pub struct UsageQueueHealthSnapshot {
 const USAGE_BODY_CAPTURE_POLICY_CACHE_TTL: Duration = Duration::from_secs(30);
 const USAGE_BODY_CAPTURE_POLICY_ERROR_CACHE_TTL: Duration = Duration::from_secs(1);
 const LIFECYCLE_ENQUEUE_CIRCUIT_OPEN_MS: u64 = 1_000;
-const LIFECYCLE_TERMINAL_CANCEL_TTL: Duration = Duration::from_secs(30);
+const LIFECYCLE_COALESCER_CLOSE_TTL: Duration = Duration::from_secs(30);
+const TERMINAL_SUBMISSION_MAX_LIMIT: usize = 1_048_576;
+const TERMINAL_DIRECT_FALLBACK_DEFAULT_MAX_IN_FLIGHT: usize = 32;
 
 #[derive(Debug, Default)]
 struct LifecycleEventCoalescer {
     entries: tokio::sync::Mutex<HashMap<String, LifecycleEventCoalescerEntry>>,
+    generation_counter: AtomicU64,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct LifecycleEventCoalescerEntry {
     generation: u64,
     terminal_seen_at: Option<Instant>,
+    first_byte_seen_at: Option<Instant>,
 }
 
 impl LifecycleEventCoalescer {
@@ -300,11 +495,12 @@ impl LifecycleEventCoalescer {
             .or_insert(LifecycleEventCoalescerEntry {
                 generation: 0,
                 terminal_seen_at: None,
+                first_byte_seen_at: None,
             });
-        if terminal_cancel_is_active(entry, now) {
+        if lifecycle_event_is_closed(entry, now) {
             return None;
         }
-        entry.generation = entry.generation.saturating_add(1);
+        entry.generation = self.next_generation();
         entry.terminal_seen_at = None;
         Some(entry.generation)
     }
@@ -318,9 +514,49 @@ impl LifecycleEventCoalescer {
             .or_insert(LifecycleEventCoalescerEntry {
                 generation: 0,
                 terminal_seen_at: None,
+                first_byte_seen_at: None,
             });
-        entry.generation = entry.generation.saturating_add(1);
+        entry.generation = self.next_generation();
         entry.terminal_seen_at = Some(now);
+    }
+
+    async fn mark_first_byte(&self, request_id: &str) -> Option<u64> {
+        let now = Instant::now();
+        let mut entries = self.entries.lock().await;
+        Self::compact_locked(&mut entries, now);
+        let entry = entries
+            .entry(request_id.to_string())
+            .or_insert(LifecycleEventCoalescerEntry {
+                generation: 0,
+                terminal_seen_at: None,
+                first_byte_seen_at: None,
+            });
+        if lifecycle_event_is_closed(entry, now) {
+            return None;
+        }
+        entry.generation = self.next_generation();
+        entry.first_byte_seen_at = Some(now);
+        Some(entry.generation)
+    }
+
+    async fn rollback_first_byte(&self, request_id: &str, generation: u64) {
+        let mut entries = self.entries.lock().await;
+        if entries
+            .get(request_id)
+            .is_some_and(|entry| entry.generation == generation && entry.terminal_seen_at.is_none())
+        {
+            entries.remove(request_id);
+        }
+    }
+
+    async fn abandon(&self, request_id: &str, generation: u64) {
+        let mut entries = self.entries.lock().await;
+        if entries
+            .get(request_id)
+            .is_some_and(|entry| entry.generation == generation)
+        {
+            entries.remove(request_id);
+        }
     }
 
     async fn should_emit(&self, request_id: &str, generation: u64) -> bool {
@@ -329,17 +565,26 @@ impl LifecycleEventCoalescer {
         let Some(entry) = entries.get(request_id).copied() else {
             return false;
         };
-        let should_emit = entry.generation == generation && !terminal_cancel_is_active(&entry, now);
-        if should_emit || !terminal_cancel_is_active(&entry, now) {
+        let closed = lifecycle_event_is_closed(&entry, now);
+        let should_emit = entry.generation == generation && !closed;
+        if should_emit {
             entries.remove(request_id);
         }
         Self::compact_locked(&mut entries, now);
         should_emit
     }
 
+    fn next_generation(&self) -> u64 {
+        self.generation_counter
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1)
+    }
+
     fn compact_locked(entries: &mut HashMap<String, LifecycleEventCoalescerEntry>, now: Instant) {
         entries.retain(|_, entry| {
-            entry.terminal_seen_at.is_none() || terminal_cancel_is_active(entry, now)
+            let has_close_marker =
+                entry.terminal_seen_at.is_some() || entry.first_byte_seen_at.is_some();
+            !has_close_marker || lifecycle_event_is_closed(entry, now)
         });
     }
 }
@@ -347,7 +592,17 @@ impl LifecycleEventCoalescer {
 fn terminal_cancel_is_active(entry: &LifecycleEventCoalescerEntry, now: Instant) -> bool {
     entry
         .terminal_seen_at
-        .is_some_and(|seen_at| now.duration_since(seen_at) <= LIFECYCLE_TERMINAL_CANCEL_TTL)
+        .is_some_and(|seen_at| now.duration_since(seen_at) <= LIFECYCLE_COALESCER_CLOSE_TTL)
+}
+
+fn first_byte_marker_is_active(entry: &LifecycleEventCoalescerEntry, now: Instant) -> bool {
+    entry
+        .first_byte_seen_at
+        .is_some_and(|seen_at| now.duration_since(seen_at) <= LIFECYCLE_COALESCER_CLOSE_TTL)
+}
+
+fn lifecycle_event_is_closed(entry: &LifecycleEventCoalescerEntry, now: Instant) -> bool {
+    terminal_cancel_is_active(entry, now) || first_byte_marker_is_active(entry, now)
 }
 
 impl Default for UsageRuntime {
@@ -364,7 +619,11 @@ impl UsageRuntime {
             enqueue_retry: UsageEnqueueRetryDispatcher::disabled(),
             worker_supervisor_state: Arc::new(UsageWorkerSupervisorState::default()),
             worker_record_gate: None,
+            terminal_submission_state: Arc::new(TerminalSubmissionState::new(1)),
             terminal_enqueue_state: Arc::new(LifecycleEnqueueState::default()),
+            terminal_direct_fallback_state: Arc::new(TerminalDirectFallbackState::new(
+                TERMINAL_DIRECT_FALLBACK_DEFAULT_MAX_IN_FLIGHT,
+            )),
             lifecycle_enqueue_state: Arc::new(LifecycleEnqueueState::default()),
             lifecycle_coalescer: Arc::new(LifecycleEventCoalescer::default()),
             lifecycle_delay: LifecycleDelayDispatcher::disabled(),
@@ -380,6 +639,12 @@ impl UsageRuntime {
             .map(Arc::new);
         let lifecycle_enqueue_state = Arc::new(LifecycleEnqueueState::default());
         let lifecycle_coalescer = Arc::new(LifecycleEventCoalescer::default());
+        let terminal_submission_state = Arc::new(TerminalSubmissionState::new(
+            terminal_submission_limit(&config),
+        ));
+        let terminal_direct_fallback_state = Arc::new(TerminalDirectFallbackState::new(
+            terminal_direct_fallback_limit(&config),
+        ));
         let lifecycle_delay = LifecycleDelayDispatcher::spawn(
             config.clone(),
             Arc::clone(&lifecycle_coalescer),
@@ -392,7 +657,9 @@ impl UsageRuntime {
             enqueue_retry,
             worker_supervisor_state: Arc::new(UsageWorkerSupervisorState::default()),
             worker_record_gate,
+            terminal_submission_state,
             terminal_enqueue_state: Arc::new(LifecycleEnqueueState::default()),
+            terminal_direct_fallback_state,
             lifecycle_enqueue_state,
             lifecycle_coalescer,
             lifecycle_delay,
@@ -476,12 +743,36 @@ impl UsageRuntime {
                 .reclaim_failures_total
                 .load(Ordering::Acquire),
             retry_deferred_lifecycle_events: self.config.retry_deferred_lifecycle_events,
+            terminal_submission_limit: self.terminal_submission_state.limit(),
+            terminal_submission_in_flight: self.terminal_submission_state.in_flight(),
+            terminal_submission_max_in_flight: self.terminal_submission_state.max_in_flight(),
+            terminal_submission_rejected_total: self.terminal_submission_state.rejected_total(),
             terminal_enqueue_in_flight: self.terminal_enqueue_state.in_flight(),
             terminal_enqueue_deferred_total: self.terminal_enqueue_state.deferred_total(),
+            terminal_enqueue_deferred_direct_write_total: self
+                .terminal_enqueue_state
+                .deferred_direct_write_total(),
+            terminal_enqueue_deferred_dropped_total: self
+                .terminal_enqueue_state
+                .deferred_dropped_total(),
             terminal_enqueue_deferred_retry_total: self
                 .terminal_enqueue_state
                 .deferred_retry_total(),
             terminal_enqueue_failed_total: self.terminal_enqueue_state.failed_total(),
+            terminal_direct_fallback_limit: self.terminal_direct_fallback_state.limit(),
+            terminal_direct_fallback_in_flight: self.terminal_direct_fallback_state.in_flight(),
+            terminal_direct_fallback_max_in_flight: self
+                .terminal_direct_fallback_state
+                .max_in_flight(),
+            terminal_direct_fallback_succeeded_total: self
+                .terminal_direct_fallback_state
+                .succeeded_total(),
+            terminal_direct_fallback_failed_total: self
+                .terminal_direct_fallback_state
+                .failed_total(),
+            terminal_direct_fallback_rejected_total: self
+                .terminal_direct_fallback_state
+                .rejected_total(),
             lifecycle_enqueue_in_flight: self.lifecycle_enqueue_state.in_flight(),
             lifecycle_enqueue_deferred_total: self.lifecycle_enqueue_state.deferred_total(),
             lifecycle_enqueue_deferred_dropped_total: self
@@ -676,8 +967,8 @@ impl UsageRuntime {
         let seed = seed.clone();
         let telemetry = telemetry.cloned();
         let request_id = seed.request_id.clone();
+        let now_unix_secs = now_unix_secs();
         spawn_on_usage_background_runtime(boxed_usage_task(async move {
-            let now_unix_secs = now_unix_secs();
             match build_streaming_usage_event_offthread(seed, status_code, telemetry, now_unix_secs)
                 .await
             {
@@ -807,6 +1098,25 @@ impl UsageRuntime {
         }));
     }
 
+    fn try_begin_terminal_submission(&self, request_id: &str) -> Option<TerminalSubmissionPermit> {
+        let permit = self.terminal_submission_state.try_acquire();
+        if permit.is_none() {
+            let rejected = self.terminal_submission_state.rejected_total();
+            if should_log_usage_retry_counter(rejected) {
+                warn!(
+                    event_name = "usage_terminal_submission_rejected",
+                    log_type = "event",
+                    request_id,
+                    submission_limit = self.terminal_submission_state.limit(),
+                    rejected_total = rejected,
+                    fallback = "drop",
+                    "usage runtime terminal submission admission is saturated"
+                );
+            }
+        }
+        permit
+    }
+
     pub fn record_sync_terminal<T>(
         &self,
         data: &T,
@@ -821,7 +1131,11 @@ impl UsageRuntime {
         let runtime = self.clone();
         let data = T::clone(data);
         let request_id = context_seed.request_id.clone();
+        let Some(submission_permit) = self.try_begin_terminal_submission(&request_id) else {
+            return;
+        };
         spawn_on_usage_background_runtime(boxed_usage_task(async move {
+            let _submission_permit = submission_permit;
             match build_sync_terminal_usage_event_offthread(context_seed, payload_seed).await {
                 Ok(mut event) => {
                     runtime
@@ -857,7 +1171,11 @@ impl UsageRuntime {
         let runtime = self.clone();
         let data = T::clone(data);
         let request_id = context_seed.request_id.clone();
+        let Some(submission_permit) = self.try_begin_terminal_submission(&request_id) else {
+            return;
+        };
         spawn_on_usage_background_runtime(boxed_usage_task(async move {
+            let _submission_permit = submission_permit;
             match build_stream_terminal_usage_event_offthread(context_seed, payload_seed, cancelled)
                 .await
             {
@@ -889,18 +1207,32 @@ impl UsageRuntime {
         }
         let runtime = self.clone();
         let data = T::clone(data);
+        let Some(submission_permit) = self.try_begin_terminal_submission(&event.request_id) else {
+            return;
+        };
         spawn_on_usage_background_runtime(boxed_usage_task(async move {
-            runtime.record_terminal_event(&data, event).await;
+            let _submission_permit = submission_permit;
+            runtime.record_terminal_event_admitted(&data, event).await;
         }));
     }
 
-    pub async fn record_terminal_event<T>(&self, data: &T, mut event: UsageEvent)
+    pub async fn record_terminal_event<T>(&self, data: &T, event: UsageEvent)
     where
         T: UsageRuntimeAccess,
     {
         if !self.is_enabled() {
             return;
         }
+        let Some(_submission_permit) = self.try_begin_terminal_submission(&event.request_id) else {
+            return;
+        };
+        self.record_terminal_event_admitted(data, event).await;
+    }
+
+    async fn record_terminal_event_admitted<T>(&self, data: &T, mut event: UsageEvent)
+    where
+        T: UsageRuntimeAccess,
+    {
         self.apply_body_capture_policy_from_data(data, &mut event)
             .await;
         self.enqueue_or_write_terminal(data, event).await;
@@ -1003,11 +1335,40 @@ impl UsageRuntime {
         T: UsageRuntimeAccess + Clone + 'static,
     {
         if self.config.queue_lifecycle_events {
-            self.enqueue_lifecycle_event_with_config_delay(data, event)
-                .await;
+            // Keep pre-first-byte churn debounced, but publish the observed first byte as a single
+            // background queue event so the live usage row can enter `streaming` without
+            // putting Redis or database I/O back on the response-body critical path.
+            if event.event_type == crate::UsageEventType::Streaming
+                && event.data.first_byte_time_ms.is_some()
+            {
+                self.enqueue_first_byte_lifecycle_event(data, event).await;
+            } else {
+                self.enqueue_lifecycle_event_with_config_delay(data, event)
+                    .await;
+            }
         } else {
             self.write_event_direct(data, &event).await;
         }
+    }
+
+    async fn enqueue_first_byte_lifecycle_event<T>(&self, data: &T, event: UsageEvent)
+    where
+        T: UsageRuntimeAccess + Clone + 'static,
+    {
+        let request_id = event.request_id.clone();
+        let Some(generation) = self.lifecycle_coalescer.mark_first_byte(&request_id).await else {
+            return;
+        };
+        let runtime = self.clone();
+        let data = T::clone(data);
+        spawn_on_usage_background_runtime(boxed_usage_task(async move {
+            if !runtime.enqueue_lifecycle_event(&data, event).await {
+                runtime
+                    .lifecycle_coalescer
+                    .rollback_first_byte(&request_id, generation)
+                    .await;
+            }
+        }));
     }
 
     async fn enqueue_lifecycle_event_with_config_delay<T>(&self, data: &T, event: UsageEvent)
@@ -1025,12 +1386,21 @@ impl UsageRuntime {
             return;
         };
         let data = T::clone(data);
-        if !self.lifecycle_delay.schedule(data, event, generation).await {
-            self.lifecycle_coalescer.cancel(&request_id).await;
+        if let Err(event) = self.lifecycle_delay.schedule(data, event, generation).await {
+            self.lifecycle_coalescer
+                .abandon(&request_id, generation)
+                .await;
+            self.lifecycle_enqueue_state.record_deferred(
+                "usage_lifecycle_delay_buffer_deferred",
+                "delay_buffer_unavailable",
+                event.event_type,
+                &event.request_id,
+                DeferredEnqueueFallback::Drop,
+            );
         }
     }
 
-    async fn enqueue_lifecycle_event<T>(&self, data: &T, event: UsageEvent)
+    async fn enqueue_lifecycle_event<T>(&self, data: &T, event: UsageEvent) -> bool
     where
         T: UsageRuntimeAccess,
     {
@@ -1043,7 +1413,7 @@ impl UsageRuntime {
                 fallback = "none",
                 "usage runtime lifecycle queue is disabled; lifecycle event will not be written directly"
             );
-            return;
+            return false;
         }
         enqueue_lifecycle_event_now(
             data,
@@ -1052,7 +1422,7 @@ impl UsageRuntime {
             Arc::clone(&self.lifecycle_enqueue_state),
             Arc::clone(&self.enqueue_retry),
         )
-        .await;
+        .await
     }
 
     async fn enqueue_or_write_event<T>(
@@ -1069,16 +1439,14 @@ impl UsageRuntime {
                 match UsageQueue::new(runner, self.config.clone()) {
                     Ok(queue) => {
                         if event_phase == "terminal" {
-                            self.enqueue_terminal_event_or_schedule_retry(queue, event)
+                            self.enqueue_terminal_event_or_fallback(data, queue, event)
                                 .await;
                             return;
                         }
                         match queue.enqueue(&event).await {
                             Ok(_) => return,
                             Err(err) => {
-                                self.enqueue_retry
-                                    .schedule(queue, event, event_phase, err)
-                                    .await;
+                                self.enqueue_retry.schedule(queue, event, event_phase, err);
                                 return;
                             }
                         }
@@ -1099,29 +1467,50 @@ impl UsageRuntime {
             }
         }
 
+        if event_phase == "terminal" && queue_enabled {
+            let usage_event_type = event.event_type;
+            let request_id = event.request_id.clone();
+            let deferred_fallback = if self
+                .try_write_terminal_direct_fallback(data, &mut event)
+                .await
+            {
+                DeferredEnqueueFallback::DirectWrite
+            } else {
+                DeferredEnqueueFallback::Drop
+            };
+            self.terminal_enqueue_state.record_deferred(
+                "usage_terminal_event_enqueue_deferred",
+                "queue_unavailable",
+                usage_event_type,
+                &request_id,
+                deferred_fallback,
+            );
+            return;
+        }
         if event_phase == "terminal" {
             enrich_terminal_event(data, &mut event).await;
         }
         self.write_event_direct(data, &event).await;
     }
 
-    async fn enqueue_terminal_event_or_schedule_retry(&self, queue: UsageQueue, event: UsageEvent) {
+    async fn enqueue_terminal_event_or_fallback<T>(
+        &self,
+        data: &T,
+        queue: UsageQueue,
+        event: UsageEvent,
+    ) where
+        T: UsageRuntimeAccess,
+    {
         let now_ms = now_unix_ms();
         if self.terminal_enqueue_state.is_circuit_open(now_ms) {
-            self.terminal_enqueue_state.record_deferred(
-                "usage_terminal_event_enqueue_deferred",
+            self.defer_terminal_event(
+                data,
+                queue,
+                event,
                 "circuit_open",
-                &event,
-                true,
-            );
-            self.enqueue_retry
-                .schedule_and_wait(
-                    queue,
-                    event,
-                    "terminal",
-                    DataLayerError::TimedOut("terminal enqueue circuit is open".to_string()),
-                )
-                .await;
+                DataLayerError::TimedOut("terminal enqueue circuit is open".to_string()),
+            )
+            .await;
             return;
         }
 
@@ -1129,24 +1518,19 @@ impl UsageRuntime {
             .terminal_enqueue_state
             .try_acquire_in_flight(self.config.terminal_enqueue_max_in_flight)
         else {
-            self.terminal_enqueue_state.record_deferred(
-                "usage_terminal_event_enqueue_deferred",
+            self.defer_terminal_event(
+                data,
+                queue,
+                event,
                 "in_flight_limit",
-                &event,
-                true,
-            );
-            self.enqueue_retry
-                .schedule_and_wait(
-                    queue,
-                    event,
-                    "terminal",
-                    DataLayerError::TimedOut("terminal enqueue in-flight limit".to_string()),
-                )
-                .await;
+                DataLayerError::TimedOut("terminal enqueue in-flight limit".to_string()),
+            )
+            .await;
             return;
         };
 
         if let Err(err) = queue.enqueue(&event).await {
+            drop(_guard);
             self.terminal_enqueue_state
                 .open_circuit(now_unix_ms().saturating_add(LIFECYCLE_ENQUEUE_CIRCUIT_OPEN_MS));
             let failures = self.terminal_enqueue_state.increment_failed_total();
@@ -1156,20 +1540,154 @@ impl UsageRuntime {
                     log_type = "event",
                     usage_event_type = ?event.event_type,
                     request_id = %event.request_id,
-                    fallback = "local_enqueue_retry",
+                    fallback = "direct_write_or_bounded_retry",
                     failure_total = failures,
                     circuit_open_ms = LIFECYCLE_ENQUEUE_CIRCUIT_OPEN_MS,
                     error = %err,
                     "usage runtime failed to enqueue terminal event; terminal enqueue circuit opened"
                 );
             }
-            self.enqueue_retry
-                .schedule_and_wait(queue, event, "terminal", err)
+            self.defer_terminal_event(data, queue, event, "primary_enqueue_failed", err)
                 .await;
         }
     }
 
-    async fn write_event_direct<T>(&self, data: &T, event: &UsageEvent)
+    async fn defer_terminal_event<T>(
+        &self,
+        data: &T,
+        queue: UsageQueue,
+        mut event: UsageEvent,
+        reason: &'static str,
+        cause: DataLayerError,
+    ) where
+        T: UsageRuntimeAccess,
+    {
+        let usage_event_type = event.event_type;
+        let request_id = event.request_id.clone();
+        let deferred_fallback = if self
+            .try_write_terminal_direct_fallback(data, &mut event)
+            .await
+        {
+            DeferredEnqueueFallback::DirectWrite
+        } else if self.enqueue_retry.schedule(queue, event, "terminal", cause) {
+            DeferredEnqueueFallback::LocalRetry
+        } else {
+            DeferredEnqueueFallback::Drop
+        };
+        self.terminal_enqueue_state.record_deferred(
+            "usage_terminal_event_enqueue_deferred",
+            reason,
+            usage_event_type,
+            &request_id,
+            deferred_fallback,
+        );
+    }
+
+    async fn try_write_terminal_direct_fallback<T>(&self, data: &T, event: &mut UsageEvent) -> bool
+    where
+        T: UsageRuntimeAccess,
+    {
+        if !data.has_usage_writer() || data.usage_worker_should_defer_for_database_pressure() {
+            let rejected = self.terminal_direct_fallback_state.record_rejected();
+            if should_log_usage_retry_counter(rejected) {
+                warn!(
+                    event_name = "usage_terminal_direct_fallback_rejected",
+                    log_type = "event",
+                    usage_event_type = ?event.event_type,
+                    request_id = %event.request_id,
+                    rejected_total = rejected,
+                    fallback = "bounded_local_enqueue_retry",
+                    "usage runtime skipped terminal direct fallback because the writer is unavailable or under pressure"
+                );
+            }
+            return false;
+        }
+
+        let _worker_record_permit = if let Some(gate) = self.worker_record_gate.as_ref() {
+            let Some(permit) = gate.try_acquire() else {
+                gate.record_deferred();
+                let rejected = self.terminal_direct_fallback_state.record_rejected();
+                if should_log_usage_retry_counter(rejected) {
+                    warn!(
+                        event_name = "usage_terminal_direct_fallback_worker_gate_saturated",
+                        log_type = "event",
+                        usage_event_type = ?event.event_type,
+                        request_id = %event.request_id,
+                        worker_record_limit = gate.limit(),
+                        rejected_total = rejected,
+                        fallback = "bounded_local_enqueue_retry",
+                        "usage runtime terminal direct fallback was rejected by the shared database concurrency gate"
+                    );
+                }
+                return false;
+            };
+            Some(permit)
+        } else {
+            None
+        };
+
+        let Some(_permit) = self.terminal_direct_fallback_state.try_acquire() else {
+            let rejected = self.terminal_direct_fallback_state.rejected_total();
+            if should_log_usage_retry_counter(rejected) {
+                warn!(
+                    event_name = "usage_terminal_direct_fallback_saturated",
+                    log_type = "event",
+                    usage_event_type = ?event.event_type,
+                    request_id = %event.request_id,
+                    fallback_limit = self.terminal_direct_fallback_state.limit(),
+                    rejected_total = rejected,
+                    fallback = "bounded_local_enqueue_retry",
+                    "usage runtime terminal direct fallback is saturated"
+                );
+            }
+            return false;
+        };
+
+        let write_succeeded = if let Err(err) = data.enrich_usage_event(event).await {
+            warn!(
+                event_name = "usage_terminal_direct_fallback_enrichment_failed",
+                log_type = "event",
+                usage_event_type = ?event.event_type,
+                request_id = %event.request_id,
+                error = %err,
+                fallback = "bounded_local_enqueue_retry",
+                "usage runtime could not enrich terminal event for direct fallback"
+            );
+            false
+        } else {
+            self.write_event_direct(data, event).await
+        };
+        if write_succeeded {
+            let succeeded = self.terminal_direct_fallback_state.record_succeeded();
+            if should_log_usage_retry_counter(succeeded) {
+                info!(
+                    event_name = "usage_terminal_direct_fallback_succeeded",
+                    log_type = "event",
+                    usage_event_type = ?event.event_type,
+                    request_id = %event.request_id,
+                    succeeded_total = succeeded,
+                    "usage runtime persisted terminal event through bounded direct fallback"
+                );
+            }
+            true
+        } else {
+            let failed = self.terminal_direct_fallback_state.record_failed();
+            if should_log_usage_retry_counter(failed) {
+                warn!(
+                    event_name = "usage_terminal_direct_fallback_failed",
+                    log_type = "event",
+                    usage_event_type = ?event.event_type,
+                    request_id = %event.request_id,
+                    failed_total = failed,
+                    fallback = "bounded_local_enqueue_retry",
+                    "usage runtime terminal direct fallback failed"
+                );
+            }
+            false
+        }
+    }
+
+    async fn write_event_direct<T>(&self, data: &T, event: &UsageEvent) -> bool
     where
         T: UsageRuntimeAccess,
     {
@@ -1184,9 +1702,11 @@ impl UsageRuntime {
                             error = %err,
                             "usage runtime failed to settle terminal usage directly"
                         );
+                        return false;
                     }
+                    true
                 }
-                Ok(None) => {}
+                Ok(None) => true,
                 Err(err) => {
                     warn!(
                         event_name = "usage_event_upsert_failed",
@@ -1196,6 +1716,7 @@ impl UsageRuntime {
                         error = %err,
                         "usage runtime failed to upsert usage event directly"
                     );
+                    false
                 }
             },
             Err(err) => {
@@ -1206,7 +1727,8 @@ impl UsageRuntime {
                     request_id = %event.request_id,
                     error = %err,
                     "usage runtime failed to build usage event upsert"
-                )
+                );
+                false
             }
         }
     }
@@ -1557,9 +2079,17 @@ struct LifecycleEnqueueState {
     in_flight: AtomicU64,
     circuit_open_until_unix_ms: AtomicU64,
     skipped_total: AtomicU64,
+    direct_write_total: AtomicU64,
     dropped_total: AtomicU64,
     retry_total: AtomicU64,
     failed_total: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeferredEnqueueFallback {
+    DirectWrite,
+    LocalRetry,
+    Drop,
 }
 
 impl LifecycleEnqueueState {
@@ -1573,6 +2103,10 @@ impl LifecycleEnqueueState {
 
     fn deferred_dropped_total(&self) -> u64 {
         self.dropped_total.load(Ordering::Acquire)
+    }
+
+    fn deferred_direct_write_total(&self) -> u64 {
+        self.direct_write_total.load(Ordering::Acquire)
     }
 
     fn deferred_retry_total(&self) -> u64 {
@@ -1633,23 +2167,31 @@ impl LifecycleEnqueueState {
         &self,
         event_name: &'static str,
         reason: &'static str,
-        event: &UsageEvent,
-        retry_enabled: bool,
+        usage_event_type: crate::UsageEventType,
+        request_id: &str,
+        deferred_fallback: DeferredEnqueueFallback,
     ) {
         let skipped = self.skipped_total.fetch_add(1, Ordering::AcqRel) + 1;
-        let fallback = if retry_enabled {
-            self.retry_total.fetch_add(1, Ordering::AcqRel);
-            "local_enqueue_retry"
-        } else {
-            self.dropped_total.fetch_add(1, Ordering::AcqRel);
-            "drop"
+        let fallback = match deferred_fallback {
+            DeferredEnqueueFallback::DirectWrite => {
+                self.direct_write_total.fetch_add(1, Ordering::AcqRel);
+                "direct_write"
+            }
+            DeferredEnqueueFallback::LocalRetry => {
+                self.retry_total.fetch_add(1, Ordering::AcqRel);
+                "local_enqueue_retry"
+            }
+            DeferredEnqueueFallback::Drop => {
+                self.dropped_total.fetch_add(1, Ordering::AcqRel);
+                "drop"
+            }
         };
         if should_log_usage_retry_counter(skipped) {
             warn!(
                 event_name,
                 log_type = "event",
-                usage_event_type = ?event.event_type,
-                request_id = %event.request_id,
+                usage_event_type = ?usage_event_type,
+                request_id,
                 reason,
                 deferred_total = skipped,
                 fallback,
@@ -1757,23 +2299,30 @@ impl LifecycleDelayDispatcher {
         })
     }
 
-    async fn schedule<T>(&self, data: T, event: UsageEvent, generation: u64) -> bool
+    async fn schedule<T>(
+        &self,
+        data: T,
+        event: UsageEvent,
+        generation: u64,
+    ) -> Result<(), UsageEvent>
     where
         T: UsageRuntimeAccess + Clone + 'static,
     {
         let Some(sender) = &self.sender else {
-            return false;
+            return Err(event);
         };
-        sender
-            .try_send(DelayedLifecycleQueueItem {
-                due_at: tokio::time::Instant::now() + self.delay,
-                item: Box::new(DelayedLifecycleEventItem {
-                    data,
-                    event,
-                    generation,
-                }),
-            })
-            .is_ok()
+        let Ok(permit) = sender.try_reserve() else {
+            return Err(event);
+        };
+        permit.send(DelayedLifecycleQueueItem {
+            due_at: tokio::time::Instant::now() + self.delay,
+            item: Box::new(DelayedLifecycleEventItem {
+                data,
+                event,
+                generation,
+            }),
+        });
+        Ok(())
     }
 }
 
@@ -1892,7 +2441,8 @@ async fn enqueue_lifecycle_event_now<T>(
     config: UsageRuntimeConfig,
     enqueue_state: Arc<LifecycleEnqueueState>,
     enqueue_retry: Arc<UsageEnqueueRetryDispatcher>,
-) where
+) -> bool
+where
     T: UsageRuntimeAccess,
 {
     let Some(runner) = data.usage_worker_queue() else {
@@ -1904,7 +2454,7 @@ async fn enqueue_lifecycle_event_now<T>(
             fallback = "none",
             "usage runtime lifecycle queue is unavailable; lifecycle event will not be written directly"
         );
-        return;
+        return false;
     };
 
     let queue = match UsageQueue::new(runner, config.clone()) {
@@ -1919,78 +2469,121 @@ async fn enqueue_lifecycle_event_now<T>(
                 error = %err,
                 "usage runtime failed to build lifecycle queue; lifecycle event will not be written directly"
             );
-            return;
+            return false;
         }
     };
 
     let now_ms = now_unix_ms();
     if enqueue_state.is_circuit_open(now_ms) {
         let retry_enabled = config.retry_deferred_lifecycle_events;
+        if retry_enabled {
+            let usage_event_type = event.event_type;
+            let request_id = event.request_id.clone();
+            let accepted = enqueue_retry.schedule(
+                queue,
+                event,
+                "lifecycle",
+                DataLayerError::TimedOut("lifecycle enqueue circuit is open".to_string()),
+            );
+            enqueue_state.record_deferred(
+                "usage_lifecycle_event_enqueue_deferred",
+                "circuit_open",
+                usage_event_type,
+                &request_id,
+                if accepted {
+                    DeferredEnqueueFallback::LocalRetry
+                } else {
+                    DeferredEnqueueFallback::Drop
+                },
+            );
+            return accepted;
+        }
         enqueue_state.record_deferred(
             "usage_lifecycle_event_enqueue_deferred",
             "circuit_open",
-            &event,
-            retry_enabled,
+            event.event_type,
+            &event.request_id,
+            DeferredEnqueueFallback::Drop,
         );
-        if retry_enabled {
-            enqueue_retry
-                .schedule(
-                    queue,
-                    event,
-                    "lifecycle",
-                    DataLayerError::TimedOut("lifecycle enqueue circuit is open".to_string()),
-                )
-                .await;
-        }
-        return;
+        return false;
     }
 
     let Some(_guard) = enqueue_state.try_acquire_in_flight(config.lifecycle_enqueue_max_in_flight)
     else {
         let retry_enabled = config.retry_deferred_lifecycle_events;
+        if retry_enabled {
+            let usage_event_type = event.event_type;
+            let request_id = event.request_id.clone();
+            let accepted = enqueue_retry.schedule(
+                queue,
+                event,
+                "lifecycle",
+                DataLayerError::TimedOut("lifecycle enqueue in-flight limit".to_string()),
+            );
+            enqueue_state.record_deferred(
+                "usage_lifecycle_event_enqueue_deferred",
+                "in_flight_limit",
+                usage_event_type,
+                &request_id,
+                if accepted {
+                    DeferredEnqueueFallback::LocalRetry
+                } else {
+                    DeferredEnqueueFallback::Drop
+                },
+            );
+            return accepted;
+        }
         enqueue_state.record_deferred(
             "usage_lifecycle_event_enqueue_deferred",
             "in_flight_limit",
-            &event,
-            retry_enabled,
+            event.event_type,
+            &event.request_id,
+            DeferredEnqueueFallback::Drop,
         );
-        if retry_enabled {
-            enqueue_retry
-                .schedule(
-                    queue,
-                    event,
-                    "lifecycle",
-                    DataLayerError::TimedOut("lifecycle enqueue in-flight limit".to_string()),
-                )
-                .await;
-        }
-        return;
+        return false;
     };
 
-    if let Err(err) = queue.enqueue(&event).await {
-        enqueue_state.open_circuit(now_unix_ms().saturating_add(LIFECYCLE_ENQUEUE_CIRCUIT_OPEN_MS));
-        let failures = enqueue_state.increment_failed_total();
-        if should_log_usage_retry_counter(failures) {
-            warn!(
-                event_name = "usage_lifecycle_event_enqueue_failed",
-                log_type = "event",
-                usage_event_type = ?event.event_type,
-                request_id = %event.request_id,
-                fallback = "none",
-                failure_total = failures,
-                circuit_open_ms = LIFECYCLE_ENQUEUE_CIRCUIT_OPEN_MS,
-                error = %err,
-                "usage runtime failed to enqueue lifecycle event; lifecycle enqueue circuit opened"
-            );
-        }
+    let Err(err) = queue.enqueue(&event).await else {
+        return true;
+    };
+
+    enqueue_state.open_circuit(now_unix_ms().saturating_add(LIFECYCLE_ENQUEUE_CIRCUIT_OPEN_MS));
+    let failures = enqueue_state.increment_failed_total();
+    let retry_enabled = config.retry_deferred_lifecycle_events;
+    if should_log_usage_retry_counter(failures) {
+        warn!(
+            event_name = "usage_lifecycle_event_enqueue_failed",
+            log_type = "event",
+            usage_event_type = ?event.event_type,
+            request_id = %event.request_id,
+            fallback = if retry_enabled { "local_enqueue_retry" } else { "none" },
+            failure_total = failures,
+            circuit_open_ms = LIFECYCLE_ENQUEUE_CIRCUIT_OPEN_MS,
+            error = %err,
+            "usage runtime failed to enqueue lifecycle event; lifecycle enqueue circuit opened"
+        );
     }
+    let usage_event_type = event.event_type;
+    let request_id = event.request_id.clone();
+    let accepted = retry_enabled && enqueue_retry.schedule(queue, event, "lifecycle", err);
+    enqueue_state.record_deferred(
+        "usage_lifecycle_event_enqueue_deferred",
+        "primary_enqueue_failed",
+        usage_event_type,
+        &request_id,
+        if accepted {
+            DeferredEnqueueFallback::LocalRetry
+        } else {
+            DeferredEnqueueFallback::Drop
+        },
+    );
+    accepted
 }
 
 #[derive(Debug)]
 struct UsageEnqueueRetryDispatcher {
     senders: Vec<mpsc::Sender<UsageEnqueueRetryItem>>,
     metrics: Arc<UsageEnqueueDispatcherMetrics>,
-    config: UsageRuntimeConfig,
 }
 
 #[derive(Debug, Default)]
@@ -2008,14 +2601,6 @@ struct UsageEnqueueRetryItem {
     event_phase: &'static str,
     attempts: u64,
     delay_before_first_attempt: bool,
-    completion: Option<oneshot::Sender<()>>,
-}
-
-struct UsageEnqueueRetryOptions {
-    delay_before_first_attempt: bool,
-    cause: Option<DataLayerError>,
-    completion: Option<oneshot::Sender<()>>,
-    retain_pending_on_unavailable: bool,
 }
 
 impl UsageEnqueueRetryDispatcher {
@@ -2023,7 +2608,6 @@ impl UsageEnqueueRetryDispatcher {
         Arc::new(Self {
             senders: Vec::new(),
             metrics: Arc::new(UsageEnqueueDispatcherMetrics::default()),
-            config: UsageRuntimeConfig::disabled(),
         })
     }
 
@@ -2058,237 +2642,105 @@ impl UsageEnqueueRetryDispatcher {
             });
         }
 
-        Arc::new(Self {
-            senders,
-            metrics,
-            config,
-        })
+        Arc::new(Self { senders, metrics })
     }
 
-    async fn schedule(
+    fn schedule(
         &self,
         queue: UsageQueue,
         event: UsageEvent,
         event_phase: &'static str,
         cause: DataLayerError,
-    ) {
-        let scheduled = self.metrics.record_scheduled();
-        if should_log_usage_retry_counter(scheduled) {
-            warn!(
-                event_name = "usage_event_enqueue_failed_retry_scheduled",
-                log_type = "event",
-                event_phase,
-                usage_event_type = ?event.event_type,
-                request_id = %event.request_id,
-                retry_scheduled_total = scheduled,
-                fallback = "local_enqueue_retry",
-                error = %cause,
-                "usage runtime failed to enqueue usage event; scheduled local retry"
-            );
-        }
-        let _ = self
-            .schedule_item(
-                queue,
-                event,
-                event_phase,
-                UsageEnqueueRetryOptions {
-                    delay_before_first_attempt: true,
-                    cause: Some(cause),
-                    completion: None,
-                    retain_pending_on_unavailable: false,
-                },
-            )
-            .await;
-    }
-
-    async fn schedule_and_wait(
-        &self,
-        queue: UsageQueue,
-        event: UsageEvent,
-        event_phase: &'static str,
-        cause: DataLayerError,
-    ) {
-        let scheduled = self.metrics.record_scheduled();
-        if should_log_usage_retry_counter(scheduled) {
-            warn!(
-                event_name = "usage_event_enqueue_failed_retry_scheduled",
-                log_type = "event",
-                event_phase,
-                usage_event_type = ?event.event_type,
-                request_id = %event.request_id,
-                retry_scheduled_total = scheduled,
-                fallback = "local_enqueue_retry_with_persistence_ack",
-                error = %cause,
-                "usage runtime failed to enqueue usage event; waiting for durable local retry"
-            );
-        }
-
-        let fallback_queue = queue.clone();
-        let fallback_event = event.clone();
-        let (completion, completed) = oneshot::channel();
-        let accepted = self
-            .schedule_item(
-                queue,
-                event,
-                event_phase,
-                UsageEnqueueRetryOptions {
-                    delay_before_first_attempt: true,
-                    cause: Some(cause),
-                    completion: Some(completion),
-                    retain_pending_on_unavailable: true,
-                },
-            )
-            .await;
-        if accepted && completed.await.is_ok() {
-            return;
-        }
-        if accepted {
-            self.metrics.record_unavailable_retaining_pending();
-        }
-        self.retry_inline_until_persisted(fallback_queue, fallback_event, event_phase)
-            .await;
-    }
-
-    async fn retry_inline_until_persisted(
-        &self,
-        queue: UsageQueue,
-        event: UsageEvent,
-        event_phase: &'static str,
-    ) {
-        let mut attempts = 0_u64;
-        tokio::time::sleep(usage_enqueue_retry_delay(&self.config, 1)).await;
-        loop {
-            match queue.enqueue(&event).await {
-                Ok(_) => {
-                    let recovered = self.metrics.record_recovered();
-                    if should_log_usage_retry_counter(recovered) {
-                        warn!(
-                            event_name = "usage_event_enqueue_retry_recovered",
-                            log_type = "event",
-                            event_phase,
-                            usage_event_type = ?event.event_type,
-                            request_id = %event.request_id,
-                            retry_attempts = attempts,
-                            retry_recovered_total = recovered,
-                            fallback = "inline_persistence_retry",
-                            "usage runtime durable inline retry recovered"
-                        );
-                    }
-                    return;
-                }
-                Err(err) => {
-                    attempts = attempts.saturating_add(1);
-                    self.metrics.record_retry_failed();
-                    let delay = usage_enqueue_retry_delay(&self.config, attempts);
-                    if should_log_usage_retry_counter(attempts) {
-                        warn!(
-                            event_name = "usage_event_enqueue_retry_failed",
-                            log_type = "event",
-                            event_phase,
-                            usage_event_type = ?event.event_type,
-                            request_id = %event.request_id,
-                            retry_attempt = attempts,
-                            retry_delay_ms = delay.as_millis() as u64,
-                            error = %err,
-                            fallback = "inline_persistence_retry",
-                            "usage runtime durable inline retry failed; will retry"
-                        );
-                    }
-                    tokio::time::sleep(delay).await;
-                }
-            }
-        }
-    }
-
-    async fn schedule_item(
-        &self,
-        queue: UsageQueue,
-        event: UsageEvent,
-        event_phase: &'static str,
-        options: UsageEnqueueRetryOptions,
     ) -> bool {
-        let UsageEnqueueRetryOptions {
-            delay_before_first_attempt,
-            cause,
-            completion,
-            retain_pending_on_unavailable,
-        } = options;
+        let event_type = event.event_type;
+        let request_id = event.request_id.clone();
+        let cause_message = cause.to_string();
+        let scheduled = self.schedule_item(queue, event, event_phase, Some(cause_message.as_str()));
+        if let Some(scheduled) = scheduled {
+            if should_log_usage_retry_counter(scheduled) {
+                warn!(
+                    event_name = "usage_event_enqueue_failed_retry_scheduled",
+                    log_type = "event",
+                    event_phase,
+                    usage_event_type = ?event_type,
+                    request_id,
+                    retry_scheduled_total = scheduled,
+                    fallback = "local_enqueue_retry",
+                    error = %cause_message,
+                    "usage runtime failed to enqueue usage event; scheduled local retry"
+                );
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    fn schedule_item(
+        &self,
+        queue: UsageQueue,
+        event: UsageEvent,
+        event_phase: &'static str,
+        cause: Option<&str>,
+    ) -> Option<u64> {
         let worker_index = retry_worker_index(&event.request_id, self.senders.len());
         let Some(sender) = self.senders.get(worker_index) else {
-            if retain_pending_on_unavailable {
-                self.metrics.record_unavailable_retaining_pending();
-            } else {
-                self.metrics.record_closed_or_unavailable();
-            }
+            self.metrics.record_closed_or_unavailable();
             warn!(
                 event_name = "usage_event_enqueue_retry_unavailable",
                 log_type = "event",
                 event_phase,
                 usage_event_type = ?event.event_type,
                 request_id = %event.request_id,
-                error = ?cause.as_ref().map(ToString::to_string),
+                error = ?cause,
+                fallback = "drop",
                 "usage runtime local enqueue retry dispatcher is unavailable"
             );
-            return false;
+            return None;
         };
 
-        let item = UsageEnqueueRetryItem {
-            queue,
-            event,
-            event_phase,
-            attempts: 0,
-            delay_before_first_attempt,
-            completion,
-        };
-        match sender.try_send(item) {
-            Ok(()) => true,
-            Err(mpsc::error::TrySendError::Full(item)) => {
-                warn!(
-                    event_name = "usage_event_enqueue_retry_buffer_full",
-                    log_type = "event",
-                    event_phase = item.event_phase,
-                    usage_event_type = ?item.event.event_type,
-                    request_id = %item.event.request_id,
-                    worker_index,
-                    "usage runtime local enqueue retry buffer is full; waiting for capacity"
-                );
-                if let Err(err) = sender.send(item).await {
-                    let item = err.0;
-                    if retain_pending_on_unavailable {
-                        self.metrics.record_unavailable_retaining_pending();
-                    } else {
-                        self.metrics.record_closed_or_unavailable();
-                    }
-                    warn!(
-                        event_name = "usage_event_enqueue_retry_closed",
-                        log_type = "event",
-                        event_phase = item.event_phase,
-                        usage_event_type = ?item.event.event_type,
-                        request_id = %item.event.request_id,
-                        worker_index,
-                        "usage runtime local enqueue retry dispatcher closed before accepting event"
-                    );
-                    false
-                } else {
-                    true
-                }
+        match sender.try_reserve() {
+            Ok(permit) => {
+                let scheduled = self.metrics.record_scheduled();
+                permit.send(UsageEnqueueRetryItem {
+                    queue,
+                    event,
+                    event_phase,
+                    attempts: 0,
+                    delay_before_first_attempt: true,
+                });
+                Some(scheduled)
             }
-            Err(mpsc::error::TrySendError::Closed(item)) => {
-                if retain_pending_on_unavailable {
-                    self.metrics.record_unavailable_retaining_pending();
-                } else {
-                    self.metrics.record_closed_or_unavailable();
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                let dropped = self.metrics.record_closed_or_unavailable();
+                if should_log_usage_retry_counter(dropped) {
+                    warn!(
+                        event_name = "usage_event_enqueue_retry_buffer_full",
+                        log_type = "event",
+                        event_phase,
+                        usage_event_type = ?event.event_type,
+                        request_id = %event.request_id,
+                        worker_index,
+                        retry_dropped_total = dropped,
+                        fallback = "drop",
+                        "usage runtime local enqueue retry buffer is full; dropped usage event"
+                    );
                 }
+                None
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.metrics.record_closed_or_unavailable();
                 warn!(
                     event_name = "usage_event_enqueue_retry_closed",
                     log_type = "event",
-                    event_phase = item.event_phase,
-                    usage_event_type = ?item.event.event_type,
-                    request_id = %item.event.request_id,
+                    event_phase,
+                    usage_event_type = ?event.event_type,
+                    request_id = %event.request_id,
                     worker_index,
+                    fallback = "drop",
                     "usage runtime local enqueue retry dispatcher is closed"
                 );
-                false
+                None
             }
         }
     }
@@ -2318,9 +2770,8 @@ impl UsageEnqueueRetryDispatcher {
 
 impl UsageEnqueueDispatcherMetrics {
     fn record_scheduled(&self) -> u64 {
-        let scheduled = self.scheduled_total.fetch_add(1, Ordering::AcqRel) + 1;
         self.pending.fetch_add(1, Ordering::AcqRel);
-        scheduled
+        self.scheduled_total.fetch_add(1, Ordering::AcqRel) + 1
     }
 
     fn record_recovered(&self) -> u64 {
@@ -2333,15 +2784,10 @@ impl UsageEnqueueDispatcherMetrics {
         self.retry_failed_total.fetch_add(1, Ordering::AcqRel);
     }
 
-    fn record_closed_or_unavailable(&self) {
+    fn record_closed_or_unavailable(&self) -> u64 {
         self.closed_or_unavailable_total
-            .fetch_add(1, Ordering::AcqRel);
-        self.pending.fetch_sub(1, Ordering::AcqRel);
-    }
-
-    fn record_unavailable_retaining_pending(&self) {
-        self.closed_or_unavailable_total
-            .fetch_add(1, Ordering::AcqRel);
+            .fetch_add(1, Ordering::AcqRel)
+            + 1
     }
 }
 
@@ -2373,9 +2819,6 @@ async fn run_usage_enqueue_retry_worker(
                             retry_recovered_total = recovered,
                             "usage runtime local enqueue retry recovered"
                         );
-                    }
-                    if let Some(completion) = item.completion.take() {
-                        let _ = completion.send(());
                     }
                     break;
                 }
@@ -2551,12 +2994,13 @@ mod tests {
     use aether_runtime_state::{MemoryRuntimeStateConfig, RuntimeQueueStore, RuntimeState};
     use async_trait::async_trait;
     use serde_json::json;
+    use tokio::sync::mpsc;
     use tokio::time::{sleep, timeout, Duration};
 
     use super::{
-        preserve_provider_response_facts, UsageBillingEventEnricher, UsageBodyCapturePolicy,
-        UsageRequestRecordLevel, UsageRuntimeAccess, UsageWorkerObservation,
-        UsageWorkerSupervisorState,
+        preserve_provider_response_facts, LifecycleEventCoalescer, UsageBillingEventEnricher,
+        UsageBodyCapturePolicy, UsageEnqueueRetryDispatcher, UsageRequestRecordLevel,
+        UsageRuntimeAccess, UsageWorkerObservation, UsageWorkerSupervisorState,
     };
     use crate::worker::ManualProxyNodeCounter;
     use crate::{
@@ -2590,6 +3034,28 @@ mod tests {
         records: Mutex<Vec<UpsertUsageRecord>>,
         queue: Arc<dyn RuntimeQueueStore>,
         enrich_calls: AtomicUsize,
+    }
+
+    #[derive(Clone)]
+    struct FailingWriteQueueConfiguredUsageStore {
+        queue: Arc<dyn RuntimeQueueStore>,
+        upsert_attempts: Arc<AtomicUsize>,
+    }
+
+    #[derive(Clone)]
+    struct BlockingWriteQueueConfiguredUsageStore {
+        queue: Arc<dyn RuntimeQueueStore>,
+        write_started: Arc<tokio::sync::Notify>,
+        release_writes: Arc<tokio::sync::Notify>,
+        writes_completed: Arc<AtomicUsize>,
+    }
+
+    #[derive(Clone)]
+    struct BlockingPolicyQueueConfiguredUsageStore {
+        queue: Arc<dyn RuntimeQueueStore>,
+        policy_started: Arc<tokio::sync::Notify>,
+        release_policy: Arc<tokio::sync::Notify>,
+        policy_reads: Arc<AtomicUsize>,
     }
 
     #[derive(Default)]
@@ -2641,6 +3107,29 @@ mod tests {
         })
         .await
         .expect("local usage enqueue dispatcher should drain");
+    }
+
+    async fn wait_for_queued_usage_events(
+        queue: &UsageQueue,
+        consumer: &str,
+        expected: usize,
+    ) -> Vec<aether_runtime_state::RuntimeQueueEntry> {
+        timeout(Duration::from_secs(2), async {
+            let mut queued = Vec::new();
+            loop {
+                let mut entries = queue
+                    .read_group(consumer)
+                    .await
+                    .expect("queue read should succeed");
+                queued.append(&mut entries);
+                if queued.len() >= expected {
+                    return queued;
+                }
+                sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("usage events should be queued")
     }
 
     #[async_trait]
@@ -2944,6 +3433,194 @@ mod tests {
 
         fn usage_worker_queue(&self) -> Option<Arc<dyn RuntimeQueueStore>> {
             Some(Arc::clone(&self.queue))
+        }
+    }
+
+    #[async_trait]
+    impl UsageRecordWriter for FailingWriteQueueConfiguredUsageStore {
+        async fn upsert_usage_record(
+            &self,
+            _record: UpsertUsageRecord,
+        ) -> Result<Option<StoredRequestUsageAudit>, DataLayerError> {
+            self.upsert_attempts.fetch_add(1, Ordering::AcqRel);
+            Err(DataLayerError::Postgres(
+                "forced direct fallback write failure".to_string(),
+            ))
+        }
+    }
+
+    #[async_trait]
+    impl UsageSettlementWriter for FailingWriteQueueConfiguredUsageStore {
+        fn has_usage_settlement_writer(&self) -> bool {
+            false
+        }
+
+        async fn settle_usage(
+            &self,
+            _input: UsageSettlementInput,
+        ) -> Result<Option<StoredUsageSettlement>, DataLayerError> {
+            Ok(None)
+        }
+    }
+
+    #[async_trait]
+    impl UsageBillingEventEnricher for FailingWriteQueueConfiguredUsageStore {
+        async fn enrich_usage_event(&self, _event: &mut UsageEvent) -> Result<(), DataLayerError> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl ManualProxyNodeCounter for FailingWriteQueueConfiguredUsageStore {
+        async fn increment_manual_proxy_node_requests(
+            &self,
+            _node_id: &str,
+            _total_delta: i64,
+            _failed_delta: i64,
+            _latency_ms: Option<i64>,
+        ) -> Result<(), DataLayerError> {
+            Ok(())
+        }
+    }
+
+    impl UsageRuntimeAccess for FailingWriteQueueConfiguredUsageStore {
+        fn has_usage_writer(&self) -> bool {
+            true
+        }
+
+        fn has_usage_worker_queue(&self) -> bool {
+            true
+        }
+
+        fn usage_worker_queue(&self) -> Option<Arc<dyn RuntimeQueueStore>> {
+            Some(Arc::clone(&self.queue))
+        }
+    }
+
+    #[async_trait]
+    impl UsageRecordWriter for BlockingWriteQueueConfiguredUsageStore {
+        async fn upsert_usage_record(
+            &self,
+            _record: UpsertUsageRecord,
+        ) -> Result<Option<StoredRequestUsageAudit>, DataLayerError> {
+            self.write_started.notify_one();
+            self.release_writes.notified().await;
+            self.writes_completed.fetch_add(1, Ordering::AcqRel);
+            Ok(None)
+        }
+    }
+
+    #[async_trait]
+    impl UsageSettlementWriter for BlockingWriteQueueConfiguredUsageStore {
+        fn has_usage_settlement_writer(&self) -> bool {
+            false
+        }
+
+        async fn settle_usage(
+            &self,
+            _input: UsageSettlementInput,
+        ) -> Result<Option<StoredUsageSettlement>, DataLayerError> {
+            Ok(None)
+        }
+    }
+
+    #[async_trait]
+    impl UsageBillingEventEnricher for BlockingWriteQueueConfiguredUsageStore {
+        async fn enrich_usage_event(&self, _event: &mut UsageEvent) -> Result<(), DataLayerError> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl ManualProxyNodeCounter for BlockingWriteQueueConfiguredUsageStore {
+        async fn increment_manual_proxy_node_requests(
+            &self,
+            _node_id: &str,
+            _total_delta: i64,
+            _failed_delta: i64,
+            _latency_ms: Option<i64>,
+        ) -> Result<(), DataLayerError> {
+            Ok(())
+        }
+    }
+
+    impl UsageRuntimeAccess for BlockingWriteQueueConfiguredUsageStore {
+        fn has_usage_writer(&self) -> bool {
+            true
+        }
+
+        fn has_usage_worker_queue(&self) -> bool {
+            true
+        }
+
+        fn usage_worker_queue(&self) -> Option<Arc<dyn RuntimeQueueStore>> {
+            Some(Arc::clone(&self.queue))
+        }
+    }
+
+    #[async_trait]
+    impl UsageRecordWriter for BlockingPolicyQueueConfiguredUsageStore {
+        async fn upsert_usage_record(
+            &self,
+            _record: UpsertUsageRecord,
+        ) -> Result<Option<StoredRequestUsageAudit>, DataLayerError> {
+            Ok(None)
+        }
+    }
+
+    #[async_trait]
+    impl UsageSettlementWriter for BlockingPolicyQueueConfiguredUsageStore {
+        fn has_usage_settlement_writer(&self) -> bool {
+            false
+        }
+
+        async fn settle_usage(
+            &self,
+            _input: UsageSettlementInput,
+        ) -> Result<Option<StoredUsageSettlement>, DataLayerError> {
+            Ok(None)
+        }
+    }
+
+    #[async_trait]
+    impl UsageBillingEventEnricher for BlockingPolicyQueueConfiguredUsageStore {
+        async fn enrich_usage_event(&self, _event: &mut UsageEvent) -> Result<(), DataLayerError> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl ManualProxyNodeCounter for BlockingPolicyQueueConfiguredUsageStore {
+        async fn increment_manual_proxy_node_requests(
+            &self,
+            _node_id: &str,
+            _total_delta: i64,
+            _failed_delta: i64,
+            _latency_ms: Option<i64>,
+        ) -> Result<(), DataLayerError> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl UsageRuntimeAccess for BlockingPolicyQueueConfiguredUsageStore {
+        fn has_usage_writer(&self) -> bool {
+            true
+        }
+
+        fn has_usage_worker_queue(&self) -> bool {
+            true
+        }
+
+        fn usage_worker_queue(&self) -> Option<Arc<dyn RuntimeQueueStore>> {
+            Some(Arc::clone(&self.queue))
+        }
+
+        async fn body_capture_policy(&self) -> Result<UsageBodyCapturePolicy, DataLayerError> {
+            self.policy_reads.fetch_add(1, Ordering::AcqRel);
+            self.policy_started.notify_one();
+            self.release_policy.notified().await;
+            Ok(UsageBodyCapturePolicy::default())
         }
     }
 
@@ -3393,6 +4070,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn older_delayed_generation_does_not_discard_latest_lifecycle_event() {
+        let coalescer = LifecycleEventCoalescer::default();
+        let request_id = "req-latest-lifecycle-generation";
+        let older = coalescer.register(request_id.to_string()).await;
+        let latest = coalescer.register(request_id.to_string()).await;
+
+        assert!(
+            !coalescer
+                .should_emit(request_id, older.expect("older generation"))
+                .await,
+            "the superseded generation must not be emitted"
+        );
+        assert!(
+            coalescer
+                .should_emit(request_id, latest.expect("latest generation"))
+                .await,
+            "checking an older generation must preserve the latest generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_cleanup_tokens_preserve_newer_first_byte_and_terminal_markers() {
+        let coalescer = LifecycleEventCoalescer::default();
+        let request_id = "req-lifecycle-cleanup-token";
+        let delayed_generation = coalescer
+            .register(request_id.to_string())
+            .await
+            .expect("delayed generation");
+        let first_byte_generation = coalescer
+            .mark_first_byte(request_id)
+            .await
+            .expect("first-byte generation");
+
+        coalescer.abandon(request_id, delayed_generation).await;
+        assert!(
+            coalescer.mark_first_byte(request_id).await.is_none(),
+            "abandoning an older delayed item must preserve the first-byte marker"
+        );
+
+        coalescer.cancel(request_id).await;
+        coalescer
+            .rollback_first_byte(request_id, first_byte_generation)
+            .await;
+        assert!(
+            coalescer.register(request_id.to_string()).await.is_none(),
+            "rolling back an older first-byte enqueue must preserve the terminal marker"
+        );
+
+        let retry_request_id = "req-first-byte-marker-retry";
+        let retry_generation = coalescer
+            .mark_first_byte(retry_request_id)
+            .await
+            .expect("retry first-byte generation");
+        coalescer
+            .rollback_first_byte(retry_request_id, retry_generation)
+            .await;
+        assert!(
+            coalescer.mark_first_byte(retry_request_id).await.is_some(),
+            "a rejected first-byte enqueue should be allowed to retry"
+        );
+    }
+
+    #[tokio::test]
     async fn terminal_event_cancels_delayed_lifecycle_enqueue() {
         let config = UsageRuntimeConfig {
             enabled: true,
@@ -3461,7 +4201,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_started_direct_lifecycle_enqueue_can_be_delayed() {
+    async fn stream_started_direct_with_first_byte_bypasses_lifecycle_delay() {
         let config = UsageRuntimeConfig {
             enabled: true,
             queue_lifecycle_events: true,
@@ -3520,29 +4260,230 @@ mod tests {
             )
             .await;
 
-        let immediate = queue
-            .read_group("usage-test-consumer-stream-direct-delay")
-            .await
-            .expect("queue read should succeed");
-        assert!(
-            immediate.is_empty(),
-            "stream started direct lifecycle event should not enqueue before the delay"
-        );
+        let entries =
+            wait_for_queued_usage_events(&queue, "usage-test-consumer-stream-direct-delay", 1)
+                .await;
+        assert_eq!(entries.len(), 1);
+        let event = UsageEvent::from_stream_fields(&entries[0].fields)
+            .expect("queued usage event should parse");
+        assert_eq!(event.request_id, "req-stream-direct-delay");
+        assert_eq!(event.event_type, UsageEventType::Streaming);
+        assert_eq!(event.data.first_byte_time_ms, Some(12));
         assert!(
             store.records.lock().expect("records lock").is_empty(),
             "stream started direct lifecycle event should not write directly when queue succeeds"
         );
 
         sleep(Duration::from_millis(60)).await;
+        let delayed = queue
+            .read_group("usage-test-consumer-stream-direct-delay-after-wait")
+            .await
+            .expect("queue read should succeed");
+        assert!(
+            delayed.is_empty(),
+            "first-byte transition should only be queued once"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_started_without_first_byte_keeps_lifecycle_delay() {
+        let config = UsageRuntimeConfig {
+            enabled: true,
+            queue_lifecycle_events: true,
+            lifecycle_enqueue_delay_ms: 30,
+            stream_key: "usage:events:test:stream-no-first-byte-delay".to_string(),
+            consumer_group: "usage_consumers_test_stream_no_first_byte_delay".to_string(),
+            consumer_block_ms: 1,
+            ..UsageRuntimeConfig::default()
+        };
+        let queue_runner: Arc<dyn RuntimeQueueStore> =
+            Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+        let queue = UsageQueue::new(Arc::clone(&queue_runner), config.clone())
+            .expect("usage queue should build");
+        queue
+            .ensure_consumer_group()
+            .await
+            .expect("consumer group should initialize");
+        let store = CloneQueueConfiguredUsageStore {
+            records: Arc::new(Mutex::new(Vec::new())),
+            queue: queue_runner,
+        };
+        let runtime = UsageRuntime::new(config).expect("usage runtime should build");
+        let event = UsageEvent::new(
+            UsageEventType::Streaming,
+            "req-stream-no-first-byte-delay",
+            UsageEventData {
+                provider_name: "openai".to_string(),
+                model: "gpt-5".to_string(),
+                status_code: Some(200),
+                first_byte_time_ms: None,
+                ..UsageEventData::default()
+            },
+        );
+
+        runtime.enqueue_or_write_lifecycle(&store, event).await;
+
+        let immediate = queue
+            .read_group("usage-test-consumer-stream-no-first-byte-immediate")
+            .await
+            .expect("queue read should succeed");
+        assert!(
+            immediate.is_empty(),
+            "pre-first-byte streaming event should still be coalesced"
+        );
+
+        sleep(Duration::from_millis(60)).await;
         let entries = queue
-            .read_group("usage-test-consumer-stream-direct-delay")
+            .read_group("usage-test-consumer-stream-no-first-byte-delayed")
             .await
             .expect("queue read should succeed");
         assert_eq!(entries.len(), 1);
         let event = UsageEvent::from_stream_fields(&entries[0].fields)
             .expect("queued usage event should parse");
-        assert_eq!(event.request_id, "req-stream-direct-delay");
+        assert_eq!(event.request_id, "req-stream-no-first-byte-delay");
         assert_eq!(event.event_type, UsageEventType::Streaming);
+        assert_eq!(event.data.first_byte_time_ms, None);
+    }
+
+    #[tokio::test]
+    async fn first_byte_transition_supersedes_delayed_pending_event() {
+        let config = UsageRuntimeConfig {
+            enabled: true,
+            queue_lifecycle_events: true,
+            lifecycle_enqueue_delay_ms: 40,
+            stream_key: "usage:events:test:first-byte-supersedes-pending".to_string(),
+            consumer_group: "usage_consumers_test_first_byte_supersedes_pending".to_string(),
+            consumer_block_ms: 1,
+            ..UsageRuntimeConfig::default()
+        };
+        let queue_runner: Arc<dyn RuntimeQueueStore> =
+            Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+        let queue = UsageQueue::new(Arc::clone(&queue_runner), config.clone())
+            .expect("usage queue should build");
+        queue
+            .ensure_consumer_group()
+            .await
+            .expect("consumer group should initialize");
+        let store = CloneQueueConfiguredUsageStore {
+            records: Arc::new(Mutex::new(Vec::new())),
+            queue: queue_runner,
+        };
+        let runtime = UsageRuntime::new(config).expect("usage runtime should build");
+
+        runtime
+            .enqueue_or_write_lifecycle(
+                &store,
+                UsageEvent::new(
+                    UsageEventType::Pending,
+                    "req-first-byte-supersedes-pending",
+                    UsageEventData {
+                        provider_name: "openai".to_string(),
+                        model: "gpt-5".to_string(),
+                        ..UsageEventData::default()
+                    },
+                ),
+            )
+            .await;
+        runtime
+            .enqueue_or_write_lifecycle(
+                &store,
+                UsageEvent::new(
+                    UsageEventType::Streaming,
+                    "req-first-byte-supersedes-pending",
+                    UsageEventData {
+                        provider_name: "openai".to_string(),
+                        model: "gpt-5".to_string(),
+                        status_code: Some(200),
+                        first_byte_time_ms: Some(12),
+                        ..UsageEventData::default()
+                    },
+                ),
+            )
+            .await;
+
+        let entries =
+            wait_for_queued_usage_events(&queue, "usage-test-consumer-first-byte-immediate", 1)
+                .await;
+        assert_eq!(entries.len(), 1);
+        let event = UsageEvent::from_stream_fields(&entries[0].fields)
+            .expect("queued usage event should parse");
+        assert_eq!(event.event_type, UsageEventType::Streaming);
+        assert_eq!(event.data.first_byte_time_ms, Some(12));
+
+        sleep(Duration::from_millis(80)).await;
+        let delayed = queue
+            .read_group("usage-test-consumer-first-byte-after-delay")
+            .await
+            .expect("queue read should succeed");
+        assert!(
+            delayed.is_empty(),
+            "the delayed pending event must not overwrite the first-byte transition"
+        );
+    }
+
+    #[tokio::test]
+    async fn first_byte_append_failure_is_retried_locally() {
+        let config = UsageRuntimeConfig {
+            enabled: true,
+            queue_lifecycle_events: true,
+            lifecycle_enqueue_delay_ms: 1_000,
+            retry_deferred_lifecycle_events: true,
+            stream_key: "usage:events:test:first-byte-retry".to_string(),
+            consumer_group: "usage_consumers_test_first_byte_retry".to_string(),
+            consumer_block_ms: 1,
+            enqueue_retry_initial_backoff_ms: 1,
+            enqueue_retry_max_backoff_ms: 5,
+            enqueue_retry_buffer_capacity: 16,
+            enqueue_retry_workers: 1,
+            ..UsageRuntimeConfig::default()
+        };
+        let inner_queue: Arc<dyn RuntimeQueueStore> =
+            Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+        let queue = UsageQueue::new(Arc::clone(&inner_queue), config.clone())
+            .expect("usage queue should build");
+        queue
+            .ensure_consumer_group()
+            .await
+            .expect("consumer group should initialize");
+        let flaky_queue: Arc<dyn RuntimeQueueStore> = Arc::new(
+            FlakyAppendQueueStore::new(Arc::clone(&inner_queue), 1).with_append_delay_ms(200),
+        );
+        let store = CloneQueueConfiguredUsageStore {
+            records: Arc::new(Mutex::new(Vec::new())),
+            queue: flaky_queue,
+        };
+        let runtime = UsageRuntime::new(config).expect("usage runtime should build");
+
+        timeout(
+            Duration::from_millis(100),
+            runtime.enqueue_or_write_lifecycle(
+                &store,
+                UsageEvent::new(
+                    UsageEventType::Streaming,
+                    "req-first-byte-retry",
+                    UsageEventData {
+                        provider_name: "openai".to_string(),
+                        model: "gpt-5".to_string(),
+                        status_code: Some(200),
+                        first_byte_time_ms: Some(12),
+                        ..UsageEventData::default()
+                    },
+                ),
+            ),
+        )
+        .await
+        .expect("first-byte submission must not wait for the Redis append");
+
+        wait_for_enqueue_dispatcher_to_drain(&runtime, 1).await;
+        let entries = queue
+            .read_group("usage-test-consumer-first-byte-retry")
+            .await
+            .expect("queue read should succeed");
+        assert_eq!(entries.len(), 1);
+        let event = UsageEvent::from_stream_fields(&entries[0].fields)
+            .expect("queued usage event should parse");
+        assert_eq!(event.event_type, UsageEventType::Streaming);
+        assert_eq!(event.data.first_byte_time_ms, Some(12));
     }
 
     #[tokio::test]
@@ -3838,6 +4779,8 @@ mod tests {
         let config = UsageRuntimeConfig {
             enabled: true,
             queue_lifecycle_events: true,
+            lifecycle_enqueue_delay_ms: 0,
+            retry_deferred_lifecycle_events: false,
             stream_key: "usage:events:test:lifecycle-failure".to_string(),
             consumer_group: "usage_consumers_test_lifecycle_failure".to_string(),
             consumer_block_ms: 1,
@@ -3887,6 +4830,11 @@ mod tests {
             store.records.lock().expect("records lock").is_empty(),
             "lifecycle enqueue failure must not fall back to direct DB writes"
         );
+        assert_eq!(
+            runtime.metrics_snapshot().lifecycle_enqueue_failed_total,
+            1,
+            "the lifecycle append failure should be observed"
+        );
     }
 
     #[tokio::test]
@@ -3935,8 +4883,8 @@ mod tests {
             "first append failure should open the lifecycle enqueue circuit"
         );
         assert_eq!(
-            snapshot.lifecycle_enqueue_deferred_dropped_total, 9,
-            "deferred lifecycle events should be dropped when retry is disabled"
+            snapshot.lifecycle_enqueue_deferred_dropped_total, 10,
+            "the failed primary event and circuit-deferred events should be counted as dropped"
         );
         assert_eq!(
             snapshot.enqueue_retry_scheduled_total, 0,
@@ -4002,9 +4950,65 @@ mod tests {
             .await;
 
         let snapshot = runtime.metrics_snapshot();
-        assert_eq!(snapshot.lifecycle_enqueue_deferred_retry_total, 1);
+        assert_eq!(snapshot.lifecycle_enqueue_deferred_retry_total, 2);
         assert_eq!(snapshot.lifecycle_enqueue_deferred_dropped_total, 0);
-        assert_eq!(snapshot.enqueue_retry_scheduled_total, 1);
+        assert_eq!(
+            snapshot.enqueue_retry_scheduled_total, 2,
+            "the initial append failure and the circuit-deferred event should both retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_retry_buffer_full_drops_without_waiting_for_capacity() {
+        let config = UsageRuntimeConfig {
+            enabled: true,
+            queue_lifecycle_events: true,
+            enqueue_retry_buffer_capacity: 1,
+            enqueue_retry_workers: 1,
+            ..UsageRuntimeConfig::default()
+        };
+        let runner: Arc<dyn RuntimeQueueStore> =
+            Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+        let queue = UsageQueue::new(runner, config.clone()).expect("usage queue should build");
+        let (sender, _receiver) = mpsc::channel(1);
+        let dispatcher = UsageEnqueueRetryDispatcher {
+            senders: vec![sender],
+            metrics: Arc::new(Default::default()),
+        };
+        let event = |request_id: &str| {
+            UsageEvent::new(
+                UsageEventType::Streaming,
+                request_id,
+                UsageEventData {
+                    provider_name: "openai".to_string(),
+                    model: "gpt-5".to_string(),
+                    first_byte_time_ms: Some(12),
+                    ..UsageEventData::default()
+                },
+            )
+        };
+
+        assert!(dispatcher.schedule(
+            queue.clone(),
+            event("req-lifecycle-retry-buffer-fill"),
+            "lifecycle",
+            DataLayerError::Redis("forced failure".to_string()),
+        ));
+        let started_at = std::time::Instant::now();
+        let accepted = dispatcher.schedule(
+            queue,
+            event("req-lifecycle-retry-buffer-overflow"),
+            "lifecycle",
+            DataLayerError::Redis("forced failure".to_string()),
+        );
+        assert!(
+            started_at.elapsed() < Duration::from_millis(50),
+            "retry submission must remain non-blocking"
+        );
+        assert!(!accepted);
+        assert_eq!(dispatcher.scheduled_total(), 1);
+        assert_eq!(dispatcher.pending(), 1);
+        assert_eq!(dispatcher.closed_or_unavailable_total(), 1);
     }
 
     #[tokio::test]
@@ -4119,7 +5123,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_enqueue_failure_opens_submission_circuit_and_retries_durably() {
+    async fn terminal_enqueue_failure_uses_bounded_direct_database_fallback() {
         let config = UsageRuntimeConfig {
             enabled: true,
             queue_terminal_events: true,
@@ -4158,13 +5162,7 @@ mod tests {
                     ),
                 )
                 .await;
-            assert_eq!(
-                flaky_queue.successful_appends.load(Ordering::Acquire),
-                index + 1,
-                "terminal submission must wait for Redis persistence, including retry paths"
-            );
         }
-        wait_for_enqueue_dispatcher_to_drain(&runtime, 2).await;
 
         let snapshot = runtime.metrics_snapshot();
         assert_eq!(
@@ -4172,21 +5170,377 @@ mod tests {
             "the first terminal submission should attempt Redis before opening the circuit"
         );
         assert_eq!(
-            snapshot.terminal_enqueue_deferred_retry_total, 1,
-            "the second terminal submission should defer through the open circuit"
+            snapshot.terminal_enqueue_deferred_direct_write_total, 2,
+            "the failed primary event and circuit-deferred event should use direct fallback"
+        );
+        assert_eq!(snapshot.terminal_enqueue_deferred_retry_total, 0);
+        assert_eq!(snapshot.terminal_enqueue_deferred_dropped_total, 0);
+        assert_eq!(snapshot.terminal_direct_fallback_succeeded_total, 2);
+        assert_eq!(snapshot.enqueue_retry_scheduled_total, 0);
+        assert_eq!(snapshot.enqueue_retry_recovered_total, 0);
+        assert_eq!(snapshot.enqueue_retry_pending, 0);
+        assert_eq!(snapshot.enqueue_retry_failed_total, 0);
+        assert_eq!(snapshot.enqueue_retry_closed_or_unavailable_total, 0);
+        assert_eq!(
+            store.records.lock().expect("records lock").len(),
+            2,
+            "both terminal events should be persisted directly"
+        );
+        assert_eq!(flaky_queue.successful_appends.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn permanent_redis_and_database_failure_keeps_terminal_retry_tasks_bounded() {
+        const TOTAL: usize = 32;
+        const RETRY_CAPACITY: u64 = 1;
+        const RETRY_WORKERS: u64 = 1;
+
+        let config = UsageRuntimeConfig {
+            enabled: true,
+            queue_terminal_events: true,
+            worker_record_concurrency_limit: Some(1),
+            terminal_submission_max_in_flight: TOTAL as u64,
+            terminal_enqueue_max_in_flight: 1,
+            stream_key: "usage:events:test:terminal-permanent-failure".to_string(),
+            consumer_group: "usage_consumers_test_terminal_permanent_failure".to_string(),
+            consumer_block_ms: 1,
+            enqueue_retry_initial_backoff_ms: 1,
+            enqueue_retry_max_backoff_ms: 5,
+            enqueue_retry_buffer_capacity: RETRY_CAPACITY as usize,
+            enqueue_retry_workers: RETRY_WORKERS as usize,
+            ..UsageRuntimeConfig::default()
+        };
+        let inner_queue: Arc<dyn RuntimeQueueStore> =
+            Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+        let flaky_queue = Arc::new(FlakyAppendQueueStore::new(
+            Arc::clone(&inner_queue),
+            usize::MAX,
+        ));
+        let queue: Arc<dyn RuntimeQueueStore> = flaky_queue.clone();
+        let store = FailingWriteQueueConfiguredUsageStore {
+            queue,
+            upsert_attempts: Arc::new(AtomicUsize::new(0)),
+        };
+        let runtime = UsageRuntime::new(config).expect("usage runtime should build");
+        let mut submissions = tokio::task::JoinSet::new();
+
+        for index in 0..TOTAL {
+            let runtime = runtime.clone();
+            let store = store.clone();
+            submissions.spawn(async move {
+                runtime
+                    .record_terminal_event(
+                        &store,
+                        UsageEvent::new(
+                            UsageEventType::Completed,
+                            format!("req-terminal-permanent-failure-{index}"),
+                            UsageEventData {
+                                provider_name: "openai".to_string(),
+                                model: "gpt-5".to_string(),
+                                total_tokens: Some(12),
+                                status_code: Some(200),
+                                ..UsageEventData::default()
+                            },
+                        ),
+                    )
+                    .await;
+            });
+        }
+
+        let completed_without_waiters = timeout(Duration::from_secs(1), async {
+            while let Some(result) = submissions.join_next().await {
+                result.expect("terminal submission should not panic");
+            }
+        })
+        .await;
+        let saturated_snapshot = runtime.metrics_snapshot();
+
+        flaky_queue.remaining_failures.store(0, Ordering::Release);
+        if completed_without_waiters.is_err() {
+            submissions.abort_all();
+            while submissions.join_next().await.is_some() {}
+        }
+        wait_for_enqueue_dispatcher_to_drain(
+            &runtime,
+            saturated_snapshot.enqueue_retry_scheduled_total,
+        )
+        .await;
+
+        assert!(
+            completed_without_waiters.is_ok(),
+            "terminal submissions must never wait outside bounded fallback queues"
         );
         assert_eq!(
-            snapshot.enqueue_retry_scheduled_total, 2,
-            "both failed and deferred terminal events should enter local retry"
+            saturated_snapshot.terminal_enqueue_deferred_total,
+            TOTAL as u64
         );
-        assert_eq!(snapshot.enqueue_retry_recovered_total, 2);
-        assert_eq!(snapshot.enqueue_retry_pending, 0);
-        assert_eq!(snapshot.enqueue_retry_failed_total, 1);
-        assert_eq!(snapshot.enqueue_retry_closed_or_unavailable_total, 0);
+        assert_eq!(
+            saturated_snapshot.terminal_direct_fallback_failed_total,
+            TOTAL as u64
+        );
+        assert_eq!(
+            store.upsert_attempts.load(Ordering::Acquire),
+            TOTAL,
+            "each terminal event should receive one bounded direct write attempt"
+        );
+        assert_eq!(
+            saturated_snapshot.terminal_enqueue_deferred_retry_total
+                + saturated_snapshot.terminal_enqueue_deferred_dropped_total,
+            TOTAL as u64
+        );
+        assert_eq!(
+            saturated_snapshot.enqueue_retry_scheduled_total,
+            saturated_snapshot.terminal_enqueue_deferred_retry_total
+        );
         assert!(
-            store.records.lock().expect("records lock").is_empty(),
-            "terminal queue failure must not fall back to direct writes"
+            saturated_snapshot.enqueue_retry_pending <= RETRY_CAPACITY + RETRY_WORKERS,
+            "retry pending events must stay within active workers plus channel capacity"
         );
+        assert!(
+            saturated_snapshot.terminal_enqueue_deferred_dropped_total > 0,
+            "the test must saturate the bounded retry buffer"
+        );
+        assert_eq!(
+            saturated_snapshot.enqueue_retry_closed_or_unavailable_total,
+            saturated_snapshot.terminal_enqueue_deferred_dropped_total
+        );
+        assert!(saturated_snapshot.terminal_direct_fallback_max_in_flight <= 1);
+        assert_eq!(saturated_snapshot.terminal_direct_fallback_in_flight, 0);
+        assert_eq!(saturated_snapshot.terminal_enqueue_in_flight, 0);
+    }
+
+    #[tokio::test]
+    async fn slow_database_fallback_rejects_excess_without_waiting_for_a_permit() {
+        const EXCESS_SUBMISSIONS: usize = 16;
+
+        let config = UsageRuntimeConfig {
+            enabled: true,
+            queue_terminal_events: true,
+            worker_record_concurrency_limit: Some(1),
+            terminal_submission_max_in_flight: (EXCESS_SUBMISSIONS + 1) as u64,
+            terminal_enqueue_max_in_flight: 1,
+            stream_key: "usage:events:test:terminal-slow-db-fallback".to_string(),
+            consumer_group: "usage_consumers_test_terminal_slow_db_fallback".to_string(),
+            consumer_block_ms: 1,
+            enqueue_retry_initial_backoff_ms: 1,
+            enqueue_retry_max_backoff_ms: 5,
+            enqueue_retry_buffer_capacity: 1,
+            enqueue_retry_workers: 1,
+            ..UsageRuntimeConfig::default()
+        };
+        let inner_queue: Arc<dyn RuntimeQueueStore> =
+            Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+        let flaky_queue = Arc::new(FlakyAppendQueueStore::new(
+            Arc::clone(&inner_queue),
+            usize::MAX,
+        ));
+        let queue: Arc<dyn RuntimeQueueStore> = flaky_queue.clone();
+        let store = BlockingWriteQueueConfiguredUsageStore {
+            queue,
+            write_started: Arc::new(tokio::sync::Notify::new()),
+            release_writes: Arc::new(tokio::sync::Notify::new()),
+            writes_completed: Arc::new(AtomicUsize::new(0)),
+        };
+        let runtime = UsageRuntime::new(config).expect("usage runtime should build");
+        let write_started = store.write_started.notified();
+        let first_runtime = runtime.clone();
+        let first_store = store.clone();
+        let mut first_submission = tokio::spawn(async move {
+            first_runtime
+                .record_terminal_event(
+                    &first_store,
+                    UsageEvent::new(
+                        UsageEventType::Completed,
+                        "req-terminal-slow-db-fallback-first",
+                        UsageEventData {
+                            provider_name: "openai".to_string(),
+                            model: "gpt-5".to_string(),
+                            total_tokens: Some(12),
+                            status_code: Some(200),
+                            ..UsageEventData::default()
+                        },
+                    ),
+                )
+                .await;
+        });
+
+        let first_write_started = timeout(Duration::from_secs(1), write_started).await;
+        let mut excess = tokio::task::JoinSet::new();
+        for index in 0..EXCESS_SUBMISSIONS {
+            let runtime = runtime.clone();
+            let store = store.clone();
+            excess.spawn(async move {
+                runtime
+                    .record_terminal_event(
+                        &store,
+                        UsageEvent::new(
+                            UsageEventType::Completed,
+                            format!("req-terminal-slow-db-fallback-excess-{index}"),
+                            UsageEventData {
+                                provider_name: "openai".to_string(),
+                                model: "gpt-5".to_string(),
+                                total_tokens: Some(12),
+                                status_code: Some(200),
+                                ..UsageEventData::default()
+                            },
+                        ),
+                    )
+                    .await;
+            });
+        }
+        let excess_completed = timeout(Duration::from_secs(1), async {
+            while let Some(result) = excess.join_next().await {
+                result.expect("excess terminal submission should not panic");
+            }
+        })
+        .await;
+        let saturated_snapshot = runtime.metrics_snapshot();
+
+        store.release_writes.notify_waiters();
+        flaky_queue.remaining_failures.store(0, Ordering::Release);
+        if excess_completed.is_err() {
+            excess.abort_all();
+            while excess.join_next().await.is_some() {}
+        }
+        let first_completed = timeout(Duration::from_secs(1), &mut first_submission).await;
+        if first_completed.is_err() {
+            first_submission.abort();
+            let _ = first_submission.await;
+        }
+        wait_for_enqueue_dispatcher_to_drain(
+            &runtime,
+            saturated_snapshot.enqueue_retry_scheduled_total,
+        )
+        .await;
+        let recovered_snapshot = runtime.metrics_snapshot();
+
+        assert!(
+            first_write_started.is_ok(),
+            "first fallback should reach the writer"
+        );
+        assert!(
+            excess_completed.is_ok(),
+            "excess fallbacks must not wait for database permits"
+        );
+        assert!(first_completed.is_ok(), "released fallback should complete");
+        assert_eq!(saturated_snapshot.terminal_direct_fallback_limit, 1);
+        assert_eq!(saturated_snapshot.terminal_direct_fallback_in_flight, 1);
+        assert_eq!(saturated_snapshot.terminal_direct_fallback_max_in_flight, 1);
+        assert_eq!(saturated_snapshot.worker_record_concurrency_in_flight, 1);
+        assert_eq!(
+            saturated_snapshot.worker_record_concurrency_max_in_flight,
+            1
+        );
+        assert_eq!(
+            saturated_snapshot.worker_record_deferred_total,
+            EXCESS_SUBMISSIONS as u64
+        );
+        assert_eq!(
+            saturated_snapshot.terminal_direct_fallback_rejected_total,
+            EXCESS_SUBMISSIONS as u64
+        );
+        assert_eq!(
+            saturated_snapshot.terminal_enqueue_deferred_retry_total
+                + saturated_snapshot.terminal_enqueue_deferred_dropped_total,
+            EXCESS_SUBMISSIONS as u64
+        );
+        assert!(saturated_snapshot.enqueue_retry_pending <= 2);
+        assert_eq!(store.writes_completed.load(Ordering::Acquire), 1);
+        assert_eq!(recovered_snapshot.terminal_direct_fallback_in_flight, 0);
+        assert_eq!(recovered_snapshot.worker_record_concurrency_in_flight, 0);
+        assert_eq!(
+            recovered_snapshot.terminal_direct_fallback_succeeded_total,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_submission_admission_runs_before_fire_and_forget_policy_io() {
+        const EXCESS_SUBMISSIONS: usize = 16;
+
+        let config = UsageRuntimeConfig {
+            enabled: true,
+            queue_terminal_events: true,
+            terminal_submission_max_in_flight: 1,
+            terminal_enqueue_max_in_flight: 1,
+            stream_key: "usage:events:test:terminal-submission-admission".to_string(),
+            consumer_group: "usage_consumers_test_terminal_submission_admission".to_string(),
+            consumer_block_ms: 1,
+            ..UsageRuntimeConfig::default()
+        };
+        let queue: Arc<dyn RuntimeQueueStore> =
+            Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+        let store = BlockingPolicyQueueConfiguredUsageStore {
+            queue,
+            policy_started: Arc::new(tokio::sync::Notify::new()),
+            release_policy: Arc::new(tokio::sync::Notify::new()),
+            policy_reads: Arc::new(AtomicUsize::new(0)),
+        };
+        let runtime = UsageRuntime::new(config).expect("usage runtime should build");
+        let policy_started = store.policy_started.notified();
+        runtime.submit_terminal_event(
+            &store,
+            UsageEvent::new(
+                UsageEventType::Completed,
+                "req-terminal-submission-admission-first",
+                UsageEventData {
+                    provider_name: "openai".to_string(),
+                    model: "gpt-5".to_string(),
+                    total_tokens: Some(12),
+                    status_code: Some(200),
+                    ..UsageEventData::default()
+                },
+            ),
+        );
+
+        let first_policy_started = timeout(Duration::from_secs(1), policy_started).await;
+        for index in 0..EXCESS_SUBMISSIONS {
+            runtime.submit_terminal_event(
+                &store,
+                UsageEvent::new(
+                    UsageEventType::Completed,
+                    format!("req-terminal-submission-admission-excess-{index}"),
+                    UsageEventData {
+                        provider_name: "openai".to_string(),
+                        model: "gpt-5".to_string(),
+                        total_tokens: Some(12),
+                        status_code: Some(200),
+                        ..UsageEventData::default()
+                    },
+                ),
+            );
+        }
+        let saturated_snapshot = runtime.metrics_snapshot();
+
+        store.release_policy.notify_waiters();
+        let first_completed = timeout(Duration::from_secs(1), async {
+            loop {
+                if runtime.metrics_snapshot().terminal_submission_in_flight == 0 {
+                    break;
+                }
+                sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await;
+        let recovered_snapshot = runtime.metrics_snapshot();
+
+        assert!(
+            first_policy_started.is_ok(),
+            "first terminal submission should reach policy I/O"
+        );
+        assert!(
+            first_completed.is_ok(),
+            "released submission should complete"
+        );
+        assert_eq!(saturated_snapshot.terminal_submission_limit, 1);
+        assert_eq!(saturated_snapshot.terminal_submission_in_flight, 1);
+        assert_eq!(saturated_snapshot.terminal_submission_max_in_flight, 1);
+        assert_eq!(
+            saturated_snapshot.terminal_submission_rejected_total,
+            EXCESS_SUBMISSIONS as u64
+        );
+        assert_eq!(store.policy_reads.load(Ordering::Acquire), 1);
+        assert_eq!(recovered_snapshot.terminal_submission_in_flight, 0);
     }
 
     #[tokio::test]
@@ -4205,7 +5559,7 @@ mod tests {
             terminal_enqueue_max_in_flight: PRIMARY_LIMIT as u64,
             enqueue_retry_initial_backoff_ms: 1,
             enqueue_retry_max_backoff_ms: 5,
-            enqueue_retry_buffer_capacity: 8,
+            enqueue_retry_buffer_capacity: BURST,
             enqueue_retry_workers: WORKERS,
             ..UsageRuntimeConfig::default()
         };
@@ -4257,20 +5611,18 @@ mod tests {
         assert_eq!(snapshot.enqueue_retry_scheduled_total, scheduled);
         assert_eq!(snapshot.enqueue_retry_recovered_total, scheduled);
         assert_eq!(snapshot.enqueue_retry_pending, 0);
-        assert_eq!(
-            snapshot
-                .enqueue_retry_failed_total
-                .saturating_add(snapshot.terminal_enqueue_failed_total),
-            FORCED_FAILURES as u64
-        );
         assert_eq!(snapshot.enqueue_retry_closed_or_unavailable_total, 0);
         assert_eq!(
-            tracked_queue.successful_appends.load(Ordering::Acquire),
-            BURST
+            tracked_queue.successful_appends.load(Ordering::Acquire)
+                + store.records.lock().expect("records lock").len(),
+            BURST,
+            "every terminal event should reach Redis or bounded direct fallback"
         );
         assert_eq!(
             tracked_queue.append_attempts.load(Ordering::Acquire),
-            BURST + FORCED_FAILURES
+            tracked_queue.successful_appends.load(Ordering::Acquire)
+                + snapshot.terminal_enqueue_failed_total as usize
+                + snapshot.enqueue_retry_failed_total as usize
         );
         assert!(
             tracked_queue.max_active_appends.load(Ordering::Acquire) <= PRIMARY_LIMIT + WORKERS,
@@ -4278,13 +5630,17 @@ mod tests {
         );
         assert_eq!(snapshot.terminal_enqueue_in_flight, 0);
         assert!(
-            snapshot.terminal_enqueue_deferred_retry_total > 0,
-            "burst submissions above the primary limit should defer to retry"
+            snapshot.terminal_enqueue_deferred_direct_write_total
+                + snapshot.terminal_enqueue_deferred_retry_total
+                > 0,
+            "burst submissions above the primary limit should use a bounded fallback"
         );
+        assert_eq!(snapshot.terminal_enqueue_deferred_dropped_total, 0);
+        assert!(snapshot.terminal_direct_fallback_max_in_flight <= 32);
     }
 
     #[tokio::test]
-    async fn queue_append_failure_retries_locally_without_direct_write() {
+    async fn queue_append_failure_prefers_bounded_direct_write_before_retry() {
         let config = UsageRuntimeConfig {
             enabled: true,
             queue_terminal_events: true,
@@ -4327,25 +5683,20 @@ mod tests {
         );
 
         runtime.record_terminal_event(&store, event).await;
-        wait_for_enqueue_dispatcher_to_drain(&runtime, 1).await;
 
-        assert_eq!(store.enrich_calls.load(Ordering::Acquire), 0);
-        assert!(store.records.lock().expect("records lock").is_empty());
-        for _ in 0..50 {
-            let entries = queue
+        assert_eq!(store.enrich_calls.load(Ordering::Acquire), 1);
+        assert_eq!(store.records.lock().expect("records lock").len(), 1);
+        assert!(
+            queue
                 .read_group("usage-test-retry-consumer")
                 .await
-                .expect("queue read should succeed");
-            if let Some(entry) = entries.into_iter().next() {
-                let event = UsageEvent::from_stream_fields(&entry.fields)
-                    .expect("queued retry event should parse");
-                assert_eq!(event.request_id, "req-terminal-retry-1");
-                return;
-            }
-            sleep(Duration::from_millis(10)).await;
-        }
-
-        panic!("terminal usage event was not retried into queue");
+                .expect("queue read should succeed")
+                .is_empty(),
+            "successful direct fallback should not also schedule Redis retry"
+        );
+        let snapshot = runtime.metrics_snapshot();
+        assert_eq!(snapshot.terminal_direct_fallback_succeeded_total, 1);
+        assert_eq!(snapshot.enqueue_retry_scheduled_total, 0);
     }
 
     #[tokio::test]

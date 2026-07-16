@@ -819,6 +819,13 @@ struct GatewayUsageArgs {
 
     #[arg(
         long,
+        env = "AETHER_GATEWAY_USAGE_TERMINAL_SUBMISSION_MAX_IN_FLIGHT",
+        default_value_t = 1_024
+    )]
+    terminal_submission_max_in_flight: u64,
+
+    #[arg(
+        long,
         env = "AETHER_GATEWAY_USAGE_TERMINAL_ENQUEUE_MAX_IN_FLIGHT",
         default_value_t = 1_024
     )]
@@ -979,6 +986,7 @@ impl GatewayUsageArgs {
             reclaim_idle_ms: self.queue_reclaim_idle_ms.max(1),
             reclaim_count: self.queue_reclaim_count.max(1),
             reclaim_interval_ms: self.queue_reclaim_interval_ms.max(1),
+            terminal_submission_max_in_flight: self.terminal_submission_max_in_flight.max(1),
             terminal_enqueue_max_in_flight: self.terminal_enqueue_max_in_flight.max(1),
             lifecycle_enqueue_max_in_flight: self.lifecycle_enqueue_max_in_flight.max(1),
             lifecycle_enqueue_delay_ms: self.lifecycle_enqueue_delay_ms,
@@ -2489,6 +2497,7 @@ mod tests {
                 queue_reclaim_idle_ms: 60_000,
                 queue_reclaim_count: 128,
                 queue_reclaim_interval_ms: 5_000,
+                terminal_submission_max_in_flight: 1_024,
                 terminal_enqueue_max_in_flight: 1_024,
                 lifecycle_enqueue_max_in_flight: 512,
                 lifecycle_enqueue_delay_ms: 1_000,
