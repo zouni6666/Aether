@@ -5,10 +5,40 @@ import {
   formatCodexResetCreditDays,
   getCodexResetCreditAvailableCount,
   getVisibleCodexResetCreditItems,
+  mergeCodexQuotaDisplays,
 } from '@/features/providers/components/codex-reset-credit-display'
 import type { QuotaResetCreditsSnapshot } from '@/api/endpoints/types'
 
 describe('codex reset credit display helpers', () => {
+  it('keeps reset credits and usage windows when snapshot sources are partially populated', () => {
+    const merged = mergeCodexQuotaDisplays(
+      {
+        updated_at: 1_700_000_100,
+        primary_used_percent: 25,
+        reset_credits: {
+          available_count: 2,
+        },
+      },
+      {
+        updated_at: 1_700_000_000,
+        secondary_used_percent: 40,
+        reset_credits: {
+          credits: [{ id: 'credit-1', expires_at: 1_700_086_400 }],
+        },
+      },
+    )
+
+    expect(merged).toMatchObject({
+      updated_at: 1_700_000_100,
+      primary_used_percent: 25,
+      secondary_used_percent: 40,
+      reset_credits: {
+        available_count: 2,
+        credits: [{ id: 'credit-1', expires_at: 1_700_086_400 }],
+      },
+    })
+  })
+
   it('keeps zero available credits displayable but non-positive detail items hidden', () => {
     const snapshot: QuotaResetCreditsSnapshot = {
       available_count: 0,

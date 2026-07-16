@@ -1,7 +1,40 @@
 import type {
+  CodexUpstreamMetadata,
   QuotaResetCreditSnapshot,
   QuotaResetCreditsSnapshot,
 } from '@/api/endpoints/types'
+
+function codexQuotaUpdatedAt(display: CodexUpstreamMetadata | null | undefined): number | null {
+  const updatedAt = Number(display?.updated_at)
+  return Number.isFinite(updatedAt) ? updatedAt : null
+}
+
+export function mergeCodexQuotaDisplays(
+  snapshotDisplay: CodexUpstreamMetadata | null | undefined,
+  metadataDisplay: CodexUpstreamMetadata | null | undefined,
+): CodexUpstreamMetadata | null {
+  if (!snapshotDisplay) return metadataDisplay ?? null
+  if (!metadataDisplay) return snapshotDisplay
+
+  const snapshotUpdatedAt = codexQuotaUpdatedAt(snapshotDisplay)
+  const metadataUpdatedAt = codexQuotaUpdatedAt(metadataDisplay)
+  const metadataIsNewer = metadataUpdatedAt !== null
+    && (snapshotUpdatedAt === null || metadataUpdatedAt > snapshotUpdatedAt)
+  const preferred = metadataIsNewer ? metadataDisplay : snapshotDisplay
+  const fallback = metadataIsNewer ? snapshotDisplay : metadataDisplay
+  const resetCredits = preferred.reset_credits || fallback.reset_credits
+    ? {
+        ...fallback.reset_credits,
+        ...preferred.reset_credits,
+      }
+    : undefined
+
+  return {
+    ...fallback,
+    ...preferred,
+    ...(resetCredits ? { reset_credits: resetCredits } : {}),
+  }
+}
 
 export interface CodexResetCreditDisplayItem {
   id?: string | null

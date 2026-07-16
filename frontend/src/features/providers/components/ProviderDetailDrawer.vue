@@ -993,10 +993,6 @@ import type {
 } from '@/api/endpoints/types'
 import { formatApiFormatShort } from '@/api/endpoints/types/api-format'
 import { isOAuthAccountProviderType, isKeyManagedProviderType } from '../utils/providerTypeUtils'
-import {
-  isProviderQuotaAutoRefreshCoolingDown,
-  markProviderQuotaAutoRefreshAttempt,
-} from '../utils/quotaAutoRefreshCooldown'
 import { getOAuthOrgBadge } from '@/utils/oauthIdentity'
 import { getOAuthRefreshFeedback } from '@/utils/oauthRefreshFeedback'
 import { formatCompactNumber } from '@/utils/format'
@@ -1022,6 +1018,7 @@ import {
   formatCodexResetCreditDays,
   getCodexResetCreditAvailableCount as getCodexResetCreditAvailableCountFromSnapshot,
   getVisibleCodexResetCreditItems as getVisibleCodexResetCreditItemsFromSnapshot,
+  mergeCodexQuotaDisplays,
 } from './codex-reset-credit-display'
 
 // 扩展端点类型,包含密钥列表
@@ -1600,7 +1597,7 @@ async function handleRefreshOAuth(key: EndpointAPIKey) {
     }
     // Antigravity：token 刷新后可能完成了账号激活，触发配额获取
     // （不 emit('refresh')，避免触发全局 provider 余额刷新）
-    void autoRefreshQuotaInBackground({ ignoreCooldown: true })
+    void autoRefreshQuotaInBackground()
   } catch (err: unknown) {
     showError(localizedApiError(err, 'Token 刷新失败'), legacyT('错误'))
   } finally {
@@ -1951,20 +1948,6 @@ function getCodexQuotaDisplayFromSnapshot(quota: QuotaStatusSnapshot | null | un
   return Object.keys(display).length > 0 ? display : null
 }
 
-function getCodexQuotaDisplayUpdatedAt(display: CodexUpstreamMetadata | null | undefined): number | null {
-  const updatedAt = Number(display?.updated_at)
-  return Number.isFinite(updatedAt) ? updatedAt : null
-}
-
-function codexDisplayHasUsage(display: CodexUpstreamMetadata | null | undefined): boolean {
-  return !!display && (
-    display.primary_used_percent !== undefined
-    || display.secondary_used_percent !== undefined
-    || display.spark_primary_used_percent !== undefined
-    || display.spark_secondary_used_percent !== undefined
-  )
-}
-
 function codexDisplayHasResetCredits(display: CodexUpstreamMetadata | null | undefined): boolean {
   const count = display?.reset_credits?.available_count
   return typeof count === 'number' && Number.isFinite(count)
@@ -1973,20 +1956,7 @@ function codexDisplayHasResetCredits(display: CodexUpstreamMetadata | null | und
 function getCodexQuotaDisplay(key: EndpointAPIKey): CodexUpstreamMetadata | null {
   const snapshotDisplay = getCodexQuotaDisplayFromSnapshot(getQuotaSnapshotForProvider(key, 'codex'))
   const metadataDisplay = getCodexQuotaDisplayFromMetadata(key.upstream_metadata?.codex)
-
-  if (!snapshotDisplay) return metadataDisplay
-  if (!metadataDisplay) return snapshotDisplay
-  if (!codexDisplayHasUsage(snapshotDisplay) && codexDisplayHasUsage(metadataDisplay)) {
-    return metadataDisplay
-  }
-
-  const snapshotUpdatedAt = getCodexQuotaDisplayUpdatedAt(snapshotDisplay)
-  const metadataUpdatedAt = getCodexQuotaDisplayUpdatedAt(metadataDisplay)
-  if (metadataUpdatedAt !== null && (snapshotUpdatedAt === null || metadataUpdatedAt > snapshotUpdatedAt)) {
-    return metadataDisplay
-  }
-
-  return snapshotDisplay
+  return mergeCodexQuotaDisplays(snapshotDisplay, metadataDisplay)
 }
 
 function hasCodexQuotaDisplayData(key: EndpointAPIKey): boolean {
@@ -2714,7 +2684,7 @@ function applyQuotaResults(
 }
 
 // 通用的自动刷新配额函数（支持 Codex、Gemini CLI、Antigravity、Kiro、Windsurf 和 ChatGPT Web）
-async function autoRefreshQuotaInBackground(options: { ignoreCooldown?: boolean } = {}) {
+async function autoRefreshQuotaInBackground() {
   const providerId = props.providerId
   if (!providerId) return
   if (refreshingQuota.value) return
@@ -2740,7 +2710,6 @@ async function autoRefreshQuotaInBackground(options: { ignoreCooldown?: boolean 
     shouldRefresh = shouldAutoRefreshChatGPTWebQuota()
   }
   if (!shouldRefresh) return
-  if (!options.ignoreCooldown && isProviderQuotaAutoRefreshCoolingDown(providerId)) return
 
   let hadCachedQuota = false
   if (providerType === 'codex') {
@@ -2760,7 +2729,6 @@ async function autoRefreshQuotaInBackground(options: { ignoreCooldown?: boolean 
   }
 
   refreshingQuota.value = true
-  markProviderQuotaAutoRefreshAttempt(providerId)
   try {
     const result = await refreshProviderQuota(providerId)
     const applied = applyQuotaResults(result.results)
@@ -2804,7 +2772,7 @@ async function handleKeyChanged() {
   await Promise.all([loadEndpoints(), loadMappingPreview()])
   emit('refresh')
   // 添加/修改 key 后自动获取已支持 provider 的配额（新 key 的 upstream_metadata 为空）
-  void autoRefreshQuotaInBackground({ ignoreCooldown: true })
+  void autoRefreshQuotaInBackground()
 }
 
 // 切换密钥启用状态
