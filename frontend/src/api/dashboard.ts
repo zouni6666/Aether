@@ -154,10 +154,34 @@ export interface RequestSchedulingFailure {
   no_upstream_attempt?: boolean | null
 }
 
+export interface RequestPricingTier {
+  up_to?: number | null
+  input_price_per_1m?: number | null
+  output_price_per_1m?: number | null
+  cache_creation_price_per_1m?: number | null
+  cache_read_price_per_1m?: number | null
+  cache_ttl_pricing?: Array<{
+    ttl_minutes?: number | null
+    cache_creation_price_per_1m?: number | null
+    cache_read_price_per_1m?: number | null
+  }> | null
+  [key: string]: unknown
+}
+
+export interface RequestSettlementTieredPricing {
+  tiers?: RequestPricingTier[] | null
+  [key: string]: unknown
+}
+
 export interface RequestSettlementPricingSnapshot {
   requested_processing_tier?: string | null
   actual_processing_tier?: string | null
   billing_processing_tier?: string | null
+  processing_tier_price_multiplier?: number | null
+  pricing_source?: string | null
+  tiered_pricing_source?: string | null
+  price_per_request_source?: string | null
+  tiered_pricing?: RequestSettlementTieredPricing | null
   [key: string]: unknown
 }
 
@@ -283,30 +307,8 @@ export interface RequestDetail {
     tier_index: number  // 命中的阶梯索引 (0-based)
     tier_count: number  // 阶梯总数
     source?: 'provider' | 'global'  // 定价来源: 提供商或全局
-    current_tier: {  // 当前命中的阶梯配置
-      up_to?: number | null
-      input_price_per_1m: number
-      output_price_per_1m: number
-      cache_creation_price_per_1m?: number
-      cache_read_price_per_1m?: number
-      cache_ttl_pricing?: Array<{
-        ttl_minutes: number
-        cache_creation_price_per_1m?: number
-        cache_read_price_per_1m?: number
-      }>
-    }
-    tiers: Array<{  // 完整阶梯配置列表
-      up_to?: number | null
-      input_price_per_1m: number
-      output_price_per_1m: number
-      cache_creation_price_per_1m?: number
-      cache_read_price_per_1m?: number
-      cache_ttl_pricing?: Array<{
-        ttl_minutes: number
-        cache_creation_price_per_1m?: number
-        cache_read_price_per_1m?: number
-      }>
-    }>
+    current_tier: RequestPricingTier  // 当前命中的阶梯配置
+    tiers: RequestPricingTier[]  // 完整阶梯配置列表
   } | null
   // 视频/图像/音频计费信息
   video_billing?: VideoBilling | null

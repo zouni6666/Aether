@@ -36,10 +36,12 @@ impl BillingService {
         pricing: &BillingModelPricingSnapshot,
         input: &BillingUsageInput,
     ) -> Result<BillingComputation, ExpressionEvaluationError> {
-        let pricing_resolution = pricing.resolve_pricing(
-            input.requested_processing_tier.as_deref(),
-            input.actual_processing_tier.as_deref(),
-        );
+        let pricing_resolution = pricing
+            .resolve_pricing_checked(
+                input.requested_processing_tier.as_deref(),
+                input.actual_processing_tier.as_deref(),
+            )
+            .map_err(|err| ExpressionEvaluationError::Failed(err.to_string()))?;
         self.calculate_with_resolution(pricing, input, pricing_resolution)
     }
 
@@ -48,14 +50,15 @@ impl BillingService {
         pricing: &BillingModelPricingSnapshot,
         estimate: &BillingAuthorizationEstimateInput,
     ) -> Result<Option<f64>, ExpressionEvaluationError> {
+        let Some(pricing_resolutions) = pricing
+            .resolve_authorization_pricing_candidates(estimate.requested_processing_tier.as_deref())
+            .map_err(|err| ExpressionEvaluationError::Failed(err.to_string()))?
+        else {
+            return Ok(None);
+        };
         if normalize_task_type(&estimate.task_type) == "image" {
             return Ok(None);
         }
-        let Some(pricing_resolutions) = pricing.resolve_authorization_pricing_candidates(
-            estimate.requested_processing_tier.as_deref(),
-        ) else {
-            return Ok(None);
-        };
         if pricing.is_free_tier() {
             return Ok(Some(0.0));
         }
@@ -1162,6 +1165,211 @@ mod tests {
                 Some(source)
             );
         }
+    }
+
+    #[test]
+    fn processing_multiplier_is_settled_and_authorized_from_standard_prices() {
+        let pricing = BillingModelPricingSnapshot {
+            provider_api_key_rate_multipliers: None,
+            default_price_per_request: Some(0.02),
+            default_tiered_pricing: Some(json!({
+                "tiers": [{
+                    "up_to": null,
+                    "input_price_per_1m": 2.0,
+                    "output_price_per_1m": 4.0,
+                    "cache_creation_price_per_1m": 0.0,
+                    "cache_read_price_per_1m": 0.0
+                }],
+                "processing_tiers": {
+                    "priority": {"price_multiplier": 2.5}
+                }
+            })),
+            model_price_per_request: None,
+            model_tiered_pricing: None,
+            ..pricing()
+        };
+        let usage = BillingUsageInput {
+            api_format: Some("openai:responses".to_string()),
+            requested_processing_tier: Some("priority".to_string()),
+            actual_processing_tier: Some("priority".to_string()),
+            input_tokens: 1_000_000,
+            ..BillingUsageInput::new("chat")
+        };
+
+        let settled = BillingService::new()
+            .calculate(&pricing, &usage)
+            .expect("multiplier pricing should settle");
+        assert_eq!(settled.cost_result.status, BillingSnapshotStatus::Complete);
+        assert_eq!(settled.cost_result.cost, 5.02);
+        assert_eq!(settled.actual_total_cost, 5.02);
+        assert_eq!(
+            settled.cost_result.snapshot.resolved_variables["input_price_per_1m"],
+            json!(5.0)
+        );
+        assert_eq!(
+            settled.cost_result.snapshot.resolved_variables["price_per_request"],
+            json!(0.02),
+            "processing multiplier must not affect price_per_request"
+        );
+
+        let mut estimate = BillingAuthorizationEstimateInput::new("chat", 1_000_000);
+        estimate.api_format = Some("openai:responses".to_string());
+        estimate.requested_processing_tier = Some("priority".to_string());
+        estimate.max_output_tokens = Some(0);
+        assert_eq!(
+            BillingService::new()
+                .estimate_authorization_cost_upper_bound(&pricing, &estimate)
+                .expect("multiplier pricing should authorize"),
+            Some(5.02)
+        );
+    }
+
+    #[test]
+    fn invalid_processing_multiplier_fails_closed_at_settlement_and_authorization() {
+        let pricing = BillingModelPricingSnapshot {
+            provider_api_key_rate_multipliers: None,
+            default_price_per_request: None,
+            default_tiered_pricing: Some(json!({
+                "tiers": [{"up_to": null, "input_price_per_1m": 2.0}],
+                "processing_tiers": {
+                    "priority": {"price_multiplier": -1.0}
+                }
+            })),
+            model_tiered_pricing: None,
+            ..pricing()
+        };
+        let usage = processing_usage(Some("priority"), Some("priority"), 1_000);
+
+        let settlement_error = BillingService::new()
+            .calculate(&pricing, &usage)
+            .expect_err("invalid multiplier settlement must return a configuration error");
+        assert!(settlement_error
+            .to_string()
+            .contains("price_multiplier must be a non-negative finite number"));
+
+        let mut estimate = BillingAuthorizationEstimateInput::new("chat", 1_000);
+        estimate.api_format = Some("openai:responses".to_string());
+        estimate.requested_processing_tier = Some("priority".to_string());
+        estimate.max_output_tokens = Some(0);
+        let authorization_error = BillingService::new()
+            .estimate_authorization_cost_upper_bound(&pricing, &estimate)
+            .expect_err("invalid multiplier authorization must return a configuration error");
+        assert!(authorization_error
+            .to_string()
+            .contains("price_multiplier must be a non-negative finite number"));
+    }
+
+    #[test]
+    fn empty_processing_catalog_cannot_turn_an_invalid_multiplier_into_zero_cost() {
+        let pricing = BillingModelPricingSnapshot {
+            default_price_per_request: None,
+            default_tiered_pricing: Some(json!({
+                "tiers": [{"up_to": null, "input_price_per_1m": 2.0}],
+                "processing_tiers": {
+                    "priority": {
+                        "tiers": [{}],
+                        "price_multiplier": 2.0
+                    }
+                }
+            })),
+            model_tiered_pricing: None,
+            ..pricing()
+        };
+        let usage = processing_usage(Some("priority"), Some("priority"), 1_000);
+
+        let settlement_error = BillingService::new()
+            .calculate(&pricing, &usage)
+            .expect_err("malformed processing pricing must not settle as zero");
+        assert!(settlement_error
+            .to_string()
+            .contains("explicit catalog contains malformed or unrecognized prices"));
+
+        let mut estimate = BillingAuthorizationEstimateInput::new("chat", 1_000);
+        estimate.requested_processing_tier = Some("priority".to_string());
+        estimate.max_output_tokens = Some(0);
+        let authorization_error = BillingService::new()
+            .estimate_authorization_cost_upper_bound(&pricing, &estimate)
+            .expect_err("malformed processing pricing must stop authorization");
+        assert!(authorization_error
+            .to_string()
+            .contains("explicit catalog contains malformed or unrecognized prices"));
+    }
+
+    #[test]
+    fn authorization_accepts_input_only_processing_catalog() {
+        let pricing = BillingModelPricingSnapshot {
+            default_price_per_request: None,
+            default_tiered_pricing: Some(json!({
+                "tiers": [{"up_to": null, "input_price_per_1m": 0.1}],
+                "processing_tiers": {
+                    "embedding": {
+                        "tiers": [{
+                            "up_to": null,
+                            "input_price_per_1m": 0.2,
+                            "output_price_per_1m": null
+                        }]
+                    }
+                }
+            })),
+            model_tiered_pricing: None,
+            ..pricing()
+        };
+        let mut estimate = BillingAuthorizationEstimateInput::new("embedding", 1_000_000);
+        estimate.requested_processing_tier = Some("embedding".to_string());
+
+        assert_eq!(
+            BillingService::new()
+                .estimate_authorization_cost_upper_bound(&pricing, &estimate)
+                .expect("input-only processing catalog should be valid"),
+            Some(0.45),
+            "the bound includes the runtime's conservative cache-write fallback"
+        );
+    }
+
+    #[test]
+    fn invalid_image_catalog_is_reported_before_the_unavailable_image_estimate() {
+        let pricing = BillingModelPricingSnapshot {
+            default_price_per_request: None,
+            default_tiered_pricing: Some(json!({
+                "image_output_price_ranges": {
+                    "1048576": {"low": 0.04}
+                }
+            })),
+            model_tiered_pricing: None,
+            ..pricing()
+        };
+        let estimate = BillingAuthorizationEstimateInput::new("image", 0);
+
+        let err = BillingService::new()
+            .estimate_authorization_cost_upper_bound(&pricing, &estimate)
+            .expect_err("an unparseable image range must be a configuration error");
+        assert!(err
+            .to_string()
+            .contains("Standard catalog contains malformed or unrecognized prices"));
+    }
+
+    #[test]
+    fn historical_noncanonical_processing_tier_key_is_a_configuration_error() {
+        let pricing = BillingModelPricingSnapshot {
+            default_tiered_pricing: Some(json!({
+                "tiers": [{"up_to": null, "input_price_per_1m": 1.0}],
+                "processing_tiers": {
+                    "Priority": {"price_multiplier": 2.0}
+                }
+            })),
+            model_tiered_pricing: None,
+            ..pricing()
+        };
+        let mut estimate = BillingAuthorizationEstimateInput::new("chat", 1_000);
+        estimate.requested_processing_tier = Some("priority".to_string());
+        estimate.max_output_tokens = Some(0);
+
+        let err = BillingService::new()
+            .estimate_authorization_cost_upper_bound(&pricing, &estimate)
+            .expect_err("a noncanonical historical key must not disappear during lookup");
+        assert!(err
+            .to_string()
+            .contains("must be canonical lowercase without surrounding whitespace"));
     }
 
     #[test]

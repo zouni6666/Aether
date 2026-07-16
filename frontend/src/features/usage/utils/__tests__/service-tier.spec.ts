@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  formatServiceTierFact,
   hasServiceTierFact,
   normalizeServiceTierFact,
   resolveServiceTierFacts,
@@ -37,5 +38,17 @@ describe('service tier facts', () => {
     expect(normalizeServiceTierFact('  Batch  ')).toBe('Batch')
     expect(normalizeServiceTierFact('  ')).toBeNull()
     expect(normalizeServiceTierFact(0)).toBeNull()
+  })
+
+  it.each(['priority', 'fast', ' Priority ', 'FAST'])(
+    'displays the raw %s tier as Fast',
+    (tier) => {
+      expect(formatServiceTierFact(tier)).toBe('Fast')
+    },
+  )
+
+  it('keeps non-fast tier labels unchanged', () => {
+    expect(formatServiceTierFact('  Batch  ')).toBe('Batch')
+    expect(formatServiceTierFact('  ')).toBeNull()
   })
 })

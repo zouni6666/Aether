@@ -24,7 +24,8 @@ pub use precision::{
 };
 pub use pricing::{
     BillingAuthorizationEstimateInput, BillingComputation, BillingModelPricingSnapshot,
-    BillingPricingResolution, BillingPricingSource, BillingUsageInput,
+    BillingPricingConfigurationError, BillingPricingResolution, BillingPricingSource,
+    BillingUsageInput,
 };
 pub use schema::{
     BillingSnapshot, BillingSnapshotStatus, CostResult, BILLING_SNAPSHOT_SCHEMA_VERSION,

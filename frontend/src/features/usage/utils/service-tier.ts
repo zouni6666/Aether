@@ -33,6 +33,21 @@ export function normalizeServiceTierFact(value: unknown): string | null {
   return normalized || null
 }
 
+/**
+ * Provider contracts use both `priority` (OpenAI) and `fast` (Claude) for the
+ * same user-facing processing mode. Keep the raw fact in data structures and
+ * normalize only at the presentation boundary.
+ */
+export function formatServiceTierFact(value: unknown): string | null {
+  const normalized = normalizeServiceTierFact(value)
+  if (normalized === null) return null
+
+  const canonical = normalized.toLowerCase()
+  return canonical === 'priority' || canonical === 'fast'
+    ? 'Fast'
+    : normalized
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>

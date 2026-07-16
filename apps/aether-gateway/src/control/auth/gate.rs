@@ -100,10 +100,15 @@ pub(crate) async fn execution_plan_balance_capacity_rejection(
     let Some(auth_context) = decision.auth_context.as_ref() else {
         return Ok(None);
     };
-    if auth_context.api_key_is_standalone || auth_context.local_rejection.is_some() {
+    if auth_context.local_rejection.is_some() {
+        return Ok(None);
+    }
+    if auth_context.api_key_is_standalone {
+        validate_execution_plan_pricing_configuration_for_plan(state, plan, report_context).await?;
         return Ok(None);
     }
     let Some(available_usd) = available_balance_capacity_usd(state, auth_context).await? else {
+        validate_execution_plan_pricing_configuration_for_plan(state, plan, report_context).await?;
         return Ok(None);
     };
     match estimate_execution_plan_cost_upper_bound_usd(state, plan, report_context).await? {
@@ -122,6 +127,27 @@ pub(crate) async fn execution_plan_balance_capacity_rejection(
         })),
         None => Ok(None),
     }
+}
+
+async fn validate_execution_plan_pricing_configuration_for_plan(
+    state: &AppState,
+    plan: &aether_contracts::ExecutionPlan,
+    report_context: Option<&serde_json::Value>,
+) -> Result<(), GatewayError> {
+    let model_id = report_context_string_field(report_context, "model_id");
+    let global_model_name = report_context_string_field(report_context, "global_model_name");
+    let requested_processing_tier =
+        aether_data_contracts::repository::usage::extract_provider_service_tier_from_body(
+            plan.body.json_body.as_ref(),
+        );
+    validate_execution_plan_pricing_for_unavailable_estimate(
+        state,
+        plan,
+        model_id,
+        global_model_name,
+        requested_processing_tier.as_deref(),
+    )
+    .await
 }
 
 async fn available_balance_capacity_usd(
@@ -169,28 +195,61 @@ async fn estimate_execution_plan_cost_upper_bound_usd(
     report_context: Option<&serde_json::Value>,
 ) -> Result<Option<f64>, GatewayError> {
     let api_format = crate::ai_serving::normalize_api_format_alias(&plan.provider_api_format);
+    let body_json = plan.body.json_body.as_ref();
+    let requested_processing_tier =
+        aether_data_contracts::repository::usage::extract_provider_service_tier_from_body(
+            body_json,
+        );
+    let model_id = report_context_string_field(report_context, "model_id");
+    let global_model_name = report_context_string_field(report_context, "global_model_name");
     let Some(task_type) = authorization_task_type(&api_format, report_context) else {
+        validate_execution_plan_pricing_for_unavailable_estimate(
+            state,
+            plan,
+            model_id,
+            global_model_name,
+            requested_processing_tier.as_deref(),
+        )
+        .await?;
         return Ok(None);
     };
-    let Some(body_json) = plan.body.json_body.as_ref() else {
+    let Some(body_json) = body_json else {
+        validate_execution_plan_pricing_for_unavailable_estimate(
+            state,
+            plan,
+            model_id,
+            global_model_name,
+            requested_processing_tier.as_deref(),
+        )
+        .await?;
         return Ok(None);
     };
     if !openai_request_input_is_self_contained(&api_format, body_json) {
+        validate_execution_plan_pricing_for_unavailable_estimate(
+            state,
+            plan,
+            model_id,
+            global_model_name,
+            requested_processing_tier.as_deref(),
+        )
+        .await?;
         return Ok(None);
     }
     let input_tokens = json_token_count_upper_bound(body_json);
     let Ok(input_tokens) = i64::try_from(input_tokens) else {
+        validate_execution_plan_pricing_for_unavailable_estimate(
+            state,
+            plan,
+            model_id,
+            global_model_name,
+            requested_processing_tier.as_deref(),
+        )
+        .await?;
         return Ok(None);
     };
     let max_output_tokens = max_output_tokens_from_request(body_json)
         .map(|value| value.saturating_mul(output_choice_count_upper_bound(&api_format, body_json)))
         .and_then(|value| i64::try_from(value).ok());
-    let requested_processing_tier =
-        aether_data_contracts::repository::usage::extract_provider_service_tier_from_body(Some(
-            body_json,
-        ));
-    let model_id = report_context_string_field(report_context, "model_id");
-    let global_model_name = report_context_string_field(report_context, "global_model_name");
     let cache_ttl_minutes =
         aether_data_contracts::repository::usage::resolve_provider_cache_ttl_minutes(
             Some(&api_format),
@@ -262,6 +321,55 @@ async fn calculate_execution_plan_cost_upper_bound(
     requested_processing_tier: Option<&str>,
     cache_ttl_minutes: Option<i64>,
 ) -> Result<Option<f64>, GatewayError> {
+    let context =
+        load_execution_plan_billing_context(state, plan, model_id, global_model_name).await?;
+    let Some(context) = context else {
+        return Ok(None);
+    };
+    let mut estimate =
+        aether_billing::BillingAuthorizationEstimateInput::new(task_type, input_tokens);
+    estimate.api_format = Some(api_format.to_string());
+    estimate.requested_processing_tier = requested_processing_tier.map(ToOwned::to_owned);
+    estimate.cache_ttl_minutes = cache_ttl_minutes;
+    estimate.max_output_tokens = max_output_tokens;
+    aether_billing::BillingService::new()
+        .estimate_authorization_cost_upper_bound(
+            &aether_billing::BillingModelPricingSnapshot::from(context),
+            &estimate,
+        )
+        .map_err(|err| GatewayError::Internal(err.to_string()))
+}
+
+async fn validate_execution_plan_pricing_for_unavailable_estimate(
+    state: &AppState,
+    plan: &aether_contracts::ExecutionPlan,
+    model_id: Option<&str>,
+    global_model_name: Option<&str>,
+    requested_processing_tier: Option<&str>,
+) -> Result<(), GatewayError> {
+    if model_id.is_none() && global_model_name.is_none() {
+        return Ok(());
+    }
+    let _permit = state.acquire_auth_snapshot_load_gate().await?;
+    let Some(context) =
+        load_execution_plan_billing_context(state, plan, model_id, global_model_name).await?
+    else {
+        return Ok(());
+    };
+    aether_billing::BillingModelPricingSnapshot::from(context)
+        .validate_authorization_pricing_configuration(requested_processing_tier)
+        .map_err(|err| GatewayError::Internal(err.to_string()))
+}
+
+async fn load_execution_plan_billing_context(
+    state: &AppState,
+    plan: &aether_contracts::ExecutionPlan,
+    model_id: Option<&str>,
+    global_model_name: Option<&str>,
+) -> Result<
+    Option<aether_data_contracts::repository::billing::StoredBillingModelContext>,
+    GatewayError,
+> {
     let context = match model_id {
         Some(model_id) => state
             .data
@@ -278,21 +386,7 @@ async fn calculate_execution_plan_cost_upper_bound(
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?,
     };
-    let Some(context) = context else {
-        return Ok(None);
-    };
-    let mut estimate =
-        aether_billing::BillingAuthorizationEstimateInput::new(task_type, input_tokens);
-    estimate.api_format = Some(api_format.to_string());
-    estimate.requested_processing_tier = requested_processing_tier.map(ToOwned::to_owned);
-    estimate.cache_ttl_minutes = cache_ttl_minutes;
-    estimate.max_output_tokens = max_output_tokens;
-    aether_billing::BillingService::new()
-        .estimate_authorization_cost_upper_bound(
-            &aether_billing::BillingModelPricingSnapshot::from(context),
-            &estimate,
-        )
-        .map_err(|err| GatewayError::Internal(err.to_string()))
+    Ok(context)
 }
 
 fn execution_plan_cost_upper_bound_cache_key(
@@ -1100,6 +1194,210 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn positive_balance_does_not_allow_historical_invalid_processing_pricing() {
+        let context = billing_context_with_pricing(
+            Some(json!({
+                "tiers": [{
+                    "up_to": null,
+                    "input_price_per_1m": 1.0,
+                    "output_price_per_1m": 2.0
+                }],
+                "processing_tiers": {
+                    "priority": {
+                        "tiers": [{}],
+                        "price_multiplier": -1.0
+                    }
+                }
+            })),
+            None,
+            None,
+            None,
+        );
+        let state = state_with_quota_and_wallet(quota_availability(50.0, true), context);
+        let decision = decision_with_allowed_models(vec!["gpt-5".to_string()]);
+        let plan = execution_plan(
+            json!({
+                "model": "gpt-5",
+                "messages": [{"role": "user", "content": "hi"}],
+                "service_tier": "priority",
+                "max_completion_tokens": 1
+            }),
+            "openai:chat",
+        );
+
+        let error = execution_plan_balance_capacity_rejection(
+            &state,
+            &decision,
+            &plan,
+            Some(&billing_report_context()),
+        )
+        .await
+        .expect_err("invalid configured processing pricing must stop authorization");
+
+        assert!(error
+            .into_message()
+            .contains("explicit catalog contains malformed or unrecognized prices"));
+    }
+
+    #[tokio::test]
+    async fn standalone_key_does_not_bypass_invalid_processing_pricing_validation() {
+        let context = billing_context_with_pricing(
+            Some(json!({
+                "tiers": [{"up_to": null, "input_price_per_1m": 1.0}],
+                "processing_tiers": {
+                    "priority": {"tiers": [{}], "price_multiplier": 2.0}
+                }
+            })),
+            None,
+            None,
+            None,
+        );
+        let state = state_with_quota_and_wallet(quota_availability(50.0, true), context);
+        let mut decision = decision_with_allowed_models(vec!["gpt-5".to_string()]);
+        decision
+            .auth_context
+            .as_mut()
+            .expect("auth context should exist")
+            .api_key_is_standalone = true;
+        let plan = execution_plan(
+            json!({
+                "model": "gpt-5",
+                "messages": [{"role": "user", "content": "hi"}],
+                "service_tier": "priority",
+                "max_completion_tokens": 1
+            }),
+            "openai:chat",
+        );
+
+        let error = execution_plan_balance_capacity_rejection(
+            &state,
+            &decision,
+            &plan,
+            Some(&billing_report_context()),
+        )
+        .await
+        .expect_err("standalone keys must still validate configured pricing");
+        assert!(error
+            .into_message()
+            .contains("explicit catalog contains malformed or unrecognized prices"));
+    }
+
+    #[tokio::test]
+    async fn unlimited_wallet_does_not_bypass_invalid_processing_pricing_validation() {
+        let context = billing_context_with_pricing(
+            Some(json!({
+                "tiers": [{"up_to": null, "input_price_per_1m": 1.0}],
+                "processing_tiers": {
+                    "priority": {"tiers": [{}], "price_multiplier": 2.0}
+                }
+            })),
+            None,
+            None,
+            None,
+        );
+        let state = state_with_quota_and_wallet(quota_availability(0.0, true), context);
+        {
+            let store = state
+                .auth_wallet_store
+                .as_ref()
+                .expect("test wallet store should exist");
+            let mut wallets = store.lock().expect("wallet store should lock");
+            wallets
+                .get_mut("wallet-user-1")
+                .expect("test wallet should exist")
+                .limit_mode = "unlimited".to_string();
+        }
+        let decision = decision_with_allowed_models(vec!["gpt-5".to_string()]);
+        let plan = execution_plan(
+            json!({
+                "model": "gpt-5",
+                "messages": [{"role": "user", "content": "hi"}],
+                "service_tier": "priority",
+                "max_completion_tokens": 1
+            }),
+            "openai:chat",
+        );
+
+        let error = execution_plan_balance_capacity_rejection(
+            &state,
+            &decision,
+            &plan,
+            Some(&billing_report_context()),
+        )
+        .await
+        .expect_err("unlimited wallets must still validate configured pricing");
+        assert!(error
+            .into_message()
+            .contains("explicit catalog contains malformed or unrecognized prices"));
+    }
+
+    #[tokio::test]
+    async fn standalone_and_unlimited_paths_keep_allowing_valid_pricing() {
+        let valid_context = billing_context_with_pricing(
+            Some(json!({
+                "tiers": [{"up_to": null, "input_price_per_1m": 1.0}]
+            })),
+            None,
+            None,
+            None,
+        );
+        let plan = execution_plan(
+            json!({
+                "model": "gpt-5",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_completion_tokens": 1
+            }),
+            "openai:chat",
+        );
+        let report_context = billing_report_context();
+
+        let standalone_state =
+            state_with_quota_and_wallet(quota_availability(50.0, true), valid_context.clone());
+        let mut standalone_decision = decision_with_allowed_models(vec!["gpt-5".to_string()]);
+        standalone_decision
+            .auth_context
+            .as_mut()
+            .expect("auth context should exist")
+            .api_key_is_standalone = true;
+        assert_eq!(
+            execution_plan_balance_capacity_rejection(
+                &standalone_state,
+                &standalone_decision,
+                &plan,
+                Some(&report_context),
+            )
+            .await
+            .expect("valid standalone pricing should resolve"),
+            None
+        );
+
+        let unlimited_state =
+            state_with_quota_and_wallet(quota_availability(0.0, true), valid_context);
+        {
+            let store = unlimited_state
+                .auth_wallet_store
+                .as_ref()
+                .expect("test wallet store should exist");
+            let mut wallets = store.lock().expect("wallet store should lock");
+            wallets
+                .get_mut("wallet-user-1")
+                .expect("test wallet should exist")
+                .limit_mode = "unlimited".to_string();
+        }
+        assert_eq!(
+            execution_plan_balance_capacity_rejection(
+                &unlimited_state,
+                &decision_with_allowed_models(vec!["gpt-5".to_string()]),
+                &plan,
+                Some(&report_context),
+            )
+            .await
+            .expect("valid unlimited-wallet pricing should resolve"),
+            None
+        );
+    }
+
+    #[tokio::test]
     async fn auth_capacity_reuses_quota_wallet_and_cost_estimate_within_ttl() {
         let context = billing_context_with_pricing(
             Some(json!({
@@ -1368,6 +1666,53 @@ mod tests {
         .expect("stateful request capacity check should resolve");
 
         assert_eq!(rejection, None);
+    }
+
+    #[tokio::test]
+    async fn stateful_unavailable_estimate_still_rejects_invalid_processing_pricing() {
+        let context = billing_context_with_pricing(
+            Some(json!({
+                "tiers": [{
+                    "up_to": null,
+                    "input_price_per_1m": 1.0,
+                    "output_price_per_1m": 2.0
+                }],
+                "processing_tiers": {
+                    "priority": {
+                        "tiers": [{}],
+                        "price_multiplier": 2.0
+                    }
+                }
+            })),
+            None,
+            None,
+            None,
+        );
+        let state = state_with_quota_and_wallet(quota_availability(1.0, false), context);
+        let decision = decision_with_allowed_models(vec!["gpt-5".to_string()]);
+        let plan = execution_plan(
+            json!({
+                "model": "gpt-5",
+                "input": "continue",
+                "previous_response_id": "resp_123",
+                "service_tier": "priority",
+                "max_output_tokens": 1
+            }),
+            "openai:responses",
+        );
+
+        let error = execution_plan_balance_capacity_rejection(
+            &state,
+            &decision,
+            &plan,
+            Some(&billing_report_context()),
+        )
+        .await
+        .expect_err("unavailable estimates must still validate configured processing pricing");
+
+        assert!(error
+            .into_message()
+            .contains("explicit catalog contains malformed or unrecognized prices"));
     }
 
     #[tokio::test]

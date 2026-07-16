@@ -31,6 +31,37 @@ afterEach(() => {
 })
 
 describe('ProcessingTierPricingSummary', () => {
+  it('shows multiplier-only processing tiers', async () => {
+    const root = mountSummary({
+      tiers: [{ up_to: null, input_price_per_1m: 5, output_price_per_1m: 30 }],
+      processing_tiers: {
+        priority: { price_multiplier: 2.5 },
+        fast: { price_multiplier: 2 },
+        flex: {
+          price_multiplier: 99,
+          tiers: [{ up_to: null, input_price_per_1m: 2.5, output_price_per_1m: 15 }],
+        },
+      },
+    })
+
+    expect(root.querySelector('[data-processing-tier="priority"]')?.textContent)
+      .toContain('Fast（OpenAI）')
+    expect(root.querySelector('[data-processing-tier="fast"]')?.textContent)
+      .toContain('Fast（Claude）')
+    expect(root.textContent).not.toContain('Priority')
+    expect(root.querySelector('[data-testid="processing-tier-price-multiplier"]')?.textContent)
+      .toContain('2.5×')
+    clickTier(root, 'fast')
+    await nextTick()
+    expect(root.querySelector('[data-testid="processing-tier-price-multiplier"]')?.textContent)
+      .toContain('2×')
+
+    clickTier(root, 'flex')
+    await nextTick()
+    expect(root.querySelector('[data-testid="processing-tier-price-multiplier"]')).toBeNull()
+    expect(root.querySelectorAll('[data-testid="processing-token-tier-row"]')).toHaveLength(1)
+  })
+
   it('shows finite and unbounded token tiers in stable processing-tier order', () => {
     const root = mountSummary({
       tiers: [{ up_to: null, input_price_per_1m: 5, output_price_per_1m: 30 }],

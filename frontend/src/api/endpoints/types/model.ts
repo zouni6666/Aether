@@ -35,6 +35,8 @@ export interface ImageOutputPriceRange {
 
 /** 按处理层级覆盖的费率配置。允许图像或未来计费字段独立扩展。 */
 export interface ProcessingTierPricingConfig {
+  /** 相对 Standard 目录的统一价格倍率。新写入应与显式目录二选一；读取混合配置时显式目录优先。 */
+  price_multiplier?: number
   tiers?: PricingTier[]
   image_output_prices?: Record<string, ImageOutputQualityPricing> | null
   image_output_price_default?: number | null
@@ -52,6 +54,19 @@ export interface TieredPricingConfig {
   [key: string]: unknown
 }
 
+/**
+ * Provider 价格覆盖可以只声明 processing_tiers，并继续从 GlobalModel
+ * 继承 Standard 目录，因此 tiers 在原始 Provider 配置中是可选的。
+ */
+export interface ProviderTieredPricingConfig {
+  tiers?: PricingTier[]
+  image_output_prices?: Record<string, ImageOutputQualityPricing> | null
+  image_output_price_default?: number | null
+  image_output_price_ranges?: ImageOutputPriceRange[] | null
+  processing_tiers?: Record<string, ProcessingTierPricingConfig> | null
+  [key: string]: unknown
+}
+
 export interface Model {
   id: string
   provider_id: string
@@ -61,7 +76,7 @@ export interface Model {
   config?: Record<string, unknown> | null  // 额外配置（如 billing/video 等）
   // 原始配置值（可能为空，为空时使用 GlobalModel 默认值）
   price_per_request?: number | null  // 按次计费价格
-  tiered_pricing?: TieredPricingConfig | null  // 阶梯计费配置
+  tiered_pricing?: ProviderTieredPricingConfig | null  // Provider 原始覆盖，可仅包含 processing_tiers
   supports_vision?: boolean | null
   supports_function_calling?: boolean | null
   supports_streaming?: boolean | null
@@ -69,7 +84,7 @@ export interface Model {
   supports_image_generation?: boolean | null
   supports_embedding?: boolean | null
   // 有效值（合并 Model 和 GlobalModel 默认值后的结果）
-  effective_tiered_pricing?: TieredPricingConfig | null  // 有效阶梯计费配置
+  effective_tiered_pricing?: ProviderTieredPricingConfig | null  // 当前响应可能是 Provider partial 覆盖
   effective_input_price?: number | null
   effective_output_price?: number | null
   effective_price_per_request?: number | null  // 有效按次计费价格
@@ -97,7 +112,7 @@ export interface ModelCreate {
   global_model_id: string  // 关联的 GlobalModel ID（必填）
   // 计费配置（可选，为空时使用 GlobalModel 默认值）
   price_per_request?: number  // 按次计费价格
-  tiered_pricing?: TieredPricingConfig  // 阶梯计费配置
+  tiered_pricing?: ProviderTieredPricingConfig  // Provider 阶梯计费覆盖
   // 能力配置（可选，为空时使用 GlobalModel 默认值）
   supports_vision?: boolean
   supports_function_calling?: boolean
@@ -113,7 +128,7 @@ export interface ModelUpdate {
   provider_model_mappings?: ProviderModelMapping[] | null  // 模型名称映射列表（带优先级）
   global_model_id?: string
   price_per_request?: number | null  // 按次计费价格（null 表示清空/使用默认值）
-  tiered_pricing?: TieredPricingConfig | null  // 阶梯计费配置
+  tiered_pricing?: ProviderTieredPricingConfig | null  // Provider 阶梯计费覆盖
   supports_vision?: boolean
   supports_function_calling?: boolean
   supports_streaming?: boolean

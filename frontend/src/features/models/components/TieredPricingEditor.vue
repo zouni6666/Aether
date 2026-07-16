@@ -1,6 +1,9 @@
 <template>
   <div class="space-y-3">
-    <div class="space-y-2 border-b border-border/60 pb-3">
+    <div
+      v-if="showProcessingTierControls"
+      class="space-y-2 border-b border-border/60 pb-3"
+    >
       <div class="flex items-center justify-between gap-3">
         <div class="min-w-0">
           <p class="text-sm font-medium text-foreground">
@@ -55,210 +58,355 @@
     </div>
 
     <div
-      v-if="!isActivePricingScopeConfigured"
+      v-if="showProcessingTierControls && !isActivePricingScopeConfigured"
       class="flex flex-wrap items-center justify-between gap-3 py-4"
       data-testid="processing-tier-empty"
     >
       <p class="text-sm text-muted-foreground">
         未配置 {{ activeProcessingTierLabel }} 费率
       </p>
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        data-testid="processing-tier-add"
-        @click="addActiveProcessingTier"
-      >
-        <Plus class="mr-2 h-4 w-4" />
-        添加费率
-      </Button>
+      <div class="flex flex-wrap gap-2">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          data-testid="processing-tier-add-multiplier"
+          @click="startActiveProcessingTierMultiplier"
+        >
+          <Plus class="mr-2 h-4 w-4" />
+          使用倍率
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          data-testid="processing-tier-add"
+          @click="addActiveProcessingTier"
+        >
+          <Plus class="mr-2 h-4 w-4" />
+          添加自定义费率
+        </Button>
+      </div>
     </div>
 
-    <template v-else>
-      <template v-if="showTokenPricing !== false">
-      <!-- 阶梯列表 -->
-      <div
-        v-for="(tier, index) in localTiers"
-        :key="index"
-        class="space-y-3 border-b border-border/60 pb-3 last:border-b-0"
-      >
-        <!-- 阶梯头部 -->
-        <div class="flex items-center justify-between">
-          <div class="flex items-center gap-2 text-sm">
-            <span class="text-muted-foreground">{{ getTierStartLabel(index) }}</span>
-            <span class="text-muted-foreground">-</span>
-            <template v-if="isTierUpperBoundEditable(index)">
-              <template v-if="customInputMode[index]">
-                <Input
-                  v-model="customInputValue[index]"
-                  type="number"
-                  min="1"
-                  class="h-7 w-20 text-sm"
-                  :aria-label="`${activeProcessingTierLabel} 阶梯 ${index + 1} 自定义上限（千 Token）`"
-                  placeholder="K"
-                  @keyup.enter="confirmCustomInput(index)"
-                  @blur="confirmCustomInput(index)"
-                />
-                <span class="text-xs text-muted-foreground">K</span>
-              </template>
-              <select
-                v-else
-                :value="getSelectValue(index)"
-                class="h-7 px-2 text-sm border rounded bg-background"
-                :aria-label="`${activeProcessingTierLabel} 阶梯 ${index + 1} 上限`"
-                @change="(e) => handleThresholdChange(index, parseInt((e.target as HTMLSelectElement).value))"
-              >
-                <option
-                  v-for="opt in getAvailableThresholds(index)"
-                  :key="opt.value"
-                  :value="opt.value"
-                >
-                  {{ opt.label }}
-                </option>
-              </select>
-            </template>
-            <span
-              v-else
-              class="font-medium"
-            >无上限</span>
-          </div>
-          <div class="flex items-center gap-1">
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              class="h-7 px-2 text-xs text-muted-foreground"
-              :aria-label="`${activeProcessingTierLabel} 阶梯 ${index + 1} 切换缓存价格输入方式`"
-              @click="toggleCachePriceMode(index)"
-            >
-              <Repeat2 class="mr-1 h-3.5 w-3.5" />
-              {{ getCachePriceMode(index) === 'multiplier' ? '价格' : '倍率' }}
-            </Button>
-            <Button
-              v-if="localTiers.length > 1"
-              variant="ghost"
-              size="sm"
-              class="h-7 w-7 p-0"
-              :aria-label="`删除 ${activeProcessingTierLabel} 阶梯 ${index + 1}`"
-              :title="`删除 ${activeProcessingTierLabel} 阶梯 ${index + 1}`"
-              @click="removeTier(index)"
-            >
-              <X class="w-4 h-4 text-muted-foreground hover:text-destructive" />
-            </Button>
-          </div>
+    <div
+      v-if="showProcessingTierControls && activeProcessingTierUsesMultiplier"
+      class="space-y-3 rounded-lg border border-border/60 bg-muted/20 p-3"
+      data-testid="processing-tier-multiplier-editor"
+    >
+      <div class="flex flex-wrap items-end justify-between gap-3">
+        <div class="space-y-1">
+          <Label class="text-xs font-medium">层级倍率（相对 Standard）</Label>
+          <p class="text-xs text-muted-foreground">
+            该层级按 Standard 的完整价格目录统一缩放。
+          </p>
         </div>
-
-        <!-- 价格输入 -->
-        <div
-          class="grid gap-3"
-          :class="[showCache1h ? 'grid-cols-2 lg:grid-cols-5' : 'grid-cols-2 lg:grid-cols-4']"
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          data-testid="processing-tier-use-custom"
+          @click="useCustomPricingForActiveProcessingTier"
         >
-          <div class="space-y-1">
-            <Label class="text-xs">输入 ($/M)</Label>
-            <Input
-              :model-value="tier.input_price_per_1m"
-              data-testid="tier-input-price"
-              :data-tier-index="index"
-              type="number"
-              step="0.01"
-              min="0"
-              class="h-8"
-              :aria-label="`${activeProcessingTierLabel} 阶梯 ${index + 1} 输入价格（美元/百万 Token）`"
-              placeholder="0"
-              @update:model-value="(v) => updateInputPrice(index, parseFloatInput(v))"
-            />
-          </div>
-          <div class="space-y-1">
-            <Label class="text-xs">输出 ($/M)</Label>
-            <Input
-              :model-value="tier.output_price_per_1m"
-              type="number"
-              step="0.01"
-              min="0"
-              class="h-8"
-              :aria-label="`${activeProcessingTierLabel} 阶梯 ${index + 1} 输出价格（美元/百万 Token）`"
-              placeholder="0"
-              @update:model-value="(v) => updateOutputPrice(index, parseFloatInput(v))"
-            />
-          </div>
-          <div class="space-y-1">
-            <Label class="text-xs text-muted-foreground">
-              {{ getCachePriceMode(index) === 'multiplier' ? '创建（倍率）' : '创建 ($/M)' }}
-            </Label>
-            <div class="relative">
-              <Input
-                :model-value="getCacheCreationEditorValue(index)"
-                type="number"
-                step="0.01"
-                min="0"
-                class="h-8"
-                :class="getCachePriceMode(index) === 'multiplier' ? 'pr-7' : ''"
-                :aria-label="`${activeProcessingTierLabel} 阶梯 ${index + 1} 缓存创建${getCachePriceMode(index) === 'multiplier' ? '倍率' : '价格'}`"
-                placeholder="0"
-                @update:model-value="(v) => updateCacheCreation(index, v)"
-              />
+          改用自定义价格
+        </Button>
+      </div>
+      <div class="relative max-w-40">
+        <Input
+          :model-value="activeProcessingTierMultiplierDraft?.value ?? ''"
+          type="number"
+          min="0"
+          step="0.01"
+          class="h-8 pr-7"
+          data-testid="processing-tier-multiplier-input"
+          :aria-label="`${activeProcessingTierLabel} 层级倍率`"
+          placeholder="请输入倍率"
+          @update:model-value="updateActiveProcessingTierMultiplier"
+        />
+        <span class="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">×</span>
+      </div>
+    </div>
+
+    <template v-else-if="isActivePricingScopeConfigured">
+      <template v-if="showTokenPricing !== false">
+        <!-- 阶梯列表 -->
+        <div
+          v-for="(tier, index) in localTiers"
+          :key="index"
+          class="space-y-3 border-b border-border/60 pb-3 last:border-b-0"
+        >
+          <!-- 阶梯头部 -->
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-2 text-sm">
+              <span class="text-muted-foreground">{{ getTierStartLabel(index) }}</span>
+              <span class="text-muted-foreground">-</span>
+              <template v-if="isTierUpperBoundEditable(index)">
+                <template v-if="customInputMode[index]">
+                  <Input
+                    v-model="customInputValue[index]"
+                    type="number"
+                    min="1"
+                    class="h-7 w-20 text-sm"
+                    :aria-label="`${activeProcessingTierLabel} 阶梯 ${index + 1} 自定义上限（千 Token）`"
+                    placeholder="K"
+                    @keyup.enter="confirmCustomInput(index)"
+                    @blur="confirmCustomInput(index)"
+                  />
+                  <span class="text-xs text-muted-foreground">K</span>
+                </template>
+                <select
+                  v-else
+                  :value="getSelectValue(index)"
+                  class="h-7 px-2 text-sm border rounded bg-background"
+                  :aria-label="`${activeProcessingTierLabel} 阶梯 ${index + 1} 上限`"
+                  @change="(e) => handleThresholdChange(index, parseInt((e.target as HTMLSelectElement).value))"
+                >
+                  <option
+                    v-for="opt in getAvailableThresholds(index)"
+                    :key="opt.value"
+                    :value="opt.value"
+                  >
+                    {{ opt.label }}
+                  </option>
+                </select>
+              </template>
               <span
-                v-if="getCachePriceMode(index) === 'multiplier'"
-                class="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-muted-foreground"
-              >×</span>
+                v-else
+                class="font-medium"
+              >无上限</span>
+            </div>
+            <div class="flex items-center gap-1">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                class="h-7 px-2 text-xs text-muted-foreground"
+                :aria-label="`${activeProcessingTierLabel} 阶梯 ${index + 1} 切换缓存价格输入方式`"
+                @click="toggleCachePriceMode(index)"
+              >
+                <Repeat2 class="mr-1 h-3.5 w-3.5" />
+                {{ getCachePriceMode(index) === 'multiplier' ? '价格' : '倍率' }}
+              </Button>
+              <Button
+                v-if="localTiers.length > 1"
+                variant="ghost"
+                size="sm"
+                class="h-7 w-7 p-0"
+                :aria-label="`删除 ${activeProcessingTierLabel} 阶梯 ${index + 1}`"
+                :title="`删除 ${activeProcessingTierLabel} 阶梯 ${index + 1}`"
+                @click="removeTier(index)"
+              >
+                <X class="w-4 h-4 text-muted-foreground hover:text-destructive" />
+              </Button>
             </div>
           </div>
-          <div class="space-y-1">
-            <Label class="text-xs text-muted-foreground">
-              {{ getCachePriceMode(index) === 'multiplier' ? '读取（倍率）' : '读取 ($/M)' }}
-            </Label>
-            <div class="relative">
-              <Input
-                :model-value="getCacheReadEditorValue(index)"
-                type="number"
-                step="0.01"
-                min="0"
-                class="h-8"
-                :class="getCachePriceMode(index) === 'multiplier' ? 'pr-7' : ''"
-                :aria-label="`${activeProcessingTierLabel} 阶梯 ${index + 1} 缓存读取${getCachePriceMode(index) === 'multiplier' ? '倍率' : '价格'}`"
-                placeholder="0"
-                @update:model-value="(v) => updateCacheRead(index, v)"
-              />
-              <span
-                v-if="getCachePriceMode(index) === 'multiplier'"
-                class="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-muted-foreground"
-              >×</span>
-            </div>
-          </div>
+
+          <!-- 价格输入 -->
           <div
-            v-if="showCache1h"
-            class="space-y-1"
+            class="grid gap-3"
+            :class="[showCache1h ? 'grid-cols-2 lg:grid-cols-5' : 'grid-cols-2 lg:grid-cols-4']"
           >
-            <Label class="text-xs text-muted-foreground">1h 缓存</Label>
-            <Input
-              :model-value="getCache1hDisplay(index)"
-              type="number"
-              step="0.01"
-              min="0"
-              class="h-8"
-              :aria-label="`${activeProcessingTierLabel} 阶梯 ${index + 1} 一小时缓存价格`"
-              :placeholder="getCache1hPlaceholder(index)"
-              @update:model-value="(v) => updateCache1h(index, v)"
-            />
+            <div class="space-y-1">
+              <Label class="text-xs">输入 ($/M)</Label>
+              <Input
+                :model-value="tier.input_price_per_1m"
+                data-testid="tier-input-price"
+                :data-tier-index="index"
+                type="number"
+                step="0.01"
+                min="0"
+                class="h-8"
+                :aria-label="`${activeProcessingTierLabel} 阶梯 ${index + 1} 输入价格（美元/百万 Token）`"
+                placeholder="0"
+                @update:model-value="(v) => updateInputPrice(index, parseFloatInput(v))"
+              />
+            </div>
+            <div class="space-y-1">
+              <Label class="text-xs">输出 ($/M)</Label>
+              <Input
+                :model-value="tier.output_price_per_1m"
+                type="number"
+                step="0.01"
+                min="0"
+                class="h-8"
+                :aria-label="`${activeProcessingTierLabel} 阶梯 ${index + 1} 输出价格（美元/百万 Token）`"
+                placeholder="0"
+                @update:model-value="(v) => updateOutputPrice(index, parseFloatInput(v))"
+              />
+            </div>
+            <div class="space-y-1">
+              <Label class="text-xs text-muted-foreground">
+                {{ getCachePriceMode(index) === 'multiplier' ? '创建（倍率）' : '创建 ($/M)' }}
+              </Label>
+              <div class="relative">
+                <Input
+                  :model-value="getCacheCreationEditorValue(index)"
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  class="h-8"
+                  :class="getCachePriceMode(index) === 'multiplier' ? 'pr-7' : ''"
+                  :aria-label="`${activeProcessingTierLabel} 阶梯 ${index + 1} 缓存创建${getCachePriceMode(index) === 'multiplier' ? '倍率' : '价格'}`"
+                  placeholder="0"
+                  @update:model-value="(v) => updateCacheCreation(index, v)"
+                />
+                <span
+                  v-if="getCachePriceMode(index) === 'multiplier'"
+                  class="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-muted-foreground"
+                >×</span>
+              </div>
+            </div>
+            <div class="space-y-1">
+              <Label class="text-xs text-muted-foreground">
+                {{ getCachePriceMode(index) === 'multiplier' ? '读取（倍率）' : '读取 ($/M)' }}
+              </Label>
+              <div class="relative">
+                <Input
+                  :model-value="getCacheReadEditorValue(index)"
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  class="h-8"
+                  :class="getCachePriceMode(index) === 'multiplier' ? 'pr-7' : ''"
+                  :aria-label="`${activeProcessingTierLabel} 阶梯 ${index + 1} 缓存读取${getCachePriceMode(index) === 'multiplier' ? '倍率' : '价格'}`"
+                  placeholder="0"
+                  @update:model-value="(v) => updateCacheRead(index, v)"
+                />
+                <span
+                  v-if="getCachePriceMode(index) === 'multiplier'"
+                  class="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-muted-foreground"
+                >×</span>
+              </div>
+            </div>
+            <div
+              v-if="showCache1h"
+              class="space-y-1"
+            >
+              <Label class="text-xs text-muted-foreground">1h 缓存</Label>
+              <Input
+                :model-value="getCache1hDisplay(index)"
+                type="number"
+                step="0.01"
+                min="0"
+                class="h-8"
+                :aria-label="`${activeProcessingTierLabel} 阶梯 ${index + 1} 一小时缓存价格`"
+                :placeholder="getCache1hPlaceholder(index)"
+                @update:model-value="(v) => updateCache1h(index, v)"
+              />
+            </div>
           </div>
         </div>
-      </div>
 
-      <!-- 添加阶梯按钮 -->
-      <Button
-        variant="outline"
-        size="sm"
-        class="w-full"
-        @click="addTier"
-      >
-        <Plus class="w-4 h-4 mr-2" />
-        添加价格阶梯
-      </Button>
+        <!-- 添加阶梯按钮 -->
+        <Button
+          variant="outline"
+          size="sm"
+          class="w-full"
+          @click="addTier"
+        >
+          <Plus class="w-4 h-4 mr-2" />
+          添加价格阶梯
+        </Button>
       </template>
     </template>
 
     <div
-      v-if="showImagePricing && showImageEditor !== false && isActivePricingScopeConfigured"
+      v-if="showProcessingTierMultiplierControls && showTokenPricing !== false"
+      class="space-y-3 border-t border-border/60 pt-3"
+      data-testid="processing-tier-multiplier-list"
+    >
+      <div class="space-y-1">
+        <p class="text-sm font-medium text-foreground">
+          层级倍率（相对标准价格）
+        </p>
+        <p class="text-xs text-muted-foreground">
+          配置模型级默认倍率；层级是否可用由 Provider 端点/API 格式决定。
+        </p>
+      </div>
+      <div class="space-y-3">
+        <div
+          v-for="group in compactProcessingTierGroups"
+          :key="group.key"
+          class="space-y-2"
+          :data-processing-tier-group="group.key"
+        >
+          <p
+            v-if="group.label"
+            class="px-1 text-sm font-medium text-foreground"
+            :data-testid="`processing-tier-group-${group.key}`"
+          >
+            {{ group.label }}
+          </p>
+          <div
+            class="space-y-2"
+            :class="group.label ? 'border-l-2 border-border/60 pl-3' : ''"
+          >
+            <div
+              v-for="option in group.options"
+              :key="option.key"
+              class="flex min-h-10 flex-wrap items-center gap-3 rounded-md border border-border/60 px-3 py-2"
+              :data-processing-tier-multiplier="option.key"
+            >
+              <Checkbox
+                :checked="option.enabled"
+                :aria-label="`启用 ${option.accessibleLabel} 层级倍率`"
+                @update:checked="enabled => setCompactProcessingTierEnabled(option.key, enabled)"
+              />
+              <div class="min-w-32 flex-1">
+                <p class="text-sm font-medium">
+                  {{ option.label }}
+                </p>
+                <p
+                  v-if="option.detail"
+                  class="text-xs text-muted-foreground"
+                >
+                  {{ option.detail }}
+                </p>
+                <p
+                  v-if="option.mode === 'custom'"
+                  class="text-xs text-muted-foreground"
+                >
+                  已配置自定义价格目录
+                </p>
+              </div>
+              <template v-if="option.mode === 'custom'">
+                <span class="rounded-md bg-muted px-2 py-1 text-xs text-muted-foreground">自定义价格</span>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  :data-testid="`processing-tier-convert-${option.key}`"
+                  @click="startProcessingTierMultiplier(option.key)"
+                >
+                  改用倍率
+                </Button>
+              </template>
+              <div
+                v-else
+                class="relative w-36"
+              >
+                <Input
+                  :model-value="option.value"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  class="h-8 pr-7"
+                  :disabled="!option.enabled"
+                  :data-testid="`processing-tier-multiplier-${option.key}`"
+                  :aria-label="`${option.accessibleLabel} 层级倍率`"
+                  placeholder="未设置"
+                  @update:model-value="value => updateProcessingTierMultiplier(option.key, value)"
+                />
+                <span class="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">×</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div
+      v-if="showImagePricing && showImageEditor !== false && isActivePricingScopeConfigured && !activeProcessingTierUsesMultiplier"
       class="space-y-3 border-t border-border/60 pt-3"
     >
       <div class="flex flex-wrap items-end justify-between gap-3">
@@ -424,7 +572,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, reactive } from 'vue'
 import { Plus, Repeat2, Trash2, X } from 'lucide-vue-next'
-import { Button, Input, Label } from '@/components/ui'
+import { Button, Checkbox, Input, Label } from '@/components/ui'
 import { formatTokens } from '@/utils/format'
 import type {
   ImageOutputQualityPricing,
@@ -470,6 +618,23 @@ type ProcessingTierOption = {
   label: string
   configured: boolean
 }
+type ProcessingTierMultiplierDraft = {
+  enabled: boolean
+  mode: 'multiplier' | 'custom'
+  value: string
+}
+type CompactProcessingTierOption = ProcessingTierMultiplierDraft & {
+  key: string
+  label: string
+  detail?: string
+  group?: string
+  accessibleLabel: string
+}
+type CompactProcessingTierGroup = {
+  key: string
+  label: string | null
+  options: CompactProcessingTierOption[]
+}
 type PricingScopePolicy = {
   allowEmptyTiers: boolean
   terminalUpperBound: 'require-unbounded' | 'finite-or-unbounded'
@@ -481,10 +646,15 @@ const props = withDefaults(defineProps<{
   showCache1h?: boolean
   showImagePricing?: boolean
   showImageEditor?: boolean
+  showProcessingTierControls?: boolean
+  showProcessingTierMultiplierControls?: boolean
   autoFillMissingCachePrices?: boolean
 }>(), {
+  modelValue: null,
   showTokenPricing: true,
   showImageEditor: true,
+  showProcessingTierControls: true,
+  showProcessingTierMultiplierControls: false,
   autoFillMissingCachePrices: true,
 })
 const emit = defineEmits<{
@@ -497,7 +667,14 @@ const STANDARD_PRICING_SCOPE = 'standard'
 const PROCESSING_PRICING_SCOPE_PREFIX = 'processing:'
 const UNBOUNDED_THRESHOLD_VALUE = -2
 const KNOWN_PROCESSING_TIERS = [
-  { key: 'priority', label: 'Priority' },
+  { key: 'priority', label: 'Fast（OpenAI）' },
+  { key: 'fast', label: 'Fast（Claude）' },
+  { key: 'flex', label: 'Flex' },
+  { key: 'batch', label: 'Batch' },
+] as const
+const COMPACT_PROCESSING_TIERS = [
+  { key: 'priority', label: 'OpenAI', detail: 'Chat / Responses', group: 'Fast' },
+  { key: 'fast', label: 'Claude', detail: 'Messages', group: 'Fast' },
   { key: 'flex', label: 'Flex' },
   { key: 'batch', label: 'Batch' },
 ] as const
@@ -519,11 +696,17 @@ const cacheManualStateByScope = reactive<Record<string, Record<number, CacheManu
 const cachePriceModesByScope = reactive<Record<string, Record<number, CachePriceMode>>>({})
 const cacheMultiplierDraftsByScope = reactive<Record<string, Record<number, CacheMultiplierDraft>>>({})
 const imagePricingStateByScope = reactive<Record<string, ImagePricingState>>({})
+const processingTierMultiplierDrafts = reactive<Record<string, ProcessingTierMultiplierDraft>>(
+  Object.create(null) as Record<string, ProcessingTierMultiplierDraft>,
+)
 
 const activeProcessingTierKey = computed(() => processingTierKeyFromScope(activePricingScope.value))
 const isActiveProcessingTierConfigured = computed(() => {
   const key = activeProcessingTierKey.value
-  return key !== null && hasOwn(processingTierConfigs.value, key)
+  return key !== null && (
+    hasOwn(processingTierConfigs.value, key)
+    || processingTierMultiplierDrafts[key]?.enabled === true
+  )
 })
 const isActivePricingScopeConfigured = computed(() => (
   activePricingScope.value === STANDARD_PRICING_SCOPE || isActiveProcessingTierConfigured.value
@@ -532,6 +715,41 @@ const activeProcessingTierLabel = computed(() => {
   const key = activeProcessingTierKey.value
   if (key === null) return 'Standard'
   return KNOWN_PROCESSING_TIERS.find(tier => tier.key === key)?.label ?? key
+})
+const activeProcessingTierMultiplierDraft = computed(() => {
+  const key = activeProcessingTierKey.value
+  return key === null ? null : processingTierMultiplierDrafts[key] ?? null
+})
+const activeProcessingTierUsesMultiplier = computed(() => (
+  activeProcessingTierKey.value !== null
+  && activeProcessingTierMultiplierDraft.value?.enabled === true
+  && activeProcessingTierMultiplierDraft.value.mode === 'multiplier'
+))
+const compactProcessingTierOptions = computed<CompactProcessingTierOption[]>(() => (
+  COMPACT_PROCESSING_TIERS.map(option => ({
+    ...option,
+    accessibleLabel: [option.group, option.label, 'detail' in option ? option.detail : null]
+      .filter((part): part is string => Boolean(part))
+      .join(' · '),
+    ...(processingTierMultiplierDrafts[option.key] ?? {
+      enabled: false,
+      mode: 'multiplier' as const,
+      value: '',
+    }),
+  }))
+))
+const compactProcessingTierGroups = computed<CompactProcessingTierGroup[]>(() => {
+  const groups: CompactProcessingTierGroup[] = []
+  for (const option of compactProcessingTierOptions.value) {
+    const key = option.group ? option.group.toLowerCase() : option.key
+    const existing = groups.find(group => group.key === key)
+    if (existing) {
+      existing.options.push(option)
+    } else {
+      groups.push({ key, label: option.group ?? null, options: [option] })
+    }
+  }
+  return groups
 })
 const processingTierOptions = computed<ProcessingTierOption[]>(() => {
   const knownKeys = new Set<string>(KNOWN_PROCESSING_TIERS.map(tier => tier.key))
@@ -636,6 +854,7 @@ watch(
           : 'absent'
       processingTierKeysEdited.value = false
       resetScopeState()
+      initializeProcessingTierMultiplierDrafts()
       initializeScopeCacheState(STANDARD_PRICING_SCOPE, standardTiers.value)
       initializeScopeImagePricingState(STANDARD_PRICING_SCOPE, clonedValue)
       for (const [key, config] of Object.entries(processingTierConfigs.value)) {
@@ -660,12 +879,23 @@ watch(
       processingTierKeysEdited.value = false
       originalEmptyProcessingTiers.value = 'absent'
       resetScopeState()
+      initializeProcessingTierMultiplierDrafts()
       initializeScopeCacheState(STANDARD_PRICING_SCOPE, standardTiers.value)
       initializeScopeImagePricingState(STANDARD_PRICING_SCOPE, {})
       activePricingScope.value = STANDARD_PRICING_SCOPE
     }
   },
   { immediate: true }
+)
+
+watch(
+  () => props.showProcessingTierControls,
+  (showProcessingTierControls) => {
+    if (showProcessingTierControls) return
+    activePricingScope.value = STANDARD_PRICING_SCOPE
+    resetCustomThresholdState()
+  },
+  { immediate: true },
 )
 
 function processingTierScope(key: string): string {
@@ -701,11 +931,53 @@ function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T
 }
 
+function processingTierHasExplicitPricingData(config: ProcessingTierPricingConfig): boolean {
+  return (Array.isArray(config.tiers) && config.tiers.length > 0)
+    || (typeof config.image_output_price_default === 'number'
+      && Number.isFinite(config.image_output_price_default))
+    || [
+      'image_output_prices',
+      'image_output_price_ranges',
+      'image_output_price_per_image',
+      'image_output_price_matrix',
+      'image_prices',
+    ].some(key => valueHasEntries(config[key]))
+}
+
+function valueHasEntries(value: unknown): boolean {
+  return (Array.isArray(value) && value.length > 0)
+    || (isRecord(value) && Object.keys(value).length > 0)
+}
+
+function initializeProcessingTierMultiplierDrafts() {
+  const keys = new Set<string>([
+    ...KNOWN_PROCESSING_TIERS.map(tier => tier.key),
+    ...Object.keys(processingTierConfigs.value),
+  ])
+  for (const key of keys) {
+    const config = processingTierConfigs.value[key]
+    const hasMultiplier = isRecord(config)
+      && !processingTierHasExplicitPricingData(config)
+      && hasOwn(config, 'price_multiplier')
+    processingTierMultiplierDrafts[key] = {
+      enabled: config !== undefined,
+      mode: hasMultiplier ? 'multiplier' : 'custom',
+      value: hasMultiplier && config.price_multiplier != null
+        ? String(config.price_multiplier)
+        : '',
+    }
+    if (config === undefined) {
+      processingTierMultiplierDrafts[key].mode = 'multiplier'
+    }
+  }
+}
+
 function resetScopeState() {
   for (const scope of Object.keys(cacheManualStateByScope)) delete cacheManualStateByScope[scope]
   for (const scope of Object.keys(cachePriceModesByScope)) delete cachePriceModesByScope[scope]
   for (const scope of Object.keys(cacheMultiplierDraftsByScope)) delete cacheMultiplierDraftsByScope[scope]
   for (const scope of Object.keys(imagePricingStateByScope)) delete imagePricingStateByScope[scope]
+  for (const key of Object.keys(processingTierMultiplierDrafts)) delete processingTierMultiplierDrafts[key]
   resetCustomThresholdState()
 }
 
@@ -868,6 +1140,104 @@ function selectPricingScope(scope: string) {
   resetCustomThresholdState()
 }
 
+function setProcessingTierConfig(key: string, config: ProcessingTierPricingConfig | null) {
+  processingTierConfigs.value = Object.fromEntries(
+    config === null
+      ? Object.entries(processingTierConfigs.value).filter(([existingKey]) => existingKey !== key)
+      : [
+          ...Object.entries(processingTierConfigs.value)
+            .filter(([existingKey]) => existingKey !== key),
+          [key, config],
+        ],
+  )
+  processingTierKeysEdited.value = true
+}
+
+function requireProcessingTierMultiplierDraft(key: string): ProcessingTierMultiplierDraft {
+  if (!processingTierMultiplierDrafts[key]) {
+    processingTierMultiplierDrafts[key] = {
+      enabled: false,
+      mode: 'multiplier',
+      value: '',
+    }
+  }
+  return processingTierMultiplierDrafts[key]
+}
+
+function parseProcessingTierMultiplier(value: string | number): number | null {
+  const raw = String(value ?? '').trim()
+  if (!raw) return null
+  const multiplier = Number(raw)
+  return Number.isFinite(multiplier) && multiplier >= 0 ? multiplier : null
+}
+
+function startProcessingTierMultiplier(key: string) {
+  const draft = requireProcessingTierMultiplierDraft(key)
+  draft.enabled = true
+  draft.mode = 'multiplier'
+  draft.value = ''
+  // Keep an existing explicit catalog intact until a valid multiplier is entered.
+  // This lets validation stop an incomplete conversion without silently deleting
+  // the catalog when the parent form is submitted.
+  syncToParent()
+}
+
+function startActiveProcessingTierMultiplier() {
+  const key = activeProcessingTierKey.value
+  if (key !== null) startProcessingTierMultiplier(key)
+}
+
+function updateProcessingTierMultiplier(key: string, value: string | number) {
+  const draft = requireProcessingTierMultiplierDraft(key)
+  draft.enabled = true
+  draft.mode = 'multiplier'
+  draft.value = String(value ?? '')
+  const multiplier = parseProcessingTierMultiplier(value)
+  if (multiplier !== null) {
+    setProcessingTierConfig(key, { price_multiplier: multiplier })
+    const scope = processingTierScope(key)
+    initializeScopeCacheState(scope, [])
+    initializeScopeImagePricingState(scope, {})
+  }
+  syncToParent()
+}
+
+function updateActiveProcessingTierMultiplier(value: string | number) {
+  const key = activeProcessingTierKey.value
+  if (key !== null) updateProcessingTierMultiplier(key, value)
+}
+
+function setCompactProcessingTierEnabled(key: string, enabled: boolean) {
+  const draft = requireProcessingTierMultiplierDraft(key)
+  if (!enabled) {
+    draft.enabled = false
+    draft.mode = 'multiplier'
+    draft.value = ''
+    setProcessingTierConfig(key, null)
+    syncToParent()
+    return
+  }
+  if (draft.enabled) return
+  startProcessingTierMultiplier(key)
+}
+
+function useCustomPricingForActiveProcessingTier() {
+  const key = activeProcessingTierKey.value
+  if (key === null) return
+  const existingConfig = processingTierConfigs.value[key]
+  const restoredConfig = existingConfig && processingTierHasExplicitPricingData(existingConfig)
+    ? cloneJson(existingConfig)
+    : { tiers: cloneJson(standardTiers.value) }
+  setProcessingTierConfig(key, restoredConfig)
+  const draft = requireProcessingTierMultiplierDraft(key)
+  draft.enabled = true
+  draft.mode = 'custom'
+  draft.value = ''
+  initializeScopeCacheState(activePricingScope.value, restoredConfig.tiers ?? [])
+  initializeScopeImagePricingState(activePricingScope.value, restoredConfig)
+  syncToParent()
+}
+
 function addActiveProcessingTier() {
   const key = activeProcessingTierKey.value
   if (key === null || hasOwn(processingTierConfigs.value, key)) return
@@ -878,6 +1248,10 @@ function addActiveProcessingTier() {
     [key, { tiers }],
   ])
   processingTierKeysEdited.value = true
+  const draft = requireProcessingTierMultiplierDraft(key)
+  draft.enabled = true
+  draft.mode = 'custom'
+  draft.value = ''
   initializeScopeCacheState(activePricingScope.value, tiers)
   initializeScopeImagePricingState(activePricingScope.value, {})
   syncToParent()
@@ -895,6 +1269,10 @@ function removeActiveProcessingTier() {
   delete cacheMultiplierDraftsByScope[activePricingScope.value]
   delete imagePricingStateByScope[activePricingScope.value]
   processingTierKeysEdited.value = true
+  const draft = requireProcessingTierMultiplierDraft(key)
+  draft.enabled = false
+  draft.mode = 'multiplier'
+  draft.value = ''
   if (!KNOWN_PROCESSING_TIERS.some(tier => tier.key === key)) {
     activePricingScope.value = STANDARD_PRICING_SCOPE
   }
@@ -934,9 +1312,14 @@ function replaceCacheTtlPrice(
 }
 
 const validationError = computed(() => {
+  const multiplierError = validateProcessingTierMultipliers()
+  if (multiplierError) return multiplierError
+
   const scopes = [
     STANDARD_PRICING_SCOPE,
-    ...Object.keys(processingTierConfigs.value).map(processingTierScope),
+    ...(props.showProcessingTierControls
+      ? Object.keys(processingTierConfigs.value).map(processingTierScope)
+      : []),
   ]
   for (const scope of new Set(scopes)) {
     const error = validatePricingScope(scope)
@@ -944,6 +1327,39 @@ const validationError = computed(() => {
   }
   return null
 })
+
+function processingTierDisplayLabel(key: string): string {
+  const compactTier = COMPACT_PROCESSING_TIERS.find(tier => tier.key === key)
+  if (compactTier) {
+    return [
+      'group' in compactTier ? compactTier.group : null,
+      compactTier.label,
+      'detail' in compactTier ? compactTier.detail : null,
+    ].filter((part): part is string => Boolean(part)).join(' · ')
+  }
+  return KNOWN_PROCESSING_TIERS.find(tier => tier.key === key)?.label ?? key
+}
+
+function validateProcessingTierMultipliers(): string | null {
+  const keys = new Set<string>([
+    ...Object.keys(processingTierConfigs.value),
+    ...Object.keys(processingTierMultiplierDrafts),
+    ...(props.showProcessingTierMultiplierControls
+      ? COMPACT_PROCESSING_TIERS.map(tier => tier.key)
+      : []),
+  ])
+  for (const key of keys) {
+    const draft = processingTierMultiplierDrafts[key]
+    if (!draft?.enabled || draft.mode !== 'multiplier') continue
+    if (!draft.value.trim()) {
+      return `${processingTierDisplayLabel(key)}: 请输入层级倍率`
+    }
+    if (parseProcessingTierMultiplier(draft.value) === null) {
+      return `${processingTierDisplayLabel(key)}: 层级倍率必须是非负有限数值`
+    }
+  }
+  return null
+}
 
 function validatePricingScope(scope: string): string | null {
   const processingTierKey = processingTierKeyFromScope(scope)
@@ -1152,25 +1568,37 @@ function buildPricingConfig(includeAutomaticCache: boolean): TieredPricingConfig
   const config = cloneJson(basePricingConfig.value) as TieredPricingConfig
   config.tiers = buildTiersForScope(STANDARD_PRICING_SCOPE, includeAutomaticCache)
 
-  const processingTierEntries: Array<[string, ProcessingTierPricingConfig]> = []
-  for (const [key, overlay] of Object.entries(processingTierConfigs.value)) {
-    const serializedOverlay = cloneJson(overlay)
-    if (Array.isArray(overlay.tiers)) {
-      serializedOverlay.tiers = buildTiersForScope(processingTierScope(key), includeAutomaticCache)
+  if (props.showProcessingTierControls) {
+    const processingTierEntries: Array<[string, ProcessingTierPricingConfig]> = []
+    for (const [key, overlay] of Object.entries(processingTierConfigs.value)) {
+      const serializedOverlay = cloneJson(overlay)
+      if (Array.isArray(overlay.tiers)) {
+        serializedOverlay.tiers = buildTiersForScope(processingTierScope(key), includeAutomaticCache)
+      }
+      if (props.showImagePricing) {
+        applyImagePricing(serializedOverlay, processingTierScope(key))
+      }
+      processingTierEntries.push([key, serializedOverlay])
     }
-    if (props.showImagePricing) {
-      applyImagePricing(serializedOverlay, processingTierScope(key))
+    const processingTiers = Object.fromEntries(processingTierEntries)
+    delete config.processing_tiers
+    if (Object.keys(processingTiers).length > 0) {
+      config.processing_tiers = processingTiers
+    } else if (!processingTierKeysEdited.value && originalEmptyProcessingTiers.value === 'null') {
+      config.processing_tiers = null
+    } else if (!processingTierKeysEdited.value && originalEmptyProcessingTiers.value === 'object') {
+      config.processing_tiers = {}
     }
-    processingTierEntries.push([key, serializedOverlay])
-  }
-  const processingTiers = Object.fromEntries(processingTierEntries)
-  delete config.processing_tiers
-  if (Object.keys(processingTiers).length > 0) {
-    config.processing_tiers = processingTiers
-  } else if (!processingTierKeysEdited.value && originalEmptyProcessingTiers.value === 'null') {
-    config.processing_tiers = null
-  } else if (!processingTierKeysEdited.value && originalEmptyProcessingTiers.value === 'object') {
-    config.processing_tiers = {}
+  } else {
+    const processingTiers = cloneJson(processingTierConfigs.value)
+    delete config.processing_tiers
+    if (Object.keys(processingTiers).length > 0) {
+      config.processing_tiers = processingTiers
+    } else if (!processingTierKeysEdited.value && originalEmptyProcessingTiers.value === 'null') {
+      config.processing_tiers = null
+    } else if (!processingTierKeysEdited.value && originalEmptyProcessingTiers.value === 'object') {
+      config.processing_tiers = {}
+    }
   }
 
   if (props.showImagePricing) {

@@ -44,7 +44,7 @@ export const MODEL_DIRECTIVE_SUFFIX_METADATA: Readonly<
   xhigh: { label: 'xhigh', description: '超高推理投入' },
   max: { label: 'max', description: '模型支持时使用最大推理投入' },
   ultra: { label: 'ultra', description: 'Codex Ultra 预设，请求推理强度为 max' },
-  fast: { label: 'fast', description: 'Priority 服务层级' },
+  fast: { label: 'fast', description: 'Fast 服务层级' },
 }
 
 export const MODEL_DIRECTIVE_API_FORMATS = [

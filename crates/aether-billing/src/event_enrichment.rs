@@ -379,6 +379,7 @@ fn build_settlement_snapshot(
             "billing_processing_tier": resolution.billing_processing_tier,
             "pricing_source": resolution.pricing_source(),
             "tiered_pricing_source": resolution.tiered_pricing_source.map(|source| source.as_str()),
+            "processing_tier_price_multiplier": resolution.processing_tier_price_multiplier,
             "price_per_request_source": resolution.price_per_request_source.map(|source| source.as_str()),
             "tiered_pricing": resolution.tiered_pricing,
             "price_per_request": resolution.price_per_request,
@@ -458,6 +459,22 @@ mod tests {
 
         assert_eq!(tiers.requested.as_deref(), Some("priority"));
         assert_eq!(tiers.actual.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn processing_tier_facts_recognize_anthropic_fast_speed() {
+        let data = UsageEventData {
+            provider_request_body: Some(json!({"speed": "fast"})),
+            response_body: Some(json!({
+                "usage": {"speed": "fast", "service_tier": "standard"}
+            })),
+            ..UsageEventData::default()
+        };
+
+        let tiers = usage_event_processing_tiers(&data);
+
+        assert_eq!(tiers.requested.as_deref(), Some("fast"));
+        assert_eq!(tiers.actual.as_deref(), Some("fast"));
     }
 
     #[tokio::test]
@@ -637,7 +654,7 @@ mod tests {
                     Some(json!({
                         "tiers": [{"up_to": null, "input_price_per_1m": 5.0, "output_price_per_1m": 30.0}],
                         "processing_tiers": {
-                            "flex": {"tiers": [{"up_to": null, "input_price_per_1m": 2.5, "output_price_per_1m": 15.0}]}
+                            "flex": {"price_multiplier": 0.5}
                         }
                     })),
                     Some("model-1".to_string()),
@@ -692,6 +709,7 @@ mod tests {
         assert_eq!(pricing_snapshot["actual_processing_tier"], "flex");
         assert_eq!(pricing_snapshot["billing_processing_tier"], "flex");
         assert_eq!(pricing_snapshot["tiered_pricing_source"], "global_default");
+        assert_eq!(pricing_snapshot["processing_tier_price_multiplier"], 0.5);
         assert_eq!(
             pricing_snapshot["tiered_pricing"]["tiers"][0]["input_price_per_1m"],
             2.5

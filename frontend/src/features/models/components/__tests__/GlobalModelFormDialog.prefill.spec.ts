@@ -167,6 +167,10 @@ describe('GlobalModelFormDialog preset replacement', () => {
     findButton('Stale Model').click()
     await settle()
 
+    expect(document.body.querySelector('[data-processing-tier="standard"]')).not.toBeNull()
+    expect(document.body.querySelector('[data-processing-tier="priority"]')).not.toBeNull()
+    expect(document.body.textContent).toContain('自定义价格')
+
     await setInput(
       document.body.querySelector<HTMLInputElement>('input[placeholder="如 0.01"]'),
       '0.25',
@@ -245,5 +249,33 @@ describe('GlobalModelFormDialog preset replacement', () => {
         output_price_per_1m: 6,
       },
     ])
+  })
+
+  it('submits a compact processing-tier multiplier without a Standard overlay', async () => {
+    mountDialog()
+    await settle()
+    findButton('Fresh Model').click()
+    await settle()
+
+    const priorityToggle = document.body.querySelector(
+      'input[aria-label="启用 Fast · OpenAI · Chat / Responses 层级倍率"]',
+    ) as HTMLInputElement
+    priorityToggle.click()
+    await nextTick()
+    await setInput(
+      document.body.querySelector<HTMLInputElement>(
+        '[data-testid="processing-tier-multiplier-priority"]',
+      ),
+      '2.5',
+    )
+
+    findExactButton('添加').click()
+    await settle()
+
+    const payload = globalModelMocks.createGlobalModel.mock.calls[0][0]
+    expect(payload.default_tiered_pricing.processing_tiers).toEqual({
+      priority: { price_multiplier: 2.5 },
+    })
+    expect(payload.default_tiered_pricing.processing_tiers).not.toHaveProperty('standard')
   })
 })

@@ -1,9 +1,11 @@
 import type {
+  ProviderTieredPricingConfig,
   ProcessingTierPricingConfig,
   TieredPricingConfig,
 } from '@/api/endpoints/types'
 
-type PricingCatalog = TieredPricingConfig | ProcessingTierPricingConfig
+type PricingCatalog = ProviderTieredPricingConfig | ProcessingTierPricingConfig
+type RootPricingCatalog = TieredPricingConfig | ProviderTieredPricingConfig
 
 export function comparePricingUpperBounds(
   left: number | null,
@@ -15,7 +17,7 @@ export function comparePricingUpperBounds(
   return left - right
 }
 
-function pricingCatalogs(pricing: TieredPricingConfig | null | undefined): PricingCatalog[] {
+function pricingCatalogs(pricing: RootPricingCatalog | null | undefined): PricingCatalog[] {
   if (!pricing) return []
   const processingTiers = pricing.processing_tiers
     ? Object.values(pricing.processing_tiers).filter(isRecord)
@@ -24,7 +26,7 @@ function pricingCatalogs(pricing: TieredPricingConfig | null | undefined): Prici
 }
 
 export function tieredPricingHasImageOutputPricing(
-  pricing: TieredPricingConfig | null | undefined,
+  pricing: RootPricingCatalog | null | undefined,
 ): boolean {
   return pricingCatalogs(pricing).some((catalog) => {
     if (toFinitePrice(catalog.image_output_price_default) !== null) return true
@@ -41,7 +43,7 @@ export function tieredPricingHasImageOutputPricing(
 }
 
 export function tieredPricingHasCacheTtl(
-  pricing: TieredPricingConfig | null | undefined,
+  pricing: RootPricingCatalog | null | undefined,
   ttlMinutes: number,
 ): boolean {
   return pricingCatalogs(pricing).some(catalog => (

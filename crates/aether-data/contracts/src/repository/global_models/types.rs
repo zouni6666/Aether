@@ -24,6 +24,394 @@ fn validate_optional_price(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExplicitPricingCatalogState {
+    Absent,
+    Valid,
+    Invalid,
+}
+
+const TOKEN_PRICE_FIELDS: &[&str] = &[
+    "input_price_per_1m",
+    "output_price_per_1m",
+    "cache_creation_price_per_1m",
+    "cache_read_price_per_1m",
+];
+
+const IMAGE_MATRIX_PRICE_FIELDS: &[&str] = &[
+    "image_output_prices",
+    "image_output_price_per_image",
+    "image_output_price_matrix",
+    "image_prices",
+];
+
+/// Classifies whether a JSON object contains a complete pricing catalog understood by the
+/// default billing runtime.
+///
+/// `Absent` deliberately differs from `Invalid`: a provider override containing only
+/// `processing_tiers` may inherit its Standard catalog, while a present-but-malformed catalog
+/// must never shadow a valid lower-precedence catalog or silently bill as zero.
+pub fn explicit_pricing_catalog_state(value: &Value) -> ExplicitPricingCatalogState {
+    let Some(object) = value.as_object() else {
+        return ExplicitPricingCatalogState::Invalid;
+    };
+
+    let mut has_catalog_field = false;
+    let mut has_valid_price_data = false;
+
+    if let Some(tiers) = object.get("tiers") {
+        if tiers.is_null() {
+            // Null and [] both represent an inherited/absent Standard catalog in legacy rows.
+        } else {
+            let Some(tiers) = tiers.as_array() else {
+                return ExplicitPricingCatalogState::Invalid;
+            };
+            // An empty provider Standard list is the legacy representation for "inherit the global
+            // catalog". It is not an explicit catalog and therefore cannot shadow a multiplier or a
+            // lower-precedence Standard catalog.
+            if !tiers.is_empty() {
+                has_catalog_field = true;
+                if !token_pricing_tiers_are_valid(tiers) {
+                    return ExplicitPricingCatalogState::Invalid;
+                }
+                has_valid_price_data = true;
+            }
+        }
+    }
+
+    for key in ["image_output_price_default", "image_price_default"] {
+        let Some(price) = object.get(key) else {
+            continue;
+        };
+        if price.is_null() {
+            continue;
+        }
+        has_catalog_field = true;
+        if !value_is_valid_price(price) {
+            return ExplicitPricingCatalogState::Invalid;
+        }
+        has_valid_price_data = true;
+    }
+
+    for key in IMAGE_MATRIX_PRICE_FIELDS {
+        let Some(prices) = object.get(*key) else {
+            continue;
+        };
+        let Some(has_prices) = validate_image_matrix_prices(key, prices) else {
+            return ExplicitPricingCatalogState::Invalid;
+        };
+        if has_prices {
+            has_catalog_field = true;
+            has_valid_price_data = true;
+        }
+    }
+
+    if let Some(ranges) = object.get("image_output_price_ranges") {
+        let Some(has_prices) = validate_image_price_ranges(ranges) else {
+            return ExplicitPricingCatalogState::Invalid;
+        };
+        if has_prices {
+            has_catalog_field = true;
+            has_valid_price_data = true;
+        }
+    }
+
+    match (has_catalog_field, has_valid_price_data) {
+        (false, _) => ExplicitPricingCatalogState::Absent,
+        (true, true) => ExplicitPricingCatalogState::Valid,
+        (true, false) => ExplicitPricingCatalogState::Invalid,
+    }
+}
+
+fn token_pricing_tiers_are_valid(tiers: &[Value]) -> bool {
+    let mut previous_up_to = None;
+    for (index, tier) in tiers.iter().enumerate() {
+        let Some(tier) = tier.as_object() else {
+            return false;
+        };
+        let up_to = match tier.get("up_to") {
+            None | Some(Value::Null) => None,
+            Some(value) => match nonnegative_i64(value) {
+                Some(value) => Some(value),
+                None => return false,
+            },
+        };
+        if index + 1 < tiers.len() && up_to.is_none() {
+            return false;
+        }
+        if let (Some(previous), Some(current)) = (previous_up_to, up_to) {
+            if current <= previous {
+                return false;
+            }
+        }
+        previous_up_to = up_to;
+
+        let mut has_tier_price = false;
+        for field in TOKEN_PRICE_FIELDS {
+            let Some(price) = tier.get(*field) else {
+                continue;
+            };
+            let Some(is_declared) = validate_optional_price_value(price) else {
+                return false;
+            };
+            has_tier_price |= is_declared;
+        }
+        if !has_tier_price {
+            return false;
+        }
+
+        if let Some(ttl_pricing) = tier.get("cache_ttl_pricing") {
+            let Some(entries) = ttl_pricing.as_array() else {
+                return false;
+            };
+            for entry in entries {
+                let Some(entry) = entry.as_object() else {
+                    return false;
+                };
+                if entry
+                    .get("ttl_minutes")
+                    .is_some_and(|value| nonnegative_i64(value).is_none())
+                {
+                    return false;
+                }
+                for field in ["cache_creation_price_per_1m", "cache_read_price_per_1m"] {
+                    if let Some(price) = entry.get(field) {
+                        if validate_optional_price_value(price).is_none() {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
+fn validate_image_matrix_prices(field: &str, value: &Value) -> Option<bool> {
+    match value {
+        Value::Object(entries) => {
+            let mut has_price = false;
+            for (key, entry) in entries {
+                if key.eq_ignore_ascii_case("default") {
+                    if field == "image_output_prices" {
+                        has_price |= validate_optional_price_value(entry)?;
+                    } else if entry.is_number() {
+                        return None;
+                    }
+                    continue;
+                }
+                match entry {
+                    Value::Number(_) => {
+                        if !value_is_valid_price(entry) {
+                            return None;
+                        }
+                        let has_reachable_flat_key = key
+                            .split_once(':')
+                            .or_else(|| key.split_once('|'))
+                            .is_some_and(|(size, quality)| {
+                                !size.trim().is_empty() && !quality.trim().is_empty()
+                            });
+                        if !has_reachable_flat_key {
+                            return None;
+                        }
+                        has_price = true;
+                    }
+                    Value::Object(nested) => {
+                        for (nested_key, price) in nested {
+                            if key.trim().is_empty() || nested_key.trim().is_empty() {
+                                return None;
+                            }
+                            match price {
+                                Value::Number(_) if value_is_valid_price(price) => {
+                                    has_price = true;
+                                }
+                                Value::Number(_) => return None,
+                                Value::Null => {}
+                                _ => {}
+                            }
+                        }
+                    }
+                    Value::Null => {}
+                    _ => {}
+                }
+            }
+            Some(has_price)
+        }
+        Value::Array(entries) => {
+            let mut has_price = false;
+            for entry in entries {
+                let Some(entry) = entry.as_object() else {
+                    continue;
+                };
+                if entry
+                    .get("size")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .is_none_or(str::is_empty)
+                {
+                    continue;
+                }
+                let Some(price) = entry
+                    .get("price_per_image")
+                    .or_else(|| entry.get("price"))
+                    .or_else(|| entry.get("cost"))
+                else {
+                    continue;
+                };
+                let is_declared = validate_optional_price_value(price)?;
+                has_price |= is_declared;
+            }
+            Some(has_price)
+        }
+        // The runtime only treats object/array matrix shapes as price catalogs. Preserve scalar
+        // extension values without letting them make an otherwise empty catalog authoritative.
+        _ => Some(false),
+    }
+}
+
+fn validate_image_price_ranges(value: &Value) -> Option<bool> {
+    let (ranges, allow_direct_prices) = match value {
+        Value::Array(ranges) => (ranges.iter().collect::<Vec<_>>(), true),
+        Value::Object(ranges) => (ranges.values().collect::<Vec<_>>(), false),
+        Value::Null => return Some(false),
+        _ => return None,
+    };
+    let mut has_price = false;
+    for range in ranges {
+        let range = range.as_object()?;
+        for key in ["up_to_pixels", "up_to", "max_pixels"] {
+            if let Some(value) = range.get(key) {
+                if !value.is_null() && nonnegative_i64(value).is_none() {
+                    return None;
+                }
+            }
+        }
+
+        let mut range_has_price = false;
+        let mut has_price_field = false;
+        if let Some(prices) = range.get("prices") {
+            let prices = prices.as_object().filter(|prices| !prices.is_empty())?;
+            for price in prices.values() {
+                has_price_field = true;
+                let is_declared = match price {
+                    Value::Number(_) | Value::Null => validate_optional_price_value(price)?,
+                    _ => false,
+                };
+                range_has_price |= is_declared;
+            }
+        } else if allow_direct_prices {
+            for key in ["low", "medium", "high", "price_per_image", "price", "value"] {
+                let Some(price) = range.get(key) else {
+                    continue;
+                };
+                has_price_field = true;
+                let is_declared = validate_optional_price_value(price)?;
+                range_has_price |= is_declared;
+            }
+        }
+        if !range_has_price {
+            if !has_price_field {
+                return None;
+            }
+            continue;
+        }
+        has_price = true;
+    }
+    Some(has_price)
+}
+
+fn value_is_valid_price(value: &Value) -> bool {
+    value
+        .as_f64()
+        .is_some_and(|price| price.is_finite() && price >= 0.0)
+}
+
+fn validate_optional_price_value(value: &Value) -> Option<bool> {
+    if value.is_null() {
+        return Some(false);
+    }
+    value_is_valid_price(value).then_some(true)
+}
+
+fn nonnegative_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+        .filter(|value| *value >= 0)
+}
+
+fn validate_processing_tier_price_multipliers(
+    field_name: &str,
+    tiered_pricing: Option<&Value>,
+) -> Result<(), crate::DataLayerError> {
+    let Some(tiered_pricing) = tiered_pricing else {
+        return Ok(());
+    };
+    let Some(processing_tiers_value) = tiered_pricing.get("processing_tiers") else {
+        return Ok(());
+    };
+    if processing_tiers_value.is_null() {
+        return Ok(());
+    }
+    let Some(processing_tiers) = processing_tiers_value.as_object() else {
+        return Err(crate::DataLayerError::UnexpectedValue(format!(
+            "{field_name}.processing_tiers must be an object"
+        )));
+    };
+
+    let standard_catalog_state = explicit_pricing_catalog_state(tiered_pricing);
+
+    for (tier_name, overlay) in processing_tiers {
+        let canonical_tier_name =
+            crate::repository::usage::normalize_provider_service_tier(tier_name);
+        if canonical_tier_name.as_deref() != Some(tier_name.as_str()) {
+            return Err(crate::DataLayerError::UnexpectedValue(format!(
+                "{field_name}.processing_tiers tier name `{tier_name}` must be canonical lowercase without surrounding whitespace"
+            )));
+        }
+        let Some(overlay) = overlay.as_object().map(|_| overlay) else {
+            return Err(crate::DataLayerError::UnexpectedValue(format!(
+                "{field_name}.processing_tiers.{tier_name} must be an object"
+            )));
+        };
+
+        // Settlement gives an explicit catalog precedence over a multiplier. Keep accepting a
+        // stale or future multiplier beside an authoritative explicit catalog for compatibility.
+        match explicit_pricing_catalog_state(overlay) {
+            ExplicitPricingCatalogState::Valid => continue,
+            ExplicitPricingCatalogState::Invalid => {
+                return Err(crate::DataLayerError::UnexpectedValue(format!(
+                    "{field_name}.processing_tiers.{tier_name} explicit catalog must contain valid non-negative finite token or image prices"
+                )));
+            }
+            ExplicitPricingCatalogState::Absent => {}
+        }
+
+        let Some(multiplier) = overlay.get("price_multiplier") else {
+            return Err(crate::DataLayerError::UnexpectedValue(format!(
+                "{field_name}.processing_tiers.{tier_name} must contain an explicit catalog or price_multiplier"
+            )));
+        };
+        if multiplier
+            .as_f64()
+            .is_none_or(|multiplier| !multiplier.is_finite() || multiplier < 0.0)
+        {
+            return Err(crate::DataLayerError::UnexpectedValue(format!(
+                "{field_name}.processing_tiers.{tier_name}.price_multiplier must be a non-negative finite number"
+            )));
+        }
+        if field_name == "global_models.default_tiered_pricing"
+            && standard_catalog_state != ExplicitPricingCatalogState::Valid
+        {
+            return Err(crate::DataLayerError::UnexpectedValue(format!(
+                "{field_name}.processing_tiers.{tier_name}.price_multiplier requires a valid Standard pricing catalog"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_embedding_global_billing(
     default_price_per_request: Option<f64>,
     default_tiered_pricing: Option<&Value>,
@@ -585,6 +973,10 @@ impl UpsertAdminProviderModelRecord {
             ));
         }
         validate_provider_model_pricing(price_per_request)?;
+        validate_processing_tier_price_multipliers(
+            "models.tiered_pricing",
+            tiered_pricing.as_ref(),
+        )?;
 
         Ok(Self {
             id,
@@ -653,6 +1045,10 @@ impl CreateAdminGlobalModelRecord {
             supported_capabilities.as_ref(),
             config.as_ref(),
         )?;
+        validate_processing_tier_price_multipliers(
+            "global_models.default_tiered_pricing",
+            default_tiered_pricing.as_ref(),
+        )?;
 
         Ok(Self {
             id,
@@ -707,6 +1103,10 @@ impl UpdateAdminGlobalModelRecord {
             default_tiered_pricing.as_ref(),
             supported_capabilities.as_ref(),
             config.as_ref(),
+        )?;
+        validate_processing_tier_price_multipliers(
+            "global_models.default_tiered_pricing",
+            default_tiered_pricing.as_ref(),
         )?;
 
         Ok(Self {
@@ -895,7 +1295,10 @@ pub trait GlobalModelWriteRepository: Send + Sync {
 mod tests {
     use serde_json::json;
 
-    use super::{CreateAdminGlobalModelRecord, UpsertAdminProviderModelRecord};
+    use super::{
+        explicit_pricing_catalog_state, CreateAdminGlobalModelRecord, ExplicitPricingCatalogState,
+        UpdateAdminGlobalModelRecord, UpsertAdminProviderModelRecord,
+    };
 
     #[test]
     fn embedding_missing_billing_config_rejected() {
@@ -984,5 +1387,284 @@ mod tests {
         assert!(err
             .to_string()
             .contains("models.price_per_request must be a non-negative finite number"));
+    }
+
+    #[test]
+    fn global_model_invalid_processing_tier_multiplier_rejected_on_create_and_update() {
+        let invalid_pricing = json!({
+            "tiers": [{"input_price_per_1m": 1.0, "output_price_per_1m": 2.0}],
+            "processing_tiers": {
+                "fast": {"price_multiplier": -1.0}
+            }
+        });
+
+        let create_err = CreateAdminGlobalModelRecord::new(
+            "global-model-1".to_string(),
+            "model-1".to_string(),
+            "Model 1".to_string(),
+            true,
+            None,
+            Some(invalid_pricing.clone()),
+            None,
+            None,
+        )
+        .expect_err("create should reject a negative processing-tier multiplier");
+        assert!(create_err.to_string().contains(
+            "global_models.default_tiered_pricing.processing_tiers.fast.price_multiplier must be a non-negative finite number"
+        ));
+
+        let update_err = UpdateAdminGlobalModelRecord::new(
+            "global-model-1".to_string(),
+            "Model 1".to_string(),
+            true,
+            None,
+            Some(invalid_pricing),
+            None,
+            None,
+        )
+        .expect_err("update should reject a negative processing-tier multiplier");
+        assert!(update_err.to_string().contains(
+            "global_models.default_tiered_pricing.processing_tiers.fast.price_multiplier must be a non-negative finite number"
+        ));
+    }
+
+    #[test]
+    fn provider_model_invalid_processing_tier_multiplier_rejected() {
+        let err = UpsertAdminProviderModelRecord::new(
+            "model-1".to_string(),
+            "provider-1".to_string(),
+            "global-model-1".to_string(),
+            "provider-model-1".to_string(),
+            None,
+            None,
+            Some(json!({
+                "processing_tiers": {
+                    "flex": {"price_multiplier": "0.5"}
+                }
+            })),
+            None,
+            None,
+            None,
+            None,
+            None,
+            true,
+            true,
+            None,
+        )
+        .expect_err("provider model should reject a non-numeric processing-tier multiplier");
+
+        assert!(err.to_string().contains(
+            "models.tiered_pricing.processing_tiers.flex.price_multiplier must be a non-negative finite number"
+        ));
+    }
+
+    #[test]
+    fn explicit_processing_tier_catalog_takes_precedence_over_stale_multiplier() {
+        let pricing = json!({
+            "tiers": [{"input_price_per_1m": 1.0, "output_price_per_1m": 2.0}],
+            "processing_tiers": {
+                "fast": {
+                    "tiers": [{"input_price_per_1m": 2.0, "output_price_per_1m": 4.0}],
+                    "price_multiplier": "stale"
+                }
+            }
+        });
+
+        CreateAdminGlobalModelRecord::new(
+            "global-model-1".to_string(),
+            "model-1".to_string(),
+            "Model 1".to_string(),
+            true,
+            None,
+            Some(pricing.clone()),
+            None,
+            None,
+        )
+        .expect("an explicit global processing-tier catalog should shadow a stale multiplier");
+
+        UpsertAdminProviderModelRecord::new(
+            "model-1".to_string(),
+            "provider-1".to_string(),
+            "global-model-1".to_string(),
+            "provider-model-1".to_string(),
+            None,
+            None,
+            Some(pricing),
+            None,
+            None,
+            None,
+            None,
+            None,
+            true,
+            true,
+            None,
+        )
+        .expect("an explicit provider processing-tier catalog should shadow a stale multiplier");
+    }
+
+    #[test]
+    fn non_negative_processing_tier_multipliers_are_accepted() {
+        let pricing = json!({
+            "tiers": [{"input_price_per_1m": 1.0, "output_price_per_1m": 2.0}],
+            "processing_tiers": {
+                "flex": {"price_multiplier": 0.0},
+                "fast": {"price_multiplier": 2.5}
+            }
+        });
+
+        CreateAdminGlobalModelRecord::new(
+            "global-model-1".to_string(),
+            "model-1".to_string(),
+            "Model 1".to_string(),
+            true,
+            None,
+            Some(pricing),
+            None,
+            None,
+        )
+        .expect("finite non-negative processing-tier multipliers should be accepted");
+    }
+
+    #[test]
+    fn empty_explicit_processing_catalog_cannot_hide_an_invalid_multiplier() {
+        let err = CreateAdminGlobalModelRecord::new(
+            "global-model-1".to_string(),
+            "model-1".to_string(),
+            "Model 1".to_string(),
+            true,
+            None,
+            Some(json!({
+                "tiers": [{"input_price_per_1m": 1.0}],
+                "processing_tiers": {
+                    "priority": {
+                        "tiers": [{}],
+                        "price_multiplier": -1.0
+                    }
+                }
+            })),
+            None,
+            None,
+        )
+        .expect_err("an empty explicit catalog must not bypass processing-tier validation");
+
+        assert!(err
+            .to_string()
+            .contains("processing_tiers.priority explicit catalog must contain valid"));
+    }
+
+    #[test]
+    fn processing_catalog_accepts_input_only_and_image_only_prices() {
+        CreateAdminGlobalModelRecord::new(
+            "global-model-1".to_string(),
+            "model-1".to_string(),
+            "Model 1".to_string(),
+            true,
+            None,
+            Some(json!({
+                "tiers": [{"input_price_per_1m": 1.0}],
+                "processing_tiers": {
+                    "embedding": {
+                        "tiers": [{
+                            "up_to": null,
+                            "input_price_per_1m": 0.1,
+                            "output_price_per_1m": null
+                        }]
+                    },
+                    "image": {"image_output_price_default": 0.04}
+                }
+            })),
+            None,
+            None,
+        )
+        .expect("input-only and image-only processing catalogs are billable");
+    }
+
+    #[test]
+    fn global_multiplier_requires_a_valid_standard_catalog() {
+        let err = CreateAdminGlobalModelRecord::new(
+            "global-model-1".to_string(),
+            "model-1".to_string(),
+            "Model 1".to_string(),
+            true,
+            None,
+            Some(json!({
+                "processing_tiers": {
+                    "priority": {"price_multiplier": 2.0}
+                }
+            })),
+            None,
+            None,
+        )
+        .expect_err("a global multiplier without Standard prices cannot be materialized");
+
+        assert!(err
+            .to_string()
+            .contains("price_multiplier requires a valid Standard pricing catalog"));
+    }
+
+    #[test]
+    fn nullable_processing_tiers_remains_an_empty_compatible_value() {
+        CreateAdminGlobalModelRecord::new(
+            "global-model-1".to_string(),
+            "model-1".to_string(),
+            "Model 1".to_string(),
+            true,
+            None,
+            Some(json!({
+                "tiers": [{"input_price_per_1m": 1.0}],
+                "processing_tiers": null
+            })),
+            None,
+            None,
+        )
+        .expect("null processing_tiers should keep its legacy empty meaning");
+    }
+
+    #[test]
+    fn noncanonical_processing_tier_name_is_rejected() {
+        let err = CreateAdminGlobalModelRecord::new(
+            "global-model-1".to_string(),
+            "model-1".to_string(),
+            "Model 1".to_string(),
+            true,
+            None,
+            Some(json!({
+                "tiers": [{"input_price_per_1m": 1.0}],
+                "processing_tiers": {
+                    " Priority ": {"price_multiplier": 2.0}
+                }
+            })),
+            None,
+            None,
+        )
+        .expect_err("noncanonical processing-tier keys are not resolvable at runtime");
+
+        assert!(err
+            .to_string()
+            .contains("must be canonical lowercase without surrounding whitespace"));
+    }
+
+    #[test]
+    fn image_catalog_requires_a_runtime_reachable_price_key() {
+        for unreachable in [
+            json!({"image_prices": {"default": 0.1}}),
+            json!({"image_output_prices": {"1024x1024": 0.1}}),
+        ] {
+            assert_ne!(
+                explicit_pricing_catalog_state(&unreachable),
+                ExplicitPricingCatalogState::Valid
+            );
+        }
+
+        for reachable in [
+            json!({"image_output_prices": {"default": 0.1}}),
+            json!({"image_output_prices": {"1024x1024:high": 0.1}}),
+            json!({"image_prices": {"1024x1024": {"high": 0.1}}}),
+        ] {
+            assert_eq!(
+                explicit_pricing_catalog_state(&reachable),
+                ExplicitPricingCatalogState::Valid
+            );
+        }
     }
 }

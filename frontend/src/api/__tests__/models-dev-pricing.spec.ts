@@ -183,4 +183,98 @@ describe('resolveModelsDevTieredPricing', () => {
   it('does not synthesize pricing when the fetched cost is absent', () => {
     expect(resolveModelsDevTieredPricing('openai', 'gpt-5.6-sol', undefined)).toBeNull()
   })
+
+  it('keeps a models.dev fast cost as an explicit Priority catalog when bands differ', () => {
+    expect(resolveModelsDevTieredPricing('openai', 'gpt-5.6-sol', {
+      input: 5,
+      output: 30,
+      tiers: [{
+        input: 10,
+        output: 45,
+        tier: { type: 'context', size: 272_000 },
+      }],
+    }, {
+      fast: {
+        cost: { input: 10, output: 60 },
+        provider: { body: { service_tier: 'priority' } },
+      },
+    })).toEqual({
+      tiers: [
+        { up_to: 271_999, input_price_per_1m: 5, output_price_per_1m: 30 },
+        { up_to: null, input_price_per_1m: 10, output_price_per_1m: 45 },
+      ],
+      processing_tiers: {
+        priority: {
+          tiers: [{ up_to: null, input_price_per_1m: 10, output_price_per_1m: 60 }],
+        },
+      },
+    })
+  })
+
+  it('uses a multiplier only when every fast price has the same ratio', () => {
+    expect(resolveModelsDevTieredPricing('anthropic', 'claude-opus-4.8', {
+      input: 5,
+      output: 25,
+      cache_read: 0.5,
+      cache_write: 6.25,
+    }, {
+      fast: {
+        cost: { input: 10, output: 50, cache_read: 1, cache_write: 12.5 },
+        provider: { body: { speed: 'fast' } },
+      },
+    })?.processing_tiers).toEqual({
+      fast: { price_multiplier: 2 },
+    })
+
+    expect(resolveModelsDevTieredPricing('anthropic', 'claude-opus-4.7', {
+      input: 5,
+      output: 25,
+    }, {
+      fast: {
+        cost: { input: 30, output: 150 },
+        provider: { body: { speed: 'fast' } },
+      },
+    })?.processing_tiers).toEqual({
+      fast: { price_multiplier: 6 },
+    })
+  })
+
+  it('prefers Anthropic speed=fast when the mode body also carries a standard service tier', () => {
+    expect(resolveModelsDevTieredPricing('anthropic', 'claude-opus-fast', {
+      input: 5,
+      output: 25,
+    }, {
+      fast: {
+        cost: { input: 10, output: 50 },
+        provider: { body: { speed: ' FAST ', service_tier: 'default' } },
+      },
+    })?.processing_tiers).toEqual({
+      fast: { price_multiplier: 2 },
+    })
+  })
+
+  it('falls back to the mode key and keeps non-uniform prices explicit', () => {
+    expect(resolveModelsDevTieredPricing('vendor', 'model', {
+      input: 2,
+      output: 4,
+    }, {
+      flex: { cost: { input: 1, output: 3 } },
+    })?.processing_tiers).toEqual({
+      flex: {
+        tiers: [{ up_to: null, input_price_per_1m: 1, output_price_per_1m: 3 }],
+      },
+    })
+  })
+
+  it('does not reinterpret unrelated or special experimental modes as processing tiers', () => {
+    const modes = JSON.parse(
+      '{"pro":{"cost":{"input":2,"output":4}},"__proto__":{"cost":{"input":2,"output":4}}}',
+    )
+    const pricing = resolveModelsDevTieredPricing('vendor', 'model', {
+      input: 1,
+      output: 2,
+    }, modes)
+
+    expect(pricing?.processing_tiers).toBeUndefined()
+  })
 })

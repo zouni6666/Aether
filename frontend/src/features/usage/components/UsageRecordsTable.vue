@@ -1105,6 +1105,7 @@ import { useRowClick } from '@/composables/useRowClick'
 import { useDarkMode } from '@/composables/useDarkMode'
 import { API_FORMAT_ORDER, formatApiFormat } from '@/api/endpoints/types/api-format'
 import { formatClientFamily } from '@/features/usage/utils/clientFamily'
+import { formatServiceTierFact } from '../utils/service-tier'
 import type { DateRangeParams, UsageRecord } from '../types'
 import { MultiSelect, TimeRangePicker } from '@/components/common'
 import type { MultiSelectOption } from '@/components/common/MultiSelect.vue'
@@ -1635,6 +1636,9 @@ function canonicalServiceTier(value: string | null): string | null {
   if (value === 'auto' || value === 'default' || value === 'standard') {
     return 'standard'
   }
+  if (value === 'fast') {
+    return 'priority'
+  }
   return value
 }
 
@@ -1661,10 +1665,13 @@ function buildServiceTierBadgePresentation(
   billingTier: string | null,
 ): ServiceTierBadgePresentation {
   const titleLines: string[] = []
-  if (requestedRaw) titleLines.push(`请求档位：${requestedRaw}`)
-  if (actualRaw) titleLines.push(`实际档位：${actualRaw}`)
-  if (billingTier) {
-    titleLines.push(`计费档位：${billingTier}`)
+  const requestedLabel = formatServiceTierFact(requestedRaw)
+  const actualLabel = formatServiceTierFact(actualRaw)
+  const billingLabel = formatServiceTierFact(billingTier)
+  if (requestedLabel) titleLines.push(`请求档位：${requestedLabel}`)
+  if (actualLabel) titleLines.push(`实际档位：${actualLabel}`)
+  if (billingLabel) {
+    titleLines.push(`计费档位：${billingLabel}`)
   } else {
     titleLines.push(`计费档位：${state === 'pending' ? '待上游确认' : '未确认'}`)
   }
@@ -1689,7 +1696,7 @@ function getServiceTierBadge(record: UsageRecord): ServiceTierBadgePresentation 
   if (actual) {
     if (requestedFast && !actualFast) {
       return buildServiceTierBadgePresentation(
-        `fast → ${actual}`,
+        `Fast → ${actual}`,
         'downgraded',
         requestedRaw,
         actualRaw,
@@ -1699,7 +1706,7 @@ function getServiceTierBadge(record: UsageRecord): ServiceTierBadgePresentation 
     if (!requestedFast && actualFast) {
       const requestedLabel = requested ?? 'standard'
       return buildServiceTierBadgePresentation(
-        requested ? `${requestedLabel} → fast` : 'fast',
+        requested ? `${requestedLabel} → Fast` : 'Fast',
         requested ? 'upgraded' : 'confirmed',
         requestedRaw,
         actualRaw,
@@ -1708,7 +1715,7 @@ function getServiceTierBadge(record: UsageRecord): ServiceTierBadgePresentation 
     }
     if (actualFast) {
       return buildServiceTierBadgePresentation(
-        'fast',
+        'Fast',
         'confirmed',
         requestedRaw,
         actualRaw,
@@ -1722,7 +1729,7 @@ function getServiceTierBadge(record: UsageRecord): ServiceTierBadgePresentation 
   const displayStatus = getDisplayStatus(record)
   const isActive = displayStatus === 'pending' || displayStatus === 'streaming'
   return buildServiceTierBadgePresentation(
-    isActive ? 'fast · 待确认' : 'fast · 未确认',
+    isActive ? 'Fast · 待确认' : 'Fast · 未确认',
     isActive ? 'pending' : 'unconfirmed',
     requestedRaw,
     null,
@@ -1734,8 +1741,8 @@ function getServiceTierTitle(record: UsageRecord): string {
   const badge = getServiceTierBadge(record)
   if (badge) return badge.title
 
-  const requested = normalizeServiceTier(record.service_tier)
-  const actual = normalizeServiceTier(record.actual_service_tier)
+  const requested = formatServiceTierFact(record.service_tier)
+  const actual = formatServiceTierFact(record.actual_service_tier)
   return [
     requested ? `请求档位：${requested}` : null,
     actual ? `实际档位：${actual}` : null,

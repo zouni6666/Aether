@@ -33,9 +33,75 @@ describe('ServiceTierFacts', () => {
       '计费层级',
     ])
     expect([...root.querySelectorAll('dd')].map(node => node.textContent?.trim())).toEqual([
-      'priority',
+      'Fast',
       '-',
       'flex',
     ])
+    expect([...root.querySelectorAll('dd')].map(node => node.getAttribute('title'))).toEqual([
+      'Fast',
+      '-',
+      'flex',
+    ])
+  })
+
+  it('uses the same Fast label for raw priority and fast facts', () => {
+    const root = document.createElement('div')
+    document.body.appendChild(root)
+    const app = createApp({
+      render: () => h(ServiceTierFacts, {
+        requested: 'priority',
+        actual: 'fast',
+        billing: 'priority',
+      }),
+    })
+    app.mount(root)
+    mountedApps.push({ app, root })
+
+    expect([...root.querySelectorAll('dd')].map(node => node.textContent?.trim())).toEqual([
+      'Fast',
+      'Fast',
+      'Fast',
+    ])
+    expect([...root.querySelectorAll('dd')].map(node => node.getAttribute('title'))).toEqual([
+      'Fast',
+      'Fast',
+      'Fast',
+    ])
+  })
+
+  it('renders the processing-tier multiplier with the billing tier label', () => {
+    const root = document.createElement('div')
+    document.body.appendChild(root)
+    const app = createApp({
+      render: () => h(ServiceTierFacts, {
+        requested: 'priority',
+        actual: 'fast',
+        billing: 'fast',
+        priceMultiplier: 2.5,
+      }),
+    })
+    app.mount(root)
+    mountedApps.push({ app, root })
+
+    const multiplier = root.querySelector('[data-testid="service-tier-price-multiplier"]')
+    expect(multiplier?.textContent).toContain('Fast 倍率')
+    expect(multiplier?.textContent).toContain('2.5×')
+  })
+
+  it('does not render an empty or invalid processing-tier multiplier', () => {
+    const root = document.createElement('div')
+    document.body.appendChild(root)
+    const app = createApp({
+      render: () => h(ServiceTierFacts, {
+        requested: 'priority',
+        actual: null,
+        billing: null,
+        priceMultiplier: null,
+      }),
+    })
+    app.mount(root)
+    mountedApps.push({ app, root })
+
+    expect(root.querySelector('[data-testid="service-tier-price-multiplier"]')).toBeNull()
   })
 })

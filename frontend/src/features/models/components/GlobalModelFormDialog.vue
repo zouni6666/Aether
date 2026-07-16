@@ -398,6 +398,7 @@
                 :show-token-pricing="billingMode === 'token'"
                 :show-image-pricing="isImageGenerationEnabled"
                 :show-image-editor="billingMode === 'image'"
+                :show-processing-tier-multiplier-controls="true"
               />
 
               <TabsContent

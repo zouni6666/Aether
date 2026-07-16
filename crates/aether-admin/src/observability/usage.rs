@@ -3508,7 +3508,17 @@ mod tests {
                 "settlement_snapshot": {
                     "schema_version": "3.0",
                     "pricing_snapshot": {
-                        "pricing_source": "provider_override"
+                        "pricing_source": "provider_override",
+                        "tiered_pricing_source": "provider_override",
+                        "billing_processing_tier": "fast",
+                        "processing_tier_price_multiplier": 2.5,
+                        "tiered_pricing": {
+                            "tiers": [{
+                                "up_to": null,
+                                "input_price_per_1m": 7.5,
+                                "output_price_per_1m": 37.5
+                            }]
+                        }
                     }
                 },
                 "billing_snapshot": {
@@ -3548,6 +3558,21 @@ mod tests {
         assert_eq!(
             payload["settlement"]["settlement_snapshot"]["pricing_snapshot"]["pricing_source"],
             "provider_override"
+        );
+        assert_eq!(
+            payload["settlement"]["settlement_snapshot"]["pricing_snapshot"]
+                ["billing_processing_tier"],
+            "fast"
+        );
+        assert_eq!(
+            payload["settlement"]["settlement_snapshot"]["pricing_snapshot"]
+                ["processing_tier_price_multiplier"],
+            2.5
+        );
+        assert_eq!(
+            payload["settlement"]["settlement_snapshot"]["pricing_snapshot"]["tiered_pricing"]
+                ["tiers"][0]["input_price_per_1m"],
+            7.5
         );
         assert_eq!(
             payload["settlement"]["billing_dimensions"]["input_tokens"],

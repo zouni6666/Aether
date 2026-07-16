@@ -36,8 +36,21 @@ export interface ModelsDevModel {
   last_updated?: string
   input?: string[] // 输入模态: text, image, audio, video, pdf
   output?: string[] // 输出模态: text, image, audio
+  modalities?: {
+    input?: string[]
+    output?: string[]
+  }
   open_weights?: boolean
   cost?: ModelsDevCost
+  experimental?: {
+    modes?: Record<string, {
+      cost?: ModelsDevCost
+      provider?: {
+        body?: Record<string, unknown>
+        headers?: Record<string, string>
+      }
+    }>
+  }
   limit?: ModelsDevLimit
   deprecated?: boolean
 }
@@ -166,7 +179,14 @@ export async function getModelsDevList(officialOnly: boolean = true): Promise<Mo
       if (!provider.models) continue
 
       for (const [modelId, model] of Object.entries(provider.models)) {
-        const tieredPricing = resolveModelsDevTieredPricing(providerId, modelId, model.cost)
+        const inputModalities = model.modalities?.input ?? model.input
+        const outputModalities = model.modalities?.output ?? model.output
+        const tieredPricing = resolveModelsDevTieredPricing(
+          providerId,
+          modelId,
+          model.cost,
+          model.experimental?.modes,
+        )
         const basePricingTier = tieredPricing?.tiers[0]
         items.push({
           providerId,
@@ -179,7 +199,7 @@ export async function getModelsDevList(officialOnly: boolean = true): Promise<Mo
           tieredPricing: tieredPricing ?? undefined,
           contextLimit: model.limit?.context,
           outputLimit: model.limit?.output,
-          supportsVision: model.input?.includes('image'),
+          supportsVision: inputModalities?.includes('image'),
           supportsToolCall: model.tool_call,
           supportsReasoning: model.reasoning,
           supportsStructuredOutput: model.structured_output,
@@ -194,8 +214,8 @@ export async function getModelsDevList(officialOnly: boolean = true): Promise<Mo
           // display_metadata 相关字段
           knowledgeCutoff: model.knowledge,
           releaseDate: model.release_date,
-          inputModalities: model.input,
-          outputModalities: model.output,
+          inputModalities,
+          outputModalities,
         })
       }
     }

@@ -38,11 +38,24 @@ fn normalize_provider_reasoning_effort(value: &str) -> Option<String> {
 }
 
 pub fn extract_provider_service_tier_from_body(value: Option<&Value>) -> Option<String> {
-    value
-        .and_then(Value::as_object)
-        .and_then(|object| object.get("service_tier"))
+    let object = value.and_then(Value::as_object)?;
+
+    // Anthropic Fast is a separate processing mode (`speed=fast`), not an OpenAI
+    // `service_tier`. Prefer that explicit paid mode when both facts happen to be present so it
+    // resolves against `processing_tiers.fast` instead of being mistaken for Standard/Priority.
+    let speed = object
+        .get("speed")
+        .and_then(Value::as_str)
+        .and_then(normalize_provider_service_tier);
+    if speed.as_deref() == Some("fast") {
+        return speed;
+    }
+
+    object
+        .get("service_tier")
         .and_then(Value::as_str)
         .and_then(normalize_provider_service_tier)
+        .or_else(|| speed.filter(|speed| speed == "standard"))
 }
 
 pub fn extract_provider_actual_service_tier_from_response(value: Option<&Value>) -> Option<String> {
@@ -57,9 +70,19 @@ pub fn extract_provider_actual_service_tier_from_response(value: Option<&Value>)
                 .find_map(|chunk| extract_provider_actual_service_tier_from_response(Some(chunk)))
         })
         .or_else(|| {
+            value.get("response").and_then(|response| {
+                extract_provider_actual_service_tier_from_response(Some(response))
+            })
+        })
+        .or_else(|| {
+            value.get("message").and_then(|message| {
+                extract_provider_actual_service_tier_from_response(Some(message))
+            })
+        })
+        .or_else(|| {
             value
-                .get("response")
-                .and_then(|response| extract_provider_service_tier_from_body(Some(response)))
+                .get("usage")
+                .and_then(|usage| extract_provider_service_tier_from_body(Some(usage)))
         })
         .or_else(|| extract_provider_service_tier_from_body(Some(value)))
 }
@@ -2215,7 +2238,8 @@ fn parse_timestamp(value: i64, field_name: &str) -> Result<u64, crate::DataLayer
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_provider_actual_service_tier_from_response, resolve_provider_cache_ttl_minutes,
+        extract_provider_actual_service_tier_from_response,
+        extract_provider_service_tier_from_body, resolve_provider_cache_ttl_minutes,
         StoredRequestUsageAudit, UpsertUsageRecord, UsageBodyCaptureState, UsageBodyCaptureStorage,
         UsageBodyField, UsageProviderPerformanceQuery,
     };
@@ -2755,6 +2779,40 @@ mod tests {
         assert_eq!(
             extract_provider_actual_service_tier_from_response(Some(&responses_stream)).as_deref(),
             Some("flex")
+        );
+    }
+
+    #[test]
+    fn extracts_anthropic_fast_speed_as_its_own_processing_tier() {
+        let request = json!({"speed": " FAST ", "service_tier": "default"});
+        let sync_response = json!({
+            "usage": {"speed": "fast", "service_tier": "standard"}
+        });
+        let stream_response = json!({
+            "chunks": [{
+                "type": "message_start",
+                "message": {"usage": {"speed": "fast", "service_tier": "standard"}}
+            }]
+        });
+        let standard_response = json!({
+            "usage": {"speed": "standard"}
+        });
+
+        assert_eq!(
+            extract_provider_service_tier_from_body(Some(&request)).as_deref(),
+            Some("fast")
+        );
+        assert_eq!(
+            extract_provider_actual_service_tier_from_response(Some(&sync_response)).as_deref(),
+            Some("fast")
+        );
+        assert_eq!(
+            extract_provider_actual_service_tier_from_response(Some(&stream_response)).as_deref(),
+            Some("fast")
+        );
+        assert_eq!(
+            extract_provider_actual_service_tier_from_response(Some(&standard_response)).as_deref(),
+            Some("standard")
         );
     }
 

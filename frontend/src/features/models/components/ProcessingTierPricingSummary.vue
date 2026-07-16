@@ -35,6 +35,15 @@
     </div>
 
     <div
+      v-if="activePriceMultiplier !== null"
+      class="flex items-center justify-between rounded-md border bg-muted/20 px-3 py-2 text-xs"
+      data-testid="processing-tier-price-multiplier"
+    >
+      <span class="text-muted-foreground">相对 Standard</span>
+      <span class="font-mono font-medium text-foreground">{{ formatMultiplier(activePriceMultiplier) }}×</span>
+    </div>
+
+    <div
       v-if="activeTokenTiers.length > 0"
       class="overflow-x-auto rounded-md border"
     >
@@ -226,7 +235,8 @@ const props = defineProps<{
 }>()
 
 const KNOWN_PROCESSING_TIERS = [
-  { key: 'priority', label: 'Priority' },
+  { key: 'priority', label: 'Fast（OpenAI）' },
+  { key: 'fast', label: 'Fast（Claude）' },
   { key: 'flex', label: 'Flex' },
   { key: 'batch', label: 'Batch' },
 ] as const
@@ -264,6 +274,14 @@ const activeTokenTiers = computed<PricingTier[]>(() =>
     ? activeEntry.value.config.tiers.filter(isRecord) as PricingTier[]
     : [],
 )
+const activePriceMultiplier = computed(() => {
+  const config = activeEntry.value?.config
+  if (!config || processingPricingHasExplicitFacts(config)) return null
+  const multiplier = config.price_multiplier
+  return typeof multiplier === 'number' && Number.isFinite(multiplier) && multiplier >= 0
+    ? multiplier
+    : null
+})
 const activeImageDefaultPrice = computed(() =>
   toFiniteNumber(activeEntry.value?.config.image_output_price_default),
 )
@@ -311,6 +329,15 @@ const imageTableMinWidthClass = computed(() =>
 )
 
 function processingPricingHasFacts(config: ProcessingTierPricingConfig): boolean {
+  if (
+    typeof config.price_multiplier === 'number'
+    && Number.isFinite(config.price_multiplier)
+    && config.price_multiplier >= 0
+  ) return true
+  return processingPricingHasExplicitFacts(config)
+}
+
+function processingPricingHasExplicitFacts(config: ProcessingTierPricingConfig): boolean {
   if (Array.isArray(config.tiers) && config.tiers.length > 0) return true
   if (toFiniteNumber(config.image_output_price_default) !== null) return true
   if (isRecord(config.image_output_prices)) {
@@ -318,12 +345,26 @@ function processingPricingHasFacts(config: ProcessingTierPricingConfig): boolean
       if (isRecord(prices) && Object.keys(finitePriceRecord(prices)).length > 0) return true
     }
   }
-  return Array.isArray(config.image_output_price_ranges)
+  if (Array.isArray(config.image_output_price_ranges)
     && config.image_output_price_ranges.some(range => (
       isRecord(range)
       && isRecord(range.prices)
       && Object.keys(finitePriceRecord(range.prices)).length > 0
-    ))
+    ))) return true
+  return [
+    'image_output_price_per_image',
+    'image_output_price_matrix',
+    'image_prices',
+  ].some(key => valueHasEntries(config[key]))
+}
+
+function valueHasEntries(value: unknown): boolean {
+  return (Array.isArray(value) && value.length > 0)
+    || (isRecord(value) && Object.keys(value).length > 0)
+}
+
+function formatMultiplier(value: number): string {
+  return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(6)))
 }
 
 function formatTokenRange(tiers: PricingTier[], index: number): string {

@@ -21,6 +21,14 @@ export interface ModelsDevCost extends ModelsDevTokenCost {
   tiers?: ModelsDevCostTier[]
 }
 
+const TOKEN_PRICE_FIELDS = [
+  'input_price_per_1m',
+  'output_price_per_1m',
+  'cache_creation_price_per_1m',
+  'cache_read_price_per_1m',
+] as const
+const PROCESSING_MODE_FALLBACK_KEYS = new Set(['fast', 'priority', 'flex', 'batch'])
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -91,11 +99,88 @@ export function buildModelsDevTieredPricing(cost: unknown): TieredPricingConfig 
   return { tiers }
 }
 
+function uniformPriceMultiplier(
+  standard: TieredPricingConfig,
+  processing: TieredPricingConfig,
+): number | null {
+  if (standard.tiers.length !== processing.tiers.length) return null
+
+  let candidate: number | null = null
+  for (const [index, standardTier] of standard.tiers.entries()) {
+    const processingTier = processing.tiers[index]
+    if (standardTier.up_to !== processingTier?.up_to) return null
+
+    for (const field of TOKEN_PRICE_FIELDS) {
+      const standardPrice = standardTier[field]
+      const processingPrice = processingTier[field]
+      if (standardPrice === undefined || processingPrice === undefined) {
+        if (standardPrice !== processingPrice) return null
+        continue
+      }
+      if (standardPrice === 0) {
+        if (processingPrice !== 0) return null
+        continue
+      }
+
+      const ratio = processingPrice / standardPrice
+      if (!Number.isFinite(ratio) || ratio < 0) return null
+      if (candidate === null) candidate = ratio
+      if (Math.abs(processingPrice - standardPrice * candidate) > 1e-9) return null
+    }
+  }
+  return candidate
+}
+
 export function resolveModelsDevTieredPricing(
   _providerId: string,
   _modelId: string,
   cost: unknown,
+  experimentalModes?: unknown,
 ): TieredPricingConfig | null {
   // Provider/model identities must never inject local prices over the fetched catalog.
-  return buildModelsDevTieredPricing(cost)
+  const standard = buildModelsDevTieredPricing(cost)
+  if (!standard || !isRecord(experimentalModes)) return standard
+
+  const processingTierEntries: Array<[string, NonNullable<TieredPricingConfig['processing_tiers']>[string]]> = []
+  const seenProcessingTiers = new Set<string>()
+  for (const [modeKey, rawMode] of Object.entries(experimentalModes)) {
+    if (!isRecord(rawMode)) continue
+    const modePricing = buildModelsDevTieredPricing(rawMode.cost)
+    if (!modePricing) continue
+
+    const provider = isRecord(rawMode.provider) ? rawMode.provider : null
+    const body = provider && isRecord(provider.body) ? provider.body : null
+    // Anthropic Fast is expressed with `speed=fast`. A provider body may also carry a
+    // `service_tier` fact (commonly `default`/`standard`), but runtime settlement deliberately
+    // gives Fast speed precedence, so catalog import must resolve the same processing-tier key.
+    const mappedProcessingTier = typeof body?.speed === 'string'
+      && body.speed.trim().toLowerCase() === 'fast'
+      ? body.speed
+      : typeof body?.service_tier === 'string'
+        ? body.service_tier
+        : null
+    const normalizedModeKey = modeKey.trim().toLowerCase()
+    const rawProcessingTier = mappedProcessingTier
+      ?? (PROCESSING_MODE_FALLBACK_KEYS.has(normalizedModeKey) ? normalizedModeKey : '')
+    const processingTier = rawProcessingTier.trim().toLowerCase()
+    if (
+      !processingTier
+      || processingTier.length > 64
+      || ['auto', 'default', 'standard'].includes(processingTier)
+      || seenProcessingTiers.has(processingTier)
+    ) {
+      continue
+    }
+
+    const multiplier = uniformPriceMultiplier(standard, modePricing)
+    seenProcessingTiers.add(processingTier)
+    processingTierEntries.push([processingTier, multiplier === null
+      ? { tiers: modePricing.tiers }
+      : { price_multiplier: multiplier }])
+  }
+  if (processingTierEntries.length === 0) return standard
+  return {
+    ...standard,
+    processing_tiers: Object.fromEntries(processingTierEntries),
+  }
 }

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   MODEL_DIRECTIVE_API_FORMATS,
+  MODEL_DIRECTIVE_SUFFIX_METADATA,
   MODEL_DIRECTIVE_SUFFIXES,
   REASONING_EFFORTS,
   createDefaultModelDirectivesConfig,
@@ -31,6 +32,7 @@ describe('modelDirectivesConfig', () => {
     expect(defaultModelDirectiveSuffixesForApiFormat('openai:search')).toEqual(MODEL_DIRECTIVE_SUFFIXES)
     expect(defaultModelDirectiveSuffixesForApiFormat('claude:messages')).not.toContain('ultra')
     expect(defaultModelDirectiveSuffixesForApiFormat('gemini:generate_content')).not.toContain('ultra')
+    expect(MODEL_DIRECTIVE_SUFFIX_METADATA.fast.description).toBe('Fast 服务层级')
   })
 
   it('creates a config whose mappings contain overrides only', () => {
