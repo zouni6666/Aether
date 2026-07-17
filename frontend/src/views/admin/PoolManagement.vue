@@ -1554,9 +1554,9 @@ const showAccountQuotaColumn = computed(() => {
 const desktopColumnWidths = computed(() => {
   if (showAccountQuotaColumn.value) {
     return {
-      name: '21%',
+      name: '19%',
       quota: '18%',
-      stats: '13%',
+      stats: '15%',
       imported: '10%',
       lastUsed: '8%',
       score: '9%',

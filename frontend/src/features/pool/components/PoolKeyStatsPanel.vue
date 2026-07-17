@@ -7,13 +7,23 @@
     <div
       v-for="row in cycleMetricRows"
       :key="`${row.key}-${variant}-cycle-row`"
-      class="truncate"
+      class="flex items-baseline justify-between gap-3"
       :title="`${row.label} ${row.valueText}`"
     >
+      <span class="shrink-0 text-muted-foreground">
+        {{ row.label }}
+      </span>
       <span
+        class="grid w-[112px] shrink-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-baseline gap-x-1 font-medium text-foreground"
         :data-testid="variant === 'desktop' ? `pool-stats-cycle-${row.key}` : undefined"
       >
-        {{ row.label }} {{ row.valueText }}
+        <span class="min-w-0 truncate text-right">{{ row.hasComparison ? row.smallValue : '-' }}</span>
+        <span
+          class="w-1.5 text-center text-muted-foreground/60"
+          data-cycle-stat-part="divider"
+          aria-hidden="true"
+        >/</span>
+        <span class="min-w-0 truncate text-left">{{ row.largeValue }}</span>
       </span>
     </div>
   </div>
@@ -83,7 +93,7 @@ function missingMetric(key: PoolStatsMetricKey): PoolStatsMetric {
   return {
     key,
     label: CYCLE_METRIC_LABELS[key],
-    value: '—',
+    value: '-',
     missing: true,
     numericValue: null,
   }
@@ -108,14 +118,17 @@ const cycleMetricRows = computed(() => {
     return {
       key,
       label: CYCLE_METRIC_LABELS[key],
+      hasComparison,
+      smallValue: smallMetric.value,
+      largeValue: largeMetric.value,
       valueText: hasComparison ? `${smallMetric.value}/${largeMetric.value}` : largeMetric.value,
     }
   })
 })
 
 const cycleContainerClass = computed(() => [
-  'mx-auto w-[132px] space-y-0.5 text-[10px] leading-4 text-foreground/90 tabular-nums',
-  props.variant === 'mobile' ? 'py-0.5' : '',
+  'w-full space-y-1 text-[11px] leading-4 tabular-nums',
+  props.variant === 'desktop' ? 'mx-auto max-w-[168px]' : 'py-0.5',
 ].filter(Boolean).join(' '))
 
 const accountContainerClass = computed(() => props.variant === 'desktop'
