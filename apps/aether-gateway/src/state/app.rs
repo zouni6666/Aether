@@ -2,15 +2,16 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aether_data::repository::users::StoredUserGroup;
 use aether_data_contracts::repository::billing::UserDailyQuotaAvailabilityRecord;
 use aether_data_contracts::repository::quota::StoredProviderQuotaSnapshot;
+use aether_data_contracts::repository::usage::UsageCounterHealthSnapshot;
 use aether_runtime::ConcurrencyGate;
 use aether_runtime_state::{RuntimeSemaphore, RuntimeState};
 use dashmap::DashMap;
-use tokio::sync::{Mutex as TokioMutex, Semaphore};
+use tokio::sync::{Mutex as TokioMutex, RwLock as TokioRwLock, Semaphore};
 
 use super::super::async_task::{VideoTaskPollerConfig, VideoTaskService};
 use super::super::cache::{
@@ -105,6 +106,8 @@ pub(crate) struct FrontdoorRuntimeGuardConfig {
     pub(crate) upstream_execution_gate_limit: Option<usize>,
     pub(crate) upstream_target_gate_limit: Option<usize>,
 }
+
+pub(crate) const METRIC_SNAPSHOT_TTL: Duration = Duration::from_secs(2);
 
 impl FrontdoorRuntimeGuardConfig {
     pub(crate) fn from_env() -> Self {
@@ -364,6 +367,8 @@ pub struct AppState {
     #[cfg(test)]
     pub(crate) execution_runtime_sync_override: Option<TestExecutionRuntimeSyncOverride>,
     pub(crate) data: Arc<GatewayDataState>,
+    pub(crate) background_data: Arc<GatewayDataState>,
+    pub(crate) background_data_isolated: bool,
     pub(crate) runtime_state: Arc<RuntimeState>,
     pub(crate) usage_runtime: Arc<usage::UsageRuntime>,
     pub(crate) video_tasks: Arc<VideoTaskService>,
@@ -377,6 +382,7 @@ pub struct AppState {
     pub(crate) upstream_target_admission: Arc<crate::upstream_admission::UpstreamTargetAdmission>,
     pub(crate) distributed_request_gate: Option<Arc<RuntimeSemaphore>>,
     pub(crate) client: reqwest::Client,
+    pub(crate) owner_forward_client: reqwest::Client,
     pub(crate) auth_context_cache: Arc<AuthContextCache>,
     pub(crate) auth_snapshot_cache: Arc<AuthSnapshotCache>,
     pub(crate) admin_security_blacklist_cache: Arc<ValueCache<String, bool>>,
@@ -411,6 +417,13 @@ pub struct AppState {
     pub(crate) usage_counter_flush_metrics: Arc<UsageCounterFlushRuntimeMetrics>,
     pub(crate) task_supervisor_metrics: TaskSupervisorMetrics,
     pub(crate) process_resource_monitor: Arc<crate::process_metrics::GatewayProcessResourceMonitor>,
+    pub(crate) metric_snapshot:
+        Arc<TokioRwLock<Option<(Instant, Vec<aether_runtime::MetricSample>)>>>,
+    pub(crate) metric_snapshot_refresh: Arc<TokioMutex<()>>,
+    pub(crate) usage_counter_exact_health_metric_snapshot:
+        Arc<TokioRwLock<Option<(Instant, UsageCounterHealthSnapshot)>>>,
+    pub(crate) usage_counter_exact_health_metric_last_attempt: Arc<StdMutex<Option<Instant>>>,
+    pub(crate) usage_counter_exact_health_metric_refresh: Arc<TokioMutex<()>>,
     pub(crate) request_candidate_queue: Option<Arc<RequestCandidateQueueRuntime>>,
     pub(crate) frontdoor_cors: Option<Arc<FrontdoorCorsConfig>>,
     pub(crate) frontdoor_user_rpm: Arc<FrontdoorUserRpmLimiter>,

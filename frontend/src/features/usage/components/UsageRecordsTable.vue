@@ -253,12 +253,14 @@
                 {{ getReasoningEffort(record) }}
               </Badge>
               <Badge
-                v-if="getFastBadge(record)"
+                v-if="getServiceTierBadge(record)"
                 variant="outline"
-                class="h-4 rounded-full px-1.5 text-[10px] leading-4 text-foreground flex-shrink-0"
-                :title="getFastBadgeTitle(record)"
+                class="h-4 whitespace-nowrap rounded-full px-1.5 text-[10px] leading-4 flex-shrink-0"
+                :class="getServiceTierBadge(record)?.className"
+                :title="getServiceTierBadge(record)?.title"
+                :aria-label="getServiceTierBadge(record)?.ariaLabel"
               >
-                fast
+                {{ getServiceTierBadge(record)?.label }}
               </Badge>
               <!-- 状态 Badge -->
               <Badge
@@ -762,12 +764,14 @@
                   {{ getReasoningEffort(record) }}
                 </Badge>
                 <Badge
-                  v-if="getFastBadge(record)"
+                  v-if="getServiceTierBadge(record)"
                   variant="outline"
-                  class="h-4 rounded-full px-1.5 text-[10px] leading-4 text-foreground flex-shrink-0"
-                  :title="getFastBadgeTitle(record)"
+                  class="h-4 whitespace-nowrap rounded-full px-1.5 text-[10px] leading-4 flex-shrink-0"
+                  :class="getServiceTierBadge(record)?.className"
+                  :title="getServiceTierBadge(record)?.title"
+                  :aria-label="getServiceTierBadge(record)?.ariaLabel"
                 >
-                  fast
+                  {{ getServiceTierBadge(record)?.label }}
                 </Badge>
               </div>
               <span class="text-muted-foreground truncate">{{ getActualModel(record) }}</span>
@@ -786,12 +790,14 @@
                 {{ getReasoningEffort(record) }}
               </Badge>
               <Badge
-                v-if="getFastBadge(record)"
+                v-if="getServiceTierBadge(record)"
                 variant="outline"
-                class="h-4 rounded-full px-1.5 text-[10px] leading-4 text-foreground flex-shrink-0"
-                :title="getFastBadgeTitle(record)"
+                class="h-4 whitespace-nowrap rounded-full px-1.5 text-[10px] leading-4 flex-shrink-0"
+                :class="getServiceTierBadge(record)?.className"
+                :title="getServiceTierBadge(record)?.title"
+                :aria-label="getServiceTierBadge(record)?.ariaLabel"
               >
-                fast
+                {{ getServiceTierBadge(record)?.label }}
               </Badge>
             </span>
           </TableCell>
@@ -1099,6 +1105,7 @@ import { useRowClick } from '@/composables/useRowClick'
 import { useDarkMode } from '@/composables/useDarkMode'
 import { API_FORMAT_ORDER, formatApiFormat } from '@/api/endpoints/types/api-format'
 import { formatClientFamily } from '@/features/usage/utils/clientFamily'
+import { formatServiceTierFact } from '../utils/service-tier'
 import type { DateRangeParams, UsageRecord } from '../types'
 import { MultiSelect, TimeRangePicker } from '@/components/common'
 import type { MultiSelectOption } from '@/components/common/MultiSelect.vue'
@@ -1610,26 +1617,145 @@ function getReasoningEffortTitle(record: UsageRecord): string {
   return effort ? `Reasoning: ${effort}` : ''
 }
 
-function getServiceTier(record: UsageRecord): string | null {
-  const serviceTier = record.service_tier?.trim().toLowerCase()
+type ServiceTierBadgeState = 'confirmed' | 'downgraded' | 'upgraded' | 'pending' | 'unconfirmed'
+
+interface ServiceTierBadgePresentation {
+  label: string
+  state: ServiceTierBadgeState
+  className: string
+  title: string
+  ariaLabel: string
+}
+
+function normalizeServiceTier(value: string | null | undefined): string | null {
+  const serviceTier = value?.trim().toLowerCase()
   return serviceTier || null
 }
 
-function getFastBadge(record: UsageRecord): boolean {
-  return getServiceTier(record) === 'priority'
+function canonicalServiceTier(value: string | null): string | null {
+  if (value === 'auto' || value === 'default' || value === 'standard') {
+    return 'standard'
+  }
+  if (value === 'fast') {
+    return 'priority'
+  }
+  return value
 }
 
-function getFastBadgeTitle(record: UsageRecord): string {
-  const serviceTier = getServiceTier(record)
-  return serviceTier ? `Service tier: ${serviceTier}` : ''
+function serviceTierBadgeClass(state: ServiceTierBadgeState): string {
+  switch (state) {
+    case 'confirmed':
+      return 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+    case 'downgraded':
+      return 'border-amber-500/50 bg-amber-500/10 text-amber-700 dark:text-amber-300'
+    case 'upgraded':
+      return 'border-sky-500/40 bg-sky-500/10 text-sky-700 dark:text-sky-300'
+    case 'pending':
+      return 'border-dashed border-muted-foreground/30 bg-muted/30 text-muted-foreground'
+    case 'unconfirmed':
+      return 'border-dashed border-amber-500/40 bg-amber-500/5 text-amber-700 dark:text-amber-300'
+  }
+}
+
+function buildServiceTierBadgePresentation(
+  label: string,
+  state: ServiceTierBadgeState,
+  requestedRaw: string | null,
+  actualRaw: string | null,
+  billingTier: string | null,
+): ServiceTierBadgePresentation {
+  const titleLines: string[] = []
+  const requestedLabel = formatServiceTierFact(requestedRaw)
+  const actualLabel = formatServiceTierFact(actualRaw)
+  const billingLabel = formatServiceTierFact(billingTier)
+  if (requestedLabel) titleLines.push(`请求档位：${requestedLabel}`)
+  if (actualLabel) titleLines.push(`实际档位：${actualLabel}`)
+  if (billingLabel) {
+    titleLines.push(`计费档位：${billingLabel}`)
+  } else {
+    titleLines.push(`计费档位：${state === 'pending' ? '待上游确认' : '未确认'}`)
+  }
+  const title = titleLines.join('\n')
+  return {
+    label,
+    state,
+    className: serviceTierBadgeClass(state),
+    title,
+    ariaLabel: titleLines.join('，'),
+  }
+}
+
+function getServiceTierBadge(record: UsageRecord): ServiceTierBadgePresentation | null {
+  const requestedRaw = normalizeServiceTier(record.service_tier)
+  const actualRaw = normalizeServiceTier(record.actual_service_tier)
+  const requested = canonicalServiceTier(requestedRaw)
+  const actual = canonicalServiceTier(actualRaw)
+  const requestedFast = requested === 'priority'
+  const actualFast = actual === 'priority'
+
+  if (actual) {
+    if (requestedFast && !actualFast) {
+      return buildServiceTierBadgePresentation(
+        `Fast → ${actual}`,
+        'downgraded',
+        requestedRaw,
+        actualRaw,
+        actual,
+      )
+    }
+    if (!requestedFast && actualFast) {
+      const requestedLabel = requested ?? 'standard'
+      return buildServiceTierBadgePresentation(
+        requested ? `${requestedLabel} → Fast` : 'Fast',
+        requested ? 'upgraded' : 'confirmed',
+        requestedRaw,
+        actualRaw,
+        actual,
+      )
+    }
+    if (actualFast) {
+      return buildServiceTierBadgePresentation(
+        'Fast',
+        'confirmed',
+        requestedRaw,
+        actualRaw,
+        actual,
+      )
+    }
+    return null
+  }
+
+  if (!requestedFast) return null
+  const displayStatus = getDisplayStatus(record)
+  const isActive = displayStatus === 'pending' || displayStatus === 'streaming'
+  return buildServiceTierBadgePresentation(
+    isActive ? 'Fast · 待确认' : 'Fast · 未确认',
+    isActive ? 'pending' : 'unconfirmed',
+    requestedRaw,
+    null,
+    null,
+  )
+}
+
+function getServiceTierTitle(record: UsageRecord): string {
+  const badge = getServiceTierBadge(record)
+  if (badge) return badge.title
+
+  const requested = formatServiceTierFact(record.service_tier)
+  const actual = formatServiceTierFact(record.actual_service_tier)
+  return [
+    requested ? `请求档位：${requested}` : null,
+    actual ? `实际档位：${actual}` : null,
+  ].filter((line): line is string => Boolean(line)).join('\n')
 }
 
 // 获取模型列的 tooltip
 function getModelTooltip(record: UsageRecord): string {
   const actualModel = getActualModel(record)
   const reasoningEffort = getReasoningEffort(record)
-  const fastSuffix = getFastBadge(record) ? '\nService tier: priority' : ''
-  const suffix = `${reasoningEffort ? `\nReasoning: ${reasoningEffort}` : ''}${fastSuffix}`
+  const serviceTierTitle = getServiceTierTitle(record)
+  const tierSuffix = serviceTierTitle ? `\n${serviceTierTitle}` : ''
+  const suffix = `${reasoningEffort ? `\nReasoning: ${reasoningEffort}` : ''}${tierSuffix}`
   if (actualModel) {
     return `${record.model} -> ${actualModel}${suffix}`
   }

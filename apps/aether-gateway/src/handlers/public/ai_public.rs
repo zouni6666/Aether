@@ -1,9 +1,8 @@
+use crate::ai_serving::normalize_openai_image_quality;
 use crate::async_task::CancelVideoTaskError;
 use crate::control::GatewayControlDecision;
 use crate::control::GatewayPublicRequestContext;
-use crate::image_capabilities::{
-    openai_image_gateway_max_generation_count, openai_image_gateway_max_generation_count_for_model,
-};
+use crate::image_capabilities::openai_image_gateway_max_generation_count;
 use crate::{AppState, GatewayError};
 use aether_data_contracts::repository::video_tasks::{
     StoredVideoTask, VideoTaskQueryFilter, VideoTaskStatus,
@@ -26,7 +25,7 @@ const OPENAI_IMAGE_PARTIAL_IMAGES_DETAIL: &str =
 const OPENAI_IMAGE_STYLE_DETAIL: &str = "当前 Codex 图片反代暂不支持 style 参数";
 const OPENAI_IMAGE_RESPONSE_FORMAT_DETAIL: &str = "response_format 仅支持 url 或 b64_json";
 const OPENAI_IMAGE_OUTPUT_FORMAT_DETAIL: &str = "output_format 仅支持 png、jpeg 或 webp";
-const OPENAI_IMAGE_QUALITY_DETAIL: &str = "quality 仅支持 low、medium、high、standard 或 hd";
+const OPENAI_IMAGE_QUALITY_DETAIL: &str = "quality 仅支持 auto、low、medium、high、standard 或 hd";
 const OPENAI_IMAGE_BACKGROUND_DETAIL: &str = "background 仅支持 auto、opaque 或 transparent";
 const OPENAI_IMAGE_MODERATION_DETAIL: &str = "moderation 仅支持 auto 或 low";
 const OPENAI_IMAGE_INPUT_FIDELITY_DETAIL: &str = "input_fidelity 仅支持 low 或 high";
@@ -303,7 +302,7 @@ fn maybe_build_local_openai_request_validation_response(
     if validation
         .quality
         .as_deref()
-        .is_some_and(|value| !matches!(value, "low" | "medium" | "high" | "standard" | "hd"))
+        .is_some_and(|value| normalize_openai_image_quality(value).is_none())
     {
         return Some(build_ai_public_error_response(
             http::StatusCode::BAD_REQUEST,
@@ -366,8 +365,7 @@ fn openai_image_n_detail(max_generation_count: u64) -> String {
 }
 
 fn validate_openai_image_n(validation: &OpenAiImageValidationInput) -> Option<String> {
-    let max_generation_count =
-        openai_image_gateway_max_generation_count_for_model(validation.model.as_deref());
+    let max_generation_count = openai_image_gateway_max_generation_count();
     validation
         .n
         .is_some_and(|value| value == 0 || value > max_generation_count)
@@ -1761,7 +1759,7 @@ mod tests {
     }
 
     #[test]
-    fn image_validation_restricts_multi_image_count_to_grok_models() {
+    fn image_validation_applies_the_global_count_limit_before_model_mapping() {
         let openai_body = Bytes::from_static(br#"{"model":"gpt-image-2","prompt":"draw","n":2}"#);
         let openai_validation = parse_openai_image_validation_input(
             OpenAiImageOperation::Generate,
@@ -1770,10 +1768,7 @@ mod tests {
         )
         .expect("valid image payload should parse");
 
-        assert_eq!(
-            validate_openai_image_n(&openai_validation).as_deref(),
-            Some("当前图片模型仅支持 n=1..1")
-        );
+        assert!(validate_openai_image_n(&openai_validation).is_none());
 
         let grok_body =
             Bytes::from_static(br#"{"model":"grok-imagine-image-lite","prompt":"draw","n":4}"#);
@@ -1785,5 +1780,28 @@ mod tests {
         .expect("valid grok image payload should parse");
 
         assert!(validate_openai_image_n(&grok_validation).is_none());
+
+        let alias_body =
+            Bytes::from_static(br#"{"model":"production-image-alias","prompt":"draw","n":10}"#);
+        let alias_validation = parse_openai_image_validation_input(
+            OpenAiImageOperation::Generate,
+            Some("application/json"),
+            &alias_body,
+        )
+        .expect("valid image alias payload should parse");
+        assert!(validate_openai_image_n(&alias_validation).is_none());
+
+        let excessive_body =
+            Bytes::from_static(br#"{"model":"production-image-alias","prompt":"draw","n":11}"#);
+        let excessive_validation = parse_openai_image_validation_input(
+            OpenAiImageOperation::Generate,
+            Some("application/json"),
+            &excessive_body,
+        )
+        .expect("image payload should parse before count validation");
+        assert_eq!(
+            validate_openai_image_n(&excessive_validation).as_deref(),
+            Some("当前图片反代仅支持 n=1..10")
+        );
     }
 }

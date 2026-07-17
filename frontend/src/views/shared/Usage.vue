@@ -154,6 +154,7 @@ import {
   getDateRangeFromPeriod
 } from '@/features/usage/composables'
 import { reconcileActiveRequestDiscovery } from '@/features/usage/utils/activeRequestDiscovery'
+import { mergeUsageRecordFirstByteTimeMs } from '@/features/usage/utils/recordSync'
 import {
   hasUsageFallback,
   isUsageRecordFailed,
@@ -521,7 +522,10 @@ async function pollActiveRequests() {
         record.actual_cost = update.actual_cost ?? undefined
         record.rate_multiplier = update.rate_multiplier ?? undefined
         record.response_time_ms = update.response_time_ms ?? undefined
-        record.first_byte_time_ms = update.first_byte_time_ms ?? undefined
+        record.first_byte_time_ms = mergeUsageRecordFirstByteTimeMs(
+          record.first_byte_time_ms,
+          update.first_byte_time_ms
+        )
         if ('updated_at' in update) {
           record.updated_at = typeof update.updated_at === 'string' ? update.updated_at : null
         }
@@ -566,6 +570,11 @@ async function pollActiveRequests() {
         if ('service_tier' in update) {
           record.service_tier = typeof update.service_tier === 'string'
             ? update.service_tier
+            : null
+        }
+        if ('actual_service_tier' in update) {
+          record.actual_service_tier = typeof update.actual_service_tier === 'string'
+            ? update.actual_service_tier
             : null
         }
         // 管理员接口返回额外字段
@@ -812,6 +821,7 @@ onMounted(async () => {
     const heatmapPromise = loadHeatmapData().catch(err => {
       log.error('加载热力图数据失败:', err)
     })
+    const adminUsersPromise = loadAdminUsers()
 
     await loadRecords(
       { page: currentPage.value, pageSize: pageSize.value },
@@ -820,8 +830,7 @@ onMounted(async () => {
     )
     void (async () => {
       await refreshAdminAnalytics({ force: true, preserveOnFailure: false })
-      await heatmapPromise
-      await loadAdminUsers()
+      await Promise.all([heatmapPromise, adminUsersPromise])
     })()
   } else {
     // 用户页面：loadStats 已包含记录加载，不需要单独调用 loadRecords
@@ -1039,6 +1048,7 @@ function handleDetailRequestState(update: {
   targetModel?: string | null
   reasoningEffort?: string | null
   serviceTier?: string | null
+  actualServiceTier?: string | null
   imageProgress?: ImageProgress | null
   errorMessage?: string | null
 }) {
@@ -1098,7 +1108,10 @@ function handleDetailRequestState(update: {
     record.response_time_ms = update.responseTimeMs
   }
   if ('firstByteTimeMs' in update) {
-    record.first_byte_time_ms = update.firstByteTimeMs ?? undefined
+    record.first_byte_time_ms = mergeUsageRecordFirstByteTimeMs(
+      record.first_byte_time_ms,
+      update.firstByteTimeMs
+    )
   }
   if ('isStream' in update && typeof update.isStream === 'boolean') {
     record.is_stream = update.isStream
@@ -1129,6 +1142,11 @@ function handleDetailRequestState(update: {
   }
   if ('serviceTier' in update) {
     record.service_tier = typeof update.serviceTier === 'string' ? update.serviceTier : null
+  }
+  if ('actualServiceTier' in update) {
+    record.actual_service_tier = typeof update.actualServiceTier === 'string'
+      ? update.actualServiceTier
+      : null
   }
   if ('imageProgress' in update) {
     const nextProgress = update.imageProgress ?? null

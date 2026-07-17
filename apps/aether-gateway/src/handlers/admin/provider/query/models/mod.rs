@@ -64,7 +64,8 @@ use aether_data_contracts::repository::provider_catalog::{
 };
 use aether_model_fetch::{
     aggregate_models_for_cache, fetch_models_from_transports, json_string_list,
-    merge_upstream_metadata, preset_models_for_provider, selected_models_fetch_endpoints,
+    model_catalog_upstream_metadata, preset_models_for_provider, selected_models_fetch_endpoints,
+    upstream_metadata_namespace_updates,
 };
 use axum::{
     body::{to_bytes, Body},
@@ -281,6 +282,7 @@ fn provider_query_attach_model_test_capabilities(
 
 fn provider_query_codex_preset_fallback(
     provider: &StoredProviderCatalogProvider,
+    fetch_error: &str,
 ) -> Option<ProviderQueryKeyFetchResult> {
     if !provider.provider_type.trim().eq_ignore_ascii_case("codex") {
         return None;
@@ -289,10 +291,57 @@ fn provider_query_codex_preset_fallback(
     Some(ProviderQueryKeyFetchResult {
         models: aggregate_models_for_cache(&models),
         error: None,
-        warning: None,
+        warning: Some(format!(
+            "Codex 动态模型目录不可用，已使用内置模型卡：{fetch_error}"
+        )),
         from_cache: false,
         has_success: true,
     })
+}
+
+async fn provider_query_persist_preset_models(
+    state: &AdminAppState<'_>,
+    provider: &StoredProviderCatalogProvider,
+    key: &StoredProviderCatalogKey,
+    models: &[Value],
+) -> Result<(), GatewayError> {
+    if models.is_empty() {
+        return Ok(());
+    }
+    <AppState as ModelFetchRuntimeState>::write_upstream_models_cache(
+        state.app(),
+        &provider.id,
+        &key.id,
+        models,
+    )
+    .await;
+    if let Some(catalog_metadata) = model_catalog_upstream_metadata(&provider.provider_type, models)
+    {
+        provider_query_persist_upstream_metadata(state, key, &catalog_metadata).await?;
+    }
+    Ok(())
+}
+
+async fn provider_query_persist_upstream_metadata(
+    state: &AdminAppState<'_>,
+    key: &StoredProviderCatalogKey,
+    upstream_metadata: &Value,
+) -> Result<(), GatewayError> {
+    let updated_at = current_unix_secs();
+    for (namespace, value) in
+        upstream_metadata_namespace_updates(key.upstream_metadata.as_ref(), upstream_metadata)
+    {
+        state
+            .app()
+            .upsert_provider_catalog_key_upstream_metadata_namespace(
+                &key.id,
+                &namespace,
+                &value,
+                Some(updated_at),
+            )
+            .await?;
+    }
+    Ok(())
 }
 
 mod model_test;
@@ -439,11 +488,9 @@ async fn provider_query_fetch_models_for_key(
     let selected_endpoints = selected_models_fetch_endpoints(endpoints, key);
     if selected_endpoints.is_empty() {
         if let Some(models) = preset_models_for_provider(&provider.provider_type) {
-            let models = provider_query_filter_models_for_key(
-                provider,
-                key,
-                aggregate_models_for_cache(&models),
-            );
+            let models = aggregate_models_for_cache(&models);
+            provider_query_persist_preset_models(state, provider, key, &models).await?;
+            let models = provider_query_filter_models_for_key(provider, key, models);
             return Ok(ProviderQueryKeyFetchResult {
                 models,
                 error: None,
@@ -492,7 +539,11 @@ async fn provider_query_fetch_models_for_key(
         Ok(outcome) => outcome,
         Err(err) => {
             all_errors.push(err);
-            if let Some(fallback) = provider_query_codex_preset_fallback(provider) {
+            if let Some(fallback) =
+                provider_query_codex_preset_fallback(provider, &all_errors.join("; "))
+            {
+                provider_query_persist_preset_models(state, provider, key, &fallback.models)
+                    .await?;
                 return Ok(fallback);
             }
             return Ok(ProviderQueryKeyFetchResult {
@@ -517,20 +568,14 @@ async fn provider_query_fetch_models_for_key(
         .await;
     }
     if let Some(upstream_metadata) = outcome.upstream_metadata.as_ref() {
-        let merged_metadata =
-            merge_upstream_metadata(key.upstream_metadata.as_ref(), upstream_metadata);
-        state
-            .app()
-            .update_provider_catalog_key_upstream_metadata(
-                &key.id,
-                Some(&merged_metadata),
-                Some(current_unix_secs()),
-            )
-            .await?;
+        provider_query_persist_upstream_metadata(state, key, upstream_metadata).await?;
     }
 
     if unique_models.is_empty() && !all_errors.is_empty() {
-        if let Some(fallback) = provider_query_codex_preset_fallback(provider) {
+        if let Some(fallback) =
+            provider_query_codex_preset_fallback(provider, &all_errors.join("; "))
+        {
+            provider_query_persist_preset_models(state, provider, key, &fallback.models).await?;
             return Ok(fallback);
         }
     }

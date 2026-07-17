@@ -941,6 +941,7 @@ mod tests {
                 success_failover_patterns: Vec::new(),
                 error_stop_patterns: Vec::new(),
                 stop_cyber_policy_errors: false,
+                retry_client_errors_by_default: true,
             }
         );
     }

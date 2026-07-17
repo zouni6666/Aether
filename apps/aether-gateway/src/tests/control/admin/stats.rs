@@ -1009,6 +1009,26 @@ async fn gateway_handles_admin_stats_provider_performance_locally_with_trusted_a
         payload["timeline"][1]["avg_first_byte_time_ms"],
         serde_json::Value::Null
     );
+
+    let without_timeline_response = admin_request(reqwest::Client::new().get(format!(
+        "{gateway_url}/api/admin/stats/performance/providers?start_date=2024-03-21&end_date=2024-03-21&granularity=hour&limit=2&tz_offset_minutes=0&include_timeline=false"
+    )))
+    .send()
+    .await
+    .expect("request without timeline should succeed");
+    assert_eq!(without_timeline_response.status(), StatusCode::OK);
+    let without_timeline_payload: serde_json::Value = without_timeline_response
+        .json()
+        .await
+        .expect("json body without timeline should parse");
+    assert_eq!(without_timeline_payload["summary"], payload["summary"]);
+    assert_eq!(without_timeline_payload["providers"], payload["providers"]);
+    assert_eq!(
+        without_timeline_payload["timeline"]
+            .as_array()
+            .map(Vec::len),
+        Some(0)
+    );
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -1379,7 +1399,7 @@ async fn gateway_handles_admin_stats_leaderboard_models_locally_with_trusted_adm
     assert_eq!(payload["metric"], "tokens");
     assert_eq!(payload["items"][0]["rank"], 1);
     assert_eq!(payload["items"][0]["id"], "gpt-5");
-    assert_eq!(payload["items"][0]["value"], 160);
+    assert_eq!(payload["items"][0]["value"], 150);
     assert_eq!(payload["items"][1]["id"], "claude-3-5-sonnet");
     assert_eq!(payload["items"][1]["value"], 100);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);

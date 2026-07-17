@@ -249,6 +249,14 @@
                         <span class="ml-1 font-bold text-primary">{{ formatOutputRateValue(detailOutputRate) }}tps</span>
                       </span>
                     </div>
+                    <ServiceTierFacts
+                      v-if="hasServiceTierFacts || processingTierPriceMultiplier !== null"
+                      class="mt-3"
+                      :requested="serviceTierFacts.requested"
+                      :actual="serviceTierFacts.actual"
+                      :billing="serviceTierFacts.billing"
+                      :price-multiplier="processingTierPriceMultiplier"
+                    />
                   </div>
 
                   <!-- 分隔线 -->
@@ -306,13 +314,13 @@
                         <div class="grid grid-cols-2 gap-x-4 gap-y-1 text-muted-foreground sm:hidden">
                           <div class="grid grid-cols-[max-content_1fr] items-baseline gap-x-1">
                             <span>输入</span>
-                            <span class="text-right">${{ formatPrice(tier.input_price_per_1m) }}/M</span>
+                            <span class="text-right">{{ formatPricePerMillion(tier.input_price_per_1m) }}</span>
                           </div>
                           <div
                             class="grid grid-cols-[max-content_1fr] items-baseline gap-x-1"
                           >
                             <span>输出</span>
-                            <span class="text-right">${{ formatPrice(tier.output_price_per_1m) }}/M</span>
+                            <span class="text-right">{{ formatPricePerMillion(tier.output_price_per_1m) }}</span>
                           </div>
                           <template v-if="getTierActiveCacheCreationDisplay(tier) || shouldShowCacheReadPrice(tier)">
                             <div
@@ -334,8 +342,8 @@
                           </template>
                         </div>
                         <div class="text-muted-foreground hidden items-center gap-2 flex-wrap sm:flex">
-                          <span>输入 ${{ formatPrice(tier.input_price_per_1m) }}/M</span>
-                          <span>输出 ${{ formatPrice(tier.output_price_per_1m) }}/M</span>
+                          <span>输入 {{ formatPricePerMillion(tier.input_price_per_1m) }}</span>
+                          <span>输出 {{ formatPricePerMillion(tier.output_price_per_1m) }}</span>
                           <span v-if="getTierActiveCacheCreationDisplay(tier)">
                             {{ getTierActiveCacheCreationDisplay(tier)?.label }}
                             ${{ formatPrice(getTierActiveCacheCreationDisplay(tier)?.price || 0) }}/M
@@ -899,6 +907,12 @@ import {
   resolveUsageStreamLabelSegments,
 } from '../utils/status'
 import { resolveRequestFailureNotice } from '../utils/errorNotice'
+import {
+  formatPricePerMillion,
+  resolveProcessingTierPriceMultiplier,
+  resolveSettlementPricingSourceLabel,
+  resolveSettlementPricingTiers,
+} from '../utils/settlement-pricing'
 
 // 子组件
 import RequestHeadersContent from './RequestDetailDrawer/RequestHeadersContent.vue'
@@ -907,6 +921,8 @@ import JsonContentPanel from './JsonContentPanel.vue'
 import ConversationView from './RequestDetailDrawer/ConversationView.vue'
 import HorizontalRequestTimeline from './HorizontalRequestTimeline.vue'
 import ReplayDialog from './ReplayDialog.vue'
+import ServiceTierFacts from './ServiceTierFacts.vue'
+import { hasServiceTierFact, resolveServiceTierFacts } from '../utils/service-tier'
 
 // 对话解析器
 import {
@@ -952,6 +968,7 @@ const emit = defineEmits<{
     targetModel?: string | null
     reasoningEffort?: string | null
     serviceTier?: string | null
+    actualServiceTier?: string | null
     imageProgress?: ImageProgress | null
     errorMessage?: string | null
   }]
@@ -1134,6 +1151,7 @@ function emitDetailRequestState(nextDetail: RequestDetail) {
     targetModel: nextDetail.target_model ?? null,
     reasoningEffort: nextDetail.reasoning_effort ?? null,
     serviceTier: nextDetail.service_tier ?? null,
+    actualServiceTier: nextDetail.actual_service_tier ?? null,
     errorMessage: nextDetail.error_message ?? undefined,
   })
 }
@@ -1341,6 +1359,12 @@ const metadataPanelData = computed<Record<string, unknown> | null>(() => {
 })
 
 const failureNotice = computed(() => resolveRequestFailureNotice(detail.value))
+
+const serviceTierFacts = computed(() => resolveServiceTierFacts(detail.value))
+const hasServiceTierFacts = computed(() => hasServiceTierFact(serviceTierFacts.value))
+const processingTierPriceMultiplier = computed(() => (
+  resolveProcessingTierPriceMultiplier(detail.value)
+))
 
 const settlementInfo = computed<JsonRecord | null>(() =>
   asRecord(detail.value?.settlement ?? null),
@@ -1629,20 +1653,10 @@ const hasValidConversation = computed(() => {
   return false
 })
 
-// 价格来源标签
-// tiered_pricing.source 表示定价来源: 'provider' 或 'global'
+// 价格来源优先使用 v3 结算快照，旧 tiered_pricing.source 仅作回退。
 const priceSourceLabel = computed(() => {
   if (!detail.value) return '历史定价'
-
-  const source = detail.value.tiered_pricing?.source
-  if (source === 'provider') {
-    return '提供商定价'
-  } else if (source === 'global') {
-    return '全局定价'
-  }
-
-  // 没有 tiered_pricing 时，使用历史价格
-  return '历史定价'
+  return resolveSettlementPricingSourceLabel(detail.value) ?? '历史定价'
 })
 
 const cacheCreationInputTokens5m = computed(() => {
@@ -1882,10 +1896,9 @@ const activeCacheTtlMinutes = computed(() => {
 const displayTiers = computed(() => {
   if (!detail.value) return []
 
-  // 如果有阶梯定价数据，直接使用
-  if (detail.value.tiered_pricing?.tiers && detail.value.tiered_pricing.tiers.length > 0) {
-    return detail.value.tiered_pricing.tiers
-  }
+  // 优先展示结算快照中已解析的价格目录，旧字段仅作回退。
+  const resolvedTiers = resolveSettlementPricingTiers(detail.value)
+  if (resolvedTiers) return resolvedTiers as PricingTierLike[]
 
   // 否则用历史价格构建单阶梯（无上限）
   return [{

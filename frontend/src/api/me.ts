@@ -56,6 +56,7 @@ export interface UsageRecordDetail {
   model: string
   reasoning_effort?: string | null
   service_tier?: string | null
+  actual_service_tier?: string | null
   input_tokens: number
   effective_input_tokens?: number
   output_tokens: number
@@ -369,6 +370,7 @@ export const meApi = {
       target_model?: string | null
       reasoning_effort?: string | null
       service_tier?: string | null
+      actual_service_tier?: string | null
     }>
   }> {
     const params = ids ? { ids } : {}

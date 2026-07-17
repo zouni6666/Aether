@@ -2,11 +2,11 @@ use crate::api::response::build_local_http_error_response;
 use crate::control::GatewayPublicRequestContext;
 use crate::headers::RequestBodyNormalizationError;
 use crate::{AppState, GatewayError};
-use axum::body::{to_bytes, Body, Bytes};
+use aether_gateway_frontdoor::{BodyBufferError, BodyBufferPolicy as FrontdoorBodyBufferPolicy};
+use axum::body::{Body, Bytes};
 use axum::http::{self, Response};
-use std::error::Error as StdError;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
@@ -16,23 +16,22 @@ const REQUEST_BODY_READ_FAILED_DETAIL: &str = "Failed to read request body";
 
 #[derive(Debug, Clone)]
 pub(super) struct RequestBodyBufferPolicy {
-    max_bytes: u64,
-    read_timeout: Duration,
-    queue_timeout: Duration,
-    budget_bytes: usize,
-    budget: Arc<Semaphore>,
+    inner: FrontdoorBodyBufferPolicy,
 }
 
 impl RequestBodyBufferPolicy {
     pub(super) fn from_state(state: &AppState) -> Self {
         Self {
-            max_bytes: crate::headers::max_request_body_bytes(),
-            read_timeout: state.frontdoor_runtime_guards.request_body_read_timeout,
-            queue_timeout: state.frontdoor_runtime_guards.internal_gate_queue_budget,
-            budget_bytes: state
-                .frontdoor_runtime_guards
-                .request_body_buffer_budget_bytes,
-            budget: Arc::clone(&state.request_body_buffer_budget),
+            inner: FrontdoorBodyBufferPolicy::with_permit_bytes(
+                crate::headers::max_request_body_bytes(),
+                state.frontdoor_runtime_guards.request_body_read_timeout,
+                state.frontdoor_runtime_guards.internal_gate_queue_budget,
+                state
+                    .frontdoor_runtime_guards
+                    .request_body_buffer_budget_bytes,
+                crate::state::REQUEST_BODY_BUFFER_PERMIT_BYTES,
+                Arc::clone(&state.request_body_buffer_budget),
+            ),
         }
     }
 
@@ -42,14 +41,17 @@ impl RequestBodyBufferPolicy {
             .unwrap_or(usize::MAX)
             .max(crate::state::REQUEST_BODY_BUFFER_PERMIT_BYTES);
         Self {
-            max_bytes,
-            read_timeout,
-            queue_timeout: read_timeout,
-            budget_bytes,
-            budget: Arc::new(Semaphore::new(
-                budget_bytes.saturating_add(crate::state::REQUEST_BODY_BUFFER_PERMIT_BYTES - 1)
-                    / crate::state::REQUEST_BODY_BUFFER_PERMIT_BYTES,
-            )),
+            inner: FrontdoorBodyBufferPolicy::with_permit_bytes(
+                max_bytes,
+                read_timeout,
+                read_timeout,
+                budget_bytes,
+                crate::state::REQUEST_BODY_BUFFER_PERMIT_BYTES,
+                Arc::new(Semaphore::new(
+                    budget_bytes.saturating_add(crate::state::REQUEST_BODY_BUFFER_PERMIT_BYTES - 1)
+                        / crate::state::REQUEST_BODY_BUFFER_PERMIT_BYTES,
+                )),
+            ),
         }
     }
 
@@ -62,12 +64,34 @@ impl RequestBodyBufferPolicy {
         budget: Arc<Semaphore>,
     ) -> Self {
         Self {
-            max_bytes,
-            read_timeout,
-            queue_timeout,
-            budget_bytes,
-            budget,
+            inner: FrontdoorBodyBufferPolicy::with_permit_bytes(
+                max_bytes,
+                read_timeout,
+                queue_timeout,
+                budget_bytes,
+                crate::state::REQUEST_BODY_BUFFER_PERMIT_BYTES,
+                budget,
+            ),
         }
+    }
+
+    fn max_bytes(&self) -> u64 {
+        self.inner.max_bytes()
+    }
+
+    fn budget_bytes(&self) -> usize {
+        self.inner.budget_bytes()
+    }
+
+    fn read_timeout(&self) -> Duration {
+        self.inner.read_timeout()
+    }
+
+    async fn reserve(
+        &self,
+        headers: &http::HeaderMap,
+    ) -> Result<aether_gateway_frontdoor::BodyBufferReservation, BodyBufferError> {
+        self.inner.reserve(headers).await
     }
 }
 
@@ -135,30 +159,23 @@ impl RequestBodyBufferError {
     }
 }
 
-fn request_body_buffer_reservation_bytes(headers: &http::HeaderMap, max_bytes: u64) -> usize {
-    let max_bytes = usize::try_from(max_bytes).unwrap_or(usize::MAX);
-    let encoded = headers
-        .get(http::header::CONTENT_ENCODING)
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .is_some_and(|value| !value.is_empty() && !value.eq_ignore_ascii_case("identity"));
-    if encoded {
-        return max_bytes;
+impl From<BodyBufferError> for RequestBodyBufferError {
+    fn from(error: BodyBufferError) -> Self {
+        match error {
+            BodyBufferError::TooLarge { limit_bytes } => Self::TooLarge { limit_bytes },
+            BodyBufferError::Overloaded {
+                requested_bytes,
+                budget_bytes,
+                timeout_ms,
+            } => Self::Overloaded {
+                requested_bytes,
+                budget_bytes,
+                timeout_ms,
+            },
+            BodyBufferError::Timeout { timeout_ms } => Self::Timeout { timeout_ms },
+            BodyBufferError::ReadFailed { message } => Self::ReadFailed { message },
+        }
     }
-    headers
-        .get(http::header::CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .map(|value| value.min(max_bytes))
-        .unwrap_or(max_bytes)
-}
-
-fn request_body_buffer_reservation_permits(reservation_bytes: usize) -> u32 {
-    let permits = reservation_bytes
-        .max(1)
-        .saturating_add(crate::state::REQUEST_BODY_BUFFER_PERMIT_BYTES - 1)
-        / crate::state::REQUEST_BODY_BUFFER_PERMIT_BYTES;
-    u32::try_from(permits).unwrap_or(u32::MAX).max(1)
 }
 
 pub(super) async fn buffer_and_normalize_request_body(
@@ -171,33 +188,12 @@ pub(super) async fn buffer_and_normalize_request_body(
     phase: &'static str,
     policy: RequestBodyBufferPolicy,
 ) -> Result<Bytes, RequestBodyBufferError> {
-    if let Err(err) =
-        crate::headers::check_request_content_length_with_limit(headers, policy.max_bytes)
-    {
-        return Err(RequestBodyBufferError::Normalization(err));
-    }
+    let reservation = policy
+        .reserve(headers)
+        .await
+        .map_err(RequestBodyBufferError::from)?;
+    let reservation_bytes = reservation.requested_bytes();
 
-    let reservation_bytes = request_body_buffer_reservation_bytes(headers, policy.max_bytes);
-    let reservation_permits = request_body_buffer_reservation_permits(reservation_bytes);
-    let queue_timeout_ms = policy.queue_timeout.as_millis() as u64;
-    let _budget_permit = match tokio::time::timeout(
-        policy.queue_timeout,
-        Arc::clone(&policy.budget).acquire_many_owned(reservation_permits),
-    )
-    .await
-    {
-        Ok(Ok(permit)) => permit,
-        Ok(Err(_)) | Err(_) => {
-            return Err(RequestBodyBufferError::Overloaded {
-                requested_bytes: reservation_bytes,
-                budget_bytes: policy.budget_bytes,
-                timeout_ms: queue_timeout_ms,
-            });
-        }
-    };
-
-    let read_started_at = Instant::now();
-    let timeout_ms = policy.read_timeout.as_millis() as u64;
     info!(
         event_name = "frontdoor_request_body_buffer_started",
         log_type = "event",
@@ -205,45 +201,27 @@ pub(super) async fn buffer_and_normalize_request_body(
         method = %method,
         path = %path_and_query,
         phase,
-        max_body_bytes = policy.max_bytes,
+        max_body_bytes = policy.max_bytes(),
         reserved_body_bytes = reservation_bytes,
-        body_buffer_budget_bytes = policy.budget_bytes,
-        timeout_ms,
+        body_buffer_budget_bytes = policy.budget_bytes(),
+        timeout_ms = policy.read_timeout().as_millis() as u64,
         "gateway started buffering request body"
     );
 
-    let body_limit = usize::try_from(policy.max_bytes).unwrap_or(usize::MAX);
-    let body = match tokio::time::timeout(
-        policy.read_timeout,
-        to_bytes(
-            request_body.take().expect(body_owner_expectation),
-            body_limit,
-        ),
-    )
-    .await
-    {
-        Ok(Ok(body)) => body,
-        Ok(Err(err)) if request_body_collection_exceeded_limit(&err) => {
-            return Err(RequestBodyBufferError::TooLarge {
-                limit_bytes: policy.max_bytes,
-            });
-        }
-        Ok(Err(err)) => {
-            return Err(RequestBodyBufferError::ReadFailed {
-                message: err.to_string(),
-            });
-        }
-        Err(_) => {
-            return Err(RequestBodyBufferError::Timeout { timeout_ms });
-        }
-    };
-
-    let normalized = crate::headers::normalize_request_body_headers_and_bytes_with_limit(
-        headers,
-        body,
-        policy.max_bytes,
-    )
-    .map_err(RequestBodyBufferError::Normalization)?;
+    let buffered = reservation
+        .collect(request_body.take().expect(body_owner_expectation))
+        .await
+        .map_err(RequestBodyBufferError::from)?;
+    let elapsed_ms = buffered.elapsed().as_millis() as u64;
+    let normalized = buffered
+        .try_map(|body| {
+            crate::headers::normalize_request_body_headers_and_bytes_with_limit(
+                headers,
+                body,
+                policy.max_bytes(),
+            )
+        })
+        .map_err(RequestBodyBufferError::Normalization)?;
     info!(
         event_name = "frontdoor_request_body_buffer_completed",
         log_type = "event",
@@ -252,21 +230,10 @@ pub(super) async fn buffer_and_normalize_request_body(
         path = %path_and_query,
         phase,
         body_bytes = normalized.len(),
-        elapsed_ms = read_started_at.elapsed().as_millis() as u64,
+        elapsed_ms,
         "gateway completed buffering request body"
     );
     Ok(normalized)
-}
-
-fn request_body_collection_exceeded_limit(error: &(dyn StdError + 'static)) -> bool {
-    let mut current = Some(error);
-    while let Some(error) = current {
-        if error.to_string().contains("length limit exceeded") {
-            return true;
-        }
-        current = error.source();
-    }
-    false
 }
 
 pub(super) fn build_request_body_buffer_error_response(

@@ -1,16 +1,56 @@
 use std::collections::BTreeMap;
 
 use super::{
-    apply_codex_openai_responses_special_body_edits, apply_codex_openai_responses_special_headers,
+    apply_codex_openai_responses_special_body_edits, apply_codex_openai_special_headers,
+    codex_model_capabilities,
 };
 use crate::ai_serving::planner::standard::build_local_openai_responses_request_body;
 use http::{HeaderMap, HeaderValue};
 use serde_json::json;
 
 #[test]
+fn search_uses_live_codex_model_catalog_capabilities() {
+    let metadata = crate::ai_serving::build_codex_model_catalog_metadata(&[json!({
+        "slug": "gpt-search-custom",
+        "default_reasoning_level": "low",
+        "supported_reasoning_levels": [
+            {"effort": "low"},
+            {"effort": "max"}
+        ],
+        "supports_parallel_tool_calls": true
+    })]);
+
+    let capabilities = codex_model_capabilities(
+        "codex",
+        "openai:search",
+        "gpt-search-custom",
+        "gpt-search-custom",
+        Some(&metadata),
+    )
+    .expect("Search should resolve capabilities from the Codex model catalog");
+
+    assert_eq!(
+        capabilities.default_reasoning_effort.as_deref(),
+        Some("low")
+    );
+    assert_eq!(
+        capabilities.supported_reasoning_efforts,
+        vec!["low".to_string(), "max".to_string()]
+    );
+    assert!(codex_model_capabilities(
+        "codex",
+        "openai:chat",
+        "gpt-search-custom",
+        "gpt-search-custom",
+        Some(&metadata),
+    )
+    .is_none());
+}
+
+#[test]
 fn applies_codex_defaults_when_body_rules_do_not_handle_fields() {
     let mut body = json!({
-        "model": "gpt-5",
+        "model": "gpt-5.4",
         "max_output_tokens": 128,
         "temperature": 0.3,
         "top_p": 0.9,
@@ -31,10 +71,11 @@ fn applies_codex_defaults_when_body_rules_do_not_handle_fields() {
     assert!(body.get("top_p").is_none());
     assert!(body.get("metadata").is_none());
     assert_eq!(body["store"], false);
-    assert_eq!(body["instructions"], "");
+    assert!(body.get("instructions").is_none());
     assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
     assert_eq!(body["parallel_tool_calls"], true);
-    assert!(body.get("reasoning").is_none());
+    assert_eq!(body["reasoning"]["effort"], "medium");
+    assert!(body["reasoning"].get("summary").is_none());
 }
 
 #[test]
@@ -80,7 +121,7 @@ fn strips_store_for_compact_even_when_body_rules_handle_it() {
         {"action":"set","path":"top_p","value":0.5}
     ]);
     let mut body = json!({
-        "model": "gpt-5",
+        "model": "gpt-5.4",
         "max_output_tokens": 128,
         "metadata": {"client": "desktop", "mode": "custom"},
         "store": true,
@@ -99,12 +140,29 @@ fn strips_store_for_compact_even_when_body_rules_handle_it() {
     assert!(body.get("max_output_tokens").is_none());
     assert!(body.get("store").is_none());
     assert_eq!(body["instructions"], "Keep custom");
-    assert_eq!(body["metadata"]["mode"], "custom");
-    assert_eq!(body["top_p"], 0.5);
+    assert!(body.get("metadata").is_none());
+    assert!(body.get("top_p").is_none());
+    assert_eq!(body["parallel_tool_calls"], true);
+    assert!(body.as_object().is_some_and(|object| {
+        object.keys().all(|field| {
+            matches!(
+                field.as_str(),
+                "model"
+                    | "input"
+                    | "instructions"
+                    | "tools"
+                    | "parallel_tool_calls"
+                    | "reasoning"
+                    | "service_tier"
+                    | "prompt_cache_key"
+                    | "text"
+            )
+        })
+    }));
 }
 
 #[test]
-fn injects_stable_prompt_cache_key_for_codex_requests() {
+fn does_not_synthesize_prompt_cache_key_from_api_key_identity() {
     let mut body = json!({
         "model": "gpt-5",
         "input": "hello",
@@ -118,10 +176,7 @@ fn injects_stable_prompt_cache_key_for_codex_requests() {
         Some("key-123"),
     );
 
-    assert_eq!(
-        body["prompt_cache_key"],
-        "53363264-dbb0-5f9d-b9c7-3e92c45c5bdf"
-    );
+    assert!(body.get("prompt_cache_key").is_none());
 }
 
 #[test]
@@ -144,21 +199,53 @@ fn keeps_existing_prompt_cache_key_for_codex_requests() {
 }
 
 #[test]
-fn injects_chatgpt_account_id_and_session_headers_for_codex_requests() {
+fn injects_identity_headers_without_deriving_session_headers_from_body() {
     let mut headers = BTreeMap::new();
     let body = json!({
         "model": "gpt-5",
         "prompt_cache_key": "172c39e6-c0a0-5a70-8b63-e0f8e0d185a3",
     });
 
-    apply_codex_openai_responses_special_headers(
+    apply_codex_openai_special_headers(
         &mut headers,
         &body,
         &HeaderMap::new(),
         "codex",
         "openai:responses",
         Some("trace-codex-123"),
-        Some(r#"{"account_id":"acc-123"}"#),
+        Some(r#"{"account_id":"acc-123","is_fedramp":true}"#),
+    );
+
+    assert_eq!(
+        headers.get("chatgpt-account-id"),
+        Some(&"acc-123".to_string())
+    );
+    assert_eq!(headers.get("x-client-request-id"), None);
+    assert_eq!(
+        headers.get("user-agent"),
+        Some(&"codex_cli_rs/0.144.1".to_string())
+    );
+    assert_eq!(headers.get("originator"), Some(&"codex_cli_rs".to_string()));
+    assert!(!headers.contains_key("version"));
+    assert_eq!(headers.get("x-openai-fedramp"), Some(&"true".to_string()));
+    assert_eq!(headers.get("session-id"), None);
+    assert_eq!(headers.get("thread-id"), None);
+}
+
+#[test]
+fn injects_only_codex_client_headers_for_images_requests() {
+    let mut headers = BTreeMap::new();
+    apply_codex_openai_special_headers(
+        &mut headers,
+        &json!({
+            "model": "gpt-image-2",
+            "prompt": "draw a city"
+        }),
+        &HeaderMap::new(),
+        "codex",
+        "openai:image",
+        Some("trace-codex-image-123"),
+        Some(r#"{"account_id":"acc-123","is_fedramp":true}"#),
     );
 
     assert_eq!(
@@ -166,35 +253,42 @@ fn injects_chatgpt_account_id_and_session_headers_for_codex_requests() {
         Some(&"acc-123".to_string())
     );
     assert_eq!(
-        headers.get("x-client-request-id"),
-        Some(&"trace-codex-123".to_string())
-    );
-    assert_eq!(
         headers.get("user-agent"),
-        Some(
-            &"codex-tui/0.122.0 (Mac OS 15.2.0; arm64) vscode/2.6.11 (codex-tui; 0.122.0)"
-                .to_string()
-        )
+        Some(&"codex_cli_rs/0.144.1".to_string())
     );
-    assert_eq!(headers.get("originator"), Some(&"codex-tui".to_string()));
-    assert_eq!(
-        headers.get("session_id"),
-        Some(&"ab5ecce4f0d110fe".to_string())
-    );
-    assert_eq!(
-        headers.get("conversation_id"),
-        Some(&"ab5ecce4f0d110fe".to_string())
-    );
+    assert_eq!(headers.get("originator"), Some(&"codex_cli_rs".to_string()));
+    assert!(!headers.contains_key("version"));
+    assert_eq!(headers.get("x-openai-fedramp"), Some(&"true".to_string()));
+    for name in ["x-client-request-id", "session-id", "thread-id"] {
+        assert!(
+            !headers.contains_key(name),
+            "unexpected Images header: {name}"
+        );
+    }
 }
 
 #[test]
-fn respects_existing_codex_request_and_session_headers() {
+fn preserves_client_context_headers_and_enforces_codex_provider_identity() {
     let mut headers = BTreeMap::new();
     headers.insert(
         "x-client-request-id".to_string(),
         "kept-by-rule-request".to_string(),
     );
-    headers.insert("session_id".to_string(), "kept-by-rule".to_string());
+    headers.insert("session-id".to_string(), "kept-by-rule-session".to_string());
+    headers.insert("thread-id".to_string(), "kept-by-rule-thread".to_string());
+    headers.insert(
+        "chatgpt-account-id".to_string(),
+        "configured-spoof".to_string(),
+    );
+    headers.insert(
+        "x-openai-fedramp".to_string(),
+        "configured-false".to_string(),
+    );
+    headers.insert(
+        "User-Agent".to_string(),
+        "AsyncOpenAI/Python 2.44.0".to_string(),
+    );
+    headers.insert("ORIGINATOR".to_string(), "sdk-client".to_string());
     let body = json!({
         "model": "gpt-5",
         "prompt_cache_key": "172c39e6-c0a0-5a70-8b63-e0f8e0d185a3",
@@ -205,12 +299,12 @@ fn respects_existing_codex_request_and_session_headers() {
         HeaderValue::from_static("user-specified-request"),
     );
     original_headers.insert(
-        "session_id",
+        "session-id",
         HeaderValue::from_static("user-specified-session"),
     );
     original_headers.insert(
-        "conversation_id",
-        HeaderValue::from_static("user-specified-conversation"),
+        "thread-id",
+        HeaderValue::from_static("user-specified-thread"),
     );
     original_headers.insert(
         "user-agent",
@@ -220,64 +314,92 @@ fn respects_existing_codex_request_and_session_headers() {
         "originator",
         HeaderValue::from_static("user-specified-originator"),
     );
+    original_headers.insert("version", HeaderValue::from_static("user-version"));
+    original_headers.insert("x-openai-fedramp", HeaderValue::from_static("user-fedramp"));
+    original_headers.insert(
+        "chatgpt-account-id",
+        HeaderValue::from_static("user-account"),
+    );
 
-    apply_codex_openai_responses_special_headers(
+    apply_codex_openai_special_headers(
         &mut headers,
         &body,
         &original_headers,
         "codex",
         "openai:responses",
         Some("trace-codex-123"),
-        Some(r#"{"account_id":"acc-123"}"#),
+        Some(r#"{"account_id":"acc-123","is_fedramp":true}"#),
     );
 
     assert_eq!(
         headers.get("x-client-request-id"),
         Some(&"kept-by-rule-request".to_string())
     );
-    assert!(!headers.contains_key("user-agent"));
-    assert!(!headers.contains_key("originator"));
-    assert_eq!(headers.get("session_id"), Some(&"kept-by-rule".to_string()));
-    assert!(!headers.contains_key("conversation_id"));
+    assert_eq!(
+        headers.get("user-agent"),
+        Some(&"codex_cli_rs/0.144.1".to_string())
+    );
+    assert_eq!(headers.get("originator"), Some(&"codex_cli_rs".to_string()));
+    assert_eq!(
+        headers
+            .keys()
+            .filter(|name| name.eq_ignore_ascii_case("user-agent"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        headers
+            .keys()
+            .filter(|name| name.eq_ignore_ascii_case("originator"))
+            .count(),
+        1
+    );
+    assert!(!headers.contains_key("version"));
+    assert_eq!(
+        headers.get("chatgpt-account-id"),
+        Some(&"acc-123".to_string())
+    );
+    assert_eq!(headers.get("x-openai-fedramp"), Some(&"true".to_string()));
+    assert_eq!(
+        headers.get("session-id"),
+        Some(&"kept-by-rule-session".to_string())
+    );
+    assert_eq!(
+        headers.get("thread-id"),
+        Some(&"kept-by-rule-thread".to_string())
+    );
 }
 
 #[test]
-fn skips_conversation_id_for_compact_codex_requests() {
+fn compact_does_not_derive_session_headers_from_body() {
     let mut headers = BTreeMap::new();
     let body = json!({
         "model": "gpt-5",
         "prompt_cache_key": "172c39e6-c0a0-5a70-8b63-e0f8e0d185a3",
     });
 
-    apply_codex_openai_responses_special_headers(
+    apply_codex_openai_special_headers(
         &mut headers,
         &body,
         &HeaderMap::new(),
         "codex",
         "openai:responses:compact",
         Some("trace-codex-compact-123"),
-        Some(r#"{"account_id":"acc-123"}"#),
+        Some(r#"{"account_id":"acc-123","is_fedramp":true}"#),
     );
 
     assert_eq!(
         headers.get("chatgpt-account-id"),
         Some(&"acc-123".to_string())
     );
-    assert_eq!(
-        headers.get("x-client-request-id"),
-        Some(&"trace-codex-compact-123".to_string())
-    );
+    assert_eq!(headers.get("x-client-request-id"), None);
     assert_eq!(
         headers.get("user-agent"),
-        Some(
-            &"codex-tui/0.122.0 (Mac OS 15.2.0; arm64) vscode/2.6.11 (codex-tui; 0.122.0)"
-                .to_string()
-        )
+        Some(&"codex_cli_rs/0.144.1".to_string())
     );
-    assert_eq!(headers.get("originator"), Some(&"codex-tui".to_string()));
-    assert_eq!(
-        headers.get("session_id"),
-        Some(&"ab5ecce4f0d110fe".to_string())
-    );
-    assert!(!headers.contains_key("conversation_id"));
+    assert_eq!(headers.get("originator"), Some(&"codex_cli_rs".to_string()));
+    assert!(!headers.contains_key("version"));
+    assert_eq!(headers.get("x-openai-fedramp"), Some(&"true".to_string()));
+    assert_eq!(headers.get("session-id"), None);
+    assert_eq!(headers.get("thread-id"), None);
 }

@@ -851,6 +851,9 @@ fn merge_stream_terminal_summary(
     if current_summary.model.is_none() {
         current_summary.model = observed.model;
     }
+    if observed.provider_actual_service_tier.is_some() {
+        current_summary.provider_actual_service_tier = observed.provider_actual_service_tier;
+    }
     current_summary.observed_finish |= observed.observed_finish;
     current_summary.unknown_event_count = current_summary
         .unknown_event_count
@@ -5252,16 +5255,12 @@ async fn execute_stream_from_frame_stream(
                             telemetry.as_ref(),
                             &mut usage_stream_telemetry,
                         ) {
-                            let usage_data = state_for_report.data.as_ref().clone();
-                            state_for_report
-                                .usage_runtime
-                                .record_stream_started_direct(
-                                    &usage_data,
-                                    &lifecycle_seed_for_report,
-                                    status_code,
-                                    usage_stream_telemetry.as_ref(),
-                                )
-                                .await;
+                            state_for_report.usage_runtime.record_stream_started(
+                                state_for_report.data.as_ref(),
+                                &lifecycle_seed_for_report,
+                                status_code,
+                                usage_stream_telemetry.as_ref(),
+                            );
                         }
                         let first_data_after = usage_stream_telemetry
                             .as_ref()
@@ -5460,33 +5459,16 @@ async fn execute_stream_from_frame_stream(
                             &usage_frame_telemetry,
                         );
                         if should_refresh_stream_usage {
-                            if usage_frame_telemetry.ttfb_ms.is_some() {
-                                let usage_data = state_for_report.data.as_ref().clone();
-                                state_for_report
-                                    .usage_runtime
-                                    .record_stream_started_direct(
-                                        &usage_data,
-                                        &lifecycle_seed_for_report,
-                                        status_code,
-                                        Some(&usage_frame_telemetry),
-                                    )
-                                    .await;
-                            } else {
-                                state_for_report.usage_runtime.record_stream_started(
-                                    state_for_report.data.as_ref(),
-                                    &lifecycle_seed_for_report,
-                                    status_code,
-                                    Some(&usage_frame_telemetry),
-                                );
-                            }
+                            // The first Data frame records the live streaming transition. Later
+                            // telemetry frames only refine the terminal accumulator; persisting
+                            // every elapsed-time update would create one usage task per frame.
                             usage_stream_telemetry = Some(usage_frame_telemetry);
                         }
                         telemetry = Some(frame_telemetry);
                     }
                     StreamFramePayload::Eof { summary } => {
-                        if summary.is_some() {
-                            stream_terminal_summary = summary;
-                        }
+                        stream_terminal_summary =
+                            merge_stream_terminal_summary(stream_terminal_summary.take(), summary);
                         break;
                     }
                     StreamFramePayload::Error { error } => {
@@ -6293,12 +6275,14 @@ mod tests {
             Some(ExecutionStreamTerminalSummary {
                 standardized_usage: Some(runtime_usage),
                 model: Some("gpt-5.5".to_string()),
+                provider_actual_service_tier: Some("priority".to_string()),
                 unknown_event_count: 1,
                 ..ExecutionStreamTerminalSummary::default()
             }),
             Some(ExecutionStreamTerminalSummary {
                 standardized_usage: Some(observed_usage),
                 response_id: Some("resp_123".to_string()),
+                provider_actual_service_tier: Some("default".to_string()),
                 observed_finish: true,
                 unknown_event_count: 2,
                 ..ExecutionStreamTerminalSummary::default()
@@ -6313,6 +6297,10 @@ mod tests {
         assert_eq!(usage.output_tokens, 137);
         assert_eq!(merged.model.as_deref(), Some("gpt-5.5"));
         assert_eq!(merged.response_id.as_deref(), Some("resp_123"));
+        assert_eq!(
+            merged.provider_actual_service_tier.as_deref(),
+            Some("default")
+        );
         assert!(merged.observed_finish);
         assert_eq!(merged.unknown_event_count, 3);
     }

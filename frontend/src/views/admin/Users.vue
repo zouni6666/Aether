@@ -24,7 +24,7 @@
         @update:sort-option="sortOption = $event"
         @open-groups="showUserGroupsDialog = true"
         @create-user="openCreateDialog"
-        @refresh="refreshUsers"
+        @refresh="handleManualRefresh"
       />
 
       <UserSelectionToolbar
@@ -189,7 +189,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useUsersStore } from '@/stores/users'
 import { useAuthStore } from '@/stores/auth'
 import {
@@ -325,7 +325,9 @@ const currentPage = ref(1)
 const pageSize = ref(20)
 const USERS_PAGE_CACHE_TTL_MS = 10 * 1000
 const USER_WALLETS_CACHE_TTL_MS = 10 * 1000
+const USERS_SEARCH_DEBOUNCE_MS = 300
 let userWalletsRequestId = 0
+let usersSearchDebounceTimer: ReturnType<typeof setTimeout> | null = null
 
 const filteredUsers = computed(() => usersStore.users)
 
@@ -404,39 +406,70 @@ const userRows = computed<UserManagementRow[]>(() =>
   })
 )
 
-// Watch filter changes and reset to first page
-watch([searchQuery, filterRole, filterStatus, filterGroup, sortOption], () => {
+function resetUserListForFilterChange() {
   currentPage.value = 1
   resetBatchSelection()
+}
+
+function clearUsersSearchDebounce() {
+  if (usersSearchDebounceTimer) {
+    clearTimeout(usersSearchDebounceTimer)
+    usersSearchDebounceTimer = null
+  }
+}
+
+watch(searchQuery, () => {
+  resetUserListForFilterChange()
+  clearUsersSearchDebounce()
+  usersSearchDebounceTimer = setTimeout(() => {
+    usersSearchDebounceTimer = null
+    void refreshUsers()
+  }, USERS_SEARCH_DEBOUNCE_MS)
+})
+
+watch([filterRole, filterStatus, filterGroup, sortOption], () => {
+  resetUserListForFilterChange()
+  clearUsersSearchDebounce()
   void refreshUsers()
 })
 
 watch(paginatedUsers, (users) => rememberBatchPageUsers(users), { immediate: true })
 
 onMounted(() => {
-  void refreshUsers({ preferCache: true })
+  void refreshUsers({ preferCache: true }).then(() =>
+    loadUserWallets({ cacheTtlMs: USER_WALLETS_CACHE_TTL_MS })
+  )
+  void loadUserGroups()
+})
+
+onBeforeUnmount(() => {
+  clearUsersSearchDebounce()
+  userWalletsRequestId += 1
 })
 
 async function refreshUsers(options: { preferCache?: boolean } = {}) {
   const cacheTtlMs = options.preferCache ? USERS_PAGE_CACHE_TTL_MS : 0
   const search = searchQuery.value.trim()
-  await Promise.all([
-    usersStore.fetchUsers({
-      cacheTtlMs,
-      search: search || undefined,
-      role: filterRole.value === 'all' ? undefined : filterRole.value,
-      is_active: filterStatus.value === 'all' ? undefined : filterStatus.value === 'active',
-      group_id: filterGroup.value === 'all' ? undefined : filterGroup.value,
-      sort_by: sortBy.value ?? undefined,
-      sort_order: sortBy.value ? sortOrder.value : undefined,
-      skip: (currentPage.value - 1) * pageSize.value,
-      limit: pageSize.value,
-    }),
-    loadUserGroups(),
-  ])
-  void loadUserWallets({
-    cacheTtlMs: options.preferCache ? USER_WALLETS_CACHE_TTL_MS : 0,
+  await usersStore.fetchUsers({
+    cacheTtlMs,
+    search: search || undefined,
+    role: filterRole.value === 'all' ? undefined : filterRole.value,
+    is_active: filterStatus.value === 'all' ? undefined : filterStatus.value === 'active',
+    group_id: filterGroup.value === 'all' ? undefined : filterGroup.value,
+    sort_by: sortBy.value ?? undefined,
+    sort_order: sortBy.value ? sortOrder.value : undefined,
+    skip: (currentPage.value - 1) * pageSize.value,
+    limit: pageSize.value,
   })
+}
+
+async function handleManualRefresh() {
+  clearUsersSearchDebounce()
+  await Promise.all([
+    refreshUsers(),
+    loadUserGroups(),
+    loadUserWallets(),
+  ])
 }
 
 function handleTableSort(payload: { key: string, direction: AdminUserSortOrder }): void {
@@ -469,7 +502,7 @@ async function loadUserGroups(): Promise<void> {
 }
 
 async function handleUserGroupsChanged(): Promise<void> {
-  await refreshUsers()
+  await Promise.all([refreshUsers(), loadUserGroups()])
 }
 
 function openUserBatchDialog(): void {
@@ -478,7 +511,7 @@ function openUserBatchDialog(): void {
 }
 
 async function handleUserBatchCompleted(_result: UserBatchActionResponse): Promise<void> {
-  await refreshUsers()
+  await Promise.all([refreshUsers(), loadUserWallets()])
   resetBatchSelection(true)
 }
 
@@ -740,7 +773,7 @@ async function handleUserFormSubmit(data: UserFormData & { password?: string; un
       success(legacyT('用户创建成功'))
     }
     closeUserFormDialog()
-    await refreshUsers()
+    await Promise.all([refreshUsers(), loadUserWallets()])
   } catch (err: unknown) {
     const title = data.id ? '更新用户失败' : '创建用户失败'
     error(localizedApiError(err, '未知错误'), legacyT(title))

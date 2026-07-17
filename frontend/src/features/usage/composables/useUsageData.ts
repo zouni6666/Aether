@@ -631,7 +631,8 @@ export function useUsageData(options: UseUsageDataOptions) {
         rate_multiplier: record.rate_multiplier ?? existing.rate_multiplier,
         target_model: record.target_model ?? existing.target_model,
         reasoning_effort: record.reasoning_effort ?? existing.reasoning_effort,
-        service_tier: record.service_tier ?? existing.service_tier
+        service_tier: record.service_tier ?? existing.service_tier,
+        actual_service_tier: record.actual_service_tier ?? existing.actual_service_tier
       }
     })
   }

@@ -10,6 +10,7 @@ import {
   isModelTestableEndpoint,
   isModelTestableApiFormat,
   listModelTestMappedModelOptions,
+  modelTestMappingScopeMatchesEndpoint,
   normalizeModelTestMappedModelSelection,
   selectPreferredModelTestEndpoint,
   setModelTestRequestBodyModel,
@@ -97,6 +98,20 @@ describe('buildDefaultModelTestRequestBody', () => {
     expect(body.messages).toBeUndefined()
   })
 
+  it('uses the synchronous OpenAI Search request contract', () => {
+    const body = JSON.parse(buildDefaultModelTestRequestBody('gpt-5.6-sol', 'openai:search'))
+
+    expect(body).toEqual({
+      id: expect.stringMatching(/^aether-model-test-/),
+      model: 'gpt-5.6-sol',
+      input: 'Hello! This is a test message.',
+      commands: {
+        search_query: [{ q: 'Hello! This is a test message.' }],
+      },
+      max_output_tokens: 256,
+    })
+  })
+
   it('uses image generation tools for image models on OpenAI Responses endpoints', () => {
     const body = JSON.parse(buildDefaultModelTestRequestBody(
       'gpt-image-2',
@@ -175,6 +190,52 @@ describe('buildDefaultModelTestRequestBody', () => {
     })
 
     expect(options).toEqual([])
+  })
+
+  it('uses one-way format permissions for Search mapping options', () => {
+    const responsesOptions = listModelTestMappedModelOptions({
+      provider_model_name: 'gpt-5.6-luna',
+      provider_model_mappings: [{
+        name: 'gpt-5.6-luna',
+        priority: 1,
+        api_formats: ['openai:responses'],
+      }],
+    }, {
+      id: 'search-endpoint',
+      api_format: 'openai:search',
+    })
+    const searchOptions = listModelTestMappedModelOptions({
+      provider_model_name: 'gpt-5.6-luna',
+      provider_model_mappings: [{
+        name: 'gpt-5.6-luna',
+        priority: 1,
+        api_formats: ['openai:search'],
+      }],
+    }, {
+      id: 'responses-endpoint',
+      api_format: 'openai:responses',
+    })
+
+    expect(responsesOptions).toEqual([{ name: 'gpt-5.6-luna', priority: 1 }])
+    expect(searchOptions).toEqual([])
+  })
+
+  it('keeps explicit mapping scopes strict when no endpoint matches', () => {
+    expect(modelTestMappingScopeMatchesEndpoint(
+      ['openai:responses'],
+      ['search-endpoint'],
+      { id: 'search-endpoint', api_format: 'openai:search' },
+    )).toBe(true)
+    expect(modelTestMappingScopeMatchesEndpoint(
+      ['openai:responses'],
+      ['another-endpoint'],
+      { id: 'search-endpoint', api_format: 'openai:search' },
+    )).toBe(false)
+    expect(modelTestMappingScopeMatchesEndpoint(
+      ['openai:search'],
+      undefined,
+      { id: 'responses-endpoint', api_format: 'openai:responses' },
+    )).toBe(false)
   })
 
   it('keeps the current model selected by default until a mapped model is chosen', () => {
@@ -259,7 +320,7 @@ describe('isModelTestableApiFormat', () => {
     'gemini:video',
     'gemini:files',
     '  OPENAI:VIDEO  ',
-  ])('excludes task and file endpoint formats from model tests: %s', (apiFormat) => {
+  ])('excludes endpoint formats without a model-test request contract: %s', (apiFormat) => {
     expect(isModelTestableApiFormat(apiFormat)).toBe(false)
   })
 
@@ -267,6 +328,7 @@ describe('isModelTestableApiFormat', () => {
     'openai:chat',
     'openai:responses',
     'openai:responses:compact',
+    'openai:search',
     'openai:image',
     'claude:messages',
     'gemini:generate_content',
@@ -377,6 +439,17 @@ describe('isModelTestableEndpoint', () => {
       api_format: 'openai:responses',
       is_active: true,
     }, keys)).toBe(true)
+  })
+
+  it('uses one-way format permissions for Search endpoint keys', () => {
+    expect(isModelTestableEndpoint({
+      api_format: 'openai:search',
+      is_active: true,
+    }, [{ api_formats: ['openai:responses'], is_active: true }])).toBe(true)
+    expect(isModelTestableEndpoint({
+      api_format: 'openai:responses',
+      is_active: true,
+    }, [{ api_formats: ['openai:search'], is_active: true }])).toBe(false)
   })
 
   it('lets fixed provider OAuth keys inherit testable endpoint formats', () => {

@@ -1,8 +1,8 @@
 use super::{
     hash_api_key, sample_models_candidate_row, unrestricted_models_snapshot,
     InMemoryAuthApiKeySnapshotRepository, InMemoryMinimalCandidateSelectionReadRepository,
-    InMemoryVideoTaskRepository, UpsertVideoTask, VideoTaskLookupKey, VideoTaskReadRepository,
-    VideoTaskStatus, VideoTaskWriteRepository, DEVELOPMENT_ENCRYPTION_KEY,
+    InMemoryVideoTaskRepository, StoredAuthApiKeySnapshot, UpsertVideoTask, VideoTaskLookupKey,
+    VideoTaskReadRepository, VideoTaskStatus, VideoTaskWriteRepository, DEVELOPMENT_ENCRYPTION_KEY,
 };
 use crate::image_capabilities::openai_image_gateway_max_generation_count;
 use crate::tests::{
@@ -25,6 +25,95 @@ use axum::response::IntoResponse;
 use std::collections::HashMap;
 use std::future::pending;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+fn codex_models_snapshot(api_key_id: &str, user_id: &str) -> StoredAuthApiKeySnapshot {
+    StoredAuthApiKeySnapshot::new(
+        user_id.to_string(),
+        "alice".to_string(),
+        Some("alice@example.com".to_string()),
+        "user".to_string(),
+        "local".to_string(),
+        true,
+        false,
+        Some(json!(["codex"])),
+        Some(json!(["openai:responses"])),
+        Some(json!(["frontier-sol", "broken-luna"])),
+        api_key_id.to_string(),
+        Some("codex-models".to_string()),
+        true,
+        false,
+        false,
+        Some(10),
+        Some(5),
+        Some(4_102_444_800),
+        Some(json!(["codex"])),
+        Some(json!(["openai:responses"])),
+        Some(json!(["frontier-sol", "broken-luna"])),
+    )
+    .expect("Codex models auth snapshot should build")
+}
+
+fn sample_codex_models_candidate_row(
+    provider_id: &str,
+    global_model_name: &str,
+    source_model_name: &str,
+) -> StoredMinimalCandidateSelectionRow {
+    let mut row = sample_models_candidate_row(
+        provider_id,
+        "codex",
+        "openai:responses",
+        global_model_name,
+        10,
+    );
+    row.provider_type = "codex".to_string();
+    row.key_auth_type = "oauth".to_string();
+    row.model_provider_model_name = source_model_name.to_string();
+    row.model_provider_model_mappings = Some(vec![
+        aether_data_contracts::repository::candidate_selection::StoredProviderModelMapping {
+            name: source_model_name.to_string(),
+            priority: 1,
+            api_formats: Some(vec!["openai:responses".to_string()]),
+            endpoint_ids: None,
+            operations: None,
+        },
+    ]);
+    row
+}
+
+fn complete_codex_model_card(source_model_name: &str) -> serde_json::Value {
+    json!({
+        "id": source_model_name,
+        "api_formats": ["openai:responses"],
+        "slug": source_model_name,
+        "display_name": "GPT-5.6-Sol",
+        "description": "Frontier coding model",
+        "default_reasoning_level": "low",
+        "supported_reasoning_levels": [
+            {"effort": "low", "description": "Low"},
+            {"effort": "medium", "description": "Medium"},
+            {"effort": "high", "description": "High"},
+            {"effort": "xhigh", "description": "XHigh"},
+            {"effort": "max", "description": "Max"},
+            {"effort": "ultra", "description": "Ultra"}
+        ],
+        "shell_type": "shell_command",
+        "visibility": "list",
+        "supported_in_api": true,
+        "priority": 1,
+        "availability_nux": null,
+        "upgrade": null,
+        "base_instructions": "Use the current Codex instructions.",
+        "model_messages": null,
+        "support_verbosity": true,
+        "default_verbosity": "low",
+        "apply_patch_tool_type": "freeform",
+        "truncation_policy": {"mode": "tokens", "limit": 10000},
+        "supports_parallel_tool_calls": true,
+        "experimental_supported_tools": [],
+        "minimal_client_version": "0.144.0",
+        "future_capability": {"enabled": true}
+    })
+}
 
 fn gemini_operation_status_label(status: VideoTaskStatus) -> &'static str {
     match status {
@@ -358,6 +447,121 @@ async fn gateway_handles_public_openai_models_without_hitting_fallback_probe() {
 
     gateway_handle.abort();
     fallback_probe_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_serves_codex_model_cards_for_versioned_models_requests() {
+    let codex_row =
+        sample_codex_models_candidate_row("provider-codex-models", "frontier-sol", "gpt-5.6-sol");
+    let incomplete_codex_row = sample_codex_models_candidate_row(
+        "provider-codex-incomplete",
+        "broken-luna",
+        "gpt-5.6-luna",
+    );
+    let candidate_repository =
+        Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+            codex_row.clone(),
+            incomplete_codex_row.clone(),
+            sample_models_candidate_row(
+                "provider-openai-responses",
+                "openai",
+                "openai:responses",
+                "custom-responses-model",
+                20,
+            ),
+        ]));
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![
+        (
+            Some(hash_api_key("sk-codex-models")),
+            codex_models_snapshot("key-codex-models", "user-codex-models"),
+        ),
+        (
+            Some(hash_api_key("sk-standard-models")),
+            unrestricted_models_snapshot("key-standard-models", "user-standard-models"),
+        ),
+    ]));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(
+            crate::data::GatewayDataState::with_minimal_candidate_selection_and_auth_for_tests(
+                candidate_repository,
+                auth_repository,
+            ),
+        );
+    state
+        .runtime_kv_setex(
+            &format!(
+                "upstream_models:{}:{}",
+                codex_row.provider_id, codex_row.key_id
+            ),
+            &serde_json::to_string(&vec![complete_codex_model_card("gpt-5.6-sol")])
+                .expect("model cache should serialize"),
+            60,
+        )
+        .await
+        .expect("model cache should seed");
+    state
+        .runtime_kv_setex(
+            &format!(
+                "upstream_models:{}:{}",
+                incomplete_codex_row.provider_id, incomplete_codex_row.key_id
+            ),
+            &serde_json::to_string(&vec![json!({
+                "id": "gpt-5.6-luna",
+                "slug": "gpt-5.6-luna",
+                "display_name": "GPT-5.6-Luna"
+            })])
+            .expect("incomplete model cache should serialize"),
+            60,
+        )
+        .await
+        .expect("incomplete model cache should seed");
+
+    let gateway = build_router_with_state(state);
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+
+    let codex_response = client
+        .get(format!("{gateway_url}/v1/models?client_version=0.144.1"))
+        .header("authorization", "Bearer sk-codex-models")
+        .send()
+        .await
+        .expect("Codex models request should succeed");
+    assert_eq!(codex_response.status(), StatusCode::OK);
+    let codex_payload: serde_json::Value = codex_response
+        .json()
+        .await
+        .expect("Codex models body should parse");
+    assert_eq!(codex_payload["models"].as_array().map(Vec::len), Some(1));
+    assert_eq!(codex_payload["models"][0]["slug"], "frontier-sol");
+    assert_eq!(
+        codex_payload["models"][0]["supported_reasoning_levels"][5]["effort"],
+        "ultra"
+    );
+    assert_eq!(
+        codex_payload["models"][0]["future_capability"],
+        json!({"enabled": true})
+    );
+    assert!(codex_payload["models"][0].get("id").is_none());
+    assert!(codex_payload["models"][0].get("api_formats").is_none());
+    assert!(codex_payload.get("object").is_none());
+
+    let standard_response = client
+        .get(format!("{gateway_url}/v1/models"))
+        .header("authorization", "Bearer sk-standard-models")
+        .send()
+        .await
+        .expect("standard models request should succeed");
+    assert_eq!(standard_response.status(), StatusCode::OK);
+    let standard_payload: serde_json::Value = standard_response
+        .json()
+        .await
+        .expect("standard models body should parse");
+    assert_eq!(standard_payload["object"], "list");
+    assert!(standard_payload["data"].is_array());
+    assert!(standard_payload.get("models").is_none());
+
+    gateway_handle.abort();
 }
 
 #[tokio::test]
@@ -1212,7 +1416,7 @@ async fn gateway_does_not_locally_reject_image_model_name_on_chat_completions() 
 }
 
 #[tokio::test]
-async fn gateway_rejects_image_request_with_n_greater_than_four_without_hitting_fallback_probe() {
+async fn gateway_rejects_image_request_above_gateway_limit_without_hitting_fallback_probe() {
     let fallback_probe_hits = Arc::new(Mutex::new(0usize));
     let fallback_probe_hits_clone = Arc::clone(&fallback_probe_hits);
     let fallback_probe = Router::new().route(
@@ -1247,7 +1451,7 @@ async fn gateway_rejects_image_request_with_n_greater_than_four_without_hitting_
             serde_json::to_vec(&json!({
                 "model": "grok-imagine-image-lite",
                 "prompt": "draw",
-                "n": 5,
+                "n": openai_image_gateway_max_generation_count() + 1,
                 "response_format": "b64_json"
             }))
             .expect("request body should encode"),

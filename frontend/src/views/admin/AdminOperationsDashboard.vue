@@ -11,7 +11,7 @@
       </div>
       <div class="flex flex-wrap items-center gap-2">
         <Badge variant="outline">
-          自动刷新 10s
+          手动刷新
         </Badge>
         <span class="text-xs text-muted-foreground">
           更新 {{ lastUpdatedLabel }}
@@ -19,7 +19,7 @@
         <RefreshButton
           :loading="refreshing"
           title="刷新运维总览"
-          @click="refreshAll"
+          @click="refreshAll()"
         />
         <TimeRangePicker
           v-model="timeRange"
@@ -702,8 +702,8 @@
               :value-class="errorRateValueClass"
             />
             <MetricCell
-              label="请求错误"
-              :value="formatMetricNumber(summaryStats?.error_requests)"
+              label="已分类错误"
+              :value="formatMetricNumber(classifiedErrorCount)"
             />
             <MetricCell
               label="熔断打开"
@@ -1012,7 +1012,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineComponent, h, onMounted, onUnmounted, ref, watch, type Component } from 'vue'
+import { computed, defineComponent, h, onUnmounted, ref, watch, type Component } from 'vue'
 import { RouterLink } from 'vue-router'
 import type { ChartData, ChartOptions } from 'chart.js'
 import {
@@ -1034,9 +1034,8 @@ import LineChart from '@/components/charts/LineChart.vue'
 import DoughnutChart from '@/components/charts/DoughnutChart.vue'
 import { adminApi, type ErrorDistributionItem, type PercentileItem, type ProviderPerformanceResponse } from '@/api/admin'
 import { cacheApi, redisCacheApi, type CacheStats, type RedisCacheCategoriesResponse } from '@/api/cache'
-import { monitoringApi, type AdminMonitoringRecentError, type AdminMonitoringResilienceStatus, type AdminMonitoringSystemStatus, type GatewayMetricsSummary } from '@/api/monitoring'
+import { monitoringApi, type AdminMonitoringRecentError, type AdminMonitoringResilienceStatus, type GatewayMetricsSummary } from '@/api/monitoring'
 import { proxyNodesApi, type ProxyNode, type ProxyNodeMetricsResponse } from '@/api/proxy-nodes'
-import { usageApi, type UsageStats } from '@/api/usage'
 import { getDateRangeFromPeriod } from '@/features/usage/composables'
 import type { DateRangeParams } from '@/features/usage/types'
 import { formatByteSize, formatCurrency, formatNumber, formatTokens } from '@/utils/format'
@@ -1063,7 +1062,6 @@ const MetricCell = defineComponent<MetricCellProps>({
   },
 })
 
-const AUTO_REFRESH_MS = 10_000
 const DEFAULT_SLOW_THRESHOLD_MS = 10_000
 
 interface ResourceSnapshot {
@@ -1079,24 +1077,28 @@ const timeRange = ref<DateRangeParams>({
   ...getDateRangeFromPeriod('today'),
   granularity: 'hour',
 })
-const summaryStats = ref<UsageStats | null>(null)
 const timeSeries = ref<Array<Record<string, unknown>>>([])
 const percentiles = ref<PercentileItem[]>([])
 const providerPerformance = ref<ProviderPerformanceResponse | null>(null)
 const errorDistribution = ref<ErrorDistributionItem[]>([])
-const systemStatus = ref<AdminMonitoringSystemStatus | null>(null)
+const errorDistributionLoaded = ref(false)
 const resilienceStatus = ref<AdminMonitoringResilienceStatus | null>(null)
 const gatewayMetrics = ref<GatewayMetricsSummary | null>(null)
 const cacheStats = ref<CacheStats | null>(null)
 const redisCategories = ref<RedisCacheCategoriesResponse | null>(null)
 const resourceSnapshot = ref<ResourceSnapshot | null>(null)
 const lastUpdatedAt = ref<string | null>(null)
-const loadWarning = ref<string | null>(null)
+const analyticsWarning = ref<string | null>(null)
+const realtimeWarning = ref<string | null>(null)
+const loadWarning = computed(() =>
+  [analyticsWarning.value, realtimeWarning.value].filter(Boolean).join('；') || null
+)
 const refreshing = ref(false)
 const trendLoading = ref(false)
 const percentileLoading = ref(false)
-let refreshTimer: ReturnType<typeof setInterval> | null = null
 let requestId = 0
+let refreshPromise: Promise<void> | null = null
+let analyticsGeneration = 0
 
 const timeRangeParams = computed(() => ({
   start_date: timeRange.value.start_date,
@@ -1314,80 +1316,140 @@ function sumSeries(field: string): number {
   return timeSeries.value.reduce((total, item) => total + numeric(item[field]), 0)
 }
 
-async function refreshAll() {
+function seriesTokenTotal(item: Record<string, unknown>): number {
+  return numeric(item.input_tokens)
+    + numeric(item.output_tokens)
+    + numeric(item.cache_creation_tokens)
+    + numeric(item.cache_read_tokens)
+}
+
+async function performRefresh(refreshAnalytics: boolean) {
   const currentRequestId = ++requestId
+  const currentAnalyticsGeneration = analyticsGeneration
   refreshing.value = true
-  trendLoading.value = timeSeries.value.length === 0
-  percentileLoading.value = percentiles.value.length === 0
+  if (refreshAnalytics) {
+    trendLoading.value = timeSeries.value.length === 0
+    percentileLoading.value = percentiles.value.length === 0
+    analyticsWarning.value = null
+  }
+  realtimeWarning.value = null
 
   const params = timeRangeParams.value
+  const canCommitRealtime = () => currentRequestId === requestId
+  const canCommitAnalytics = () => (
+    refreshAnalytics
+    && canCommitRealtime()
+    && currentAnalyticsGeneration === analyticsGeneration
+  )
+
+  const timeSeriesRequest = (refreshAnalytics
+    ? adminApi.getTimeSeries(params, { skipCache: true })
+    : Promise.resolve(timeSeries.value)
+  ).then((value) => {
+    if (canCommitAnalytics()) timeSeries.value = value
+    return value
+  }).finally(() => {
+    if (canCommitAnalytics()) trendLoading.value = false
+  })
+
+  const percentilesRequest = (refreshAnalytics
+    ? adminApi.getPercentiles(params, { skipCache: true })
+    : Promise.resolve(percentiles.value)
+  ).then((value) => {
+    if (canCommitAnalytics()) percentiles.value = value
+    return value
+  }).finally(() => {
+    if (canCommitAnalytics()) percentileLoading.value = false
+  })
+
+  const providerPerformanceRequest = (refreshAnalytics
+    ? adminApi.getProviderPerformance({
+        ...params,
+        granularity: params.granularity === 'hour' ? 'hour' : 'day',
+        limit: 8,
+        slow_threshold_ms: DEFAULT_SLOW_THRESHOLD_MS,
+        include_timeline: false,
+      }, { skipCache: true })
+    : Promise.resolve(providerPerformance.value)
+  ).then((value) => {
+    if (canCommitAnalytics()) providerPerformance.value = value
+    return value
+  })
+
+  const errorDistributionRequest = (refreshAnalytics
+    ? adminApi.getErrorDistribution(params, { skipCache: true })
+    : Promise.resolve({ distribution: errorDistribution.value })
+  ).then((value) => {
+    if (canCommitAnalytics()) {
+      errorDistribution.value = value.distribution
+      errorDistributionLoaded.value = true
+    }
+    return value
+  })
+
+  const resilienceRequest = monitoringApi.getResilienceStatus().then((value) => {
+    if (canCommitRealtime()) resilienceStatus.value = value
+    return value
+  })
+  const gatewayRequest = monitoringApi.getGatewayMetricsSummary().then((value) => {
+    if (canCommitRealtime()) gatewayMetrics.value = value
+    return value
+  })
+  const cacheRequest = cacheApi.getStats().then((value) => {
+    if (canCommitRealtime()) cacheStats.value = value
+    return value
+  })
+  const redisRequest = redisCacheApi.getCategories().then((value) => {
+    if (canCommitRealtime()) redisCategories.value = value
+    return value
+  })
+  const resourceRequest = loadResourceSnapshot().then((value) => {
+    if (canCommitRealtime()) resourceSnapshot.value = value
+    return value
+  })
+
   const results = await Promise.allSettled([
-    usageApi.getUsageStats(params, { skipCache: true }),
-    adminApi.getTimeSeries(params),
-    adminApi.getPercentiles(params),
-    adminApi.getProviderPerformance({
-      ...params,
-      granularity: params.granularity === 'hour' ? 'hour' : 'day',
-      limit: 8,
-      slow_threshold_ms: DEFAULT_SLOW_THRESHOLD_MS,
-    }),
-    adminApi.getErrorDistribution(params),
-    monitoringApi.getSystemStatus(),
-    monitoringApi.getResilienceStatus(),
-    monitoringApi.getGatewayMetricsSummary(),
-    cacheApi.getStats(),
-    redisCacheApi.getCategories(),
-    loadResourceSnapshot(),
+    timeSeriesRequest,
+    percentilesRequest,
+    providerPerformanceRequest,
+    errorDistributionRequest,
+    resilienceRequest,
+    gatewayRequest,
+    cacheRequest,
+    redisRequest,
+    resourceRequest,
   ])
 
   if (currentRequestId !== requestId) return
 
-  const failed: string[] = []
+  const analyticsFailed: string[] = []
+  const realtimeFailed: string[] = []
   const [
-    summaryResult,
     timeSeriesResult,
     percentilesResult,
     providerPerformanceResult,
     errorDistributionResult,
-    systemStatusResult,
     resilienceResult,
     gatewayResult,
     cacheResult,
     redisResult,
-    resourceResult,
   ] = results
 
-  if (summaryResult.status === 'fulfilled') summaryStats.value = summaryResult.value
-  else failed.push('统计摘要')
+  if (refreshAnalytics && currentAnalyticsGeneration === analyticsGeneration) {
+    if (timeSeriesResult.status === 'rejected') analyticsFailed.push('流量趋势')
+    if (percentilesResult.status === 'rejected') analyticsFailed.push('延迟百分位')
+    if (providerPerformanceResult.status === 'rejected') analyticsFailed.push('上游性能')
+    if (errorDistributionResult.status === 'rejected') analyticsFailed.push('错误分类')
 
-  if (timeSeriesResult.status === 'fulfilled') timeSeries.value = timeSeriesResult.value
-  else failed.push('流量趋势')
+    analyticsWarning.value = analyticsFailed.length
+      ? `分析数据加载失败：${analyticsFailed.join('、')}`
+      : null
+  }
 
-  if (percentilesResult.status === 'fulfilled') percentiles.value = percentilesResult.value
-  else failed.push('延迟百分位')
-
-  if (providerPerformanceResult.status === 'fulfilled') providerPerformance.value = providerPerformanceResult.value
-  else failed.push('上游性能')
-
-  if (errorDistributionResult.status === 'fulfilled') errorDistribution.value = errorDistributionResult.value.distribution
-  else failed.push('错误分类')
-
-  if (systemStatusResult.status === 'fulfilled') systemStatus.value = systemStatusResult.value
-  else failed.push('系统状态')
-
-  if (resilienceResult.status === 'fulfilled') resilienceStatus.value = resilienceResult.value
-  else failed.push('韧性状态')
-
-  if (gatewayResult.status === 'fulfilled') gatewayMetrics.value = gatewayResult.value
-  else failed.push('网关指标')
-
-  if (cacheResult.status === 'fulfilled') cacheStats.value = cacheResult.value
-  else failed.push('缓存统计')
-
-  if (redisResult.status === 'fulfilled') redisCategories.value = redisResult.value
-  else failed.push('Redis 分类')
-
-  if (resourceResult.status === 'fulfilled') resourceSnapshot.value = resourceResult.value
+  if (resilienceResult.status === 'rejected') realtimeFailed.push('韧性状态')
+  if (gatewayResult.status === 'rejected') realtimeFailed.push('网关指标')
+  if (cacheResult.status === 'rejected') realtimeFailed.push('缓存统计')
+  if (redisResult.status === 'rejected') realtimeFailed.push('Redis 分类')
 
   results.forEach((result, index) => {
     if (result.status === 'rejected') {
@@ -1395,19 +1457,45 @@ async function refreshAll() {
     }
   })
 
-  loadWarning.value = failed.length ? `部分数据加载失败：${failed.join('、')}` : null
-  lastUpdatedAt.value = new Date().toISOString()
-  refreshing.value = false
-  trendLoading.value = false
-  percentileLoading.value = false
+  realtimeWarning.value = realtimeFailed.length
+    ? `实时数据加载失败：${realtimeFailed.join('、')}`
+    : null
+  if (currentAnalyticsGeneration === analyticsGeneration) {
+    lastUpdatedAt.value = new Date().toISOString()
+  }
+}
+
+function refreshAll(): Promise<void> {
+  if (refreshPromise) {
+    return refreshPromise
+  }
+
+  const request = performRefresh(true).finally(() => {
+    if (refreshPromise === request) {
+      refreshPromise = null
+    }
+    refreshing.value = false
+    trendLoading.value = false
+    percentileLoading.value = false
+  })
+  refreshPromise = request
+  return request
 }
 
 const lastUpdatedLabel = computed(() => formatShortDate(lastUpdatedAt.value))
 
-const totalRequests = computed(() => summaryStats.value?.total_requests ?? sumSeries('total_requests'))
-const totalTokens = computed(() => summaryStats.value?.total_tokens ?? sumSeries('total_tokens'))
-const totalCost = computed(() => summaryStats.value?.total_cost ?? sumSeries('total_cost'))
-const avgResponseMs = computed(() => providerPerformance.value?.summary.avg_response_time_ms ?? (summaryStats.value?.avg_response_time ? summaryStats.value.avg_response_time * 1000 : null))
+const totalRequests = computed(() => sumSeries('total_requests'))
+const totalTokens = computed(() => timeSeries.value.reduce(
+  (total, item) => total + seriesTokenTotal(item),
+  0,
+))
+const totalCost = computed(() => sumSeries('total_cost'))
+const classifiedErrorCount = computed(() => (
+  errorDistributionLoaded.value
+    ? errorDistribution.value.reduce((total, item) => total + numeric(item.count), 0)
+    : null
+))
+const avgResponseMs = computed(() => providerPerformance.value?.summary.avg_response_time_ms ?? null)
 const avgFirstByteMs = computed(() => providerPerformance.value?.summary.avg_first_byte_time_ms ?? average(percentiles.value.map(item => item.p50_first_byte_time_ms)))
 const avgOutputTps = computed(() => providerPerformance.value?.summary.avg_output_tps ?? null)
 const windowSeconds = computed(() => {
@@ -1446,9 +1534,9 @@ const kpiCards = computed<Array<{
     iconClass: 'text-sky-500',
   },
   {
-    title: '吞吐 Tokens',
+    title: '趋势 Tokens',
     value: formatTokens(totalTokens.value),
-    hint: `${formatMetricNumber(tokensPerMinute.value)} TPM`,
+    hint: `趋势聚合 · ${formatMetricNumber(tokensPerMinute.value)} TPM`,
     icon: Zap,
     iconClass: 'text-amber-500',
   },
@@ -1511,7 +1599,7 @@ const trafficChartData = computed<ChartData<'line'>>(() => ({
     },
     {
       label: 'Tokens',
-      data: timeSeries.value.map(item => numeric(item.total_tokens)),
+      data: timeSeries.value.map(seriesTokenTotal),
       borderColor: 'rgb(245, 158, 11)',
       backgroundColor: 'rgba(245, 158, 11, 0.12)',
       tension: 0.25,
@@ -1609,8 +1697,8 @@ const distributedGateVariant = computed<'warning' | 'outline'>(() => (
 const distributedGateText = computed(() => (
   gatewayMetrics.value?.distributed.unavailable ? '全局不可用' : '全局在线'
 ))
-const currentActiveStreams = computed(() => gatewayMetrics.value?.tunnel.activeStreams ?? systemStatus.value?.tunnel.active_streams ?? null)
-const currentProxyConnections = computed(() => gatewayMetrics.value?.tunnel.proxyConnections ?? systemStatus.value?.tunnel.proxy_connections ?? null)
+const currentActiveStreams = computed(() => gatewayMetrics.value?.tunnel.activeStreams ?? null)
+const currentProxyConnections = computed(() => gatewayMetrics.value?.tunnel.proxyConnections ?? null)
 const localGateUtilization = computed(() => gateUtilization(gatewayMetrics.value?.local))
 const distributedGateUtilization = computed(() => gateUtilization(gatewayMetrics.value?.distributed))
 const candidatePlanningGateUtilization = computed(() => gateUtilization(gatewayMetrics.value?.candidatePlanning))
@@ -2078,20 +2166,21 @@ const opsLinks = [
 ]
 
 watch(timeRange, () => {
-  void refreshAll()
+  // 手动模式下切换范围只清空旧范围数据，不自动发起请求。
+  analyticsGeneration += 1
+  timeSeries.value = []
+  percentiles.value = []
+  providerPerformance.value = null
+  errorDistribution.value = []
+  errorDistributionLoaded.value = false
+  analyticsWarning.value = null
+  lastUpdatedAt.value = null
+  trendLoading.value = false
+  percentileLoading.value = false
 }, { deep: true })
 
-onMounted(() => {
-  void refreshAll()
-  refreshTimer = setInterval(() => {
-    void refreshAll()
-  }, AUTO_REFRESH_MS)
-})
-
 onUnmounted(() => {
-  if (refreshTimer) {
-    clearInterval(refreshTimer)
-    refreshTimer = null
-  }
+  requestId += 1
+  analyticsGeneration += 1
 })
 </script>

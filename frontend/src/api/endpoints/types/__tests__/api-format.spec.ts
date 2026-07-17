@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   API_FORMATS,
+  apiFormatPermissionCovers,
   formatApiFormat,
   formatApiFormatShort,
   groupApiFormats,
@@ -14,6 +15,8 @@ describe('api format display helpers', () => {
     expect(normalizeApiFormatAlias('CLAUDE_MESSAGES')).toBe(API_FORMATS.CLAUDE_MESSAGES)
     expect(normalizeApiFormatAlias('OPENAI_RESPONSES')).toBe(API_FORMATS.OPENAI_RESPONSES)
     expect(normalizeApiFormatAlias('OPENAI_RESPONSES_COMPACT')).toBe(API_FORMATS.OPENAI_RESPONSES_COMPACT)
+    expect(normalizeApiFormatAlias('OPENAI_SEARCH')).toBe(API_FORMATS.OPENAI_SEARCH)
+    expect(normalizeApiFormatAlias('SEARCH')).toBe(API_FORMATS.OPENAI_SEARCH)
     expect(normalizeApiFormatAlias('GEMINI_GENERATE_CONTENT')).toBe(API_FORMATS.GEMINI_GENERATE_CONTENT)
     expect(normalizeApiFormatAlias('OPENAI_EMBEDDING')).toBe(API_FORMATS.OPENAI_EMBEDDING)
     expect(normalizeApiFormatAlias('OPENAI_RERANK')).toBe(API_FORMATS.OPENAI_RERANK)
@@ -31,6 +34,25 @@ describe('api format display helpers', () => {
     expect(formatApiFormat(API_FORMATS.JINA_RERANK)).toBe('Jina Rerank')
     expect(formatApiFormatShort(API_FORMATS.OPENAI_RERANK)).toBe('ORR')
     expect(formatApiFormatShort(API_FORMATS.JINA_RERANK)).toBe('JR')
+  })
+
+  it('formats OpenAI Search as a first-class api format', () => {
+    expect(formatApiFormat(API_FORMATS.OPENAI_SEARCH)).toBe('OpenAI Search')
+    expect(formatApiFormatShort(API_FORMATS.OPENAI_SEARCH)).toBe('OS')
+    expect(sortApiFormats([
+      API_FORMATS.OPENAI_EMBEDDING,
+      API_FORMATS.OPENAI_SEARCH,
+      API_FORMATS.OPENAI_RESPONSES,
+    ])).toEqual([
+      API_FORMATS.OPENAI_RESPONSES,
+      API_FORMATS.OPENAI_SEARCH,
+      API_FORMATS.OPENAI_EMBEDDING,
+    ])
+  })
+
+  it('applies Responses to Search permissions in one direction', () => {
+    expect(apiFormatPermissionCovers('OPENAI_RESPONSES', 'openai:search')).toBe(true)
+    expect(apiFormatPermissionCovers('openai:search', 'openai:responses')).toBe(false)
   })
 
   it('formats embedding api format ids distinctly from chat formats', () => {

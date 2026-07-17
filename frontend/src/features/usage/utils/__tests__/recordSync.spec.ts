@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
 import type { UsageRecord } from '../../types'
-import { syncUsageRecordStreamResolution } from '../recordSync'
+import {
+  mergeUsageRecordFirstByteTimeMs,
+  syncUsageRecordStreamResolution,
+} from '../recordSync'
 
 function buildUsageRecord(overrides: Partial<UsageRecord> = {}): UsageRecord {
   return {
@@ -57,5 +60,18 @@ describe('syncUsageRecordStreamResolution', () => {
     })
 
     expect(nextRecords).toBe(records)
+  })
+})
+
+describe('mergeUsageRecordFirstByteTimeMs', () => {
+  it('does not let a stale active update clear or reduce a resolved first-byte time', () => {
+    expect(mergeUsageRecordFirstByteTimeMs(500, null)).toBe(500)
+    expect(mergeUsageRecordFirstByteTimeMs(500, 320)).toBe(500)
+    expect(mergeUsageRecordFirstByteTimeMs(500, 640)).toBe(640)
+    expect(mergeUsageRecordFirstByteTimeMs(undefined, 320)).toBe(320)
+    expect(mergeUsageRecordFirstByteTimeMs(undefined, 0)).toBe(0)
+    expect(mergeUsageRecordFirstByteTimeMs(0, null)).toBe(0)
+    expect(mergeUsageRecordFirstByteTimeMs(null, -1)).toBeNull()
+    expect(mergeUsageRecordFirstByteTimeMs(-1, null)).toBeUndefined()
   })
 })

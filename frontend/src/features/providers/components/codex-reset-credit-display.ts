@@ -1,7 +1,40 @@
 import type {
+  CodexUpstreamMetadata,
   QuotaResetCreditSnapshot,
   QuotaResetCreditsSnapshot,
 } from '@/api/endpoints/types'
+
+function codexQuotaUpdatedAt(display: CodexUpstreamMetadata | null | undefined): number | null {
+  const updatedAt = Number(display?.updated_at)
+  return Number.isFinite(updatedAt) ? updatedAt : null
+}
+
+export function mergeCodexQuotaDisplays(
+  snapshotDisplay: CodexUpstreamMetadata | null | undefined,
+  metadataDisplay: CodexUpstreamMetadata | null | undefined,
+): CodexUpstreamMetadata | null {
+  if (!snapshotDisplay) return metadataDisplay ?? null
+  if (!metadataDisplay) return snapshotDisplay
+
+  const snapshotUpdatedAt = codexQuotaUpdatedAt(snapshotDisplay)
+  const metadataUpdatedAt = codexQuotaUpdatedAt(metadataDisplay)
+  const metadataIsNewer = metadataUpdatedAt !== null
+    && (snapshotUpdatedAt === null || metadataUpdatedAt > snapshotUpdatedAt)
+  const preferred = metadataIsNewer ? metadataDisplay : snapshotDisplay
+  const fallback = metadataIsNewer ? snapshotDisplay : metadataDisplay
+  const resetCredits = preferred.reset_credits || fallback.reset_credits
+    ? {
+        ...fallback.reset_credits,
+        ...preferred.reset_credits,
+      }
+    : undefined
+
+  return {
+    ...fallback,
+    ...preferred,
+    ...(resetCredits ? { reset_credits: resetCredits } : {}),
+  }
+}
 
 export interface CodexResetCreditDisplayItem {
   id?: string | null
@@ -26,6 +59,27 @@ export function getCodexResetCreditAvailableCount(
 
 export function formatCodexResetCreditCount(count: number | null | undefined): string {
   return `共 ${count ?? 0} 次机会`
+}
+
+interface CodexResetCreditCrypto {
+  randomUUID?: () => string
+  getRandomValues: (array: Uint8Array) => Uint8Array
+}
+
+export function createCodexResetCreditIdempotencyKey(
+  cryptoSource: CodexResetCreditCrypto | undefined = globalThis.crypto,
+): string {
+  const randomUUID = cryptoSource?.randomUUID?.bind(cryptoSource)
+  if (randomUUID) return randomUUID()
+  if (!cryptoSource) {
+    throw new Error('浏览器不支持安全随机数，无法生成幂等 ID')
+  }
+
+  const bytes = cryptoSource.getRandomValues(new Uint8Array(16))
+  bytes[6] = (bytes[6] & 0x0f) | 0x40
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
 }
 
 function codexResetCreditRemainingSeconds(

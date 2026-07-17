@@ -138,6 +138,10 @@ impl NodeRoleArg {
     const fn spawns_background_tasks(self) -> bool {
         matches!(self, Self::All | Self::Background)
     }
+
+    const fn isolates_background_database(self) -> bool {
+        matches!(self, Self::All)
+    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -286,6 +290,7 @@ fn available_parallelism_usize() -> usize {
         .max(1)
 }
 
+#[cfg(test)]
 fn automatic_gateway_request_concurrency_for_parallelism(parallelism: usize) -> usize {
     automatic_gateway_request_concurrency_for_capacity(parallelism, None)
 }
@@ -355,6 +360,18 @@ fn usage_queue_workers_for_request_concurrency(request_concurrency: usize) -> us
         .saturating_add(AUTO_USAGE_QUEUE_WORKERS_REQUESTS_PER_WORKER - 1)
         / AUTO_USAGE_QUEUE_WORKERS_REQUESTS_PER_WORKER;
     workers.clamp(AUTO_USAGE_QUEUE_WORKERS_MIN, MAX_USAGE_QUEUE_WORKERS)
+}
+
+fn usage_database_config_for_role<'a>(
+    node_role: NodeRoleArg,
+    database: Option<&'a SqlDatabaseConfig>,
+    isolated_background_database: Option<&'a SqlDatabaseConfig>,
+) -> Option<&'a SqlDatabaseConfig> {
+    if node_role.isolates_background_database() {
+        isolated_background_database.or(database)
+    } else {
+        database
+    }
 }
 
 fn usage_queue_worker_database_cap(
@@ -802,6 +819,13 @@ struct GatewayUsageArgs {
 
     #[arg(
         long,
+        env = "AETHER_GATEWAY_USAGE_TERMINAL_SUBMISSION_MAX_IN_FLIGHT",
+        default_value_t = 1_024
+    )]
+    terminal_submission_max_in_flight: u64,
+
+    #[arg(
+        long,
         env = "AETHER_GATEWAY_USAGE_TERMINAL_ENQUEUE_MAX_IN_FLIGHT",
         default_value_t = 1_024
     )]
@@ -962,6 +986,7 @@ impl GatewayUsageArgs {
             reclaim_idle_ms: self.queue_reclaim_idle_ms.max(1),
             reclaim_count: self.queue_reclaim_count.max(1),
             reclaim_interval_ms: self.queue_reclaim_interval_ms.max(1),
+            terminal_submission_max_in_flight: self.terminal_submission_max_in_flight.max(1),
             terminal_enqueue_max_in_flight: self.terminal_enqueue_max_in_flight.max(1),
             lifecycle_enqueue_max_in_flight: self.lifecycle_enqueue_max_in_flight.max(1),
             lifecycle_enqueue_delay_ms: self.lifecycle_enqueue_delay_ms,
@@ -1278,7 +1303,7 @@ struct Args {
     #[arg(
         long,
         env = "AETHER_RUNTIME_COMMAND_TIMEOUT_MS",
-        default_value_t = 1_000
+        default_value_t = 2_000
     )]
     runtime_command_timeout_ms: u64,
 
@@ -1709,6 +1734,18 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         runtime_redis_url.as_deref(),
         runtime_backend,
     )?;
+    let data_config = args.data.to_config();
+    let isolate_background_database = args.node_role.isolates_background_database();
+    let background_database_config = if isolate_background_database {
+        data_config.background_database_config()
+    } else {
+        None
+    };
+    let usage_database_config = usage_database_config_for_role(
+        args.node_role,
+        data_config.database(),
+        background_database_config.as_ref(),
+    );
     let request_concurrency_limit = args
         .max_in_flight_requests
         .filter(|limit| *limit > 0)
@@ -1727,16 +1764,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         args.node_role,
         Some(request_concurrency_limit),
         args.distributed_request_limit,
-        sql_database_config.as_ref(),
+        usage_database_config,
     );
     let usage_queue_worker_max_count = args.usage.effective_queue_worker_max_count(
         args.node_role,
-        sql_database_config.as_ref(),
+        usage_database_config,
         usage_queue_workers,
     );
     let usage_worker_record_concurrency_limit = args
         .usage
-        .effective_worker_record_concurrency_limit(args.node_role, sql_database_config.as_ref());
+        .effective_worker_record_concurrency_limit(args.node_role, usage_database_config);
     let usage_config = args.usage.to_config(
         usage_queue_workers,
         usage_queue_worker_max_count,
@@ -1744,7 +1781,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
     let usage_blocking_stream_lanes = args.usage.runtime_state_blocking_stream_lanes(
         args.node_role,
-        sql_database_config.as_ref(),
+        usage_database_config,
         usage_config.worker_max_count,
     );
     let runtime_state = Arc::new(
@@ -1756,7 +1793,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string()))?,
     );
-    let data_config = args.data.to_config();
     let rate_limit_config = if matches!(args.deployment_topology, DeploymentTopologyArg::MultiNode)
     {
         args.rate_limit.config().with_local_fallback(false)
@@ -1858,7 +1894,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut state = AppState::new()?
         .with_runtime_state(runtime_state)
-        .with_data_config(data_config)?
+        .with_data_config_and_background_isolation(data_config, isolate_background_database)?
         .with_usage_runtime_config(usage_config)?
         .with_video_task_truth_source_mode(args.video_task_truth_source_mode.into());
     if let Some(cors_config) = args.frontdoor.cors_config() {
@@ -1926,6 +1962,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         "aether-gateway data layer configured"
     );
     prepare_database_startup_requirements(&state, args.auto_prepare_database).await?;
+    state.warm_database_pools().await?;
     let reset_stale_proxy_nodes = state.reset_stale_proxy_node_tunnel_statuses().await?;
     if reset_stale_proxy_nodes > 0 {
         info!(
@@ -1985,6 +2022,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         );
         None
     };
+    if state.prewarm_metric_snapshot().await {
+        info!("gateway metric snapshot prewarmed");
+    } else {
+        warn!(
+            "gateway metric snapshot prewarm did not complete; continuing with fail-open metrics"
+        );
+    }
     let listen_backlog = gateway_listen_backlog(args.listen_backlog);
     let listener_shards = gateway_listener_shards(args.listener_shards);
     let listeners = gateway_listeners(bind_addr, listen_backlog, listener_shards)?;
@@ -2377,15 +2421,15 @@ mod tests {
         automatic_gateway_request_concurrency_for_parallelism, automatic_sql_pool_config,
         automatic_sql_pool_config_for_parallelism, automatic_usage_queue_workers_for_parallelism,
         ensure_database_backfills_are_current, ensure_database_schema_is_current,
-        pending_backfills_error, pending_schema_error, resolve_healthcheck_url, Args,
-        DatabaseDriverArg, DeploymentTopologyArg, GatewayDataArgs, GatewayFrontdoorArgs,
-        GatewayLogDestinationArg, GatewayLogFormatArg, GatewayLogRotationArg, GatewayLoggingArgs,
-        GatewayRateLimitArgs, GatewayUsageArgs, NodeRoleArg, RuntimeBackendArg,
-        VideoTaskTruthSourceArg, DEFAULT_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS,
-        DEFAULT_GATEWAY_LISTENER_SHARDS, DEFAULT_GATEWAY_LISTEN_BACKLOG,
-        MAX_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS, MAX_GATEWAY_LISTENER_SHARDS,
-        MAX_GATEWAY_LISTEN_BACKLOG, MIN_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS,
-        MIN_GATEWAY_LISTEN_BACKLOG,
+        pending_backfills_error, pending_schema_error, resolve_healthcheck_url,
+        usage_database_config_for_role, Args, DatabaseDriverArg, DeploymentTopologyArg,
+        GatewayDataArgs, GatewayFrontdoorArgs, GatewayLogDestinationArg, GatewayLogFormatArg,
+        GatewayLogRotationArg, GatewayLoggingArgs, GatewayRateLimitArgs, GatewayUsageArgs,
+        NodeRoleArg, RuntimeBackendArg, VideoTaskTruthSourceArg,
+        DEFAULT_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS, DEFAULT_GATEWAY_LISTENER_SHARDS,
+        DEFAULT_GATEWAY_LISTEN_BACKLOG, MAX_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS,
+        MAX_GATEWAY_LISTENER_SHARDS, MAX_GATEWAY_LISTEN_BACKLOG,
+        MIN_GATEWAY_HTTP2_MAX_CONCURRENT_STREAMS, MIN_GATEWAY_LISTEN_BACKLOG,
     };
     use aether_data::{DatabaseDriver, SqlDatabaseConfig, SqlPoolConfig};
     use aether_gateway::AppState;
@@ -2453,6 +2497,7 @@ mod tests {
                 queue_reclaim_idle_ms: 60_000,
                 queue_reclaim_count: 128,
                 queue_reclaim_interval_ms: 5_000,
+                terminal_submission_max_in_flight: 1_024,
                 terminal_enqueue_max_in_flight: 1_024,
                 lifecycle_enqueue_max_in_flight: 512,
                 lifecycle_enqueue_delay_ms: 1_000,
@@ -2692,6 +2737,36 @@ mod tests {
         let many_cpu = automatic_sql_pool_config_for_parallelism(DatabaseDriver::Postgres, 32);
         assert_eq!(many_cpu.min_connections, 16);
         assert_eq!(many_cpu.max_connections, 100);
+    }
+
+    #[test]
+    fn gateway_database_pool_isolation_and_usage_capacity_follow_role() {
+        assert!(NodeRoleArg::All.isolates_background_database());
+        assert!(!NodeRoleArg::Frontdoor.isolates_background_database());
+        assert!(!NodeRoleArg::Background.isolates_background_database());
+
+        let database = test_database(DatabaseDriver::Postgres, 20);
+        let isolated_background = test_database(DatabaseDriver::Postgres, 4);
+        assert_eq!(
+            usage_database_config_for_role(
+                NodeRoleArg::All,
+                Some(&database),
+                Some(&isolated_background),
+            )
+            .expect("all-role usage database")
+            .pool
+            .max_connections,
+            4
+        );
+        for role in [NodeRoleArg::Frontdoor, NodeRoleArg::Background] {
+            assert_eq!(
+                usage_database_config_for_role(role, Some(&database), Some(&isolated_background),)
+                    .expect("single-pool role usage database")
+                    .pool
+                    .max_connections,
+                20
+            );
+        }
     }
 
     #[test]

@@ -5,6 +5,30 @@ export type UsageRecordStreamResolution = Pick<
   'id' | 'is_stream' | 'upstream_is_stream' | 'client_requested_stream' | 'client_is_stream'
 >
 
+export function mergeUsageRecordFirstByteTimeMs(
+  existingValue: number | null | undefined,
+  nextValue: number | null | undefined
+): number | null | undefined {
+  // Millisecond timing is floored, so 0 still means the first byte was observed.
+  const existingIsResolved = typeof existingValue === 'number' &&
+    Number.isFinite(existingValue) &&
+    existingValue >= 0
+  const nextIsResolved = typeof nextValue === 'number' &&
+    Number.isFinite(nextValue) &&
+    nextValue >= 0
+
+  if (existingIsResolved && nextIsResolved) {
+    return Math.max(existingValue, nextValue)
+  }
+  if (existingIsResolved) {
+    return existingValue
+  }
+  if (nextIsResolved) {
+    return nextValue
+  }
+  return existingValue == null ? existingValue : undefined
+}
+
 export function syncUsageRecordStreamResolution(
   records: UsageRecord[],
   resolved: UsageRecordStreamResolution

@@ -2,7 +2,7 @@ use crate::handlers::admin::provider::shared::payloads::AdminProviderKeyUpdatePa
 use crate::handlers::admin::provider::write::normalize::{
     normalize_allow_auth_channel_mismatch_formats, normalize_api_format_json_object_keys,
     normalize_api_format_list, normalize_auth_type, normalize_auth_type_by_format,
-    normalize_max_probe_interval_minutes, validate_vertex_api_formats,
+    normalize_max_probe_interval_minutes, normalize_rate_multipliers, validate_vertex_api_formats,
 };
 use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::{
@@ -260,8 +260,7 @@ pub(crate) async fn build_admin_update_provider_key_record(
         updated.name = trimmed.to_string();
     }
     if fields.contains("rate_multipliers") {
-        updated.rate_multipliers =
-            normalize_api_format_json_object_keys(payload.rate_multipliers, "rate_multipliers")?;
+        updated.rate_multipliers = normalize_rate_multipliers(payload.rate_multipliers)?;
     }
     if let Some(internal_priority) = payload.internal_priority {
         updated.internal_priority = internal_priority;

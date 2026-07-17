@@ -218,6 +218,7 @@ describe('useUsageData', () => {
       target_model: 'gpt-5.5',
       reasoning_effort: 'xhigh',
       service_tier: 'auto',
+      actual_service_tier: 'priority',
     })
 
     getAllUsageRecordsMock.mockResolvedValueOnce({
@@ -246,6 +247,7 @@ describe('useUsageData', () => {
         target_model: null,
         reasoning_effort: null,
         service_tier: null,
+        actual_service_tier: null,
       })],
       total: 1,
       limit: 20,
@@ -279,6 +281,7 @@ describe('useUsageData', () => {
       target_model: 'gpt-5.5',
       reasoning_effort: 'xhigh',
       service_tier: 'auto',
+      actual_service_tier: 'priority',
     })
   })
 

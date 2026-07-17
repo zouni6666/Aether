@@ -38,7 +38,8 @@ use aether_data_contracts::repository::usage::{
     PendingUsageCleanupSummary, ProviderApiKeyWindowUsageRequest,
     StoredProviderApiKeyWindowUsageSummary, StoredUsageDailySummary, UsageAuditListQuery,
     UsageCleanupExecutionMode, UsageCleanupSummary, UsageCleanupTargets, UsageCleanupWindow,
-    UsageCounterFlushSummary, UsageCounterHealthSnapshot, UsageDailyHeatmapQuery,
+    UsageCounterFlushSummary, UsageCounterHealthSnapshot, UsageCounterPendingHealthSnapshot,
+    UsageDailyHeatmapQuery,
 };
 use aether_runtime_state::RuntimeQueueStore;
 use aether_video_tasks_core::read_data_backed_video_task_response;
@@ -152,6 +153,13 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn warm_database_pool(&self) -> Result<(), DataLayerError> {
+        match &self.backends {
+            Some(backends) => backends.warm_database_pool().await,
+            None => Ok(()),
+        }
+    }
+
     pub(crate) async fn pending_database_backfills(
         &self,
     ) -> Result<
@@ -198,15 +206,22 @@ impl GatewayDataState {
     pub(crate) fn database_pool_summary_under_maintenance_pressure(
         summary: &aether_data::DatabasePoolSummary,
     ) -> bool {
-        summary.checked_out > 0 && summary.idle <= Self::maintenance_pool_idle_reserve(summary)
+        summary.checked_out > 0
+            && Self::database_pool_available_capacity(summary)
+                <= Self::maintenance_pool_idle_reserve(summary)
     }
 
     pub(crate) fn database_pool_summary_under_usage_worker_pressure(
         summary: &aether_data::DatabasePoolSummary,
     ) -> bool {
         summary.checked_out > 0
-            && (summary.checked_out >= summary.max_connections as usize
-                || summary.idle <= Self::usage_worker_pool_idle_reserve(summary))
+            && Self::database_pool_available_capacity(summary)
+                <= Self::usage_worker_pool_idle_reserve(summary)
+    }
+
+    fn database_pool_available_capacity(summary: &aether_data::DatabasePoolSummary) -> usize {
+        let unopened = (summary.max_connections as usize).saturating_sub(summary.pool_size);
+        summary.idle.saturating_add(unopened)
     }
 
     pub(crate) fn maintenance_pool_idle_reserve(
@@ -1353,6 +1368,15 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn read_usage_counter_pending_health(
+        &self,
+    ) -> Result<UsageCounterPendingHealthSnapshot, DataLayerError> {
+        match &self.usage_reader {
+            Some(repository) => repository.read_usage_counter_pending_health().await,
+            None => Ok(UsageCounterPendingHealthSnapshot::default()),
+        }
+    }
+
     pub(crate) async fn summarize_usage_totals_by_user_ids(
         &self,
         user_ids: &[String],
@@ -1435,6 +1459,22 @@ impl GatewayDataState {
             Some(repository) => repository.summarize_dashboard_usage(query).await,
             None => Ok(
                 aether_data_contracts::repository::usage::StoredUsageDashboardSummary::default(),
+            ),
+        }
+    }
+
+    pub(crate) async fn summarize_dashboard_stats(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageDashboardSummaryQuery,
+    ) -> Result<
+        aether_data_contracts::repository::usage::StoredUsageDashboardStatsSummary,
+        DataLayerError,
+    > {
+        match &self.usage_reader {
+            Some(repository) => repository.summarize_dashboard_stats(query).await,
+            None => Ok(
+                aether_data_contracts::repository::usage::StoredUsageDashboardStatsSummary::default(
+                ),
             ),
         }
     }

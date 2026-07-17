@@ -16,6 +16,7 @@ export interface UsageRecord {
   model: string
   reasoning_effort?: string | null
   service_tier?: string | null
+  actual_service_tier?: string | null
   input_tokens: number
   effective_input_tokens?: number
   output_tokens: number
@@ -43,6 +44,8 @@ export interface UsageStats {
   total_cost: number
   total_actual_cost?: number
   avg_response_time: number
+  error_count?: number
+  error_rate?: number
   today?: {
     requests: number
     tokens: number
@@ -567,6 +570,7 @@ export const usageApi = {
       target_model?: string | null
       reasoning_effort?: string | null
       service_tier?: string | null
+      actual_service_tier?: string | null
       image_progress?: ImageProgress | null
     }>
   }> {

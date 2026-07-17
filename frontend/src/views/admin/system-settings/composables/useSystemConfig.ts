@@ -152,9 +152,9 @@ function createDefaultConfig(): SystemConfig {
     // 标准文本非流式心跳
     enable_standard_text_sync_heartbeat: false,
     // 请求记录
-    request_record_level: 'basic',
-    max_request_body_size: 1048576,
-    max_response_body_size: 1048576,
+    request_record_level: 'full',
+    max_request_body_size: 5_242_880,
+    max_response_body_size: 5_242_880,
     sensitive_headers: ['authorization', 'x-api-key', 'api-key', 'cookie', 'set-cookie'],
     // 请求记录清理
     enable_auto_cleanup: true,
@@ -321,25 +321,13 @@ export function useSystemConfig() {
   async function loadSystemConfig() {
     systemConfigLoading.value = true
     try {
-      const results = await Promise.all(
-        CONFIG_KEYS.map(async (key) => {
-          try {
-            return {
-              key,
-              response: await adminApi.getSystemConfig(key),
-            }
-          } catch {
-            return null
-          }
-        })
-      )
+      const configs = await adminApi.getAllSystemConfigs({ cacheTtlMs: 30_000 })
+      const configsByKey = new Map(configs.map((config) => [config.key, config]))
 
       const nextConfig = createDefaultConfig()
-      for (const result of results) {
-        if (!result) {
-          continue
-        }
-        const { key, response } = result
+      for (const key of CONFIG_KEYS) {
+        const response = configsByKey.get(key)
+        if (!response) continue
         try {
           if (key === 'turnstile_secret_key') {
             nextConfig.turnstile_secret_key = ''

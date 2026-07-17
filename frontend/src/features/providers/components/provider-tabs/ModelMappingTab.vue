@@ -366,12 +366,12 @@ import { type EndpointAPIKey } from '@/api/endpoints/keys'
 import { updateModel } from '@/api/endpoints/models'
 import { parseApiError } from '@/utils/errorParser'
 import type { ProviderWithEndpointsSummary } from '@/api/endpoints'
-import { normalizeApiFormatAlias } from '@/api/endpoints/types/api-format'
 import {
   buildDefaultModelTestRequestHeaders,
   buildDefaultModelTestRequestBody,
   isModelTestableApiFormat,
   isModelTestableEndpoint,
+  modelTestMappingScopeMatchesEndpoint,
   parseModelTestRequestHeadersDraft,
   parseModelTestRequestBodyDraft,
   selectPreferredModelTestEndpoint,
@@ -852,16 +852,11 @@ function scopedMappingEndpoints(item: CombinedMapping): ProviderEndpoint[] {
   const group = item.group
   if (!group) return activeEndpoints.value
 
-  const apiFormats = new Set(normalizeStringList(group.apiFormats).map(normalizeApiFormatAlias))
-  const endpointIds = new Set(normalizeStringList(group.endpointIds))
-  const matched = activeEndpoints.value.filter((endpoint) => {
-    const apiFormatMatched = apiFormats.size === 0
-      || apiFormats.has(normalizeApiFormatAlias(endpoint.api_format))
-    const endpointMatched = endpointIds.size === 0 || endpointIds.has(endpoint.id)
-    return apiFormatMatched && endpointMatched
-  })
-
-  return matched.length > 0 ? matched : activeEndpoints.value
+  return activeEndpoints.value.filter(endpoint => modelTestMappingScopeMatchesEndpoint(
+    group.apiFormats,
+    group.endpointIds,
+    endpoint,
+  ))
 }
 
 // 测试精确映射

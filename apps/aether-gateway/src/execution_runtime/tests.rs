@@ -43,6 +43,7 @@ fn missing_exact_provider_request_payload(decision_kind: &str) -> AiExecutionDec
         request_id: Some("req_123".to_string()),
         candidate_id: Some("cand_123".to_string()),
         provider_name: Some("provider".to_string()),
+        provider_type: None,
         provider_id: Some("provider_id".to_string()),
         endpoint_id: Some("endpoint_id".to_string()),
         key_id: Some("key_id".to_string()),

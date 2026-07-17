@@ -394,9 +394,11 @@
                 ref="tieredPricingEditorRef"
                 v-model="tieredPricing"
                 class="mt-3"
+                :auto-fill-missing-cache-prices="autoFillMissingCachePrices"
                 :show-token-pricing="billingMode === 'token'"
                 :show-image-pricing="isImageGenerationEnabled"
                 :show-image-editor="billingMode === 'image'"
+                :show-processing-tier-multiplier-controls="true"
               />
 
               <TabsContent
@@ -601,7 +603,9 @@ import {
   EMBEDDING_API_FORMATS,
   buildGlobalModelCreatePayload,
   buildGlobalModelUpdatePayload,
+  cloneTieredPricingConfig,
 } from './global-model-form-helpers'
+import { tieredPricingHasImageOutputPricing } from '../utils/tiered-pricing'
 
 const props = defineProps<{
   open: boolean
@@ -778,6 +782,7 @@ function enterManualEntryMode() {
 }
 
 function reopenPresetPanel() {
+  clearSelection()
   presetPanelCollapsed.value = false
 }
 
@@ -1066,8 +1071,6 @@ function selectModel(model: ModelsDevModelItem) {
   imageGenerationExplicitOverride.value = null
   selectedModel.value = model
   expandedProvider.value = model.providerId
-  form.value.name = model.modelId
-  form.value.display_name = model.modelName
 
   // 构建 config
   const config: Record<string, unknown> = {
@@ -1087,11 +1090,16 @@ function selectModel(model: ModelsDevModelItem) {
   if (model.releaseDate) config.release_date = model.releaseDate
   if (model.inputModalities?.length) config.input_modalities = model.inputModalities
   if (model.outputModalities?.length) config.output_modalities = model.outputModalities
-  form.value.config = config
   const supportedCapabilities = new Set<string>()
   if (model.supportsEmbedding) supportedCapabilities.add('embedding')
   if (model.outputModalities?.includes('image')) supportedCapabilities.add('image_generation')
-  form.value.supported_capabilities = [...supportedCapabilities]
+  form.value = {
+    ...defaultForm(),
+    name: model.modelId,
+    display_name: model.modelName,
+    config,
+    supported_capabilities: [...supportedCapabilities],
+  }
   if (model.supportsEmbedding) {
     setEmbeddingEnabled(true)
   }
@@ -1104,17 +1112,9 @@ function selectModel(model: ModelsDevModelItem) {
   }
   loadVideoPricingFromConfig()
 
-  if (model.inputPrice !== undefined || model.outputPrice !== undefined) {
-    tieredPricing.value = {
-      tiers: [{
-        up_to: null,
-        input_price_per_1m: model.inputPrice || 0,
-        output_price_per_1m: model.outputPrice || 0,
-      }]
-    }
-  } else {
-    tieredPricing.value = null
-  }
+  tieredPricing.value = model.tieredPricing
+    ? cloneTieredPricingConfig(model.tieredPricing)
+    : null
 
   presetPanelCollapsed.value = true
   scrollToBasicInformation()
@@ -1126,6 +1126,7 @@ function clearSelection() {
   selectedModel.value = null
   form.value = defaultForm()
   tieredPricing.value = null
+  videoResolutionPrices.value = []
   billingMode.value = 'token'
 }
 
@@ -1198,9 +1199,19 @@ const { isEditMode, handleDialogUpdate, handleCancel } = useFormDialog({
   resetForm,
 })
 
+const autoFillMissingCachePrices = computed(() => (
+  !isEditMode.value && selectedModel.value === null
+))
+
 async function handleSubmit() {
   if (!form.value.name || !form.value.display_name) {
     showError('请填写模型ID和名称')
+    return
+  }
+
+  const pricingValidationError = tieredPricingEditorRef.value?.getValidationError()
+  if (pricingValidationError) {
+    showError(pricingValidationError, '价格配置错误')
     return
   }
 
@@ -1244,28 +1255,4 @@ async function handleSubmit() {
   }
 }
 
-function tieredPricingHasImageOutputPricing(pricing: TieredPricingConfig | null | undefined): boolean {
-  if (!pricing) return false
-  if (toFinitePrice(pricing.image_output_price_default) !== null) return true
-  if (Object.values(pricing.image_output_prices || {}).some((prices) => {
-    if (!prices || typeof prices !== 'object') return false
-    return Object.values(prices).some((price) => toFinitePrice(price) !== null)
-  })) return true
-  return (pricing.image_output_price_ranges || []).some((range) => {
-    if (!range || typeof range !== 'object') return false
-    const prices = range.prices && typeof range.prices === 'object'
-      ? range.prices
-      : range as Record<string, unknown>
-    return Object.values(prices).some((price) => toFinitePrice(price) !== null)
-  })
-}
-
-function toFinitePrice(value: unknown): number | null {
-  if (typeof value === 'number' && Number.isFinite(value)) return value
-  if (typeof value === 'string' && value.trim()) {
-    const parsed = Number(value)
-    return Number.isFinite(parsed) ? parsed : null
-  }
-  return null
-}
 </script>

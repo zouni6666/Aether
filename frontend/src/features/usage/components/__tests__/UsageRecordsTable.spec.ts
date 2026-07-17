@@ -162,6 +162,14 @@ function mountUsageRecordsTable(records: UsageRecord[], overrides: Record<string
   return root
 }
 
+function expectServiceTierBadge(root: HTMLElement, label: string): HTMLElement {
+  const badge = [...root.querySelectorAll<HTMLElement>('span')]
+    .find(element => element.textContent?.trim() === label)
+
+  expect(badge).toBeDefined()
+  return badge as HTMLElement
+}
+
 afterEach(() => {
   for (const { app, root } of mountedApps.splice(0)) {
     app.unmount()
@@ -288,11 +296,81 @@ describe('UsageRecordsTable', () => {
     expect(root.textContent).toContain('xhigh')
   })
 
-  it('shows fast badge for priority service tier', () => {
-    const root = mountUsageRecordsTable([buildRecord({ service_tier: 'priority' })])
+  it.each([
+    ['priority', 'priority'],
+    ['fast', 'fast'],
+    ['priority', 'fast'],
+    ['fast', 'priority'],
+  ])('shows confirmed Fast for requested %s and actual %s', (requested, actual) => {
+    const root = mountUsageRecordsTable([buildRecord({
+      service_tier: requested,
+      actual_service_tier: actual,
+    })])
 
-    expect(root.textContent).toContain('gpt-5')
-    expect(root.textContent).toContain('fast')
+    const badge = expectServiceTierBadge(root, 'Fast')
+    expect(badge.getAttribute('title')).toBe([
+      '请求档位：Fast',
+      '实际档位：Fast',
+      '计费档位：Fast',
+    ].join('\n'))
+    expect(badge.getAttribute('aria-label')).toBe(
+      '请求档位：Fast，实际档位：Fast，计费档位：Fast',
+    )
+  })
+
+  it('shows fast to standard when the provider downgrades a priority request', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      service_tier: 'priority',
+      actual_service_tier: 'default',
+    })])
+
+    const badge = expectServiceTierBadge(root, 'Fast → standard')
+    expect(badge.getAttribute('title')).toBe([
+      '请求档位：Fast',
+      '实际档位：default',
+      '计费档位：standard',
+    ].join('\n'))
+  })
+
+  it('shows fast to flex when the provider moves a priority request to flex', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      service_tier: 'priority',
+      actual_service_tier: 'flex',
+    })])
+
+    expectServiceTierBadge(root, 'Fast → flex')
+  })
+
+  it('shows standard to fast when the provider upgrades a default request', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      service_tier: 'default',
+      actual_service_tier: 'priority',
+    })])
+
+    expectServiceTierBadge(root, 'standard → Fast')
+  })
+
+  it.each(['pending', 'streaming'] as const)(
+    'shows fast as pending confirmation while a priority request is %s',
+    (status) => {
+      const root = mountUsageRecordsTable([buildRecord({
+        service_tier: 'priority',
+        actual_service_tier: null,
+        status,
+      })])
+
+      expectServiceTierBadge(root, 'Fast · 待确认')
+    },
+  )
+
+  it('shows fast as unconfirmed when a completed priority request has no actual tier', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      service_tier: 'priority',
+      actual_service_tier: null,
+      status: 'completed',
+    })])
+
+    expectServiceTierBadge(root, 'Fast · 未确认')
   })
 
   it('offers embedding API formats in the usage record filter', () => {

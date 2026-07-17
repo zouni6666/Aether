@@ -60,12 +60,22 @@
                     <h3 class="text-sm font-semibold">
                       {{ legacyT(isKeyManagedProviderType(provider.provider_type) ? '密钥管理' : '账号管理') }}
                     </h3>
-                    <div class="flex items-center gap-2">
+                    <div class="flex flex-wrap items-center justify-end gap-2">
+                      <Button
+                        v-if="endpoints.length > 0 && provider.provider_type === 'custom'"
+                        variant="outline"
+                        size="sm"
+                        class="h-9"
+                        @click="keyBatchImportDialogOpen = true"
+                      >
+                        <ListPlus class="mr-1.5 h-3.5 w-3.5" />
+                        批量导入
+                      </Button>
                       <Button
                         v-if="endpoints.length > 0"
                         variant="outline"
                         size="sm"
-                        class="h-8"
+                        class="h-9"
                         @click="handleAddKeyToFirstEndpoint"
                       >
                         <Plus class="w-3.5 h-3.5 mr-1.5" />
@@ -279,7 +289,7 @@
                         </div>
                       </div>
                       <div
-                        v-if="getCodexResetCreditsDisplay(key)"
+                        v-if="getCodexResetCreditAvailableCount(key) !== null"
                         class="mt-3 border-t border-border/60 pt-2"
                       >
                         <div class="flex flex-wrap items-center gap-x-1 gap-y-1 text-[10px] leading-4 text-muted-foreground">
@@ -823,6 +833,16 @@
     @saved="handleKeyChanged"
   />
 
+  <ProviderKeyBatchImportDialog
+    v-if="open && provider?.provider_type === 'custom'"
+    :open="keyBatchImportDialogOpen"
+    :provider-id="provider.id"
+    :provider-name="provider.name"
+    :available-api-formats="availableKeyApiFormats"
+    @close="keyBatchImportDialogOpen = false"
+    @saved="handleKeyChanged"
+  />
+
   <!-- OAuth 账号对话框 -->
   <OAuthAccountDialog
     v-if="open && provider"
@@ -913,6 +933,7 @@ import { ref, watch, computed, nextTick } from 'vue'
 import {
   Plus,
   Key,
+  ListPlus,
   Loader2,
   GripVertical,
   ShieldX,
@@ -951,6 +972,7 @@ import AlertDialog from '@/components/common/AlertDialog.vue'
 import AntigravityQuotaDialog from '@/features/providers/components/AntigravityQuotaDialog.vue'
 import FailoverRulesDialog from '@/features/providers/components/FailoverRulesDialog.vue'
 import ProviderDetailHeader from '@/features/providers/components/ProviderDetailHeader.vue'
+import ProviderKeyBatchImportDialog from '@/features/providers/components/ProviderKeyBatchImportDialog.vue'
 import ProviderKeyActionCluster from '@/features/providers/components/ProviderKeyActionCluster.vue'
 import ProviderKeyIdentityBlock from '@/features/providers/components/ProviderKeyIdentityBlock.vue'
 import ProviderMonthlyQuotaCard from '@/features/providers/components/ProviderMonthlyQuotaCard.vue'
@@ -993,10 +1015,6 @@ import type {
 } from '@/api/endpoints/types'
 import { formatApiFormatShort } from '@/api/endpoints/types/api-format'
 import { isOAuthAccountProviderType, isKeyManagedProviderType } from '../utils/providerTypeUtils'
-import {
-  isProviderQuotaAutoRefreshCoolingDown,
-  markProviderQuotaAutoRefreshAttempt,
-} from '../utils/quotaAutoRefreshCooldown'
 import { getOAuthOrgBadge } from '@/utils/oauthIdentity'
 import { getOAuthRefreshFeedback } from '@/utils/oauthRefreshFeedback'
 import { formatCompactNumber } from '@/utils/format'
@@ -1018,10 +1036,12 @@ import {
 } from '@/utils/providerKeyStatus'
 import { getGeminiCliAccountCreditsText } from '@/utils/providerKeyQuota'
 import {
+  createCodexResetCreditIdempotencyKey,
   formatCodexResetCreditCount as formatCodexResetCreditCountLabel,
   formatCodexResetCreditDays,
   getCodexResetCreditAvailableCount as getCodexResetCreditAvailableCountFromSnapshot,
   getVisibleCodexResetCreditItems as getVisibleCodexResetCreditItemsFromSnapshot,
+  mergeCodexQuotaDisplays,
 } from './codex-reset-credit-display'
 
 // 扩展端点类型,包含密钥列表
@@ -1085,6 +1105,7 @@ const endpointDialogOpen = ref(false)
 
 // 密钥相关状态
 const keyFormDialogOpen = ref(false)
+const keyBatchImportDialogOpen = ref(false)
 const keyPermissionsDialogOpen = ref(false)
 const oauthAccountDialogOpen = ref(false)
 const oauthKeyEditDialogOpen = ref(false)
@@ -1173,6 +1194,7 @@ const multiplierSaving = ref(false)
 const hasBlockingDialogOpen = computed(() =>
   endpointDialogOpen.value ||
   keyFormDialogOpen.value ||
+  keyBatchImportDialogOpen.value ||
   keyPermissionsDialogOpen.value ||
   oauthAccountDialogOpen.value ||
   oauthKeyEditDialogOpen.value ||
@@ -1319,6 +1341,7 @@ watch(
       // 重置所有对话框状态
       endpointDialogOpen.value = false
       keyFormDialogOpen.value = false
+      keyBatchImportDialogOpen.value = false
       keyPermissionsDialogOpen.value = false
       oauthAccountDialogOpen.value = false
       oauthKeyEditDialogOpen.value = false
@@ -1600,7 +1623,7 @@ async function handleRefreshOAuth(key: EndpointAPIKey) {
     }
     // Antigravity：token 刷新后可能完成了账号激活，触发配额获取
     // （不 emit('refresh')，避免触发全局 provider 余额刷新）
-    void autoRefreshQuotaInBackground({ ignoreCooldown: true })
+    void autoRefreshQuotaInBackground()
   } catch (err: unknown) {
     showError(localizedApiError(err, 'Token 刷新失败'), legacyT('错误'))
   } finally {
@@ -1671,13 +1694,6 @@ async function handleClearOAuthInvalid(key: EndpointAPIKey) {
   } finally {
     clearingOAuthInvalidKeyId.value = null
   }
-}
-
-function createCodexResetCreditIdempotencyKey(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID()
-  }
-  throw new Error('浏览器不支持 crypto.randomUUID，无法生成安全幂等 ID')
 }
 
 function codexResetCreditOutcomeFeedback(
@@ -1951,20 +1967,6 @@ function getCodexQuotaDisplayFromSnapshot(quota: QuotaStatusSnapshot | null | un
   return Object.keys(display).length > 0 ? display : null
 }
 
-function getCodexQuotaDisplayUpdatedAt(display: CodexUpstreamMetadata | null | undefined): number | null {
-  const updatedAt = Number(display?.updated_at)
-  return Number.isFinite(updatedAt) ? updatedAt : null
-}
-
-function codexDisplayHasUsage(display: CodexUpstreamMetadata | null | undefined): boolean {
-  return !!display && (
-    display.primary_used_percent !== undefined
-    || display.secondary_used_percent !== undefined
-    || display.spark_primary_used_percent !== undefined
-    || display.spark_secondary_used_percent !== undefined
-  )
-}
-
 function codexDisplayHasResetCredits(display: CodexUpstreamMetadata | null | undefined): boolean {
   const count = display?.reset_credits?.available_count
   return typeof count === 'number' && Number.isFinite(count)
@@ -1973,20 +1975,7 @@ function codexDisplayHasResetCredits(display: CodexUpstreamMetadata | null | und
 function getCodexQuotaDisplay(key: EndpointAPIKey): CodexUpstreamMetadata | null {
   const snapshotDisplay = getCodexQuotaDisplayFromSnapshot(getQuotaSnapshotForProvider(key, 'codex'))
   const metadataDisplay = getCodexQuotaDisplayFromMetadata(key.upstream_metadata?.codex)
-
-  if (!snapshotDisplay) return metadataDisplay
-  if (!metadataDisplay) return snapshotDisplay
-  if (!codexDisplayHasUsage(snapshotDisplay) && codexDisplayHasUsage(metadataDisplay)) {
-    return metadataDisplay
-  }
-
-  const snapshotUpdatedAt = getCodexQuotaDisplayUpdatedAt(snapshotDisplay)
-  const metadataUpdatedAt = getCodexQuotaDisplayUpdatedAt(metadataDisplay)
-  if (metadataUpdatedAt !== null && (snapshotUpdatedAt === null || metadataUpdatedAt > snapshotUpdatedAt)) {
-    return metadataDisplay
-  }
-
-  return snapshotDisplay
+  return mergeCodexQuotaDisplays(snapshotDisplay, metadataDisplay)
 }
 
 function hasCodexQuotaDisplayData(key: EndpointAPIKey): boolean {
@@ -2479,7 +2468,7 @@ function shouldAutoRefreshCodexQuota(): boolean {
 
     if (isTokenExpiringSoon(key, now)) return true
 
-    // 只要有一个活跃 key 没有配额数据，就刷新一次
+    // reset-credit 独立于 Token 刷新；这里只按账号配额缓存决定是否后台更新
     if (!hasCodexQuotaDisplayData(key)) {
       return true
     }
@@ -2714,7 +2703,7 @@ function applyQuotaResults(
 }
 
 // 通用的自动刷新配额函数（支持 Codex、Gemini CLI、Antigravity、Kiro、Windsurf 和 ChatGPT Web）
-async function autoRefreshQuotaInBackground(options: { ignoreCooldown?: boolean } = {}) {
+async function autoRefreshQuotaInBackground() {
   const providerId = props.providerId
   if (!providerId) return
   if (refreshingQuota.value) return
@@ -2740,7 +2729,6 @@ async function autoRefreshQuotaInBackground(options: { ignoreCooldown?: boolean 
     shouldRefresh = shouldAutoRefreshChatGPTWebQuota()
   }
   if (!shouldRefresh) return
-  if (!options.ignoreCooldown && isProviderQuotaAutoRefreshCoolingDown(providerId)) return
 
   let hadCachedQuota = false
   if (providerType === 'codex') {
@@ -2760,7 +2748,6 @@ async function autoRefreshQuotaInBackground(options: { ignoreCooldown?: boolean 
   }
 
   refreshingQuota.value = true
-  markProviderQuotaAutoRefreshAttempt(providerId)
   try {
     const result = await refreshProviderQuota(providerId)
     const applied = applyQuotaResults(result.results)
@@ -2804,7 +2791,7 @@ async function handleKeyChanged() {
   await Promise.all([loadEndpoints(), loadMappingPreview()])
   emit('refresh')
   // 添加/修改 key 后自动获取已支持 provider 的配额（新 key 的 upstream_metadata 为空）
-  void autoRefreshQuotaInBackground({ ignoreCooldown: true })
+  void autoRefreshQuotaInBackground()
 }
 
 // 切换密钥启用状态

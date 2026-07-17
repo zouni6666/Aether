@@ -33,6 +33,8 @@ pub(super) fn provider_query_standard_test_client_api_format(
     let normalized_api_format = crate::ai_serving::normalize_api_format_alias(provider_api_format);
     if normalized_api_format == "openai:responses:compact" {
         "openai:responses:compact"
+    } else if normalized_api_format == "openai:search" {
+        "openai:search"
     } else if crate::ai_serving::is_embedding_api_format(&normalized_api_format) {
         "openai:embedding"
     } else if crate::ai_serving::is_rerank_api_format(&normalized_api_format) {
@@ -71,6 +73,7 @@ pub(super) fn provider_query_standard_test_unsupported_reason(
         }
         "openai:responses"
         | "openai:responses:compact"
+        | "openai:search"
         | "claude:messages"
         | "openai:embedding"
         | "jina:embedding"
@@ -261,6 +264,7 @@ pub(super) fn provider_query_test_adapter_for_provider_api_format(
         "openai:chat"
             | "openai:responses"
             | "openai:responses:compact"
+            | "openai:search"
             | "claude:messages"
             | "gemini:generate_content"
             | "gemini:interactions"
@@ -365,6 +369,7 @@ pub(super) fn provider_query_transport_supports_model_test_execution(
         }
         "openai:responses"
         | "openai:responses:compact"
+        | "openai:search"
         | "openai:embedding"
         | "jina:embedding"
         | "doubao:embedding"
