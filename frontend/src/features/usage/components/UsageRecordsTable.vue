@@ -1579,7 +1579,7 @@ function buildServiceTierBadgePresentation(
   const title = titleLines.join('\n')
   return {
     label: 'Fast',
-    className: 'border-amber-400/50 !bg-transparent text-amber-700 dark:border-amber-300/40 dark:text-amber-300',
+    className: '!bg-transparent text-amber-700 dark:text-amber-300',
     title,
     ariaLabel: titleLines.join('，'),
   }

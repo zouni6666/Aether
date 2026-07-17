@@ -30,7 +30,7 @@
           :key="badge.key"
           :data-usage-model-badge="badge.key"
           :data-request-detail-model-badge="context === 'detail' ? badge.key : undefined"
-          variant="outline"
+          :variant="badge.variant"
           class="h-4 shrink-0 whitespace-nowrap rounded-full px-1.5 text-[10px] leading-4"
           :class="badge.className"
           :title="badge.title"
@@ -52,7 +52,7 @@
         :key="badge.key"
         :data-usage-model-badge="badge.key"
         :data-request-detail-model-badge="context === 'detail' ? badge.key : undefined"
-        variant="outline"
+        :variant="badge.variant"
         class="h-4 shrink-0 whitespace-nowrap rounded-full px-1.5 text-[10px] leading-4"
         :class="badge.className"
         :title="badge.title"
@@ -76,6 +76,7 @@ type ModelBadgeKey = 'reasoning' | 'fast' | 'cyber'
 interface ModelBadgePresentation {
   key: ModelBadgeKey
   label: string
+  variant: 'outline' | 'outline-transparent'
   className: string
   title: string
   ariaLabel: string
@@ -130,6 +131,7 @@ const modelBadges = computed<ModelBadgePresentation[]>(() => {
     badges.push({
       key: 'reasoning',
       label: reasoningLabel.value,
+      variant: 'outline',
       className: 'border-primary/30 bg-primary/5 text-primary',
       title: `Reasoning: ${reasoningLabel.value}`,
       ariaLabel: `Reasoning: ${reasoningLabel.value}`,
@@ -140,7 +142,8 @@ const modelBadges = computed<ModelBadgePresentation[]>(() => {
     badges.push({
       key: 'fast',
       label: 'Fast',
-      className: 'border-amber-400/50 !bg-transparent text-amber-700 dark:border-amber-300/40 dark:text-amber-300',
+      variant: 'outline-transparent',
+      className: 'text-amber-700 dark:text-amber-300',
       title: '上游请求档位：Fast\n计费档位：Fast',
       ariaLabel: '上游请求档位：Fast，计费档位：Fast',
     })
@@ -150,6 +153,7 @@ const modelBadges = computed<ModelBadgePresentation[]>(() => {
     badges.push({
       key: 'cyber',
       label: 'Cyber',
+      variant: 'outline',
       className: 'border-primary/30 bg-primary/5 text-rose-600 dark:text-rose-300',
       title: '上游 Cyber Policy 拒绝',
       ariaLabel: '上游 Cyber Policy 拒绝',

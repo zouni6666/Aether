@@ -30,7 +30,7 @@ describe('pool key display panels', () => {
 
     expect(root.querySelector('[data-testid="pool-stats-cycle-text"]')).toBeTruthy()
     expect(root.querySelector('[data-testid="pool-stats-cycle-text"]')?.className).toContain('w-[132px]')
-    expect(root.querySelector('[data-testid="pool-stats-cycle-request_count"]')?.textContent?.trim()).toBe('12/88')
+    expect(root.querySelector('[data-testid="pool-stats-cycle-request_count"]')?.textContent?.trim()).toBe('请求 12/88')
     expect(root.querySelector('[data-testid="pool-stats-cycle-small-overlay"]')).toBeNull()
     expect(root.querySelector('[data-testid="pool-stats-cycle-large-base"]')).toBeNull()
     expect(root.textContent).not.toContain('5H')
@@ -98,7 +98,7 @@ describe('pool key display panels', () => {
     app.use(createI18n())
     app.mount(root)
 
-    expect(root.querySelector('[data-testid="pool-stats-cycle-request_count"]')?.textContent?.trim()).toBe('31')
+    expect(root.querySelector('[data-testid="pool-stats-cycle-request_count"]')?.textContent?.trim()).toBe('请求 31')
     expect(root.querySelector('[data-testid="pool-stats-cycle-single-marker"]')).toBeNull()
     expect(root.querySelector('[data-testid="pool-stats-cycle-bar-request_count"]')).toBeNull()
     expect(root.textContent).not.toContain('月')

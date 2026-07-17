@@ -7,15 +7,13 @@
     <div
       v-for="row in cycleMetricRows"
       :key="`${row.key}-${variant}-cycle-row`"
-      class="flex items-center justify-between gap-2"
+      class="truncate"
+      :title="`${row.label} ${row.valueText}`"
     >
-      <span class="shrink-0 text-muted-foreground">{{ row.label }}</span>
       <span
-        class="min-w-0 truncate text-right font-medium tabular-nums text-foreground/90"
         :data-testid="variant === 'desktop' ? `pool-stats-cycle-${row.key}` : undefined"
-        :title="row.valueText"
       >
-        {{ row.valueText }}
+        {{ row.label }} {{ row.valueText }}
       </span>
     </div>
   </div>
@@ -116,7 +114,7 @@ const cycleMetricRows = computed(() => {
 })
 
 const cycleContainerClass = computed(() => [
-  'mx-auto w-[132px] space-y-1 text-[9px] leading-3',
+  'mx-auto w-[132px] space-y-0.5 text-[10px] leading-4 text-foreground/90 tabular-nums',
   props.variant === 'mobile' ? 'py-0.5' : '',
 ].filter(Boolean).join(' '))
 
