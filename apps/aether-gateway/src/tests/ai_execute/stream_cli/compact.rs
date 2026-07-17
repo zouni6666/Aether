@@ -657,7 +657,8 @@ async fn gateway_executes_openai_responses_compact_as_unary_request_impl() {
     );
     assert_eq!(
         seen_execution_runtime_request.body["prompt_cache_key"],
-        json!("session:compact-e2e")
+        // Compact omits client_metadata, but keeps the same deterministic Codex cache identity.
+        json!("f3eb8726-b7b2-56c5-90b5-8789d628c8cf")
     );
     assert_eq!(
         seen_execution_runtime_request.proxy_node_id,
