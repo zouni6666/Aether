@@ -20,4 +20,24 @@ describe('admin usage initial loading', () => {
       .toBeLessThan(mountedBlock?.indexOf('await loadRecords(') ?? -1)
     expect(mountedBlock).not.toContain('await loadAdminUsers()')
   })
+
+  it('uses authoritative active snapshots for errors and final-provider facts', () => {
+    const pollBlock = source
+      .split('async function pollActiveRequests()')[1]
+      ?.split('async function discoverActiveRequests()')[0]
+
+    expect(pollBlock).toBeTruthy()
+    expect(pollBlock).toContain('const shouldApply = !updateSnapshotIsOlder && newRank >= currentRank')
+    expect(pollBlock).toContain('!updateSnapshotIsOlder && currentRank < 2 && updateHasFailureSignal')
+    expect(pollBlock).toContain('record.error_message = mergeUsageRecordErrorMessage(')
+    expect(pollBlock).toContain('{ authoritative: shouldApply }')
+    expect(pollBlock).toContain('record.target_model = typeof update.target_model')
+    expect(pollBlock).toContain('record.reasoning_effort = typeof update.reasoning_effort')
+    expect(pollBlock).toContain('record.service_tier = typeof update.service_tier')
+    expect(pollBlock).not.toContain("if ('target_model' in update)")
+    expect(pollBlock).not.toContain("if ('reasoning_effort' in update)")
+    expect(pollBlock).toContain(
+      "if (typeof update.requested_reasoning_effort === 'string' && update.requested_reasoning_effort.trim())",
+    )
+  })
 })

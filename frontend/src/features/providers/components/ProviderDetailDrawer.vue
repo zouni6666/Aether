@@ -782,7 +782,7 @@
                 :models="providerModels"
                 :endpoints="endpoints"
                 :provider-keys="providerKeys"
-                :loading="loadingProviderModels || loadingProviderKeys"
+                :loading="loadingProviderModels"
                 @edit-model="handleEditModel"
                 @batch-assign="handleBatchAssign"
                 @refresh="loadEndpoints"
@@ -798,7 +798,7 @@
                 :provider-keys="providerKeys"
                 :models="providerModels"
                 :mapping-preview="providerMappingPreview"
-                :loading="loadingProviderEndpoints || loadingProviderKeys || loadingProviderModels || loadingProviderMappingPreview"
+                :loading="loadingProviderMappingPreview"
                 @refresh="handleModelMappingChanged"
               />
             </div>
@@ -1303,8 +1303,6 @@ watch(
         loading.value = false
       }
       void loadSystemFormatConversionConfig()
-      // mapping-preview 较慢，不阻塞首屏渲染
-      void loadMappingPreview()
       if (!hasInitialProvider) {
         await loadProvider()
       }
@@ -1313,7 +1311,13 @@ watch(
       if (newOpen && !oldOpen) {
         startCountdownTimer()
       }
-      void endpointsPromise.then(() => autoRefreshQuotaInBackground())
+      // 优先完成端点、密钥和模型的首屏数据，再请求计算量较大的映射预览。
+      // 同时校验抽屉状态，避免关闭或切换 Provider 后启动无用请求。
+      void endpointsPromise.then(() => {
+        if (!props.open || props.providerId !== newId) return
+        void loadMappingPreview()
+        void autoRefreshQuotaInBackground()
+      })
     } else if (!newOpen && oldOpen) {
       // 使在途请求失效，避免关闭后旧响应回写
       providerLoadRequestId += 1

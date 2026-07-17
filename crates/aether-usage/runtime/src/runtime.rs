@@ -13,7 +13,12 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::executor::spawn_on_usage_background_runtime;
-use crate::request_metadata::attach_provider_response_body_metadata;
+use crate::request_metadata::{
+    attach_client_request_body_metadata, attach_provider_request_body_metadata,
+    attach_provider_response_body_metadata, clear_client_request_body_metadata,
+    clear_provider_request_body_metadata, request_body_derived_facts_action,
+    RequestBodyDerivedFactsAction,
+};
 use crate::worker::{
     build_usage_queue_worker_with_record_gate, UsageWorkerControl, UsageWorkerObservation,
 };
@@ -1264,6 +1269,7 @@ impl UsageRuntime {
     where
         T: UsageRuntimeAccess,
     {
+        preserve_request_facts(event);
         preserve_provider_response_facts(event);
         match self.cached_body_capture_policy(data).await {
             Ok(policy) => apply_usage_body_capture_policy_to_event(policy, event),
@@ -1731,6 +1737,44 @@ impl UsageRuntime {
                 false
             }
         }
+    }
+}
+
+fn preserve_request_facts(event: &mut UsageEvent) {
+    let data = &mut event.data;
+    match request_body_derived_facts_action(data.request_body.as_ref(), data.request_body_state) {
+        RequestBodyDerivedFactsAction::Refresh => {
+            data.request_metadata = attach_client_request_body_metadata(
+                data.request_metadata.take(),
+                data.request_body.as_ref(),
+            );
+        }
+        RequestBodyDerivedFactsAction::Clear => {
+            data.request_metadata =
+                clear_client_request_body_metadata(data.request_metadata.take());
+        }
+        RequestBodyDerivedFactsAction::Preserve => {}
+    }
+    match request_body_derived_facts_action(
+        data.provider_request_body.as_ref(),
+        data.provider_request_body_state,
+    ) {
+        RequestBodyDerivedFactsAction::Refresh => {
+            data.request_metadata = attach_provider_request_body_metadata(
+                data.request_metadata.take(),
+                data.endpoint_api_format
+                    .as_deref()
+                    .or(data.api_format.as_deref()),
+                data.target_model.as_deref().or(Some(data.model.as_str())),
+                Some(data.model.as_str()),
+                data.provider_request_body.as_ref(),
+            );
+        }
+        RequestBodyDerivedFactsAction::Clear => {
+            data.request_metadata =
+                clear_provider_request_body_metadata(data.request_metadata.take());
+        }
+        RequestBodyDerivedFactsAction::Preserve => {}
     }
 }
 
@@ -2989,7 +3033,9 @@ mod tests {
     use aether_data_contracts::repository::settlement::{
         StoredUsageSettlement, UsageSettlementInput,
     };
-    use aether_data_contracts::repository::usage::{StoredRequestUsageAudit, UpsertUsageRecord};
+    use aether_data_contracts::repository::usage::{
+        StoredRequestUsageAudit, UpsertUsageRecord, UsageBodyCaptureState,
+    };
     use aether_data_contracts::DataLayerError;
     use aether_runtime_state::{MemoryRuntimeStateConfig, RuntimeQueueStore, RuntimeState};
     use async_trait::async_trait;
@@ -2998,9 +3044,10 @@ mod tests {
     use tokio::time::{sleep, timeout, Duration};
 
     use super::{
-        preserve_provider_response_facts, LifecycleEventCoalescer, UsageBillingEventEnricher,
-        UsageBodyCapturePolicy, UsageEnqueueRetryDispatcher, UsageRequestRecordLevel,
-        UsageRuntimeAccess, UsageWorkerObservation, UsageWorkerSupervisorState,
+        preserve_provider_response_facts, preserve_request_facts, LifecycleEventCoalescer,
+        UsageBillingEventEnricher, UsageBodyCapturePolicy, UsageEnqueueRetryDispatcher,
+        UsageRequestRecordLevel, UsageRuntimeAccess, UsageWorkerObservation,
+        UsageWorkerSupervisorState,
     };
     use crate::worker::ManualProxyNodeCounter;
     use crate::{
@@ -5730,6 +5777,76 @@ mod tests {
     }
 
     #[test]
+    fn preserve_request_facts_ignores_post_capture_truncation_placeholders() {
+        let truncated = json!({
+            "truncated": true,
+            "reason": "body_capture_limit_exceeded"
+        });
+        let mut event = UsageEvent::new(
+            UsageEventType::Completed,
+            "req-truncated-preserve",
+            UsageEventData {
+                provider_name: "OpenAI".to_string(),
+                model: "gpt-5".to_string(),
+                request_body: Some(truncated.clone()),
+                request_body_state: Some(UsageBodyCaptureState::Truncated),
+                provider_request_body: Some(truncated),
+                provider_request_body_state: Some(UsageBodyCaptureState::Truncated),
+                request_metadata: Some(json!({
+                    "requested_reasoning_effort": "xhigh",
+                    "provider_reasoning_effort": "max",
+                    "provider_service_tier": "priority"
+                })),
+                ..UsageEventData::default()
+            },
+        );
+
+        preserve_request_facts(&mut event);
+
+        let metadata = event
+            .data
+            .request_metadata
+            .as_ref()
+            .expect("metadata remains");
+        assert_eq!(metadata["requested_reasoning_effort"], "xhigh");
+        assert_eq!(metadata["provider_reasoning_effort"], "max");
+        assert_eq!(metadata["provider_service_tier"], "priority");
+    }
+
+    #[test]
+    fn preserve_request_facts_clears_stale_facts_when_final_bodies_are_missing() {
+        let mut event = UsageEvent::new(
+            UsageEventType::Completed,
+            "req-missing-final-body",
+            UsageEventData {
+                provider_name: "OpenAI".to_string(),
+                model: "gpt-5".to_string(),
+                request_body_state: Some(UsageBodyCaptureState::None),
+                provider_request_body_state: Some(UsageBodyCaptureState::None),
+                request_metadata: Some(json!({
+                    "requested_reasoning_effort": "xhigh",
+                    "provider_reasoning_effort": "max",
+                    "provider_service_tier": "priority",
+                    "provider_actual_service_tier": "priority"
+                })),
+                ..UsageEventData::default()
+            },
+        );
+
+        preserve_request_facts(&mut event);
+
+        let metadata = event
+            .data
+            .request_metadata
+            .as_ref()
+            .expect("response audit fact remains");
+        assert!(metadata.get("requested_reasoning_effort").is_none());
+        assert!(metadata.get("provider_reasoning_effort").is_none());
+        assert!(metadata.get("provider_service_tier").is_none());
+        assert_eq!(metadata["provider_actual_service_tier"], "priority");
+    }
+
+    #[test]
     fn basic_request_record_level_strips_body_capture_but_preserves_derived_fields() {
         let mut event = UsageEvent::new(
             UsageEventType::Failed,
@@ -5739,9 +5856,16 @@ mod tests {
                 model: "gpt-5".to_string(),
                 total_tokens: Some(42),
                 error_message: Some("upstream failed".to_string()),
-                request_body: Some(json!({"messages":[{"role":"user","content":"hello"}]})),
+                request_body: Some(json!({
+                    "messages":[{"role":"user","content":"hello"}],
+                    "reasoning": {"effort": "xhigh"}
+                })),
                 request_body_ref: Some("usage://request/req-basic-1/request_body".to_string()),
-                provider_request_body: Some(json!({"model":"gpt-5"})),
+                provider_request_body: Some(json!({
+                    "model":"gpt-5",
+                    "reasoning": {"effort": "max"},
+                    "service_tier": "priority"
+                })),
                 provider_request_body_ref: Some(
                     "usage://request/req-basic-1/provider_request_body".to_string(),
                 ),
@@ -5754,11 +5878,16 @@ mod tests {
                 client_response_body_ref: Some(
                     "usage://request/req-basic-1/client_response_body".to_string(),
                 ),
-                request_metadata: Some(json!({"provider_service_tier": "priority"})),
+                request_metadata: Some(json!({
+                    "requested_reasoning_effort": "low",
+                    "provider_reasoning_effort": "medium",
+                    "provider_service_tier": "standard"
+                })),
                 ..UsageEventData::default()
             },
         );
 
+        preserve_request_facts(&mut event);
         preserve_provider_response_facts(&mut event);
         apply_usage_body_capture_policy_to_event(
             UsageBodyCapturePolicy {
@@ -5778,6 +5907,33 @@ mod tests {
         assert!(event.data.response_body_ref.is_none());
         assert!(event.data.client_response_body.is_none());
         assert!(event.data.client_response_body_ref.is_none());
+        assert_eq!(
+            event
+                .data
+                .request_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("requested_reasoning_effort"))
+                .and_then(serde_json::Value::as_str),
+            Some("xhigh")
+        );
+        assert_eq!(
+            event
+                .data
+                .request_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("provider_reasoning_effort"))
+                .and_then(serde_json::Value::as_str),
+            Some("max")
+        );
+        assert_eq!(
+            event
+                .data
+                .request_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("provider_service_tier"))
+                .and_then(serde_json::Value::as_str),
+            Some("priority")
+        );
         assert_eq!(
             event
                 .data

@@ -41,16 +41,25 @@ DO UPDATE SET
     EXCLUDED.client_response_headers,
     usage_http_audits.client_response_headers
   ),
-  request_body_ref = COALESCE(EXCLUDED.request_body_ref, usage_http_audits.request_body_ref),
-  provider_request_body_ref = COALESCE(
-    EXCLUDED.provider_request_body_ref,
-    usage_http_audits.provider_request_body_ref
-  ),
-  response_body_ref = COALESCE(EXCLUDED.response_body_ref, usage_http_audits.response_body_ref),
-  client_response_body_ref = COALESCE(
-    EXCLUDED.client_response_body_ref,
-    usage_http_audits.client_response_body_ref
-  ),
+  request_body_ref = CASE
+    WHEN EXCLUDED.request_body_state = 'none' THEN NULL
+    ELSE COALESCE(EXCLUDED.request_body_ref, usage_http_audits.request_body_ref)
+  END,
+  provider_request_body_ref = CASE
+    WHEN EXCLUDED.provider_request_body_state = 'none' THEN NULL
+    ELSE COALESCE(EXCLUDED.provider_request_body_ref, usage_http_audits.provider_request_body_ref)
+  END,
+  response_body_ref = CASE
+    WHEN EXCLUDED.response_body_state = 'none' THEN NULL
+    ELSE COALESCE(EXCLUDED.response_body_ref, usage_http_audits.response_body_ref)
+  END,
+  client_response_body_ref = CASE
+    WHEN EXCLUDED.client_response_body_state = 'none' THEN NULL
+    ELSE COALESCE(
+      EXCLUDED.client_response_body_ref,
+      usage_http_audits.client_response_body_ref
+    )
+  END,
   request_body_state = COALESCE(
     EXCLUDED.request_body_state,
     usage_http_audits.request_body_state
@@ -67,9 +76,19 @@ DO UPDATE SET
     EXCLUDED.client_response_body_state,
     usage_http_audits.client_response_body_state
   ),
-  body_capture_mode = COALESCE(
-    NULLIF(EXCLUDED.body_capture_mode, 'none'),
-    usage_http_audits.body_capture_mode,
-    'none'
-  ),
+  body_capture_mode = CASE
+    WHEN EXCLUDED.body_capture_mode = 'none'
+      AND (
+        EXCLUDED.request_body_state = 'none'
+        OR EXCLUDED.provider_request_body_state = 'none'
+        OR EXCLUDED.response_body_state = 'none'
+        OR EXCLUDED.client_response_body_state = 'none'
+      )
+      THEN 'none'
+    ELSE COALESCE(
+      NULLIF(EXCLUDED.body_capture_mode, 'none'),
+      usage_http_audits.body_capture_mode,
+      'none'
+    )
+  END,
   updated_at = NOW()

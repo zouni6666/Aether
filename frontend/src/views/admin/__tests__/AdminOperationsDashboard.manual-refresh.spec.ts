@@ -7,18 +7,23 @@ const source = readFileSync(
   'utf8',
 )
 
-describe('AdminOperationsDashboard manual refresh', () => {
-  it('only starts a refresh from the explicit refresh button', () => {
-    expect(source).toContain('@click="refreshAll()"')
-    expect(source).not.toContain('onMounted(')
-    expect(source).not.toContain('setInterval(')
-    expect(source).not.toContain('visibilitychange')
+describe('AdminOperationsDashboard refresh behavior', () => {
+  it('refreshes on entry and supports toggling automatic refresh', () => {
+    expect(source).not.toContain('手动刷新')
+    expect(source).toContain('@click="toggleAutoRefresh"')
+    expect(source).toContain("autoRefresh ? '点击关闭自动刷新' : '点击开启自动刷新'")
+    expect(source).toContain('onMounted(() => {')
+    expect(source).toContain('void refreshAll()')
+    expect(source).toContain('const AUTO_REFRESH_INTERVAL = 10_000')
+    expect(source).toContain('autoRefreshTimer = setInterval(')
+    expect(source).toContain('clearInterval(autoRefreshTimer)')
 
     const rangeWatcher = source
       .split('watch(timeRange, () => {')[1]
       ?.split('}, { deep: true })')[0]
     expect(rangeWatcher).toBeTruthy()
-    expect(rangeWatcher).not.toContain('refreshAll(')
+    expect(rangeWatcher).toContain('if (autoRefresh.value)')
+    expect(rangeWatcher).toContain('refreshAll()')
   })
 
   it('does not request the heavyweight system-status fallback', () => {

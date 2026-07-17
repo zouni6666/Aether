@@ -65,6 +65,50 @@ fn mysql_usage_upsert_keeps_terminal_state_when_streaming_arrives_late() {
     ));
 }
 
+#[test]
+fn mysql_usage_upsert_guards_candidate_identity_metadata_and_routing_from_late_lifecycle() {
+    for field in [
+        "provider_name",
+        "model",
+        "target_model",
+        "provider_id",
+        "provider_endpoint_id",
+        "provider_api_key_id",
+        "request_type",
+        "api_format",
+        "api_family",
+        "endpoint_kind",
+        "endpoint_api_format",
+        "provider_api_family",
+        "provider_endpoint_kind",
+        "has_format_conversion",
+        "is_stream",
+        "upstream_is_stream",
+        "request_metadata",
+        "candidate_id",
+        "candidate_index",
+        "key_name",
+        "planner_kind",
+        "route_family",
+        "route_kind",
+        "execution_path",
+        "local_execution_runtime_miss_reason",
+    ] {
+        let assignment = format!("{field} = CASE WHEN (");
+        assert!(
+            super::UPSERT_USAGE_SQL.contains(&assignment),
+            "missing lifecycle guard for {field}"
+        );
+        let preserve = format!("THEN {field} ELSE VALUES({field}) END");
+        assert!(
+            super::UPSERT_USAGE_SQL.contains(&preserve),
+            "late lifecycle must preserve {field}"
+        );
+    }
+    assert!(super::UPSERT_USAGE_SQL
+        .contains("OR (status = 'streaming' AND VALUES(status) = 'pending')"));
+}
+
 #[tokio::test]
 async fn mysql_usage_write_repository_upserts_when_url_is_set() {
     let Some(database_url) = std::env::var("AETHER_TEST_MYSQL_URL")

@@ -13,10 +13,11 @@ use crate::body_capture::{
     RuntimeBodyCaptureMetadataInput,
 };
 use crate::request_metadata::{
-    attach_provider_actual_service_tier_metadata, attach_provider_request_body_metadata,
-    attach_provider_response_body_metadata, build_usage_request_metadata_seed,
+    attach_client_request_body_metadata, attach_provider_actual_service_tier_metadata,
+    attach_provider_request_body_metadata, build_usage_request_metadata_seed,
     merge_usage_request_metadata, merge_usage_request_metadata_owned,
-    sanitize_usage_request_metadata, sanitize_usage_request_metadata_ref,
+    refresh_provider_response_body_metadata, sanitize_usage_request_metadata,
+    sanitize_usage_request_metadata_ref,
 };
 use crate::{
     map_usage_from_response, stream_capture_terminal_state, GatewayStreamReportRequest,
@@ -696,6 +697,8 @@ fn build_terminal_usage_event_from_seed_impl(
     } else {
         merge_usage_request_metadata(request_metadata, audit_payload)
     };
+    let request_metadata =
+        attach_client_request_body_metadata(request_metadata, request_body.as_ref());
     let request_metadata = attach_provider_request_body_metadata(
         request_metadata,
         Some(provider_contract.as_str()),
@@ -1021,7 +1024,7 @@ pub fn build_sync_terminal_usage_seed(
         status_code,
         provider_response_full.as_ref(),
     );
-    let request_metadata = attach_provider_response_body_metadata(
+    let request_metadata = refresh_provider_response_body_metadata(
         context_seed.request_metadata,
         provider_response_full.as_ref(),
     );
@@ -1199,12 +1202,16 @@ pub fn build_stream_terminal_usage_seed(
         missing_observed_finish,
         terminal_error_message.is_some(),
     );
-    let request_metadata = attach_provider_actual_service_tier_metadata(
+    let request_metadata = refresh_provider_response_body_metadata(
         context_seed.request_metadata,
+        provider_response_full.as_ref(),
+    );
+    // The parser's terminal summary is authoritative when a response body is truncated or the
+    // body and summary disagree; attach it after the body refresh so it wins.
+    let request_metadata = attach_provider_actual_service_tier_metadata(
+        request_metadata,
         provider_actual_service_tier.as_deref(),
     );
-    let request_metadata =
-        attach_provider_response_body_metadata(request_metadata, provider_response_full.as_ref());
 
     TerminalUsageSeed {
         terminal_state,
@@ -2111,7 +2118,10 @@ fn build_runtime_request_metadata_seed_from_parts(
         metadata.insert("body_size".to_string(), body_size);
     }
 
-    (!metadata.is_empty()).then_some(Value::Object(metadata))
+    attach_client_request_body_metadata(
+        (!metadata.is_empty()).then_some(Value::Object(metadata)),
+        context_value_ref(context, "original_request_body"),
+    )
 }
 
 fn build_runtime_body_size_metadata(

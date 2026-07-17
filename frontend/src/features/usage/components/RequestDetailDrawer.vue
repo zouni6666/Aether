@@ -23,23 +23,21 @@
                 <h3 class="text-lg font-semibold">
                   请求详情
                 </h3>
-                <div class="flex min-w-0 max-w-[10rem] items-center gap-1 text-sm font-mono text-muted-foreground bg-muted px-2 py-0.5 rounded sm:max-w-none">
-                  <span class="truncate">{{ detail?.model || '-' }}</span>
-                  <template v-if="detail?.target_model && detail.target_model !== detail.model">
-                    <svg
-                      xmlns="http://www.w3.org/2000/svg"
-                      viewBox="0 0 20 20"
-                      fill="currentColor"
-                      class="w-3 h-3 flex-shrink-0"
-                    >
-                      <path
-                        fill-rule="evenodd"
-                        d="M3 10a.75.75 0 01.75-.75h10.638L10.23 5.29a.75.75 0 111.04-1.08l5.5 5.25a.75.75 0 010 1.08l-5.5 5.25a.75.75 0 11-1.04-1.08l4.158-3.96H3.75A.75.75 0 013 10z"
-                        clip-rule="evenodd"
-                      />
-                    </svg>
-                    <span class="truncate">{{ detail.target_model }}</span>
-                  </template>
+                <UsageModelDisplay
+                  v-if="headerModelRecord"
+                  :record="headerModelRecord"
+                  :cyber="detailCyberPolicyError"
+                  context="detail"
+                  data-request-detail-model-display
+                  class="min-w-0 max-w-[18rem] text-sm font-mono text-muted-foreground sm:max-w-none"
+                  model-row-class="rounded bg-muted px-2 py-0.5"
+                />
+                <div
+                  v-else
+                  data-request-detail-model-display
+                  class="rounded bg-muted px-2 py-0.5 text-sm font-mono text-muted-foreground"
+                >
+                  -
                 </div>
                 <Badge
                   v-if="detail?.status_code === 200"
@@ -159,47 +157,6 @@
               v-else-if="detail"
               class="space-y-4"
             >
-              <!-- 执行失败原因：优先展示本地调度/运行时失败摘要 -->
-              <Card
-                v-if="failureNotice"
-                class="border-red-200 bg-red-50/80 shadow-sm dark:border-red-900/60 dark:bg-red-950/30"
-              >
-                <div class="p-3 sm:p-4 flex gap-3">
-                  <div class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-red-100 text-red-600 dark:bg-red-900/50 dark:text-red-300">
-                    <AlertTriangle class="h-4 w-4" />
-                  </div>
-                  <div class="min-w-0 flex-1 space-y-2">
-                    <div class="flex flex-wrap items-center gap-2">
-                      <h4 class="text-sm font-semibold text-red-950 dark:text-red-100">
-                        {{ failureNotice.title }}
-                      </h4>
-                      <Badge
-                        v-if="failureNotice.isSchedulingFailure"
-                        variant="outline"
-                        class="border-red-300 bg-white/60 text-[10px] text-red-700 dark:border-red-800 dark:bg-red-950/40 dark:text-red-200"
-                      >
-                        调度阶段
-                      </Badge>
-                    </div>
-                    <p class="text-sm leading-6 text-red-900 dark:text-red-100">
-                      {{ failureNotice.message }}
-                    </p>
-                    <div
-                      v-if="failureNotice.meta.length > 0"
-                      class="flex flex-wrap gap-1.5"
-                    >
-                      <span
-                        v-for="item in failureNotice.meta"
-                        :key="item"
-                        class="rounded-full border border-red-200 bg-white/70 px-2 py-0.5 text-[11px] font-mono text-red-700 dark:border-red-900 dark:bg-red-950/50 dark:text-red-200"
-                      >
-                        {{ item }}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </Card>
-
               <!-- 费用与性能概览 -->
               <Card>
                 <div class="p-3 sm:p-4">
@@ -253,8 +210,6 @@
                       v-if="hasServiceTierFacts || processingTierPriceMultiplier !== null"
                       class="mt-3"
                       :requested="serviceTierFacts.requested"
-                      :actual="serviceTierFacts.actual"
-                      :billing="serviceTierFacts.billing"
                       :price-multiplier="processingTierPriceMultiplier"
                     />
                   </div>
@@ -886,6 +841,7 @@ import TabsContent from '@/components/ui/tabs-content.vue'
 import { AlertTriangle, Check, Columns2, RefreshCw, X, Monitor, Server, MessageSquareText, Code2, Terminal, Play } from 'lucide-vue-next'
 import { dashboardApi, type RequestDetail } from '@/api/dashboard'
 import type { ImageProgress, RequestTrace } from '@/api/requestTrace'
+import type { UsageRecord } from '../types'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
 import {
   formatByteSize,
@@ -906,7 +862,11 @@ import {
   resolveDisplayRequestStatus,
   resolveUsageStreamLabelSegments,
 } from '../utils/status'
-import { resolveRequestFailureNotice } from '../utils/errorNotice'
+import { isCyberPolicyError } from '../utils/cyberError'
+import {
+  mergeUsageRecordErrorMessage,
+  parseUsageTimestampMs,
+} from '../utils/recordSync'
 import {
   formatPricePerMillion,
   resolveProcessingTierPriceMultiplier,
@@ -922,7 +882,11 @@ import ConversationView from './RequestDetailDrawer/ConversationView.vue'
 import HorizontalRequestTimeline from './HorizontalRequestTimeline.vue'
 import ReplayDialog from './ReplayDialog.vue'
 import ServiceTierFacts from './ServiceTierFacts.vue'
-import { hasServiceTierFact, resolveServiceTierFacts } from '../utils/service-tier'
+import UsageModelDisplay from './UsageModelDisplay.vue'
+import {
+  hasServiceTierFact,
+  resolveServiceTierFacts,
+} from '../utils/service-tier'
 
 // 对话解析器
 import {
@@ -937,6 +901,7 @@ type RequestStateStatus = 'pending' | 'streaming' | 'completed' | 'failed' | 'ca
 const props = defineProps<{
   isOpen: boolean
   requestId: string | null
+  summaryRecord?: UsageRecord | null
 }>()
 
 const emit = defineEmits<{
@@ -966,11 +931,13 @@ const emit = defineEmits<{
     endpointApiFormat?: string | null
     hasFormatConversion?: boolean | null
     targetModel?: string | null
+    requestedReasoningEffort?: string | null
     reasoningEffort?: string | null
     serviceTier?: string | null
     actualServiceTier?: string | null
     imageProgress?: ImageProgress | null
     errorMessage?: string | null
+    updatedAt?: string | null
   }]
 }>()
 
@@ -1098,6 +1065,114 @@ function resolveRequestStateStatusFromDetail(nextDetail: Pick<RequestDetail, 'st
   return resolveRequestStateStatus(nextDetail.status, nextDetail.status_code, nextDetail.error_message)
 }
 
+type HeaderModelTextField =
+  | 'model'
+  | 'target_model'
+  | 'model_version'
+  | 'requested_reasoning_effort'
+  | 'reasoning_effort'
+  | 'service_tier'
+  | 'actual_service_tier'
+
+const FINAL_PROVIDER_HEADER_FIELDS = new Set<HeaderModelTextField>([
+  'target_model',
+  'reasoning_effort',
+  'service_tier',
+  'actual_service_tier',
+])
+
+let modelSnapshotRevision = 0
+const summaryModelRevision = ref(0)
+const detailModelRevision = ref(0)
+
+function usageSnapshotUpdatedAtMs(
+  source: UsageRecord | RequestDetail | null | undefined,
+): number | null {
+  const value = source?.updated_at
+  if (typeof value !== 'string' || !value.trim()) return null
+  return parseUsageTimestampMs(value)
+}
+
+function summaryNullIsNewerForProviderField(
+  field: HeaderModelTextField,
+  nextDetail: RequestDetail | null | undefined,
+): boolean {
+  if (!FINAL_PROVIDER_HEADER_FIELDS.has(field) || !props.summaryRecord) return false
+
+  const summaryUpdatedAt = usageSnapshotUpdatedAtMs(props.summaryRecord)
+  const detailUpdatedAt = usageSnapshotUpdatedAtMs(nextDetail)
+  if (summaryUpdatedAt != null && detailUpdatedAt != null && summaryUpdatedAt !== detailUpdatedAt) {
+    return summaryUpdatedAt > detailUpdatedAt
+  }
+
+  if (summaryModelRevision.value > detailModelRevision.value) return true
+
+  // A terminal list row is a complete final-provider snapshot. When no
+  // comparable timestamps exist, its explicit null must beat a cached detail
+  // from an earlier candidate. Non-terminal rows may still be filled by a
+  // detail request that completed after the lightweight list response.
+  return ['completed', 'failed', 'cancelled'].includes(props.summaryRecord.status ?? '')
+}
+
+function readHeaderModelTextField(
+  source: UsageRecord | RequestDetail | null | undefined,
+  field: HeaderModelTextField,
+): { resolved: boolean, value: string | null } {
+  if (!source || !Object.prototype.hasOwnProperty.call(source, field)) {
+    return { resolved: false, value: null }
+  }
+
+  const value = (source as unknown as Record<string, unknown>)[field]
+  if (value === null) return { resolved: true, value: null }
+  if (typeof value !== 'string') return { resolved: false, value: null }
+
+  const normalized = value.trim()
+  return { resolved: true, value: normalized || null }
+}
+
+function resolveHeaderModelTextField(
+  field: HeaderModelTextField,
+  nextDetail: RequestDetail | null | undefined,
+): string | null | undefined {
+  // Prefer a populated list/active fact so sparse detail cannot make the header
+  // flicker. A summary null is often only a lightweight-contract placeholder,
+  // though, so a later populated detail is still useful. Final-provider stale
+  // facts are cleared when full list/active snapshots merge into the summary.
+  const summaryValue = readHeaderModelTextField(props.summaryRecord, field)
+  if (summaryValue.value) return summaryValue.value
+
+  const detailValue = readHeaderModelTextField(nextDetail, field)
+  if (detailValue.value) {
+    if (
+      summaryValue.resolved
+      && summaryValue.value === null
+      && summaryNullIsNewerForProviderField(field, nextDetail)
+    ) return null
+    return detailValue.value
+  }
+
+  return summaryValue.resolved || detailValue.resolved ? null : undefined
+}
+
+watch(
+  () => [
+    props.requestId,
+    props.summaryRecord?.status,
+    props.summaryRecord?.updated_at,
+    props.summaryRecord?.model,
+    props.summaryRecord?.target_model,
+    props.summaryRecord?.model_version,
+    props.summaryRecord?.requested_reasoning_effort,
+    props.summaryRecord?.reasoning_effort,
+    props.summaryRecord?.service_tier,
+    props.summaryRecord?.actual_service_tier,
+  ],
+  () => {
+    summaryModelRevision.value = ++modelSnapshotRevision
+  },
+  { immediate: true },
+)
+
 function detailTotalCost(nextDetail: RequestDetail): number | null {
   const structuredCost = typeof nextDetail.cost === 'object' ? nextDetail.cost?.total : null
   const totalCost = toNumber(nextDetail.total_cost)
@@ -1124,6 +1199,15 @@ function emitDetailRequestState(nextDetail: RequestDetail) {
   const id = props.requestId
   if (!id) return
 
+  const targetModel = resolveHeaderModelTextField('target_model', nextDetail)
+  const requestedReasoningEffort = resolveHeaderModelTextField(
+    'requested_reasoning_effort',
+    nextDetail,
+  )
+  const reasoningEffort = resolveHeaderModelTextField('reasoning_effort', nextDetail)
+  const serviceTier = resolveHeaderModelTextField('service_tier', nextDetail)
+  const actualServiceTier = resolveHeaderModelTextField('actual_service_tier', nextDetail)
+
   emit('requestState', {
     id,
     requestId: nextDetail.request_id || nextDetail.id || null,
@@ -1148,11 +1232,13 @@ function emitDetailRequestState(nextDetail: RequestDetail) {
     apiFormat: nextDetail.api_format ?? null,
     endpointApiFormat: nextDetail.endpoint_api_format ?? null,
     hasFormatConversion: nextDetail.has_format_conversion ?? null,
-    targetModel: nextDetail.target_model ?? null,
-    reasoningEffort: nextDetail.reasoning_effort ?? null,
-    serviceTier: nextDetail.service_tier ?? null,
-    actualServiceTier: nextDetail.actual_service_tier ?? null,
+    ...(targetModel ? { targetModel } : {}),
+    ...(requestedReasoningEffort ? { requestedReasoningEffort } : {}),
+    ...(reasoningEffort ? { reasoningEffort } : {}),
+    ...(serviceTier ? { serviceTier } : {}),
+    ...(actualServiceTier ? { actualServiceTier } : {}),
     errorMessage: nextDetail.error_message ?? undefined,
+    updatedAt: nextDetail.updated_at ?? undefined,
   })
 }
 
@@ -1358,10 +1444,106 @@ const metadataPanelData = computed<Record<string, unknown> | null>(() => {
     : null
 })
 
-const failureNotice = computed(() => resolveRequestFailureNotice(detail.value))
+const detailForCurrentRequest = computed(() => (
+  detailMatchesRequestId(detail.value, props.requestId) ? detail.value : null
+))
 
-const serviceTierFacts = computed(() => resolveServiceTierFacts(detail.value))
+type AuthoritativeErrorSource = 'summary' | 'detail' | null
+
+function isTerminalRequestState(status: RequestStateStatus | undefined): boolean {
+  return status === 'completed' || status === 'failed' || status === 'cancelled'
+}
+
+function isSuccessfulTerminalRequestState(status: RequestStateStatus | undefined): boolean {
+  return status === 'completed' || status === 'cancelled'
+}
+
+const authoritativeErrorSource = computed<AuthoritativeErrorSource>(() => {
+  const summary = props.summaryRecord
+  const currentDetail = detailForCurrentRequest.value
+  if (!summary || !currentDetail) return null
+
+  const summaryStatus = resolveRequestStateStatus(
+    summary.status,
+    summary.status_code,
+    summary.error_message,
+  )
+  const detailStatus = resolveRequestStateStatusFromDetail(currentDetail)
+  const summaryUpdatedAtMs = usageSnapshotUpdatedAtMs(summary)
+  const detailUpdatedAtMs = usageSnapshotUpdatedAtMs(currentDetail)
+
+  if (summaryUpdatedAtMs != null && detailUpdatedAtMs != null &&
+    summaryUpdatedAtMs !== detailUpdatedAtMs) {
+    if (detailUpdatedAtMs > summaryUpdatedAtMs && isTerminalRequestState(detailStatus)) {
+      return 'detail'
+    }
+    if (summaryUpdatedAtMs > detailUpdatedAtMs && isTerminalRequestState(summaryStatus)) {
+      return 'summary'
+    }
+  }
+
+  // Without a comparable timestamp, a successful/cancelled terminal snapshot
+  // still has to clear a failure from the other source. Generic failed detail
+  // remains non-authoritative so opening the drawer cannot flash away a Cyber
+  // refusal already resolved by the list.
+  const detailSucceeded = isSuccessfulTerminalRequestState(detailStatus)
+  const summarySucceeded = isSuccessfulTerminalRequestState(summaryStatus)
+  if (detailSucceeded && !summarySucceeded) return 'detail'
+  if (summarySucceeded && !detailSucceeded) return 'summary'
+  if (detailSucceeded && summarySucceeded) {
+    return detailModelRevision.value >= summaryModelRevision.value ? 'detail' : 'summary'
+  }
+
+  return null
+})
+
+const headerModelRecord = computed(() => {
+  const summary = props.summaryRecord
+  const currentDetail = detailForCurrentRequest.value
+  if (!summary && !currentDetail) return null
+
+  const authoritativeSource = authoritativeErrorSource.value
+  const errorMessage = authoritativeSource === 'summary'
+    ? mergeUsageRecordErrorMessage(undefined, summary?.error_message, { authoritative: true })
+    : mergeUsageRecordErrorMessage(
+      summary?.error_message,
+      currentDetail?.error_message,
+      { authoritative: authoritativeSource === 'detail' },
+    )
+
+  return {
+    model: resolveHeaderModelTextField('model', currentDetail) ?? '-',
+    target_model: resolveHeaderModelTextField('target_model', currentDetail),
+    model_version: resolveHeaderModelTextField('model_version', currentDetail),
+    requested_reasoning_effort: resolveHeaderModelTextField(
+      'requested_reasoning_effort',
+      currentDetail,
+    ),
+    reasoning_effort: resolveHeaderModelTextField('reasoning_effort', currentDetail),
+    service_tier: resolveHeaderModelTextField('service_tier', currentDetail),
+    error_message: errorMessage,
+  }
+})
+const serviceTierFacts = computed(() => resolveServiceTierFacts(headerModelRecord.value))
 const hasServiceTierFacts = computed(() => hasServiceTierFact(serviceTierFacts.value))
+const detailCyberPolicyError = computed(() => {
+  const summaryError = props.summaryRecord?.error_message
+  const currentDetail = detailForCurrentRequest.value
+  const detailErrors = [
+    currentDetail?.error_message,
+    currentDetail?.upstream_error,
+    currentDetail?.failure_summary,
+    currentDetail?.response_body,
+  ]
+
+  if (authoritativeErrorSource.value === 'summary') {
+    return isCyberPolicyError(summaryError)
+  }
+  if (authoritativeErrorSource.value === 'detail') {
+    return isCyberPolicyError(detailErrors)
+  }
+  return isCyberPolicyError([summaryError, ...detailErrors])
+})
 const processingTierPriceMultiplier = computed(() => (
   resolveProcessingTierPriceMultiplier(detail.value)
 ))
@@ -2257,15 +2439,12 @@ const visibleTabs = computed(() => {
   })
 })
 
-watch(() => props.requestId, async (newId) => {
-  if (newId && props.isOpen) {
-    await loadDetail(newId)
-  }
-})
-
-watch(() => props.isOpen, async (isOpen) => {
-  if (isOpen && props.requestId) {
-    await loadDetail(props.requestId)
+watch([() => props.isOpen, () => props.requestId], async ([isOpen, requestId]) => {
+  if (isOpen && requestId) {
+    if (!detailMatchesRequestId(detail.value, requestId)) {
+      detail.value = null
+    }
+    await loadDetail(requestId)
   } else if (!isOpen) {
     stopAutoRefresh()
     showTimeline.value = false
@@ -2275,6 +2454,14 @@ watch(() => props.isOpen, async (isOpen) => {
     bodiesLoadedForRequestId.value = null
   }
 })
+
+function detailMatchesRequestId(
+  candidate: RequestDetail | null | undefined,
+  requestId: string | null | undefined,
+): boolean {
+  if (!candidate || !requestId) return false
+  return candidate.id === requestId || candidate.request_id === requestId
+}
 
 async function ensureBodyContentLoaded() {
   if (!props.requestId || !detail.value) return
@@ -2334,6 +2521,9 @@ async function loadDetail(id: string, silent = false) {
   const requestId = ++loadDetailRequestId
   loadDetailInFlight = true
   if (!silent) {
+    if (!detailMatchesRequestId(detail.value, id)) {
+      detail.value = null
+    }
     loading.value = true
     historicalPricing.value = null
     timelineLoaded.value = false
@@ -2371,6 +2561,7 @@ async function loadDetail(id: string, silent = false) {
       error_flow: response.error_flow,
       scheduling_failure: response.scheduling_failure,
     }
+    detailModelRevision.value = ++modelSnapshotRevision
     detail.value = nextDetail
     bodiesLoadedForRequestId.value = sameRequest ? bodiesLoadedForRequestId.value : null
     emitDetailRequestState(nextDetail)

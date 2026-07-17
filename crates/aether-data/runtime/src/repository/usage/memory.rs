@@ -14,14 +14,16 @@ use aether_data_contracts::repository::usage::{
     StoredUsageProviderPerformanceTimelineRow, StoredUsageSettledCostSummary,
     StoredUsageTimeSeriesBucket, StoredUsageUserTotals, UsageAuditAggregationGroupBy,
     UsageAuditAggregationQuery, UsageAuditKeywordSearchQuery, UsageAuditSummaryQuery,
-    UsageBodyField, UsageBreakdownGroupBy, UsageBreakdownSummaryQuery,
+    UsageBodyCaptureState, UsageBodyField, UsageBreakdownGroupBy, UsageBreakdownSummaryQuery,
     UsageCacheAffinityHitSummaryQuery, UsageCacheAffinityIntervalGroupBy,
     UsageCacheAffinityIntervalQuery, UsageCacheHitSummaryQuery, UsageCostSavingsSummaryQuery,
     UsageDashboardDailyBreakdownQuery, UsageDashboardProviderCountsQuery,
     UsageDashboardSummaryQuery, UsageErrorDistributionQuery, UsageLeaderboardGroupBy,
     UsageLeaderboardQuery, UsageMonitoringErrorCountQuery, UsageMonitoringErrorListQuery,
     UsagePerformancePercentilesQuery, UsageProviderPerformanceQuery, UsageSettledCostSummaryQuery,
-    UsageTimeSeriesGranularity, UsageTimeSeriesQuery,
+    UsageTimeSeriesGranularity, UsageTimeSeriesQuery, PROVIDER_CACHE_TTL_MINUTES_METADATA_KEY,
+    PROVIDER_REASONING_EFFORT_METADATA_KEY, PROVIDER_SERVICE_TIER_METADATA_KEY,
+    REQUESTED_REASONING_EFFORT_METADATA_KEY,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -2703,10 +2705,14 @@ fn hydrate_client_family(item: &mut StoredRequestUsageAudit) {
 fn persisted_usage_body_ref(
     incoming_ref: Option<&str>,
     incoming_body: Option<&Value>,
+    incoming_state: Option<UsageBodyCaptureState>,
     _metadata: Option<&Value>,
     existing: Option<&StoredRequestUsageAudit>,
     field: UsageBodyField,
 ) -> Option<String> {
+    if incoming_state == Some(UsageBodyCaptureState::None) {
+        return None;
+    }
     if incoming_body.is_some() {
         return None;
     }
@@ -2722,6 +2728,78 @@ fn persisted_usage_body_ref(
                 UsageBodyField::ClientResponseBody => existing.client_response_body_ref.clone(),
             })
         })
+}
+
+fn request_body_capture_replaces_derived_facts(
+    request_body: Option<&Value>,
+    request_body_state: Option<UsageBodyCaptureState>,
+) -> bool {
+    if request_body_state.is_some() {
+        return true;
+    }
+    let Some(request_body) = request_body else {
+        return false;
+    };
+    !request_body.as_object().is_some_and(|body| {
+        body.get("truncated").and_then(Value::as_bool) == Some(true)
+            && body.get("reason").and_then(Value::as_str) == Some("body_capture_limit_exceeded")
+    })
+}
+
+fn clear_request_body_facts(
+    metadata: Option<&Value>,
+    clear_client_request_body_facts: bool,
+    clear_provider_request_body_facts: bool,
+) -> Value {
+    let mut metadata = metadata
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if clear_client_request_body_facts {
+        metadata.remove(REQUESTED_REASONING_EFFORT_METADATA_KEY);
+        metadata.remove("request_body_ref");
+    }
+    if clear_provider_request_body_facts {
+        metadata.remove(PROVIDER_REASONING_EFFORT_METADATA_KEY);
+        metadata.remove(PROVIDER_SERVICE_TIER_METADATA_KEY);
+        metadata.remove(PROVIDER_CACHE_TTL_MINUTES_METADATA_KEY);
+        metadata.remove("provider_request_body_ref");
+    }
+    Value::Object(metadata)
+}
+
+fn retain_previous_request_audit_metadata(
+    metadata: Option<&Value>,
+    preserve_client_request_body_facts: bool,
+) -> Value {
+    let Some(metadata) = metadata.and_then(Value::as_object) else {
+        return Value::Object(serde_json::Map::new());
+    };
+    let mut retained = serde_json::Map::new();
+    for key in [
+        "trace_id",
+        "client_ip",
+        "user_agent",
+        "client_family",
+        "client_requested_stream",
+        "client_session_affinity",
+        "api_key_is_standalone",
+        "request_path",
+        "request_query_string",
+        "request_path_and_query",
+    ] {
+        if let Some(value) = metadata.get(key) {
+            retained.insert(key.to_string(), value.clone());
+        }
+    }
+    if preserve_client_request_body_facts {
+        for key in [REQUESTED_REASONING_EFFORT_METADATA_KEY, "request_body_ref"] {
+            if let Some(value) = metadata.get(key) {
+                retained.insert(key.to_string(), value.clone());
+            }
+        }
+    }
+    Value::Object(retained)
 }
 
 fn merge_usage_status_code(
@@ -2789,14 +2867,57 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
             return Ok(existing.expect("existing usage should be present").clone());
         }
 
-        let request_metadata = usage.request_metadata.clone().or_else(|| {
-            existing
-                .as_ref()
-                .and_then(|existing| existing.request_metadata.clone())
+        let replace_client_request_body_facts = request_body_capture_replaces_derived_facts(
+            usage.request_body.as_ref(),
+            usage.request_body_state,
+        );
+        let replace_provider_request_body_facts = request_body_capture_replaces_derived_facts(
+            usage.provider_request_body.as_ref(),
+            usage.provider_request_body_state,
+        );
+        let clear_request_body = usage.request_body_state == Some(UsageBodyCaptureState::None);
+        let clear_provider_request_body =
+            usage.provider_request_body_state == Some(UsageBodyCaptureState::None);
+        let clear_response_body = usage.response_body_state == Some(UsageBodyCaptureState::None);
+        let clear_client_response_body =
+            usage.client_response_body_state == Some(UsageBodyCaptureState::None);
+        let replace_routing_snapshot = usage_status_is_finalized(&usage.status);
+        let mut incoming_request_metadata = usage.request_metadata.clone();
+        if incoming_request_metadata.is_some()
+            && (clear_request_body || clear_provider_request_body)
+        {
+            incoming_request_metadata = Some(clear_request_body_facts(
+                incoming_request_metadata.as_ref(),
+                clear_request_body,
+                clear_provider_request_body,
+            ));
+        }
+        let request_metadata = incoming_request_metadata.or_else(|| {
+            if replace_routing_snapshot {
+                Some(retain_previous_request_audit_metadata(
+                    existing
+                        .as_ref()
+                        .and_then(|existing| existing.request_metadata.as_ref()),
+                    !replace_client_request_body_facts,
+                ))
+            } else if replace_client_request_body_facts || replace_provider_request_body_facts {
+                Some(clear_request_body_facts(
+                    existing
+                        .as_ref()
+                        .and_then(|existing| existing.request_metadata.as_ref()),
+                    replace_client_request_body_facts,
+                    replace_provider_request_body_facts,
+                ))
+            } else {
+                existing
+                    .as_ref()
+                    .and_then(|existing| existing.request_metadata.clone())
+            }
         });
         let request_body_ref = persisted_usage_body_ref(
             usage.request_body_ref.as_deref(),
             usage.request_body.as_ref(),
+            usage.request_body_state,
             request_metadata.as_ref(),
             existing.as_ref(),
             UsageBodyField::RequestBody,
@@ -2804,6 +2925,7 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
         let provider_request_body_ref = persisted_usage_body_ref(
             usage.provider_request_body_ref.as_deref(),
             usage.provider_request_body.as_ref(),
+            usage.provider_request_body_state,
             request_metadata.as_ref(),
             existing.as_ref(),
             UsageBodyField::ProviderRequestBody,
@@ -2811,6 +2933,7 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
         let response_body_ref = persisted_usage_body_ref(
             usage.response_body_ref.as_deref(),
             usage.response_body.as_ref(),
+            usage.response_body_state,
             request_metadata.as_ref(),
             existing.as_ref(),
             UsageBodyField::ResponseBody,
@@ -2818,10 +2941,34 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
         let client_response_body_ref = persisted_usage_body_ref(
             usage.client_response_body_ref.as_deref(),
             usage.client_response_body.as_ref(),
+            usage.client_response_body_state,
             request_metadata.as_ref(),
             existing.as_ref(),
             UsageBodyField::ClientResponseBody,
         );
+        if clear_request_body
+            || clear_provider_request_body
+            || clear_response_body
+            || clear_client_response_body
+        {
+            let mut detached_bodies = self.detached_bodies.write().expect("usage repository lock");
+            for (clear, field) in [
+                (clear_request_body, UsageBodyField::RequestBody),
+                (
+                    clear_provider_request_body,
+                    UsageBodyField::ProviderRequestBody,
+                ),
+                (clear_response_body, UsageBodyField::ResponseBody),
+                (
+                    clear_client_response_body,
+                    UsageBodyField::ClientResponseBody,
+                ),
+            ] {
+                if clear {
+                    detached_bodies.remove(&usage_body_ref(&usage.request_id, field));
+                }
+            }
+        }
         let stored = StoredRequestUsageAudit {
             id: existing
                 .as_ref()
@@ -2935,11 +3082,15 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
                     .as_ref()
                     .and_then(|existing| existing.request_headers.clone())
             }),
-            request_body: usage.request_body.or_else(|| {
-                existing
-                    .as_ref()
-                    .and_then(|existing| existing.request_body.clone())
-            }),
+            request_body: if clear_request_body {
+                None
+            } else {
+                usage.request_body.or_else(|| {
+                    existing
+                        .as_ref()
+                        .and_then(|existing| existing.request_body.clone())
+                })
+            },
             request_body_ref,
             request_body_state: usage.request_body_state.or_else(|| {
                 existing
@@ -2951,11 +3102,15 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
                     .as_ref()
                     .and_then(|existing| existing.provider_request_headers.clone())
             }),
-            provider_request_body: usage.provider_request_body.or_else(|| {
-                existing
-                    .as_ref()
-                    .and_then(|existing| existing.provider_request_body.clone())
-            }),
+            provider_request_body: if clear_provider_request_body {
+                None
+            } else {
+                usage.provider_request_body.or_else(|| {
+                    existing
+                        .as_ref()
+                        .and_then(|existing| existing.provider_request_body.clone())
+                })
+            },
             provider_request_body_ref,
             provider_request_body_state: usage.provider_request_body_state.or_else(|| {
                 existing
@@ -2967,11 +3122,15 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
                     .as_ref()
                     .and_then(|existing| existing.response_headers.clone())
             }),
-            response_body: usage.response_body.or_else(|| {
-                existing
-                    .as_ref()
-                    .and_then(|existing| existing.response_body.clone())
-            }),
+            response_body: if clear_response_body {
+                None
+            } else {
+                usage.response_body.or_else(|| {
+                    existing
+                        .as_ref()
+                        .and_then(|existing| existing.response_body.clone())
+                })
+            },
             response_body_ref,
             response_body_state: usage.response_body_state.or_else(|| {
                 existing
@@ -2983,61 +3142,95 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
                     .as_ref()
                     .and_then(|existing| existing.client_response_headers.clone())
             }),
-            client_response_body: usage.client_response_body.or_else(|| {
-                existing
-                    .as_ref()
-                    .and_then(|existing| existing.client_response_body.clone())
-            }),
+            client_response_body: if clear_client_response_body {
+                None
+            } else {
+                usage.client_response_body.or_else(|| {
+                    existing
+                        .as_ref()
+                        .and_then(|existing| existing.client_response_body.clone())
+                })
+            },
             client_response_body_ref,
             client_response_body_state: usage.client_response_body_state.or_else(|| {
                 existing
                     .as_ref()
                     .and_then(|existing| existing.client_response_body_state)
             }),
-            candidate_id: usage.candidate_id.or_else(|| {
-                existing
-                    .as_ref()
-                    .and_then(|existing| existing.routing_candidate_id().map(ToOwned::to_owned))
-            }),
-            candidate_index: usage.candidate_index.or_else(|| {
-                existing
-                    .as_ref()
-                    .and_then(|existing| existing.routing_candidate_index())
-            }),
-            key_name: usage.key_name.or_else(|| {
-                existing
-                    .as_ref()
-                    .and_then(|existing| existing.routing_key_name().map(ToOwned::to_owned))
-            }),
-            planner_kind: usage.planner_kind.or_else(|| {
-                existing
-                    .as_ref()
-                    .and_then(|existing| existing.routing_planner_kind().map(ToOwned::to_owned))
-            }),
-            route_family: usage.route_family.or_else(|| {
-                existing
-                    .as_ref()
-                    .and_then(|existing| existing.routing_route_family().map(ToOwned::to_owned))
-            }),
-            route_kind: usage.route_kind.or_else(|| {
-                existing
-                    .as_ref()
-                    .and_then(|existing| existing.routing_route_kind().map(ToOwned::to_owned))
-            }),
-            execution_path: usage.execution_path.or_else(|| {
-                existing
-                    .as_ref()
-                    .and_then(|existing| existing.routing_execution_path().map(ToOwned::to_owned))
-            }),
-            local_execution_runtime_miss_reason: usage.local_execution_runtime_miss_reason.or_else(
-                || {
+            candidate_id: if replace_routing_snapshot {
+                usage.candidate_id
+            } else {
+                usage.candidate_id.or_else(|| {
+                    existing
+                        .as_ref()
+                        .and_then(|existing| existing.routing_candidate_id().map(ToOwned::to_owned))
+                })
+            },
+            candidate_index: if replace_routing_snapshot {
+                usage.candidate_index
+            } else {
+                usage.candidate_index.or_else(|| {
+                    existing
+                        .as_ref()
+                        .and_then(|existing| existing.routing_candidate_index())
+                })
+            },
+            key_name: if replace_routing_snapshot {
+                usage.key_name
+            } else {
+                usage.key_name.or_else(|| {
+                    existing
+                        .as_ref()
+                        .and_then(|existing| existing.routing_key_name().map(ToOwned::to_owned))
+                })
+            },
+            planner_kind: if replace_routing_snapshot {
+                usage.planner_kind
+            } else {
+                usage.planner_kind.or_else(|| {
+                    existing
+                        .as_ref()
+                        .and_then(|existing| existing.routing_planner_kind().map(ToOwned::to_owned))
+                })
+            },
+            route_family: if replace_routing_snapshot {
+                usage.route_family
+            } else {
+                usage.route_family.or_else(|| {
+                    existing
+                        .as_ref()
+                        .and_then(|existing| existing.routing_route_family().map(ToOwned::to_owned))
+                })
+            },
+            route_kind: if replace_routing_snapshot {
+                usage.route_kind
+            } else {
+                usage.route_kind.or_else(|| {
+                    existing
+                        .as_ref()
+                        .and_then(|existing| existing.routing_route_kind().map(ToOwned::to_owned))
+                })
+            },
+            execution_path: if replace_routing_snapshot {
+                usage.execution_path
+            } else {
+                usage.execution_path.or_else(|| {
+                    existing.as_ref().and_then(|existing| {
+                        existing.routing_execution_path().map(ToOwned::to_owned)
+                    })
+                })
+            },
+            local_execution_runtime_miss_reason: if replace_routing_snapshot {
+                usage.local_execution_runtime_miss_reason
+            } else {
+                usage.local_execution_runtime_miss_reason.or_else(|| {
                     existing.as_ref().and_then(|existing| {
                         existing
                             .routing_local_execution_runtime_miss_reason()
                             .map(ToOwned::to_owned)
                     })
-                },
-            ),
+                })
+            },
             client_family: usage_request_metadata_client_family(request_metadata.as_ref())
                 .map(ToOwned::to_owned)
                 .or_else(|| {

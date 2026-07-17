@@ -6,6 +6,49 @@ use aether_data_contracts::repository::usage::{
     UsageReadRepository, UsageTimeSeriesGranularity, UsageWriteRepository,
 };
 
+#[test]
+fn sqlite_usage_upsert_guards_candidate_identity_metadata_and_routing_from_late_lifecycle() {
+    for field in [
+        "provider_name",
+        "model",
+        "target_model",
+        "provider_id",
+        "provider_endpoint_id",
+        "provider_api_key_id",
+        "request_type",
+        "api_format",
+        "api_family",
+        "endpoint_kind",
+        "endpoint_api_format",
+        "provider_api_family",
+        "provider_endpoint_kind",
+        "has_format_conversion",
+        "is_stream",
+        "upstream_is_stream",
+        "request_metadata",
+        "candidate_id",
+        "candidate_index",
+        "key_name",
+        "planner_kind",
+        "route_family",
+        "route_kind",
+        "execution_path",
+        "local_execution_runtime_miss_reason",
+    ] {
+        let assignment = format!("{field} = CASE WHEN (");
+        assert!(
+            super::UPSERT_USAGE_SQL.contains(&assignment),
+            "missing lifecycle guard for {field}"
+        );
+        assert!(
+            super::UPSERT_USAGE_SQL.contains(&format!("THEN \"usage\".{field}")),
+            "late lifecycle must preserve {field}"
+        );
+    }
+    assert!(super::UPSERT_USAGE_SQL
+        .contains("OR (\"usage\".status = 'streaming' AND excluded.status = 'pending')"));
+}
+
 #[tokio::test]
 async fn sqlite_provider_performance_can_skip_timeline() {
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -139,7 +182,7 @@ async fn sqlite_usage_write_repository_does_not_regress_void_usage() {
         .expect("sqlite migrations should run");
     seed_stats_targets(&pool).await;
 
-    let repository = SqliteUsageWriteRepository::new(pool);
+    let repository = SqliteUsageWriteRepository::new(pool.clone());
     repository
         .upsert(sample_usage("request-1", "failed", "void", 1_000))
         .await
@@ -205,9 +248,11 @@ async fn sqlite_usage_write_repository_does_not_regress_terminal_usage_from_late
         .expect("sqlite migrations should run");
     seed_stats_targets(&pool).await;
 
-    let repository = SqliteUsageWriteRepository::new(pool);
+    let repository = SqliteUsageWriteRepository::new(pool.clone());
+    let mut terminal = sample_usage("request-1", "completed", "pending", 1_000);
+    terminal.request_metadata = Some(serde_json::json!({"trace_id": "terminal-trace"}));
     repository
-        .upsert(sample_usage("request-1", "completed", "pending", 1_000))
+        .upsert(terminal)
         .await
         .expect("terminal usage should upsert");
 
@@ -222,6 +267,30 @@ async fn sqlite_usage_write_repository_does_not_regress_terminal_usage_from_late
     late_streaming.response_time_ms = Some(9_999);
     late_streaming.first_byte_time_ms = Some(9_999);
     late_streaming.finalized_at_unix_secs = None;
+    late_streaming.provider_name = "Late Provider".to_string();
+    late_streaming.model = "late-model".to_string();
+    late_streaming.target_model = Some("late-target".to_string());
+    late_streaming.request_type = Some("late-request".to_string());
+    late_streaming.api_format = Some("late:api".to_string());
+    late_streaming.api_family = Some("late-family".to_string());
+    late_streaming.endpoint_kind = Some("late-endpoint".to_string());
+    late_streaming.endpoint_api_format = Some("late:endpoint".to_string());
+    late_streaming.provider_api_family = Some("late-provider-family".to_string());
+    late_streaming.provider_endpoint_kind = Some("late-provider-endpoint".to_string());
+    late_streaming.has_format_conversion = Some(false);
+    late_streaming.is_stream = Some(true);
+    late_streaming.candidate_id = Some("late-candidate".to_string());
+    late_streaming.candidate_index = Some(99);
+    late_streaming.key_name = Some("late-key".to_string());
+    late_streaming.planner_kind = Some("late-planner".to_string());
+    late_streaming.route_family = Some("late-route-family".to_string());
+    late_streaming.route_kind = Some("late-route-kind".to_string());
+    late_streaming.execution_path = Some("late-path".to_string());
+    late_streaming.local_execution_runtime_miss_reason = Some("late-miss".to_string());
+    late_streaming.request_metadata = Some(serde_json::json!({
+        "provider_service_tier": "priority",
+        "upstream_is_stream": true
+    }));
 
     let current = repository
         .upsert(late_streaming)
@@ -238,6 +307,91 @@ async fn sqlite_usage_write_repository_does_not_regress_terminal_usage_from_late
     assert_eq!(current.first_byte_time_ms, Some(12));
     assert_eq!(current.finalized_at_unix_secs, Some(1_000));
     assert_eq!(current.updated_at_unix_secs, 1_000);
+    assert_eq!(current.provider_name, "Provider One");
+    assert_eq!(current.model, "model-1");
+    assert_eq!(current.target_model.as_deref(), Some("target-model"));
+    assert_eq!(current.request_type.as_deref(), Some("chat"));
+    assert_eq!(current.api_format.as_deref(), Some("openai"));
+    assert!(current.has_format_conversion);
+    assert!(!current.is_stream);
+    assert_eq!(current.candidate_id.as_deref(), Some("candidate-1"));
+    assert_eq!(current.candidate_index, Some(1));
+    assert_eq!(current.key_name.as_deref(), Some("key-one"));
+    assert_eq!(current.planner_kind.as_deref(), Some("default"));
+    assert_eq!(current.route_family.as_deref(), Some("chat"));
+    assert_eq!(current.route_kind.as_deref(), Some("completion"));
+    assert_eq!(current.execution_path.as_deref(), Some("remote"));
+    assert_eq!(current.provider_service_tier(), None);
+    assert_eq!(
+        current
+            .request_metadata
+            .as_ref()
+            .and_then(|value| value.get("trace_id"))
+            .and_then(serde_json::Value::as_str),
+        Some("terminal-trace")
+    );
+
+    let listed = SqliteUsageReadRepository::new(pool)
+        .list_usage_audits(&UsageAuditListQuery {
+            limit: Some(10),
+            newest_first: true,
+            ..UsageAuditListQuery::default()
+        })
+        .await
+        .expect("usage list should load")
+        .into_iter()
+        .find(|item| item.request_id == "request-1")
+        .expect("terminal usage should be listed");
+    assert_eq!(listed.provider_name, "Provider One");
+    assert_eq!(listed.model, "model-1");
+    assert_eq!(listed.candidate_id.as_deref(), Some("candidate-1"));
+    assert_eq!(listed.provider_service_tier(), None);
+}
+
+#[tokio::test]
+async fn sqlite_usage_write_repository_allows_authoritative_completed_recovery() {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("sqlite pool should connect");
+    run_migrations(&pool)
+        .await
+        .expect("sqlite migrations should run");
+    seed_stats_targets(&pool).await;
+
+    let repository = SqliteUsageWriteRepository::new(pool);
+    repository
+        .upsert(sample_usage("request-recovery", "failed", "void", 1_000))
+        .await
+        .expect("void failure should upsert");
+
+    let mut recovery = sample_usage("request-recovery", "completed", "pending", 1_001);
+    recovery.provider_name = "Recovered Provider".to_string();
+    recovery.model = "recovered-model".to_string();
+    recovery.target_model = Some("recovered-target".to_string());
+    recovery.api_format = Some("recovered:api".to_string());
+    recovery.candidate_id = Some("recovered-candidate".to_string());
+    recovery.request_metadata = Some(serde_json::json!({"provider_service_tier": "priority"}));
+    let recovered = repository
+        .upsert(recovery)
+        .await
+        .expect("completed recovery should upsert");
+
+    assert_eq!(recovered.status, "completed");
+    assert_eq!(recovered.billing_status, "pending");
+    assert_eq!(recovered.provider_name, "Recovered Provider");
+    assert_eq!(recovered.model, "recovered-model");
+    assert_eq!(recovered.target_model.as_deref(), Some("recovered-target"));
+    assert_eq!(recovered.api_format.as_deref(), Some("recovered:api"));
+    assert_eq!(
+        recovered.candidate_id.as_deref(),
+        Some("recovered-candidate")
+    );
+    assert_eq!(
+        recovered.provider_service_tier().as_deref(),
+        Some("priority")
+    );
 }
 
 #[tokio::test]
@@ -277,6 +431,51 @@ async fn sqlite_usage_write_repository_preserves_streaming_response_start_from_l
     assert_eq!(current.status_code, Some(200));
     assert_eq!(current.response_time_ms, Some(42));
     assert_eq!(current.first_byte_time_ms, Some(12));
+}
+
+#[tokio::test]
+async fn sqlite_usage_write_repository_keeps_streaming_capture_from_late_pending() {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("sqlite pool should connect");
+    run_migrations(&pool)
+        .await
+        .expect("sqlite migrations should run");
+    seed_stats_targets(&pool).await;
+
+    let repository = SqliteUsageWriteRepository::new(pool);
+    let mut streaming = sample_usage("request-streaming-capture", "streaming", "pending", 1_000);
+    streaming.request_metadata = Some(serde_json::json!({"trace_id": "streaming-final"}));
+    repository
+        .upsert(streaming)
+        .await
+        .expect("streaming usage should upsert");
+
+    let mut late_pending = sample_usage("request-streaming-capture", "pending", "pending", 1_001);
+    late_pending.provider_name = "Late Provider".to_string();
+    late_pending.model = "late-model".to_string();
+    late_pending.candidate_id = Some("late-candidate".to_string());
+    late_pending.request_metadata = Some(serde_json::json!({"provider_service_tier": "priority"}));
+    let current = repository
+        .upsert(late_pending)
+        .await
+        .expect("late pending usage should not regress streaming capture");
+
+    assert_eq!(current.status, "streaming");
+    assert_eq!(current.provider_name, "Provider One");
+    assert_eq!(current.model, "model-1");
+    assert_eq!(current.candidate_id.as_deref(), Some("candidate-1"));
+    assert_eq!(current.provider_service_tier(), None);
+    assert_eq!(
+        current
+            .request_metadata
+            .as_ref()
+            .and_then(|value| value.get("trace_id"))
+            .and_then(serde_json::Value::as_str),
+        Some("streaming-final")
+    );
 }
 
 #[tokio::test]

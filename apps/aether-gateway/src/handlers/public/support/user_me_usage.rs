@@ -506,6 +506,9 @@ fn build_users_me_usage_record_payload(
     if let Some(reasoning_effort) = item.provider_reasoning_effort() {
         payload["reasoning_effort"] = json!(reasoning_effort);
     }
+    if let Some(requested_reasoning_effort) = item.requested_reasoning_effort() {
+        payload["requested_reasoning_effort"] = json!(requested_reasoning_effort);
+    }
     if let Some(service_tier) = item.provider_service_tier() {
         payload["service_tier"] = json!(service_tier);
     }
@@ -576,6 +579,9 @@ fn build_users_me_usage_active_payload(item: &StoredRequestUsageAudit) -> serde_
     }
     if let Some(reasoning_effort) = item.provider_reasoning_effort() {
         payload["reasoning_effort"] = json!(reasoning_effort);
+    }
+    if let Some(requested_reasoning_effort) = item.requested_reasoning_effort() {
+        payload["requested_reasoning_effort"] = json!(requested_reasoning_effort);
     }
     if let Some(service_tier) = item.provider_service_tier() {
         payload["service_tier"] = json!(service_tier);
@@ -1653,6 +1659,27 @@ mod tests {
         assert_eq!(payload["cache_creation_input_tokens"], 10);
         assert_eq!(payload["cache_creation_ephemeral_5m_input_tokens"], 4);
         assert_eq!(payload["cache_creation_ephemeral_1h_input_tokens"], 6);
+    }
+
+    #[test]
+    fn user_usage_payloads_expose_requested_and_provider_reasoning_mapping() {
+        let item = StoredRequestUsageAudit {
+            request_body: Some(json!({
+                "reasoning": { "effort": "xhigh" }
+            })),
+            provider_request_body: Some(json!({
+                "reasoning": { "effort": "max" }
+            })),
+            ..sample_usage("completed")
+        };
+
+        let record = build_users_me_usage_record_payload(&item, false, &BTreeMap::new(), false);
+        let active = build_users_me_usage_active_payload(&item);
+
+        assert_eq!(record["requested_reasoning_effort"], "xhigh");
+        assert_eq!(active["requested_reasoning_effort"], "xhigh");
+        assert_eq!(record["reasoning_effort"], "max");
+        assert_eq!(active["reasoning_effort"], "max");
     }
 
     #[test]

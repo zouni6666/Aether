@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 pub const PROVIDER_REASONING_EFFORT_METADATA_KEY: &str = "provider_reasoning_effort";
+pub const REQUESTED_REASONING_EFFORT_METADATA_KEY: &str = "requested_reasoning_effort";
 pub const PROVIDER_SERVICE_TIER_METADATA_KEY: &str = "provider_service_tier";
 pub const PROVIDER_ACTUAL_SERVICE_TIER_METADATA_KEY: &str = "provider_actual_service_tier";
 pub const PROVIDER_CACHE_TTL_MINUTES_METADATA_KEY: &str = "provider_cache_ttl_minutes";
@@ -93,6 +94,89 @@ pub fn normalize_provider_service_tier(value: &str) -> Option<String> {
         return None;
     }
     Some(normalized)
+}
+
+/// Resolves a provider processing tier exclusively from the final upstream request.
+///
+/// A complete captured body is authoritative, including when it contains no tier. The metadata
+/// fallback is reserved for bodies that were stripped, externalized, or truncated after the tier
+/// had already been derived from that same request.
+pub fn resolve_provider_service_tier_from_request_capture(
+    provider_request_body: Option<&Value>,
+    provider_request_body_state: Option<UsageBodyCaptureState>,
+    request_metadata: Option<&Value>,
+) -> Option<String> {
+    if request_body_capture_is_authoritative(provider_request_body, provider_request_body_state) {
+        return extract_provider_service_tier_from_body(provider_request_body);
+    }
+
+    if !matches!(
+        provider_request_body_state,
+        Some(
+            UsageBodyCaptureState::Inline
+                | UsageBodyCaptureState::Reference
+                | UsageBodyCaptureState::Truncated
+                | UsageBodyCaptureState::Disabled
+                | UsageBodyCaptureState::Unavailable
+        )
+    ) {
+        return None;
+    }
+
+    request_metadata
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get(PROVIDER_SERVICE_TIER_METADATA_KEY))
+        .and_then(Value::as_str)
+        .and_then(normalize_provider_service_tier)
+}
+
+fn request_body_capture_is_authoritative(
+    request_body: Option<&Value>,
+    request_body_state: Option<UsageBodyCaptureState>,
+) -> bool {
+    let Some(request_body) = request_body else {
+        return false;
+    };
+    if matches!(
+        request_body_state,
+        Some(
+            UsageBodyCaptureState::None
+                | UsageBodyCaptureState::Truncated
+                | UsageBodyCaptureState::Disabled
+                | UsageBodyCaptureState::Unavailable
+        )
+    ) {
+        return false;
+    }
+
+    !request_body.as_object().is_some_and(|body| {
+        body.get("truncated").and_then(Value::as_bool) == Some(true)
+            && body.get("reason").and_then(Value::as_str) == Some("body_capture_limit_exceeded")
+    })
+}
+
+fn resolve_reasoning_effort_from_request_capture(
+    request_body: Option<&Value>,
+    request_body_state: Option<UsageBodyCaptureState>,
+    request_metadata: Option<&Value>,
+    metadata_key: &str,
+) -> Option<String> {
+    if request_body_capture_is_authoritative(request_body, request_body_state) {
+        return extract_provider_reasoning_effort_from_body(request_body);
+    }
+
+    // An explicit `none` marker describes the final capture attempt and must win over any stale
+    // inline body/metadata left by an earlier candidate. `None` (the absence of a marker) remains
+    // the legacy list-query shape, where metadata is the only available representation.
+    if request_body_state == Some(UsageBodyCaptureState::None) {
+        return None;
+    }
+
+    request_metadata
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get(metadata_key))
+        .and_then(Value::as_str)
+        .and_then(normalize_provider_reasoning_effort)
 }
 
 pub fn resolve_provider_cache_ttl_minutes(
@@ -511,33 +595,40 @@ impl StoredRequestUsageAudit {
     }
 
     pub fn provider_reasoning_effort(&self) -> Option<String> {
-        if self
-            .provider_request_body
-            .as_ref()
-            .and_then(Value::as_object)
-            .is_some()
-        {
-            return extract_provider_reasoning_effort_from_body(
-                self.provider_request_body.as_ref(),
-            );
-        }
+        resolve_reasoning_effort_from_request_capture(
+            self.provider_request_body.as_ref(),
+            self.provider_request_body_state,
+            self.request_metadata.as_ref(),
+            PROVIDER_REASONING_EFFORT_METADATA_KEY,
+        )
+    }
 
-        self.request_metadata_string(PROVIDER_REASONING_EFFORT_METADATA_KEY)
-            .and_then(normalize_provider_reasoning_effort)
+    pub fn requested_reasoning_effort(&self) -> Option<String> {
+        resolve_reasoning_effort_from_request_capture(
+            self.request_body.as_ref(),
+            self.request_body_state,
+            self.request_metadata.as_ref(),
+            REQUESTED_REASONING_EFFORT_METADATA_KEY,
+        )
     }
 
     pub fn provider_service_tier(&self) -> Option<String> {
-        if self
-            .provider_request_body
-            .as_ref()
-            .and_then(Value::as_object)
-            .is_some()
-        {
-            return extract_provider_service_tier_from_body(self.provider_request_body.as_ref());
-        }
-
-        self.request_metadata_string(PROVIDER_SERVICE_TIER_METADATA_KEY)
-            .and_then(normalize_provider_service_tier)
+        resolve_provider_service_tier_from_request_capture(
+            self.provider_request_body.as_ref(),
+            self.provider_request_body_state,
+            self.request_metadata.as_ref(),
+        )
+        .or_else(|| {
+            // Lightweight list queries intentionally omit bodies and typed capture state. Their
+            // request metadata was normalized before persistence and is the only available copy
+            // of the final provider-request fact.
+            if self.provider_request_body.is_none() && self.provider_request_body_state.is_none() {
+                self.request_metadata_string(PROVIDER_SERVICE_TIER_METADATA_KEY)
+                    .and_then(normalize_provider_service_tier)
+            } else {
+                None
+            }
+        })
     }
 
     pub fn provider_actual_service_tier(&self) -> Option<String> {
@@ -2682,6 +2773,126 @@ mod tests {
 
         assert_eq!(usage.provider_reasoning_effort(), None);
         assert_eq!(usage.provider_service_tier(), None);
+    }
+
+    #[test]
+    fn requested_and_provider_reasoning_efforts_remain_independent() {
+        let mut usage = sample_usage();
+        usage.request_body = Some(json!({
+            "reasoning": { "effort": "XHigh" }
+        }));
+        usage.provider_request_body = Some(json!({
+            "reasoning_effort": "max"
+        }));
+        usage.request_metadata = Some(json!({
+            "requested_reasoning_effort": "low",
+            "provider_reasoning_effort": "medium"
+        }));
+
+        assert_eq!(usage.requested_reasoning_effort().as_deref(), Some("xhigh"));
+        assert_eq!(usage.provider_reasoning_effort().as_deref(), Some("max"));
+
+        usage.request_body = Some(json!({ "model": "gpt-5" }));
+        assert_eq!(usage.requested_reasoning_effort(), None);
+
+        usage.request_body = None;
+        assert_eq!(usage.requested_reasoning_effort().as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn explicit_none_capture_ignores_stale_request_bodies_and_metadata() {
+        let mut usage = sample_usage();
+        usage.request_body = Some(json!({
+            "reasoning": { "effort": "xhigh" }
+        }));
+        usage.request_body_state = Some(UsageBodyCaptureState::None);
+        usage.provider_request_body = Some(json!({
+            "reasoning_effort": "max",
+            "service_tier": "priority"
+        }));
+        usage.provider_request_body_state = Some(UsageBodyCaptureState::None);
+        usage.request_metadata = Some(json!({
+            "requested_reasoning_effort": "high",
+            "provider_reasoning_effort": "medium",
+            "provider_service_tier": "priority"
+        }));
+
+        assert_eq!(usage.requested_reasoning_effort(), None);
+        assert_eq!(usage.provider_reasoning_effort(), None);
+        assert_eq!(usage.provider_service_tier(), None);
+    }
+
+    #[test]
+    fn reasoning_mapping_uses_derived_metadata_after_request_bodies_are_truncated() {
+        let truncated = json!({
+            "truncated": true,
+            "reason": "body_capture_limit_exceeded"
+        });
+        let mut usage = sample_usage();
+        usage.request_body = Some(truncated.clone());
+        usage.request_body_state = Some(UsageBodyCaptureState::Truncated);
+        usage.provider_request_body = Some(truncated);
+        usage.provider_request_body_state = Some(UsageBodyCaptureState::Truncated);
+        usage.request_metadata = Some(json!({
+            "requested_reasoning_effort": "xhigh",
+            "provider_reasoning_effort": "max"
+        }));
+
+        assert_eq!(usage.requested_reasoning_effort().as_deref(), Some("xhigh"));
+        assert_eq!(usage.provider_reasoning_effort().as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn provider_service_tier_does_not_infer_fast_from_response_or_stale_metadata() {
+        let mut usage = sample_usage();
+        usage.provider_request_body = Some(json!({
+            "model": "gpt-5"
+        }));
+        usage.request_metadata = Some(json!({
+            "provider_service_tier": "priority",
+            "provider_actual_service_tier": "priority"
+        }));
+        usage.response_body = Some(json!({
+            "service_tier": "priority"
+        }));
+
+        assert_eq!(usage.provider_service_tier(), None);
+    }
+
+    #[test]
+    fn provider_service_tier_uses_derived_metadata_after_final_body_is_stripped() {
+        let mut usage = sample_usage();
+        usage.provider_request_body = None;
+        usage.provider_request_body_state = Some(UsageBodyCaptureState::Disabled);
+        usage.request_metadata = Some(json!({
+            "provider_service_tier": "priority"
+        }));
+        usage.response_body = Some(json!({
+            "service_tier": "default"
+        }));
+
+        assert_eq!(usage.provider_service_tier().as_deref(), Some("priority"));
+    }
+
+    #[test]
+    fn provider_service_tier_uses_request_derived_metadata_after_body_truncation() {
+        let mut usage = sample_usage();
+        usage.provider_request_body = Some(json!({
+            "truncated": true,
+            "reason": "body_capture_limit_exceeded",
+            "max_bytes": 128,
+            "source_bytes": 4096,
+            "value_kind": "object"
+        }));
+        usage.provider_request_body_state = Some(UsageBodyCaptureState::Truncated);
+        usage.request_metadata = Some(json!({
+            "provider_service_tier": "priority"
+        }));
+        usage.response_body = Some(json!({
+            "service_tier": "default"
+        }));
+
+        assert_eq!(usage.provider_service_tier().as_deref(), Some("priority"));
     }
 
     #[test]

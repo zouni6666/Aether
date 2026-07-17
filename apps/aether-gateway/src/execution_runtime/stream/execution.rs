@@ -131,6 +131,7 @@ const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const SSE_KEEPALIVE_BYTES: &[u8] = b": aether-keepalive\n\n";
 const SSE_CONTROL_FILTER_MAX_BUFFER_BYTES: usize = 1024 * 1024;
 const SSE_TERMINAL_DETECTOR_MAX_LINE_BYTES: usize = 1024 * 1024;
+const PROVIDER_STREAM_ERROR_INSPECTION_MAX_BYTES: usize = SSE_TERMINAL_DETECTOR_MAX_LINE_BYTES;
 const STREAM_IDLE_LOG_INTERVAL: Duration = Duration::from_secs(60);
 const STREAM_IDLE_LOG_INTERVAL_MS: u64 = 60_000;
 const REWRITTEN_STREAM_PREFETCH_TIMEOUT: Duration = Duration::from_millis(750);
@@ -139,6 +140,78 @@ const MAX_DIRECT_PASSTHROUGH_CHANNEL_CAPACITY: usize = 1024;
 const DIRECT_PASSTHROUGH_CHANNEL_CAPACITY_ENV: &str =
     "AETHER_GATEWAY_DIRECT_PASSTHROUGH_CHANNEL_CAPACITY";
 const DIRECT_PASSTHROUGH_MODE_ENV: &str = "AETHER_GATEWAY_DIRECT_PASSTHROUGH_MODE";
+
+/// Retains the incomplete tail needed to recognize provider error events split across transport
+/// chunks without retaining an unbounded copy of the stream.
+#[derive(Default)]
+struct ProviderStreamErrorInspection {
+    buffered: Vec<u8>,
+}
+
+impl ProviderStreamErrorInspection {
+    fn observe(&mut self, report_context: Option<&Value>, chunk: &[u8]) -> Option<Value> {
+        if chunk.is_empty() {
+            return None;
+        }
+        if let Some(error_body) = extract_provider_private_stream_error_body(report_context, chunk)
+        {
+            return Some(error_body);
+        }
+
+        self.append_rolling(chunk);
+        let error_body = extract_provider_private_stream_error_body(report_context, &self.buffered);
+        if error_body.is_none() {
+            self.trim_completed_sse_events();
+        }
+        error_body
+    }
+
+    fn append_rolling(&mut self, chunk: &[u8]) {
+        if chunk.len() >= PROVIDER_STREAM_ERROR_INSPECTION_MAX_BYTES {
+            self.buffered.clear();
+            self.buffered.extend_from_slice(
+                &chunk[chunk.len() - PROVIDER_STREAM_ERROR_INSPECTION_MAX_BYTES..],
+            );
+            return;
+        }
+
+        let overflow = self
+            .buffered
+            .len()
+            .saturating_add(chunk.len())
+            .saturating_sub(PROVIDER_STREAM_ERROR_INSPECTION_MAX_BYTES);
+        if overflow > 0 {
+            self.buffered.drain(..overflow);
+        }
+        self.buffered.extend_from_slice(chunk);
+    }
+
+    fn trim_completed_sse_events(&mut self) {
+        let Ok(text) = std::str::from_utf8(&self.buffered) else {
+            return;
+        };
+        if !text.lines().any(|line| {
+            let line = line.trim_start();
+            line.starts_with("event:") || line.starts_with("data:") || line.starts_with(':')
+        }) {
+            return;
+        }
+
+        let lf_end = self
+            .buffered
+            .windows(2)
+            .rposition(|window| window == b"\n\n")
+            .map(|index| index + 2);
+        let crlf_end = self
+            .buffered
+            .windows(4)
+            .rposition(|window| window == b"\r\n\r\n")
+            .map(|index| index + 4);
+        if let Some(event_end) = lf_end.into_iter().chain(crlf_end).max() {
+            self.buffered.drain(..event_end);
+        }
+    }
+}
 
 struct StageElapsedGuard {
     stage: &'static str,
@@ -1192,6 +1265,7 @@ struct DirectPassthroughFinalizerCore {
     stream_usage_report_context: Option<Value>,
     stream_usage_observer: Option<StreamingStandardTerminalObserver>,
     stream_usage_observer_buffered: Vec<u8>,
+    provider_error_inspection: ProviderStreamErrorInspection,
     provider_buffered_body: Vec<u8>,
     buffered_body: Vec<u8>,
     provider_body_truncated: bool,
@@ -1318,10 +1392,10 @@ impl DirectPassthroughFinalizer {
                 chunk.as_ref(),
             );
         }
-        if let Some(error_body_json) = extract_provider_private_stream_error_body(
-            core.stream_usage_report_context.as_ref(),
-            chunk.as_ref(),
-        ) {
+        if let Some(error_body_json) = core
+            .provider_error_inspection
+            .observe(core.stream_usage_report_context.as_ref(), chunk.as_ref())
+        {
             let error_status_code =
                 resolve_local_sync_error_status_code(core.status_code, &error_body_json);
             core.terminal_failure = Some(build_stream_failure_from_provider_error_body(
@@ -1486,6 +1560,7 @@ impl DirectPassthroughFinalizerCore {
             stream_usage_report_context,
             stream_usage_observer: _,
             stream_usage_observer_buffered: _,
+            provider_error_inspection: _,
             provider_buffered_body,
             buffered_body,
             provider_body_truncated,
@@ -2207,6 +2282,7 @@ async fn execute_stream_from_direct_passthrough(
             stream_usage_report_context,
             stream_usage_observer,
             stream_usage_observer_buffered: Vec::new(),
+            provider_error_inspection: ProviderStreamErrorInspection::default(),
             provider_buffered_body: Vec::new(),
             buffered_body: Vec::new(),
             provider_body_truncated: false,
@@ -2286,6 +2362,7 @@ async fn execute_stream_from_direct_passthrough(
             .as_ref()
             .map(|_| StreamingStandardTerminalObserver::default());
         let mut stream_usage_observer_buffered = Vec::new();
+        let mut provider_error_inspection = ProviderStreamErrorInspection::default();
         let mut provider_buffered_body = Vec::new();
         let mut buffered_body = Vec::new();
         let mut provider_body_truncated = false;
@@ -2458,7 +2535,7 @@ async fn execute_stream_from_direct_passthrough(
                     provider_chunk.as_ref(),
                 );
             }
-            let provider_private_error_body_json = extract_provider_private_stream_error_body(
+            let provider_private_error_body_json = provider_error_inspection.observe(
                 stream_usage_report_context.as_ref(),
                 provider_chunk.as_ref(),
             );
@@ -5007,6 +5084,7 @@ async fn execute_stream_from_frame_stream(
             .filter(|_| !sync_json_stream_bridge_active_for_report)
             .map(|_| StreamingStandardTerminalObserver::default());
         let mut stream_usage_observer_buffered = Vec::new();
+        let mut provider_error_inspection = ProviderStreamErrorInspection::default();
         append_stream_capture_bytes(
             &mut provider_buffered_body,
             &provider_prefetched_body_for_report,
@@ -5168,6 +5246,16 @@ async fn execute_stream_from_frame_stream(
             let replay_chunk = normalized_prefetched_chunk
                 .as_deref()
                 .unwrap_or(provider_prefetched_body_for_report.as_slice());
+            if let Some(error_body_json) = provider_error_inspection
+                .observe(stream_usage_report_context.as_ref(), replay_chunk)
+            {
+                let error_status_code =
+                    resolve_local_sync_error_status_code(status_code, &error_body_json);
+                terminal_failure = Some(build_stream_failure_from_provider_error_body(
+                    error_status_code,
+                    &error_body_json,
+                ));
+            }
             if let (Some(observer), Some(report_context)) = (
                 stream_usage_observer.as_mut(),
                 stream_usage_report_context.as_ref(),
@@ -5343,11 +5431,8 @@ async fn execute_stream_from_frame_stream(
                         } else {
                             chunk
                         };
-                        let provider_private_error_body_json =
-                            extract_provider_private_stream_error_body(
-                                stream_usage_report_context.as_ref(),
-                                &normalized_chunk,
-                            );
+                        let provider_private_error_body_json = provider_error_inspection
+                            .observe(stream_usage_report_context.as_ref(), &normalized_chunk);
                         if let (Some(observer), Some(report_context)) = (
                             stream_usage_observer.as_mut(),
                             stream_usage_report_context.as_ref(),
@@ -5508,11 +5593,8 @@ async fn execute_stream_from_frame_stream(
         {
             match normalizer.finish() {
                 Ok(normalized_chunk) if !normalized_chunk.is_empty() => {
-                    let provider_private_error_body_json =
-                        extract_provider_private_stream_error_body(
-                            stream_usage_report_context.as_ref(),
-                            &normalized_chunk,
-                        );
+                    let provider_private_error_body_json = provider_error_inspection
+                        .observe(stream_usage_report_context.as_ref(), &normalized_chunk);
                     if let (Some(observer), Some(report_context)) = (
                         stream_usage_observer.as_mut(),
                         stream_usage_report_context.as_ref(),
@@ -6114,7 +6196,7 @@ mod tests {
         stream_terminal_summary_missing_observed_finish,
         stream_terminal_summary_missing_observed_finish_with_requirement,
         stream_terminal_summary_represents_failure_with_requirement,
-        ClientVisibleStreamCompletionTracker, DirectPassthroughMode,
+        ClientVisibleStreamCompletionTracker, DirectPassthroughMode, ProviderStreamErrorInspection,
     };
     use crate::control::GatewayControlDecision;
     use crate::stage_metrics::RequestStageTrace;
@@ -6236,6 +6318,51 @@ mod tests {
         assert!(!tracker.observe_chunk(b"leted\r\n"));
         assert!(tracker
             .observe_chunk(b"data: {\"type\":\"response.completed\",\"response\":{}}\r\n\r\n"));
+    }
+
+    #[test]
+    fn provider_error_inspection_detects_response_failed_at_every_chunk_boundary() {
+        let body = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n",
+            "event: response.failed\n",
+            "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"type\":\"invalid_request\",\"message\":\"cyber policy rejected the request\",\"code\":\"cyber_policy_violation\",\"param\":\"input\"}}}\n\n",
+        )
+        .as_bytes();
+
+        for split in 1..body.len() {
+            let mut inspection = ProviderStreamErrorInspection::default();
+            let detected = inspection
+                .observe(None, &body[..split])
+                .or_else(|| inspection.observe(None, &body[split..]))
+                .unwrap_or_else(|| panic!("response.failed was missed at byte split {split}"));
+
+            assert_eq!(
+                detected.pointer("/error/code"),
+                Some(&json!("cyber_policy_violation")),
+                "string provider code changed at byte split {split}"
+            );
+            assert_eq!(
+                detected.pointer("/error/param"),
+                Some(&json!("input")),
+                "provider error fields changed at byte split {split}"
+            );
+        }
+
+        let mut inspection = ProviderStreamErrorInspection::default();
+        let mut detected = None;
+        for byte in body.chunks(1) {
+            if let Some(error_body) = inspection.observe(None, byte) {
+                detected = Some(error_body);
+                break;
+            }
+        }
+        let detected = detected.expect("byte-wise response.failed stream should be detected");
+        assert_eq!(
+            detected.pointer("/error/code"),
+            Some(&json!("cyber_policy_violation"))
+        );
+        assert_eq!(detected.pointer("/error/param"), Some(&json!("input")));
     }
 
     fn tunnel_proxy_snapshot(base_url: String) -> aether_contracts::ProxySnapshot {

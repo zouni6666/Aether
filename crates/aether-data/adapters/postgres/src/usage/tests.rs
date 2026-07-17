@@ -1,24 +1,496 @@
 use chrono::{TimeZone, Utc};
 use serde_json::json;
+use sqlx::Row;
 
 use super::{
     attach_compressed_body_refs, attach_usage_http_audit_body_refs,
     attach_usage_routing_snapshot_metadata, attach_usage_settlement_pricing_snapshot_metadata,
-    inflate_usage_json_value, prepare_request_metadata_for_body_storage,
-    prepare_usage_body_storage, resolved_read_usage_body_ref, resolved_write_usage_body_ref,
+    clear_previous_request_body_facts, inflate_usage_json_value,
+    prepare_request_metadata_for_body_storage, prepare_usage_body_storage,
+    prepare_usage_upsert_context, request_body_capture_replaces_derived_facts,
+    resolved_read_usage_body_ref, resolved_write_usage_body_ref,
     split_dashboard_daily_aggregate_range, split_dashboard_hourly_aggregate_range,
-    usage_body_capture_state_for_storage, usage_body_ref, usage_effective_input_tokens,
-    usage_http_audit_body_refs, usage_http_audit_capture_mode, usage_routing_snapshot_from_usage,
-    usage_settlement_pricing_snapshot_from_usage, usage_total_input_context, AggregateRangeSplit,
-    SqlxUsageReadRepository, UsageHttpAuditRefs, UsageRoutingSnapshot,
-    UsageSettlementPricingSnapshot, MAX_INLINE_USAGE_BODY_BYTES,
+    usage_body_capture_state_for_storage, usage_body_ref, usage_capture_update_allowed,
+    usage_effective_input_tokens, usage_http_audit_body_refs, usage_http_audit_capture_mode,
+    usage_routing_snapshot_from_usage, usage_settlement_pricing_snapshot_from_usage,
+    usage_total_input_context, AggregateRangeSplit, SqlxUsageReadRepository, UsageHttpAuditRefs,
+    UsageRoutingSnapshot, UsageSettlementPricingSnapshot, MAX_INLINE_USAGE_BODY_BYTES,
 };
 use crate::{PostgresPoolConfig, PostgresPoolFactory};
 use aether_data_contracts::repository::usage::{
-    UpsertUsageRecord, UsageBodyCaptureState, UsageBodyField, UsageCostSavingsSummaryQuery,
-    UsageDashboardDailyBreakdownQuery, UsageDashboardSummaryQuery, UsageProviderPerformanceQuery,
-    UsageTimeSeriesGranularity,
+    UpsertUsageRecord, UsageAuditListQuery, UsageBodyCaptureState, UsageBodyField,
+    UsageCostSavingsSummaryQuery, UsageDashboardDailyBreakdownQuery, UsageDashboardSummaryQuery,
+    UsageProviderPerformanceQuery, UsageTimeSeriesGranularity,
 };
+
+fn fast_clear_usage_record(
+    request_id: &str,
+    provider_name: &str,
+    now_unix_secs: u64,
+    terminal: bool,
+    terminal_state: UsageBodyCaptureState,
+    terminal_service_tier: Option<&str>,
+) -> UpsertUsageRecord {
+    UpsertUsageRecord {
+        request_id: request_id.to_string(),
+        user_id: None,
+        api_key_id: None,
+        username: None,
+        api_key_name: None,
+        provider_name: provider_name.to_string(),
+        model: "gpt-5".to_string(),
+        target_model: Some("gpt-5".to_string()),
+        provider_id: None,
+        provider_endpoint_id: None,
+        provider_api_key_id: None,
+        request_type: Some("chat".to_string()),
+        api_format: Some("openai:chat".to_string()),
+        api_family: Some("openai".to_string()),
+        endpoint_kind: Some("chat".to_string()),
+        endpoint_api_format: Some("openai:chat".to_string()),
+        provider_api_family: Some("openai".to_string()),
+        provider_endpoint_kind: Some("chat".to_string()),
+        has_format_conversion: Some(false),
+        is_stream: Some(false),
+        input_tokens: terminal.then_some(1),
+        output_tokens: terminal.then_some(1),
+        total_tokens: terminal.then_some(2),
+        cache_creation_input_tokens: None,
+        cache_creation_ephemeral_5m_input_tokens: None,
+        cache_creation_ephemeral_1h_input_tokens: None,
+        cache_read_input_tokens: None,
+        cache_creation_cost_usd: None,
+        cache_read_cost_usd: None,
+        output_price_per_1m: None,
+        total_cost_usd: None,
+        actual_total_cost_usd: None,
+        status_code: terminal.then_some(200),
+        error_message: None,
+        error_category: None,
+        response_time_ms: terminal.then_some(10),
+        first_byte_time_ms: None,
+        status: if terminal { "completed" } else { "pending" }.to_string(),
+        billing_status: "pending".to_string(),
+        request_headers: None,
+        request_body: None,
+        request_body_ref: None,
+        request_body_state: None,
+        provider_request_headers: None,
+        provider_request_body: (!terminal).then(|| {
+            json!({
+                "model": "gpt-5",
+                "service_tier": "priority"
+            })
+        }),
+        provider_request_body_ref: None,
+        provider_request_body_state: Some(if terminal {
+            terminal_state
+        } else {
+            UsageBodyCaptureState::Inline
+        }),
+        response_headers: None,
+        response_body: None,
+        response_body_ref: None,
+        response_body_state: None,
+        client_response_headers: None,
+        client_response_body: None,
+        client_response_body_ref: None,
+        client_response_body_state: None,
+        candidate_id: None,
+        candidate_index: None,
+        key_name: None,
+        planner_kind: None,
+        route_family: None,
+        route_kind: None,
+        execution_path: None,
+        local_execution_runtime_miss_reason: None,
+        request_metadata: if terminal {
+            terminal_service_tier.map(|tier| json!({"provider_service_tier": tier}))
+        } else {
+            Some(json!({"provider_service_tier": "priority"}))
+        },
+        finalized_at_unix_secs: terminal.then_some(now_unix_secs + 1),
+        created_at_unix_ms: Some(now_unix_secs),
+        updated_at_unix_secs: now_unix_secs + u64::from(terminal),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires AETHER_TEST_DATABASE_URL and PostgreSQL migrations"]
+async fn live_terminal_none_capture_clears_fast_from_detail_and_lightweight_lists() {
+    let database_url = std::env::var("AETHER_TEST_DATABASE_URL")
+        .expect("AETHER_TEST_DATABASE_URL must point at the test database");
+    let factory = PostgresPoolFactory::new(PostgresPoolConfig {
+        database_url,
+        min_connections: 1,
+        max_connections: 2,
+        acquire_timeout_ms: 10_000,
+        idle_timeout_ms: 30_000,
+        max_lifetime_ms: 60_000,
+        statement_cache_capacity: 64,
+        require_ssl: false,
+    })
+    .expect("factory should build");
+    let repository =
+        SqlxUsageReadRepository::new(factory.connect_lazy().expect("lazy pool should build"));
+    crate::run_migrations(repository.pool())
+        .await
+        .expect("test database migrations should succeed");
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let request_id = format!("req-fast-clear-{suffix}");
+    let provider_name = format!("fast-clear-{suffix}");
+    let now_unix_secs = Utc::now().timestamp().max(0) as u64;
+
+    let mut pending_record = fast_clear_usage_record(
+        &request_id,
+        &provider_name,
+        now_unix_secs,
+        false,
+        UsageBodyCaptureState::Inline,
+        Some("priority"),
+    );
+    pending_record.candidate_id = Some("candidate-a".to_string());
+    pending_record.candidate_index = Some(1);
+    pending_record.key_name = Some("key-a".to_string());
+    pending_record.planner_kind = Some("planner-a".to_string());
+    pending_record.route_family = Some("route-family-a".to_string());
+    pending_record.route_kind = Some("route-kind-a".to_string());
+    pending_record.execution_path = Some("path-a".to_string());
+    pending_record.local_execution_runtime_miss_reason = Some("miss-a".to_string());
+    pending_record.request_metadata = Some(json!({
+        "trace_id": "trace-a",
+        "provider_service_tier": "priority",
+        "provider_actual_service_tier": "priority",
+        "billing_snapshot": {
+            "schema_version": "2.0",
+            "status": "complete",
+            "resolved_variables": {
+                "input_price_per_1m": 30.0,
+                "output_price_per_1m": 150.0
+            }
+        },
+        "settlement_snapshot": {
+            "schema_version": "2.0",
+            "pricing_snapshot": {
+                "pricing_source": "processing_tier",
+                "service_tier": "priority"
+            },
+            "billing_plan_snapshot": {
+                "rule_id": "fast-rule",
+                "rule_version": "1"
+            }
+        },
+        "billing_dimensions": {"service_tier": "priority"},
+        "rate_multiplier": 2.0,
+        "input_price_per_1m": 30.0,
+        "output_price_per_1m": 150.0
+    }));
+    let pending = repository
+        .upsert(pending_record)
+        .await
+        .expect("pending usage should persist");
+    assert_eq!(pending.provider_service_tier().as_deref(), Some("priority"));
+
+    let mut terminal_record = fast_clear_usage_record(
+        &request_id,
+        &provider_name,
+        now_unix_secs,
+        true,
+        UsageBodyCaptureState::None,
+        None,
+    );
+    terminal_record.provider_id = Some("final-provider-id".to_string());
+    terminal_record.provider_endpoint_id = Some("final-endpoint-id".to_string());
+    terminal_record.provider_api_key_id = Some("final-key-id".to_string());
+    terminal_record.target_model = None;
+    let terminal = repository
+        .upsert(terminal_record)
+        .await
+        .expect("terminal usage should persist");
+    assert_eq!(terminal.provider_service_tier(), None);
+
+    let stored = repository
+        .find_by_request_id(&request_id)
+        .await
+        .expect("detail lookup should succeed")
+        .expect("usage should exist");
+    assert_eq!(
+        stored.provider_request_body_state,
+        Some(UsageBodyCaptureState::None)
+    );
+    assert_eq!(stored.provider_service_tier(), None);
+    assert_eq!(stored.provider_actual_service_tier(), None);
+    let stored_metadata = stored
+        .request_metadata
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .expect("terminal audit metadata should remain");
+    assert_eq!(
+        stored_metadata
+            .get("trace_id")
+            .and_then(serde_json::Value::as_str),
+        Some("trace-a")
+    );
+    for stale_key in [
+        "provider_actual_service_tier",
+        "billing_snapshot",
+        "settlement_snapshot",
+        "billing_dimensions",
+        "rate_multiplier",
+        "input_price_per_1m",
+        "output_price_per_1m",
+        "candidate_id",
+    ] {
+        assert!(
+            stored_metadata.get(stale_key).is_none(),
+            "terminal metadata retained stale key {stale_key}"
+        );
+    }
+    assert_eq!(stored.settlement_rate_multiplier(), None);
+    assert_eq!(stored.settlement_input_price_per_1m(), None);
+    assert_eq!(stored.settlement_output_price_per_1m(), None);
+
+    let settlement_row = sqlx::query(
+        "SELECT settlement_snapshot, billing_dimensions, CAST(rate_multiplier AS DOUBLE PRECISION) AS rate_multiplier, CAST(input_price_per_1m AS DOUBLE PRECISION) AS input_price_per_1m, CAST(output_price_per_1m AS DOUBLE PRECISION) AS output_price_per_1m FROM usage_settlement_snapshots WHERE request_id = $1",
+    )
+    .bind(&request_id)
+    .fetch_one(repository.pool())
+    .await
+    .expect("settlement snapshot row should be readable");
+    assert!(settlement_row
+        .try_get::<Option<serde_json::Value>, _>("settlement_snapshot")
+        .expect("settlement snapshot should decode")
+        .is_none());
+    assert!(settlement_row
+        .try_get::<Option<serde_json::Value>, _>("billing_dimensions")
+        .expect("billing dimensions should decode")
+        .is_none());
+    assert!(settlement_row
+        .try_get::<Option<f64>, _>("rate_multiplier")
+        .expect("rate multiplier should decode")
+        .is_none());
+    assert!(settlement_row
+        .try_get::<Option<f64>, _>("input_price_per_1m")
+        .expect("input price should decode")
+        .is_none());
+    assert!(settlement_row
+        .try_get::<Option<f64>, _>("output_price_per_1m")
+        .expect("output price should decode")
+        .is_none());
+
+    let physical_metadata = sqlx::query_scalar::<_, Option<serde_json::Value>>(
+        "SELECT request_metadata FROM \"usage\" WHERE request_id = $1",
+    )
+    .bind(&request_id)
+    .fetch_one(repository.pool())
+    .await
+    .expect("physical metadata should be readable")
+    .expect("clear tombstone should be stored");
+    assert!(physical_metadata.get("provider_service_tier").is_none());
+
+    let physical_body = sqlx::query(
+        "SELECT provider_request_body, provider_request_body_compressed FROM \"usage\" WHERE request_id = $1",
+    )
+    .bind(&request_id)
+    .fetch_one(repository.pool())
+    .await
+    .expect("physical body columns should be readable");
+    assert!(physical_body
+        .try_get::<Option<serde_json::Value>, _>("provider_request_body")
+        .expect("provider body column should decode")
+        .is_none());
+    assert!(physical_body
+        .try_get::<Option<Vec<u8>>, _>("provider_request_body_compressed")
+        .expect("compressed provider body column should decode")
+        .is_none());
+
+    let physical_http = sqlx::query(
+        "SELECT provider_request_body_ref, provider_request_body_state FROM usage_http_audits WHERE request_id = $1",
+    )
+    .bind(&request_id)
+    .fetch_one(repository.pool())
+    .await
+    .expect("HTTP audit row should be readable");
+    assert!(physical_http
+        .try_get::<Option<String>, _>("provider_request_body_ref")
+        .expect("provider body ref should decode")
+        .is_none());
+    assert_eq!(
+        physical_http
+            .try_get::<Option<String>, _>("provider_request_body_state")
+            .expect("provider body state should decode")
+            .as_deref(),
+        Some("none")
+    );
+    let physical_blob_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM usage_body_blobs WHERE request_id = $1 AND body_field = 'provider_request_body'",
+    )
+    .bind(&request_id)
+    .fetch_one(repository.pool())
+    .await
+    .expect("provider body blob count should be readable");
+    assert_eq!(physical_blob_count, 0);
+
+    // A late pending candidate must not resurrect the terminal capture, metadata, or detached
+    // blob after the final state has been written.
+    let mut late_record = fast_clear_usage_record(
+        &request_id,
+        "late-provider",
+        now_unix_secs + 2,
+        false,
+        UsageBodyCaptureState::Inline,
+        Some("priority"),
+    );
+    late_record.model = "late-model".to_string();
+    late_record.target_model = Some("late-target".to_string());
+    late_record.provider_id = Some("late-provider-id".to_string());
+    late_record.provider_endpoint_id = Some("late-endpoint-id".to_string());
+    late_record.provider_api_key_id = Some("late-key-id".to_string());
+    late_record.endpoint_api_format = Some("late:format".to_string());
+    late_record.candidate_id = Some("late-candidate".to_string());
+    let late = repository
+        .upsert(late_record)
+        .await
+        .expect("late pending usage should be accepted without regressing capture");
+    assert_eq!(late.provider_service_tier(), None);
+    assert_eq!(late.provider_name, provider_name);
+    assert_eq!(late.model, "gpt-5");
+    assert_eq!(late.target_model, None);
+    assert_eq!(late.provider_id.as_deref(), Some("final-provider-id"));
+    assert_eq!(
+        late.provider_endpoint_id.as_deref(),
+        Some("final-endpoint-id")
+    );
+    assert_eq!(late.provider_api_key_id.as_deref(), Some("final-key-id"));
+    assert_eq!(late.endpoint_api_format.as_deref(), Some("openai:chat"));
+    assert_eq!(late.candidate_id, None);
+    let late_blob_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM usage_body_blobs WHERE request_id = $1 AND body_field = 'provider_request_body'",
+    )
+    .bind(&request_id)
+    .fetch_one(repository.pool())
+    .await
+    .expect("late provider body blob count should be readable");
+    assert_eq!(late_blob_count, 0);
+
+    let list_item = repository
+        .list_usage_audits(&UsageAuditListQuery {
+            provider_name: Some(provider_name.clone()),
+            limit: Some(10),
+            newest_first: true,
+            ..UsageAuditListQuery::default()
+        })
+        .await
+        .expect("usage list should succeed")
+        .into_iter()
+        .find(|item| item.request_id == request_id)
+        .expect("usage list should contain the test row");
+    assert_eq!(list_item.provider_request_body_state, None);
+    assert_eq!(list_item.provider_service_tier(), None);
+    assert_eq!(list_item.target_model, None);
+    assert_eq!(list_item.candidate_id, None);
+    assert_eq!(list_item.candidate_index, None);
+    assert_eq!(list_item.key_name, None);
+    assert_eq!(list_item.planner_kind, None);
+    assert_eq!(list_item.route_family, None);
+    assert_eq!(list_item.route_kind, None);
+    assert_eq!(list_item.execution_path, None);
+    assert_eq!(list_item.local_execution_runtime_miss_reason, None);
+
+    let recent_item = repository
+        .list_recent_usage_audits(None, 20)
+        .await
+        .expect("recent usage list should succeed")
+        .into_iter()
+        .find(|item| item.request_id == request_id)
+        .expect("recent usage list should contain the test row");
+    assert_eq!(recent_item.provider_request_body_state, None);
+    assert_eq!(recent_item.provider_service_tier(), None);
+
+    sqlx::query("DELETE FROM \"usage\" WHERE request_id = $1")
+        .bind(&request_id)
+        .execute(repository.pool())
+        .await
+        .expect("test usage should be removed");
+
+    for (index, state, incoming_tier, expected_tier) in [
+        ("disabled", UsageBodyCaptureState::Disabled, None, None),
+        ("truncated", UsageBodyCaptureState::Truncated, None, None),
+        (
+            "unavailable",
+            UsageBodyCaptureState::Unavailable,
+            None,
+            None,
+        ),
+        (
+            "none-stale-metadata",
+            UsageBodyCaptureState::None,
+            Some("priority"),
+            None,
+        ),
+        (
+            "disabled-preserved",
+            UsageBodyCaptureState::Disabled,
+            Some("priority"),
+            Some("priority"),
+        ),
+        (
+            "truncated-preserved",
+            UsageBodyCaptureState::Truncated,
+            Some("priority"),
+            Some("priority"),
+        ),
+    ] {
+        let request_id = format!("req-fast-clear-{suffix}-{index}");
+        let provider_name = format!("fast-clear-{suffix}-{index}");
+        repository
+            .upsert(fast_clear_usage_record(
+                &request_id,
+                &provider_name,
+                now_unix_secs,
+                false,
+                UsageBodyCaptureState::Inline,
+                Some("priority"),
+            ))
+            .await
+            .expect("typed-state pending usage should persist");
+        let terminal = repository
+            .upsert(fast_clear_usage_record(
+                &request_id,
+                &provider_name,
+                now_unix_secs + 1,
+                true,
+                state,
+                incoming_tier,
+            ))
+            .await
+            .expect("typed-state terminal usage should persist");
+        assert_eq!(
+            terminal.provider_service_tier().as_deref(),
+            expected_tier,
+            "state={state:?} should use only same-source metadata"
+        );
+        let list_item = repository
+            .list_usage_audits(&UsageAuditListQuery {
+                provider_name: Some(provider_name.clone()),
+                limit: Some(10),
+                newest_first: true,
+                ..UsageAuditListQuery::default()
+            })
+            .await
+            .expect("typed-state list should succeed")
+            .into_iter()
+            .find(|item| item.request_id == request_id)
+            .expect("typed-state row should be listed");
+        assert_eq!(list_item.provider_service_tier().as_deref(), expected_tier);
+        sqlx::query("DELETE FROM \"usage\" WHERE request_id = $1")
+            .bind(&request_id)
+            .execute(repository.pool())
+            .await
+            .expect("typed-state test usage should be removed");
+    }
+}
 
 #[tokio::test]
 #[ignore = "requires AETHER_TEST_DATABASE_URL and a populated PostgreSQL database"]
@@ -1536,6 +2008,8 @@ fn usage_sql_uses_json_null_placeholders_for_usage_payload_columns() {
         assert!(sql.contains("request_metadata->>'client_ip'"));
         assert!(sql.contains("'user_agent'"));
         assert!(sql.contains("request_metadata->>'user_agent'"));
+        assert!(sql.contains("request_metadata->>'requested_reasoning_effort'"));
+        assert!(sql.contains("request_metadata->>'provider_reasoning_effort'"));
         assert!(sql.contains("request_metadata->>'provider_service_tier'"));
         assert!(sql.contains("request_metadata->>'provider_actual_service_tier'"));
         assert!(sql.contains("AS client_family"));
@@ -1656,7 +2130,7 @@ fn usage_sql_settlement_pricing_snapshot_billing_values_use_authoritative_incomi
         "billing_actual_total_cost_usd",
     ] {
         let assignment = format!(
-            "{field} = COALESCE(\n    EXCLUDED.{field},\n    usage_settlement_snapshots.{field}\n  )"
+            "{field} = CASE WHEN $30 THEN EXCLUDED.{field} ELSE COALESCE(EXCLUDED.{field}, usage_settlement_snapshots.{field}) END"
         );
         assert!(
             sql.contains(assignment.as_str()),
@@ -1672,9 +2146,9 @@ fn usage_sql_settlement_pricing_snapshot_billing_values_use_authoritative_incomi
 #[test]
 fn usage_sql_upsert_recovers_missing_provider_links_after_billing_finalizes() {
     for assignment in [
-        "provider_id = CASE WHEN \"usage\".billing_status = 'pending' OR (\"usage\".provider_id IS NULL AND (\"usage\".provider_endpoint_id IS NULL OR \"usage\".provider_endpoint_id = EXCLUDED.provider_endpoint_id) AND (\"usage\".provider_api_key_id IS NULL OR \"usage\".provider_api_key_id = EXCLUDED.provider_api_key_id)) THEN COALESCE(EXCLUDED.provider_id, \"usage\".provider_id) ELSE \"usage\".provider_id END",
-        "provider_endpoint_id = CASE WHEN \"usage\".billing_status = 'pending' OR (\"usage\".provider_endpoint_id IS NULL AND (\"usage\".provider_id IS NULL OR \"usage\".provider_id = EXCLUDED.provider_id) AND (\"usage\".provider_api_key_id IS NULL OR \"usage\".provider_api_key_id = EXCLUDED.provider_api_key_id)) THEN COALESCE(EXCLUDED.provider_endpoint_id, \"usage\".provider_endpoint_id) ELSE \"usage\".provider_endpoint_id END",
-        "provider_api_key_id = CASE WHEN \"usage\".billing_status = 'pending' OR (\"usage\".provider_api_key_id IS NULL AND (\"usage\".provider_id IS NULL OR \"usage\".provider_id = EXCLUDED.provider_id) AND (\"usage\".provider_endpoint_id IS NULL OR \"usage\".provider_endpoint_id = EXCLUDED.provider_endpoint_id)) THEN COALESCE(EXCLUDED.provider_api_key_id, \"usage\".provider_api_key_id) ELSE \"usage\".provider_api_key_id END",
+        "provider_id = CASE WHEN (\"usage\".billing_status = 'pending' AND $61) OR (\"usage\".billing_status <> 'pending' AND \"usage\".provider_id IS NULL AND (\"usage\".provider_endpoint_id IS NULL OR \"usage\".provider_endpoint_id = EXCLUDED.provider_endpoint_id) AND (\"usage\".provider_api_key_id IS NULL OR \"usage\".provider_api_key_id = EXCLUDED.provider_api_key_id)) THEN COALESCE(EXCLUDED.provider_id, \"usage\".provider_id) ELSE \"usage\".provider_id END",
+        "provider_endpoint_id = CASE WHEN (\"usage\".billing_status = 'pending' AND $61) OR (\"usage\".billing_status <> 'pending' AND \"usage\".provider_endpoint_id IS NULL AND (\"usage\".provider_id IS NULL OR \"usage\".provider_id = EXCLUDED.provider_id) AND (\"usage\".provider_api_key_id IS NULL OR \"usage\".provider_api_key_id = EXCLUDED.provider_api_key_id)) THEN COALESCE(EXCLUDED.provider_endpoint_id, \"usage\".provider_endpoint_id) ELSE \"usage\".provider_endpoint_id END",
+        "provider_api_key_id = CASE WHEN (\"usage\".billing_status = 'pending' AND $61) OR (\"usage\".billing_status <> 'pending' AND \"usage\".provider_api_key_id IS NULL AND (\"usage\".provider_id IS NULL OR \"usage\".provider_id = EXCLUDED.provider_id) AND (\"usage\".provider_endpoint_id IS NULL OR \"usage\".provider_endpoint_id = EXCLUDED.provider_endpoint_id)) THEN COALESCE(EXCLUDED.provider_api_key_id, \"usage\".provider_api_key_id) ELSE \"usage\".provider_api_key_id END",
     ] {
         assert!(
             super::UPSERT_SQL.contains(assignment),
@@ -1759,6 +2233,56 @@ fn usage_sql_detached_body_flags_clear_inline_and_compressed_columns() {
         .contains("WHEN EXCLUDED.response_body_compressed IS NOT NULL OR $59 THEN NULL"));
     assert!(super::UPSERT_SQL
         .contains("WHEN EXCLUDED.client_response_body_compressed IS NOT NULL OR $60 THEN NULL"));
+}
+
+#[test]
+fn usage_sql_capture_guard_covers_bodies_metadata_and_http_ref_tombstones() {
+    for assignment in [
+        "request_body = CASE WHEN \"usage\".billing_status = 'pending' AND $61",
+        "provider_request_body = CASE WHEN \"usage\".billing_status = 'pending' AND $61",
+        "response_body = CASE WHEN \"usage\".billing_status = 'pending' AND $61",
+        "client_response_body = CASE WHEN \"usage\".billing_status = 'pending' AND $61",
+        "request_metadata = CASE WHEN \"usage\".billing_status = 'pending' AND $61",
+    ] {
+        assert!(
+            super::UPSERT_SQL.contains(assignment),
+            "missing guard: {assignment}"
+        );
+    }
+    for assignment in [
+        "WHEN EXCLUDED.request_body_state = 'none' THEN NULL",
+        "WHEN EXCLUDED.provider_request_body_state = 'none' THEN NULL",
+        "WHEN EXCLUDED.response_body_state = 'none' THEN NULL",
+        "WHEN EXCLUDED.client_response_body_state = 'none' THEN NULL",
+    ] {
+        assert!(
+            super::UPSERT_USAGE_HTTP_AUDIT_SQL.contains(assignment),
+            "missing HTTP ref tombstone: {assignment}"
+        );
+    }
+    let source = include_str!("mod.rs");
+    assert!(source.contains(".bind(capture_update_allowed)"));
+    assert!(source.contains("if capture_update_allowed {"));
+}
+
+#[test]
+fn usage_sql_terminal_snapshots_replace_sparse_routing_and_settlement_facts() {
+    assert!(super::UPSERT_SQL.contains(
+        "target_model = CASE WHEN \"usage\".billing_status = 'pending' AND $61 THEN CASE WHEN EXCLUDED.status IN ('completed', 'failed', 'cancelled') THEN EXCLUDED.target_model"
+    ));
+    let routing = super::UPSERT_USAGE_ROUTING_SNAPSHOT_SQL;
+    assert!(routing.contains("candidate_id = CASE WHEN $14 THEN EXCLUDED.candidate_id"));
+    assert!(
+        routing.contains("selected_provider_id = CASE WHEN $14 THEN EXCLUDED.selected_provider_id")
+    );
+    let settlement = super::UPSERT_USAGE_SETTLEMENT_PRICING_SNAPSHOT_SQL;
+    assert!(settlement
+        .contains("settlement_snapshot = CASE WHEN $30 THEN EXCLUDED.settlement_snapshot"));
+    assert!(
+        settlement.contains("billing_dimensions = CASE WHEN $30 THEN EXCLUDED.billing_dimensions")
+    );
+    assert!(settlement.contains("rate_multiplier = CASE WHEN $30 THEN EXCLUDED.rate_multiplier"));
+    assert!(include_str!("mod.rs").contains(".bind(replace_existing)"));
 }
 
 #[test]
@@ -1882,6 +2406,123 @@ fn usage_body_capture_state_for_storage_preserves_unavailable_states() {
         ),
         Some(UsageBodyCaptureState::Unavailable)
     );
+}
+
+#[test]
+fn explicit_none_capture_replaces_stale_request_body_facts_even_with_a_residual_body() {
+    let stale_body = json!({
+        "reasoning_effort": "xhigh",
+        "service_tier": "priority"
+    });
+
+    assert!(request_body_capture_replaces_derived_facts(
+        Some(&stale_body),
+        Some(UsageBodyCaptureState::None),
+    ));
+    assert!(request_body_capture_replaces_derived_facts(
+        Some(&stale_body),
+        None,
+    ));
+    assert!(request_body_capture_replaces_derived_facts(
+        Some(&stale_body),
+        Some(UsageBodyCaptureState::Disabled),
+    ));
+    assert!(request_body_capture_replaces_derived_facts(
+        None,
+        Some(UsageBodyCaptureState::Truncated),
+    ));
+    assert!(!request_body_capture_replaces_derived_facts(None, None,));
+}
+
+#[test]
+fn explicit_none_capture_drops_residual_body_ref_and_incoming_fast_metadata_before_storage() {
+    let mut usage = fast_clear_usage_record(
+        "req-none-residual",
+        "none-residual",
+        100,
+        true,
+        UsageBodyCaptureState::None,
+        Some("priority"),
+    );
+    usage.provider_request_body = Some(json!({
+        "model": "gpt-5",
+        "service_tier": "priority"
+    }));
+    usage.provider_request_body_ref =
+        Some("usage://request/req-none-residual/provider_request_body".to_string());
+    usage.request_metadata = Some(json!({
+        "trace_id": "trace-1",
+        "provider_service_tier": "priority",
+        "provider_reasoning_effort": "high",
+        "provider_cache_ttl_minutes": 30,
+        "provider_request_body_ref": "usage://request/req-none-residual/provider_request_body"
+    }));
+
+    let prepared = prepare_usage_upsert_context(&usage).expect("usage should prepare");
+    assert!(prepared.clear_provider_request_body);
+    assert!(!prepared.provider_request_body_storage.has_detached_blob());
+    assert_eq!(prepared.http_audit_refs.provider_request_body_ref, None);
+    assert_eq!(
+        prepared.request_metadata_value,
+        Some(json!({"trace_id": "trace-1"}))
+    );
+}
+
+#[test]
+fn request_body_fact_clear_keeps_unrelated_metadata_and_emits_an_empty_tombstone() {
+    let previous = json!({
+        "trace_id": "trace-1",
+        "requested_reasoning_effort": "xhigh",
+        "provider_reasoning_effort": "max",
+        "provider_service_tier": "priority",
+        "provider_cache_ttl_minutes": 30,
+        "provider_actual_service_tier": "default"
+    });
+
+    assert_eq!(
+        clear_previous_request_body_facts(Some(&previous), true, true),
+        json!({
+            "trace_id": "trace-1",
+            "provider_actual_service_tier": "default"
+        })
+    );
+    assert_eq!(
+        clear_previous_request_body_facts(
+            Some(&json!({"provider_service_tier": "priority"})),
+            false,
+            true,
+        ),
+        json!({})
+    );
+}
+
+#[test]
+fn terminal_capture_rejects_late_non_terminal_updates() {
+    assert!(usage_capture_update_allowed(None, "pending"));
+    assert!(usage_capture_update_allowed(
+        Some(("pending", "pending")),
+        "streaming",
+    ));
+    assert!(usage_capture_update_allowed(
+        Some(("failed", "pending")),
+        "completed",
+    ));
+    assert!(!usage_capture_update_allowed(
+        Some(("completed", "pending")),
+        "pending",
+    ));
+    assert!(!usage_capture_update_allowed(
+        Some(("failed", "pending")),
+        "streaming",
+    ));
+    assert!(!usage_capture_update_allowed(
+        Some(("streaming", "pending")),
+        "pending",
+    ));
+    assert!(!usage_capture_update_allowed(
+        Some(("completed", "settled")),
+        "completed",
+    ));
 }
 
 #[test]

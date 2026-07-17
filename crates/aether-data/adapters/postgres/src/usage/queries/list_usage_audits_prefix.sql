@@ -179,6 +179,7 @@ SELECT
       OR NULLIF(BTRIM("usage".request_metadata->>'user_agent'), '') IS NOT NULL
       OR NULLIF(BTRIM("usage".request_metadata->>'request_path'), '') IS NOT NULL
       OR NULLIF(BTRIM("usage".request_metadata->>'request_path_and_query'), '') IS NOT NULL
+      OR NULLIF(BTRIM("usage".request_metadata->>'requested_reasoning_effort'), '') IS NOT NULL
       OR NULLIF(BTRIM("usage".request_metadata->>'provider_reasoning_effort'), '') IS NOT NULL
       OR NULLIF(BTRIM("usage".request_metadata->>'provider_service_tier'), '') IS NOT NULL
       OR NULLIF(BTRIM("usage".request_metadata->>'provider_actual_service_tier'), '') IS NOT NULL
@@ -193,6 +194,8 @@ SELECT
         NULLIF(BTRIM("usage".request_metadata->>'request_path'), ''),
         'request_path_and_query',
         NULLIF(BTRIM("usage".request_metadata->>'request_path_and_query'), ''),
+        'requested_reasoning_effort',
+        NULLIF(BTRIM("usage".request_metadata->>'requested_reasoning_effort'), ''),
         'provider_reasoning_effort',
         NULLIF(BTRIM("usage".request_metadata->>'provider_reasoning_effort'), ''),
         'provider_service_tier',
