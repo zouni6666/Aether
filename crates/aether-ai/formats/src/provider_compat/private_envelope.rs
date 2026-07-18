@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
+use crate::formats::shared::stream_core::common::openai_stream_terminal_error_body;
 use crate::formats::shared::AiSurfaceFinalizeError;
 use crate::provider_compat::kiro_stream::KiroToClaudeCliStreamState;
 
@@ -719,6 +720,27 @@ fn extract_stream_error_event_body(body: &[u8]) -> Option<Value> {
         {
             return Some(normalize_provider_private_error_body(event));
         }
+        if let Some(mut error_body) = openai_stream_terminal_error_body(&event) {
+            let response_failed_without_provider_type = event
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|event_type| event_type.eq_ignore_ascii_case("response.failed"))
+                && event
+                    .pointer("/response/error/type")
+                    .or_else(|| event.pointer("/error/type"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .is_none_or(str::is_empty);
+            if response_failed_without_provider_type {
+                if let Some(error) = error_body.get_mut("error").and_then(Value::as_object_mut) {
+                    error.insert(
+                        "type".to_string(),
+                        Value::String("stream_terminal_error".to_string()),
+                    );
+                }
+            }
+            return Some(error_body);
+        }
         current_event_type = None;
     }
     None
@@ -1177,6 +1199,53 @@ data: {"message":"bad"}
 
 "#;
         assert!(stream_body_contains_error_event(body));
+    }
+
+    #[test]
+    fn extracts_openai_response_failed_error_without_losing_provider_fields() {
+        let body = br#"event: response.failed
+data: {"type":"response.failed","response":{"status":"failed","error":{"type":"invalid_request","message":"cyber policy rejected the request","code":"cyber_policy_violation","param":"input","details":{"policy_category":"cybersecurity","appeal_allowed":true}}}}
+
+"#;
+
+        let error_body = extract_provider_private_stream_error_body(None, body)
+            .expect("response.failed should expose its provider error body");
+
+        assert_eq!(
+            error_body,
+            json!({
+                "error": {
+                    "type": "invalid_request",
+                    "message": "cyber policy rejected the request",
+                    "code": "cyber_policy_violation",
+                    "param": "input",
+                    "details": {
+                        "policy_category": "cybersecurity",
+                        "appeal_allowed": true
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn response_failed_without_provider_type_uses_stream_terminal_error_category() {
+        let body = br#"event: response.failed
+data: {"type":"response.failed","response":{"status":"failed","error":{"message":"cyber policy rejected the request","code":"cyber_policy"}}}
+
+"#;
+
+        let error_body = extract_provider_private_stream_error_body(None, body)
+            .expect("response.failed should expose its provider error body");
+
+        assert_eq!(
+            error_body.pointer("/error/type"),
+            Some(&json!("stream_terminal_error"))
+        );
+        assert_eq!(
+            error_body.pointer("/error/code"),
+            Some(&json!("cyber_policy"))
+        );
     }
 
     #[test]

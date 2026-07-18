@@ -806,6 +806,50 @@ fn codex_default_window_minutes(code: &str) -> Option<u64> {
     }
 }
 
+fn codex_quota_period_identity(window_minutes: u64) -> (String, String) {
+    const MINUTES_PER_HOUR: u64 = 60;
+    const MINUTES_PER_DAY: u64 = 24 * MINUTES_PER_HOUR;
+    const MINUTES_PER_WEEK: u64 = 7 * MINUTES_PER_DAY;
+
+    if window_minutes == 5 * MINUTES_PER_HOUR {
+        return ("5h".to_string(), "5H".to_string());
+    }
+    if window_minutes == MINUTES_PER_WEEK {
+        return ("weekly".to_string(), "周".to_string());
+    }
+    if (28 * MINUTES_PER_DAY..=31 * MINUTES_PER_DAY).contains(&window_minutes) {
+        return ("monthly".to_string(), "月".to_string());
+    }
+
+    let label = if window_minutes % MINUTES_PER_WEEK == 0 {
+        format!("{}周", window_minutes / MINUTES_PER_WEEK)
+    } else if window_minutes % MINUTES_PER_DAY == 0 {
+        format!("{}天", window_minutes / MINUTES_PER_DAY)
+    } else if window_minutes % MINUTES_PER_HOUR == 0 {
+        format!("{}H", window_minutes / MINUTES_PER_HOUR)
+    } else {
+        format!("{window_minutes}分钟")
+    };
+    (format!("window_{window_minutes}m"), label)
+}
+
+fn codex_quota_window_identity(
+    fallback_code: &str,
+    fallback_label: &str,
+    window_minutes: Option<u64>,
+) -> (String, String) {
+    let Some(window_minutes) = window_minutes else {
+        return (fallback_code.to_string(), fallback_label.to_string());
+    };
+    let is_spark = fallback_code.to_ascii_lowercase().starts_with("spark_");
+    let (code, label) = codex_quota_period_identity(window_minutes);
+    if is_spark {
+        (format!("spark_{code}"), format!("Spark {label}"))
+    } else {
+        (code, label)
+    }
+}
+
 fn codex_quota_window_snapshot(
     metadata: &Map<String, Value>,
     prefix: &str,
@@ -847,6 +891,10 @@ fn codex_quota_window_snapshot(
         .get(&window_minutes_key)
         .and_then(admin_provider_quota_pure::coerce_json_u64);
 
+    if explicit_window_minutes == Some(0) {
+        return None;
+    }
+
     if used_percent.is_none()
         && reset_at.is_none()
         && reset_seconds.is_none()
@@ -856,6 +904,7 @@ fn codex_quota_window_snapshot(
     }
 
     let window_minutes = explicit_window_minutes.or_else(|| codex_default_window_minutes(code));
+    let (code, label) = codex_quota_window_identity(code, label, window_minutes);
     let used_ratio = used_percent.map(|value| (value / 100.0).clamp(0.0, 1.0));
     let remaining_ratio = used_ratio.map(|value| (1.0 - value).max(0.0));
 
@@ -931,12 +980,16 @@ fn build_codex_quota_status_snapshot(
     let primary_windows = windows
         .iter()
         .filter(|window| {
-            window
+            let code = window
                 .get("code")
                 .and_then(Value::as_str)
-                .is_some_and(|code| {
-                    code.eq_ignore_ascii_case("weekly") || code.eq_ignore_ascii_case("5h")
-                })
+                .unwrap_or_default();
+            let scope = window
+                .get("scope")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            scope.eq_ignore_ascii_case("account")
+                && !code.to_ascii_lowercase().starts_with("spark_")
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -3790,6 +3843,39 @@ mod tests {
 
         assert_eq!(weekly.get("window_minutes"), Some(&json!(10_080u64)));
         assert_eq!(five_h.get("window_minutes"), Some(&json!(300u64)));
+    }
+
+    #[test]
+    fn sync_provider_key_quota_status_snapshot_labels_actual_monthly_window() {
+        let upstream_metadata = json!({
+            "codex": {
+                "updated_at": 1_784_287_450u64,
+                "plan_type": "team",
+                "primary_used_percent": 14.0,
+                "primary_reset_at": 1_786_915_122u64,
+                "primary_window_minutes": 43_800u64,
+                "secondary_used_percent": 0.0,
+                "secondary_reset_after_seconds": 0u64,
+                "secondary_window_minutes": 0u64
+            }
+        });
+
+        let payload = sync_provider_key_quota_status_snapshot(
+            None,
+            "codex",
+            Some(&upstream_metadata),
+            "response_headers",
+        )
+        .expect("quota snapshot should sync");
+        let windows = payload["quota"]["windows"]
+            .as_array()
+            .expect("quota windows should exist");
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0]["code"], json!("monthly"));
+        assert_eq!(windows[0]["label"], json!("月"));
+        assert_eq!(windows[0]["window_minutes"], json!(43_800u64));
+        assert_eq!(windows[0]["remaining_ratio"], json!(0.86));
     }
 
     #[test]

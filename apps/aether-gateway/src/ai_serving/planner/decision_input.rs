@@ -133,6 +133,17 @@ pub(crate) fn apply_provider_request_routing_policy_to_decision(
     );
 
     let Some(context) = input.routing_context.as_ref() else {
+        // Cache identity headers are projected only at the terminal boundary. Any non-empty
+        // session headers already present here are explicit client or header-rule inputs and stay
+        // authoritative.
+        if let Some(provider_request_body) = decision.provider_request_body.as_ref() {
+            crate::ai_serving::apply_codex_openai_responses_identity_headers(
+                &mut decision.provider_request_headers,
+                provider_request_body,
+                provider_type.as_str(),
+                provider_api_format.as_str(),
+            );
+        }
         return Ok(());
     };
     let provider_body_rules = decision
@@ -182,6 +193,14 @@ pub(crate) fn apply_provider_request_routing_policy_to_decision(
     })?;
     ensure_report_context_routing_trace(input, decision, &policy);
     if policy.mutation_plan.is_empty() {
+        if let Some(provider_request_body) = decision.provider_request_body.as_ref() {
+            crate::ai_serving::apply_codex_openai_responses_identity_headers(
+                &mut decision.provider_request_headers,
+                provider_request_body,
+                provider_type.as_str(),
+                provider_api_format.as_str(),
+            );
+        }
         return Ok(());
     }
     if original_provider_request_body.is_none() && !policy.mutation_plan.body_patch.is_empty() {
@@ -255,6 +274,12 @@ pub(crate) fn apply_provider_request_routing_policy_to_decision(
             input.requested_model.as_str(),
         )
     });
+    crate::ai_serving::apply_codex_openai_responses_identity_headers(
+        &mut provider_request_headers,
+        &provider_request_body,
+        provider_type.as_str(),
+        provider_api_format.as_str(),
+    );
     crate::ai_serving::apply_codex_openai_responses_lite_header_for_request_body_with_capabilities(
         &mut provider_request_headers,
         Some(&provider_request_body),
@@ -1277,6 +1302,107 @@ mod tests {
             report_context["routing_trace"]["global_candidates"][0]["provider_id"],
             json!("provider-1")
         );
+    }
+
+    #[test]
+    fn codex_prompt_cache_identity_headers_are_terminal_after_routing_mutations() {
+        let mut input = sample_decision_input();
+        input
+            .routing_context
+            .as_mut()
+            .expect("routing context")
+            .client_api_format = "openai:responses".to_string();
+        set_provider_request_rules(
+            &mut input,
+            &["gpt-5"],
+            json!([{
+                "type": "patch_headers",
+                "patch": [
+                    {"op": "remove", "name": "session-id"},
+                    {"op": "remove", "name": "thread-id"}
+                ]
+            }]),
+        );
+        let identity = "172c39e6-c0a0-5a70-8b63-e0f8e0d185a3";
+        let mut decision = sample_decision();
+        decision.provider_type = Some("codex".to_string());
+        decision.provider_api_format = Some("openai:responses".to_string());
+        decision.client_api_format = Some("openai:responses".to_string());
+        decision.provider_request_body = Some(json!({
+            "model": "gpt-5",
+            "input": [],
+            "prompt_cache_key": identity,
+            "client_metadata": {
+                "session_id": identity,
+                "thread_id": identity
+            }
+        }));
+        assert!(!decision.provider_request_headers.contains_key("session-id"));
+        assert!(!decision.provider_request_headers.contains_key("thread-id"));
+
+        apply_provider_request_routing_policy_to_decision(&input, &mut decision, None)
+            .expect("terminal Codex identity contract should be restored");
+
+        assert_eq!(
+            decision
+                .provider_request_headers
+                .get("session-id")
+                .map(String::as_str),
+            Some(identity)
+        );
+        assert_eq!(
+            decision
+                .provider_request_headers
+                .get("thread-id")
+                .map(String::as_str),
+            Some(identity)
+        );
+    }
+
+    #[test]
+    fn codex_prompt_cache_identity_headers_fail_closed_after_body_identity_removal() {
+        let mut input = sample_decision_input();
+        input
+            .routing_context
+            .as_mut()
+            .expect("routing context")
+            .client_api_format = "openai:responses".to_string();
+        set_provider_request_rules(
+            &mut input,
+            &["gpt-5"],
+            json!([{
+                "type": "json_patch_body",
+                "patch": [
+                    {"op": "remove", "path": "/prompt_cache_key"},
+                    {"op": "remove", "path": "/client_metadata"}
+                ]
+            }]),
+        );
+        let identity = "172c39e6-c0a0-5a70-8b63-e0f8e0d185a3";
+        let mut decision = sample_decision();
+        decision.provider_type = Some("codex".to_string());
+        decision.provider_api_format = Some("openai:responses".to_string());
+        decision.client_api_format = Some("openai:responses".to_string());
+        decision.provider_request_body = Some(json!({
+            "model": "gpt-5",
+            "input": [],
+            "prompt_cache_key": identity,
+            "client_metadata": {
+                "session_id": identity,
+                "thread_id": identity
+            }
+        }));
+        assert!(!decision.provider_request_headers.contains_key("session-id"));
+        assert!(!decision.provider_request_headers.contains_key("thread-id"));
+
+        apply_provider_request_routing_policy_to_decision(&input, &mut decision, None)
+            .expect("terminal Codex identity contract should fail closed");
+
+        let body = decision.provider_request_body.as_ref().expect("body");
+        assert!(body.get("prompt_cache_key").is_none());
+        assert!(body.get("client_metadata").is_none());
+        assert!(!decision.provider_request_headers.contains_key("session-id"));
+        assert!(!decision.provider_request_headers.contains_key("thread-id"));
     }
 
     #[test]

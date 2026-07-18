@@ -173,6 +173,7 @@ pub use crate::formats::{
             codex::{
                 apply_codex_openai_compact_terminal_headers,
                 apply_codex_openai_responses_chat_body_edits,
+                apply_codex_openai_responses_identity_headers,
                 apply_codex_openai_responses_lite_header_for_request_body_with_capabilities,
                 apply_codex_openai_responses_lite_header_with_capabilities,
                 apply_codex_openai_responses_special_body_edits,

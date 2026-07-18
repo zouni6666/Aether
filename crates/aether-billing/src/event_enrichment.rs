@@ -1,9 +1,7 @@
 use aether_data_contracts::repository::billing::StoredBillingModelContext;
 use aether_data_contracts::repository::usage::{
-    extract_provider_actual_service_tier_from_response,
-    extract_provider_cache_ttl_minutes_from_metadata, extract_provider_service_tier_from_body,
-    normalize_provider_service_tier, resolve_provider_cache_ttl_minutes,
-    PROVIDER_ACTUAL_SERVICE_TIER_METADATA_KEY, PROVIDER_SERVICE_TIER_METADATA_KEY,
+    extract_provider_cache_ttl_minutes_from_metadata, resolve_provider_cache_ttl_minutes,
+    resolve_provider_service_tier_from_request_capture,
 };
 use aether_data_contracts::DataLayerError;
 use aether_usage_runtime::{UsageEvent, UsageEventType};
@@ -160,7 +158,9 @@ fn calculate_billing_computation(
             .clone()
             .or_else(|| event.data.api_format.clone()),
         requested_processing_tier: processing_tiers.requested,
-        actual_processing_tier: processing_tiers.actual,
+        // The response-reported tier remains usage audit data, but it is not authoritative for
+        // pricing. Settlement follows the final request that was sent upstream.
+        actual_processing_tier: None,
         request_count,
         input_tokens: event.data.input_tokens.unwrap_or_default() as i64,
         output_tokens: event.data.output_tokens.unwrap_or_default() as i64,
@@ -192,29 +192,18 @@ fn calculate_billing_computation(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UsageEventProcessingTiers {
     requested: Option<String>,
-    actual: Option<String>,
 }
 
 fn usage_event_processing_tiers(
     data: &aether_usage_runtime::UsageEventData,
 ) -> UsageEventProcessingTiers {
-    let metadata = data.request_metadata.as_ref().and_then(Value::as_object);
-    let requested = extract_provider_service_tier_from_body(data.provider_request_body.as_ref())
-        .or_else(|| {
-            metadata
-                .and_then(|metadata| metadata.get(PROVIDER_SERVICE_TIER_METADATA_KEY))
-                .and_then(Value::as_str)
-                .and_then(normalize_provider_service_tier)
-        });
-    let actual = metadata
-        .and_then(|metadata| metadata.get(PROVIDER_ACTUAL_SERVICE_TIER_METADATA_KEY))
-        .and_then(Value::as_str)
-        .and_then(normalize_provider_service_tier)
-        .or_else(|| {
-            extract_provider_actual_service_tier_from_response(data.response_body.as_ref())
-        });
+    let requested = resolve_provider_service_tier_from_request_capture(
+        data.provider_request_body.as_ref(),
+        data.provider_request_body_state,
+        data.request_metadata.as_ref(),
+    );
 
-    UsageEventProcessingTiers { requested, actual }
+    UsageEventProcessingTiers { requested }
 }
 
 fn usage_event_provider_cache_ttl_minutes(
@@ -406,6 +395,7 @@ fn build_settlement_snapshot(
 #[cfg(test)]
 mod tests {
     use aether_data_contracts::repository::billing::StoredBillingModelContext;
+    use aether_data_contracts::repository::usage::UsageBodyCaptureState;
     use aether_usage_runtime::{UsageEvent, UsageEventData, UsageEventType};
     use async_trait::async_trait;
     use serde_json::json;
@@ -444,7 +434,7 @@ mod tests {
     }
 
     #[test]
-    fn processing_tier_facts_keep_request_and_terminal_response_independent() {
+    fn processing_tier_fact_uses_final_provider_request_body() {
         let data = UsageEventData {
             provider_request_body: Some(json!({"service_tier": "Priority"})),
             response_body: Some(json!({"service_tier": "priority"})),
@@ -458,7 +448,6 @@ mod tests {
         let tiers = usage_event_processing_tiers(&data);
 
         assert_eq!(tiers.requested.as_deref(), Some("priority"));
-        assert_eq!(tiers.actual.as_deref(), Some("default"));
     }
 
     #[test]
@@ -474,7 +463,83 @@ mod tests {
         let tiers = usage_event_processing_tiers(&data);
 
         assert_eq!(tiers.requested.as_deref(), Some("fast"));
-        assert_eq!(tiers.actual.as_deref(), Some("fast"));
+    }
+
+    #[test]
+    fn processing_tier_does_not_fall_back_to_stale_metadata_when_body_is_present() {
+        let data = UsageEventData {
+            provider_request_body: Some(json!({"model": "gpt-5"})),
+            response_body: Some(json!({"service_tier": "priority"})),
+            request_metadata: Some(json!({
+                "provider_service_tier": "priority",
+                "provider_actual_service_tier": "priority"
+            })),
+            ..UsageEventData::default()
+        };
+
+        let tiers = usage_event_processing_tiers(&data);
+
+        assert_eq!(tiers.requested, None);
+    }
+
+    #[test]
+    fn processing_tier_uses_request_derived_metadata_when_body_capture_was_disabled() {
+        let data = UsageEventData {
+            provider_request_body: None,
+            provider_request_body_state: Some(UsageBodyCaptureState::Disabled),
+            response_body: Some(json!({"service_tier": "flex"})),
+            request_metadata: Some(json!({
+                "provider_service_tier": "priority",
+                "provider_actual_service_tier": "flex"
+            })),
+            ..UsageEventData::default()
+        };
+
+        let tiers = usage_event_processing_tiers(&data);
+
+        assert_eq!(tiers.requested.as_deref(), Some("priority"));
+    }
+
+    #[test]
+    fn processing_tier_does_not_use_metadata_or_response_when_final_request_body_is_missing() {
+        let data = UsageEventData {
+            provider_request_body: None,
+            provider_request_body_state: Some(UsageBodyCaptureState::None),
+            response_body: Some(json!({"service_tier": "priority"})),
+            request_metadata: Some(json!({
+                "provider_service_tier": "priority",
+                "provider_actual_service_tier": "priority"
+            })),
+            ..UsageEventData::default()
+        };
+
+        let tiers = usage_event_processing_tiers(&data);
+
+        assert_eq!(tiers.requested, None);
+    }
+
+    #[test]
+    fn processing_tier_uses_request_derived_metadata_when_body_capture_was_truncated() {
+        let data = UsageEventData {
+            provider_request_body: Some(json!({
+                "truncated": true,
+                "reason": "body_capture_limit_exceeded",
+                "max_bytes": 128,
+                "source_bytes": 4096,
+                "value_kind": "object"
+            })),
+            provider_request_body_state: Some(UsageBodyCaptureState::Truncated),
+            response_body: Some(json!({"service_tier": "default"})),
+            request_metadata: Some(json!({
+                "provider_service_tier": "priority",
+                "provider_actual_service_tier": "default"
+            })),
+            ..UsageEventData::default()
+        };
+
+        let tiers = usage_event_processing_tiers(&data);
+
+        assert_eq!(tiers.requested.as_deref(), Some("priority"));
     }
 
     #[tokio::test]
@@ -638,7 +703,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn settlement_uses_actual_processing_tier_catalog_and_source() {
+    async fn settlement_uses_requested_processing_tier_catalog_and_ignores_response_tier() {
         let lookup = TestLookup {
             name_context: Some(
                 StoredBillingModelContext::new(
@@ -706,13 +771,28 @@ mod tests {
             .and_then(|value| value.pointer("/settlement_snapshot/pricing_snapshot"))
             .expect("settlement pricing snapshot should exist");
         assert_eq!(pricing_snapshot["requested_processing_tier"], "priority");
-        assert_eq!(pricing_snapshot["actual_processing_tier"], "flex");
-        assert_eq!(pricing_snapshot["billing_processing_tier"], "flex");
-        assert_eq!(pricing_snapshot["tiered_pricing_source"], "global_default");
-        assert_eq!(pricing_snapshot["processing_tier_price_multiplier"], 0.5);
+        assert!(pricing_snapshot["actual_processing_tier"].is_null());
+        assert_eq!(pricing_snapshot["billing_processing_tier"], "priority");
+        assert_eq!(
+            pricing_snapshot["tiered_pricing_source"],
+            "provider_override"
+        );
+        assert_eq!(
+            pricing_snapshot["processing_tier_price_multiplier"],
+            Value::Null
+        );
         assert_eq!(
             pricing_snapshot["tiered_pricing"]["tiers"][0]["input_price_per_1m"],
-            2.5
+            10.0
+        );
+        // The response fact remains available for audit, but does not influence settlement.
+        assert_eq!(
+            event
+                .data
+                .request_metadata
+                .as_ref()
+                .and_then(|value| value.get("provider_actual_service_tier")),
+            Some(&json!("flex"))
         );
         assert_eq!(
             event
@@ -720,12 +800,12 @@ mod tests {
                 .request_metadata
                 .as_ref()
                 .and_then(|value| { value.pointer("/billing_dimensions/actual_processing_tier") }),
-            Some(&json!("flex"))
+            Some(&Value::Null)
         );
     }
 
     #[tokio::test]
-    async fn actual_processing_catalog_controls_image_price_with_independent_fixed_price() {
+    async fn requested_processing_catalog_controls_image_price_with_independent_fixed_price() {
         let lookup = TestLookup {
             name_context: Some(
                 StoredBillingModelContext::new(
@@ -783,27 +863,27 @@ mod tests {
             .await
             .expect("billing should succeed");
 
-        assert_eq!(event.data.total_cost_usd, Some(0.44));
-        assert_eq!(event.data.actual_total_cost_usd, Some(0.44));
+        assert_eq!(event.data.total_cost_usd, Some(0.84));
+        assert_eq!(event.data.actual_total_cost_usd, Some(0.84));
         let metadata = event.data.request_metadata.as_ref().expect("metadata");
         let pricing = metadata
             .pointer("/settlement_snapshot/pricing_snapshot")
             .expect("pricing snapshot");
-        assert_eq!(pricing["billing_processing_tier"], "flex");
-        assert_eq!(pricing["tiered_pricing_source"], "global_default");
+        assert_eq!(pricing["billing_processing_tier"], "priority");
+        assert_eq!(pricing["tiered_pricing_source"], "provider_override");
         assert_eq!(pricing["price_per_request_source"], "provider_override");
-        assert_eq!(pricing["pricing_source"], "mixed");
+        assert_eq!(pricing["pricing_source"], "provider_override");
         assert_eq!(
             metadata
                 .pointer("/billing_snapshot/resolved_variables/image_output_price_per_image")
                 .and_then(Value::as_f64),
-            Some(0.2)
+            Some(0.4)
         );
         assert_eq!(
             metadata
                 .pointer("/billing_snapshot/cost_breakdown/image_output_cost")
                 .and_then(Value::as_f64),
-            Some(0.4)
+            Some(0.8)
         );
         assert_eq!(
             metadata

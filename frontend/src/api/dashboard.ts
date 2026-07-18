@@ -209,6 +209,7 @@ export interface RequestDetail {
   has_format_conversion?: boolean | null
   model: string
   target_model?: string | null  // 映射后的目标模型名
+  requested_reasoning_effort?: string | null
   reasoning_effort?: string | null
   service_tier?: string | null
   actual_service_tier?: string | null
@@ -266,6 +267,7 @@ export interface RequestDetail {
   response_time_ms: number
   first_byte_time_ms?: number | null
   created_at: string
+  updated_at?: string | null
   request_headers?: Record<string, unknown>
   request_body?: Record<string, unknown>
   provider_request_headers?: Record<string, unknown>

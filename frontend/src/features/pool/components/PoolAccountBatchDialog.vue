@@ -135,10 +135,10 @@
                     :title="row.statusBadgeTitle"
                   >{{ row.statusBadgeLabel }}</Badge>
                   <Badge
-                    v-if="row.key.oauth_plan_type"
+                    v-if="row.planLabel"
                     variant="outline"
                     class="text-[10px] px-1 py-0 h-4 shrink-0"
-                  >{{ row.key.oauth_plan_type }}</Badge>
+                  >{{ row.planLabel }}</Badge>
                   <Badge
                     v-if="row.oauthOrgBadge"
                     variant="secondary"
@@ -499,6 +499,7 @@ import { exportKey, refreshProviderQuota } from '@/api/endpoints/keys'
 import { refreshProviderOAuth } from '@/api/endpoints/provider_oauth'
 import { useProxyNodesStore } from '@/stores/proxy-nodes'
 import { getOAuthOrgBadge } from '@/utils/oauthIdentity'
+import { formatOAuthPlanType } from '@/utils/oauthPlanType'
 import {
   canExportOAuthCredential,
   canRefreshOAuthCredential,
@@ -552,6 +553,7 @@ type BatchActionOption = {
 
 type PageKeyRow = {
   key: PoolKeyDetail
+  planLabel: string
   authTypeLabel: string
   statusBadgeLabel: string | null
   statusBadgeTitle: string
@@ -650,6 +652,7 @@ const pageKeyRows = computed<PageKeyRow[]>(() => pageKeys.value.map((key) => {
 
   return {
     key,
+    planLabel: formatOAuthPlanType(key.oauth_plan_type),
     authTypeLabel: normalizeAuthTypeLabel(key),
     statusBadgeLabel,
     statusBadgeTitle: statusBadgeLabel ? getStatusBadgeTitle(key) : '',

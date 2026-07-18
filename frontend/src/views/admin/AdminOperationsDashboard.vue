@@ -10,17 +10,24 @@
         </p>
       </div>
       <div class="flex flex-wrap items-center gap-2">
-        <Badge variant="outline">
-          手动刷新
-        </Badge>
         <span class="text-xs text-muted-foreground">
           更新 {{ lastUpdatedLabel }}
         </span>
-        <RefreshButton
-          :loading="refreshing"
-          title="刷新运维总览"
-          @click="refreshAll()"
-        />
+        <Button
+          variant="ghost"
+          size="icon"
+          class="h-8 w-8 shrink-0"
+          :class="autoRefresh ? 'text-primary' : ''"
+          :title="autoRefresh ? '点击关闭自动刷新' : '点击开启自动刷新'"
+          :aria-label="autoRefresh ? '关闭自动刷新' : '开启自动刷新'"
+          :aria-pressed="autoRefresh"
+          @click="toggleAutoRefresh"
+        >
+          <RefreshCw
+            class="h-3.5 w-3.5"
+            :class="autoRefresh || refreshing ? 'animate-spin' : ''"
+          />
+        </Button>
         <TimeRangePicker
           v-model="timeRange"
           :allow-hourly="true"
@@ -1012,7 +1019,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineComponent, h, onUnmounted, ref, watch, type Component } from 'vue'
+import { computed, defineComponent, h, onMounted, onUnmounted, ref, watch, type Component } from 'vue'
 import { RouterLink } from 'vue-router'
 import type { ChartData, ChartOptions } from 'chart.js'
 import {
@@ -1028,7 +1035,7 @@ import {
   Timer,
   Zap,
 } from 'lucide-vue-next'
-import { Badge, Card, RefreshButton, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui'
+import { Badge, Button, Card, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui'
 import { LoadingState, TimeRangePicker } from '@/components/common'
 import LineChart from '@/components/charts/LineChart.vue'
 import DoughnutChart from '@/components/charts/DoughnutChart.vue'
@@ -1094,10 +1101,13 @@ const loadWarning = computed(() =>
   [analyticsWarning.value, realtimeWarning.value].filter(Boolean).join('；') || null
 )
 const refreshing = ref(false)
+const autoRefresh = ref(false)
 const trendLoading = ref(false)
 const percentileLoading = ref(false)
+const AUTO_REFRESH_INTERVAL = 10_000
 let requestId = 0
 let refreshPromise: Promise<void> | null = null
+let autoRefreshTimer: ReturnType<typeof setInterval> | null = null
 let analyticsGeneration = 0
 
 const timeRangeParams = computed(() => ({
@@ -1480,6 +1490,26 @@ function refreshAll(): Promise<void> {
   })
   refreshPromise = request
   return request
+}
+
+function stopAutoRefresh() {
+  if (autoRefreshTimer) {
+    clearInterval(autoRefreshTimer)
+    autoRefreshTimer = null
+  }
+}
+
+function toggleAutoRefresh() {
+  autoRefresh.value = !autoRefresh.value
+  if (!autoRefresh.value) {
+    stopAutoRefresh()
+    return
+  }
+
+  void refreshAll()
+  autoRefreshTimer = setInterval(() => {
+    void refreshAll()
+  }, AUTO_REFRESH_INTERVAL)
 }
 
 const lastUpdatedLabel = computed(() => formatShortDate(lastUpdatedAt.value))
@@ -2166,7 +2196,6 @@ const opsLinks = [
 ]
 
 watch(timeRange, () => {
-  // 手动模式下切换范围只清空旧范围数据，不自动发起请求。
   analyticsGeneration += 1
   timeSeries.value = []
   percentiles.value = []
@@ -2177,9 +2206,17 @@ watch(timeRange, () => {
   lastUpdatedAt.value = null
   trendLoading.value = false
   percentileLoading.value = false
+  if (autoRefresh.value) {
+    void refreshAll()
+  }
 }, { deep: true })
 
+onMounted(() => {
+  void refreshAll()
+})
+
 onUnmounted(() => {
+  stopAutoRefresh()
   requestId += 1
   analyticsGeneration += 1
 })

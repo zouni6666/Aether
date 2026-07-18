@@ -1231,6 +1231,9 @@ fn admin_usage_active_request_json(
     if let Some(reasoning_effort) = item.provider_reasoning_effort() {
         value["reasoning_effort"] = json!(reasoning_effort);
     }
+    if let Some(requested_reasoning_effort) = item.requested_reasoning_effort() {
+        value["requested_reasoning_effort"] = json!(requested_reasoning_effort);
+    }
     if let Some(service_tier) = item.provider_service_tier() {
         value["service_tier"] = json!(service_tier);
     }
@@ -1298,6 +1301,7 @@ pub fn admin_usage_record_json(
         "response_time_ms": item.response_time_ms,
         "first_byte_time_ms": item.first_byte_time_ms,
         "created_at": unix_secs_to_rfc3339(item.created_at_unix_ms),
+        "updated_at": unix_secs_to_rfc3339(item.updated_at_unix_secs),
         "input_price_per_1m": input_price_per_1m,
         "output_price_per_1m": output_price_per_1m,
         "cache_creation_price_per_1m": cache_creation_price_per_1m,
@@ -1353,6 +1357,12 @@ pub fn admin_usage_record_json(
     );
     if let Some(reasoning_effort) = item.provider_reasoning_effort() {
         object.insert("reasoning_effort".to_string(), json!(reasoning_effort));
+    }
+    if let Some(requested_reasoning_effort) = item.requested_reasoning_effort() {
+        object.insert(
+            "requested_reasoning_effort".to_string(),
+            json!(requested_reasoning_effort),
+        );
     }
     if let Some(service_tier) = item.provider_service_tier() {
         object.insert("service_tier".to_string(), json!(service_tier));
@@ -2702,10 +2712,13 @@ mod tests {
     }
 
     #[test]
-    fn admin_usage_record_includes_provider_reasoning_effort() {
+    fn admin_usage_record_includes_requested_and_provider_reasoning_efforts() {
         let item = StoredRequestUsageAudit {
+            request_body: Some(json!({
+                "reasoning": { "effort": "xhigh" }
+            })),
             provider_request_body: Some(json!({
-                "reasoning": { "effort": "xhigh" },
+                "reasoning": { "effort": "max" },
                 "service_tier": "priority"
             })),
             ..sample_usage("completed", Some(200), None)
@@ -2721,10 +2734,14 @@ mod tests {
         );
         let active = admin_usage_active_request_json(&item, None, None, None);
 
-        assert_eq!(record["reasoning_effort"], "xhigh");
-        assert_eq!(active["reasoning_effort"], "xhigh");
+        assert_eq!(record["requested_reasoning_effort"], "xhigh");
+        assert_eq!(active["requested_reasoning_effort"], "xhigh");
+        assert_eq!(record["reasoning_effort"], "max");
+        assert_eq!(active["reasoning_effort"], "max");
         assert_eq!(record["service_tier"], "priority");
         assert_eq!(active["service_tier"], "priority");
+        assert!(record["updated_at"].is_string());
+        assert_eq!(record["updated_at"], active["updated_at"]);
     }
 
     #[test]

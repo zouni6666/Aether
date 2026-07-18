@@ -15,7 +15,7 @@ use crate::repository::usage::{
 };
 use aether_data_contracts::repository::usage::{
     usage_body_ref, ProviderApiKeyWindowUsageRequest, UsageAuditAggregationGroupBy,
-    UsageAuditAggregationQuery, UsageBodyField, UsageDashboardSummaryQuery,
+    UsageAuditAggregationQuery, UsageBodyCaptureState, UsageBodyField, UsageDashboardSummaryQuery,
     UsageLeaderboardGroupBy, UsageLeaderboardQuery, UsageProviderPerformanceQuery,
     UsageTimeSeriesGranularity,
 };
@@ -132,6 +132,127 @@ fn sample_upsert_usage_record(request_id: &str) -> UpsertUsageRecord {
         finalized_at_unix_secs: None,
         created_at_unix_ms: Some(1_700_000_000),
         updated_at_unix_secs: 1_700_000_000,
+    }
+}
+
+#[tokio::test]
+async fn upsert_uses_typed_provider_capture_as_the_fast_fact_snapshot() {
+    for (name, state, incoming_tier, expected_tier) in [
+        (
+            "disabled-clear",
+            UsageBodyCaptureState::Disabled,
+            None,
+            None,
+        ),
+        (
+            "truncated-clear",
+            UsageBodyCaptureState::Truncated,
+            None,
+            None,
+        ),
+        (
+            "unavailable-clear",
+            UsageBodyCaptureState::Unavailable,
+            None,
+            None,
+        ),
+        (
+            "disabled-preserve",
+            UsageBodyCaptureState::Disabled,
+            Some("priority"),
+            Some("priority"),
+        ),
+        (
+            "truncated-preserve",
+            UsageBodyCaptureState::Truncated,
+            Some("priority"),
+            Some("priority"),
+        ),
+        (
+            "none-clears-residual",
+            UsageBodyCaptureState::None,
+            Some("priority"),
+            None,
+        ),
+    ] {
+        let request_id = format!("req-memory-fast-{name}");
+        let repository = InMemoryUsageReadRepository::default();
+        let mut pending = sample_upsert_usage_record(&request_id);
+        pending.provider_request_body = Some(json!({
+            "model": "gpt-5",
+            "service_tier": "priority"
+        }));
+        pending.provider_request_body_state = Some(UsageBodyCaptureState::Inline);
+        pending.request_metadata = Some(json!({"provider_service_tier": "priority"}));
+        pending.target_model = Some("candidate-a-target".to_string());
+        pending.candidate_id = Some("candidate-a".to_string());
+        pending.candidate_index = Some(1);
+        pending.key_name = Some("key-a".to_string());
+        pending.planner_kind = Some("planner-a".to_string());
+        pending.route_family = Some("route-family-a".to_string());
+        pending.route_kind = Some("route-kind-a".to_string());
+        pending.execution_path = Some("path-a".to_string());
+        let pending = repository
+            .upsert(pending)
+            .await
+            .expect("pending usage should upsert");
+        assert_eq!(pending.provider_service_tier().as_deref(), Some("priority"));
+
+        let mut terminal = sample_upsert_usage_record(&request_id);
+        terminal.status = "completed".to_string();
+        terminal.provider_request_body_state = Some(state);
+        terminal.target_model = None;
+        terminal.request_metadata =
+            incoming_tier.map(|tier| json!({"provider_service_tier": tier}));
+        terminal.updated_at_unix_secs += 1;
+        terminal.finalized_at_unix_secs = Some(terminal.updated_at_unix_secs);
+        if state == UsageBodyCaptureState::None {
+            terminal.provider_request_body = Some(json!({
+                "model": "stale-model",
+                "service_tier": "priority"
+            }));
+            terminal.provider_request_body_ref = Some(usage_body_ref(
+                &request_id,
+                UsageBodyField::ProviderRequestBody,
+            ));
+        }
+        let terminal = repository
+            .upsert(terminal)
+            .await
+            .expect("terminal usage should upsert");
+        assert_eq!(
+            terminal.provider_service_tier().as_deref(),
+            expected_tier,
+            "state={state:?} must use only incoming facts"
+        );
+        assert_eq!(terminal.target_model, None);
+        assert_eq!(terminal.candidate_id, None);
+        assert_eq!(terminal.candidate_index, None);
+        assert_eq!(terminal.key_name, None);
+        assert_eq!(terminal.planner_kind, None);
+        assert_eq!(terminal.route_family, None);
+        assert_eq!(terminal.route_kind, None);
+        assert_eq!(terminal.execution_path, None);
+        if state == UsageBodyCaptureState::None {
+            assert_eq!(terminal.provider_request_body, None);
+            assert_eq!(terminal.provider_request_body_ref, None);
+
+            let mut late = sample_upsert_usage_record(&request_id);
+            late.provider_request_body = Some(json!({
+                "model": "late-model",
+                "service_tier": "priority"
+            }));
+            late.provider_request_body_state = Some(UsageBodyCaptureState::Inline);
+            late.request_metadata = Some(json!({"provider_service_tier": "priority"}));
+            late.updated_at_unix_secs += 2;
+            let late = repository
+                .upsert(late)
+                .await
+                .expect("late pending usage should not regress terminal capture");
+            assert_eq!(late.provider_service_tier(), None);
+            assert_eq!(late.provider_request_body, None);
+            assert_eq!(late.provider_request_body_ref, None);
+        }
     }
 }
 

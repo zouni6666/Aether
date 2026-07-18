@@ -1104,7 +1104,7 @@ mod tests {
     }
 
     #[test]
-    fn nonstandard_request_without_actual_tier_fails_closed() {
+    fn nonstandard_request_without_actual_tier_uses_requested_catalog() {
         let result = BillingService::new()
             .calculate(
                 &processing_pricing(),
@@ -1112,57 +1112,49 @@ mod tests {
             )
             .expect("billing should calculate");
 
-        assert_eq!(result.cost_result.status, BillingSnapshotStatus::NoRule);
-        assert_eq!(
-            result.cost_result.snapshot.missing_required,
-            vec!["actual_processing_tier"]
-        );
+        assert_eq!(result.cost_result.status, BillingSnapshotStatus::Complete);
         assert_eq!(
             result.cost_result.snapshot.resolved_dimensions["billing_processing_tier"],
-            json!(null)
+            json!("priority")
+        );
+        assert_eq!(
+            result.cost_result.snapshot.resolved_variables["input_price_per_1m"],
+            json!(10.0)
         );
     }
 
     #[test]
-    fn actual_tier_controls_standard_flex_and_priority_catalogs() {
-        let cases = [
-            (
-                "default",
-                100,
-                5.0,
-                6.25,
-                BillingPricingSource::GlobalDefault,
-            ),
-            ("flex", 100, 2.5, 3.125, BillingPricingSource::GlobalDefault),
-            (
-                "priority",
-                100,
-                10.0,
-                12.5,
-                BillingPricingSource::ProviderOverride,
-            ),
-        ];
+    fn response_actual_tier_does_not_override_requested_catalog() {
+        let cases = ["default", "flex", "priority"];
 
-        for (actual, input_tokens, input_price, cache_write_price, source) in cases {
+        for actual in cases {
             let result = BillingService::new()
                 .calculate(
                     &processing_pricing(),
-                    &processing_usage(Some("priority"), Some(actual), input_tokens),
+                    &processing_usage(Some("priority"), Some(actual), 100),
                 )
                 .expect("processing tier should resolve");
 
             assert_eq!(result.cost_result.status, BillingSnapshotStatus::Complete);
             assert_eq!(
+                result.pricing_resolution.actual_processing_tier.as_deref(),
+                Some(actual)
+            );
+            assert_eq!(
+                result.pricing_resolution.billing_processing_tier.as_deref(),
+                Some("priority")
+            );
+            assert_eq!(
                 result.cost_result.snapshot.resolved_variables["input_price_per_1m"],
-                json!(input_price)
+                json!(10.0)
             );
             assert_eq!(
                 result.cost_result.snapshot.resolved_variables["cache_creation_price_per_1m"],
-                json!(cache_write_price)
+                json!(12.5)
             );
             assert_eq!(
                 result.pricing_resolution.tiered_pricing_source,
-                Some(source)
+                Some(BillingPricingSource::ProviderOverride)
             );
         }
     }
@@ -1373,7 +1365,7 @@ mod tests {
     }
 
     #[test]
-    fn finite_processing_catalog_and_unknown_actual_tier_fail_closed() {
+    fn finite_processing_catalog_fails_only_on_requested_catalog_bounds() {
         let priority = BillingService::new()
             .calculate(
                 &processing_pricing(),
@@ -1386,16 +1378,22 @@ mod tests {
             vec!["input_context_tier"]
         );
 
-        let unknown = BillingService::new()
+        let conflicting_actual = BillingService::new()
             .calculate(
                 &processing_pricing(),
                 &processing_usage(Some("priority"), Some("expedited"), 100),
             )
             .expect("billing should calculate");
-        assert_eq!(unknown.cost_result.status, BillingSnapshotStatus::NoRule);
         assert_eq!(
-            unknown.cost_result.snapshot.missing_required,
-            vec!["processing_tier_catalog"]
+            conflicting_actual.cost_result.status,
+            BillingSnapshotStatus::Complete
+        );
+        assert_eq!(
+            conflicting_actual
+                .pricing_resolution
+                .billing_processing_tier
+                .as_deref(),
+            Some("priority")
         );
     }
 
@@ -1502,13 +1500,17 @@ mod tests {
         estimate.max_output_tokens = Some(0);
         estimate.cache_ttl_minutes = Some(30);
 
-        for requested_processing_tier in [None, Some("standard"), Some("flex")] {
+        for (requested_processing_tier, expected) in [
+            (None, 3.75),
+            (Some("standard"), 3.75),
+            (Some("flex"), 1.875),
+        ] {
             estimate.requested_processing_tier = requested_processing_tier.map(ToOwned::to_owned);
             assert_eq!(
                 service
                     .estimate_authorization_cost_upper_bound(&processing_pricing(), &estimate)
                     .expect("eligible processing catalogs should calculate"),
-                Some(3.75),
+                Some(expected),
                 "requested tier: {requested_processing_tier:?}"
             );
         }
@@ -1523,7 +1525,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_actual_tier_cannot_fall_back_to_fixed_request_price() {
+    fn unknown_actual_tier_does_not_override_requested_tier_or_fixed_price() {
         let pricing = BillingModelPricingSnapshot {
             default_price_per_request: Some(0.02),
             ..processing_pricing()
@@ -1535,16 +1537,20 @@ mod tests {
             )
             .expect("billing should calculate");
 
-        assert_eq!(result.cost_result.status, BillingSnapshotStatus::NoRule);
+        assert_eq!(result.cost_result.status, BillingSnapshotStatus::Complete);
         assert_eq!(
-            result.cost_result.snapshot.missing_required,
-            vec!["processing_tier_catalog"]
+            result.pricing_resolution.billing_processing_tier.as_deref(),
+            Some("priority")
+        );
+        assert_eq!(
+            result.pricing_resolution.actual_processing_tier.as_deref(),
+            Some("expedited")
         );
         assert_eq!(result.pricing_resolution.price_per_request, Some(0.02));
     }
 
     #[test]
-    fn authorization_estimate_bounds_requested_and_provider_actual_catalogs() {
+    fn authorization_estimate_bounds_only_the_requested_catalog() {
         let service = BillingService::new();
         let mut estimate = BillingAuthorizationEstimateInput::new("chat", 100_000);
         estimate.api_format = Some("openai:responses".to_string());
@@ -1563,8 +1569,8 @@ mod tests {
             .expect("flex estimate should be bounded");
 
         assert_eq!(priority, 61.25);
-        assert_eq!(flex, 61.25);
-        assert_eq!(priority, flex);
+        assert_eq!(flex, 15.3125);
+        assert!(priority > flex);
     }
 
     #[test]

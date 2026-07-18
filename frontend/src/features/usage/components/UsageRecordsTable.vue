@@ -242,26 +242,12 @@
         <!-- 第一行：模型 + 费用 -->
         <div class="flex items-start justify-between gap-2">
           <div class="min-w-0 flex-1">
-            <div class="flex min-w-0 items-center gap-1.5">
-              <span class="min-w-0 truncate text-[15px] font-semibold leading-5">{{ record.model }}</span>
-              <Badge
-                v-if="getReasoningEffort(record)"
-                variant="outline"
-                class="h-4 rounded-full border-primary/30 bg-primary/5 px-1.5 text-[10px] leading-4 text-primary flex-shrink-0"
-                :title="getReasoningEffortTitle(record)"
-              >
-                {{ getReasoningEffort(record) }}
-              </Badge>
-              <Badge
-                v-if="getServiceTierBadge(record)"
-                variant="outline"
-                class="h-4 whitespace-nowrap rounded-full px-1.5 text-[10px] leading-4 flex-shrink-0"
-                :class="getServiceTierBadge(record)?.className"
-                :title="getServiceTierBadge(record)?.title"
-                :aria-label="getServiceTierBadge(record)?.ariaLabel"
-              >
-                {{ getServiceTierBadge(record)?.label }}
-              </Badge>
+            <div class="flex min-w-0 flex-wrap items-center gap-1.5">
+              <UsageModelDisplay
+                :record="record"
+                model-class="text-[15px] font-semibold leading-5"
+                stack-full-width
+              />
               <!-- 状态 Badge -->
               <Badge
                 v-if="isUsageRecordFailed(record)"
@@ -312,10 +298,6 @@
                 {{ getStreamModeLabel(record) }}
               </Badge>
             </div>
-            <span
-              v-if="getActualModel(record)"
-              class="text-[11px] text-muted-foreground truncate block"
-            >-> {{ getActualModel(record) }}</span>
           </div>
           <div class="flex flex-col items-end flex-shrink-0">
             <span class="text-sm text-primary font-semibold leading-5">{{ formatCurrency(record.cost || 0) }}</span>
@@ -737,69 +719,10 @@
             :class="[isAdmin ? 'w-[14%]' : 'w-[22%]']"
             :title="getModelTooltip(record)"
           >
-            <div
-              v-if="getActualModel(record)"
-              class="flex flex-col text-xs gap-0.5"
-            >
-              <div class="flex min-w-0 items-center gap-1">
-                <span class="truncate">{{ record.model }}</span>
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  viewBox="0 0 20 20"
-                  fill="currentColor"
-                  class="w-3 h-3 text-muted-foreground flex-shrink-0"
-                >
-                  <path
-                    fill-rule="evenodd"
-                    d="M3 10a.75.75 0 01.75-.75h10.638L10.23 5.29a.75.75 0 111.04-1.08l5.5 5.25a.75.75 0 010 1.08l-5.5 5.25a.75.75 0 11-1.04-1.08l4.158-3.96H3.75A.75.75 0 013 10z"
-                    clip-rule="evenodd"
-                  />
-                </svg>
-                <Badge
-                  v-if="getReasoningEffort(record)"
-                  variant="outline"
-                  class="h-4 rounded-full border-primary/30 bg-primary/5 px-1.5 text-[10px] leading-4 text-primary flex-shrink-0"
-                  :title="getReasoningEffortTitle(record)"
-                >
-                  {{ getReasoningEffort(record) }}
-                </Badge>
-                <Badge
-                  v-if="getServiceTierBadge(record)"
-                  variant="outline"
-                  class="h-4 whitespace-nowrap rounded-full px-1.5 text-[10px] leading-4 flex-shrink-0"
-                  :class="getServiceTierBadge(record)?.className"
-                  :title="getServiceTierBadge(record)?.title"
-                  :aria-label="getServiceTierBadge(record)?.ariaLabel"
-                >
-                  {{ getServiceTierBadge(record)?.label }}
-                </Badge>
-              </div>
-              <span class="text-muted-foreground truncate">{{ getActualModel(record) }}</span>
-            </div>
-            <span
-              v-else
-              class="flex min-w-0 items-center gap-1"
-            >
-              <span class="truncate">{{ record.model }}</span>
-              <Badge
-                v-if="getReasoningEffort(record)"
-                variant="outline"
-                class="h-4 rounded-full border-primary/30 bg-primary/5 px-1.5 text-[10px] leading-4 text-primary flex-shrink-0"
-                :title="getReasoningEffortTitle(record)"
-              >
-                {{ getReasoningEffort(record) }}
-              </Badge>
-              <Badge
-                v-if="getServiceTierBadge(record)"
-                variant="outline"
-                class="h-4 whitespace-nowrap rounded-full px-1.5 text-[10px] leading-4 flex-shrink-0"
-                :class="getServiceTierBadge(record)?.className"
-                :title="getServiceTierBadge(record)?.title"
-                :aria-label="getServiceTierBadge(record)?.ariaLabel"
-              >
-                {{ getServiceTierBadge(record)?.label }}
-              </Badge>
-            </span>
+            <UsageModelDisplay
+              :record="record"
+              class="text-xs"
+            />
           </TableCell>
           <TableCell
             v-if="isAdmin && isColumnVisible('provider')"
@@ -1106,11 +1029,13 @@ import { useDarkMode } from '@/composables/useDarkMode'
 import { API_FORMAT_ORDER, formatApiFormat } from '@/api/endpoints/types/api-format'
 import { formatClientFamily } from '@/features/usage/utils/clientFamily'
 import { formatServiceTierFact } from '../utils/service-tier'
+import { isCyberPolicyError } from '../utils/cyberError'
 import type { DateRangeParams, UsageRecord } from '../types'
 import { MultiSelect, TimeRangePicker } from '@/components/common'
 import type { MultiSelectOption } from '@/components/common/MultiSelect.vue'
 import ElapsedTimeText from './ElapsedTimeText.vue'
 import ServerUserSelector from './ServerUserSelector.vue'
+import UsageModelDisplay from './UsageModelDisplay.vue'
 
 export interface UserOption {
   id: string
@@ -1608,20 +1533,20 @@ function getActualModel(record: UsageRecord): string | null {
 }
 
 function getReasoningEffort(record: UsageRecord): string | null {
-  const effort = record.reasoning_effort?.trim()
-  return effort || null
+  const requested = record.requested_reasoning_effort?.trim()
+  const actual = record.reasoning_effort?.trim()
+  if (requested && actual && requested.toLowerCase() !== actual.toLowerCase()) {
+    return `${requested} -> ${actual}`
+  }
+  return actual || requested || null
 }
 
-function getReasoningEffortTitle(record: UsageRecord): string {
-  const effort = getReasoningEffort(record)
-  return effort ? `Reasoning: ${effort}` : ''
+function hasCyberPolicyError(record: UsageRecord): boolean {
+  return isCyberPolicyError(record.error_message)
 }
-
-type ServiceTierBadgeState = 'confirmed' | 'downgraded' | 'upgraded' | 'pending' | 'unconfirmed'
 
 interface ServiceTierBadgePresentation {
   label: string
-  state: ServiceTierBadgeState
   className: string
   title: string
   ariaLabel: string
@@ -1642,44 +1567,19 @@ function canonicalServiceTier(value: string | null): string | null {
   return value
 }
 
-function serviceTierBadgeClass(state: ServiceTierBadgeState): string {
-  switch (state) {
-    case 'confirmed':
-      return 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
-    case 'downgraded':
-      return 'border-amber-500/50 bg-amber-500/10 text-amber-700 dark:text-amber-300'
-    case 'upgraded':
-      return 'border-sky-500/40 bg-sky-500/10 text-sky-700 dark:text-sky-300'
-    case 'pending':
-      return 'border-dashed border-muted-foreground/30 bg-muted/30 text-muted-foreground'
-    case 'unconfirmed':
-      return 'border-dashed border-amber-500/40 bg-amber-500/5 text-amber-700 dark:text-amber-300'
-  }
-}
-
 function buildServiceTierBadgePresentation(
-  label: string,
-  state: ServiceTierBadgeState,
   requestedRaw: string | null,
-  actualRaw: string | null,
-  billingTier: string | null,
 ): ServiceTierBadgePresentation {
   const titleLines: string[] = []
   const requestedLabel = formatServiceTierFact(requestedRaw)
-  const actualLabel = formatServiceTierFact(actualRaw)
-  const billingLabel = formatServiceTierFact(billingTier)
-  if (requestedLabel) titleLines.push(`请求档位：${requestedLabel}`)
-  if (actualLabel) titleLines.push(`实际档位：${actualLabel}`)
-  if (billingLabel) {
-    titleLines.push(`计费档位：${billingLabel}`)
-  } else {
-    titleLines.push(`计费档位：${state === 'pending' ? '待上游确认' : '未确认'}`)
-  }
+  if (requestedLabel) titleLines.push(`上游请求档位：${requestedLabel}`)
+  // Billing is resolved from the same final provider request tier. Keep it
+  // explicit in the tooltip without consulting a response-side tier.
+  if (requestedLabel) titleLines.push(`计费档位：${requestedLabel}`)
   const title = titleLines.join('\n')
   return {
-    label,
-    state,
-    className: serviceTierBadgeClass(state),
+    label: 'Fast',
+    className: '!bg-transparent text-amber-700 dark:text-amber-300',
     title,
     ariaLabel: titleLines.join('，'),
   }
@@ -1687,54 +1587,10 @@ function buildServiceTierBadgePresentation(
 
 function getServiceTierBadge(record: UsageRecord): ServiceTierBadgePresentation | null {
   const requestedRaw = normalizeServiceTier(record.service_tier)
-  const actualRaw = normalizeServiceTier(record.actual_service_tier)
   const requested = canonicalServiceTier(requestedRaw)
-  const actual = canonicalServiceTier(actualRaw)
   const requestedFast = requested === 'priority'
-  const actualFast = actual === 'priority'
-
-  if (actual) {
-    if (requestedFast && !actualFast) {
-      return buildServiceTierBadgePresentation(
-        `Fast → ${actual}`,
-        'downgraded',
-        requestedRaw,
-        actualRaw,
-        actual,
-      )
-    }
-    if (!requestedFast && actualFast) {
-      const requestedLabel = requested ?? 'standard'
-      return buildServiceTierBadgePresentation(
-        requested ? `${requestedLabel} → Fast` : 'Fast',
-        requested ? 'upgraded' : 'confirmed',
-        requestedRaw,
-        actualRaw,
-        actual,
-      )
-    }
-    if (actualFast) {
-      return buildServiceTierBadgePresentation(
-        'Fast',
-        'confirmed',
-        requestedRaw,
-        actualRaw,
-        actual,
-      )
-    }
-    return null
-  }
-
   if (!requestedFast) return null
-  const displayStatus = getDisplayStatus(record)
-  const isActive = displayStatus === 'pending' || displayStatus === 'streaming'
-  return buildServiceTierBadgePresentation(
-    isActive ? 'Fast · 待确认' : 'Fast · 未确认',
-    isActive ? 'pending' : 'unconfirmed',
-    requestedRaw,
-    null,
-    null,
-  )
+  return buildServiceTierBadgePresentation(requestedRaw)
 }
 
 function getServiceTierTitle(record: UsageRecord): string {
@@ -1742,10 +1598,9 @@ function getServiceTierTitle(record: UsageRecord): string {
   if (badge) return badge.title
 
   const requested = formatServiceTierFact(record.service_tier)
-  const actual = formatServiceTierFact(record.actual_service_tier)
   return [
-    requested ? `请求档位：${requested}` : null,
-    actual ? `实际档位：${actual}` : null,
+    requested ? `上游请求档位：${requested}` : null,
+    requested ? `计费档位：${requested}` : null,
   ].filter((line): line is string => Boolean(line)).join('\n')
 }
 
@@ -1755,7 +1610,8 @@ function getModelTooltip(record: UsageRecord): string {
   const reasoningEffort = getReasoningEffort(record)
   const serviceTierTitle = getServiceTierTitle(record)
   const tierSuffix = serviceTierTitle ? `\n${serviceTierTitle}` : ''
-  const suffix = `${reasoningEffort ? `\nReasoning: ${reasoningEffort}` : ''}${tierSuffix}`
+  const cyberSuffix = hasCyberPolicyError(record) ? '\nCyber Policy: blocked' : ''
+  const suffix = `${reasoningEffort ? `\nReasoning: ${reasoningEffort}` : ''}${tierSuffix}${cyberSuffix}`
   if (actualModel) {
     return `${record.model} -> ${actualModel}${suffix}`
   }

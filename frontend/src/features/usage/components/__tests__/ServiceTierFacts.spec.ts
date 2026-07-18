@@ -13,14 +13,12 @@ afterEach(() => {
 })
 
 describe('ServiceTierFacts', () => {
-  it('renders all three facts and marks a missing actual tier explicitly', () => {
+  it('renders request and billing facts from the same request tier', () => {
     const root = document.createElement('div')
     document.body.appendChild(root)
     const app = createApp({
       render: () => h(ServiceTierFacts, {
         requested: 'priority',
-        actual: null,
-        billing: 'flex',
       }),
     })
     app.mount(root)
@@ -28,30 +26,25 @@ describe('ServiceTierFacts', () => {
 
     expect(root.querySelector('[data-testid="service-tier-facts"]')).not.toBeNull()
     expect([...root.querySelectorAll('dt')].map(node => node.textContent?.trim())).toEqual([
-      '请求层级',
-      '实际层级',
+      '上游请求层级',
       '计费层级',
     ])
     expect([...root.querySelectorAll('dd')].map(node => node.textContent?.trim())).toEqual([
       'Fast',
-      '-',
-      'flex',
+      'Fast',
     ])
     expect([...root.querySelectorAll('dd')].map(node => node.getAttribute('title'))).toEqual([
       'Fast',
-      '-',
-      'flex',
+      'Fast',
     ])
   })
 
-  it('uses the same Fast label for raw priority and fast facts', () => {
+  it('uses the Fast label for a raw fast request tier', () => {
     const root = document.createElement('div')
     document.body.appendChild(root)
     const app = createApp({
       render: () => h(ServiceTierFacts, {
-        requested: 'priority',
-        actual: 'fast',
-        billing: 'priority',
+        requested: 'fast',
       }),
     })
     app.mount(root)
@@ -60,10 +53,8 @@ describe('ServiceTierFacts', () => {
     expect([...root.querySelectorAll('dd')].map(node => node.textContent?.trim())).toEqual([
       'Fast',
       'Fast',
-      'Fast',
     ])
     expect([...root.querySelectorAll('dd')].map(node => node.getAttribute('title'))).toEqual([
-      'Fast',
       'Fast',
       'Fast',
     ])
@@ -75,8 +66,6 @@ describe('ServiceTierFacts', () => {
     const app = createApp({
       render: () => h(ServiceTierFacts, {
         requested: 'priority',
-        actual: 'fast',
-        billing: 'fast',
         priceMultiplier: 2.5,
       }),
     })
@@ -94,8 +83,6 @@ describe('ServiceTierFacts', () => {
     const app = createApp({
       render: () => h(ServiceTierFacts, {
         requested: 'priority',
-        actual: null,
-        billing: null,
         priceMultiplier: null,
       }),
     })

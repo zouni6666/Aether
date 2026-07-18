@@ -540,13 +540,20 @@ const regexMappings = computed<CombinedMapping[]>(() => {
   const result: CombinedMapping[] = []
   const modelMap = new Map<string, CombinedMapping>()
 
-  for (const keyInfo of aliasMappingPreview.value.keys) {
-    for (const gm of keyInfo.matching_global_models) {
+  const previewKeys = Array.isArray(aliasMappingPreview.value.keys)
+    ? aliasMappingPreview.value.keys
+    : []
+  for (const keyInfo of previewKeys) {
+    const matchingGlobalModels = Array.isArray(keyInfo.matching_global_models)
+      ? keyInfo.matching_global_models
+      : []
+    for (const gm of matchingGlobalModels) {
+      const matchedModels = Array.isArray(gm.matched_models) ? gm.matched_models : []
       if (!modelMap.has(gm.global_model_id)) {
         modelMap.set(gm.global_model_id, {
           key: `regex-${gm.global_model_id}`,
           type: 'regex',
-          targetModelName: gm.display_name,
+          targetModelName: gm.display_name || gm.global_model_name || gm.global_model_id,
           targetModelId: gm.global_model_id,
           globalModelName: gm.global_model_name,
           mappings: [],
@@ -559,7 +566,7 @@ const regexMappings = computed<CombinedMapping[]>(() => {
       if (!mapping) continue
 
       // 添加 Key 信息
-      const keyMatches: MappingItem[] = gm.matched_models.map(m => ({
+      const keyMatches: MappingItem[] = matchedModels.map(m => ({
         name: m.allowed_model,
         pattern: m.mapping_pattern
       }))
@@ -572,7 +579,7 @@ const regexMappings = computed<CombinedMapping[]>(() => {
       })
 
       // 收集所有映射（去重）
-      for (const match of gm.matched_models) {
+      for (const match of matchedModels) {
         if (!mapping.mappings.some(m => m.name === match.allowed_model)) {
           mapping.mappings.push({
             name: match.allowed_model,

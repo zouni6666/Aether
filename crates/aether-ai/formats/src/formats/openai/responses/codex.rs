@@ -7,6 +7,8 @@ use serde_json::{json, Value};
 
 const CODEX_DEFAULT_REASONING_EFFORT: &str = "medium";
 const CODEX_REASONING_ENCRYPTED_CONTENT_INCLUDE: &str = "reasoning.encrypted_content";
+const CODEX_PROMPT_CACHE_IDENTITY_NAMESPACE: &str =
+    "https://github.com/fawney19/Aether/codex/prompt-cache-identity/v1/";
 pub const CODEX_RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
 pub const CODEX_MODEL_CATALOG_METADATA_FIELD: &str = "codex_models";
 const CODEX_OPENAI_RESPONSES_UNSUPPORTED_BODY_FIELDS: &[&str] = &[
@@ -1466,6 +1468,148 @@ fn wrap_codex_responses_string_input_for_backend(
     );
 }
 
+fn non_empty_json_string(value: Option<&Value>) -> Option<&str> {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn adapt_codex_prompt_cache_identity_for_backend(body_object: &mut serde_json::Map<String, Value>) {
+    // The standard OpenAI contract permits arbitrary prompt_cache_key strings, while the Codex
+    // backend's native session identity is UUID-shaped. Adapt only requests that carry a cache key
+    // but do not already carry a native Codex session identity.
+    let Some(prompt_cache_key) = body_object
+        .get("prompt_cache_key")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned)
+    else {
+        return;
+    };
+
+    match body_object.get("client_metadata") {
+        Some(Value::Object(metadata)) => {
+            match metadata.get("session_id") {
+                Some(Value::String(session_id)) if !session_id.trim().is_empty() => return,
+                None | Some(Value::Null) => {}
+                Some(_) => return,
+            }
+            match metadata.get("thread_id") {
+                None | Some(Value::Null) => {}
+                Some(Value::String(thread_id)) if !thread_id.trim().is_empty() => {}
+                Some(_) => return,
+            }
+        }
+        Some(Value::Null) | None => {}
+        Some(_) => return,
+    }
+
+    let cache_identity = uuid::Uuid::parse_str(&prompt_cache_key)
+        .unwrap_or_else(|_| {
+            uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_URL,
+                format!("{CODEX_PROMPT_CACHE_IDENTITY_NAMESPACE}{prompt_cache_key}").as_bytes(),
+            )
+        })
+        .to_string();
+
+    {
+        let metadata = body_object
+            .entry("client_metadata".to_string())
+            .or_insert_with(|| json!({}));
+        if metadata.is_null() {
+            *metadata = json!({});
+        }
+        let Some(metadata) = metadata.as_object_mut() else {
+            return;
+        };
+        metadata.insert(
+            "session_id".to_string(),
+            Value::String(cache_identity.clone()),
+        );
+        if metadata.get("thread_id").is_none_or(Value::is_null) {
+            metadata.insert(
+                "thread_id".to_string(),
+                Value::String(cache_identity.clone()),
+            );
+        }
+    }
+
+    body_object.insert(
+        "prompt_cache_key".to_string(),
+        Value::String(cache_identity),
+    );
+}
+
+fn valid_codex_identity_header(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() || value.parse::<http::HeaderValue>().is_err() {
+        return None;
+    }
+    Some(value.to_string())
+}
+
+fn codex_prompt_cache_header_identity(provider_request_body: &Value) -> Option<(String, String)> {
+    let prompt_cache_key = non_empty_json_string(provider_request_body.get("prompt_cache_key"))?;
+
+    match provider_request_body.get("client_metadata") {
+        Some(Value::Object(metadata)) => match metadata.get("session_id") {
+            Some(Value::String(session_id)) if !session_id.trim().is_empty() => {
+                let session_id = valid_codex_identity_header(session_id)?;
+                let thread_id = match metadata.get("thread_id") {
+                    None | Some(Value::Null) => session_id.clone(),
+                    Some(Value::String(thread_id)) if !thread_id.trim().is_empty() => {
+                        valid_codex_identity_header(thread_id)?
+                    }
+                    Some(_) => return None,
+                };
+                return Some((session_id, thread_id));
+            }
+            None | Some(Value::Null) => {}
+            Some(_) => return None,
+        },
+        Some(Value::Null) | None => {}
+        Some(_) => return None,
+    }
+
+    let cache_identity = uuid::Uuid::parse_str(prompt_cache_key).ok()?.to_string();
+    Some((cache_identity.clone(), cache_identity))
+}
+
+fn insert_btree_header_if_missing(
+    headers: &mut BTreeMap<String, String>,
+    header_name: &str,
+    header_value: String,
+) {
+    if headers.iter().any(|(name, value)| {
+        name.trim().eq_ignore_ascii_case(header_name) && !value.trim().is_empty()
+    }) {
+        return;
+    }
+    remove_btree_header(headers, header_name);
+    headers.insert(header_name.to_string(), header_value);
+}
+
+pub fn apply_codex_openai_responses_identity_headers(
+    provider_request_headers: &mut BTreeMap<String, String>,
+    provider_request_body: &Value,
+    provider_type: &str,
+    provider_api_format: &str,
+) {
+    // Codex projects its body session identity into compatibility HTTP headers. Existing explicit
+    // headers remain authoritative; only missing values are completed here.
+    if !is_codex_openai_responses_request(provider_type, provider_api_format) {
+        return;
+    }
+    let Some((session_id, thread_id)) = codex_prompt_cache_header_identity(provider_request_body)
+    else {
+        return;
+    };
+    insert_btree_header_if_missing(provider_request_headers, "session-id", session_id);
+    insert_btree_header_if_missing(provider_request_headers, "thread-id", thread_id);
+}
+
 pub fn apply_codex_openai_responses_special_body_edits(
     provider_request_body: &mut Value,
     provider_type: &str,
@@ -1532,6 +1676,7 @@ pub fn apply_codex_openai_responses_special_body_edits_with_source_model_and_cap
             body_object.remove(*field);
         }
     }
+    adapt_codex_prompt_cache_identity_for_backend(body_object);
     if is_openai_responses_compact_request(provider_api_format) {
         body_object.remove("store");
     } else if !body_rules_handle_path(body_rules, "store") {

@@ -239,6 +239,20 @@ describe('resolveModelsDevTieredPricing', () => {
     })
   })
 
+  it('uses the standard catalog when an imported tier has a zero default ratio', () => {
+    expect(resolveModelsDevTieredPricing('openai', 'gpt-5.6-sol', {
+      input: 5,
+      output: 30,
+    }, {
+      fast: {
+        cost: { input: 0, output: 0 },
+        provider: { body: { service_tier: 'priority' } },
+      },
+    })?.processing_tiers).toEqual({
+      priority: { price_multiplier: 1 },
+    })
+  })
+
   it('prefers Anthropic speed=fast when the mode body also carries a standard service tier', () => {
     expect(resolveModelsDevTieredPricing('anthropic', 'claude-opus-fast', {
       input: 5,

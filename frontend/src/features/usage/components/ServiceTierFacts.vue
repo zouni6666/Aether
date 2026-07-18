@@ -1,12 +1,12 @@
 <template>
   <dl
     class="grid grid-cols-1 gap-x-4 gap-y-1.5 text-xs"
-    :class="hasPriceMultiplier ? 'sm:grid-cols-4' : 'sm:grid-cols-3'"
+    :class="hasPriceMultiplier ? 'sm:grid-cols-3' : 'sm:grid-cols-2'"
     data-testid="service-tier-facts"
   >
     <div class="flex min-w-0 items-baseline justify-between gap-3 sm:block">
       <dt class="text-muted-foreground">
-        请求层级
+        上游请求层级
       </dt>
       <dd
         class="truncate font-mono font-medium text-foreground sm:mt-0.5"
@@ -17,24 +17,13 @@
     </div>
     <div class="flex min-w-0 items-baseline justify-between gap-3 sm:block">
       <dt class="text-muted-foreground">
-        实际层级
-      </dt>
-      <dd
-        class="truncate font-mono font-medium text-foreground sm:mt-0.5"
-        :title="formatServiceTierFact(actual) || '-'"
-      >
-        {{ formatServiceTierFact(actual) || '-' }}
-      </dd>
-    </div>
-    <div class="flex min-w-0 items-baseline justify-between gap-3 sm:block">
-      <dt class="text-muted-foreground">
         计费层级
       </dt>
       <dd
         class="truncate font-mono font-medium text-foreground sm:mt-0.5"
-        :title="formatServiceTierFact(billing) || '-'"
+        :title="formatServiceTierFact(requested) || '-'"
       >
-        {{ formatServiceTierFact(billing) || '-' }}
+        {{ formatServiceTierFact(requested) || '-' }}
       </dd>
     </div>
     <div
@@ -58,8 +47,6 @@ import { formatServiceTierFact } from '../utils/service-tier'
 
 const props = defineProps<{
   requested: string | null
-  actual: string | null
-  billing: string | null
   priceMultiplier?: number | null
 }>()
 
@@ -70,7 +57,7 @@ const hasPriceMultiplier = computed(() => (
 ))
 
 const multiplierTierLabel = computed(() => (
-  formatServiceTierFact(props.billing ?? props.actual ?? props.requested) ?? '处理层级'
+  formatServiceTierFact(props.requested) ?? '处理层级'
 ))
 
 const formattedPriceMultiplier = computed(() => (

@@ -2,7 +2,10 @@ use aether_data_contracts::repository::usage::UpsertUsageRecord;
 use aether_data_contracts::DataLayerError;
 
 use crate::request_metadata::{
-    attach_provider_request_body_metadata, sanitize_usage_request_metadata,
+    attach_client_request_body_metadata, attach_provider_request_body_metadata,
+    clear_client_request_body_metadata, clear_provider_request_body_metadata,
+    request_body_derived_facts_action, sanitize_usage_request_metadata,
+    RequestBodyDerivedFactsAction,
 };
 use crate::{UsageEvent, UsageEventType};
 
@@ -38,15 +41,42 @@ pub fn build_upsert_usage_record_from_event(
         }
     };
     let mut data = event.data.clone();
-    data.request_metadata = attach_provider_request_body_metadata(
-        data.request_metadata,
-        data.endpoint_api_format
-            .as_deref()
-            .or(data.api_format.as_deref()),
-        data.target_model.as_deref().or(Some(data.model.as_str())),
-        Some(data.model.as_str()),
+    // Request-derived facts are captured before body capture policy is applied. Do not let a
+    // truncation/disabled placeholder clear those facts while converting the queued event into a
+    // database record. Inline (or ref-loaded) bodies remain authoritative and may clear stale
+    // metadata when the final upstream request no longer contains a value.
+    match request_body_derived_facts_action(data.request_body.as_ref(), data.request_body_state) {
+        RequestBodyDerivedFactsAction::Refresh => {
+            data.request_metadata = attach_client_request_body_metadata(
+                data.request_metadata,
+                data.request_body.as_ref(),
+            );
+        }
+        RequestBodyDerivedFactsAction::Clear => {
+            data.request_metadata = clear_client_request_body_metadata(data.request_metadata);
+        }
+        RequestBodyDerivedFactsAction::Preserve => {}
+    }
+    match request_body_derived_facts_action(
         data.provider_request_body.as_ref(),
-    );
+        data.provider_request_body_state,
+    ) {
+        RequestBodyDerivedFactsAction::Refresh => {
+            data.request_metadata = attach_provider_request_body_metadata(
+                data.request_metadata,
+                data.endpoint_api_format
+                    .as_deref()
+                    .or(data.api_format.as_deref()),
+                data.target_model.as_deref().or(Some(data.model.as_str())),
+                Some(data.model.as_str()),
+                data.provider_request_body.as_ref(),
+            );
+        }
+        RequestBodyDerivedFactsAction::Clear => {
+            data.request_metadata = clear_provider_request_body_metadata(data.request_metadata);
+        }
+        RequestBodyDerivedFactsAction::Preserve => {}
+    }
     let now_unix_secs = event.timestamp_ms / 1_000;
 
     Ok(UpsertUsageRecord {
@@ -165,6 +195,8 @@ fn empty_to_none(value: Option<String>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use aether_data_contracts::repository::usage::UsageBodyCaptureState;
+
     use crate::{UsageEvent, UsageEventData, UsageEventType};
 
     use super::build_upsert_usage_record_from_event;
@@ -186,6 +218,9 @@ mod tests {
                 output_tokens: Some(20),
                 total_tokens: Some(30),
                 status_code: Some(200),
+                request_body: Some(serde_json::json!({
+                    "reasoning": { "effort": "xhigh" }
+                })),
                 provider_request_body: Some(serde_json::json!({
                     "reasoning": { "effort": "max" },
                     "service_tier": "priority"
@@ -202,6 +237,14 @@ mod tests {
         assert_eq!(record.status, "completed");
         assert_eq!(record.billing_status, "pending");
         assert_eq!(record.total_tokens, Some(30));
+        assert_eq!(
+            record
+                .request_metadata
+                .as_ref()
+                .and_then(|value| value.get("requested_reasoning_effort"))
+                .and_then(serde_json::Value::as_str),
+            Some("xhigh")
+        );
         assert_eq!(
             record
                 .request_metadata
@@ -227,6 +270,139 @@ mod tests {
             Some("default")
         );
         assert_eq!(record.finalized_at_unix_secs, Some(1_700_000_000));
+    }
+
+    #[test]
+    fn truncated_request_placeholders_preserve_pre_capture_request_facts() {
+        let truncated = serde_json::json!({
+            "truncated": true,
+            "reason": "body_capture_limit_exceeded",
+            "max_bytes": 128,
+            "source_bytes": 2048,
+            "value_kind": "object"
+        });
+        let record = build_upsert_usage_record_from_event(&UsageEvent {
+            event_type: UsageEventType::Completed,
+            request_id: "req-truncated-request-facts".to_string(),
+            timestamp_ms: 1_700_000_000_000,
+            data: UsageEventData {
+                provider_name: "OpenAI".to_string(),
+                model: "gpt-5".to_string(),
+                api_format: Some("openai:responses".to_string()),
+                endpoint_api_format: Some("openai:responses".to_string()),
+                request_body: Some(truncated.clone()),
+                request_body_state: Some(UsageBodyCaptureState::Truncated),
+                provider_request_body: Some(truncated),
+                provider_request_body_state: Some(UsageBodyCaptureState::Truncated),
+                request_metadata: Some(serde_json::json!({
+                    "requested_reasoning_effort": "xhigh",
+                    "provider_reasoning_effort": "max",
+                    "provider_service_tier": "priority"
+                })),
+                ..UsageEventData::default()
+            },
+        })
+        .expect("record should build");
+
+        let metadata = record
+            .request_metadata
+            .as_ref()
+            .expect("derived request facts should remain");
+        assert_eq!(metadata["requested_reasoning_effort"], "xhigh");
+        assert_eq!(metadata["provider_reasoning_effort"], "max");
+        assert_eq!(metadata["provider_service_tier"], "priority");
+    }
+
+    #[test]
+    fn disabled_reference_and_unavailable_bodies_preserve_pre_capture_request_facts() {
+        for state in [
+            UsageBodyCaptureState::Disabled,
+            UsageBodyCaptureState::Reference,
+            UsageBodyCaptureState::Unavailable,
+        ] {
+            let record = build_upsert_usage_record_from_event(&UsageEvent {
+                event_type: UsageEventType::Completed,
+                request_id: format!("req-preserved-{state:?}"),
+                timestamp_ms: 1_700_000_000_000,
+                data: UsageEventData {
+                    provider_name: "OpenAI".to_string(),
+                    model: "gpt-5".to_string(),
+                    request_body_state: Some(state),
+                    provider_request_body_state: Some(state),
+                    request_metadata: Some(serde_json::json!({
+                        "requested_reasoning_effort": "xhigh",
+                        "provider_reasoning_effort": "max",
+                        "provider_service_tier": "priority"
+                    })),
+                    ..UsageEventData::default()
+                },
+            })
+            .expect("record should build");
+
+            let metadata = record
+                .request_metadata
+                .as_ref()
+                .expect("derived request facts should remain");
+            assert_eq!(metadata["requested_reasoning_effort"], "xhigh");
+            assert_eq!(metadata["provider_reasoning_effort"], "max");
+            assert_eq!(metadata["provider_service_tier"], "priority");
+        }
+    }
+
+    #[test]
+    fn missing_or_complete_factless_final_bodies_clear_stale_request_facts() {
+        let cases = [
+            ("typed-missing", Some(UsageBodyCaptureState::None), None),
+            (
+                "typed-missing-with-stale-body",
+                Some(UsageBodyCaptureState::None),
+                Some(serde_json::json!({
+                    "reasoning_effort": "xhigh",
+                    "service_tier": "priority"
+                })),
+            ),
+            ("untyped-missing", None, None),
+            (
+                "inline-without-facts",
+                Some(UsageBodyCaptureState::Inline),
+                Some(serde_json::json!({"model": "gpt-5"})),
+            ),
+        ];
+
+        for (name, state, body) in cases {
+            let record = build_upsert_usage_record_from_event(&UsageEvent {
+                event_type: UsageEventType::Completed,
+                request_id: format!("req-clear-{name}"),
+                timestamp_ms: 1_700_000_000_000,
+                data: UsageEventData {
+                    provider_name: "OpenAI".to_string(),
+                    model: "gpt-5".to_string(),
+                    request_body: body.clone(),
+                    request_body_state: state,
+                    provider_request_body: body,
+                    provider_request_body_state: state,
+                    request_metadata: Some(serde_json::json!({
+                        "trace_id": "trace-1",
+                        "requested_reasoning_effort": "xhigh",
+                        "provider_reasoning_effort": "max",
+                        "provider_service_tier": "priority",
+                        "provider_actual_service_tier": "priority"
+                    })),
+                    ..UsageEventData::default()
+                },
+            })
+            .expect("record should build");
+
+            let metadata = record
+                .request_metadata
+                .as_ref()
+                .expect("audit facts remain");
+            assert_eq!(metadata["trace_id"], "trace-1");
+            assert_eq!(metadata["provider_actual_service_tier"], "priority");
+            assert!(metadata.get("requested_reasoning_effort").is_none());
+            assert!(metadata.get("provider_reasoning_effort").is_none());
+            assert!(metadata.get("provider_service_tier").is_none());
+        }
     }
 
     #[test]

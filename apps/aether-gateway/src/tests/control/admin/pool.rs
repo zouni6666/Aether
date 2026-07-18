@@ -1362,6 +1362,18 @@ async fn gateway_pool_list_overrides_stale_codex_cycle_usage_from_usage_facts() 
                         "total_tokens": 700,
                         "total_cost_usd": "0.70000000"
                     }
+                },
+                {
+                    "code": "monthly",
+                    "label": "月",
+                    "scope": "account",
+                    "reset_at": reset_at,
+                    "window_minutes": 43_800,
+                    "usage": {
+                        "request_count": 8,
+                        "total_tokens": 600,
+                        "total_cost_usd": "0.60000000"
+                    }
                 }
             ]
         }
@@ -1441,6 +1453,10 @@ async fn gateway_pool_list_overrides_stale_codex_cycle_usage_from_usage_facts() 
         .iter()
         .find(|window| window["code"] == json!("5h"))
         .expect("5h window should exist");
+    let monthly = windows
+        .iter()
+        .find(|window| window["code"] == json!("monthly"))
+        .expect("monthly window should exist");
 
     assert_eq!(weekly["usage"]["request_count"], json!(3));
     assert_eq!(weekly["usage"]["total_tokens"], json!(2_199));
@@ -1448,6 +1464,9 @@ async fn gateway_pool_list_overrides_stale_codex_cycle_usage_from_usage_facts() 
     assert_eq!(five_hour["usage"]["request_count"], json!(1));
     assert_eq!(five_hour["usage"]["total_tokens"], json!(200));
     assert_eq!(five_hour["usage"]["total_cost_usd"], json!("0.75000000"));
+    assert_eq!(monthly["usage"]["request_count"], json!(3));
+    assert_eq!(monthly["usage"]["total_tokens"], json!(2_199));
+    assert_eq!(monthly["usage"]["total_cost_usd"], json!("11.99000000"));
 }
 
 #[tokio::test]

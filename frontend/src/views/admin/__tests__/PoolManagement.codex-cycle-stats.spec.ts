@@ -133,7 +133,6 @@ vi.mock('lucide-vue-next', async () => {
     Copy: Icon,
     Shield: Icon,
     Globe: Icon,
-    Repeat2: Icon,
     RotateCcw: Icon,
     SquarePen: Icon,
     Trash2: Icon,
@@ -492,7 +491,7 @@ function createPoolKey(providerType = 'codex', overrides: Partial<PoolKeyDetail>
               {
                 code: 'weekly',
                 remaining_ratio: 0.5,
-                usage: { request_count: 0, total_tokens: 0, total_cost_usd: '0.00000000' },
+                usage: { request_count: 12, total_tokens: 5000, total_cost_usd: '0.012' },
               },
             ]
           : [],
@@ -533,13 +532,6 @@ async function settle() {
   }
 }
 
-function seedStoredStatsMode(statsMode: 'current_cycle' | 'account_total') {
-  window.sessionStorage.setItem(
-    POOL_MANAGEMENT_VIEW_STORAGE_KEY,
-    JSON.stringify({ statsMode }),
-  )
-}
-
 beforeEach(() => {
   resetQuery()
   window.sessionStorage.clear()
@@ -574,7 +566,7 @@ afterEach(() => {
 })
 
 describe('PoolManagement Codex cycle stats mode', () => {
-  it('renders Codex current-cycle stats by default with a header icon toggle', async () => {
+  it('renders current-cycle comparison text without a mode toggle', async () => {
     const codexKey = createPoolKey('codex')
     endpointMocks.getPoolOverview.mockResolvedValue({ items: [createOverview('codex')] })
     endpointMocks.listPoolKeys.mockResolvedValue(createKeyPage(codexKey))
@@ -583,19 +575,12 @@ describe('PoolManagement Codex cycle stats mode', () => {
     const root = mountPoolManagement()
     await settle()
 
-    expect(root.querySelector('[data-testid="pool-stats-mode-switch"]')).toBeNull()
-    const modeButton = root.querySelector<HTMLButtonElement>('[data-testid="pool-stats-mode-control"]')
-    expect(modeButton).not.toBeNull()
-    expect(modeButton?.getAttribute('title')).toBe('切换为总计统计')
-    expect(root.querySelectorAll('[data-testid="pool-stats-cycle-group-5h"]').length).toBeGreaterThan(0)
-    expect(root.querySelectorAll('[data-testid="pool-stats-cycle-group-weekly"]').length).toBeGreaterThan(0)
-    expect(root.querySelector('[data-testid="pool-stats-5h-request_count"]')?.textContent?.trim()).toBe('7')
-    expect(root.querySelector('[data-testid="pool-stats-weekly-total_tokens"]')?.textContent?.trim()).toBe('0')
-    expect(root.querySelector('[data-testid="pool-stats-cycle-grid"]')?.className).toContain('grid-cols-[38px_64px_10px_64px]')
-    expect(root.querySelector('[data-testid="pool-stats-cycle-grid"]')?.className).toContain('w-[188px]')
-    expect(root.querySelector('[data-testid="pool-stats-cycle-grid"]')?.className).toContain('min-h-16')
-    expect(root.querySelector('[data-testid="pool-stats-5h-request_count"]')?.className).toContain('text-center')
-    expect(root.querySelector('[data-testid="pool-stats-weekly-total_tokens"]')?.className).toContain('text-center')
+    expect(root.querySelector('[data-testid="pool-stats-mode-control"]')).toBeNull()
+    expect(root.querySelector('[data-testid="pool-stats-cycle-text"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="pool-stats-cycle-request_count"]')?.textContent?.trim()).toBe('7/12')
+    expect(root.querySelector('[data-testid="pool-stats-cycle-total_tokens"]')?.textContent?.trim()).toBe('2.5K/5K')
+    expect(root.querySelector('[data-testid="pool-stats-cycle-small-overlay"]')).toBeNull()
+    expect(root.querySelector('[data-testid="pool-stats-cycle-large-base"]')).toBeNull()
     expect(endpointMocks.listPoolKeys).toHaveBeenLastCalledWith(
       'codex-provider',
       expect.objectContaining({
@@ -684,6 +669,50 @@ describe('PoolManagement Codex cycle stats mode', () => {
     expect(root.textContent).toContain('生图')
   })
 
+  it('labels Codex quota by the actual refresh window duration', async () => {
+    const monthlyCodexKey = createPoolKey('codex', {
+      status_snapshot: {
+        oauth: { code: 'valid' },
+        account: { code: 'ok', blocked: false },
+        quota: {
+          code: 'ok',
+          exhausted: false,
+          provider_type: 'codex',
+          windows: [
+            {
+              code: 'weekly',
+              remaining_ratio: 0.86,
+              window_minutes: 43_800,
+              usage: { request_count: 23, total_tokens: 45_600, total_cost_usd: '0.1234' },
+            },
+            {
+              code: '5h',
+              remaining_ratio: 1,
+              window_minutes: 0,
+            },
+          ],
+        },
+      },
+    })
+    endpointMocks.getPoolOverview.mockResolvedValue({ items: [createOverview('codex')] })
+    endpointMocks.listPoolKeys.mockResolvedValue(createKeyPage(monthlyCodexKey))
+    endpointMocks.getProvider.mockResolvedValue(createProvider('codex'))
+
+    const root = mountPoolManagement()
+    await settle()
+
+    const periodLabels = Array.from(root.querySelectorAll('[data-testid="pool-quota-period-label"]'))
+      .map((element) => element.textContent?.trim())
+      .filter(Boolean)
+    expect(periodLabels).toContain('月')
+    expect(periodLabels).not.toContain('5H')
+    expect(periodLabels).not.toContain('周')
+    expect(root.querySelector('[data-testid="pool-stats-cycle-request_count"]')?.textContent?.trim()).toBe('-/23')
+    expect(root.querySelector('[data-testid="pool-stats-cycle-small-overlay"]')).toBeNull()
+    expect(root.querySelector('[data-testid="pool-stats-cycle-bar-request_count"]')).toBeNull()
+    expect(root.querySelector('[data-testid="pool-stats-cycle-single-marker"]')).toBeNull()
+  })
+
   it('opens only one score popover across desktop and mobile layouts', async () => {
     const scoredKey = createPoolKey('codex', {
       pool_score: {
@@ -768,32 +797,11 @@ describe('PoolManagement Codex cycle stats mode', () => {
     expect(endpointMocks.refreshProviderQuota).not.toHaveBeenCalledWith('codex-provider')
   })
 
-  it('toggles Codex stats to account totals and persists the choice', async () => {
-    const codexKey = createPoolKey('codex')
-    endpointMocks.getPoolOverview.mockResolvedValue({ items: [createOverview('codex')] })
-    endpointMocks.listPoolKeys.mockResolvedValue(createKeyPage(codexKey))
-    endpointMocks.getProvider.mockResolvedValue(createProvider('codex'))
-
-    const root = mountPoolManagement()
-    await settle()
-
-    const modeButton = root.querySelector<HTMLButtonElement>('[data-testid="pool-stats-mode-control"]')
-    expect(modeButton).not.toBeNull()
-    modeButton?.click()
-    await settle()
-
-    expect(root.querySelector('[data-testid="pool-stats-account-total"]')).not.toBeNull()
-    expect(root.querySelector('[data-testid="pool-stats-account-total"]')?.className).toContain('w-[188px]')
-    expect(root.querySelector('[data-testid="pool-stats-account-total"]')?.className).toContain('grid-rows-4')
-    expect(root.querySelector('[data-testid="pool-stats-account-total"]')?.className).toContain('min-h-16')
-    expect(root.querySelector('[data-testid="pool-stats-cycle-group-5h"]')).toBeNull()
-    expect(routeMocks.query.statsMode).toBe('account_total')
-    expect(window.sessionStorage.getItem(POOL_MANAGEMENT_VIEW_STORAGE_KEY)).toContain('"statsMode":"account_total"')
-    expect(modeButton?.getAttribute('title')).toBe('切换为周期统计')
-  })
-
-  it('restores stored and query account-total mode for Codex providers', async () => {
-    seedStoredStatsMode('account_total')
+  it('ignores legacy account-total mode and removes it from the route', async () => {
+    window.sessionStorage.setItem(
+      POOL_MANAGEMENT_VIEW_STORAGE_KEY,
+      JSON.stringify({ statsMode: 'account_total' }),
+    )
     routeMocks.query.statsMode = 'account_total'
     const codexKey = createPoolKey('codex')
     endpointMocks.getPoolOverview.mockResolvedValue({ items: [createOverview('codex')] })
@@ -803,10 +811,10 @@ describe('PoolManagement Codex cycle stats mode', () => {
     const root = mountPoolManagement()
     await settle()
 
-    expect(root.querySelector('[data-testid="pool-stats-account-total"]')).not.toBeNull()
-    expect(root.querySelector('[data-testid="pool-stats-cycle-group-5h"]')).toBeNull()
-    expect(routeMocks.query.statsMode).toBe('account_total')
-    expect(window.sessionStorage.getItem(POOL_MANAGEMENT_VIEW_STORAGE_KEY)).toContain('"statsMode":"account_total"')
+    expect(root.querySelector('[data-testid="pool-stats-mode-control"]')).toBeNull()
+    expect(root.querySelector('[data-testid="pool-stats-cycle-text"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="pool-stats-account-total"]')).toBeNull()
+    expect(routeMocks.query.statsMode).toBeUndefined()
   })
 
   it('resets Codex cycle stats from the action column', async () => {
@@ -841,10 +849,9 @@ describe('PoolManagement Codex cycle stats mode', () => {
     const root = mountPoolManagement()
     await settle()
 
-    expect(root.querySelector('[data-testid="pool-stats-mode-switch"]')).toBeNull()
     expect(root.querySelector('[data-testid="pool-stats-mode-control"]')).toBeNull()
     expect(root.querySelector('[data-testid="pool-reset-cycle-stats"]')).toBeNull()
-    expect(root.querySelector('[data-testid="pool-stats-cycle-group-5h"]')).toBeNull()
+    expect(root.querySelector('[data-testid="pool-stats-cycle-text"]')).toBeNull()
     expect(root.querySelector('[data-testid="pool-stats-account-total"]')).not.toBeNull()
     expect(root.textContent).toContain('12')
     expect(root.textContent).toContain('3.5K')

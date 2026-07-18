@@ -1,10 +1,11 @@
 import type { QuotaWindowUsageSnapshot } from '@/api/endpoints/types/statusSnapshot'
 import type { PoolManagementStatsMode } from '@/features/pool/utils/poolManagementState'
+import { getCodexQuotaWindowPresentation } from '@/utils/codexQuotaWindow'
 import { formatCompactNumber } from '@/utils/format'
 
 export type PoolStatsMetricKey = 'request_count' | 'total_tokens' | 'total_cost_usd'
 export type PoolStatsDisplayKind = 'account_total' | 'codex_cycle'
-export type PoolCodexCycleWindowCode = '5h' | 'weekly'
+export type PoolCodexCycleWindowCode = string
 
 export interface PoolStatsKeyInput {
   request_count?: number | null
@@ -14,6 +15,9 @@ export interface PoolStatsKeyInput {
     quota?: {
       windows?: Array<{
         code?: string | null
+        label?: string | null
+        scope?: string | null
+        window_minutes?: number | null
         usage?: QuotaWindowUsageSnapshot | null
       } | null> | null
     } | null
@@ -25,6 +29,7 @@ export interface PoolStatsMetric {
   label: string
   value: string
   missing: boolean
+  numericValue?: number | null
 }
 
 export interface PoolAccountTotalStatsDisplay {
@@ -46,10 +51,6 @@ export interface PoolCodexCycleStatsDisplay {
 export type PoolStatsDisplay = PoolAccountTotalStatsDisplay | PoolCodexCycleStatsDisplay
 
 const MISSING_STAT_VALUE = '—'
-const CODEX_CYCLE_WINDOWS: Array<{ code: PoolCodexCycleWindowCode, label: string }> = [
-  { code: '5h', label: '5H' },
-  { code: 'weekly', label: '周' },
-]
 
 export function isCodexProviderType(providerType: string | null | undefined): boolean {
   return String(providerType || '').trim().toLowerCase() === 'codex'
@@ -103,12 +104,14 @@ function createMetric(
   key: PoolStatsMetricKey,
   label: string,
   value: string | null,
+  numericValue?: number | null,
 ): PoolStatsMetric {
   return {
     key,
     label,
     value: value ?? MISSING_STAT_VALUE,
     missing: value == null,
+    numericValue: numericValue ?? null,
   }
 }
 
@@ -116,16 +119,39 @@ function normalizeWindowCode(value: unknown): string {
   return String(value || '').trim().toLowerCase()
 }
 
-function getQuotaWindowUsage(
-  key: PoolStatsKeyInput,
-  code: PoolCodexCycleWindowCode,
-): QuotaWindowUsageSnapshot | null {
+function getCodexCycleStatsGroups(key: PoolStatsKeyInput): PoolCodexCycleStatsGroup[] {
   const windows = key.status_snapshot?.quota?.windows
-  if (!Array.isArray(windows)) return null
+  if (!Array.isArray(windows)) return []
 
-  const window = windows.find(item => normalizeWindowCode(item?.code) === code)
-  return window?.usage ?? null
+  const seenCodes = new Set<string>()
+  return windows
+    .map((window) => {
+      if (!window) return null
+      const code = normalizeWindowCode(window.code)
+      const scope = String(window.scope || 'account').trim().toLowerCase()
+      if (!code || scope !== 'account' || code.startsWith('spark_') || seenCodes.has(code)) {
+        return null
+      }
+      const presentation = getCodexQuotaWindowPresentation({
+        code,
+        label: window.label,
+        scope,
+        window_minutes: window.window_minutes,
+      })
+      if (!presentation) return null
+      seenCodes.add(code)
+      return {
+        code,
+        label: presentation.label,
+        sortOrder: presentation.sortOrder,
+        metrics: buildCycleMetrics(window.usage ?? null),
+      }
+    })
+    .filter((group): group is PoolCodexCycleStatsGroup & { sortOrder: number } => group != null)
+    .sort((left, right) => left.sortOrder - right.sortOrder)
+    .map(({ sortOrder: _sortOrder, ...group }) => group)
 }
+
 
 function buildAccountTotalMetrics(key: PoolStatsKeyInput): PoolStatsMetric[] {
   return [
@@ -136,10 +162,28 @@ function buildAccountTotalMetrics(key: PoolStatsKeyInput): PoolStatsMetric[] {
 }
 
 function buildCycleMetrics(usage: QuotaWindowUsageSnapshot | null): PoolStatsMetric[] {
+  const requestCount = usage?.request_count == null ? null : Number(usage.request_count)
+  const totalTokens = usage?.total_tokens == null ? null : Number(usage.total_tokens)
+  const totalCostUsd = usage?.total_cost_usd == null ? null : Number(usage.total_cost_usd)
   return [
-    createMetric('request_count', '请求', formatCycleInteger(usage?.request_count)),
-    createMetric('total_tokens', 'Token', formatCycleTokenCount(usage?.total_tokens)),
-    createMetric('total_cost_usd', '费用', formatCycleUsd(usage?.total_cost_usd)),
+    createMetric(
+      'request_count',
+      '请求',
+      formatCycleInteger(usage?.request_count),
+      Number.isFinite(requestCount) ? Math.max(requestCount ?? 0, 0) : null,
+    ),
+    createMetric(
+      'total_tokens',
+      'Token',
+      formatCycleTokenCount(usage?.total_tokens),
+      Number.isFinite(totalTokens) ? Math.max(totalTokens ?? 0, 0) : null,
+    ),
+    createMetric(
+      'total_cost_usd',
+      '费用',
+      formatCycleUsd(usage?.total_cost_usd),
+      Number.isFinite(totalCostUsd) ? Math.max(totalCostUsd ?? 0, 0) : null,
+    ),
   ]
 }
 
@@ -157,10 +201,7 @@ export function buildCodexCycleStatsDisplay(
 ): PoolCodexCycleStatsDisplay {
   return {
     kind: 'codex_cycle',
-    groups: CODEX_CYCLE_WINDOWS.map(window => ({
-      ...window,
-      metrics: buildCycleMetrics(getQuotaWindowUsage(key, window.code)),
-    })),
+    groups: getCodexCycleStatsGroups(key),
   }
 }
 

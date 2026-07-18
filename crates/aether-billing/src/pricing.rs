@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use aether_data_contracts::repository::{
     billing::StoredBillingModelContext,
     global_models::{explicit_pricing_catalog_state, ExplicitPricingCatalogState},
@@ -108,17 +106,12 @@ impl BillingModelPricingSnapshot {
     ) -> BillingPricingResolution {
         let requested_processing_tier = normalize_processing_tier(requested_processing_tier);
         let actual_processing_tier = normalize_processing_tier(actual_processing_tier);
-        let billing_processing_tier = actual_processing_tier
+        // The provider-reported actual tier is retained in the resolution for audit only. The
+        // final upstream request is the sole authority for selecting a billing catalog.
+        let billing_processing_tier = requested_processing_tier
             .as_deref()
             .map(canonical_processing_tier)
-            .or_else(|| {
-                requested_processing_tier.as_deref().map_or(
-                    Some("standard".to_string()),
-                    |requested| {
-                        processing_tier_is_standard(requested).then(|| "standard".to_string())
-                    },
-                )
-            });
+            .or_else(|| Some("standard".to_string()));
 
         let (tiered_pricing, tiered_pricing_source, processing_tier_price_multiplier) =
             billing_processing_tier
@@ -151,17 +144,12 @@ impl BillingModelPricingSnapshot {
         self.validate_processing_tier_containers()?;
         let requested_processing_tier = normalize_processing_tier(requested_processing_tier);
         let actual_processing_tier = normalize_processing_tier(actual_processing_tier);
-        let billing_processing_tier = actual_processing_tier
+        // Keep this checked path aligned with `resolve_pricing`: response facts must never choose
+        // the catalog used for settlement.
+        let billing_processing_tier = requested_processing_tier
             .as_deref()
             .map(canonical_processing_tier)
-            .or_else(|| {
-                requested_processing_tier.as_deref().map_or(
-                    Some("standard".to_string()),
-                    |requested| {
-                        processing_tier_is_standard(requested).then(|| "standard".to_string())
-                    },
-                )
-            });
+            .or_else(|| Some("standard".to_string()));
 
         let (tiered_pricing, tiered_pricing_source, processing_tier_price_multiplier) =
             match billing_processing_tier.as_deref() {
@@ -208,34 +196,7 @@ impl BillingModelPricingSnapshot {
             return Ok(None);
         }
 
-        let mut billing_tiers = BTreeSet::from(["standard".to_string(), requested_billing_tier]);
-        for pricing in [
-            self.model_tiered_pricing.as_ref(),
-            self.default_tiered_pricing.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            let Some(processing_tiers) = pricing.get("processing_tiers").and_then(Value::as_object)
-            else {
-                continue;
-            };
-            billing_tiers.extend(processing_tiers.keys().filter_map(|tier| {
-                normalize_processing_tier(Some(tier)).map(|tier| canonical_processing_tier(&tier))
-            }));
-        }
-
-        let mut candidates = Vec::new();
-        for billing_tier in billing_tiers {
-            let resolution = self.authorization_pricing_for_tier(
-                requested_processing_tier.clone(),
-                Some(billing_tier),
-            )?;
-            if resolution.bills_standard_processing_tier() || resolution.tiered_pricing.is_some() {
-                candidates.push(resolution);
-            }
-        }
-        Ok((!candidates.is_empty()).then_some(candidates))
+        Ok(Some(vec![requested_resolution]))
     }
 
     pub fn validate_authorization_pricing_configuration(
@@ -839,7 +800,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_nonstandard_request_requires_actual_tier() {
+    fn explicit_nonstandard_request_selects_requested_catalog_without_actual_tier() {
         let pricing = snapshot(
             None,
             Some(json!({
@@ -852,17 +813,27 @@ mod tests {
 
         let resolution = pricing.resolve_pricing(Some("Priority"), None);
 
-        assert!(resolution.requires_actual_processing_tier());
+        assert!(!resolution.requires_actual_processing_tier());
         assert_eq!(
             resolution.requested_processing_tier.as_deref(),
             Some("priority")
         );
-        assert_eq!(resolution.billing_processing_tier, None);
-        assert_eq!(resolution.tiered_pricing, None);
+        assert_eq!(
+            resolution.billing_processing_tier.as_deref(),
+            Some("priority")
+        );
+        assert_eq!(
+            resolution
+                .tiered_pricing
+                .as_ref()
+                .and_then(|value| value.pointer("/tiers/0/input_price_per_1m"))
+                .and_then(serde_json::Value::as_f64),
+            Some(6.0)
+        );
     }
 
     #[test]
-    fn actual_tier_selects_exact_catalog_and_source() {
+    fn response_actual_tier_is_audited_but_does_not_select_pricing_catalog() {
         let pricing = snapshot(
             Some(json!({
                 "processing_tiers": {
@@ -878,28 +849,29 @@ mod tests {
         );
 
         let flex = pricing.resolve_pricing(Some("priority"), Some("flex"));
-        assert_eq!(flex.billing_processing_tier.as_deref(), Some("flex"));
+        assert_eq!(flex.actual_processing_tier.as_deref(), Some("flex"));
+        assert_eq!(flex.billing_processing_tier.as_deref(), Some("priority"));
         assert_eq!(
             flex.tiered_pricing_source,
-            Some(BillingPricingSource::GlobalDefault)
+            Some(BillingPricingSource::ProviderOverride)
         );
         assert_eq!(
             flex.tiered_pricing
                 .as_ref()
                 .and_then(|value| value.pointer("/tiers/0/input_price_per_1m"))
                 .and_then(serde_json::Value::as_f64),
-            Some(1.5)
+            Some(9.0)
         );
 
         let standard = pricing.resolve_pricing(Some("priority"), Some("Default"));
         assert_eq!(standard.actual_processing_tier.as_deref(), Some("default"));
         assert_eq!(
             standard.billing_processing_tier.as_deref(),
-            Some("standard")
+            Some("priority")
         );
         assert_eq!(
             standard.tiered_pricing_source,
-            Some(BillingPricingSource::GlobalDefault)
+            Some(BillingPricingSource::ProviderOverride)
         );
     }
 
@@ -962,9 +934,7 @@ mod tests {
                 .and_then(serde_json::Value::as_f64),
             Some(6.0)
         );
-        assert!(candidates.iter().any(|resolution| {
-            resolution.billing_processing_tier.as_deref() == Some("standard")
-        }));
+        assert_eq!(candidates.len(), 1);
     }
 
     #[test]
@@ -1222,7 +1192,7 @@ mod tests {
     }
 
     #[test]
-    fn actual_claude_fast_uses_the_exact_provider_multiplier_overlay() {
+    fn requested_claude_fast_uses_the_exact_provider_multiplier_overlay() {
         let pricing = snapshot(
             Some(json!({
                 "tiers": [{"up_to": null, "input_price_per_1m": 2.0}],
@@ -1234,8 +1204,9 @@ mod tests {
             })),
         );
 
-        let resolved = pricing.resolve_pricing(Some("priority"), Some("fast"));
+        let resolved = pricing.resolve_pricing(Some("fast"), Some("priority"));
 
+        assert_eq!(resolved.actual_processing_tier.as_deref(), Some("priority"));
         assert_eq!(resolved.billing_processing_tier.as_deref(), Some("fast"));
         assert_eq!(
             resolved

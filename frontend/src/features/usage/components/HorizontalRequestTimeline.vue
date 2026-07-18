@@ -462,7 +462,7 @@
                   </span>
                 </div>
 
-                <!-- 错误信息：真实上游响应合并在此处展示 -->
+                <!-- 错误信息：将实际上游响应头和响应体作为同一个对象展示 -->
                 <div
                   v-if="currentAttempt.status === 'failed' && currentAttemptRequestError"
                   class="error-block"
@@ -485,12 +485,24 @@
                   </div>
                   <div
                     v-if="currentAttemptRequestError.upstreamResponse"
-                    class="error-json"
+                    class="error-json error-upstream-response-json"
                   >
                     <JsonContentPanel
                       :data="currentAttemptRequestError.upstreamResponse"
                       :is-dark="isDark"
-                      empty-message="无上游响应信息"
+                      title="上游响应"
+                      empty-message="无上游响应"
+                    />
+                  </div>
+                  <div
+                    v-if="currentAttemptRequestError.diagnostic"
+                    class="error-json error-diagnostic-json"
+                  >
+                    <JsonContentPanel
+                      :data="currentAttemptRequestError.diagnostic"
+                      :is-dark="isDark"
+                      title="失败诊断"
+                      empty-message="无失败诊断信息"
                     />
                   </div>
                 </div>
@@ -1227,7 +1239,7 @@ const normalizeUpstreamResponseDisplay = (value: unknown): Record<string, unknow
   const raw = extractObject(value)
   if (!raw) return null
   const statusCode = readNumberField(raw, 'status_code') ?? readNumberField(raw, 'statusCode')
-  const headers = raw.headers
+  const headers = raw.headers ?? raw.header
   const body = raw.body
   const bodyRef = readStringField(raw, 'body_ref') ?? readStringField(raw, 'bodyRef')
   const bodyState = readStringField(raw, 'body_state') ?? readStringField(raw, 'bodyState')
@@ -1627,6 +1639,7 @@ const currentAttemptRequestError = computed<{
   message: string
   statusCode?: number
   upstreamResponse: Record<string, unknown> | null
+  diagnostic: Record<string, unknown> | null
 } | null>(() => {
   const attempt = currentAttempt.value
   if (!attempt || attempt.status !== 'failed') return null
@@ -1667,10 +1680,20 @@ const currentAttemptRequestError = computed<{
         rawMessage,
       )
     : null
-  const upstreamResponseWithDiagnostic = diagnostic
-    ? { ...(upstreamResponseDisplay ?? {}), diagnostic }
-    : upstreamResponseDisplay
-  if (!message && statusCode == null && !upstreamResponseWithDiagnostic) return null
+  const upstreamResponseData: Record<string, unknown> = {}
+  const responseHeader = upstreamResponseDisplay?.headers
+  const responseBody = upstreamResponseDisplay?.body
+  if (hasRenderableValue(responseHeader)) upstreamResponseData.header = responseHeader
+  if (hasRenderableValue(responseBody)) upstreamResponseData.body = responseBody
+  const response = Object.keys(upstreamResponseData).length > 0
+    ? upstreamResponseData
+    : null
+  if (
+    !message
+    && statusCode == null
+    && !response
+    && !diagnostic
+  ) return null
   const showMessage = shouldShowAttemptMessageWithUpstreamResponse(
     rawMessage || fallbackType,
     upstreamResponseDisplay,
@@ -1679,7 +1702,8 @@ const currentAttemptRequestError = computed<{
   return {
     message: showMessage ? (message || '未知错误') : '',
     statusCode,
-    upstreamResponse: upstreamResponseWithDiagnostic,
+    upstreamResponse: response,
+    diagnostic,
   }
 })
 

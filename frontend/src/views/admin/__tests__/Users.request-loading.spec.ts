@@ -53,4 +53,50 @@ describe('Users request loading', () => {
       ?.split('async function manageApiKeys')[0]
     expect(formSubmit).toContain('Promise.all([refreshUsers(), loadUserWallets()])')
   })
+
+  it('seeds a new managed key from the selected target user feature settings', () => {
+    const openCreateKey = source
+      .split('function openCreateUserApiKeyDialog()')[1]
+      ?.split('function openEditUserApiKeyDialog')[0]
+
+    expect(openCreateKey).toBeTruthy()
+    expect(openCreateKey).toContain('selectedUser.value?.feature_settings')
+    expect(openCreateKey).not.toContain('authStore')
+  })
+
+  it('rejects a stale API key response after switching users or closing the dialog', () => {
+    const manageKeys = source
+      .split('async function manageApiKeys(user: User)')[1]
+      ?.split('async function manageUserSessions')[0]
+    expect(manageKeys).toContain('userApiKeys.value = []')
+    expect(manageKeys).toContain('loadUserApiKeys(user.id)')
+
+    const loadKeys = source
+      .split('async function loadUserApiKeys(userId: string)')[1]
+      ?.split('function openCreateUserApiKeyDialog')[0]
+    expect(loadKeys).toContain('const requestId = ++userApiKeysRequestId')
+    expect(loadKeys).toContain('requestId !== userApiKeysRequestId')
+    expect(loadKeys).toContain('selectedUser.value?.id !== userId')
+    expect(loadKeys).toContain('!showApiKeysDialog.value')
+
+    const closeKeys = source
+      .split('function closeApiKeysDialog()')[1]
+      ?.split('async function manageUserSessions')[0]
+    expect(closeKeys).toContain('userApiKeysRequestId += 1')
+    expect(closeKeys).toContain('userApiKeys.value = []')
+    expect(source).toContain('@close="closeApiKeysDialog"')
+  })
+
+  it('keeps an in-flight key mutation bound to its original target user', () => {
+    const submitKey = source
+      .split('async function submitUserApiKeyForm()')[1]
+      ?.split('async function revokeSelectedUserSession')[0]
+
+    expect(submitKey).toContain('const targetUserId = selectedUser.value.id')
+    expect(submitKey).toContain('const mutationRequestId = ++userApiKeyMutationRequestId')
+    expect(submitKey).toContain('selectedUser.value?.id === targetUserId')
+    expect(submitKey).toContain('usersStore.createApiKey(targetUserId')
+    expect(submitKey).toContain('usersStore.updateApiKey(targetUserId')
+    expect(submitKey).toContain('if (!mutationIsCurrent()) return')
+  })
 })

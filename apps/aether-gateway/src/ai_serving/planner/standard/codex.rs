@@ -3,7 +3,8 @@
 mod tests;
 
 pub(crate) use crate::ai_serving::{
-    apply_codex_openai_responses_special_body_edits, apply_codex_openai_special_headers,
+    apply_codex_openai_responses_identity_headers, apply_codex_openai_responses_special_body_edits,
+    apply_codex_openai_special_headers,
 };
 
 pub(crate) fn codex_model_capabilities_for_transport(

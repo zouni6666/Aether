@@ -630,6 +630,25 @@ fn codex_write_window(
     }
 }
 
+fn codex_window_has_active_limit(source: &serde_json::Map<String, serde_json::Value>) -> bool {
+    [
+        "window_minutes",
+        "limit_window_seconds",
+        "reset_after_seconds",
+        "reset_at",
+    ]
+    .iter()
+    .any(|key| {
+        source
+            .get(*key)
+            .and_then(coerce_json_u64)
+            .is_some_and(|value| value > 0)
+    }) || source
+        .get("used_percent")
+        .and_then(coerce_json_f64)
+        .is_some_and(|value| value > 0.0)
+}
+
 fn codex_find_spark_rate_limit(
     root: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<&serde_json::Map<String, serde_json::Value>> {
@@ -719,7 +738,8 @@ pub fn parse_codex_wham_usage_response(
         .cloned()
         .unwrap_or_default();
 
-    let use_paid_windows = !secondary_window.is_empty() && plan_type.as_deref() != Some("free");
+    let use_paid_windows =
+        codex_window_has_active_limit(&secondary_window) && plan_type.as_deref() != Some("free");
     if use_paid_windows {
         codex_write_window(&mut result, &secondary_window, "primary");
         codex_write_window(&mut result, &primary_window, "secondary");
@@ -1173,7 +1193,8 @@ pub fn parse_codex_usage_headers(
 
     let primary_window = read_window("primary");
     let secondary_window = read_window("secondary");
-    let use_paid_windows = !secondary_window.is_empty() && plan_type.as_deref() != Some("free");
+    let use_paid_windows =
+        codex_window_has_active_limit(&secondary_window) && plan_type.as_deref() != Some("free");
     if use_paid_windows {
         codex_write_window(&mut result, &secondary_window, "primary");
         codex_write_window(&mut result, &primary_window, "secondary");
@@ -2091,8 +2112,8 @@ mod tests {
         codex_build_invalid_state, codex_runtime_invalid_reason,
         normalize_codex_reset_credit_consume_outcome, parse_antigravity_usage_response,
         parse_chatgpt_web_conversation_init_response, parse_codex_backend_me_response,
-        parse_codex_wham_reset_credits_detail_response, parse_codex_wham_usage_response,
-        parse_gemini_cli_retrieve_user_quota_response,
+        parse_codex_usage_headers, parse_codex_wham_reset_credits_detail_response,
+        parse_codex_wham_usage_response, parse_gemini_cli_retrieve_user_quota_response,
         parse_gemini_cli_v1internal_credits_response, parse_windsurf_model_configs_response,
         parse_windsurf_rate_limit_response, parse_windsurf_user_status_response,
         provider_auto_remove_quota_exhausted_keys, quota_refresh_success_invalid_state,
@@ -2101,6 +2122,7 @@ mod tests {
     };
     use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
     use serde_json::json;
+    use std::collections::BTreeMap;
 
     #[test]
     fn provider_auto_remove_quota_exhausted_keys_defaults_to_false() {
@@ -2504,6 +2526,50 @@ mod tests {
             parsed.get("spark_secondary_window_minutes"),
             Some(&json!(10_080u64))
         );
+    }
+
+    #[test]
+    fn parses_codex_monthly_header_without_zero_secondary_placeholder() {
+        let headers = BTreeMap::from([
+            ("x-codex-plan-type".to_string(), "team".to_string()),
+            ("x-codex-primary-used-percent".to_string(), "14".to_string()),
+            (
+                "x-codex-primary-reset-after-seconds".to_string(),
+                "2627672".to_string(),
+            ),
+            (
+                "x-codex-primary-reset-at".to_string(),
+                "1786915122".to_string(),
+            ),
+            (
+                "x-codex-primary-window-minutes".to_string(),
+                "43800".to_string(),
+            ),
+            (
+                "x-codex-secondary-used-percent".to_string(),
+                "0".to_string(),
+            ),
+            (
+                "x-codex-secondary-reset-after-seconds".to_string(),
+                "0".to_string(),
+            ),
+            ("x-codex-secondary-reset-at".to_string(), "".to_string()),
+            (
+                "x-codex-secondary-window-minutes".to_string(),
+                "0".to_string(),
+            ),
+        ]);
+
+        let parsed = parse_codex_usage_headers(&headers, 1_784_287_450)
+            .expect("Codex usage headers should parse");
+
+        assert_eq!(parsed.get("primary_used_percent"), Some(&json!(14.0)));
+        assert_eq!(
+            parsed.get("primary_window_minutes"),
+            Some(&json!(43_800u64))
+        );
+        assert!(parsed.get("secondary_used_percent").is_none());
+        assert!(parsed.get("secondary_window_minutes").is_none());
     }
 
     #[test]

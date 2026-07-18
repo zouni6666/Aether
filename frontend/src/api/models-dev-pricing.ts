@@ -28,6 +28,7 @@ const TOKEN_PRICE_FIELDS = [
   'cache_read_price_per_1m',
 ] as const
 const PROCESSING_MODE_FALLBACK_KEYS = new Set(['fast', 'priority', 'flex', 'batch'])
+const DEFAULT_PROCESSING_TIER_MULTIPLIER = 1
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -128,7 +129,9 @@ function uniformPriceMultiplier(
       if (Math.abs(processingPrice - standardPrice * candidate) > 1e-9) return null
     }
   }
-  return candidate
+  // A zero ratio from an imported experimental mode is a missing/default price marker,
+  // not a free processing tier. Keep the tier on the Standard catalog so it remains billable.
+  return candidate === 0 ? DEFAULT_PROCESSING_TIER_MULTIPLIER : candidate
 }
 
 export function resolveModelsDevTieredPricing(
