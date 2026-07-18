@@ -821,11 +821,11 @@ fn codex_quota_period_identity(window_minutes: u64) -> (String, String) {
         return ("monthly".to_string(), "月".to_string());
     }
 
-    let label = if window_minutes % MINUTES_PER_WEEK == 0 {
+    let label = if window_minutes.is_multiple_of(MINUTES_PER_WEEK) {
         format!("{}周", window_minutes / MINUTES_PER_WEEK)
-    } else if window_minutes % MINUTES_PER_DAY == 0 {
+    } else if window_minutes.is_multiple_of(MINUTES_PER_DAY) {
         format!("{}天", window_minutes / MINUTES_PER_DAY)
-    } else if window_minutes % MINUTES_PER_HOUR == 0 {
+    } else if window_minutes.is_multiple_of(MINUTES_PER_HOUR) {
         format!("{}H", window_minutes / MINUTES_PER_HOUR)
     } else {
         format!("{window_minutes}分钟")

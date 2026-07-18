@@ -3760,6 +3760,15 @@ pub(crate) fn build_execution_response_body(
         return Ok(None);
     }
 
+    if !stream && response_body_is_json(headers, decoded_body_bytes) {
+        let body_json: Value = serde_json::from_slice(decoded_body_bytes)
+            .map_err(ExecutionRuntimeTransportError::InvalidJson)?;
+        return Ok(Some(ResponseBody {
+            json_body: Some(body_json),
+            body_bytes_b64: None,
+        }));
+    }
+
     if let Some(body_json) = extract_provider_private_stream_error_body(None, decoded_body_bytes)
         .or_else(|| extract_provider_private_stream_error_body(None, body_bytes))
     {
@@ -3773,15 +3782,6 @@ pub(crate) fn build_execution_response_body(
         return Ok(Some(ResponseBody {
             json_body: None,
             body_bytes_b64: Some(base64::engine::general_purpose::STANDARD.encode(body_bytes)),
-        }));
-    }
-
-    if response_body_is_json(headers, decoded_body_bytes) {
-        let body_json: Value = serde_json::from_slice(decoded_body_bytes)
-            .map_err(ExecutionRuntimeTransportError::InvalidJson)?;
-        return Ok(Some(ResponseBody {
-            json_body: Some(body_json),
-            body_bytes_b64: None,
         }));
     }
 
