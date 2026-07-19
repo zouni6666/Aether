@@ -2389,7 +2389,7 @@ function getTierActiveCacheCreationDisplay(
       const fallbackPrice = toFiniteNumber(tier?.cache_creation_price_per_1m)
       if (fallbackPrice !== null) {
         return {
-          label: formatCacheTtlLabel(activeTtl),
+          label: '缓存创建',
           price: fallbackPrice,
         }
       }

@@ -95,8 +95,17 @@ function buildFastTierDetail(): RequestDetail {
               output_price_per_1m: 75,
               cache_creation_price_per_1m: 15.625,
               cache_read_price_per_1m: 1.25,
+              cache_ttl_pricing: [
+                { ttl_minutes: 5, cache_creation_price_per_1m: 15.625 },
+                { ttl_minutes: 60, cache_creation_price_per_1m: 31.25 },
+              ],
             }],
           },
+        },
+      },
+      billing_snapshot: {
+        resolved_dimensions: {
+          cache_ttl_minutes: 30,
         },
       },
     },
@@ -161,7 +170,9 @@ describe('RequestDetailDrawer settlement pricing', () => {
       expect(document.body.textContent).toContain('$0.199204 × 2.5 (Fast 层级)')
       expect(document.body.textContent).toContain('输入 $5/M')
       expect(document.body.textContent).toContain('输出 $30/M')
+      expect(document.body.textContent).toContain('缓存创建 $6.25/M')
       expect(document.body.textContent).toContain('缓存读取 $0.5/M')
+      expect(document.body.textContent).not.toContain('缓存创建(30min)')
       expect(document.body.querySelector('[data-testid="service-tier-facts"]')).toBeNull()
     })
   })
