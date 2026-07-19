@@ -167,8 +167,8 @@ describe('GlobalModelFormDialog preset replacement', () => {
     findButton('Stale Model').click()
     await settle()
 
-    expect(document.body.querySelector('[data-processing-tier="standard"]')).not.toBeNull()
-    expect(document.body.querySelector('[data-processing-tier="priority"]')).not.toBeNull()
+    expect(document.body.querySelector('[data-processing-tier]')).toBeNull()
+    expect(document.body.textContent).not.toContain('处理层级')
     expect(document.body.textContent).toContain('自定义价格')
 
     await setInput(

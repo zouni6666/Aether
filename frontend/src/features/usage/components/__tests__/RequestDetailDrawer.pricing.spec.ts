@@ -67,6 +67,42 @@ function buildEmbeddingDetail(): RequestDetail {
   }
 }
 
+function buildFastTierDetail(): RequestDetail {
+  return {
+    ...buildEmbeddingDetail(),
+    id: 'usage-fast-tier-1',
+    request_id: 'req-fast-tier-1',
+    model: 'gpt-5.6-sol',
+    service_tier: 'fast',
+    tokens: { input: 1116, output: 3028, total: 4144 },
+    input_tokens: 1116,
+    output_tokens: 3028,
+    cache_read_input_tokens: 205568,
+    input_cost: 0.01395,
+    output_cost: 0.2271,
+    cache_creation_cost: 0,
+    cache_read_cost: 0.25696,
+    cost: { input: 0.01395, output: 0.2271, total: 0.49801 },
+    settlement: {
+      settlement_snapshot: {
+        pricing_snapshot: {
+          billing_processing_tier: 'fast',
+          processing_tier_price_multiplier: 2.5,
+          tiered_pricing: {
+            tiers: [{
+              up_to: null,
+              input_price_per_1m: 12.5,
+              output_price_per_1m: 75,
+              cache_creation_price_per_1m: 15.625,
+              cache_read_price_per_1m: 1.25,
+            }],
+          },
+        },
+      },
+    },
+  }
+}
+
 describe('RequestDetailDrawer settlement pricing', () => {
   it('renders an input-only embedding tier without treating the missing output price as zero', async () => {
     apiMocks.getRequestDetail.mockResolvedValue(buildEmbeddingDetail())
@@ -96,6 +132,38 @@ describe('RequestDetailDrawer settlement pricing', () => {
       expect(document.body.textContent).toContain('输出 -')
     })
     expect(document.body.textContent).not.toContain('输出 $0/M')
+  })
+
+  it('shows Fast pricing as the base token cost multiplied by the Fast tier', async () => {
+    apiMocks.getRequestDetail.mockResolvedValue(buildFastTierDetail())
+
+    let isOpen!: Ref<boolean>
+    const Host = defineComponent({
+      setup() {
+        isOpen = ref(false)
+        return () => h(RequestDetailDrawer, {
+          isOpen: isOpen.value,
+          requestId: 'usage-fast-tier-1',
+        })
+      },
+    })
+
+    const root = document.createElement('div')
+    document.body.appendChild(root)
+    const app = createApp(Host)
+    app.mount(root)
+    mountedApps.push({ app, root })
+
+    isOpen.value = true
+    await nextTick()
+
+    await vi.waitFor(() => {
+      expect(document.body.textContent).toContain('$0.199204 × 2.5 (Fast 层级)')
+      expect(document.body.textContent).toContain('输入 $5/M')
+      expect(document.body.textContent).toContain('输出 $30/M')
+      expect(document.body.textContent).toContain('缓存读取 $0.5/M')
+      expect(document.body.querySelector('[data-testid="service-tier-facts"]')).toBeNull()
+    })
   })
 
   it('shows the compact request badge in the model header', async () => {

@@ -207,7 +207,7 @@
                       </span>
                     </div>
                     <ServiceTierFacts
-                      v-if="hasServiceTierFacts || processingTierPriceMultiplier !== null"
+                      v-if="hasServiceTierFacts && processingTierPriceMultiplier === null"
                       class="mt-3"
                       :requested="serviceTierFacts.requested"
                       :price-multiplier="processingTierPriceMultiplier"
@@ -225,7 +225,14 @@
                     <!-- 阶梯标题 -->
                     <div class="text-xs text-muted-foreground flex items-center gap-2 flex-wrap">
                       <span class="font-medium text-foreground">Token 计费</span>
-                      <span class="font-mono font-medium text-foreground">${{ tokenCostTotal.toFixed(6) }}</span>
+                      <span class="font-mono font-medium text-foreground">
+                        <template v-if="processingTierPriceMultiplier !== null">
+                          ${{ tokenCostBaseTotal.toFixed(6) }} × {{ processingTierPriceMultiplier }} ({{ processingTierLabel }} 层级)
+                        </template>
+                        <template v-else>
+                          ${{ tokenCostTotal.toFixed(6) }}
+                        </template>
+                      </span>
                       <span class="text-muted-foreground/60">(输入 {{ formatNumber(displayInputTokens) }} + 缓存创建 {{ cacheCreationSummaryText }} + 缓存读取 {{ formatNumber(detail.cache_read_input_tokens || 0) }})</span>
                       <Badge
                         v-if="displayTiers.length > 1"
@@ -315,22 +322,22 @@
                           <div class="grid grid-cols-[64px_minmax(0,1fr)_92px] items-center gap-x-2">
                             <span class="text-xs text-muted-foreground">输入</span>
                             <span class="text-sm font-semibold font-mono text-right tabular-nums">{{ displayInputTokens }}</span>
-                            <span class="text-xs font-mono text-right tabular-nums">${{ effectiveInputCost.toFixed(6) }}</span>
+                            <span class="text-xs font-mono text-right tabular-nums">${{ displayInputCost.toFixed(6) }}</span>
                           </div>
                           <div class="grid grid-cols-[64px_minmax(0,1fr)_92px] items-center gap-x-2">
                             <span class="text-xs text-muted-foreground">输出</span>
                             <span class="text-sm font-semibold font-mono text-right tabular-nums">{{ detail.tokens?.output || detail.output_tokens || 0 }}</span>
-                            <span class="text-xs font-mono text-right tabular-nums">${{ effectiveOutputCost.toFixed(6) }}</span>
+                            <span class="text-xs font-mono text-right tabular-nums">${{ displayOutputCost.toFixed(6) }}</span>
                           </div>
                           <div class="grid grid-cols-[64px_minmax(0,1fr)_92px] items-center gap-x-2">
                             <span class="text-xs text-muted-foreground">缓存创建</span>
                             <span class="text-sm font-semibold font-mono text-right tabular-nums">{{ totalCacheCreationTokens }}</span>
-                            <span class="text-xs font-mono text-right tabular-nums">${{ effectiveCacheCreationCost.toFixed(6) }}</span>
+                            <span class="text-xs font-mono text-right tabular-nums">${{ displayCacheCreationCost.toFixed(6) }}</span>
                           </div>
                           <div class="grid grid-cols-[64px_minmax(0,1fr)_92px] items-center gap-x-2">
                             <span class="text-xs text-muted-foreground">缓存读取</span>
                             <span class="text-sm font-semibold font-mono text-right tabular-nums">{{ detail.cache_read_input_tokens || 0 }}</span>
-                            <span class="text-xs font-mono text-right tabular-nums">${{ effectiveCacheReadCost.toFixed(6) }}</span>
+                            <span class="text-xs font-mono text-right tabular-nums">${{ displayCacheReadCost.toFixed(6) }}</span>
                           </div>
                         </div>
                         <!-- 输入 输出 -->
@@ -338,7 +345,7 @@
                           <div class="flex items-center flex-1">
                             <span class="text-xs text-muted-foreground w-[56px]">输入</span>
                             <span class="text-sm font-semibold font-mono flex-1 text-center">{{ displayInputTokens }}</span>
-                            <span class="text-xs font-mono">${{ effectiveInputCost.toFixed(6) }}</span>
+                            <span class="text-xs font-mono">${{ displayInputCost.toFixed(6) }}</span>
                           </div>
                           <Separator
                             orientation="vertical"
@@ -347,7 +354,7 @@
                           <div class="flex items-center flex-1">
                             <span class="text-xs text-muted-foreground w-[56px]">输出</span>
                             <span class="text-sm font-semibold font-mono flex-1 text-center">{{ detail.tokens?.output || detail.output_tokens || 0 }}</span>
-                            <span class="text-xs font-mono">${{ effectiveOutputCost.toFixed(6) }}</span>
+                            <span class="text-xs font-mono">${{ displayOutputCost.toFixed(6) }}</span>
                           </div>
                         </div>
                         <!-- 缓存创建 缓存读取 -->
@@ -355,7 +362,7 @@
                           <div class="flex items-center flex-1">
                             <span class="text-xs text-muted-foreground w-[56px]">{{ cacheCreationSplitRows.length > 0 ? '创建合计' : '缓存创建' }}</span>
                             <span class="text-sm font-semibold font-mono flex-1 text-center">{{ totalCacheCreationTokens }}</span>
-                            <span class="text-xs font-mono">${{ effectiveCacheCreationCost.toFixed(6) }}</span>
+                            <span class="text-xs font-mono">${{ displayCacheCreationCost.toFixed(6) }}</span>
                           </div>
                           <Separator
                             orientation="vertical"
@@ -364,7 +371,7 @@
                           <div class="flex items-center flex-1">
                             <span class="text-xs text-muted-foreground w-[56px]">缓存读取</span>
                             <span class="text-sm font-semibold font-mono flex-1 text-center">{{ detail.cache_read_input_tokens || 0 }}</span>
-                            <span class="text-xs font-mono">${{ effectiveCacheReadCost.toFixed(6) }}</span>
+                            <span class="text-xs font-mono">${{ displayCacheReadCost.toFixed(6) }}</span>
                           </div>
                         </div>
                         <!-- 缓存创建 5m/1h 细分 -->
@@ -870,6 +877,7 @@ import {
 import {
   formatPricePerMillion,
   resolveProcessingTierPriceMultiplier,
+  resolveSettlementPricingSnapshot,
   resolveSettlementPricingSourceLabel,
   resolveSettlementPricingTiers,
 } from '../utils/settlement-pricing'
@@ -884,6 +892,7 @@ import ReplayDialog from './ReplayDialog.vue'
 import ServiceTierFacts from './ServiceTierFacts.vue'
 import UsageModelDisplay from './UsageModelDisplay.vue'
 import {
+  formatServiceTierFact,
   hasServiceTierFact,
   resolveServiceTierFacts,
 } from '../utils/service-tier'
@@ -1529,6 +1538,12 @@ const headerModelRecord = computed(() => {
 })
 const serviceTierFacts = computed(() => resolveServiceTierFacts(headerModelRecord.value))
 const hasServiceTierFacts = computed(() => hasServiceTierFact(serviceTierFacts.value))
+const settlementPricingSnapshot = computed(() => resolveSettlementPricingSnapshot(detail.value))
+const processingTierLabel = computed(() => (
+  formatServiceTierFact(serviceTierFacts.value.requested)
+  ?? formatServiceTierFact(getNestedString(settlementPricingSnapshot.value, 'billing_processing_tier'))
+  ?? '处理'
+))
 const detailCyberPolicyError = computed(() => {
   const summaryError = props.summaryRecord?.error_message
   const currentDetail = detailForCurrentRequest.value
@@ -1920,6 +1935,20 @@ const effectiveCacheReadCost = computed(() =>
   ?? 0,
 )
 
+// Fast/Priority 的倍率目录是由后端从 Standard 目录物化出来的。详情页的阶梯与
+// 分项成本保留 Standard 基准值，倍率统一显示在 Token 计费标题中，避免把倍率
+// 隐藏在每个单价和每个分项成本里。
+function removeProcessingTierMultiplier(value: number): number {
+  const multiplier = processingTierPriceMultiplier.value
+  if (multiplier === null || multiplier <= 0) return value
+  return value / multiplier
+}
+
+const displayInputCost = computed(() => removeProcessingTierMultiplier(effectiveInputCost.value))
+const displayOutputCost = computed(() => removeProcessingTierMultiplier(effectiveOutputCost.value))
+const displayCacheCreationCost = computed(() => removeProcessingTierMultiplier(effectiveCacheCreationCost.value))
+const displayCacheReadCost = computed(() => removeProcessingTierMultiplier(effectiveCacheReadCost.value))
+
 const effectiveRequestCost = computed(() => {
   const snapshotCost = getNestedNumber(billingCostBreakdown.value, 'request_cost')
   if (snapshotCost !== null) return snapshotCost
@@ -2078,22 +2107,49 @@ const activeCacheTtlMinutes = computed(() => {
 
 // 统一的阶梯显示数据
 // 如果有 tiered_pricing，使用它；否则用历史价格构建单阶梯
+function restoreBaseTierPricing(tier: PricingTierLike): PricingTierLike {
+  const multiplier = processingTierPriceMultiplier.value
+  if (multiplier === null || multiplier <= 0) return tier
+
+  const restore = (value: number | null | undefined): number | null | undefined => {
+    if (value === null || value === undefined) return value
+    return value / multiplier
+  }
+
+  return {
+    ...tier,
+    input_price_per_1m: restore(tier.input_price_per_1m),
+    output_price_per_1m: restore(tier.output_price_per_1m),
+    cache_creation_price_per_1m: restore(tier.cache_creation_price_per_1m),
+    cache_read_price_per_1m: restore(tier.cache_read_price_per_1m),
+    cache_ttl_pricing: Array.isArray(tier.cache_ttl_pricing)
+      ? tier.cache_ttl_pricing.map(entry => ({
+          ...entry,
+          cache_creation_price_per_1m: restore(entry.cache_creation_price_per_1m),
+          cache_read_price_per_1m: restore(entry.cache_read_price_per_1m),
+        }))
+      : tier.cache_ttl_pricing,
+  }
+}
+
 const displayTiers = computed(() => {
   if (!detail.value) return []
 
   // 优先展示结算快照中已解析的价格目录，旧字段仅作回退。
   const resolvedTiers = resolveSettlementPricingTiers(detail.value)
-  if (resolvedTiers) return resolvedTiers as PricingTierLike[]
+  if (resolvedTiers) {
+    return (resolvedTiers as PricingTierLike[]).map(restoreBaseTierPricing)
+  }
 
   // 否则用历史价格构建单阶梯（无上限）
-  return [{
+  return [restoreBaseTierPricing({
     up_to: null,
     input_price_per_1m: effectiveInputPricePer1M.value ?? 0,
     output_price_per_1m: effectiveOutputPricePer1M.value ?? 0,
     cache_creation_price_per_1m: effectiveCacheCreationPricePer1M.value,
     cache_read_price_per_1m: effectiveCacheReadPricePer1M.value,
     cache_ttl_pricing: fallbackCacheTtlPricing.value,
-  }]
+  })]
 })
 
 // 当前命中的阶梯索引
@@ -2202,6 +2258,13 @@ const tokenCostTotal = computed(() => {
     + effectiveCacheCreationCost.value
     + effectiveCacheReadCost.value
 })
+
+const tokenCostBaseTotal = computed(() => (
+  displayInputCost.value
+  + displayOutputCost.value
+  + displayCacheCreationCost.value
+  + displayCacheReadCost.value
+))
 
 // 按次计费费用（非视频任务时）
 const perRequestCost = computed(() => {
