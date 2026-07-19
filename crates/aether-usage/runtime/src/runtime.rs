@@ -3966,6 +3966,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_lifecycle_generation_keeps_the_current_generation_registered() {
+        let coalescer = super::LifecycleEventCoalescer::default();
+        let request_id = "req-lifecycle-generation";
+        let pending_generation = coalescer
+            .register(request_id.to_string())
+            .await
+            .expect("pending generation should register");
+        let streaming_generation = coalescer
+            .register(request_id.to_string())
+            .await
+            .expect("streaming generation should register");
+
+        assert!(!coalescer.should_emit(request_id, pending_generation).await);
+        assert!(
+            coalescer
+                .should_emit(request_id, streaming_generation)
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_lifecycle_event_survives_a_superseded_pending_event() {
+        let config = UsageRuntimeConfig {
+            enabled: true,
+            queue_lifecycle_events: true,
+            lifecycle_enqueue_delay_ms: 40,
+            stream_key: "usage:events:test:pending-streaming-coalescing".to_string(),
+            consumer_group: "usage_consumers_test_pending_streaming_coalescing".to_string(),
+            consumer_block_ms: 1,
+            ..UsageRuntimeConfig::default()
+        };
+        let queue_runner: Arc<dyn RuntimeQueueStore> =
+            Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+        let queue = UsageQueue::new(Arc::clone(&queue_runner), config.clone())
+            .expect("usage queue should build");
+        queue
+            .ensure_consumer_group()
+            .await
+            .expect("consumer group should initialize");
+        let store = CloneQueueConfiguredUsageStore {
+            records: Arc::new(Mutex::new(Vec::new())),
+            queue: queue_runner,
+        };
+        let runtime = UsageRuntime::new(config).expect("usage runtime should build");
+
+        runtime
+            .enqueue_or_write_lifecycle(
+                &store,
+                UsageEvent::new(
+                    UsageEventType::Pending,
+                    "req-pending-streaming-coalescing",
+                    UsageEventData {
+                        provider_name: "openai".to_string(),
+                        model: "gpt-5.6-sol".to_string(),
+                        ..UsageEventData::default()
+                    },
+                ),
+            )
+            .await;
+        sleep(Duration::from_millis(10)).await;
+        runtime
+            .enqueue_or_write_lifecycle(
+                &store,
+                UsageEvent::new(
+                    UsageEventType::Streaming,
+                    "req-pending-streaming-coalescing",
+                    UsageEventData {
+                        provider_name: "openai".to_string(),
+                        model: "gpt-5.6-sol".to_string(),
+                        ..UsageEventData::default()
+                    },
+                ),
+            )
+            .await;
+
+        sleep(Duration::from_millis(90)).await;
+        let entries = queue
+            .read_group("usage-test-consumer-pending-streaming-coalescing")
+            .await
+            .expect("queue read should succeed");
+        assert_eq!(entries.len(), 1);
+        let event = UsageEvent::from_stream_fields(&entries[0].fields)
+            .expect("queued usage event should parse");
+        assert_eq!(event.event_type, UsageEventType::Streaming);
+    }
+
+    #[tokio::test]
     async fn pending_lifecycle_enqueue_can_be_delayed() {
         let config = UsageRuntimeConfig {
             enabled: true,

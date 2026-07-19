@@ -6956,8 +6956,23 @@ WHERE stats_daily_api_key.date >=
                     .push(" AND stats_daily_api_key.api_key_id IS NOT NULL");
                 if let Some(user_id) = query.user_id.as_deref() {
                     builder
-                        .push(" AND api_keys.user_id = ")
-                        .push_bind(user_id.to_string());
+                        .push(" AND (api_keys.user_id = ")
+                        .push_bind(user_id.to_string())
+                        .push(
+                            r#" OR (
+  api_keys.id IS NULL
+  AND stats_daily_api_key.api_key_id IN (
+    SELECT identity_usage.api_key_id
+    FROM usage AS identity_usage
+    WHERE identity_usage.user_id = "#,
+                        )
+                        .push_bind(user_id.to_string())
+                        .push(
+                            r#"
+      AND identity_usage.api_key_id IS NOT NULL
+    GROUP BY identity_usage.api_key_id"#,
+                        )
+                        .push(")))");
                 }
                 builder.push(
                     " GROUP BY stats_daily_api_key.api_key_id ORDER BY stats_daily_api_key.api_key_id ASC",

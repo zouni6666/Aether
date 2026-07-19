@@ -2036,6 +2036,22 @@ fn build_runtime_request_metadata_seed(
         provider_request_body_ref.as_deref(),
         plan.body.body_bytes_b64.as_deref(),
     );
+    let provider_request_body = plan.body.json_body.as_ref().or_else(|| {
+        context_value_ref(context, "provider_request_body").filter(|value| !value.is_null())
+    });
+    let provider_api_format = context_string(context, "provider_api_format")
+        .or_else(|| non_empty_str(Some(plan.provider_api_format.as_str())));
+    let provider_model = context_string(context, "mapped_model")
+        .or_else(|| non_empty_str(plan.model_name.as_deref()));
+    let source_model =
+        context_string(context, "model").or_else(|| non_empty_str(plan.model_name.as_deref()));
+    metadata = attach_provider_request_body_metadata(
+        metadata,
+        provider_api_format.as_deref(),
+        provider_model.as_deref(),
+        source_model.as_deref(),
+        provider_request_body,
+    );
     if let Some(proxy) = plan.proxy.as_ref() {
         if let Some(node_id) = proxy
             .node_id
@@ -3635,7 +3651,8 @@ mod tests {
             content_encoding: None,
             body: RequestBody::from_json(json!({
                 "model": "gpt-5.4",
-                "messages": [{"role": "user", "content": "hello"}]
+                "messages": [{"role": "user", "content": "hello"}],
+                "reasoning": {"effort": "max"}
             })),
             stream: false,
             client_api_format: "claude:messages".to_string(),
@@ -3694,7 +3711,10 @@ mod tests {
             .as_ref()
             .and_then(Value::as_object)
             .expect("pending usage should only keep lightweight request metadata");
-        assert_eq!(metadata.len(), 1);
+        assert_eq!(
+            metadata.get("provider_reasoning_effort"),
+            Some(&json!("max"))
+        );
         let body_size = metadata
             .get("body_size")
             .and_then(Value::as_object)

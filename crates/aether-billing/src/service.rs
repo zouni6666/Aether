@@ -174,6 +174,7 @@ impl BillingService {
         }
         if !pricing_resolution.bills_standard_processing_tier()
             && pricing_resolution.tiered_pricing.is_none()
+            && pricing_resolution.price_per_request.is_none()
         {
             return Ok(no_rule_computation(
                 pricing,
@@ -1124,6 +1125,64 @@ mod tests {
     }
 
     #[test]
+    fn openai_fast_request_without_overlay_uses_global_standard_catalog() {
+        let pricing = BillingModelPricingSnapshot {
+            default_price_per_request: None,
+            default_tiered_pricing: Some(json!({
+                "tiers": [{
+                    "up_to": null,
+                    "input_price_per_1m": 3.0,
+                    "output_price_per_1m": 15.0
+                }]
+            })),
+            model_tiered_pricing: None,
+            ..pricing()
+        };
+
+        let result = BillingService::new()
+            .calculate(
+                &pricing,
+                &BillingUsageInput {
+                    api_format: Some("openai:responses".to_string()),
+                    requested_processing_tier: Some("priority".to_string()),
+                    input_tokens: 1_000_000,
+                    ..BillingUsageInput::new("chat")
+                },
+            )
+            .expect("global Standard pricing should calculate OpenAI Fast usage");
+
+        assert_eq!(result.cost_result.status, BillingSnapshotStatus::Complete);
+        assert_eq!(result.cost_result.cost, 3.0);
+        assert_eq!(
+            result.pricing_resolution.tiered_pricing_source,
+            Some(crate::BillingPricingSource::GlobalDefault)
+        );
+        assert_eq!(
+            result.cost_result.snapshot.resolved_variables["input_price_per_1m"],
+            json!(3.0)
+        );
+    }
+
+    #[test]
+    fn nonstandard_request_with_only_fixed_price_is_still_billable() {
+        let pricing = BillingModelPricingSnapshot {
+            default_price_per_request: Some(0.02),
+            default_tiered_pricing: None,
+            model_tiered_pricing: None,
+            ..pricing()
+        };
+
+        let result = BillingService::new()
+            .calculate(&pricing, &processing_usage(Some("fast"), None, 1_000))
+            .expect("fixed request pricing should calculate Fast usage");
+
+        assert_eq!(result.cost_result.status, BillingSnapshotStatus::Complete);
+        assert_eq!(result.cost_result.cost, 0.02);
+        assert_eq!(result.pricing_resolution.tiered_pricing, None);
+        assert_eq!(result.pricing_resolution.price_per_request, Some(0.02));
+    }
+
+    #[test]
     fn response_actual_tier_does_not_override_requested_catalog() {
         let cases = ["default", "flex", "priority"];
 
@@ -1592,8 +1651,8 @@ mod tests {
         assert_eq!(
             service
                 .estimate_authorization_cost_upper_bound(&processing_pricing(), &estimate)
-                .expect("unknown tier estimate should resolve"),
-            None
+                .expect("unknown tier should inherit the effective Standard catalog"),
+            Some(0.000925)
         );
 
         estimate.requested_processing_tier = Some("priority".to_string());

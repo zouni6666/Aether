@@ -1,5 +1,9 @@
 use async_trait::async_trait;
-use sqlx::{mysql::MySqlRow, MySql, QueryBuilder, Row};
+use sqlx::{
+    mysql::{MySqlArguments, MySqlRow},
+    query::Query,
+    MySql, QueryBuilder, Row,
+};
 
 use aether_data_contracts::repository::provider_catalog::{
     ProviderCatalogKeyListQuery, ProviderCatalogReadRepository, ProviderCatalogSnapshot,
@@ -669,87 +673,7 @@ WHERE id = ?
     ) -> Result<StoredProviderCatalogKey, DataLayerError> {
         validate_key(key)?;
         let updated_at = key.updated_at_unix_secs.unwrap_or_else(current_unix_secs) as i64;
-        let rows_affected = sqlx::query(key_update_sql())
-            .bind(&key.provider_id)
-            .bind(&key.name)
-            .bind(&key.encrypted_api_key)
-            .bind(&key.auth_type)
-            .bind(optional_json_to_string(
-                &key.capabilities,
-                "provider_api_keys.capabilities",
-            )?)
-            .bind(key.is_active)
-            .bind(optional_json_to_string(
-                &key.api_formats,
-                "provider_api_keys.api_formats",
-            )?)
-            .bind(optional_json_to_string(
-                &key.auth_type_by_format,
-                "provider_api_keys.auth_type_by_format",
-            )?)
-            .bind(optional_json_to_string(
-                &key.allow_auth_channel_mismatch_formats,
-                "provider_api_keys.allow_auth_channel_mismatch_formats",
-            )?)
-            .bind(&key.encrypted_auth_config)
-            .bind(&key.note)
-            .bind(key.internal_priority)
-            .bind(optional_json_to_string(
-                &key.rate_multipliers,
-                "provider_api_keys.rate_multipliers",
-            )?)
-            .bind(optional_json_to_string(
-                &key.global_priority_by_format,
-                "provider_api_keys.global_priority_by_format",
-            )?)
-            .bind(optional_json_to_string(
-                &key.allowed_models,
-                "provider_api_keys.allowed_models",
-            )?)
-            .bind(optional_i64_from_u64(
-                key.expires_at_unix_secs,
-                "provider_api_keys.expires_at",
-            )?)
-            .bind(key.cache_ttl_minutes)
-            .bind(key.max_probe_interval_minutes)
-            .bind(optional_json_to_string(
-                &key.proxy,
-                "provider_api_keys.proxy",
-            )?)
-            .bind(optional_json_to_string(
-                &key.fingerprint,
-                "provider_api_keys.fingerprint",
-            )?)
-            .bind(optional_i64_from_u32(key.rpm_limit))
-            .bind(key.concurrent_limit)
-            .bind(optional_i64_from_u32(key.learned_rpm_limit))
-            .bind(optional_i64_from_u32(key.concurrent_429_count).unwrap_or(0))
-            .bind(optional_i64_from_u32(key.rpm_429_count).unwrap_or(0))
-            .bind(optional_i64_from_u64(
-                key.last_429_at_unix_secs,
-                "provider_api_keys.last_429_at",
-            )?)
-            .bind(&key.last_429_type)
-            .bind(optional_json_to_string(
-                &key.adjustment_history,
-                "provider_api_keys.adjustment_history",
-            )?)
-            .bind(optional_json_to_string(
-                &key.utilization_samples,
-                "provider_api_keys.utilization_samples",
-            )?)
-            .bind(optional_i64_from_u64(
-                key.last_probe_increase_at_unix_secs,
-                "provider_api_keys.last_probe_increase_at",
-            )?)
-            .bind(optional_i64_from_u32(key.last_rpm_peak))
-            .bind(optional_i64_from_u64(
-                key.last_models_fetch_at_unix_secs,
-                "provider_api_keys.last_models_fetch_at",
-            )?)
-            .bind(&key.last_models_fetch_error)
-            .bind(updated_at)
-            .bind(&key.id)
+        let rows_affected = key_update_query(key, updated_at)?
             .execute(&self.pool)
             .await
             .map_sql_err()?
@@ -762,6 +686,37 @@ WHERE id = ?
             )));
         }
         self.reload_key(&key.id, "updated").await
+    }
+
+    pub async fn update_keys(
+        &self,
+        keys: &[StoredProviderCatalogKey],
+    ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        for key in keys {
+            validate_key(key)?;
+        }
+
+        let updated_at = current_unix_secs() as i64;
+        let mut transaction = self.pool.begin().await.map_sql_err()?;
+        for key in keys {
+            let key_updated_at = key.updated_at_unix_secs.unwrap_or(updated_at as u64) as i64;
+            let rows_affected = key_update_query(key, key_updated_at)?
+                .execute(&mut *transaction)
+                .await
+                .map_sql_err()?
+                .rows_affected();
+            if rows_affected == 0 {
+                return Err(DataLayerError::UnexpectedValue(format!(
+                    "provider catalog key {} not found",
+                    key.id
+                )));
+            }
+        }
+        transaction.commit().await.map_sql_err()?;
+        Ok(keys.to_vec())
     }
 
     pub async fn delete_key(&self, key_id: &str) -> Result<bool, DataLayerError> {
@@ -1251,6 +1206,13 @@ impl ProviderCatalogWriteRepository for MysqlProviderCatalogReadRepository {
         Self::update_key(self, key).await
     }
 
+    async fn update_keys(
+        &self,
+        keys: &[StoredProviderCatalogKey],
+    ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
+        Self::update_keys(self, keys).await
+    }
+
     async fn update_key_upstream_metadata(
         &self,
         key_id: &str,
@@ -1526,9 +1488,113 @@ SET
   last_rpm_peak = ?,
   last_models_fetch_at = ?,
   last_models_fetch_error = ?,
+  auto_fetch_models = ?,
+  locked_models = ?,
+  model_include_patterns = ?,
+  model_exclude_patterns = ?,
   updated_at = ?
 WHERE id = ?
 "#
+}
+
+fn key_update_query(
+    key: &StoredProviderCatalogKey,
+    updated_at: i64,
+) -> Result<Query<'_, MySql, MySqlArguments>, DataLayerError> {
+    Ok(sqlx::query(key_update_sql())
+        .bind(&key.provider_id)
+        .bind(&key.name)
+        .bind(&key.encrypted_api_key)
+        .bind(&key.auth_type)
+        .bind(optional_json_to_string(
+            &key.capabilities,
+            "provider_api_keys.capabilities",
+        )?)
+        .bind(key.is_active)
+        .bind(optional_json_to_string(
+            &key.api_formats,
+            "provider_api_keys.api_formats",
+        )?)
+        .bind(optional_json_to_string(
+            &key.auth_type_by_format,
+            "provider_api_keys.auth_type_by_format",
+        )?)
+        .bind(optional_json_to_string(
+            &key.allow_auth_channel_mismatch_formats,
+            "provider_api_keys.allow_auth_channel_mismatch_formats",
+        )?)
+        .bind(&key.encrypted_auth_config)
+        .bind(&key.note)
+        .bind(key.internal_priority)
+        .bind(optional_json_to_string(
+            &key.rate_multipliers,
+            "provider_api_keys.rate_multipliers",
+        )?)
+        .bind(optional_json_to_string(
+            &key.global_priority_by_format,
+            "provider_api_keys.global_priority_by_format",
+        )?)
+        .bind(optional_json_to_string(
+            &key.allowed_models,
+            "provider_api_keys.allowed_models",
+        )?)
+        .bind(optional_i64_from_u64(
+            key.expires_at_unix_secs,
+            "provider_api_keys.expires_at",
+        )?)
+        .bind(key.cache_ttl_minutes)
+        .bind(key.max_probe_interval_minutes)
+        .bind(optional_json_to_string(
+            &key.proxy,
+            "provider_api_keys.proxy",
+        )?)
+        .bind(optional_json_to_string(
+            &key.fingerprint,
+            "provider_api_keys.fingerprint",
+        )?)
+        .bind(optional_i64_from_u32(key.rpm_limit))
+        .bind(key.concurrent_limit)
+        .bind(optional_i64_from_u32(key.learned_rpm_limit))
+        .bind(optional_i64_from_u32(key.concurrent_429_count).unwrap_or(0))
+        .bind(optional_i64_from_u32(key.rpm_429_count).unwrap_or(0))
+        .bind(optional_i64_from_u64(
+            key.last_429_at_unix_secs,
+            "provider_api_keys.last_429_at",
+        )?)
+        .bind(&key.last_429_type)
+        .bind(optional_json_to_string(
+            &key.adjustment_history,
+            "provider_api_keys.adjustment_history",
+        )?)
+        .bind(optional_json_to_string(
+            &key.utilization_samples,
+            "provider_api_keys.utilization_samples",
+        )?)
+        .bind(optional_i64_from_u64(
+            key.last_probe_increase_at_unix_secs,
+            "provider_api_keys.last_probe_increase_at",
+        )?)
+        .bind(optional_i64_from_u32(key.last_rpm_peak))
+        .bind(optional_i64_from_u64(
+            key.last_models_fetch_at_unix_secs,
+            "provider_api_keys.last_models_fetch_at",
+        )?)
+        .bind(&key.last_models_fetch_error)
+        .bind(key.auto_fetch_models)
+        .bind(optional_json_to_string(
+            &key.locked_models,
+            "provider_api_keys.locked_models",
+        )?)
+        .bind(optional_json_to_string(
+            &key.model_include_patterns,
+            "provider_api_keys.model_include_patterns",
+        )?)
+        .bind(optional_json_to_string(
+            &key.model_exclude_patterns,
+            "provider_api_keys.model_exclude_patterns",
+        )?)
+        .bind(updated_at)
+        .bind(&key.id))
 }
 
 fn optional_json_from_string(

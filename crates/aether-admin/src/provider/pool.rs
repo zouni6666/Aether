@@ -13,6 +13,8 @@ pub struct AdminPoolResolveSelectionRequest {
     #[serde(default)]
     pub search: String,
     #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
     pub quick_selectors: Vec<String>,
 }
 

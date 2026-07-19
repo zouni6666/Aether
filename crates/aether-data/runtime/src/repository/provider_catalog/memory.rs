@@ -537,6 +537,28 @@ impl ProviderCatalogWriteRepository for InMemoryProviderCatalogReadRepository {
         Ok(stored.clone())
     }
 
+    async fn update_keys(
+        &self,
+        keys: &[StoredProviderCatalogKey],
+    ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
+        let mut index = self
+            .index
+            .write()
+            .expect("provider catalog repository lock");
+        for key in keys {
+            if !index.keys.contains_key(&key.id) {
+                return Err(DataLayerError::UnexpectedValue(format!(
+                    "provider catalog key {} not found",
+                    key.id
+                )));
+            }
+        }
+        for key in keys {
+            index.keys.insert(key.id.clone(), key.clone());
+        }
+        Ok(keys.to_vec())
+    }
+
     async fn update_key_upstream_metadata(
         &self,
         key_id: &str,

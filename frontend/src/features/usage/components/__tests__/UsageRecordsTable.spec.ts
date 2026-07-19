@@ -306,7 +306,28 @@ describe('UsageRecordsTable', () => {
       .toBe('Fast')
   })
 
-  it('shows mapping, reasoning, Fast, and Cyber together in the model area', () => {
+  it('shows request reasoning effort while the record is pending', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      status: 'pending',
+      requested_reasoning_effort: 'max',
+      reasoning_effort: null,
+    })])
+
+    expect(root.querySelector('[data-usage-model-badge="reasoning"]')?.textContent?.trim())
+      .toBe('max')
+  })
+
+  it('marks Responses compaction while the record is pending', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      status: 'pending',
+      request_type: 'compact',
+    })])
+
+    expect(root.querySelector('[data-usage-model-badge="compact"]')?.textContent?.trim())
+      .toBe('会话压缩')
+  })
+
+  it('shows mapping, reasoning, Fast, and Cyber in the model area', () => {
     const root = mountUsageRecordsTable([buildRecord({
       model: 'gpt-5',
       target_model: 'gpt-5.1',
@@ -343,25 +364,25 @@ describe('UsageRecordsTable', () => {
     expect(fastBadge?.classList.contains('border-amber-400/50')).toBe(false)
     expect(fastBadge?.classList.contains('!bg-transparent')).toBe(false)
     expect(fastBadge?.classList.contains('bg-amber-400/10')).toBe(false)
-    expect(fastBadge?.classList.contains('text-amber-700')).toBe(true)
+    expect(fastBadge?.classList.contains('text-blue-500')).toBe(true)
     expect(cyberBadge?.classList.contains('border-primary/30')).toBe(true)
     expect(cyberBadge?.classList.contains('bg-primary/5')).toBe(true)
-    expect(cyberBadge?.classList.contains('text-rose-600')).toBe(true)
+    expect(cyberBadge?.classList.contains('text-rose-500')).toBe(true)
     expect(cyberBadges.length).toBeGreaterThan(0)
     expect([...cyberBadges].every(badge => badge.textContent?.trim() === 'Cyber')).toBe(true)
     expect([...cyberBadges].every(badge => badge.title === '上游 Cyber Policy 拒绝')).toBe(true)
 
-    const stackedLayout = root.querySelector('[data-usage-model-layout="stacked"]')
-    expect(stackedLayout).not.toBeNull()
-    const modelRow = stackedLayout?.firstElementChild
+    const inlineLayout = root.querySelector('[data-usage-model-layout="inline"]')
+    expect(inlineLayout).not.toBeNull()
+    const modelRow = inlineLayout?.firstElementChild
     expect(modelRow?.textContent).toContain('gpt-5')
     expect(modelRow?.textContent).toContain('->')
     expect(modelRow?.textContent).toContain('gpt-5.1')
-    expect(modelRow?.querySelector('[data-usage-model-badge]')).toBeNull()
-    const badgesRow = stackedLayout?.querySelector('[data-usage-model-badges-row]')
-    expect(badgesRow?.textContent).toContain('xhigh -> max')
-    expect(badgesRow?.textContent).toContain('Fast')
-    expect(badgesRow?.textContent).toContain('Cyber')
+    expect(modelRow?.querySelector('[data-usage-model-target]')?.classList.contains('basis-full')).toBe(true)
+    expect(modelRow?.querySelector('[data-usage-model-target]')?.classList.contains('order-last')).toBe(true)
+    expect(modelRow?.querySelector('[data-usage-model-badge="reasoning"]')?.textContent).toContain('xhigh -> max')
+    expect(modelRow?.querySelector('[data-usage-model-badge="fast"]')?.textContent).toContain('Fast')
+    expect(modelRow?.querySelector('[data-usage-model-badge="cyber"]')?.textContent).toContain('Cyber')
   })
 
   it('stacks three model badges even without a model mapping', () => {
@@ -377,13 +398,10 @@ describe('UsageRecordsTable', () => {
     })])
 
     const stackedLayout = root.querySelector('[data-usage-model-layout="stacked"]')
-    expect(stackedLayout?.firstElementChild?.textContent?.trim()).toBe('gpt-5')
-    expect(stackedLayout?.querySelector('[data-usage-model-badges-row]')?.textContent)
-      .toContain('xhigh')
-    expect(stackedLayout?.querySelector('[data-usage-model-badges-row]')?.textContent)
-      .toContain('Fast')
-    expect(stackedLayout?.querySelector('[data-usage-model-badges-row]')?.textContent)
-      .toContain('Cyber')
+    expect(stackedLayout?.textContent).toContain('gpt-5')
+    expect(stackedLayout?.textContent).toContain('xhigh')
+    expect(stackedLayout?.textContent).toContain('Fast')
+    expect(stackedLayout?.textContent).toContain('Cyber')
   })
 
   it.each(['priority', 'fast', ' Priority ', 'FAST'])(

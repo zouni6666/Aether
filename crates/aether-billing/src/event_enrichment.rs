@@ -703,6 +703,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn openai_fast_usage_without_overlay_inherits_global_model_pricing() {
+        let lookup = TestLookup {
+            name_context: Some(
+                StoredBillingModelContext::new(
+                    "provider-1".to_string(),
+                    Some("pay_as_you_go".to_string()),
+                    Some("key-1".to_string()),
+                    None,
+                    None,
+                    "global-model-1".to_string(),
+                    "gpt-5.6-sol".to_string(),
+                    None,
+                    None,
+                    Some(json!({
+                        "tiers": [{
+                            "up_to": null,
+                            "input_price_per_1m": 3.0,
+                            "output_price_per_1m": 15.0
+                        }]
+                    })),
+                    Some("model-1".to_string()),
+                    Some("gpt-5.6-sol".to_string()),
+                    None,
+                    None,
+                    None,
+                )
+                .expect("billing context should build"),
+            ),
+            model_id_context: None,
+        };
+        let mut event = UsageEvent::new(
+            UsageEventType::Completed,
+            "req-fast-global-fallback",
+            UsageEventData {
+                provider_name: "OpenAI".to_string(),
+                model: "gpt-5.6-sol".to_string(),
+                target_model: Some("gpt-5.6-sol".to_string()),
+                provider_id: Some("provider-1".to_string()),
+                provider_api_key_id: Some("key-1".to_string()),
+                request_type: Some("chat".to_string()),
+                api_format: Some("openai:responses".to_string()),
+                endpoint_api_format: Some("openai:responses".to_string()),
+                // OpenAI calls the Fast request tier `priority` on the wire.
+                provider_request_body: Some(json!({
+                    "model": "gpt-5.6-sol",
+                    "service_tier": "priority"
+                })),
+                input_tokens: Some(1_000_000),
+                status_code: Some(200),
+                ..UsageEventData::default()
+            },
+        );
+
+        enrich_usage_event_with_billing(&lookup, &mut event)
+            .await
+            .expect("billing should succeed");
+
+        assert_eq!(event.data.total_cost_usd, Some(3.0));
+        let metadata = event.data.request_metadata.as_ref().expect("metadata");
+        assert_eq!(
+            metadata.pointer("/billing_snapshot/status"),
+            Some(&json!("complete"))
+        );
+        let pricing = metadata
+            .pointer("/settlement_snapshot/pricing_snapshot")
+            .expect("settlement pricing snapshot");
+        assert_eq!(pricing["billing_processing_tier"], "priority");
+        assert_eq!(pricing["pricing_source"], "global_default");
+        assert_eq!(pricing["tiered_pricing_source"], "global_default");
+        assert_eq!(
+            pricing["tiered_pricing"]["tiers"][0]["input_price_per_1m"],
+            3.0
+        );
+    }
+
+    #[tokio::test]
     async fn settlement_uses_requested_processing_tier_catalog_and_ignores_response_tier() {
         let lookup = TestLookup {
             name_context: Some(

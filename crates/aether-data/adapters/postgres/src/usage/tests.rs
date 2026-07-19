@@ -886,6 +886,26 @@ async fn repository_constructs_from_lazy_pool() {
     let _ = repository.transaction_runner();
 }
 
+#[test]
+fn api_key_leaderboard_user_filter_keeps_aggregates_with_historical_identity_evidence() {
+    let source = include_str!("mod.rs");
+    let aggregate_path = source
+        .split("async fn summarize_usage_leaderboard_from_daily_aggregates")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub async fn summarize_usage_leaderboard")
+                .next()
+        })
+        .expect("daily aggregate leaderboard path should be present");
+
+    assert!(aggregate_path.contains("api_keys.user_id = "));
+    assert!(aggregate_path.contains("api_keys.id IS NULL"));
+    assert!(aggregate_path.contains("stats_daily_api_key.api_key_id IN ("));
+    assert!(aggregate_path.contains("FROM usage AS identity_usage"));
+    assert!(aggregate_path.contains("identity_usage.user_id = "));
+    assert!(aggregate_path.contains("GROUP BY identity_usage.api_key_id"));
+}
+
 #[tokio::test]
 async fn validates_upsert_before_hitting_database() {
     let factory = PostgresPoolFactory::new(PostgresPoolConfig {

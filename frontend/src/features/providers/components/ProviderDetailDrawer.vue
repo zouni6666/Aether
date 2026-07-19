@@ -320,7 +320,7 @@
                                 :title="item.title"
                                 class="tabular-nums"
                               >
-                                {{ item.displayKey }} {{ formatCodexResetCreditDays(item.remainingSeconds) }}
+                                {{ item.displayKey }} {{ formatCodexResetCreditExpiresAt(item.expiresAt) }}
                               </span>
                               <span
                                 v-if="itemIndex < getVisibleCodexResetCreditItems(key).length - 1"
@@ -1038,7 +1038,7 @@ import { getGeminiCliAccountCreditsText } from '@/utils/providerKeyQuota'
 import {
   createCodexResetCreditIdempotencyKey,
   formatCodexResetCreditCount as formatCodexResetCreditCountLabel,
-  formatCodexResetCreditDays,
+  formatCodexResetCreditExpiresAt,
   getCodexResetCreditAvailableCount as getCodexResetCreditAvailableCountFromSnapshot,
   getVisibleCodexResetCreditItems as getVisibleCodexResetCreditItemsFromSnapshot,
   mergeCodexQuotaDisplays,
@@ -1722,7 +1722,7 @@ async function handleConsumeCodexResetCredit(key: EndpointAPIKey) {
 
   const earliest = getVisibleCodexResetCreditItems(key)[0]
   const detailMessage = earliest
-    ? `\n当前最早过期项：${earliest.displayKey}，约 ${formatCodexResetCreditDays(earliest.remainingSeconds)} 后过期。`
+    ? `\n当前最早过期项：${earliest.displayKey}，${formatCodexResetCreditExpiresAt(earliest.expiresAt)} 过期。`
     : ''
   const confirmed = await confirm({
     title: legacyT('确认使用 Codex 重置机会'),

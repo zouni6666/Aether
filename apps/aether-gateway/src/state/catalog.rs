@@ -662,6 +662,21 @@ impl AppState {
         Ok(updated)
     }
 
+    pub(crate) async fn update_provider_catalog_keys(
+        &self,
+        keys: &[provider_catalog::StoredProviderCatalogKey],
+    ) -> Result<Option<Vec<provider_catalog::StoredProviderCatalogKey>>, GatewayError> {
+        let updated = self
+            .data
+            .update_provider_catalog_keys(keys)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if updated.as_ref().is_some_and(|keys| !keys.is_empty()) {
+            self.invalidate_provider_routing_caches();
+        }
+        Ok(updated)
+    }
+
     pub(crate) async fn update_provider_catalog_key_runtime_state(
         &self,
         key: &provider_catalog::StoredProviderCatalogKey,

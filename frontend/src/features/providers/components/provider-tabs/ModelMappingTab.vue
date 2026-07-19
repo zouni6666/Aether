@@ -39,10 +39,10 @@
       >
         <!-- 行头部（可点击展开） -->
         <div
-          class="flex items-center justify-between px-4 py-3 hover:bg-muted/20 cursor-pointer"
+          class="flex items-start justify-between px-4 py-3 hover:bg-muted/20 cursor-pointer"
           @click="toggleExpand(item.key)"
         >
-          <div class="flex items-center gap-2 flex-1 min-w-0">
+          <div class="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1.5">
             <!-- 展开/收起图标 -->
             <ChevronRight
               class="w-4 h-4 text-muted-foreground shrink-0 transition-transform self-start mt-0.5"
@@ -50,7 +50,7 @@
             />
             <!-- 精确映射 -->
             <template v-if="item.type === 'exact'">
-              <div class="flex flex-col min-w-0">
+              <div class="flex min-w-0 flex-[1_1_12rem] flex-col">
                 <span class="font-semibold text-sm truncate">
                   {{ item.targetModelName }}
                 </span>
@@ -75,14 +75,23 @@
               <Badge
                 v-if="item.group"
                 variant="outline"
-                class="text-xs shrink-0"
+                class="min-w-0 max-w-full text-xs"
+                :title="getGroupEndpointScopeTitle(item.group)"
               >
-                {{ getGroupEndpointScopeLabel(item.group) }}
+                <span class="truncate">{{ getGroupEndpointScopeLabel(item.group) }}</span>
+              </Badge>
+              <Badge
+                v-if="item.group"
+                variant="outline"
+                class="min-w-0 max-w-full text-xs"
+                :title="getGroupOperationScopeLabel(item.group)"
+              >
+                <span class="truncate">{{ getGroupOperationScopeLabel(item.group) }}</span>
               </Badge>
             </template>
             <!-- 正则映射 -->
             <template v-else>
-              <div class="flex flex-col min-w-0">
+              <div class="flex min-w-0 flex-[1_1_12rem] flex-col">
                 <span class="font-semibold text-sm truncate">
                   {{ item.targetModelName }}
                 </span>
@@ -160,6 +169,7 @@
               </span>
               <!-- 测试按钮（直连测试） -->
               <Button
+                v-if="!item.group || item.group.operations.length === 0"
                 variant="ghost"
                 size="icon"
                 class="h-7 w-7 shrink-0"
@@ -364,8 +374,15 @@ import {
 } from '@/api/endpoints'
 import { type EndpointAPIKey } from '@/api/endpoints/keys'
 import { updateModel } from '@/api/endpoints/models'
+import { useI18n } from '@/i18n'
 import { parseApiError } from '@/utils/errorParser'
 import type { ProviderWithEndpointsSummary } from '@/api/endpoints'
+import {
+  formatModelMappingEndpointLabel,
+  formatModelMappingRequestScope,
+  modelMappingOperationsKey,
+  normalizeModelMappingOperations,
+} from '../../utils/modelMappingScope'
 import {
   buildDefaultModelTestRequestHeaders,
   buildDefaultModelTestRequestBody,
@@ -416,6 +433,7 @@ const emit = defineEmits<{
 }>()
 
 const { error: showError, success: showSuccess } = useToast()
+const { t } = useI18n()
 
 // 模型测试 composable
 const modelTest = useModelTest({ providerId: () => props.provider.id })
@@ -492,9 +510,47 @@ function getEndpointIdsKey(endpointIds: string[] | undefined): string {
   return getScopeKey(endpointIds)
 }
 
+function getOperationsKey(operations: string[] | undefined): string {
+  return modelMappingOperationsKey(operations)
+}
+
+const requestScopeLabels = computed(() => ({
+  allRequests: t('providers.modelMapping.scope.allRequests'),
+  sessionCompactionOnly: t('providers.modelMapping.scope.sessionCompactionOnly'),
+  customOperations: (operations: string[]) => t(
+    'providers.modelMapping.scope.customOperations',
+    { operations: operations.join(', ') },
+  ),
+}))
+
 function getGroupEndpointScopeLabel(group: AliasGroup): string {
-  if (!group.endpointIds || group.endpointIds.length === 0) return '全部端点'
-  return `${group.endpointIds.length} 端点`
+  if (!group.endpointIds || group.endpointIds.length === 0) {
+    return t('providers.modelMapping.scope.allEndpoints')
+  }
+  const labels = getGroupEndpointScopeLabels(group)
+  return labels.length === 1
+    ? labels[0]
+    : t('providers.modelMapping.scope.endpointCount', { count: labels.length })
+}
+
+function getGroupEndpointScopeTitle(group: AliasGroup): string {
+  if (!group.endpointIds || group.endpointIds.length === 0) {
+    return t('providers.modelMapping.scope.allEndpoints')
+  }
+  return getGroupEndpointScopeLabels(group).join('、')
+}
+
+function getGroupEndpointScopeLabels(group: AliasGroup): string[] {
+  const endpoints = props.endpoints ?? []
+  return group.endpointIds.map((endpointId) => {
+    const endpoint = endpoints.find(item => item.id === endpointId)
+    if (!endpoint) return endpointId
+    return formatModelMappingEndpointLabel(endpoint, endpoints)
+  })
+}
+
+function getGroupOperationScopeLabel(group: AliasGroup): string {
+  return formatModelMappingRequestScope(group.operations, requestScopeLabels.value)
 }
 
 // 精确映射分组（来自 provider_model_mappings）
@@ -508,7 +564,8 @@ const exactMappingGroups = computed<AliasGroup[]>(() => {
     for (const alias of model.provider_model_mappings) {
       const apiFormatsKey = getApiFormatsKey(alias.api_formats)
       const endpointIdsKey = getEndpointIdsKey(alias.endpoint_ids)
-      const groupKey = `${model.id}|${apiFormatsKey}|${endpointIdsKey}`
+      const operationsKey = getOperationsKey(alias.operations)
+      const groupKey = `${model.id}|${apiFormatsKey}|${endpointIdsKey}|${operationsKey}`
 
       if (!groupMap.has(groupKey)) {
         const group: AliasGroup = {
@@ -517,6 +574,8 @@ const exactMappingGroups = computed<AliasGroup[]>(() => {
           apiFormats: alias.api_formats || [],
           endpointIdsKey,
           endpointIds: normalizeStringList(alias.endpoint_ids),
+          operationsKey,
+          operations: normalizeModelMappingOperations(alias.operations),
           aliases: []
         }
         groupMap.set(groupKey, group)
@@ -600,7 +659,7 @@ const combinedMappings = computed<CombinedMapping[]>(() => {
   // 添加精确映射
   for (const group of exactMappingGroups.value) {
     result.push({
-      key: `exact-${group.model.id}-${group.apiFormatsKey}`,
+      key: `exact-${group.model.id}-${group.apiFormatsKey}-${group.endpointIdsKey}-${group.operationsKey}`,
       type: 'exact',
       targetModelName: group.model.global_model_display_name || group.model.provider_model_name,
       targetModelId: group.model.id,
@@ -645,7 +704,8 @@ const deleteConfirmDescription = computed(() => {
   const modelName = model.global_model_display_name || model.provider_model_name
   const aliasNames = aliases.map(a => a.name).join(', ')
   const endpointScope = getGroupEndpointScopeLabel(deletingGroup.value)
-  return `确定要删除模型「${modelName}」在「${endpointScope}」下的 ${aliases.length} 个映射吗？\n\n映射名称：${aliasNames}`
+  const operationScope = getGroupOperationScopeLabel(deletingGroup.value)
+  return `确定要删除模型「${modelName}」在「${endpointScope} / ${operationScope}」下的 ${aliases.length} 个映射吗？\n\n映射名称：${aliasNames}`
 })
 
 // 切换展开状态
@@ -692,7 +752,7 @@ function deleteGroup(group: AliasGroup) {
 async function confirmDelete() {
   if (!deletingGroup.value) return
 
-  const { model, aliases, apiFormatsKey, endpointIdsKey } = deletingGroup.value
+  const { model, aliases, apiFormatsKey, endpointIdsKey, operationsKey } = deletingGroup.value
 
   try {
     const currentAliases = model.provider_model_mappings || []
@@ -700,7 +760,11 @@ async function confirmDelete() {
     const newAliases = currentAliases.filter((a: ProviderModelAlias) => {
       const currentKey = getApiFormatsKey(a.api_formats)
       const currentEndpointIdsKey = getEndpointIdsKey(a.endpoint_ids)
-      return !(currentKey === apiFormatsKey && currentEndpointIdsKey === endpointIdsKey && aliasNamesToRemove.has(a.name))
+      const currentOperationsKey = getOperationsKey(a.operations)
+      return !(currentKey === apiFormatsKey
+        && currentEndpointIdsKey === endpointIdsKey
+        && currentOperationsKey === operationsKey
+        && aliasNamesToRemove.has(a.name))
     })
 
     await updateModel(props.provider.id, model.id, {

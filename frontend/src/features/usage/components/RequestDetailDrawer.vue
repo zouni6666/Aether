@@ -1069,6 +1069,7 @@ type HeaderModelTextField =
   | 'model'
   | 'target_model'
   | 'model_version'
+  | 'request_type'
   | 'requested_reasoning_effort'
   | 'reasoning_effort'
   | 'service_tier'
@@ -1162,6 +1163,7 @@ watch(
     props.summaryRecord?.model,
     props.summaryRecord?.target_model,
     props.summaryRecord?.model_version,
+    props.summaryRecord?.request_type,
     props.summaryRecord?.requested_reasoning_effort,
     props.summaryRecord?.reasoning_effort,
     props.summaryRecord?.service_tier,
@@ -1515,6 +1517,7 @@ const headerModelRecord = computed(() => {
     model: resolveHeaderModelTextField('model', currentDetail) ?? '-',
     target_model: resolveHeaderModelTextField('target_model', currentDetail),
     model_version: resolveHeaderModelTextField('model_version', currentDetail),
+    request_type: resolveHeaderModelTextField('request_type', currentDetail),
     requested_reasoning_effort: resolveHeaderModelTextField(
       'requested_reasoning_effort',
       currentDetail,

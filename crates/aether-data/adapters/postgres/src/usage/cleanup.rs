@@ -273,35 +273,6 @@ SET is_active = FALSE,
 WHERE id = $1
   AND is_active IS TRUE
 "#;
-const NULLIFY_USAGE_API_KEY_BATCH_SQL: &str = r#"
-WITH doomed AS (
-    SELECT id
-    FROM usage
-    WHERE api_key_id = $1
-    ORDER BY created_at ASC, id ASC
-    LIMIT $2
-)
-UPDATE usage AS usage_rows
-SET api_key_id = NULL,
-    updated_at = NOW()
-FROM doomed
-WHERE usage_rows.id = doomed.id
-"#;
-const NULLIFY_REQUEST_CANDIDATE_API_KEY_BATCH_SQL: &str = r#"
-WITH doomed AS (
-    SELECT id
-    FROM request_candidates
-    WHERE api_key_id = $1
-    ORDER BY created_at ASC, id ASC
-    LIMIT $2
-)
-UPDATE request_candidates AS candidate_rows
-SET api_key_id = NULL,
-    updated_at = NOW()
-FROM doomed
-WHERE candidate_rows.id = doomed.id
-"#;
-const EXPIRED_API_KEY_PRE_CLEAN_BATCH_SIZE: usize = 2_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageDetachedBodyBlobWrite {
@@ -1373,8 +1344,6 @@ async fn cleanup_expired_api_keys(
             .auto_delete_on_expiry
             .unwrap_or(auto_delete_expired_keys);
         if should_delete {
-            nullify_expired_api_key_usage_refs(pool, key.id).await?;
-            nullify_expired_api_key_candidate_refs(pool, key.id).await?;
             sqlx::query(DISABLE_EXPIRED_API_KEY_WALLET_SQL)
                 .bind(key.id)
                 .execute(pool)
@@ -1403,46 +1372,6 @@ async fn cleanup_expired_api_keys(
         }
     }
     Ok(cleaned)
-}
-
-async fn nullify_expired_api_key_usage_refs(
-    pool: &PostgresPool,
-    api_key_id: &str,
-) -> Result<(), DataLayerError> {
-    loop {
-        let updated = sqlx::query(NULLIFY_USAGE_API_KEY_BATCH_SQL)
-            .bind(api_key_id)
-            .bind(i64::try_from(EXPIRED_API_KEY_PRE_CLEAN_BATCH_SIZE).unwrap_or(i64::MAX))
-            .execute(pool)
-            .await
-            .map_err(postgres_error)?
-            .rows_affected();
-        let updated = usize::try_from(updated).unwrap_or(usize::MAX);
-        if updated < EXPIRED_API_KEY_PRE_CLEAN_BATCH_SIZE {
-            break;
-        }
-    }
-    Ok(())
-}
-
-async fn nullify_expired_api_key_candidate_refs(
-    pool: &PostgresPool,
-    api_key_id: &str,
-) -> Result<(), DataLayerError> {
-    loop {
-        let updated = sqlx::query(NULLIFY_REQUEST_CANDIDATE_API_KEY_BATCH_SQL)
-            .bind(api_key_id)
-            .bind(i64::try_from(EXPIRED_API_KEY_PRE_CLEAN_BATCH_SIZE).unwrap_or(i64::MAX))
-            .execute(pool)
-            .await
-            .map_err(postgres_error)?
-            .rows_affected();
-        let updated = usize::try_from(updated).unwrap_or(usize::MAX);
-        if updated < EXPIRED_API_KEY_PRE_CLEAN_BATCH_SIZE {
-            break;
-        }
-    }
-    Ok(())
 }
 
 fn maybe_externalize_usage_body_field(

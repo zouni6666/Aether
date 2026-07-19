@@ -797,18 +797,6 @@ WHERE id = $1
   AND is_standalone = TRUE
 "#;
 
-const NULL_USAGE_API_KEY_FK_SQL: &str = r#"
-UPDATE usage
-SET api_key_id = NULL
-WHERE api_key_id = $1
-"#;
-
-const NULL_REQUEST_CANDIDATE_API_KEY_FK_SQL: &str = r#"
-UPDATE request_candidates
-SET api_key_id = NULL
-WHERE api_key_id = $1
-"#;
-
 const DISABLE_WALLET_BY_API_KEY_ID_SQL: &str = r#"
 UPDATE wallets
 SET status = 'disabled',
@@ -1493,16 +1481,6 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
         api_key_id: &str,
     ) -> Result<bool, DataLayerError> {
         let mut tx = self.pool.begin().await.map_postgres_err()?;
-        sqlx::query(NULL_USAGE_API_KEY_FK_SQL)
-            .bind(api_key_id)
-            .execute(&mut *tx)
-            .await
-            .map_postgres_err()?;
-        sqlx::query(NULL_REQUEST_CANDIDATE_API_KEY_FK_SQL)
-            .bind(api_key_id)
-            .execute(&mut *tx)
-            .await
-            .map_postgres_err()?;
         sqlx::query(DISABLE_WALLET_BY_API_KEY_ID_SQL)
             .bind(api_key_id)
             .execute(&mut *tx)
@@ -1542,16 +1520,6 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
 
     async fn delete_standalone_api_key(&self, api_key_id: &str) -> Result<bool, DataLayerError> {
         let mut tx = self.pool.begin().await.map_postgres_err()?;
-        sqlx::query(NULL_USAGE_API_KEY_FK_SQL)
-            .bind(api_key_id)
-            .execute(&mut *tx)
-            .await
-            .map_postgres_err()?;
-        sqlx::query(NULL_REQUEST_CANDIDATE_API_KEY_FK_SQL)
-            .bind(api_key_id)
-            .execute(&mut *tx)
-            .await
-            .map_postgres_err()?;
         sqlx::query(DISABLE_WALLET_BY_API_KEY_ID_SQL)
             .bind(api_key_id)
             .execute(&mut *tx)

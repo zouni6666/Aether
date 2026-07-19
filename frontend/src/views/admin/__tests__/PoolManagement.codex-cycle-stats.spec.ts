@@ -141,7 +141,9 @@ vi.mock('lucide-vue-next', async () => {
     SlidersHorizontal: Icon,
     CircleHelp: Icon,
     Edit: Icon,
-    Plug: Icon,
+    Eye: Icon,
+    ListChecks: Icon,
+    SquareCheckBig: Icon,
   }
 })
 
@@ -200,10 +202,49 @@ vi.mock('@/components/ui', async () => {
     },
   })
 
+  const Checkbox = defineComponent({
+    name: 'CheckboxStub',
+    inheritAttrs: false,
+    props: {
+      checked: Boolean,
+      modelValue: Boolean,
+      indeterminate: Boolean,
+      disabled: Boolean,
+    },
+    emits: ['update:checked', 'update:modelValue'],
+    setup(props, { attrs, emit }) {
+      return () => h('input', {
+        ...attrs,
+        type: 'checkbox',
+        checked: props.checked || props.modelValue,
+        disabled: props.disabled,
+        'data-indeterminate': props.indeterminate ? 'true' : undefined,
+        onChange: (event: Event) => {
+          const checked = (event.target as HTMLInputElement).checked
+          emit('update:checked', checked)
+          emit('update:modelValue', checked)
+        },
+      })
+    },
+  })
+
   const Pagination = defineComponent({
     name: 'PaginationStub',
     setup() {
       return () => h('nav')
+    },
+  })
+
+  const DropdownMenuItem = defineComponent({
+    name: 'DropdownMenuItemStub',
+    inheritAttrs: false,
+    emits: ['select'],
+    setup(_, { attrs, emit, slots }) {
+      return () => h('button', {
+        ...attrs,
+        type: 'button',
+        onClick: (event: Event) => emit('select', event),
+      }, slots.default?.())
     },
   })
 
@@ -258,6 +299,7 @@ vi.mock('@/components/ui', async () => {
     Card: passthrough('CardStub'),
     Badge: passthrough('BadgeStub', 'span'),
     Button,
+    Checkbox,
     Input,
     Select: passthrough('SelectStub'),
     SelectTrigger: passthrough('SelectTriggerStub', 'button'),
@@ -272,6 +314,10 @@ vi.mock('@/components/ui', async () => {
     SortableTableHead: passthrough('SortableTableHeadStub', 'th'),
     TableFilterMenu: passthrough('TableFilterMenuStub'),
     TableCell: passthrough('TableCellStub', 'td'),
+    DropdownMenu: passthrough('DropdownMenuStub'),
+    DropdownMenuTrigger: passthrough('DropdownMenuTriggerStub'),
+    DropdownMenuContent: passthrough('DropdownMenuContentStub'),
+    DropdownMenuItem,
     Switch,
     Pagination,
     Popover,
@@ -326,32 +372,40 @@ vi.mock('@/features/pool/components/PoolDemandMetricsDialog.vue', async () => {
   }
 })
 vi.mock('@/features/pool/components/PoolAccountBatchDialog.vue', async () => {
-  const { defineComponent } = await import('vue')
+  const { defineComponent, h } = await import('vue')
   return {
     default: defineComponent({
       name: 'PoolAccountBatchDialogStub',
-      setup() {
-        return () => null
+      props: {
+        modelValue: Boolean,
+        selectedKeys: { type: Array, default: () => [] },
+        selectAllFiltered: Boolean,
+        selectedCount: { type: Number, default: 0 },
+        selectionFilters: { type: Object, default: () => ({}) },
+        initialAction: { type: String, default: null },
+      },
+      emits: ['update:modelValue', 'changed', 'editConfig'],
+      setup(props) {
+        return () => h('div', {
+          'data-testid': 'pool-account-batch-dialog',
+          'data-open': props.modelValue ? 'true' : 'false',
+          'data-selected-ids': (props.selectedKeys as PoolKeyDetail[])
+            .map(key => key.key_id)
+            .join(','),
+          'data-select-all-filtered': props.selectAllFiltered ? 'true' : 'false',
+          'data-selected-count': String(props.selectedCount),
+          'data-selection-filters': JSON.stringify(props.selectionFilters),
+          'data-initial-action': props.initialAction || '',
+        })
       },
     }),
   }
 })
-vi.mock('@/features/pool/components/ProviderProxyPopover.vue', async () => {
+vi.mock('@/features/pool/components/PoolKeyBatchEditDialog.vue', async () => {
   const { defineComponent } = await import('vue')
   return {
     default: defineComponent({
-      name: 'ProviderProxyPopoverStub',
-      setup() {
-        return () => null
-      },
-    }),
-  }
-})
-vi.mock('@/features/providers/components/EndpointFormDialog.vue', async () => {
-  const { defineComponent } = await import('vue')
-  return {
-    default: defineComponent({
-      name: 'EndpointFormDialogStub',
+      name: 'PoolKeyBatchEditDialogStub',
       setup() {
         return () => null
       },
@@ -856,6 +910,150 @@ describe('PoolManagement Codex cycle stats mode', () => {
     expect(root.textContent).toContain('12')
     expect(root.textContent).toContain('3.5K')
     expect(root.textContent).toContain('$1.25')
+  })
+
+  it('supports page selection across desktop/mobile rows and seeds batch actions', async () => {
+    const firstKey = createPoolKey('codex', { key_id: 'codex-selection-1', key_name: 'First key' })
+    const secondKey = createPoolKey('codex', { key_id: 'codex-selection-2', key_name: 'Second key' })
+    endpointMocks.getPoolOverview.mockResolvedValue({ items: [createOverview('codex')] })
+    endpointMocks.listPoolKeys.mockResolvedValue({
+      total: 2,
+      page: 1,
+      page_size: 50,
+      keys: [firstKey, secondKey],
+    })
+    endpointMocks.getProvider.mockResolvedValue(createProvider('codex'))
+
+    const root = mountPoolManagement()
+    await settle()
+
+    let pageCheckbox = root.querySelector<HTMLInputElement>('[data-testid="pool-select-page-desktop"]')
+    const firstDesktopCheckbox = root.querySelector<HTMLInputElement>('[data-testid="pool-select-desktop-codex-selection-1"]')
+    const firstMobileCheckbox = root.querySelector<HTMLInputElement>('[data-testid="pool-select-mobile-codex-selection-1"]')
+    expect(pageCheckbox).not.toBeNull()
+    expect(firstDesktopCheckbox).not.toBeNull()
+    expect(firstMobileCheckbox).not.toBeNull()
+    expect(root.querySelector('[data-testid="pool-selected-count-desktop"]')).toBeNull()
+    expect(root.querySelector('[data-testid="pool-selected-count-mobile"]')).toBeNull()
+    expect(root.querySelector<HTMLElement>('colgroup col')?.style.width).toBe('19%')
+    expect(root.querySelectorAll('colgroup col')).toHaveLength(8)
+    expect(pageCheckbox?.closest('th')?.textContent).toContain('名称')
+    expect(firstDesktopCheckbox?.closest('td')?.textContent).toContain('First key')
+
+    firstDesktopCheckbox?.click()
+    await settle()
+
+    expect(firstDesktopCheckbox?.checked).toBe(true)
+    expect(firstMobileCheckbox?.checked).toBe(true)
+    expect(pageCheckbox?.dataset.indeterminate).toBe('true')
+    const desktopSelectedCount = root.querySelector('[data-testid="pool-selected-count-desktop"]')
+    expect(desktopSelectedCount?.textContent).toContain('已选 1 个')
+    expect(desktopSelectedCount?.closest('th')).toBe(pageCheckbox?.closest('th'))
+    expect(root.querySelector('[data-testid="pool-selected-count-mobile"]')?.textContent).toContain('已选 1 个')
+    expect(root.querySelector('[data-testid="pool-selection-toolbar"]')).toBeNull()
+    expect(root.querySelector<HTMLButtonElement>('[data-testid="pool-batch-actions-desktop"]')?.disabled).toBe(false)
+
+    pageCheckbox?.click()
+    await settle()
+    expect(root.querySelector<HTMLInputElement>('[data-testid="pool-select-desktop-codex-selection-2"]')?.checked).toBe(true)
+    expect(root.querySelector('[data-testid="pool-selected-count-desktop"]')?.textContent).toContain('已选 2 个')
+
+    pageCheckbox?.click()
+    await settle()
+    expect(root.querySelector<HTMLButtonElement>('[data-testid="pool-batch-actions-desktop"]')?.disabled).toBe(true)
+    expect(root.querySelector('[data-testid="pool-selected-count-desktop"]')).toBeNull()
+    expect(root.querySelector('[data-testid="pool-selected-count-mobile"]')).toBeNull()
+
+    pageCheckbox = root.querySelector<HTMLInputElement>('[data-testid="pool-select-page-desktop"]')
+    pageCheckbox?.click()
+    await settle()
+    root.querySelector<HTMLButtonElement>('[data-testid="pool-batch-action-refresh_quota-desktop"]')?.click()
+    await settle()
+
+    const batchDialog = root.querySelector('[data-testid="pool-account-batch-dialog"]')
+    expect(batchDialog?.getAttribute('data-open')).toBe('true')
+    expect(batchDialog?.getAttribute('data-selected-ids')).toBe('codex-selection-1,codex-selection-2')
+    expect(batchDialog?.getAttribute('data-select-all-filtered')).toBe('false')
+    expect(batchDialog?.getAttribute('data-initial-action')).toBe('refresh_quota')
+  })
+
+  it('passes the current table search and status to filtered selection actions', async () => {
+    routeMocks.query.providerId = 'codex-provider'
+    routeMocks.query.search = 'inactive-account'
+    routeMocks.query.status = 'inactive'
+    const firstKey = createPoolKey('codex', { key_id: 'codex-filtered-1', key_name: 'inactive-account one' })
+    const secondKey = createPoolKey('codex', { key_id: 'codex-filtered-2', key_name: 'inactive-account two' })
+    endpointMocks.getPoolOverview.mockResolvedValue({ items: [createOverview('codex')] })
+    endpointMocks.listPoolKeys.mockResolvedValue({
+      total: 37,
+      page: 1,
+      page_size: 50,
+      keys: [firstKey, secondKey],
+    })
+    endpointMocks.getProvider.mockResolvedValue(createProvider('codex'))
+
+    const root = mountPoolManagement()
+    await settle()
+
+    const selectAllButton = root.querySelector<HTMLButtonElement>('[data-testid="pool-select-all-desktop"]')
+    expect(selectAllButton).not.toBeNull()
+    expect(selectAllButton?.title).toBe('全选')
+    selectAllButton?.click()
+    await settle()
+
+    expect(selectAllButton?.title).toBe('取消全选')
+    expect(selectAllButton?.getAttribute('aria-pressed')).toBe('true')
+    expect(root.querySelector<HTMLInputElement>('[data-testid="pool-select-desktop-codex-filtered-1"]')?.checked).toBe(true)
+    expect(root.querySelector<HTMLInputElement>('[data-testid="pool-select-desktop-codex-filtered-1"]')?.disabled).toBe(true)
+    expect(root.querySelector('[data-testid="pool-selected-count-desktop"]')?.textContent).toContain('已选 37 个')
+    expect(root.querySelector('[data-testid="pool-selected-count-mobile"]')?.textContent).toContain('已选 37 个')
+    const batchButton = root.querySelector<HTMLButtonElement>('[data-testid="pool-batch-actions-desktop"]')
+    expect(batchButton?.disabled).toBe(false)
+
+    selectAllButton?.click()
+    await settle()
+    expect(selectAllButton?.title).toBe('全选')
+    expect(selectAllButton?.getAttribute('aria-pressed')).toBe('false')
+    expect(root.querySelector<HTMLInputElement>('[data-testid="pool-select-desktop-codex-filtered-1"]')?.checked).toBe(false)
+    expect(root.querySelector('[data-testid="pool-selected-count-desktop"]')).toBeNull()
+    expect(batchButton?.disabled).toBe(true)
+
+    selectAllButton?.click()
+    await settle()
+    root.querySelector<HTMLButtonElement>('[data-testid="pool-batch-action-refresh_quota-desktop"]')?.click()
+    await settle()
+
+    const batchDialog = root.querySelector('[data-testid="pool-account-batch-dialog"]')
+    expect(batchDialog?.getAttribute('data-select-all-filtered')).toBe('true')
+    expect(batchDialog?.getAttribute('data-selected-count')).toBe('37')
+    expect(batchDialog?.getAttribute('data-initial-action')).toBe('refresh_quota')
+    expect(JSON.parse(batchDialog?.getAttribute('data-selection-filters') || '{}')).toEqual({
+      search: 'inactive-account',
+      status: 'inactive',
+    })
+  })
+
+  it('disables selection while a debounced search is waiting for fresh rows', async () => {
+    const key = createPoolKey('codex', { key_id: 'codex-stale-search-row' })
+    endpointMocks.getPoolOverview.mockResolvedValue({ items: [createOverview('codex')] })
+    endpointMocks.listPoolKeys.mockResolvedValue(createKeyPage(key))
+    endpointMocks.getProvider.mockResolvedValue(createProvider('codex'))
+
+    const root = mountPoolManagement()
+    await settle()
+
+    const rowCheckbox = root.querySelector<HTMLInputElement>('[data-testid="pool-select-desktop-codex-stale-search-row"]')
+    expect(rowCheckbox?.disabled).toBe(false)
+    const searchInput = root.querySelector<HTMLInputElement>('input[placeholder="搜索账号..."]')
+    expect(searchInput).not.toBeNull()
+    if (searchInput) {
+      searchInput.value = 'fresh-filter'
+      searchInput.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+    await nextTick()
+
+    expect(rowCheckbox?.disabled).toBe(true)
+    expect(root.querySelector<HTMLButtonElement>('[data-testid="pool-select-all-desktop"]')?.disabled).toBe(true)
   })
 
   it('shows adaptive hot pool metrics entry only when probing is enabled', async () => {

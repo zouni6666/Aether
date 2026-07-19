@@ -605,6 +605,7 @@ export function useUsageData(options: UseUsageDataOptions) {
         input_tokens: mergeSparseRecordMetric(existing.input_tokens, record.input_tokens) ?? record.input_tokens,
         effective_input_tokens: mergeSparseRecordMetric(existing.effective_input_tokens, record.effective_input_tokens) ?? record.effective_input_tokens,
         output_tokens: mergeSparseRecordMetric(existing.output_tokens, record.output_tokens) ?? record.output_tokens,
+        reasoning_tokens: mergeSparseRecordMetric(existing.reasoning_tokens, record.reasoning_tokens) ?? record.reasoning_tokens,
         total_tokens: mergeSparseRecordMetric(existing.total_tokens, record.total_tokens) ?? record.total_tokens,
         cache_creation_input_tokens: mergeSparseRecordMetric(existing.cache_creation_input_tokens, record.cache_creation_input_tokens) ?? record.cache_creation_input_tokens,
         cache_creation_ephemeral_5m_input_tokens:
@@ -668,6 +669,12 @@ export function useUsageData(options: UseUsageDataOptions) {
               ? record.target_model
               : null)
           : existing.target_model,
+        // Request type is client-request identity, not a provider-candidate fact. Preserve a
+        // known compact operation when a later sparse snapshot omits it.
+        request_type:
+          typeof record.request_type === 'string' && record.request_type.trim()
+            ? record.request_type
+            : existing.request_type,
         requested_reasoning_effort:
           typeof record.requested_reasoning_effort === 'string'
             && record.requested_reasoning_effort.trim()

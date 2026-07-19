@@ -1835,12 +1835,17 @@ impl GatewayDataState {
             let notified = self.billing_model_context_cache.inflight_notify.notified();
             match self.register_billing_model_context_inflight(&key) {
                 BillingModelContextInflightRegistration::Bypass => {
+                    let load_epoch = self
+                        .billing_model_context_cache
+                        .epoch
+                        .load(std::sync::atomic::Ordering::Acquire);
                     return self
                         .load_billing_model_context_by_name(
                             key,
                             provider_id,
                             provider_api_key_id,
                             global_model_name,
+                            load_epoch,
                         )
                         .await;
                 }
@@ -1861,12 +1866,17 @@ impl GatewayDataState {
                 }
                 BillingModelContextInflightRegistration::Leader(token) => {
                     let mut guard = BillingModelContextInflightGuard::new(self, key.clone(), token);
+                    let load_epoch = self
+                        .billing_model_context_cache
+                        .epoch
+                        .load(std::sync::atomic::Ordering::Acquire);
                     let result = self
                         .load_billing_model_context_by_name(
                             key,
                             provider_id,
                             provider_api_key_id,
                             global_model_name,
+                            load_epoch,
                         )
                         .await;
                     guard.finish();
@@ -1894,12 +1904,17 @@ impl GatewayDataState {
             let notified = self.billing_model_context_cache.inflight_notify.notified();
             match self.register_billing_model_context_inflight(&key) {
                 BillingModelContextInflightRegistration::Bypass => {
+                    let load_epoch = self
+                        .billing_model_context_cache
+                        .epoch
+                        .load(std::sync::atomic::Ordering::Acquire);
                     return self
                         .load_billing_model_context_by_model_id(
                             key,
                             provider_id,
                             provider_api_key_id,
                             model_id,
+                            load_epoch,
                         )
                         .await;
                 }
@@ -1920,12 +1935,17 @@ impl GatewayDataState {
                 }
                 BillingModelContextInflightRegistration::Leader(token) => {
                     let mut guard = BillingModelContextInflightGuard::new(self, key.clone(), token);
+                    let load_epoch = self
+                        .billing_model_context_cache
+                        .epoch
+                        .load(std::sync::atomic::Ordering::Acquire);
                     let result = self
                         .load_billing_model_context_by_model_id(
                             key,
                             provider_id,
                             provider_api_key_id,
                             model_id,
+                            load_epoch,
                         )
                         .await;
                     guard.finish();
@@ -1941,6 +1961,7 @@ impl GatewayDataState {
         provider_id: &str,
         provider_api_key_id: Option<&str>,
         global_model_name: &str,
+        load_epoch: u64,
     ) -> Result<Option<StoredBillingModelContext>, DataLayerError> {
         crate::request_diagnostics::observe_db_operation(
             "billing_model_context",
@@ -1951,11 +1972,11 @@ impl GatewayDataState {
                         let value = repository
                             .find_model_context(provider_id, provider_api_key_id, global_model_name)
                             .await?;
-                        self.remember_billing_model_context(key, value.clone());
+                        self.remember_billing_model_context(key, value.clone(), load_epoch);
                         Ok(value)
                     }
                     None => {
-                        self.remember_billing_model_context(key, None);
+                        self.remember_billing_model_context(key, None, load_epoch);
                         Ok(None)
                     }
                 }
@@ -1970,6 +1991,7 @@ impl GatewayDataState {
         provider_id: &str,
         provider_api_key_id: Option<&str>,
         model_id: &str,
+        load_epoch: u64,
     ) -> Result<Option<StoredBillingModelContext>, DataLayerError> {
         crate::request_diagnostics::observe_db_operation(
             "billing_model_context",
@@ -1984,11 +2006,11 @@ impl GatewayDataState {
                                 model_id,
                             )
                             .await?;
-                        self.remember_billing_model_context(key, value.clone());
+                        self.remember_billing_model_context(key, value.clone(), load_epoch);
                         Ok(value)
                     }
                     None => {
-                        self.remember_billing_model_context(key, None);
+                        self.remember_billing_model_context(key, None, load_epoch);
                         Ok(None)
                     }
                 }
@@ -2070,12 +2092,21 @@ impl GatewayDataState {
         &self,
         key: BillingModelContextCacheKey,
         value: Option<StoredBillingModelContext>,
+        load_epoch: u64,
     ) {
         let mut cache = self
             .billing_model_context_cache
             .entries
             .write()
             .expect("billing model context cache lock");
+        if load_epoch
+            != self
+                .billing_model_context_cache
+                .epoch
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return;
+        }
         cache.retain(|_, (cached_at, _)| {
             cached_at.elapsed() <= Self::BILLING_MODEL_CONTEXT_CACHE_TTL
         });
@@ -2091,7 +2122,10 @@ impl GatewayDataState {
         cache.insert(key, (Instant::now(), value));
     }
 
-    fn clear_billing_model_context_cache(&self) {
+    pub(super) fn clear_billing_model_context_cache(&self) {
+        self.billing_model_context_cache
+            .epoch
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         self.billing_model_context_cache
             .entries
             .write()
@@ -2527,21 +2561,33 @@ impl GatewayDataState {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    use aether_data::repository::global_models::InMemoryGlobalModelReadRepository;
     use aether_data::repository::users::{InMemoryUserReadRepository, StoredUserExportRow};
     use aether_data_contracts::repository::billing::{
         BillingReadRepository, StoredBillingModelContext,
     };
+    use aether_data_contracts::repository::global_models::{
+        StoredAdminGlobalModel, StoredPublicGlobalModel, UpdateAdminGlobalModelRecord,
+    };
     use async_trait::async_trait;
     use serde_json::json;
+    use tokio::sync::Barrier;
 
     use super::GatewayDataState;
 
     struct SlowBillingContextRepository {
         calls: AtomicUsize,
         context: StoredBillingModelContext,
+    }
+
+    struct BlockedBillingContextRepository {
+        calls: AtomicUsize,
+        context: Mutex<StoredBillingModelContext>,
+        first_read: Barrier,
+        release_first_read: Barrier,
     }
 
     #[async_trait]
@@ -2556,6 +2602,29 @@ mod tests {
             self.calls.fetch_add(1, Ordering::AcqRel);
             tokio::time::sleep(Duration::from_millis(25)).await;
             Ok(Some(self.context.clone()))
+        }
+    }
+
+    #[async_trait]
+    impl BillingReadRepository for BlockedBillingContextRepository {
+        async fn find_model_context(
+            &self,
+            _provider_id: &str,
+            _provider_api_key_id: Option<&str>,
+            _global_model_name: &str,
+        ) -> Result<Option<StoredBillingModelContext>, aether_data_contracts::DataLayerError>
+        {
+            let call_index = self.calls.fetch_add(1, Ordering::AcqRel);
+            let context = self
+                .context
+                .lock()
+                .expect("mutable billing context lock")
+                .clone();
+            if call_index == 0 {
+                self.first_read.wait().await;
+                self.release_first_read.wait().await;
+            }
+            Ok(Some(context))
         }
     }
 
@@ -2607,6 +2676,87 @@ mod tests {
         }
 
         assert_eq!(repository.calls.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn global_model_price_update_invalidates_inflight_billing_context_cache() {
+        let mut initial_context = billing_context();
+        initial_context.default_price_per_request = None;
+        initial_context.default_tiered_pricing = None;
+        let repository = Arc::new(BlockedBillingContextRepository {
+            calls: AtomicUsize::new(0),
+            context: Mutex::new(initial_context),
+            first_read: Barrier::new(2),
+            release_first_read: Barrier::new(2),
+        });
+        let mut state = GatewayDataState::with_billing_reader_for_tests(repository.clone());
+        let stored_global_model = StoredAdminGlobalModel::new(
+            "global-model-1".to_string(),
+            "gpt-5".to_string(),
+            "GPT-5".to_string(),
+            true,
+            None,
+            None,
+            None,
+            None,
+            1,
+            1,
+            0,
+            Some(1_711_000_000),
+            Some(1_711_000_000),
+        )
+        .expect("stored global model should build");
+        state.global_model_writer = Some(Arc::new(
+            InMemoryGlobalModelReadRepository::seed(Vec::<StoredPublicGlobalModel>::new())
+                .with_admin_global_models([stored_global_model]),
+        ));
+        let state = Arc::new(state);
+        let lookup_state = Arc::clone(&state);
+        let stale_lookup = tokio::spawn(async move {
+            lookup_state
+                .find_billing_model_context("provider-1", Some("key-1"), "gpt-5")
+                .await
+        });
+        repository.first_read.wait().await;
+
+        let updated_pricing =
+            json!({"tiers":[{"up_to":null,"input_price_per_1m":3.0,"output_price_per_1m":15.0}]});
+        let update = UpdateAdminGlobalModelRecord::new(
+            "global-model-1".to_string(),
+            "GPT-5".to_string(),
+            true,
+            None,
+            Some(updated_pricing.clone()),
+            None,
+            None,
+        )
+        .expect("global model update should build");
+        repository
+            .context
+            .lock()
+            .expect("mutable billing context lock")
+            .default_tiered_pricing = Some(updated_pricing.clone());
+        state
+            .update_admin_global_model(&update)
+            .await
+            .expect("global model price update should succeed");
+        repository.release_first_read.wait().await;
+
+        let before = stale_lookup
+            .await
+            .expect("initial billing lookup task should complete")
+            .expect("initial billing lookup should succeed")
+            .expect("initial billing context should exist");
+        assert_eq!(before.default_tiered_pricing, None);
+        assert_eq!(repository.calls.load(Ordering::Acquire), 1);
+
+        let after = state
+            .find_billing_model_context("provider-1", Some("key-1"), "gpt-5")
+            .await
+            .expect("updated billing lookup should succeed")
+            .expect("updated billing context should exist");
+        assert_eq!(after.default_tiered_pricing, Some(updated_pricing));
+        assert_eq!(repository.calls.load(Ordering::Acquire), 2);
     }
 
     #[tokio::test]

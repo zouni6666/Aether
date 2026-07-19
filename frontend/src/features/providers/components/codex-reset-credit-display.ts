@@ -120,7 +120,7 @@ export function getVisibleCodexResetCreditItems(
       if (remainingSeconds === null || remainingSeconds <= 0) return null
       return {
         id: item.id,
-        expiresAt: item.expires_at,
+        expiresAt: nowUnixSecs + remainingSeconds,
         remainingSeconds,
       } satisfies CodexResetCreditDisplayCandidate
     })
@@ -137,7 +137,11 @@ export function getVisibleCodexResetCreditItems(
     })
 }
 
-export function formatCodexResetCreditDays(remainingSeconds: number): string {
-  const days = Math.max(1, Math.ceil(remainingSeconds / 86_400))
-  return `${days}天`
+export function formatCodexResetCreditExpiresAt(expiresAt: number | null | undefined): string {
+  if (typeof expiresAt !== 'number' || !Number.isFinite(expiresAt)) return '-'
+  const date = new Date(expiresAt * 1000)
+  if (Number.isNaN(date.getTime())) return '-'
+
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
 }

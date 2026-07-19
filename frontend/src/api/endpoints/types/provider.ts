@@ -940,6 +940,7 @@ export interface ProviderModelMapping {
   priority: number  // 优先级（数字越小优先级越高）
   api_formats?: string[]  // 作用域（适用的 API 格式），为空表示对所有格式生效
   endpoint_ids?: string[]  // 作用域（适用的端点 ID），为空表示对所有端点生效
+  operations?: string[]  // 作用域（适用的请求操作），为空表示对该格式的全部操作生效
 }
 
 // 保留别名以保持向后兼容

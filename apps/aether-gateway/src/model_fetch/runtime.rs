@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -76,7 +76,16 @@ pub(crate) async fn perform_model_fetch_for_key(
     provider_id: &str,
     key_id: &str,
 ) -> Result<ModelFetchRunSummary, GatewayError> {
-    perform_model_fetch_for_key_with_state(state, provider_id, key_id).await
+    let key_ids = BTreeSet::from([key_id.to_string()]);
+    perform_model_fetch_for_keys_with_state(state, provider_id, &key_ids).await
+}
+
+pub(crate) async fn perform_model_fetch_for_keys(
+    state: &AppState,
+    provider_id: &str,
+    key_ids: &BTreeSet<String>,
+) -> Result<ModelFetchRunSummary, GatewayError> {
+    perform_model_fetch_for_keys_with_state(state, provider_id, key_ids).await
 }
 
 async fn perform_model_fetch_once_with_state<S>(
@@ -89,22 +98,22 @@ where
     execute_fetch_targets(state, targets).await
 }
 
-async fn perform_model_fetch_for_key_with_state<S>(
+async fn perform_model_fetch_for_keys_with_state<S>(
     state: &S,
     provider_id: &str,
-    key_id: &str,
+    key_ids: &BTreeSet<String>,
 ) -> Result<ModelFetchRunSummary, GatewayError>
 where
     S: ModelFetchRuntimeState + ?Sized,
 {
-    let targets = collect_fetch_targets(state, Some(provider_id), Some(key_id)).await?;
+    let targets = collect_fetch_targets(state, Some(provider_id), Some(key_ids)).await?;
     execute_fetch_targets(state, targets).await
 }
 
 async fn collect_fetch_targets<S>(
     state: &S,
     provider_id_filter: Option<&str>,
-    key_id_filter: Option<&str>,
+    key_id_filter: Option<&BTreeSet<String>>,
 ) -> Result<Vec<SelectedFetchTarget>, GatewayError>
 where
     S: ModelFetchRuntimeState + ?Sized,
@@ -158,7 +167,7 @@ where
             .unwrap_or_default();
         let keys = keys_by_provider.remove(&provider.id).unwrap_or_default();
         for key in keys {
-            if key_id_filter.is_some_and(|key_id| key.id != key_id) {
+            if key_id_filter.is_some_and(|key_ids| !key_ids.contains(&key.id)) {
                 continue;
             }
             if !key.is_active || !key.auto_fetch_models {

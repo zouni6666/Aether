@@ -192,6 +192,7 @@ impl BillingModelPricingSnapshot {
         )?;
         if !processing_tier_is_standard(&requested_billing_tier)
             && requested_resolution.tiered_pricing.is_none()
+            && requested_resolution.price_per_request.is_none()
         {
             return Ok(None);
         }
@@ -295,7 +296,9 @@ impl BillingModelPricingSnapshot {
                         processing_tier,
                         reason,
                     )),
-                    ProcessingTierOverlay::Missing => Ok(None),
+                    ProcessingTierOverlay::Missing => Ok(self
+                        .resolve_standard_tiered_pricing_checked()?
+                        .map(|(pricing, source)| (pricing.clone(), source, None))),
                 }
             }
         }
@@ -797,6 +800,54 @@ mod tests {
             Some(BillingPricingSource::ProviderOverride)
         );
         assert_eq!(resolution.processing_tier_price_multiplier, None);
+    }
+
+    #[test]
+    fn missing_processing_overlay_inherits_effective_standard_catalog() {
+        let provider_pricing = json!({"tiers":[{"up_to":null,"input_price_per_1m":2.0}]});
+        let default_pricing = json!({"tiers":[{"up_to":null,"input_price_per_1m":3.0}]});
+
+        let provider = snapshot(
+            Some(provider_pricing.clone()),
+            Some(default_pricing.clone()),
+        )
+        .resolve_pricing(Some("fast"), None);
+        assert_eq!(provider.billing_processing_tier.as_deref(), Some("fast"));
+        assert_eq!(provider.tiered_pricing, Some(provider_pricing));
+        assert_eq!(
+            provider.tiered_pricing_source,
+            Some(BillingPricingSource::ProviderOverride)
+        );
+        assert_eq!(provider.processing_tier_price_multiplier, None);
+
+        let global =
+            snapshot(None, Some(default_pricing.clone())).resolve_pricing(Some("priority"), None);
+        assert_eq!(global.billing_processing_tier.as_deref(), Some("priority"));
+        assert_eq!(global.tiered_pricing, Some(default_pricing));
+        assert_eq!(
+            global.tiered_pricing_source,
+            Some(BillingPricingSource::GlobalDefault)
+        );
+        assert_eq!(global.processing_tier_price_multiplier, None);
+    }
+
+    #[test]
+    fn nonstandard_tier_keeps_fixed_request_price_without_token_catalog() {
+        let mut pricing = snapshot(None, None);
+        pricing.default_price_per_request = Some(0.02);
+
+        let resolution = pricing.resolve_pricing(Some("fast"), None);
+        assert_eq!(resolution.billing_processing_tier.as_deref(), Some("fast"));
+        assert_eq!(resolution.tiered_pricing, None);
+        assert_eq!(resolution.price_per_request, Some(0.02));
+        assert_eq!(
+            resolution.price_per_request_source,
+            Some(BillingPricingSource::GlobalDefault)
+        );
+        assert!(pricing
+            .resolve_authorization_pricing_candidates(Some("fast"))
+            .expect("fixed request pricing should be valid")
+            .is_some());
     }
 
     #[test]

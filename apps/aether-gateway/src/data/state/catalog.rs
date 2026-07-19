@@ -512,6 +512,20 @@ impl GatewayDataState {
         Ok(updated)
     }
 
+    pub(crate) async fn update_provider_catalog_keys(
+        &self,
+        keys: &[StoredProviderCatalogKey],
+    ) -> Result<Option<Vec<StoredProviderCatalogKey>>, DataLayerError> {
+        let updated = match &self.provider_catalog_writer {
+            Some(repository) => repository.update_keys(keys).await.map(Some),
+            None => Ok(None),
+        }?;
+        if updated.as_ref().is_some_and(|keys| !keys.is_empty()) {
+            self.clear_provider_catalog_cache();
+        }
+        Ok(updated)
+    }
+
     pub(crate) async fn update_provider_catalog_key_upstream_metadata(
         &self,
         key_id: &str,

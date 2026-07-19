@@ -1099,6 +1099,14 @@ export const adminApi = {
     return response.data
   },
 
+  async queryProviderModelsForKeys(providerId: string, apiKeyIds: string[], forceRefresh = false): Promise<ProviderModelsQueryResponse> {
+    const response = await apiClient.post<ProviderModelsQueryResponse>(
+      '/api/admin/provider-query/models',
+      { provider_id: providerId, api_key_ids: apiKeyIds, force_refresh: forceRefresh }
+    )
+    return response.data
+  },
+
   // 测试 SMTP 连接，支持传入未保存的配置
   async testSmtpConnection(config: Record<string, unknown> = {}): Promise<{ success: boolean; message: string }> {
     const response = await apiClient.post<{ success: boolean; message: string }>(

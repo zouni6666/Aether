@@ -596,6 +596,9 @@ async function pollActiveRequests() {
         record.reasoning_effort = typeof update.reasoning_effort === 'string' && update.reasoning_effort.trim()
           ? update.reasoning_effort
           : null
+        if (typeof update.request_type === 'string' && update.request_type.trim()) {
+          record.request_type = update.request_type
+        }
         if (typeof update.requested_reasoning_effort === 'string' && update.requested_reasoning_effort.trim()) {
           record.requested_reasoning_effort = update.requested_reasoning_effort
         }

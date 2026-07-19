@@ -459,7 +459,7 @@ fn admin_pool_key_cost_exhausted(
         >= limit
 }
 
-fn admin_pool_key_visible_status_filter(
+pub(super) fn admin_pool_key_visible_status_filter(
     state: &AdminAppState<'_>,
     key: &StoredProviderCatalogKey,
     provider_type: &str,
@@ -654,17 +654,22 @@ pub(super) async fn build_admin_pool_list_keys_response(
             .collect::<Vec<_>>();
         (keys, total, preloaded_pool_scores_by_key_id)
     } else if !quick_selectors.is_empty() || sort_by_score {
+        let use_full_search = !quick_selectors.is_empty();
         let mut keys = state
             .list_provider_catalog_keys_by_provider_ids(std::slice::from_ref(&provider.id))
             .await?
             .into_iter()
             .filter(|key| {
-                pool_selection::admin_pool_matches_search(
-                    state,
-                    key,
-                    &provider.provider_type,
-                    search.as_deref(),
-                )
+                if use_full_search {
+                    pool_selection::admin_pool_matches_search(
+                        state,
+                        key,
+                        &provider.provider_type,
+                        search.as_deref(),
+                    )
+                } else {
+                    pool_selection::admin_pool_matches_catalog_search(key, search.as_deref())
+                }
             })
             .filter(|key| {
                 quick_selectors.iter().all(|selector| {

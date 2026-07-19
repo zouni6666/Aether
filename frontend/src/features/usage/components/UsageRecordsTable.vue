@@ -1191,7 +1191,10 @@ function sanitizeColumnIds(
     seen.add(id as UsageRecordColumnId)
     return true
   })
-  return sanitized.length > 0 ? sanitized : [...fallback]
+  if (sanitized.length === 0) return [...fallback]
+  // Add newly introduced feature column to existing saved layouts, keeping it
+  // immediately before Tokens as the default presentation order.
+  return sanitized
 }
 
 const visibleColumnIds = computed<UsageRecordColumnId[]>({
@@ -1579,7 +1582,7 @@ function buildServiceTierBadgePresentation(
   const title = titleLines.join('\n')
   return {
     label: 'Fast',
-    className: '!bg-transparent text-amber-700 dark:text-amber-300',
+    className: '!bg-transparent text-blue-500 dark:text-blue-300',
     title,
     ariaLabel: titleLines.join('，'),
   }

@@ -1,7 +1,7 @@
 use super::payload::{
-    provider_query_extract_api_key_id, provider_query_extract_force_refresh,
-    provider_query_extract_model, provider_query_extract_provider_id,
-    provider_query_extract_request_id,
+    provider_query_extract_api_key_id, provider_query_extract_api_key_ids,
+    provider_query_extract_force_refresh, provider_query_extract_model,
+    provider_query_extract_provider_id, provider_query_extract_request_id,
 };
 use super::response::{
     build_admin_provider_query_bad_request_response, build_admin_provider_query_not_found_response,
@@ -103,6 +103,26 @@ struct ProviderQueryKeyFetchResult {
     warning: Option<String>,
     from_cache: bool,
     has_success: bool,
+}
+
+fn provider_query_select_model_keys(
+    keys: Vec<StoredProviderCatalogKey>,
+    selected_key_ids: Option<&BTreeSet<String>>,
+) -> Result<Vec<StoredProviderCatalogKey>, ()> {
+    if selected_key_ids.is_some_and(|selected| {
+        selected
+            .iter()
+            .any(|key_id| !keys.iter().any(|key| key.id == *key_id))
+    }) {
+        return Err(());
+    }
+    Ok(match selected_key_ids {
+        Some(selected) => keys
+            .into_iter()
+            .filter(|key| selected.contains(&key.id))
+            .collect(),
+        None => keys.into_iter().filter(|key| key.is_active).collect(),
+    })
 }
 
 fn provider_query_model_id(model: &Value) -> Option<&str> {
@@ -667,21 +687,27 @@ pub(crate) async fn build_admin_provider_query_models_response(
         .into_response());
     }
 
-    let active_keys = keys
-        .into_iter()
-        .filter(|key| key.is_active)
-        .collect::<Vec<_>>();
-    if active_keys.is_empty() {
+    let selected_key_ids = provider_query_extract_api_key_ids(payload);
+    let query_keys = match provider_query_select_model_keys(keys, selected_key_ids.as_ref()) {
+        Ok(keys) => keys,
+        Err(()) => {
+            return Ok(build_admin_provider_query_not_found_response(
+                ADMIN_PROVIDER_QUERY_API_KEY_NOT_FOUND_DETAIL,
+            ));
+        }
+    };
+    if query_keys.is_empty() {
         return Ok(build_admin_provider_query_bad_request_response(
             ADMIN_PROVIDER_QUERY_NO_ACTIVE_API_KEY_DETAIL,
         ));
     }
-    let active_key_count = active_keys.len();
+    let query_key_count = query_keys.len();
 
-    if provider
-        .provider_type
-        .trim()
-        .eq_ignore_ascii_case("antigravity")
+    if selected_key_ids.is_none()
+        && provider
+            .provider_type
+            .trim()
+            .eq_ignore_ascii_case("antigravity")
         && !force_refresh
     {
         if let Some(models) = provider_query_read_provider_cached_models(state, &provider.id).await
@@ -694,8 +720,8 @@ pub(crate) async fn build_admin_provider_query_models_response(
                     "error": serde_json::Value::Null,
                     "warning": serde_json::Value::Null,
                     "from_cache": true,
-                    "keys_total": active_key_count,
-                    "keys_cached": active_key_count,
+                    "keys_total": query_key_count,
+                    "keys_cached": query_key_count,
                     "keys_fetched": 0,
                 },
                 "provider": provider_query_provider_payload(&provider),
@@ -709,9 +735,9 @@ pub(crate) async fn build_admin_provider_query_models_response(
         .trim()
         .eq_ignore_ascii_case("antigravity")
     {
-        provider_query_sort_antigravity_keys(state, &provider, &endpoints, active_keys).await?
+        provider_query_sort_antigravity_keys(state, &provider, &endpoints, query_keys).await?
     } else {
-        active_keys
+        query_keys
     };
 
     let mut all_models = Vec::new();
@@ -754,10 +780,11 @@ pub(crate) async fn build_admin_provider_query_models_response(
     }
 
     let models = aggregate_models_for_cache(&all_models);
-    if provider
-        .provider_type
-        .trim()
-        .eq_ignore_ascii_case("antigravity")
+    if selected_key_ids.is_none()
+        && provider
+            .provider_type
+            .trim()
+            .eq_ignore_ascii_case("antigravity")
         && !models.is_empty()
     {
         provider_query_write_provider_cached_models(state, &provider.id, &models).await;
@@ -787,7 +814,7 @@ pub(crate) async fn build_admin_provider_query_models_response(
             "error": error,
             "warning": warning,
             "from_cache": fetch_count == 0 && cache_hit_count > 0,
-            "keys_total": active_key_count,
+            "keys_total": query_key_count,
             "keys_cached": cache_hit_count,
             "keys_fetched": fetch_count,
         },
@@ -813,6 +840,56 @@ mod tests {
         .expect("provider should build");
         provider.provider_type = "grok".to_string();
         provider
+    }
+
+    #[test]
+    fn selected_model_keys_use_the_explicit_batch_scope() {
+        let mut first = StoredProviderCatalogKey::new(
+            "key-a".to_string(),
+            "provider-1".to_string(),
+            "A".to_string(),
+            "api_key".to_string(),
+            None,
+            false,
+        )
+        .expect("key should build");
+        first.is_active = false;
+        let second = StoredProviderCatalogKey::new(
+            "key-b".to_string(),
+            "provider-1".to_string(),
+            "B".to_string(),
+            "api_key".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build");
+
+        let selected = BTreeSet::from(["key-a".to_string()]);
+        let keys =
+            provider_query_select_model_keys(vec![first.clone(), second.clone()], Some(&selected))
+                .expect("explicit selection should resolve");
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].id, "key-a");
+
+        let active = provider_query_select_model_keys(vec![first, second], None)
+            .expect("default selection should resolve");
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].id, "key-b");
+    }
+
+    #[test]
+    fn selected_model_keys_reject_unknown_ids() {
+        let key = StoredProviderCatalogKey::new(
+            "key-a".to_string(),
+            "provider-1".to_string(),
+            "A".to_string(),
+            "api_key".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build");
+        let selected = BTreeSet::from(["key-missing".to_string()]);
+        assert!(provider_query_select_model_keys(vec![key], Some(&selected)).is_err());
     }
 
     fn grok_key_with_quota(quota: Value) -> StoredProviderCatalogKey {

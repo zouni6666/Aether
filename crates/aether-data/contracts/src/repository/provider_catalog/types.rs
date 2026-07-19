@@ -684,6 +684,11 @@ pub trait ProviderCatalogWriteRepository: Send + Sync {
         key: &StoredProviderCatalogKey,
     ) -> Result<StoredProviderCatalogKey, crate::DataLayerError>;
 
+    async fn update_keys(
+        &self,
+        keys: &[StoredProviderCatalogKey],
+    ) -> Result<Vec<StoredProviderCatalogKey>, crate::DataLayerError>;
+
     async fn update_key_upstream_metadata(
         &self,
         key_id: &str,

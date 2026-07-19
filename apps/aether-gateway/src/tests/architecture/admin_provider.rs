@@ -897,6 +897,7 @@ fn admin_provider_pool_admin_mod_stays_thin() {
         "#[path = \"batch_routes/import.rs\"]",
         "#[path = \"batch_routes/shared.rs\"]",
         "#[path = \"batch_routes/task_status.rs\"]",
+        "#[path = \"batch_routes/update.rs\"]",
         "#[path = \"read_routes/keys.rs\"]",
         "#[path = \"read_routes/overview.rs\"]",
         "#[path = \"read_routes/presets.rs\"]",

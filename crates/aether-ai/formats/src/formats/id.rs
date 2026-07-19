@@ -371,6 +371,13 @@ mod tests {
         );
         assert_eq!(
             intersect_api_format_allowed_lists(
+                &["openai:responses".to_string()],
+                &["openai:responses:compact".to_string()],
+            ),
+            vec!["openai:responses:compact".to_string()]
+        );
+        assert_eq!(
+            intersect_api_format_allowed_lists(
                 &["openai:search".to_string()],
                 &["OPENAI:RESPONSES".to_string()],
             ),

@@ -1,6 +1,10 @@
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
-use sqlx::{postgres::PgRow, PgPool, Postgres, QueryBuilder, Row};
+use sqlx::{
+    postgres::{PgArguments, PgRow},
+    query::Query,
+    PgPool, Postgres, QueryBuilder, Row,
+};
 
 use aether_data_contracts::repository::provider_catalog::{
     ProviderCatalogKeyListOrder, ProviderCatalogKeyListQuery, ProviderCatalogReadRepository,
@@ -333,6 +337,136 @@ SELECT
 FROM provider_api_keys
 WHERE provider_id IN (
 "#;
+
+const KEY_UPDATE_SQL: &str = r#"
+UPDATE provider_api_keys
+SET
+  provider_id = $2,
+  api_formats = $3,
+  auth_type_by_format = $40,
+  allow_auth_channel_mismatch_formats = $41,
+  auth_type = $4,
+  api_key = $5,
+  auth_config = $6,
+  name = $7,
+  note = $8,
+  rate_multipliers = $9,
+  internal_priority = $10,
+  global_priority_by_format = $11,
+  rpm_limit = $12,
+  concurrent_limit = $13,
+  learned_rpm_limit = $14,
+  allowed_models = $15,
+  capabilities = $16,
+  cache_ttl_minutes = $17,
+  max_probe_interval_minutes = $18,
+  auto_fetch_models = $19,
+  locked_models = $20,
+  model_include_patterns = $21,
+  model_exclude_patterns = $22,
+  proxy = $23,
+  fingerprint = $24,
+  upstream_metadata = $25,
+  expires_at = CASE
+    WHEN $39::double precision IS NULL THEN NULL
+    ELSE TO_TIMESTAMP($39::double precision)
+  END,
+  oauth_invalid_at = CASE
+    WHEN $26::double precision IS NULL THEN NULL
+    ELSE TO_TIMESTAMP($26::double precision)
+  END,
+  oauth_invalid_reason = $27,
+  status_snapshot = $28,
+  concurrent_429_count = COALESCE($29, 0),
+  rpm_429_count = COALESCE($30, 0),
+  last_429_at = CASE
+    WHEN $31::double precision IS NULL THEN NULL
+    ELSE TO_TIMESTAMP($31::double precision)
+  END,
+  last_429_type = $32,
+  adjustment_history = $33,
+  utilization_samples = $34,
+  last_probe_increase_at = CASE
+    WHEN $35::double precision IS NULL THEN NULL
+    ELSE TO_TIMESTAMP($35::double precision)
+  END,
+  last_rpm_peak = $36,
+  is_active = $37,
+  updated_at = CASE
+    WHEN $38::double precision IS NULL THEN NOW()
+    ELSE TO_TIMESTAMP($38::double precision)
+  END,
+  last_models_fetch_at = CASE
+    WHEN $42::double precision IS NULL THEN NULL
+    ELSE TO_TIMESTAMP($42::double precision)
+  END,
+  last_models_fetch_error = $43
+WHERE id = $1
+"#;
+
+fn validate_key_for_update(key: &StoredProviderCatalogKey) -> Result<(), DataLayerError> {
+    if key.id.trim().is_empty() {
+        return Err(DataLayerError::InvalidInput(
+            "provider catalog key.id is empty".to_string(),
+        ));
+    }
+    if key.provider_id.trim().is_empty() {
+        return Err(DataLayerError::InvalidInput(
+            "provider catalog key.provider_id is empty".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn key_update_query(key: &StoredProviderCatalogKey) -> Query<'_, Postgres, PgArguments> {
+    sqlx::query(KEY_UPDATE_SQL)
+        .bind(&key.id)
+        .bind(&key.provider_id)
+        .bind(&key.api_formats)
+        .bind(&key.auth_type)
+        .bind(&key.encrypted_api_key)
+        .bind(&key.encrypted_auth_config)
+        .bind(&key.name)
+        .bind(&key.note)
+        .bind(&key.rate_multipliers)
+        .bind(key.internal_priority)
+        .bind(&key.global_priority_by_format)
+        .bind(key.rpm_limit.map(|value| value as i32))
+        .bind(key.concurrent_limit)
+        .bind(key.learned_rpm_limit.map(|value| value as i32))
+        .bind(&key.allowed_models)
+        .bind(&key.capabilities)
+        .bind(key.cache_ttl_minutes)
+        .bind(key.max_probe_interval_minutes)
+        .bind(key.auto_fetch_models)
+        .bind(&key.locked_models)
+        .bind(&key.model_include_patterns)
+        .bind(&key.model_exclude_patterns)
+        .bind(&key.proxy)
+        .bind(&key.fingerprint)
+        .bind(&key.upstream_metadata)
+        .bind(key.oauth_invalid_at_unix_secs.map(|value| value as f64))
+        .bind(&key.oauth_invalid_reason)
+        .bind(&key.status_snapshot)
+        .bind(key.concurrent_429_count.map(|value| value as i32))
+        .bind(key.rpm_429_count.map(|value| value as i32))
+        .bind(key.last_429_at_unix_secs.map(|value| value as f64))
+        .bind(&key.last_429_type)
+        .bind(&key.adjustment_history)
+        .bind(&key.utilization_samples)
+        .bind(
+            key.last_probe_increase_at_unix_secs
+                .map(|value| value as f64),
+        )
+        .bind(key.last_rpm_peak.map(|value| value as i32))
+        .bind(key.is_active)
+        .bind(key.updated_at_unix_secs.map(|value| value as f64))
+        .bind(key.expires_at_unix_secs.map(|value| value as f64))
+        .bind(&key.auth_type_by_format)
+        .bind(&key.allow_auth_channel_mismatch_formats)
+        .bind(key.last_models_fetch_at_unix_secs.map(|value| value as f64))
+        .bind(&key.last_models_fetch_error)
+}
 
 #[derive(Debug, Clone)]
 pub struct SqlxProviderCatalogReadRepository {
@@ -1652,134 +1786,12 @@ WHERE id = $1
         &self,
         key: &StoredProviderCatalogKey,
     ) -> Result<StoredProviderCatalogKey, DataLayerError> {
-        if key.id.trim().is_empty() {
-            return Err(DataLayerError::InvalidInput(
-                "provider catalog key.id is empty".to_string(),
-            ));
-        }
-        if key.provider_id.trim().is_empty() {
-            return Err(DataLayerError::InvalidInput(
-                "provider catalog key.provider_id is empty".to_string(),
-            ));
-        }
-
-        let rows_affected = sqlx::query(
-            r#"
-UPDATE provider_api_keys
-SET
-  provider_id = $2,
-  api_formats = $3,
-  auth_type_by_format = $40,
-  allow_auth_channel_mismatch_formats = $41,
-  auth_type = $4,
-  api_key = $5,
-  auth_config = $6,
-  name = $7,
-  note = $8,
-  rate_multipliers = $9,
-  internal_priority = $10,
-  global_priority_by_format = $11,
-  rpm_limit = $12,
-  concurrent_limit = $13,
-  learned_rpm_limit = $14,
-  allowed_models = $15,
-  capabilities = $16,
-  cache_ttl_minutes = $17,
-  max_probe_interval_minutes = $18,
-  auto_fetch_models = $19,
-  locked_models = $20,
-  model_include_patterns = $21,
-  model_exclude_patterns = $22,
-  proxy = $23,
-  fingerprint = $24,
-  upstream_metadata = $25,
-  expires_at = CASE
-    WHEN $39::double precision IS NULL THEN NULL
-    ELSE TO_TIMESTAMP($39::double precision)
-  END,
-  oauth_invalid_at = CASE
-    WHEN $26::double precision IS NULL THEN NULL
-    ELSE TO_TIMESTAMP($26::double precision)
-  END,
-  oauth_invalid_reason = $27,
-  status_snapshot = $28,
-  concurrent_429_count = COALESCE($29, 0),
-  rpm_429_count = COALESCE($30, 0),
-  last_429_at = CASE
-    WHEN $31::double precision IS NULL THEN NULL
-    ELSE TO_TIMESTAMP($31::double precision)
-  END,
-  last_429_type = $32,
-  adjustment_history = $33,
-  utilization_samples = $34,
-  last_probe_increase_at = CASE
-    WHEN $35::double precision IS NULL THEN NULL
-    ELSE TO_TIMESTAMP($35::double precision)
-  END,
-  last_rpm_peak = $36,
-  is_active = $37,
-  updated_at = CASE
-    WHEN $38::double precision IS NULL THEN NOW()
-    ELSE TO_TIMESTAMP($38::double precision)
-  END,
-  last_models_fetch_at = CASE
-    WHEN $42::double precision IS NULL THEN NULL
-    ELSE TO_TIMESTAMP($42::double precision)
-  END,
-  last_models_fetch_error = $43
-WHERE id = $1
-"#,
-        )
-        .bind(&key.id)
-        .bind(&key.provider_id)
-        .bind(&key.api_formats)
-        .bind(&key.auth_type)
-        .bind(&key.encrypted_api_key)
-        .bind(&key.encrypted_auth_config)
-        .bind(&key.name)
-        .bind(&key.note)
-        .bind(&key.rate_multipliers)
-        .bind(key.internal_priority)
-        .bind(&key.global_priority_by_format)
-        .bind(key.rpm_limit.map(|value| value as i32))
-        .bind(key.concurrent_limit)
-        .bind(key.learned_rpm_limit.map(|value| value as i32))
-        .bind(&key.allowed_models)
-        .bind(&key.capabilities)
-        .bind(key.cache_ttl_minutes)
-        .bind(key.max_probe_interval_minutes)
-        .bind(key.auto_fetch_models)
-        .bind(&key.locked_models)
-        .bind(&key.model_include_patterns)
-        .bind(&key.model_exclude_patterns)
-        .bind(&key.proxy)
-        .bind(&key.fingerprint)
-        .bind(&key.upstream_metadata)
-        .bind(key.oauth_invalid_at_unix_secs.map(|value| value as f64))
-        .bind(&key.oauth_invalid_reason)
-        .bind(&key.status_snapshot)
-        .bind(key.concurrent_429_count.map(|value| value as i32))
-        .bind(key.rpm_429_count.map(|value| value as i32))
-        .bind(key.last_429_at_unix_secs.map(|value| value as f64))
-        .bind(&key.last_429_type)
-        .bind(&key.adjustment_history)
-        .bind(&key.utilization_samples)
-        .bind(
-            key.last_probe_increase_at_unix_secs
-                .map(|value| value as f64),
-        )
-        .bind(key.last_rpm_peak.map(|value| value as i32))
-        .bind(key.is_active)
-        .bind(key.updated_at_unix_secs.map(|value| value as f64))
-        .bind(key.expires_at_unix_secs.map(|value| value as f64))
-        .bind(&key.auth_type_by_format)
-        .bind(&key.allow_auth_channel_mismatch_formats)
-        .bind(key.last_models_fetch_at_unix_secs.map(|value| value as f64))
-        .bind(&key.last_models_fetch_error)
-        .execute(&self.pool)
-        .await
-        .map_postgres_err()?
-        .rows_affected();
+        validate_key_for_update(key)?;
+        let rows_affected = key_update_query(key)
+            .execute(&self.pool)
+            .await
+            .map_postgres_err()?
+            .rows_affected();
 
         if rows_affected == 0 {
             return Err(DataLayerError::UnexpectedValue(format!(
@@ -1798,6 +1810,35 @@ WHERE id = $1
                     key.id
                 ))
             })
+    }
+
+    pub async fn update_keys(
+        &self,
+        keys: &[StoredProviderCatalogKey],
+    ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        for key in keys {
+            validate_key_for_update(key)?;
+        }
+
+        let mut transaction = self.pool.begin().await.map_postgres_err()?;
+        for key in keys {
+            let rows_affected = key_update_query(key)
+                .execute(&mut *transaction)
+                .await
+                .map_postgres_err()?
+                .rows_affected();
+            if rows_affected == 0 {
+                return Err(DataLayerError::UnexpectedValue(format!(
+                    "provider catalog key {} not found",
+                    key.id
+                )));
+            }
+        }
+        transaction.commit().await.map_postgres_err()?;
+        Ok(keys.to_vec())
     }
 
     pub async fn delete_key(&self, key_id: &str) -> Result<bool, DataLayerError> {
@@ -2176,6 +2217,13 @@ impl ProviderCatalogWriteRepository for SqlxProviderCatalogReadRepository {
         key: &StoredProviderCatalogKey,
     ) -> Result<StoredProviderCatalogKey, DataLayerError> {
         Self::update_key(self, key).await
+    }
+
+    async fn update_keys(
+        &self,
+        keys: &[StoredProviderCatalogKey],
+    ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
+        Self::update_keys(self, keys).await
     }
 
     async fn update_key_upstream_metadata(
