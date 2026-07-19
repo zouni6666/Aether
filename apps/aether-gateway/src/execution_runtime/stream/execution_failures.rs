@@ -21,8 +21,9 @@ use crate::log_ids::short_request_id;
 use crate::orchestration::{
     apply_local_execution_effect, resolve_local_failover_analysis_for_attempt,
     with_upstream_response_report_context, LocalAdaptiveRateLimitEffect, LocalAttemptFailureEffect,
-    LocalExecutionEffect, LocalExecutionEffectContext, LocalHealthFailureEffect,
-    LocalOAuthInvalidationEffect, LocalPoolErrorEffect,
+    LocalExecutionEffect, LocalExecutionEffectContext, LocalFailoverAnalysis,
+    LocalFailoverDecision, LocalHealthFailureEffect, LocalOAuthInvalidationEffect,
+    LocalPoolErrorEffect,
 };
 use crate::request_candidate_runtime::record_report_request_candidate_status;
 use crate::request_diagnostics::attach_current_request_diagnostics_to_report_context;
@@ -51,6 +52,12 @@ struct StreamFailureBodyFields<'a> {
     code: u16,
     #[serde(flatten)]
     extra_error_fields: &'a Map<String, Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamFailureHandling {
+    Terminal,
+    HonorLocalFailover,
 }
 
 impl StreamFailureReport {
@@ -257,7 +264,8 @@ async fn record_stream_sync_failure(
     report_context: Option<&Value>,
     payload: &GatewaySyncReportRequest,
     started_at_unix_ms: Option<u64>,
-) {
+    handling: StreamFailureHandling,
+) -> LocalFailoverAnalysis {
     let error_type = stream_failure_body_field(payload, "type").unwrap_or("internal");
     let error_message = stream_failure_body_field(payload, "message").unwrap_or_default();
     let error_body = payload
@@ -346,16 +354,22 @@ async fn record_stream_sync_failure(
         }),
     )
     .await;
-    let report_context_with_diagnostics =
-        attach_current_request_diagnostics_to_report_context(report_context);
-    let context_seed = build_terminal_usage_context_seed(
-        plan,
-        report_context_with_diagnostics.as_ref().or(report_context),
+    let retrying_next_candidate = matches!(
+        failure_analysis.decision,
+        LocalFailoverDecision::RetryNextCandidate
     );
-    let payload_seed = build_sync_terminal_usage_payload_seed(payload);
-    state
-        .usage_runtime
-        .record_sync_terminal(state.data.as_ref(), context_seed, payload_seed);
+    if !matches!(handling, StreamFailureHandling::HonorLocalFailover) || !retrying_next_candidate {
+        let report_context_with_diagnostics =
+            attach_current_request_diagnostics_to_report_context(report_context);
+        let context_seed = build_terminal_usage_context_seed(
+            plan,
+            report_context_with_diagnostics.as_ref().or(report_context),
+        );
+        let payload_seed = build_sync_terminal_usage_payload_seed(payload);
+        state
+            .usage_runtime
+            .record_sync_terminal(state.data.as_ref(), context_seed, payload_seed);
+    }
     let terminal_unix_secs = current_request_candidate_unix_ms();
     record_report_request_candidate_status(
         state,
@@ -374,6 +388,7 @@ async fn record_stream_sync_failure(
         },
     )
     .await;
+    failure_analysis
 }
 
 #[allow(clippy::too_many_arguments)] // internal helper for prefetch error handling
@@ -408,7 +423,31 @@ pub(super) async fn handle_prefetch_provider_private_stream_error(
             .then(|| base64::engine::general_purpose::STANDARD.encode(buffered_body)),
         telemetry,
     };
-    record_stream_sync_failure(state, plan, payload.report_context.as_ref(), &payload, None).await;
+    let failure_analysis = record_stream_sync_failure(
+        state,
+        plan,
+        payload.report_context.as_ref(),
+        &payload,
+        None,
+        StreamFailureHandling::HonorLocalFailover,
+    )
+    .await;
+    if matches!(
+        failure_analysis.decision,
+        LocalFailoverDecision::RetryNextCandidate
+    ) {
+        warn!(
+            event_name = "local_stream_candidate_retry_scheduled",
+            log_type = "event",
+            trace_id = %trace_id,
+            request_id = %request_id,
+            candidate_id = ?candidate_id,
+            status_code,
+            failover_classification = failure_analysis.classification.as_str(),
+            "gateway local stream decision retrying next candidate after prefetched provider error"
+        );
+        return Ok(None);
+    }
 
     let response =
         submit_local_core_error_or_sync_finalize(state, trace_id, decision, payload).await?;
@@ -443,7 +482,15 @@ pub(super) async fn handle_prefetch_stream_failure(
         buffered_body,
         failure,
     );
-    record_stream_sync_failure(state, plan, payload.report_context.as_ref(), &payload, None).await;
+    record_stream_sync_failure(
+        state,
+        plan,
+        payload.report_context.as_ref(),
+        &payload,
+        None,
+        StreamFailureHandling::Terminal,
+    )
+    .await;
 
     let response =
         submit_local_core_error_or_sync_finalize(state, trace_id, decision, payload).await?;
@@ -487,6 +534,7 @@ pub(super) async fn submit_midstream_stream_failure(
         payload.report_context.as_ref(),
         &payload,
         Some(started_at_unix_ms),
+        StreamFailureHandling::Terminal,
     )
     .await;
     if let Err(err) = submit_sync_report(state, payload).await {
