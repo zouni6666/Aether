@@ -135,10 +135,7 @@ fn json_value_has_cyber_policy_code(value: &Value, depth: usize) -> bool {
     }
     match value {
         Value::Object(object) => object.iter().any(|(key, value)| {
-            (key == "code"
-                && value
-                    .as_str()
-                    .is_some_and(|code| code.eq_ignore_ascii_case("cyber_policy")))
+            (key.eq_ignore_ascii_case("code") && value.as_str().is_some_and(is_cyber_policy_code))
                 || json_value_has_cyber_policy_code(value, depth + 1)
         }),
         Value::Array(values) => values
@@ -155,6 +152,11 @@ fn json_value_has_cyber_policy_code(value: &Value, depth: usize) -> bool {
         }
         _ => false,
     }
+}
+
+fn is_cyber_policy_code(code: &str) -> bool {
+    let code = code.trim();
+    code.eq_ignore_ascii_case("cyber_policy") || code.eq_ignore_ascii_case("cyber_policy_violation")
 }
 
 fn parse_local_error_response(response_text: Option<&str>) -> ParsedLocalErrorResponse {
@@ -387,6 +389,16 @@ mod tests {
                 &policy,
                 LocalFailoverInput::new(
                     400,
+                    Some(r#"{"error":{"code":"cyber_policy_violation"}}"#)
+                )
+            ),
+            LocalFailoverClassification::StopCyberPolicy
+        );
+        assert_eq!(
+            classify_local_failover(
+                &policy,
+                LocalFailoverInput::new(
+                    400,
                     Some(r#"{"outer":{"error":{"code":"cyber_policy"}}}"#)
                 )
             ),
@@ -403,9 +415,13 @@ mod tests {
 
     #[test]
     fn classifier_retries_cyber_policy_when_policy_disabled() {
+        let policy = LocalFailoverPolicy {
+            stop_cyber_policy_errors: false,
+            ..LocalFailoverPolicy::default()
+        };
         assert_eq!(
             classify_local_failover(
-                &LocalFailoverPolicy::default(),
+                &policy,
                 LocalFailoverInput::new(
                     400,
                     Some(r#"{"error":{"code":"cyber_policy","message":"flagged"}}"#)

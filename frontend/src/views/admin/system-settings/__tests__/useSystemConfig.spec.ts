@@ -94,6 +94,27 @@ describe('useSystemConfig', () => {
     expect(state.hasBasicConfigChanges.value).toBe(false)
   })
 
+  it('keeps Cyber failover disabled by default and saves the enabled state', async () => {
+    getAllSystemConfigsMock.mockResolvedValue([])
+    updateSystemConfigMock.mockResolvedValue({})
+
+    const state = useSystemConfig()
+    await state.loadSystemConfig()
+
+    expect(state.systemConfig.value.cyber_continue_failover).toBe(false)
+    state.systemConfig.value.cyber_continue_failover = true
+    expect(state.hasBasicConfigChanges.value).toBe(true)
+
+    await state.saveBasicConfig()
+
+    expect(updateSystemConfigMock).toHaveBeenCalledWith(
+      'cyber_continue_failover',
+      true,
+      'Cyber继续转移开关：开启后在响应内容开始前将Cyber Policy错误按普通错误继续故障转移，可能增加首字等待时间'
+    )
+    expect(state.hasBasicConfigChanges.value).toBe(false)
+  })
+
   it('uses backend-compatible defaults when config rows have not been persisted yet', async () => {
     getAllSystemConfigsMock.mockResolvedValue([])
 

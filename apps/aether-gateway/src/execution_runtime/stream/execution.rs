@@ -98,11 +98,12 @@ use crate::execution_runtime::{
 use crate::execution_runtime::{MAX_STREAM_PREFETCH_BYTES, MAX_STREAM_PREFETCH_FRAMES};
 use crate::log_ids::short_request_id;
 use crate::orchestration::{
-    apply_local_execution_effect, build_local_error_flow_metadata, trace_upstream_response_body,
-    with_error_flow_report_context, with_upstream_response_report_context,
-    LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect,
-    LocalExecutionEffect, LocalExecutionEffectContext, LocalHealthFailureEffect,
-    LocalHealthSuccessEffect, LocalOAuthInvalidationEffect, LocalPoolErrorEffect,
+    apply_local_execution_effect, build_local_error_flow_metadata, cyber_continue_failover_enabled,
+    trace_upstream_response_body, with_error_flow_report_context,
+    with_upstream_response_report_context, LocalAdaptiveRateLimitEffect,
+    LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect, LocalExecutionEffect,
+    LocalExecutionEffectContext, LocalHealthFailureEffect, LocalHealthSuccessEffect,
+    LocalOAuthInvalidationEffect, LocalPoolErrorEffect,
 };
 use crate::provider_pool_demand::{
     acquire_provider_pool_in_flight_guard, ProviderPoolInFlightGuard,
@@ -1119,6 +1120,7 @@ fn should_use_direct_sse_passthrough(
         execution.headers.get("content-type").map(String::as_str),
         plan.provider_api_format.as_str(),
         plan.client_api_format.as_str(),
+        false,
         false,
         false,
     )
@@ -4074,8 +4076,13 @@ fn should_skip_direct_finalize_prefetch(
     client_api_format: &str,
     has_private_stream_normalizer: bool,
     has_local_stream_rewriter: bool,
+    force_prefetch: bool,
 ) -> bool {
     if direct_stream_finalize_kind.is_none() {
+        return false;
+    }
+
+    if force_prefetch {
         return false;
     }
 
@@ -4101,6 +4108,36 @@ fn should_skip_direct_finalize_prefetch(
     }
 
     !(content_type.contains("json") || content_type.ends_with("+json"))
+}
+
+fn prefetched_openai_responses_body_has_output_boundary(body: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(body) else {
+        return true;
+    };
+    for line in text.lines() {
+        let Some(data) = line.trim().strip_prefix("data:").map(str::trim) else {
+            continue;
+        };
+        if data.is_empty() {
+            continue;
+        }
+        if data == "[DONE]" {
+            return true;
+        }
+        let Ok(event) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        let event_type = event.get("type").and_then(Value::as_str).map(str::trim);
+        if !event_type.is_some_and(|event_type| {
+            matches!(
+                event_type,
+                "response.created" | "response.in_progress" | "response.queued"
+            )
+        }) {
+            return true;
+        }
+    }
+    false
 }
 
 fn should_probe_success_failover_before_stream(headers: &BTreeMap<String, String>) -> bool {
@@ -4577,6 +4614,9 @@ async fn execute_stream_from_frame_stream(
         headers.insert("content-type".to_string(), "text/event-stream".to_string());
     }
     let upstream_content_type = upstream_headers.get("content-type").map(String::as_str);
+    let prefetch_for_cyber_failover =
+        is_openai_responses_family_format(plan.provider_api_format.as_str())
+            && cyber_continue_failover_enabled(state).await;
     let skip_direct_finalize_prefetch = should_skip_direct_finalize_prefetch(
         direct_stream_finalize_kind.as_deref(),
         upstream_content_type,
@@ -4584,6 +4624,7 @@ async fn execute_stream_from_frame_stream(
         plan.client_api_format.as_str(),
         private_stream_normalizer.is_some(),
         local_stream_rewriter.is_some(),
+        prefetch_for_cyber_failover,
     );
     let limit_direct_finalize_prefetch =
         should_limit_direct_finalize_prefetch(plan_kind, local_stream_rewriter.is_some());
@@ -4930,7 +4971,12 @@ async fn execute_stream_from_frame_stream(
                         prefetched_chunks.push(Bytes::from(rewritten_chunk));
                     }
 
-                    if matches!(inspection, StreamPrefetchInspection::NonError) {
+                    if matches!(inspection, StreamPrefetchInspection::NonError)
+                        && (!prefetch_for_cyber_failover
+                            || prefetched_openai_responses_body_has_output_boundary(
+                                &prefetched_inspection_body,
+                            ))
+                    {
                         break;
                     }
                 }
@@ -6190,10 +6236,10 @@ mod tests {
         ensure_stream_terminal_summary_for_missing_observed_finish,
         execute_execution_runtime_stream, execute_stream_from_frame_stream,
         maybe_apply_kiro_prompt_cache_usage_to_stream_summary, merge_stream_terminal_summary,
-        parse_direct_passthrough_mode, should_limit_direct_finalize_prefetch,
-        should_probe_success_failover_before_stream, should_skip_direct_finalize_prefetch,
-        stream_chunk_contains_sse_done, stream_requires_observed_terminal_event,
-        stream_terminal_summary_missing_observed_finish,
+        parse_direct_passthrough_mode, prefetched_openai_responses_body_has_output_boundary,
+        should_limit_direct_finalize_prefetch, should_probe_success_failover_before_stream,
+        should_skip_direct_finalize_prefetch, stream_chunk_contains_sse_done,
+        stream_requires_observed_terminal_event, stream_terminal_summary_missing_observed_finish,
         stream_terminal_summary_missing_observed_finish_with_requirement,
         stream_terminal_summary_represents_failure_with_requirement,
         ClientVisibleStreamCompletionTracker, DirectPassthroughMode, ProviderStreamErrorInspection,
@@ -6205,6 +6251,20 @@ mod tests {
 
     fn provider_catalog_stop_429_for_plan(
         plan: &ExecutionPlan,
+    ) -> InMemoryProviderCatalogReadRepository {
+        provider_catalog_for_plan(
+            plan,
+            Some(json!({
+                "failover_rules": {
+                    "stop_status_codes": [429]
+                }
+            })),
+        )
+    }
+
+    fn provider_catalog_for_plan(
+        plan: &ExecutionPlan,
+        provider_config: Option<Value>,
     ) -> InMemoryProviderCatalogReadRepository {
         let provider_type = plan.provider_name.as_deref().unwrap_or("custom");
         let provider = StoredProviderCatalogProvider::new(
@@ -6223,11 +6283,7 @@ mod tests {
             None,
             None,
             None,
-            Some(json!({
-                "failover_rules": {
-                    "stop_status_codes": [429]
-                }
-            })),
+            provider_config,
         );
         let endpoint = StoredProviderCatalogEndpoint::new(
             plan.endpoint_id.clone(),
@@ -6272,6 +6328,118 @@ mod tests {
         .expect("key transport should build");
 
         InMemoryProviderCatalogReadRepository::seed(vec![provider], vec![endpoint], vec![key])
+    }
+
+    fn codex_cyber_policy_plan(request_id: &str) -> ExecutionPlan {
+        ExecutionPlan {
+            request_id: request_id.to_string(),
+            candidate_id: Some(format!("candidate-{request_id}")),
+            provider_name: Some("codex".to_string()),
+            provider_id: format!("provider-{request_id}"),
+            endpoint_id: format!("endpoint-{request_id}"),
+            key_id: format!("key-{request_id}"),
+            method: "POST".to_string(),
+            url: "https://chatgpt.com/backend-api/codex/responses".to_string(),
+            headers: BTreeMap::from([
+                ("content-type".to_string(), "application/json".to_string()),
+                ("accept".to_string(), "text/event-stream".to_string()),
+            ]),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({
+                "model": "gpt-5.5",
+                "input": [],
+                "stream": true
+            })),
+            stream: true,
+            client_api_format: "openai:responses".to_string(),
+            provider_api_format: "openai:responses".to_string(),
+            model_name: Some("gpt-5.5".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        }
+    }
+
+    async fn execute_prefetched_codex_cyber_policy_failure(
+        continue_failover: bool,
+    ) -> Option<axum::http::Response<Body>> {
+        let request_id = if continue_failover {
+            "req-cyber-policy-retry"
+        } else {
+            "req-cyber-policy-stop"
+        };
+        let plan = codex_cyber_policy_plan(request_id);
+        let provider_catalog = provider_catalog_for_plan(&plan, None);
+        let data_state = crate::data::GatewayDataState::with_provider_transport_reader_for_tests(
+            Arc::new(provider_catalog),
+            "development-key",
+        );
+        let data_state = if continue_failover {
+            data_state.with_system_config_values_for_tests([(
+                crate::orchestration::CYBER_CONTINUE_FAILOVER_CONFIG_KEY.to_string(),
+                json!(true),
+            )])
+        } else {
+            data_state
+        };
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(data_state);
+        let upstream_setup = "event: response.created\ndata: {\"type\":\"response.created\"}\n\n";
+        let upstream_error = "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"type\":\"invalid_request\",\"message\":\"cyber policy rejected the request\",\"code\":\"cyber_policy_violation\",\"param\":\"input\"}}}\n\n";
+        let frame_stream = stream! {
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                frame_type: StreamFrameType::Headers,
+                payload: StreamFramePayload::Headers {
+                    status_code: 200,
+                    headers: BTreeMap::from([(
+                        "content-type".to_string(),
+                        "text/event-stream".to_string(),
+                    )]),
+                },
+            }));
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                frame_type: StreamFrameType::Data,
+                payload: StreamFramePayload::Data {
+                    chunk_b64: None,
+                    text: Some(upstream_setup.to_string()),
+                },
+            }));
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                frame_type: StreamFrameType::Data,
+                payload: StreamFramePayload::Data {
+                    chunk_b64: None,
+                    text: Some(upstream_error.to_string()),
+                },
+            }));
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame::eof()));
+        }
+        .boxed();
+
+        execute_stream_from_frame_stream(
+            &state,
+            plan,
+            &format!("trace-{request_id}"),
+            &test_decision(),
+            "openai_responses_stream",
+            Some("openai_responses_stream_success".to_string()),
+            Some(json!({
+                "request_id": request_id,
+                "candidate_id": format!("candidate-{request_id}"),
+                "candidate_index": 0,
+                "retry_index": 0,
+                "provider_api_format": "openai:responses",
+                "client_api_format": "openai:responses"
+            })),
+            crate::clock::current_unix_ms(),
+            Instant::now(),
+            RequestStageTrace::from_env(),
+            frame_stream,
+            None,
+        )
+        .await
+        .expect("execution should succeed")
     }
 
     fn test_decision() -> GatewayControlDecision {
@@ -6363,6 +6531,25 @@ mod tests {
             Some(&json!("cyber_policy_violation"))
         );
         assert_eq!(detected.pointer("/error/param"), Some(&json!("input")));
+    }
+
+    #[tokio::test]
+    async fn prefetched_codex_cyber_policy_violation_stops_failover_by_default() {
+        let response = execute_prefetched_codex_cyber_policy_failure(false)
+            .await
+            .expect("default Codex cyber policy handling should return the provider error");
+
+        assert_eq!(response.status().as_u16(), 200);
+    }
+
+    #[tokio::test]
+    async fn prefetched_codex_cyber_policy_violation_retries_when_system_setting_is_enabled() {
+        assert!(
+            execute_prefetched_codex_cyber_policy_failure(true)
+                .await
+                .is_none(),
+            "enabling cyber failover should retry the next candidate"
+        );
     }
 
     fn tunnel_proxy_snapshot(base_url: String) -> aether_contracts::ProxySnapshot {
@@ -7258,6 +7445,7 @@ mod tests {
             "claude:messages",
             false,
             false,
+            false,
         ));
     }
 
@@ -7268,6 +7456,7 @@ mod tests {
             None,
             "claude:messages",
             "claude:messages",
+            false,
             false,
             false,
         ));
@@ -7282,6 +7471,7 @@ mod tests {
             "claude:messages",
             false,
             false,
+            false,
         ));
     }
 
@@ -7294,6 +7484,30 @@ mod tests {
             "claude:messages",
             false,
             true,
+            false,
+        ));
+    }
+
+    #[test]
+    fn cyber_failover_setting_forces_prefetch_for_event_streams() {
+        assert!(!should_skip_direct_finalize_prefetch(
+            Some("openai_responses_sync_finalize"),
+            Some("text/event-stream"),
+            "openai:responses",
+            "openai:responses",
+            false,
+            false,
+            true,
+        ));
+    }
+
+    #[test]
+    fn cyber_prefetch_waits_through_response_setup_until_output() {
+        assert!(!prefetched_openai_responses_body_has_output_boundary(
+            b"event: response.created\ndata: {\"type\":\"response.created\"}\n\n"
+        ));
+        assert!(prefetched_openai_responses_body_has_output_boundary(
+            b"event: response.created\ndata: {\"type\":\"response.created\"}\n\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n"
         ));
     }
 
