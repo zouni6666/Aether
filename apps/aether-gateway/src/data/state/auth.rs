@@ -1781,20 +1781,13 @@ impl GatewayDataState {
         let Some(mut snapshot) = snapshot else {
             return Ok(None);
         };
-        if snapshot.user_role.eq_ignore_ascii_case("admin") && !snapshot.api_key_is_standalone {
-            apply_admin_unrestricted_auth_snapshot(&mut snapshot);
-            return Ok(Some(GatewayAuthApiKeySnapshot::from_stored(
-                snapshot,
-                now_unix_secs,
-            )));
-        }
         let Some(repository) = self.user_reader.as_ref() else {
             return Ok(Some(GatewayAuthApiKeySnapshot::from_stored(
                 snapshot,
                 now_unix_secs,
             )));
         };
-        let Some(user) = crate::request_diagnostics::observe_db_operation(
+        let Some(_) = crate::request_diagnostics::observe_db_operation(
             "auth_user_policy",
             self.database_pool_summary(),
             repository.find_user_auth_by_id(&snapshot.user_id),
@@ -1806,14 +1799,6 @@ impl GatewayDataState {
                 now_unix_secs,
             )));
         };
-        if user.role.eq_ignore_ascii_case("admin") && !snapshot.api_key_is_standalone {
-            snapshot.user_role = user.role;
-            apply_admin_unrestricted_auth_snapshot(&mut snapshot);
-            return Ok(Some(GatewayAuthApiKeySnapshot::from_stored(
-                snapshot,
-                now_unix_secs,
-            )));
-        }
         let groups = self
             .effective_user_groups_for_user(&snapshot.user_id)
             .await?;
@@ -1923,18 +1908,6 @@ impl GatewayDataState {
         }
         Ok(group_ids.into_iter().collect())
     }
-}
-
-fn apply_admin_unrestricted_auth_snapshot(snapshot: &mut StoredAuthApiKeySnapshot) {
-    snapshot.user_allowed_providers = None;
-    snapshot.user_allowed_api_formats = None;
-    snapshot.user_allowed_models = None;
-    snapshot.user_rate_limit = None;
-    snapshot.api_key_allowed_providers = None;
-    snapshot.api_key_allowed_api_formats = None;
-    snapshot.api_key_allowed_models = None;
-    snapshot.api_key_rate_limit = None;
-    snapshot.api_key_concurrent_limit = None;
 }
 
 // Per-user list policy columns are retained only for legacy import/export compatibility.
