@@ -1673,7 +1673,7 @@ async fn gateway_handles_admin_user_api_key_routes_locally_with_trusted_admin_pr
 }
 
 #[tokio::test]
-async fn admin_created_user_key_inherits_target_user_policy_not_admin_policy() {
+async fn admin_created_user_keys_inherit_owner_group_policy() {
     let mut admin_snapshot = sample_admin_api_key_snapshot("admin-user", "admin-seed-key");
     admin_snapshot.user_role = "admin".to_string();
     let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![
@@ -1854,6 +1854,44 @@ async fn admin_created_user_key_inherits_target_user_policy_not_admin_policy() {
         key_features, None,
         "an omitted key override must inherit target settings"
     );
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/users/admin-user/api-keys"))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "admin-session")
+        .json(&json!({"name": "admin-user-key"}))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("response should parse");
+    let plaintext_key = payload["key"].as_str().expect("plaintext key should exist");
+
+    let resolved = inspection_state
+        .read_cached_auth_api_key_snapshot_by_key_hash(
+            &hash_api_key(plaintext_key),
+            chrono::Utc::now().timestamp().max(0) as u64,
+        )
+        .await
+        .expect("admin-owned user key snapshot should resolve")
+        .expect("admin-owned user key snapshot should exist");
+    assert_eq!(resolved.user_id, "admin-user");
+    assert!(!resolved.api_key_is_standalone);
+    assert_eq!(
+        resolved.effective_allowed_providers(),
+        Some(&["openai".to_string()][..])
+    );
+    assert_eq!(
+        resolved.effective_allowed_api_formats(),
+        Some(&["openai:responses".to_string()][..])
+    );
+    assert_eq!(
+        resolved.effective_allowed_models(),
+        Some(&["gpt-5.4".to_string()][..])
+    );
+    assert_eq!(resolved.user_rate_limit, Some(100));
 
     gateway_handle.abort();
 }
