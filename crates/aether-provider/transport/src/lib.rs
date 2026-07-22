@@ -30,11 +30,13 @@ pub mod windsurf;
 
 pub use aether_oauth as oauth;
 pub use agent_identity::{
-    is_codex_agent_identity_auth_config_value, is_codex_agent_identity_cached_entry,
-    is_codex_agent_identity_invalid_task_response, is_codex_agent_identity_transport,
-    validate_codex_agent_identity_auth_config, CodexAgentIdentityRefreshAdapter,
-    CODEX_AGENT_IDENTITY_AUTH_MODE, CODEX_AGENT_IDENTITY_CACHED_ENTRY_PROVIDER_TYPE,
-    CODEX_AGENT_IDENTITY_PROVIDER_TYPE, CODEX_AGENT_IDENTITY_TASK_REGISTRATION_REQUEST_ID,
+    create_codex_agent_identity_from_session_token, is_codex_agent_identity_auth_config_value,
+    is_codex_agent_identity_cached_entry, is_codex_agent_identity_invalid_task_response,
+    is_codex_agent_identity_transport, validate_codex_agent_identity_auth_config,
+    CodexAgentIdentityEnrollmentError, CodexAgentIdentityRefreshAdapter,
+    CODEX_AGENT_IDENTITY_AGENT_REGISTRATION_REQUEST_ID, CODEX_AGENT_IDENTITY_AUTH_MODE,
+    CODEX_AGENT_IDENTITY_CACHED_ENTRY_PROVIDER_TYPE, CODEX_AGENT_IDENTITY_PROVIDER_TYPE,
+    CODEX_AGENT_IDENTITY_TASK_REGISTRATION_REQUEST_ID,
 };
 pub use auth::{build_passthrough_headers, ensure_upstream_auth_header};
 pub use auth_config::apply_local_auth_config_header_overrides;

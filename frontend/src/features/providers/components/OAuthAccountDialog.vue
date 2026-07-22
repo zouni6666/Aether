@@ -643,20 +643,53 @@
             </div>
           </div>
 
-          <JsonImportInput
-            v-else
-            v-model="importText"
-            :disabled="importing"
-            :reset-key="importInputResetKey"
-            :drop-title="importDropTitle"
-            :drop-hint="importDropHint"
-            :manual-placeholder="importManualPlaceholder"
-            :manual-description="importManualDescription"
-            :paste-toggle-text="importPasteToggleText"
-            :file-toggle-text="importFileToggleText"
-            textarea-class="min-h-[200px] text-xs font-mono break-all !rounded-xl"
-            @error="handleImportInputError"
-          />
+          <template v-else>
+            <div
+              v-if="isCodexProvider"
+              class="rounded-lg border border-border bg-muted/20 px-3 py-2.5"
+            >
+              <div class="flex items-center justify-between gap-3">
+                <div class="min-w-0">
+                  <p class="text-xs font-medium">
+                    {{ legacyT('使用 Session Token 创建 Agent Identity（实验）') }}
+                  </p>
+                  <p class="mt-0.5 text-[11px] text-muted-foreground">
+                    {{ legacyT('仅用于一次性注册，成功后不会保存 Token。') }}
+                  </p>
+                </div>
+                <Switch
+                  v-model="useSessionTokenAgentIdentity"
+                  :disabled="importing"
+                  :aria-label="legacyT('使用 Session Token 创建 Agent Identity（实验）')"
+                />
+              </div>
+            </div>
+
+            <Textarea
+              v-if="isCodexSessionTokenAgentIdentityImport"
+              v-model="importText"
+              :disabled="importing"
+              :placeholder="legacyT('粘贴 ChatGPT Session Token（JWT）')"
+              class="min-h-[200px] text-xs font-mono break-all !rounded-xl"
+              autocomplete="off"
+              spellcheck="false"
+            />
+
+            <JsonImportInput
+              v-else
+              v-model="importText"
+              :disabled="importing"
+              :reset-key="importInputResetKey"
+              :drop-title="importDropTitle"
+              :drop-hint="importDropHint"
+              :manual-placeholder="importManualPlaceholder"
+              :manual-description="importManualDescription"
+              :paste-toggle-text="importPasteToggleText"
+              :file-toggle-text="importFileToggleText"
+              textarea-class="min-h-[200px] text-xs font-mono break-all !rounded-xl"
+              @error="handleImportInputError"
+            />
+          </template>
 
           <div
             v-if="importTask && !isWindsurfEmailPasswordImport"
@@ -740,7 +773,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onBeforeUnmount } from 'vue'
-import { Dialog, Button, Textarea, Popover, PopoverTrigger, PopoverContent } from '@/components/ui'
+import { Dialog, Button, Textarea, Popover, PopoverTrigger, PopoverContent, Switch } from '@/components/ui'
 import {
   ComboboxAnchor,
   ComboboxContent,
@@ -941,6 +974,7 @@ const windsurfImportMethod = ref<WindsurfImportMethod>('email_password')
 const windsurfEmail = ref('')
 const windsurfPassword = ref('')
 const windsurfAccountName = ref('')
+const useSessionTokenAgentIdentity = ref(false)
 
 const isOpen = computed(() => props.open)
 
@@ -1039,7 +1073,7 @@ const importManualPlaceholder = computed(() => (
     ? legacyT('粘贴 Grok sso/session token，支持每行一个；或粘贴包含 token、sso_token、access_token、plan_type、pool_tier 的 JSON')
     : isWindsurfProvider.value
       ? legacyT('粘贴 show-auth-token Token、API key 或 JSON 内容')
-      : legacyT('粘贴 Refresh Token / Access Token 或 JSON 内容')
+      : legacyT('粘贴 Refresh Token / Access Token / Agent Identity JSON 内容')
 ))
 const importManualDescription = computed(() => (
   isGrokProvider.value
@@ -1065,12 +1099,18 @@ const proxyUsageDescription = computed(() => {
 const isWindsurfEmailPasswordImport = computed(() =>
   isWindsurfProvider.value && windsurfImportMethod.value === 'email_password'
 )
+const isCodexSessionTokenAgentIdentityImport = computed(() =>
+  isCodexProvider.value && useSessionTokenAgentIdentity.value
+)
 
 const importButtonText = computed(() => {
   if (importing.value) {
     return importTask.value && !isWindsurfEmailPasswordImport.value
       ? (isEnglishLocale() ? `Importing ${importTask.value.progress_percent}%` : `导入中 ${importTask.value.progress_percent}%`)
       : legacyT('导入中...')
+  }
+  if (isCodexSessionTokenAgentIdentityImport.value) {
+    return legacyT('创建并导入 Agent Identity')
   }
   return isWindsurfEmailPasswordImport.value ? legacyT('登录并导入') : importButtonLabel.value
 })
@@ -1328,6 +1368,7 @@ function resetForm() {
   windsurfEmail.value = ''
   windsurfPassword.value = ''
   windsurfAccountName.value = ''
+  useSessionTokenAgentIdentity.value = false
   proxyPopoverOpen.value = false
   selectedProxyNodeId.value = ''
   mode.value = defaultMode.value
@@ -1779,6 +1820,26 @@ async function handleImport() {
   const inputText = importText.value.trim()
   if (!inputText) {
     showError(legacyT('请输入凭据数据'), legacyT('格式错误'))
+    return
+  }
+
+  if (isCodexSessionTokenAgentIdentityImport.value) {
+    importing.value = true
+    try {
+      const result = await importProviderRefreshToken(props.providerId, {
+        session_token: inputText,
+        create_agent_identity_from_session_token: true,
+        proxy_node_id: selectedProxyNodeId.value || undefined,
+      })
+      success(getOAuthSuccessMessage('导入', result))
+      emit('saved')
+      handleClose()
+    } catch (err: unknown) {
+      const errorMessage = localizedApiError(err, '创建 Agent Identity 失败')
+      showError(errorMessage, legacyT('错误'))
+    } finally {
+      importing.value = false
+    }
     return
   }
 
