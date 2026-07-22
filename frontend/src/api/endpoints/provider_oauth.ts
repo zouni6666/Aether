@@ -240,6 +240,8 @@ export async function importProviderRefreshToken(
     authToken?: string
     refresh_token?: string
     access_token?: string
+    session_token?: string
+    create_agent_identity_from_session_token?: boolean
     password?: string
     expires_at?: number
     name?: string

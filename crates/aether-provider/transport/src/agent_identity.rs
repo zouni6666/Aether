@@ -1,16 +1,24 @@
 use std::collections::BTreeMap;
 
+use aether_oauth::network::{OAuthHttpExecutor, OAuthHttpRequest, OAuthNetworkContext};
 use async_trait::async_trait;
 use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
     Engine as _,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
-use crypto_box::SecretKey as Curve25519SecretKey;
-use ed25519_dalek::{pkcs8::DecodePrivateKey, Signer, SigningKey};
+use crypto_box::{
+    aead::rand_core::{OsRng, RngCore},
+    SecretKey as Curve25519SecretKey,
+};
+use ed25519_dalek::{
+    pkcs8::{DecodePrivateKey, EncodePrivateKey},
+    Signer, SigningKey,
+};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha512};
+use thiserror::Error;
 use url::Url;
 
 use super::oauth_refresh::{
@@ -22,11 +30,35 @@ use super::snapshot::GatewayProviderTransportSnapshot;
 pub const CODEX_AGENT_IDENTITY_AUTH_MODE: &str = "agentIdentity";
 pub const CODEX_AGENT_IDENTITY_PROVIDER_TYPE: &str = "codex";
 pub const CODEX_AGENT_IDENTITY_CACHED_ENTRY_PROVIDER_TYPE: &str = "codex_agent_identity";
+pub const CODEX_AGENT_IDENTITY_AGENT_REGISTRATION_REQUEST_ID: &str =
+    "codex:agent-identity-agent-register";
 pub const CODEX_AGENT_IDENTITY_TASK_REGISTRATION_REQUEST_ID: &str =
     "codex:agent-identity-task-register";
 const CODEX_AGENT_IDENTITY_AUTH_API_BASE_URL: &str = "https://auth.openai.com/api/accounts";
 const AUTHORIZATION_HEADER: &str = "authorization";
 const ASSERTION_PREFIX: &str = "AgentAssertion ";
+const CODEX_AGENT_IDENTITY_AGENT_HARNESS_ID: &str = "codex-cli";
+const CODEX_AGENT_IDENTITY_RUNNING_LOCATION: &str = "local";
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum CodexAgentIdentityEnrollmentError {
+    #[error("ChatGPT Session Token 不能为空")]
+    MissingSessionToken,
+    #[error("Agent Identity 注册请求失败")]
+    RegistrationRequestFailed,
+    #[error("Agent Identity 注册被拒绝（HTTP {status_code}）")]
+    RegistrationRejected { status_code: u16 },
+    #[error("Agent Identity 注册响应无效")]
+    InvalidRegistrationResponse,
+    #[error("Agent Identity 密钥生成失败")]
+    KeyGenerationFailed,
+    #[error("Agent Identity task 初始化请求失败")]
+    TaskRegistrationRequestFailed,
+    #[error("Agent Identity task 初始化被拒绝（HTTP {status_code}）")]
+    TaskRegistrationRejected { status_code: u16 },
+    #[error("Agent Identity task 初始化响应无效")]
+    InvalidTaskRegistrationResponse,
+}
 
 #[derive(Clone)]
 struct AgentIdentityCredentials {
@@ -45,6 +77,14 @@ struct AgentTaskRegistrationResponse {
     encrypted_task_id: Option<String>,
     #[serde(default, rename = "encryptedTaskId")]
     encrypted_task_id_camel: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentRegistrationResponse {
+    #[serde(default)]
+    agent_runtime_id: Option<String>,
+    #[serde(default, rename = "agentRuntimeId")]
+    agent_runtime_id_camel: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -289,6 +329,182 @@ fn task_registration_url(base_url: &str, runtime_id: &str) -> Result<String, Str
     Ok(url.into())
 }
 
+fn agent_registration_url(base_url: &str) -> Result<String, String> {
+    let mut url = Url::parse(base_url.trim())
+        .map_err(|_| "Agent Identity auth API base URL is invalid".to_string())?;
+    let mut segments = url
+        .path_segments_mut()
+        .map_err(|_| "Agent Identity auth API base URL cannot be a base URL".to_string())?;
+    segments.pop_if_empty();
+    for segment in ["v1", "agent", "register"] {
+        segments.push(segment);
+    }
+    drop(segments);
+    Ok(url.into())
+}
+
+fn generate_agent_identity_signing_key() -> SigningKey {
+    let mut seed = [0_u8; 32];
+    let mut rng = OsRng;
+    rng.fill_bytes(&mut seed);
+    let signing_key = SigningKey::from_bytes(&seed);
+    seed.fill(0);
+    signing_key
+}
+
+fn agent_identity_ssh_public_key(signing_key: &SigningKey) -> String {
+    let header = b"ssh-ed25519";
+    let public_key = signing_key.verifying_key().to_bytes();
+    let mut blob = Vec::with_capacity(4 + header.len() + 4 + public_key.len());
+    blob.extend_from_slice(&(header.len() as u32).to_be_bytes());
+    blob.extend_from_slice(header);
+    blob.extend_from_slice(&(public_key.len() as u32).to_be_bytes());
+    blob.extend_from_slice(&public_key);
+    format!("ssh-ed25519 {}", STANDARD.encode(blob))
+}
+
+fn agent_runtime_id_from_registration_response(body: &str) -> Result<String, ()> {
+    let response = serde_json::from_str::<AgentRegistrationResponse>(body).map_err(|_| ())?;
+    [response.agent_runtime_id, response.agent_runtime_id_camel]
+        .into_iter()
+        .flatten()
+        .map(|value| value.trim().to_string())
+        .find(|value| !value.is_empty())
+        .ok_or(())
+}
+
+/// Uses a ChatGPT session token once to register a fresh Agent Identity. The returned config
+/// contains only the generated signing credentials and is deliberately free of the session token.
+pub async fn create_codex_agent_identity_from_session_token(
+    executor: &dyn OAuthHttpExecutor,
+    session_token: &str,
+    network: OAuthNetworkContext,
+) -> Result<Map<String, Value>, CodexAgentIdentityEnrollmentError> {
+    create_codex_agent_identity_from_session_token_with_auth_api_base_url(
+        executor,
+        session_token,
+        network,
+        CODEX_AGENT_IDENTITY_AUTH_API_BASE_URL,
+    )
+    .await
+}
+
+async fn create_codex_agent_identity_from_session_token_with_auth_api_base_url(
+    executor: &dyn OAuthHttpExecutor,
+    session_token: &str,
+    network: OAuthNetworkContext,
+    auth_api_base_url: &str,
+) -> Result<Map<String, Value>, CodexAgentIdentityEnrollmentError> {
+    let session_token = session_token.trim();
+    if session_token.is_empty() {
+        return Err(CodexAgentIdentityEnrollmentError::MissingSessionToken);
+    }
+
+    let signing_key = generate_agent_identity_signing_key();
+    let private_key_der = signing_key
+        .to_pkcs8_der()
+        .map_err(|_| CodexAgentIdentityEnrollmentError::KeyGenerationFailed)?;
+    let agent_private_key = STANDARD.encode(private_key_der.as_bytes());
+    let agent_public_key = agent_identity_ssh_public_key(&signing_key);
+    let registration_url = agent_registration_url(auth_api_base_url)
+        .map_err(|_| CodexAgentIdentityEnrollmentError::RegistrationRequestFailed)?;
+    let registration_response = executor
+        .execute(OAuthHttpRequest {
+            request_id: CODEX_AGENT_IDENTITY_AGENT_REGISTRATION_REQUEST_ID.to_string(),
+            method: reqwest::Method::POST,
+            url: registration_url,
+            headers: BTreeMap::from([
+                ("accept".to_string(), "application/json".to_string()),
+                ("content-type".to_string(), "application/json".to_string()),
+                (
+                    "authorization".to_string(),
+                    format!("Bearer {session_token}"),
+                ),
+                (
+                    "user-agent".to_string(),
+                    aether_ai_formats::CODEX_CLIENT_USER_AGENT.to_string(),
+                ),
+                (
+                    "originator".to_string(),
+                    aether_ai_formats::CODEX_CLIENT_ORIGINATOR.to_string(),
+                ),
+            ]),
+            content_type: Some("application/json".to_string()),
+            json_body: Some(json!({
+                "abom": {
+                    "agent_version": aether_ai_formats::CODEX_CLIENT_VERSION,
+                    "agent_harness_id": CODEX_AGENT_IDENTITY_AGENT_HARNESS_ID,
+                    "running_location": CODEX_AGENT_IDENTITY_RUNNING_LOCATION,
+                },
+                "agent_public_key": agent_public_key,
+            })),
+            body_bytes: None,
+            network: network.clone(),
+        })
+        .await
+        .map_err(|_| CodexAgentIdentityEnrollmentError::RegistrationRequestFailed)?;
+    if !(200..300).contains(&registration_response.status_code) {
+        return Err(CodexAgentIdentityEnrollmentError::RegistrationRejected {
+            status_code: registration_response.status_code,
+        });
+    }
+    let agent_runtime_id =
+        agent_runtime_id_from_registration_response(registration_response.body_text.as_str())
+            .map_err(|_| CodexAgentIdentityEnrollmentError::InvalidRegistrationResponse)?;
+
+    let mut auth_config = Map::from_iter([
+        (
+            "provider_type".to_string(),
+            json!(CODEX_AGENT_IDENTITY_PROVIDER_TYPE),
+        ),
+        (
+            "auth_mode".to_string(),
+            json!(CODEX_AGENT_IDENTITY_AUTH_MODE),
+        ),
+        ("agent_runtime_id".to_string(), json!(agent_runtime_id)),
+        ("agent_private_key".to_string(), json!(agent_private_key)),
+    ]);
+    let config_value = Value::Object(auth_config.clone());
+    let credentials = agent_identity_credentials(&config_value)
+        .map_err(|_| CodexAgentIdentityEnrollmentError::KeyGenerationFailed)?;
+    let (timestamp, signature) = build_task_registration_signature(&credentials, Utc::now());
+    let task_url = task_registration_url(auth_api_base_url, credentials.runtime_id.as_str())
+        .map_err(|_| CodexAgentIdentityEnrollmentError::TaskRegistrationRequestFailed)?;
+    let task_response = executor
+        .execute(OAuthHttpRequest {
+            request_id: CODEX_AGENT_IDENTITY_TASK_REGISTRATION_REQUEST_ID.to_string(),
+            method: reqwest::Method::POST,
+            url: task_url,
+            headers: BTreeMap::from([
+                ("accept".to_string(), "application/json".to_string()),
+                ("content-type".to_string(), "application/json".to_string()),
+            ]),
+            content_type: Some("application/json".to_string()),
+            json_body: Some(json!({
+                "timestamp": timestamp,
+                "signature": signature,
+            })),
+            body_bytes: None,
+            network,
+        })
+        .await
+        .map_err(|_| CodexAgentIdentityEnrollmentError::TaskRegistrationRequestFailed)?;
+    if !(200..300).contains(&task_response.status_code) {
+        return Err(
+            CodexAgentIdentityEnrollmentError::TaskRegistrationRejected {
+                status_code: task_response.status_code,
+            },
+        );
+    }
+    let task_id =
+        task_id_from_registration_response(&credentials, task_response.body_text.as_str())
+            .map_err(|_| CodexAgentIdentityEnrollmentError::InvalidTaskRegistrationResponse)?;
+    auth_config.insert("task_id".to_string(), Value::String(task_id));
+    validate_codex_agent_identity_auth_config(&Value::Object(auth_config.clone()))
+        .map_err(|_| CodexAgentIdentityEnrollmentError::KeyGenerationFailed)?;
+    Ok(auth_config)
+}
+
 fn task_id_from_registration_response(
     credentials: &AgentIdentityCredentials,
     body: &str,
@@ -468,15 +684,21 @@ impl LocalOAuthRefreshAdapter for CodexAgentIdentityRefreshAdapter {
 mod tests {
     use std::sync::{Arc, Mutex};
 
+    use aether_oauth::network::{
+        OAuthHttpExecutor, OAuthHttpRequest, OAuthHttpResponse, OAuthNetworkContext,
+    };
     use crypto_box::{aead::rand_core::OsRng, PublicKey};
     use ed25519_dalek::{pkcs8::EncodePrivateKey, Signature, Verifier};
     use serde_json::json;
 
     use super::{
-        agent_identity_credentials, build_agent_assertion, decrypt_agent_task_id,
-        is_codex_agent_identity_auth_config_value, is_codex_agent_identity_invalid_task_response,
-        task_id_from_registration_response, with_agent_identity_task_id,
-        CodexAgentIdentityRefreshAdapter, CODEX_AGENT_IDENTITY_CACHED_ENTRY_PROVIDER_TYPE,
+        agent_identity_credentials, build_agent_assertion,
+        create_codex_agent_identity_from_session_token_with_auth_api_base_url,
+        decrypt_agent_task_id, is_codex_agent_identity_auth_config_value,
+        is_codex_agent_identity_invalid_task_response, task_id_from_registration_response,
+        validate_codex_agent_identity_auth_config, with_agent_identity_task_id,
+        CodexAgentIdentityEnrollmentError, CodexAgentIdentityRefreshAdapter,
+        CODEX_AGENT_IDENTITY_CACHED_ENTRY_PROVIDER_TYPE,
     };
     use crate::oauth_refresh::{
         LocalOAuthHttpExecutor, LocalOAuthHttpRequest, LocalOAuthHttpResponse,
@@ -686,6 +908,133 @@ mod tests {
                 body_text: r#"{"task_id":"task-registered"}"#.to_string(),
             })
         }
+    }
+
+    #[derive(Clone)]
+    struct RecordingEnrollmentExecutor {
+        requests: Arc<Mutex<Vec<OAuthHttpRequest>>>,
+        responses: Arc<Mutex<Vec<OAuthHttpResponse>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl OAuthHttpExecutor for RecordingEnrollmentExecutor {
+        async fn execute(
+            &self,
+            request: OAuthHttpRequest,
+        ) -> Result<OAuthHttpResponse, aether_oauth::core::OAuthError> {
+            self.requests
+                .lock()
+                .expect("recording lock should hold")
+                .push(request);
+            let mut responses = self.responses.lock().expect("response lock should hold");
+            if responses.is_empty() {
+                return Err(aether_oauth::core::OAuthError::transport(
+                    "missing mock response",
+                ));
+            }
+            Ok(responses.remove(0))
+        }
+    }
+
+    #[tokio::test]
+    async fn enrolls_agent_identity_from_session_token_without_storing_it() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let executor = RecordingEnrollmentExecutor {
+            requests: Arc::clone(&requests),
+            responses: Arc::new(Mutex::new(vec![
+                OAuthHttpResponse {
+                    status_code: 200,
+                    body_text: r#"{"agent_runtime_id":"runtime-enrolled"}"#.to_string(),
+                    json_body: None,
+                },
+                OAuthHttpResponse {
+                    status_code: 200,
+                    body_text: r#"{"task_id":"task-enrolled"}"#.to_string(),
+                    json_body: None,
+                },
+            ])),
+        };
+
+        let config = create_codex_agent_identity_from_session_token_with_auth_api_base_url(
+            &executor,
+            "session-token-for-test-only",
+            OAuthNetworkContext::direct_identity(),
+            "https://auth.test/api/accounts",
+        )
+        .await
+        .expect("enrollment should succeed");
+
+        validate_codex_agent_identity_auth_config(&serde_json::Value::Object(config.clone()))
+            .expect("enrollment should return valid credentials");
+        assert_eq!(
+            config.get("agent_runtime_id"),
+            Some(&json!("runtime-enrolled"))
+        );
+        assert_eq!(config.get("task_id"), Some(&json!("task-enrolled")));
+        assert!(!config.contains_key("access_token"));
+        assert!(!config.contains_key("refresh_token"));
+        assert!(!config.contains_key("id_token"));
+        assert!(!config
+            .values()
+            .any(|value| value.as_str() == Some("session-token-for-test-only")));
+
+        let requests = requests.lock().expect("recording lock should hold");
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].url,
+            "https://auth.test/api/accounts/v1/agent/register"
+        );
+        assert_eq!(
+            requests[0].headers.get("authorization").map(String::as_str),
+            Some("Bearer session-token-for-test-only")
+        );
+        assert_eq!(
+            requests[0]
+                .json_body
+                .as_ref()
+                .and_then(|body| body.get("abom"))
+                .and_then(|abom| abom.get("agent_harness_id")),
+            Some(&json!("codex-cli"))
+        );
+        assert!(requests[0]
+            .json_body
+            .as_ref()
+            .and_then(|body| body.get("agent_public_key"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|key| key.starts_with("ssh-ed25519 ")));
+        assert_eq!(
+            requests[1].url,
+            "https://auth.test/api/accounts/v1/agent/runtime-enrolled/task/register"
+        );
+        assert!(!requests[1].headers.contains_key("authorization"));
+    }
+
+    #[tokio::test]
+    async fn enrollment_error_does_not_echo_session_token_or_response_body() {
+        let executor = RecordingEnrollmentExecutor {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            responses: Arc::new(Mutex::new(vec![OAuthHttpResponse {
+                status_code: 401,
+                body_text: r#"{"detail":"session-token-for-test-only"}"#.to_string(),
+                json_body: None,
+            }])),
+        };
+
+        let error = create_codex_agent_identity_from_session_token_with_auth_api_base_url(
+            &executor,
+            "session-token-for-test-only",
+            OAuthNetworkContext::direct_identity(),
+            "https://auth.test/api/accounts",
+        )
+        .await
+        .expect_err("rejected enrollment should fail");
+
+        assert_eq!(
+            error,
+            CodexAgentIdentityEnrollmentError::RegistrationRejected { status_code: 401 }
+        );
+        assert!(!error.to_string().contains("session-token-for-test-only"));
+        assert!(!error.to_string().contains("detail"));
     }
 
     #[tokio::test]

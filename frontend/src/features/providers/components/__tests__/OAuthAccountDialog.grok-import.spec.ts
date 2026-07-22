@@ -82,10 +82,30 @@ vi.mock('@/components/ui', async () => {
     },
   })
 
+  const Switch = defineComponent({
+    name: 'SwitchStub',
+    props: {
+      modelValue: Boolean,
+      disabled: Boolean,
+    },
+    emits: ['update:modelValue'],
+    setup(props, { attrs, emit }) {
+      return () => h('button', {
+        ...attrs,
+        type: 'button',
+        role: 'switch',
+        'aria-checked': String(props.modelValue),
+        disabled: props.disabled,
+        onClick: () => emit('update:modelValue', !props.modelValue),
+      })
+    },
+  })
+
   return {
     Dialog,
     Button,
     Textarea,
+    Switch,
     Popover: passthrough('PopoverStub'),
     PopoverTrigger: passthrough('PopoverTriggerStub'),
     PopoverContent: passthrough('PopoverContentStub'),
@@ -416,6 +436,35 @@ describe('OAuthAccountDialog Grok import', () => {
       undefined,
     )
     expect(endpointMocks.importProviderRefreshToken).not.toHaveBeenCalled()
+  })
+
+  it('creates Codex Agent Identity from a Session Token only when enabled', async () => {
+    const root = mountDialog('codex')
+    await settle()
+
+    getButton(root, '导入授权')?.click()
+    await settle()
+
+    const sessionTokenSwitch = root.querySelector<HTMLButtonElement>('button[role="switch"]')
+    expect(sessionTokenSwitch).toBeTruthy()
+    expect(sessionTokenSwitch?.getAttribute('aria-checked')).toBe('false')
+    sessionTokenSwitch?.click()
+    await settle()
+
+    const textarea = getImportTextarea(root)
+    textarea.value = 'session-token-for-test-only'
+    textarea.dispatchEvent(new Event('input'))
+    await settle()
+
+    getExactButton(root, '创建并导入 Agent Identity')?.click()
+    await settle()
+
+    expect(endpointMocks.importProviderRefreshToken).toHaveBeenCalledWith('provider-1', {
+      session_token: 'session-token-for-test-only',
+      create_agent_identity_from_session_token: true,
+      proxy_node_id: undefined,
+    })
+    expect(endpointMocks.startBatchImportOAuthTask).not.toHaveBeenCalled()
   })
 
   it('sends a complete sub2api Agent Identity export through batch import', async () => {

@@ -1616,7 +1616,7 @@ const legacyExactEnglishMessages: Record<string, string> = {
   '支持 .json / .txt，可多选': 'Supports .json / .txt and multiple selection',
   '粘贴 Grok sso/session token，支持每行一个；或粘贴包含 token、sso_token、access_token、plan_type、pool_tier 的 JSON': 'Paste Grok sso/session tokens, one per line, or paste JSON containing token, sso_token, access_token, plan_type, and pool_tier.',
   '粘贴 show-auth-token Token、API key 或 JSON 内容': 'Paste a show-auth-token token, API key, or JSON content',
-  '粘贴 Refresh Token / Access Token 或 JSON 内容': 'Paste a Refresh Token / Access Token or JSON content',
+  '粘贴 Refresh Token / Access Token / Agent Identity JSON 内容': 'Paste a Refresh Token, Access Token, or Agent Identity JSON',
   'plan_type / pool_tier 会作为账号套餐与能力特征保存，不是路由池选择。': 'plan_type / pool_tier are saved as account plan and capability traits, not as routing pool selection.',
   '或手动粘贴 Grok Token': 'Or manually paste a Grok token',
   '或手动粘贴 Token': 'Or manually paste a token',
