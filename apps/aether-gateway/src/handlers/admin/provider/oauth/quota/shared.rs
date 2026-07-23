@@ -448,7 +448,69 @@ pub(super) async fn execute_provider_quota_plan(
     quota_kind: &str,
 ) -> Result<ProviderQuotaExecutionOutcome, GatewayError> {
     match state.execute_execution_runtime_sync_plan(None, &plan).await {
-        Ok(result) => Ok(ProviderQuotaExecutionOutcome::Response(result)),
+        Ok(result) => {
+            if !crate::provider_transport::is_codex_agent_identity_transport(transport)
+                || !crate::provider_transport::is_codex_agent_identity_invalid_task_response(
+                    result.status_code,
+                    extract_execution_error_message(&result).as_deref(),
+                )
+            {
+                return Ok(ProviderQuotaExecutionOutcome::Response(result));
+            }
+
+            let refreshed_entry = match state.force_local_oauth_refresh_entry(transport).await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => {
+                    return Ok(ProviderQuotaExecutionOutcome::Failure(
+                        "Agent Identity 任务重注册未返回认证信息".to_string(),
+                    ));
+                }
+                Err(error) => {
+                    warn!(
+                        key_id = %transport.key.id,
+                        endpoint_id = %transport.endpoint.id,
+                        quota_kind = %quota_kind,
+                        error = %error,
+                        "gateway Agent Identity quota task recovery failed"
+                    );
+                    return Ok(ProviderQuotaExecutionOutcome::Failure(format!(
+                        "Agent Identity 任务重注册失败: {error}"
+                    )));
+                }
+            };
+            let header_name = refreshed_entry.auth_header_name.trim().to_ascii_lowercase();
+            let header_value = refreshed_entry.auth_header_value.trim();
+            if header_name.is_empty() || header_value.is_empty() {
+                return Ok(ProviderQuotaExecutionOutcome::Failure(
+                    "Agent Identity 任务重注册未返回有效认证信息".to_string(),
+                ));
+            }
+
+            let mut retry_plan = plan.clone();
+            retry_plan
+                .headers
+                .retain(|name, _| !name.eq_ignore_ascii_case(&header_name));
+            retry_plan
+                .headers
+                .insert(header_name, header_value.to_string());
+            match state
+                .execute_execution_runtime_sync_plan(None, &retry_plan)
+                .await
+            {
+                Ok(result) => Ok(ProviderQuotaExecutionOutcome::Response(result)),
+                Err(error) => {
+                    let error = error.into_message();
+                    warn!(
+                        key_id = %transport.key.id,
+                        endpoint_id = %transport.endpoint.id,
+                        quota_kind = %quota_kind,
+                        error = %error,
+                        "gateway Agent Identity quota task recovery retry failed"
+                    );
+                    Ok(ProviderQuotaExecutionOutcome::Failure(error))
+                }
+            }
+        }
         Err(err) => {
             let error = err.into_message();
             let proxy_node_id = plan

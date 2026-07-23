@@ -13,6 +13,7 @@ use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
+use super::agent_identity::{is_codex_agent_identity_transport, CodexAgentIdentityRefreshAdapter};
 use super::generic_oauth::supports_local_generic_oauth_request_auth_resolution;
 pub use super::generic_oauth::GenericOAuthRefreshAdapter;
 use super::kiro::{
@@ -341,6 +342,7 @@ impl LocalOAuthRefreshCoordinator {
     pub fn new() -> Self {
         Self {
             adapters: vec![
+                Arc::new(CodexAgentIdentityRefreshAdapter::default()),
                 Arc::new(KiroOAuthRefreshAdapter::default()),
                 Arc::new(VertexServiceAccountRefreshAdapter),
                 Arc::new(GenericOAuthRefreshAdapter::default()),
@@ -550,7 +552,8 @@ impl LocalOAuthResolution {
 pub fn supports_local_oauth_request_auth_resolution(
     transport: &GatewayProviderTransportSnapshot,
 ) -> bool {
-    supports_local_kiro_request_auth_resolution(transport)
+    is_codex_agent_identity_transport(transport)
+        || supports_local_kiro_request_auth_resolution(transport)
         || supports_local_vertex_service_account_auth_resolution(transport)
         || supports_local_generic_oauth_request_auth_resolution(transport)
 }

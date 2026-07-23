@@ -53,6 +53,130 @@ fn sanitize_windsurf_batch_import_error(error: &OAuthError) -> String {
     }
 }
 
+fn copy_codex_agent_identity_field(
+    auth_config: &mut Map<String, Value>,
+    nested: &Map<String, Value>,
+    canonical_key: &str,
+    aliases: &[&str],
+) {
+    if auth_config.contains_key(canonical_key) {
+        return;
+    }
+    if let Some(value) = aliases.iter().find_map(|key| nested.get(*key)).cloned() {
+        auth_config.insert(canonical_key.to_string(), value);
+    }
+}
+
+fn remove_codex_agent_identity_oauth_tokens(auth_config: &mut Map<String, Value>) {
+    for key in [
+        "access_token",
+        "accessToken",
+        "refresh_token",
+        "refreshToken",
+        "id_token",
+        "idToken",
+        "expires_at",
+        "expiresAt",
+        "expires_in",
+        "expiresIn",
+    ] {
+        auth_config.remove(key);
+    }
+}
+
+fn codex_agent_identity_auth_config_from_import(
+    entry: &AdminProviderOAuthBatchImportEntry,
+) -> Result<Option<Map<String, Value>>, String> {
+    let Some(raw_credentials) = entry.raw_credentials.as_ref() else {
+        return Ok(None);
+    };
+    if !aether_provider_transport::is_codex_agent_identity_auth_config_value(raw_credentials) {
+        return Ok(None);
+    }
+    let mut auth_config = raw_credentials
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "Agent Identity 凭据必须是 JSON 对象".to_string())?;
+    remove_codex_agent_identity_oauth_tokens(&mut auth_config);
+    for nested_key in ["agent_identity", "agentIdentity"] {
+        if let Some(nested) = auth_config
+            .get_mut(nested_key)
+            .and_then(Value::as_object_mut)
+        {
+            remove_codex_agent_identity_oauth_tokens(nested);
+        }
+    }
+    let nested = auth_config
+        .get("agent_identity")
+        .or_else(|| auth_config.get("agentIdentity"))
+        .and_then(Value::as_object)
+        .cloned();
+    let root = auth_config.clone();
+    for (canonical_key, aliases) in [
+        (
+            "agent_runtime_id",
+            &["agent_runtime_id", "agentRuntimeId"][..],
+        ),
+        (
+            "agent_private_key",
+            &["agent_private_key", "agentPrivateKey"][..],
+        ),
+        ("task_id", &["task_id", "taskId"][..]),
+        (
+            "account_id",
+            &[
+                "account_id",
+                "accountId",
+                "chatgpt_account_id",
+                "chatgptAccountId",
+            ][..],
+        ),
+        (
+            "account_user_id",
+            &[
+                "account_user_id",
+                "accountUserId",
+                "chatgpt_account_user_id",
+                "chatgptAccountUserId",
+            ][..],
+        ),
+        (
+            "user_id",
+            &["user_id", "userId", "chatgpt_user_id", "chatgptUserId"][..],
+        ),
+        ("email", &["email"][..]),
+        (
+            "plan_type",
+            &[
+                "plan_type",
+                "planType",
+                "chatgpt_plan_type",
+                "chatgptPlanType",
+            ][..],
+        ),
+        ("account_name", &["account_name", "accountName"][..]),
+        (
+            "is_fedramp",
+            &[
+                "is_fedramp",
+                "chatgpt_account_is_fedramp",
+                "chatgptAccountIsFedramp",
+            ][..],
+        ),
+    ] {
+        if let Some(nested) = nested.as_ref() {
+            copy_codex_agent_identity_field(&mut auth_config, nested, canonical_key, aliases);
+        }
+        copy_codex_agent_identity_field(&mut auth_config, &root, canonical_key, aliases);
+    }
+    auth_config.insert("provider_type".to_string(), json!("codex"));
+    auth_config.insert("auth_mode".to_string(), json!("agentIdentity"));
+    aether_provider_transport::validate_codex_agent_identity_auth_config(&Value::Object(
+        auth_config.clone(),
+    ))?;
+    Ok(Some(auth_config))
+}
+
 pub(super) fn estimate_admin_provider_oauth_batch_import_total(
     provider_type: &str,
     raw_credentials: &str,
@@ -103,6 +227,18 @@ async fn resolve_admin_provider_oauth_batch_import_tokens(
     entry: &AdminProviderOAuthBatchImportEntry,
     request_proxy: Option<ProxySnapshot>,
 ) -> Result<AdminProviderOAuthResolvedBatchImport, String> {
+    if provider_type.eq_ignore_ascii_case("codex") {
+        if let Some(auth_config) = codex_agent_identity_auth_config_from_import(entry)? {
+            return Ok(AdminProviderOAuthResolvedBatchImport {
+                // Agent Identity signs an assertion for every request. The existing OAuth
+                // record keeps a placeholder in its encrypted token column only.
+                access_token: "__placeholder__".to_string(),
+                auth_config,
+                expires_at: None,
+            });
+        }
+    }
+
     let refresh_token = entry
         .refresh_token
         .as_deref()
@@ -546,8 +682,12 @@ pub(super) async fn execute_admin_provider_oauth_batch_import(
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_windsurf_batch_import_error;
+    use super::super::parse::parse_admin_provider_oauth_batch_import_entries;
+    use super::{
+        codex_agent_identity_auth_config_from_import, sanitize_windsurf_batch_import_error,
+    };
     use aether_oauth::core::OAuthError;
+    use serde_json::json;
 
     #[test]
     fn windsurf_batch_import_error_redacts_http_body() {
@@ -571,5 +711,55 @@ mod tests {
         assert_eq!(detail, "Windsurf 凭据验证失败");
         assert!(!detail.contains("sk-secret"));
         assert!(!detail.contains("secret-token"));
+    }
+
+    #[test]
+    fn normalizes_codex_agent_identity_import_without_access_token() {
+        let entries = parse_admin_provider_oauth_batch_import_entries(
+            "codex",
+            r#"{
+                "type":"sub2api-data",
+                "version":1,
+                "accounts":[{
+                    "name":"agent@example.com",
+                    "platform":"openai",
+                    "credentials":{
+                        "auth_mode":"agentIdentity",
+                        "id_token":"stale-id-token",
+                        "agent_identity":{
+                            "agent_runtime_id":"runtime-1",
+                            "agent_private_key":"MC4CAQAwBQYDK2VwBCIEIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                            "accountId":"account-1",
+                            "chatgptUserId":"user-1",
+                            "chatgptAccountIsFedramp":true,
+                            "access_token":"stale-access-token"
+                        }
+                    }
+                }]
+            }"#,
+        );
+
+        let auth_config = codex_agent_identity_auth_config_from_import(&entries[0])
+            .expect("Agent Identity import should validate")
+            .expect("Agent Identity config should be recognized");
+
+        assert_eq!(auth_config.get("provider_type"), Some(&json!("codex")));
+        assert_eq!(auth_config.get("auth_mode"), Some(&json!("agentIdentity")));
+        assert_eq!(
+            auth_config.get("agent_runtime_id"),
+            Some(&json!("runtime-1"))
+        );
+        assert_eq!(auth_config.get("account_id"), Some(&json!("account-1")));
+        assert_eq!(auth_config.get("user_id"), Some(&json!("user-1")));
+        assert_eq!(auth_config.get("is_fedramp"), Some(&json!(true)));
+        assert_eq!(
+            auth_config.get("account_name"),
+            Some(&json!("agent@example.com"))
+        );
+        assert!(!auth_config.contains_key("id_token"));
+        assert!(auth_config
+            .get("agent_identity")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|nested| !nested.contains_key("access_token")));
     }
 }

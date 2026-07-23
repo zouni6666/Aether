@@ -82,10 +82,30 @@ vi.mock('@/components/ui', async () => {
     },
   })
 
+  const Switch = defineComponent({
+    name: 'SwitchStub',
+    props: {
+      modelValue: Boolean,
+      disabled: Boolean,
+    },
+    emits: ['update:modelValue'],
+    setup(props, { attrs, emit }) {
+      return () => h('button', {
+        ...attrs,
+        type: 'button',
+        role: 'switch',
+        'aria-checked': String(props.modelValue),
+        disabled: props.disabled,
+        onClick: () => emit('update:modelValue', !props.modelValue),
+      })
+    },
+  })
+
   return {
     Dialog,
     Button,
     Textarea,
+    Switch,
     Popover: passthrough('PopoverStub'),
     PopoverTrigger: passthrough('PopoverTriggerStub'),
     PopoverContent: passthrough('PopoverContentStub'),
@@ -386,6 +406,114 @@ describe('OAuthAccountDialog Grok import', () => {
       },
       account_id: 'acct-1',
     }))
+  })
+
+  it('sends a single Codex Agent Identity auth JSON through batch import', async () => {
+    const root = mountDialog('codex')
+    await settle()
+
+    getButton(root, '导入授权')?.click()
+    await settle()
+
+    const credentials = JSON.stringify({
+      auth_mode: 'agentIdentity',
+      agent_identity: {
+        agent_runtime_id: 'runtime-1',
+        agent_private_key: 'base64-pkcs8-key',
+      },
+    })
+    const textarea = getImportTextarea(root)
+    textarea.value = credentials
+    textarea.dispatchEvent(new Event('input'))
+    await settle()
+
+    getExactButton(root, '导入')?.click()
+    await settle()
+
+    expect(endpointMocks.startBatchImportOAuthTask).toHaveBeenCalledWith(
+      'provider-1',
+      credentials,
+      undefined,
+    )
+    expect(endpointMocks.importProviderRefreshToken).not.toHaveBeenCalled()
+  })
+
+  it('shows a dedicated Codex Agent Identity mode and creates from a Session Token', async () => {
+    const root = mountDialog('codex')
+    await settle()
+
+    expect(getExactButton(root, '获取授权')).toBeTruthy()
+    expect(getExactButton(root, '导入授权')).toBeTruthy()
+    expect(getExactButton(root, 'Agent Identity')).toBeTruthy()
+
+    getExactButton(root, 'Agent Identity')?.click()
+    await settle()
+
+    const textarea = root.querySelector<HTMLTextAreaElement>(
+      'textarea[placeholder="粘贴 ChatGPT Session Token（JWT）"]',
+    )
+    expect(textarea).toBeTruthy()
+    if (!textarea) throw new Error('Expected Agent Identity Session Token textarea to exist')
+    textarea.value = 'session-token-for-test-only'
+    textarea.dispatchEvent(new Event('input'))
+    await settle()
+
+    getExactButton(root, '创建并导入 Agent Identity')?.click()
+    await settle()
+
+    expect(endpointMocks.importProviderRefreshToken).toHaveBeenCalledWith('provider-1', {
+      session_token: 'session-token-for-test-only',
+      create_agent_identity_from_session_token: true,
+      proxy_node_id: undefined,
+    })
+    expect(endpointMocks.startBatchImportOAuthTask).not.toHaveBeenCalled()
+  })
+
+  it('keeps Agent Identity creation unavailable for non-Codex providers', async () => {
+    const root = mountDialog('openai')
+    await settle()
+
+    expect(getExactButton(root, '获取授权')).toBeTruthy()
+    expect(getExactButton(root, '导入授权')).toBeTruthy()
+    expect(getExactButton(root, 'Agent Identity')).toBeFalsy()
+  })
+
+  it('sends a complete sub2api Agent Identity export through batch import', async () => {
+    const root = mountDialog('codex')
+    await settle()
+
+    getButton(root, '导入授权')?.click()
+    await settle()
+
+    const credentials = JSON.stringify({
+      type: 'sub2api-data',
+      version: 1,
+      accounts: [{
+        name: 'agent@example.com',
+        platform: 'openai',
+        type: 'oauth',
+        credentials: {
+          auth_mode: 'agentIdentity',
+          agent_runtime_id: 'runtime-1',
+          agent_private_key: 'base64-pkcs8-key',
+          task_id: 'task-1',
+        },
+      }],
+    })
+    const textarea = getImportTextarea(root)
+    textarea.value = credentials
+    textarea.dispatchEvent(new Event('input'))
+    await settle()
+
+    getExactButton(root, '导入')?.click()
+    await settle()
+
+    expect(endpointMocks.startBatchImportOAuthTask).toHaveBeenCalledWith(
+      'provider-1',
+      credentials,
+      undefined,
+    )
+    expect(endpointMocks.importProviderRefreshToken).not.toHaveBeenCalled()
   })
 
   it('keeps Grok multiline token import on the batch task path', async () => {

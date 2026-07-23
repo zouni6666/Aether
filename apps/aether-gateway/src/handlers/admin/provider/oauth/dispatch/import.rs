@@ -11,8 +11,8 @@ use super::super::runtime::{
 };
 use super::super::state::{
     admin_provider_oauth_template, build_admin_provider_oauth_backend_unavailable_response,
-    exchange_admin_provider_oauth_refresh_token, is_fixed_provider_type_for_provider_oauth,
-    json_u64_value,
+    enrich_admin_provider_oauth_auth_config, exchange_admin_provider_oauth_refresh_token,
+    is_fixed_provider_type_for_provider_oauth, json_u64_value,
 };
 use super::helpers::admin_provider_oauth_key_name_from_auth_config;
 use super::token_import::{
@@ -27,10 +27,10 @@ use crate::handlers::admin::request::{
 };
 use crate::GatewayError;
 use aether_contracts::ProxySnapshot;
-use aether_oauth::core::OAuthError;
 use aether_oauth::provider::{
     ProviderOAuthImportInput, ProviderOAuthService, ProviderOAuthTransportContext,
 };
+use aether_oauth::{core::OAuthError, network::OAuthNetworkContext};
 use axum::{
     body::Body,
     http,
@@ -106,6 +106,76 @@ fn import_payload_string_any(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn import_payload_bool(payload: &serde_json::Map<String, serde_json::Value>, key: &str) -> bool {
+    payload
+        .get(key)
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn codex_session_token_identity_hints(
+    session_token: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>, &'static str> {
+    let mut hints = serde_json::Map::new();
+    enrich_admin_provider_oauth_auth_config(
+        "codex",
+        &mut hints,
+        &json!({ "access_token": session_token }),
+    );
+    let account_id = hints
+        .get("account_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let user_id = hints
+        .get("user_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if account_id.is_none() || user_id.is_none() {
+        return Err("ChatGPT Session Token 缺少账号身份字段");
+    }
+    Ok(hints)
+}
+
+async fn resolve_admin_provider_oauth_codex_session_agent_identity_import(
+    state: &AdminAppState<'_>,
+    session_token: &str,
+    identity_hints: serde_json::Map<String, serde_json::Value>,
+    request_proxy: Option<ProxySnapshot>,
+) -> Result<AdminProviderOAuthSingleImportTokens, Response<Body>> {
+    let executor = crate::oauth::GatewayOAuthHttpExecutor::new(*state);
+    let mut auth_config =
+        aether_provider_transport::create_codex_agent_identity_from_session_token(
+            &executor,
+            session_token,
+            OAuthNetworkContext::provider_operation(request_proxy),
+        )
+        .await
+        .map_err(|error| {
+            build_internal_control_error_response(http::StatusCode::BAD_REQUEST, error.to_string())
+        })?;
+    for key in [
+        "access_token",
+        "accessToken",
+        "refresh_token",
+        "refreshToken",
+        "id_token",
+        "idToken",
+    ] {
+        auth_config.remove(key);
+    }
+    for (key, value) in identity_hints {
+        auth_config.entry(key).or_insert(value);
+    }
+    Ok(AdminProviderOAuthSingleImportTokens {
+        // Agent Identity signs every request and never uses the encrypted OAuth token column.
+        access_token: "__placeholder__".to_string(),
+        auth_config,
+        expires_at: None,
+    })
 }
 
 fn import_payload_project_id_any(
@@ -514,6 +584,21 @@ pub(super) async fn handle_admin_provider_oauth_import_refresh_token(
             ));
         }
     };
+    let create_agent_identity_from_session_token =
+        import_payload_bool(&raw_payload, "create_agent_identity_from_session_token");
+    let session_token_agent_identity_input = if create_agent_identity_from_session_token {
+        import_payload_string_any(
+            &raw_payload,
+            &[
+                "session_token",
+                "sessionToken",
+                "access_token",
+                "accessToken",
+            ],
+        )
+    } else {
+        None
+    };
     let refresh_token_input = import_payload_string(&raw_payload, "refresh_token", "refreshToken");
     let access_token_input = import_payload_string_any(
         &raw_payload,
@@ -559,7 +644,10 @@ pub(super) async fn handle_admin_provider_oauth_import_refresh_token(
         refresh_token_input.as_deref(),
         access_token_input.as_deref(),
     );
-    if refresh_token_input.is_none() && access_token_input.is_none() {
+    if !create_agent_identity_from_session_token
+        && refresh_token_input.is_none()
+        && access_token_input.is_none()
+    {
         return Ok(build_internal_control_error_response(
             http::StatusCode::BAD_REQUEST,
             "Refresh Token、Access Token 或 sso_token 不能为空",
@@ -575,6 +663,18 @@ pub(super) async fn handle_admin_provider_oauth_import_refresh_token(
         return Ok(build_internal_control_error_response(
             http::StatusCode::BAD_REQUEST,
             "Kiro 不支持单条 Refresh Token 导入，请使用批量导入或设备授权。",
+        ));
+    }
+    if create_agent_identity_from_session_token && provider_type != "codex" {
+        return Ok(build_internal_control_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "仅 Codex Provider 支持使用 Session Token 创建 Agent Identity",
+        ));
+    }
+    if create_agent_identity_from_session_token && refresh_token_input.is_some() {
+        return Ok(build_internal_control_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "使用 Session Token 创建 Agent Identity 时不能同时提交 Refresh Token",
         ));
     }
     let template = admin_provider_oauth_template(&provider_type);
@@ -598,7 +698,34 @@ pub(super) async fn handle_admin_provider_oauth_import_refresh_token(
         .await;
     let key_proxy = provider_oauth_key_proxy_value(proxy_node_id.as_deref());
 
-    let resolved_import = if provider_type == "windsurf" {
+    let resolved_import = if create_agent_identity_from_session_token {
+        let Some(session_token) = session_token_agent_identity_input.as_deref() else {
+            return Ok(build_internal_control_error_response(
+                http::StatusCode::BAD_REQUEST,
+                "ChatGPT Session Token（JWT）不能为空",
+            ));
+        };
+        let identity_hints = match codex_session_token_identity_hints(session_token) {
+            Ok(hints) => hints,
+            Err(detail) => {
+                return Ok(build_internal_control_error_response(
+                    http::StatusCode::BAD_REQUEST,
+                    detail,
+                ));
+            }
+        };
+        match resolve_admin_provider_oauth_codex_session_agent_identity_import(
+            state,
+            session_token,
+            identity_hints,
+            request_proxy.clone(),
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(response) => return Ok(response),
+        }
+    } else if provider_type == "windsurf" {
         if !import_payload_has_windsurf_credentials(&raw_payload) {
             return Ok(build_internal_control_error_response(
                 http::StatusCode::BAD_REQUEST,
@@ -645,18 +772,20 @@ pub(super) async fn handle_admin_provider_oauth_import_refresh_token(
         mut auth_config,
         mut expires_at,
     } = resolved_import;
-    apply_single_import_hints(&provider_type, &raw_payload, &mut auth_config);
-    if let Some(header_access_token) =
-        provider_oauth_import_authorization_bearer_token_from_object(&raw_payload)
-    {
-        if let Some(header_expires_at) =
-            decode_access_token_expires_at(&header_access_token).or(imported_expires_at)
+    if !create_agent_identity_from_session_token {
+        apply_single_import_hints(&provider_type, &raw_payload, &mut auth_config);
+        if let Some(header_access_token) =
+            provider_oauth_import_authorization_bearer_token_from_object(&raw_payload)
         {
-            auth_config.insert("expires_at".to_string(), json!(header_expires_at));
-            expires_at = Some(header_expires_at);
-        } else {
-            auth_config.remove("expires_at");
-            expires_at = None;
+            if let Some(header_expires_at) =
+                decode_access_token_expires_at(&header_access_token).or(imported_expires_at)
+            {
+                auth_config.insert("expires_at".to_string(), json!(header_expires_at));
+                expires_at = Some(header_expires_at);
+            } else {
+                auth_config.remove("expires_at");
+                expires_at = None;
+            }
         }
     }
     let has_refresh_token = auth_config
@@ -753,11 +882,18 @@ pub(super) async fn handle_admin_provider_oauth_import_refresh_token(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_single_import_hints, import_payload_string_any, import_payload_u64_any,
-        sanitize_windsurf_import_error,
+        apply_single_import_hints, codex_session_token_identity_hints, import_payload_bool,
+        import_payload_string_any, import_payload_u64_any, sanitize_windsurf_import_error,
     };
     use aether_oauth::core::OAuthError;
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     use serde_json::json;
+
+    fn unsigned_jwt(payload: serde_json::Value) -> String {
+        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"none","typ":"JWT"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(payload.to_string());
+        format!("{header}.{payload}.signature")
+    }
 
     #[test]
     fn single_import_accepts_session_token_alias() {
@@ -772,6 +908,69 @@ mod tests {
             import_payload_string_any(&payload, &["access_token", "session_token"]).as_deref(),
             Some("session-1")
         );
+    }
+
+    #[test]
+    fn session_token_agent_identity_hints_require_and_extract_chatgpt_identity() {
+        let session_token = unsigned_jwt(json!({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "account-1",
+                "chatgpt_user_id": "user-1",
+                "chatgpt_plan_type": "plus"
+            },
+            "https://api.openai.com/profile": {
+                "email": "agent@example.com"
+            }
+        }));
+
+        let hints = codex_session_token_identity_hints(&session_token)
+            .expect("session token identity hints should parse");
+
+        assert_eq!(hints.get("account_id"), Some(&json!("account-1")));
+        assert_eq!(hints.get("user_id"), Some(&json!("user-1")));
+        assert_eq!(hints.get("plan_type"), Some(&json!("plus")));
+        assert_eq!(hints.get("email"), Some(&json!("agent@example.com")));
+        assert!(!hints.contains_key("access_token"));
+        assert!(!hints.contains_key("id_token"));
+    }
+
+    #[test]
+    fn session_token_agent_identity_hints_reject_missing_identity() {
+        let session_token = unsigned_jwt(json!({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "account-1"
+            }
+        }));
+
+        assert_eq!(
+            codex_session_token_identity_hints(&session_token),
+            Err("ChatGPT Session Token 缺少账号身份字段")
+        );
+    }
+
+    #[test]
+    fn session_token_agent_identity_flag_is_explicit_boolean_only() {
+        let payload = json!({
+            "create_agent_identity_from_session_token": true,
+        })
+        .as_object()
+        .cloned()
+        .expect("payload should be an object");
+        assert!(import_payload_bool(
+            &payload,
+            "create_agent_identity_from_session_token"
+        ));
+
+        let string_payload = json!({
+            "create_agent_identity_from_session_token": "true",
+        })
+        .as_object()
+        .cloned()
+        .expect("payload should be an object");
+        assert!(!import_payload_bool(
+            &string_payload,
+            "create_agent_identity_from_session_token"
+        ));
     }
 
     #[test]

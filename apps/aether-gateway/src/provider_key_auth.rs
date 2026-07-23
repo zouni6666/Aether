@@ -112,6 +112,23 @@ pub(crate) fn provider_key_auth_config_uses_header_authorization(
         })
 }
 
+/// Returns whether a Codex key uses the registered Agent Identity credential shape.
+///
+/// The key itself remains `auth_type = oauth` so it can use the existing OAuth
+/// pipeline. Keep this as an explicit server-side classification rather than
+/// making the frontend infer it from refresh capabilities.
+pub(crate) fn provider_key_auth_config_is_agent_identity(
+    provider_type: &str,
+    auth_config: Option<&Map<String, Value>>,
+) -> bool {
+    provider_type.trim().eq_ignore_ascii_case("codex")
+        && auth_config.is_some_and(|config| {
+            aether_provider_transport::is_codex_agent_identity_auth_config_value(&Value::Object(
+                config.clone(),
+            ))
+        })
+}
+
 fn normalized_auth_type(key: &StoredProviderCatalogKey) -> String {
     key.auth_type.trim().to_ascii_lowercase()
 }
@@ -272,11 +289,11 @@ pub(crate) fn provider_key_effective_api_formats(
 #[cfg(test)]
 mod tests {
     use super::{
-        provider_active_api_formats, provider_key_auth_config_uses_header_authorization,
-        provider_key_auth_semantics, provider_key_can_refresh_oauth,
-        provider_key_configured_api_formats, provider_key_effective_api_formats,
-        provider_key_inherits_provider_api_formats, ProviderKeyCredentialKind,
-        ProviderKeyRuntimeAuthKind,
+        provider_active_api_formats, provider_key_auth_config_is_agent_identity,
+        provider_key_auth_config_uses_header_authorization, provider_key_auth_semantics,
+        provider_key_can_refresh_oauth, provider_key_configured_api_formats,
+        provider_key_effective_api_formats, provider_key_inherits_provider_api_formats,
+        ProviderKeyCredentialKind, ProviderKeyRuntimeAuthKind,
     };
     use aether_data_contracts::repository::provider_catalog::{
         StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
@@ -412,6 +429,29 @@ mod tests {
                 }
             })
             .as_object()
+        ));
+    }
+
+    #[test]
+    fn detects_codex_agent_identity_auth_config() {
+        let config = json!({
+            "auth_mode": "agentIdentity",
+            "agent_runtime_id": "runtime-1",
+            "agent_private_key": "base64-private-key",
+            "task_id": "task-1"
+        });
+
+        assert!(provider_key_auth_config_is_agent_identity(
+            "codex",
+            config.as_object()
+        ));
+        assert!(!provider_key_auth_config_is_agent_identity(
+            "openai",
+            config.as_object()
+        ));
+        assert!(!provider_key_auth_config_is_agent_identity(
+            "codex",
+            json!({ "refresh_token": "refresh-token" }).as_object()
         ));
     }
 

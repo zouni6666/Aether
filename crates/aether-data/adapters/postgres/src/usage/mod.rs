@@ -2043,6 +2043,8 @@ struct PreparedFirstByteUsage {
     updated_at_unix_secs: i64,
 }
 
+type PartitionedFirstByteUsages = (Vec<PreparedFirstByteUsage>, Vec<(usize, UpsertUsageRecord)>);
+
 #[derive(Debug)]
 struct PreparedPendingUsage {
     usage: UpsertUsageRecord,
@@ -2223,7 +2225,7 @@ impl PreparedFirstByteUsage {
 
 fn partition_first_byte_usages(
     usages: Vec<UpsertUsageRecord>,
-) -> Result<(Vec<PreparedFirstByteUsage>, Vec<(usize, UpsertUsageRecord)>), DataLayerError> {
+) -> Result<PartitionedFirstByteUsages, DataLayerError> {
     let mut request_id_counts = BTreeMap::<String, usize>::new();
     for usage in &usages {
         *request_id_counts

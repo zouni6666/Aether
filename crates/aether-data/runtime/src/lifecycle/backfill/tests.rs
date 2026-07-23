@@ -4,7 +4,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use sqlx::{query, query_scalar, Connection, PgConnection, PgPool};
+use sha2::{Digest, Sha384};
+use sqlx::{query, query_as, query_scalar, Connection, PgConnection, PgPool};
 
 use super::{
     pending_backfills, pending_backfills_from_applied, pending_mysql_backfills,
@@ -13,6 +14,58 @@ use super::{
 };
 use crate::lifecycle::migrate::prepare_database_for_startup;
 use crate::{DatabaseDriver, SqlDatabaseConfig, SqlPoolConfig};
+
+const LEGACY_SYNC_ENABLED_ACTIVE_FLAGS_VERSION: i64 = 20260517012000;
+const ACTIVE_FLAG_REPAIR_VERSION: i64 = 20260722140744;
+const LEGACY_SYNC_ENABLED_ACTIVE_FLAGS_SQL: &str =
+    include_str!("../../../backfills/postgres/20260517012000_sync_legacy_enabled_active_flags.sql");
+const ACTIVE_FLAG_REPAIR_SQL: &str = include_str!(
+    "../../../backfills/postgres/20260722140744_sync_legacy_enabled_from_is_active.sql"
+);
+
+#[test]
+fn published_legacy_enabled_backfill_preserves_its_original_direction() {
+    for table in ["providers", "provider_endpoints", "models"] {
+        assert!(
+            LEGACY_SYNC_ENABLED_ACTIVE_FLAGS_SQL.contains(&format!(
+                "UPDATE public.{table}\n        SET\n            is_active = enabled,"
+            )),
+            "published legacy {table} backfill should remain unchanged"
+        );
+    }
+    assert!(
+        !LEGACY_SYNC_ENABLED_ACTIVE_FLAGS_SQL.contains("enabled = is_active"),
+        "the released legacy backfill must not be rewritten in place"
+    );
+}
+
+#[test]
+fn active_flag_repair_backfill_treats_is_active_as_authoritative() {
+    for table in ["providers", "provider_endpoints", "models"] {
+        assert!(
+            ACTIVE_FLAG_REPAIR_SQL.contains(&format!(
+                "UPDATE public.{table}\n        SET enabled = is_active"
+            )),
+            "active flag repair should copy canonical state for {table}"
+        );
+        assert!(
+            ACTIVE_FLAG_REPAIR_SQL.contains(&format!(
+                "AND table_name = '{table}'\n          AND column_name = 'enabled'"
+            )),
+            "active flag repair should check the legacy column for {table}"
+        );
+        assert!(
+            ACTIVE_FLAG_REPAIR_SQL.contains(&format!(
+                "AND table_name = '{table}'\n          AND column_name = 'is_active'"
+            )),
+            "active flag repair should check the canonical column for {table}"
+        );
+    }
+    assert!(
+        !ACTIVE_FLAG_REPAIR_SQL.contains("is_active = enabled"),
+        "the repair must not overwrite canonical active state"
+    );
+}
 
 #[test]
 fn pending_backfills_from_applied_returns_all_versions_when_none_applied() {
@@ -28,7 +81,8 @@ fn pending_backfills_from_applied_returns_all_versions_when_none_applied() {
             20260504120000,
             20260505120000,
             20260517012000,
-            20260716010000
+            20260716010000,
+            ACTIVE_FLAG_REPAIR_VERSION
         ]
     );
 }
@@ -49,9 +103,25 @@ fn pending_backfills_from_applied_skips_versions_already_applied() {
             20260504120000,
             20260505120000,
             20260517012000,
-            20260716010000
+            20260716010000,
+            ACTIVE_FLAG_REPAIR_VERSION
         ]
     );
+}
+
+#[test]
+fn active_flag_repair_remains_pending_after_legacy_backfill_was_applied() {
+    let pending_versions = pending_backfills_from_applied(&[AppliedBackfill {
+        version: LEGACY_SYNC_ENABLED_ACTIVE_FLAGS_VERSION,
+        checksum: Vec::new(),
+    }])
+    .into_iter()
+    .map(|item| item.version)
+    .collect::<Vec<_>>();
+
+    assert!(!pending_versions.contains(&LEGACY_SYNC_ENABLED_ACTIVE_FLAGS_VERSION));
+    assert!(pending_versions.contains(&ACTIVE_FLAG_REPAIR_VERSION));
+    assert_eq!(pending_versions.last(), Some(&ACTIVE_FLAG_REPAIR_VERSION));
 }
 
 #[tokio::test]
@@ -284,6 +354,108 @@ async fn wait_for_postgres(database_url: &str) -> Result<(), Box<dyn std::error:
 }
 
 #[tokio::test]
+async fn active_flag_repair_runs_after_legacy_backfill_was_applied() {
+    let Some(server) = ManagedPostgresServer::try_start()
+        .await
+        .expect("postgres backfill test should start or skip")
+    else {
+        return;
+    };
+
+    let pool = PgPool::connect(server.database_url())
+        .await
+        .expect("pool should connect");
+    prepare_database_for_startup(&pool)
+        .await
+        .expect("schema should prepare");
+
+    pending_backfills(&pool)
+        .await
+        .expect("backfill ledger should initialize");
+    query(
+        "INSERT INTO public.schema_backfills (version, description, success, checksum, execution_time) VALUES ($1, $2, TRUE, $3, 0)",
+    )
+    .bind(LEGACY_SYNC_ENABLED_ACTIVE_FLAGS_VERSION)
+    .bind("sync_legacy_enabled_active_flags")
+    .bind(Sha384::digest(LEGACY_SYNC_ENABLED_ACTIVE_FLAGS_SQL.as_bytes()).to_vec())
+    .execute(&pool)
+    .await
+    .expect("legacy backfill ledger fixture should insert");
+
+    let legacy_applied: bool =
+        query_scalar("SELECT EXISTS(SELECT 1 FROM public.schema_backfills WHERE version = $1)")
+            .bind(LEGACY_SYNC_ENABLED_ACTIVE_FLAGS_VERSION)
+            .fetch_one(&pool)
+            .await
+            .expect("legacy backfill ledger state should load");
+    assert!(legacy_applied);
+
+    query(
+        r#"
+INSERT INTO public.providers (id, name, provider_type, enabled, is_active)
+VALUES
+    ('provider-disabled', 'Disabled Provider', 'custom', TRUE, FALSE),
+    ('provider-active', 'Active Provider', 'custom', FALSE, TRUE)
+"#,
+    )
+    .execute(&pool)
+    .await
+    .expect("provider fixtures should insert");
+
+    let pending_before = pending_backfills(&pool)
+        .await
+        .expect("pending repair should load");
+    let pending_versions = pending_before
+        .iter()
+        .map(|item| item.version)
+        .collect::<Vec<_>>();
+    assert!(!pending_versions.contains(&LEGACY_SYNC_ENABLED_ACTIVE_FLAGS_VERSION));
+    assert!(pending_versions.contains(&ACTIVE_FLAG_REPAIR_VERSION));
+    assert_eq!(pending_versions.last(), Some(&ACTIVE_FLAG_REPAIR_VERSION));
+
+    run_backfills(&pool)
+        .await
+        .expect("active flag repair should apply");
+
+    let pending_after = pending_backfills(&pool)
+        .await
+        .expect("pending backfills should reload");
+    assert!(pending_after.is_empty());
+
+    let states: Vec<(String, bool, bool)> =
+        query_as("SELECT id, enabled, is_active FROM public.providers ORDER BY id ASC")
+            .fetch_all(&pool)
+            .await
+            .expect("provider flags should reload");
+    assert_eq!(
+        states,
+        vec![
+            ("provider-active".to_string(), true, true),
+            ("provider-disabled".to_string(), false, false),
+        ]
+    );
+
+    sqlx::raw_sql(ACTIVE_FLAG_REPAIR_SQL)
+        .execute(&pool)
+        .await
+        .expect("re-running the repair SQL should be idempotent");
+    let states_after_rerun: Vec<(String, bool, bool)> =
+        query_as("SELECT id, enabled, is_active FROM public.providers ORDER BY id ASC")
+            .fetch_all(&pool)
+            .await
+            .expect("provider flags should reload after repair rerun");
+    assert_eq!(states_after_rerun, states);
+
+    let repair_applied: bool =
+        query_scalar("SELECT EXISTS(SELECT 1 FROM public.schema_backfills WHERE version = $1)")
+            .bind(ACTIVE_FLAG_REPAIR_VERSION)
+            .fetch_one(&pool)
+            .await
+            .expect("repair backfill ledger state should load");
+    assert!(repair_applied);
+}
+
+#[tokio::test]
 async fn run_backfills_rebuilds_stats_and_records_execution() {
     let Some(server) = ManagedPostgresServer::try_start()
         .await
@@ -419,13 +591,14 @@ async fn run_backfills_rebuilds_stats_and_records_execution() {
     let pending_before = pending_backfills(&pool)
         .await
         .expect("pending backfills should load");
-    assert_eq!(pending_before.len(), 6);
+    assert_eq!(pending_before.len(), 7);
     assert_eq!(pending_before[0].version, 20260422110000);
     assert_eq!(pending_before[1].version, 20260422120000);
     assert_eq!(pending_before[2].version, 20260504120000);
     assert_eq!(pending_before[3].version, 20260505120000);
     assert_eq!(pending_before[4].version, 20260517012000);
     assert_eq!(pending_before[5].version, 20260716010000);
+    assert_eq!(pending_before[6].version, ACTIVE_FLAG_REPAIR_VERSION);
 
     run_backfills(&pool)
         .await
@@ -449,7 +622,8 @@ async fn run_backfills_rebuilds_stats_and_records_execution() {
             20260504120000,
             20260505120000,
             20260517012000,
-            20260716010000
+            20260716010000,
+            ACTIVE_FLAG_REPAIR_VERSION
         ]
     );
 
@@ -1123,5 +1297,5 @@ ORDER BY total_tokens
         .fetch_one(&pool)
         .await
         .expect("backfill count should load");
-    assert_eq!(applied_count, 6);
+    assert_eq!(applied_count, 7);
 }

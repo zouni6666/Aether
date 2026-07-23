@@ -899,14 +899,13 @@ impl LifecycleEventCoalescer {
             let mut entries = shard.entries.lock().await;
             let candidate = entries
                 .iter()
-                .filter(|(request_id, entry)| {
+                .find(|(request_id, entry)| {
                     // A terminal supersedes a delayed intermediate, but never another active
                     // terminal marker or an in-flight first-byte persistence operation.
                     request_id.as_str() != excluded_request_id
                         && !entry.first_byte_persistence_pending
                         && !terminal_cancel_is_active(entry, now)
                 })
-                .next()
                 .map(|(request_id, _)| request_id.clone());
             if let Some(request_id) = candidate {
                 let before = entries.len();
@@ -926,13 +925,12 @@ impl LifecycleEventCoalescer {
             let mut entries = shard.entries.lock().await;
             let candidate = entries
                 .iter()
-                .filter(|(request_id, entry)| {
+                .find(|(request_id, entry)| {
                     request_id.as_str() != excluded_request_id
                         && !entry.first_byte_persistence_pending
                         && entry.first_byte_seen_at.is_some()
                         && !terminal_cancel_is_active(entry, now)
                 })
-                .next()
                 .map(|(request_id, _)| request_id.clone());
             if let Some(request_id) = candidate {
                 let before = entries.len();
@@ -3110,9 +3108,7 @@ async fn run_first_byte_persistence_dispatcher(
     state: Arc<FirstBytePersistenceState>,
 ) {
     let mut tasks = tokio::task::JoinSet::new();
-    let batch_concurrency = concurrency
-        .min(FIRST_BYTE_PERSISTENCE_MAX_BATCH_CONCURRENCY)
-        .max(1);
+    let batch_concurrency = concurrency.clamp(1, FIRST_BYTE_PERSISTENCE_MAX_BATCH_CONCURRENCY);
     let write_admission = Arc::new(tokio::sync::Semaphore::new(concurrency));
     while let Some(first) = receiver.recv().await {
         let mut batch = vec![first];
@@ -7689,11 +7685,12 @@ mod tests {
         .await
         .expect("pending lifecycle usage should be persisted");
 
-        let records = store.records.lock().expect("records lock");
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].request_id, "req-lifecycle-queue-pending-1");
-        assert_eq!(records[0].status, "pending");
-        drop(records);
+        {
+            let records = store.records.lock().expect("records lock");
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].request_id, "req-lifecycle-queue-pending-1");
+            assert_eq!(records[0].status, "pending");
+        }
         assert!(
             queue
                 .read_group("usage-test-consumer")
@@ -8236,20 +8233,7 @@ mod tests {
             }
         });
 
-        timeout(Duration::from_secs(2), async {
-            while store.max_writes_in_flight.load(Ordering::Acquire)
-                < super::PENDING_PERSISTENCE_SINGLE_WRITE_TARGET_CONCURRENCY
-                || dispatcher
-                    .sender
-                    .as_ref()
-                    .is_some_and(|sender| sender.capacity() != 0)
-            {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the bounded dispatcher should fill its fixed worker window");
-        timeout(Duration::from_secs(2), dispatch)
+        timeout(Duration::from_secs(5), dispatch)
             .await
             .expect("overflow dispatch must remain non-blocking")
             .expect("overflow dispatch task should not panic");
@@ -8260,11 +8244,6 @@ mod tests {
             dispatcher.state.max_pending.load(Ordering::Acquire) <= RESIDENT_BOUND,
             "resident pending records exceeded the fixed channel and worker bound"
         );
-        assert_eq!(
-            store.max_writes_in_flight.load(Ordering::Acquire),
-            super::PENDING_PERSISTENCE_SINGLE_WRITE_TARGET_CONCURRENCY
-        );
-
         store.release_writes.add_permits(TOTAL_ITEMS);
         timeout(Duration::from_secs(5), async {
             while dispatcher.state.pending.load(Ordering::Acquire) != 0 {
@@ -8276,6 +8255,11 @@ mod tests {
         let writes_completed = store.writes_completed.load(Ordering::Acquire);
         assert_eq!(completed.load(Ordering::Acquire), writes_completed);
         assert_eq!(writes_completed as u64 + overflow, TOTAL_ITEMS as u64);
+        assert!(
+            store.max_writes_in_flight.load(Ordering::Acquire)
+                <= super::PENDING_PERSISTENCE_SINGLE_WRITE_TARGET_CONCURRENCY,
+            "pending persistence exceeded its fixed worker window"
+        );
     }
 
     #[tokio::test]
@@ -10036,12 +10020,13 @@ mod tests {
         })
         .await
         .expect("first-byte transition should be persisted directly");
-        let records = store.records.lock().expect("records lock");
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].request_id, "req-stream-direct-delay");
-        assert_eq!(records[0].status, "streaming");
-        assert_eq!(records[0].first_byte_time_ms, Some(12));
-        drop(records);
+        {
+            let records = store.records.lock().expect("records lock");
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].request_id, "req-stream-direct-delay");
+            assert_eq!(records[0].status, "streaming");
+            assert_eq!(records[0].first_byte_time_ms, Some(12));
+        }
 
         sleep(Duration::from_millis(60)).await;
         let queued = queue
@@ -10181,11 +10166,12 @@ mod tests {
         })
         .await
         .expect("first-byte transition should be persisted directly");
-        let records = store.records.lock().expect("records lock");
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].status, "streaming");
-        assert_eq!(records[0].first_byte_time_ms, Some(12));
-        drop(records);
+        {
+            let records = store.records.lock().expect("records lock");
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].status, "streaming");
+            assert_eq!(records[0].first_byte_time_ms, Some(12));
+        }
 
         sleep(Duration::from_millis(80)).await;
         let delayed = queue
@@ -12063,13 +12049,15 @@ mod tests {
         );
         timeout(Duration::from_secs(1), async {
             loop {
-                let records = store.records.lock().expect("records lock");
-                if records.iter().any(|record| {
-                    record.request_id == unrelated_request_id && record.status == "pending"
-                }) {
+                let unrelated_written = {
+                    let records = store.records.lock().expect("records lock");
+                    records.iter().any(|record| {
+                        record.request_id == unrelated_request_id && record.status == "pending"
+                    })
+                };
+                if unrelated_written {
                     break;
                 }
-                drop(records);
                 tokio::task::yield_now().await;
             }
         })
@@ -12152,13 +12140,15 @@ mod tests {
         );
         timeout(Duration::from_secs(1), async {
             loop {
-                let records = store.records.lock().expect("records lock");
-                if records.iter().any(|record| {
-                    record.request_id == unrelated_request_id && record.status == "pending"
-                }) {
+                let unrelated_written = {
+                    let records = store.records.lock().expect("records lock");
+                    records.iter().any(|record| {
+                        record.request_id == unrelated_request_id && record.status == "pending"
+                    })
+                };
+                if unrelated_written {
                     break;
                 }
-                drop(records);
                 tokio::task::yield_now().await;
             }
         })

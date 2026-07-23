@@ -37,6 +37,15 @@ pub(crate) async fn refresh_oauth_plan_auth_for_retry(
         }
     };
 
+    if aether_provider_transport::is_codex_agent_identity_transport(&transport)
+        && !aether_provider_transport::is_codex_agent_identity_invalid_task_response(
+            status_code,
+            response_text,
+        )
+    {
+        return false;
+    }
+
     if transport.key.decrypted_auth_config.is_none()
         && !transport.key.auth_type.trim().eq_ignore_ascii_case("oauth")
     {

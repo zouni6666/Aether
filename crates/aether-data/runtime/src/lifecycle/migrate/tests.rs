@@ -111,6 +111,8 @@ impl ManagedPostgresServer {
             .arg("127.0.0.1")
             .arg("-p")
             .arg(port.to_string())
+            .arg("-k")
+            .arg(&workdir)
             .arg("-F")
             .arg("-c")
             .arg("fsync=off")
@@ -132,8 +134,17 @@ impl ManagedPostgresServer {
 
         if let Err(err) = wait_for_postgres(&database_url).await {
             let _ = child.kill();
-            let _ = child.wait();
-            return Err(err);
+            let exit_status = child
+                .wait()
+                .map(|status| status.to_string())
+                .unwrap_or_else(|wait_err| format!("unavailable ({wait_err})"));
+            let logs = fs::read_to_string(&log_path)
+                .unwrap_or_else(|read_err| format!("<failed to read postgres log: {read_err}>"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("{err}; postgres exit status: {exit_status}; logs:\n{logs}"),
+            )
+            .into());
         }
 
         Ok(Self {

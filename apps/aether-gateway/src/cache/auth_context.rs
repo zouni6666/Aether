@@ -175,25 +175,16 @@ impl Drop for AuthContextOwnedInflightGuard {
 
 impl AuthContextCache {
     fn finish_inflight(&self, cache_key: &str, state: &Arc<AuthContextInflightState>) {
-        let removed = self
-            .inflight
-            .lock()
-            .map(|mut inflight| {
-                if inflight
-                    .get(cache_key)
-                    .is_some_and(|current| Arc::ptr_eq(current, state))
-                {
-                    state.complete();
-                    inflight.remove(cache_key).is_some()
-                } else {
-                    false
-                }
-            })
-            .unwrap_or(false);
-        if !removed {
+        if let Ok(mut inflight) = self.inflight.lock() {
             // A clear may already have detached and completed this flight.
             // Keep drop idempotent so an old guard cannot affect its replacement.
-            return;
+            if inflight
+                .get(cache_key)
+                .is_some_and(|current| Arc::ptr_eq(current, state))
+            {
+                state.complete();
+                inflight.remove(cache_key);
+            }
         }
     }
 

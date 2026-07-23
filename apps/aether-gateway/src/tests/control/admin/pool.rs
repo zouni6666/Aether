@@ -3060,7 +3060,7 @@ async fn gateway_pool_plan_free_selector_prefers_upstream_plan_type() {
 }
 
 #[tokio::test]
-async fn gateway_pool_keys_mark_oauth_header_auth() {
+async fn gateway_pool_keys_classify_oauth_credentials() {
     let mut provider = sample_provider("provider-codex", "codex", 10).with_transport_fields(
         true,
         false,
@@ -3091,11 +3091,25 @@ async fn gateway_pool_keys_mark_oauth_header_auth() {
         )
         .expect("auth config should encrypt"),
     );
+    let mut agent_key = sample_key(
+        "key-codex-agent-identity",
+        "provider-codex",
+        "openai:responses",
+        "",
+    );
+    agent_key.auth_type = "oauth".to_string();
+    agent_key.encrypted_auth_config = Some(
+        encrypt_python_fernet_plaintext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            r#"{"provider_type":"codex","auth_mode":"agentIdentity","agent_runtime_id":"runtime-1","agent_private_key":"base64-private-key","task_id":"task-1"}"#,
+        )
+        .expect("Agent Identity auth config should encrypt"),
+    );
 
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![provider],
         Vec::new(),
-        vec![key],
+        vec![key, agent_key],
     ));
     let state = AppState::new()
         .expect("gateway should build")
@@ -3120,8 +3134,19 @@ async fn gateway_pool_keys_mark_oauth_header_auth() {
     )
     .expect("json body should parse");
     let keys = payload["keys"].as_array().expect("keys should be array");
-    assert_eq!(keys.len(), 1);
-    assert_eq!(keys[0]["oauth_header_auth"], true);
+    assert_eq!(keys.len(), 2);
+    let oauth_header_key = keys
+        .iter()
+        .find(|key| key["key_id"] == "key-codex-oauth-header")
+        .expect("OAuth Header key should exist");
+    assert_eq!(oauth_header_key["oauth_header_auth"], true);
+    assert_eq!(oauth_header_key["agent_identity"], false);
+    let agent_identity_key = keys
+        .iter()
+        .find(|key| key["key_id"] == "key-codex-agent-identity")
+        .expect("Agent Identity key should exist");
+    assert_eq!(agent_identity_key["oauth_header_auth"], false);
+    assert_eq!(agent_identity_key["agent_identity"], true);
 }
 
 #[tokio::test]

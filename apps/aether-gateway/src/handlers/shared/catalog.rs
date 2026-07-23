@@ -1,8 +1,8 @@
 use crate::handlers::shared::{json_string_list, unix_secs_to_rfc3339};
 use crate::provider_key_auth::{
-    provider_key_auth_config_uses_header_authorization, provider_key_auth_semantics,
-    provider_key_can_refresh_oauth, provider_key_configured_api_formats,
-    provider_key_inherits_provider_api_formats,
+    provider_key_auth_config_is_agent_identity, provider_key_auth_config_uses_header_authorization,
+    provider_key_auth_semantics, provider_key_can_refresh_oauth,
+    provider_key_configured_api_formats, provider_key_inherits_provider_api_formats,
 };
 use crate::AppState;
 use aether_admin::provider::quota as admin_provider_quota_pure;
@@ -2461,6 +2461,8 @@ pub(crate) fn build_admin_provider_key_response(
             .unwrap_or(false);
     let oauth_header_auth = auth_semantics.oauth_managed()
         && provider_key_auth_config_uses_header_authorization(auth_config.as_ref());
+    let agent_identity =
+        provider_key_auth_config_is_agent_identity(provider_type, auth_config.as_ref());
     let oauth_plan_type = derive_catalog_oauth_plan_type(key, provider_type, auth_config.as_ref());
     let (
         health_score,
@@ -2494,7 +2496,11 @@ pub(crate) fn build_admin_provider_key_response(
     );
     payload.insert(
         "api_key_masked".to_string(),
-        json!(masked_catalog_api_key(state, key)),
+        json!(if agent_identity {
+            "[Agent Identity]".to_string()
+        } else {
+            masked_catalog_api_key(state, key)
+        }),
     );
     payload.insert("api_key_plain".to_string(), serde_json::Value::Null);
     payload.insert("auth_type".to_string(), json!(key.auth_type));
@@ -2518,6 +2524,7 @@ pub(crate) fn build_admin_provider_key_response(
         "oauth_managed".to_string(),
         json!(auth_semantics.oauth_managed()),
     );
+    payload.insert("agent_identity".to_string(), json!(agent_identity));
     payload.insert(
         "can_refresh_oauth".to_string(),
         json!(provider_key_can_refresh_oauth(

@@ -1567,6 +1567,68 @@ impl AppState {
             return Ok(());
         };
 
+        if provider_transport::is_codex_agent_identity_cached_entry(entry) {
+            let metadata = entry.metadata.as_ref().ok_or_else(|| {
+                GatewayError::Internal(
+                    "Agent Identity task registration produced no auth_config".to_string(),
+                )
+            })?;
+            provider_transport::validate_codex_agent_identity_auth_config(metadata)
+                .map_err(GatewayError::Internal)?;
+            let auth_config = serde_json::to_string(metadata)
+                .map_err(|err| GatewayError::Internal(err.to_string()))?;
+            let encrypted_auth_config =
+                encrypt_python_fernet_plaintext(encryption_key, &auth_config)
+                    .map_err(|err| GatewayError::Internal(err.to_string()))?;
+
+            let Some(mut latest_key) = self
+                .data
+                .list_provider_catalog_keys_by_ids(&[key_id.to_string()])
+                .await
+                .map_err(|err| GatewayError::Internal(err.to_string()))?
+                .into_iter()
+                .next()
+            else {
+                return Ok(());
+            };
+
+            latest_key.encrypted_auth_config = Some(encrypted_auth_config);
+            latest_key.encrypted_api_key = Some(
+                encrypt_python_fernet_plaintext(encryption_key, "__placeholder__")
+                    .map_err(|err| GatewayError::Internal(err.to_string()))?,
+            );
+            latest_key.expires_at_unix_secs = None;
+            let (oauth_invalid_at_unix_secs, oauth_invalid_reason) =
+                local_oauth_refresh_success_invalid_state(&latest_key);
+            latest_key.oauth_invalid_at_unix_secs = oauth_invalid_at_unix_secs;
+            latest_key.oauth_invalid_reason = oauth_invalid_reason;
+            latest_key.updated_at_unix_secs = Some(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .ok()
+                    .map(|duration| duration.as_secs())
+                    .unwrap_or(0),
+            );
+            let current_status_snapshot = latest_key.status_snapshot.take();
+            latest_key.status_snapshot =
+                sync_provider_key_oauth_status_snapshot(current_status_snapshot, &latest_key);
+            let updated = self
+                .update_provider_catalog_key(&latest_key)
+                .await?
+                .is_some();
+            if updated {
+                self.clear_provider_transport_snapshot_cache();
+            }
+            tracing::info!(
+                key_id = %key_id,
+                provider_id = %transport.provider.id,
+                provider_type = %transport.provider.provider_type,
+                updated,
+                "gateway Agent Identity task registration persisted"
+            );
+            return Ok(());
+        }
+
         let access_token = entry
             .auth_header_value
             .trim()
@@ -1944,7 +2006,13 @@ impl AppState {
                 request_refresh_token_fingerprint = request_refresh_token_fingerprint
                     .as_deref()
                     .unwrap_or("-"),
-                body_excerpt = %local_oauth_log_excerpt(response_body_text.as_str()),
+                body_excerpt = %if request.request_id
+                    == provider_transport::CODEX_AGENT_IDENTITY_TASK_REGISTRATION_REQUEST_ID
+                {
+                    "[redacted]".to_string()
+                } else {
+                    local_oauth_log_excerpt(response_body_text.as_str())
+                },
                 "gateway local oauth execution response returned error"
             );
         }
