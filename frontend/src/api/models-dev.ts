@@ -5,8 +5,10 @@
 
 import api from './client'
 import {
+  getModelsDevUnsupportedPricingFields,
   resolveModelsDevTieredPricing,
   type ModelsDevCost,
+  type ModelsDevUnsupportedPricingField,
 } from './models-dev-pricing'
 import type { TieredPricingConfig } from './endpoints/types'
 
@@ -78,6 +80,7 @@ export interface ModelsDevModelItem {
   inputPrice?: number
   outputPrice?: number
   tieredPricing?: TieredPricingConfig
+  pricingUnsupportedFields?: ModelsDevUnsupportedPricingField[]
   contextLimit?: number
   outputLimit?: number
   supportsVision?: boolean
@@ -187,6 +190,11 @@ export async function getModelsDevList(officialOnly: boolean = true): Promise<Mo
           model.cost,
           model.experimental?.modes,
         )
+        const pricingUnsupportedFields = [...new Set([
+          ...getModelsDevUnsupportedPricingFields(model.cost),
+          ...Object.values(model.experimental?.modes ?? {})
+            .flatMap(mode => getModelsDevUnsupportedPricingFields(mode.cost)),
+        ])]
         const basePricingTier = tieredPricing?.tiers[0]
         items.push({
           providerId,
@@ -197,6 +205,9 @@ export async function getModelsDevList(officialOnly: boolean = true): Promise<Mo
           inputPrice: basePricingTier?.input_price_per_1m ?? model.cost?.input,
           outputPrice: basePricingTier?.output_price_per_1m ?? model.cost?.output,
           tieredPricing: tieredPricing ?? undefined,
+          pricingUnsupportedFields: pricingUnsupportedFields.length > 0
+            ? pricingUnsupportedFields
+            : undefined,
           contextLimit: model.limit?.context,
           outputLimit: model.limit?.output,
           supportsVision: inputModalities?.includes('image'),

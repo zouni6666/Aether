@@ -21,6 +21,8 @@ export interface ModelsDevCost extends ModelsDevTokenCost {
   tiers?: ModelsDevCostTier[]
 }
 
+export type ModelsDevUnsupportedPricingField = 'reasoning' | 'input_audio' | 'output_audio'
+
 const TOKEN_PRICE_FIELDS = [
   'input_price_per_1m',
   'output_price_per_1m',
@@ -36,6 +38,40 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isPrice(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0
+}
+
+const SPECIAL_PRICE_BASE_FIELDS: Array<{
+  field: ModelsDevUnsupportedPricingField
+  baseField: 'input' | 'output'
+}> = [
+  { field: 'reasoning', baseField: 'output' },
+  { field: 'input_audio', baseField: 'input' },
+  { field: 'output_audio', baseField: 'output' },
+]
+
+export function getModelsDevUnsupportedPricingFields(
+  cost: unknown,
+): ModelsDevUnsupportedPricingField[] {
+  if (!isRecord(cost)) return []
+  const unsupportedFields = new Set<ModelsDevUnsupportedPricingField>()
+  const inspectPrices = (prices: Record<string, unknown>) => {
+    for (const { field, baseField } of SPECIAL_PRICE_BASE_FIELDS) {
+      const specialPrice = prices[field]
+      if (specialPrice === undefined) continue
+      const basePrice = prices[baseField]
+      if (!isPrice(specialPrice) || !isPrice(basePrice) || specialPrice !== basePrice) {
+        unsupportedFields.add(field)
+      }
+    }
+  }
+
+  inspectPrices(cost)
+  if (Array.isArray(cost.tiers)) {
+    for (const tier of cost.tiers) {
+      if (isRecord(tier)) inspectPrices(tier)
+    }
+  }
+  return [...unsupportedFields]
 }
 
 function parseTokenPrices(value: unknown): Omit<PricingTier, 'up_to'> | null {
@@ -70,6 +106,7 @@ function parseContextTier(value: unknown): { size: number; prices: Omit<PricingT
 }
 
 export function buildModelsDevTieredPricing(cost: unknown): TieredPricingConfig | null {
+  if (getModelsDevUnsupportedPricingFields(cost).length > 0) return null
   const basePrices = parseTokenPrices(cost)
   if (!basePrices || !isRecord(cost)) return null
 

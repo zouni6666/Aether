@@ -51,6 +51,11 @@ describe('getModelsDevList', () => {
               output: ['text'],
               cost: { input: 1, output: 2 },
             },
+            'audio-priced': {
+              id: 'audio-priced',
+              name: 'Audio Priced',
+              cost: { input: 1, output: 2, input_audio: 4 },
+            },
           },
         },
       },
@@ -59,6 +64,7 @@ describe('getModelsDevList', () => {
     const models = await getModelsDevList()
     const current = models.find(model => model.modelId === 'gpt-test')
     const legacy = models.find(model => model.modelId === 'legacy')
+    const audioPriced = models.find(model => model.modelId === 'audio-priced')
 
     expect(current).toMatchObject({
       supportsVision: true,
@@ -73,5 +79,11 @@ describe('getModelsDevList', () => {
       inputModalities: ['text', 'image'],
       outputModalities: ['text'],
     })
+    expect(audioPriced).toMatchObject({
+      inputPrice: 1,
+      outputPrice: 2,
+      pricingUnsupportedFields: ['input_audio'],
+    })
+    expect(audioPriced?.tieredPricing).toBeUndefined()
   })
 })
