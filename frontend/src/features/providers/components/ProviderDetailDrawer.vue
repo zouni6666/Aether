@@ -1091,6 +1091,14 @@ let mappingPreviewLoadRequestId = 0
 const DEFAULT_PROVIDER_KEYS_PAGE_SIZE = 3
 const CUSTOM_PROVIDER_KEYS_PAGE_SIZE = 4
 
+function applyProviderSnapshot(updated: ProviderWithEndpointsSummary): void {
+  if (provider.value?.id === updated.id) {
+    Object.assign(provider.value, updated)
+    return
+  }
+  provider.value = updated
+}
+
 function getProviderKeysPageSize(providerType?: string | null): number {
   return (providerType || '').trim().toLowerCase() === 'custom'
     ? CUSTOM_PROVIDER_KEYS_PAGE_SIZE
@@ -1386,7 +1394,7 @@ async function toggleFormatConversion() {
   const newValue = !provider.value.enable_format_conversion
   try {
     const updated = await updateProvider(provider.value.id, { enable_format_conversion: newValue })
-    provider.value = updated
+    applyProviderSnapshot(updated)
     showSuccess(legacyT(newValue ? '已启用格式转换' : '已禁用格式转换'))
     emit('refresh')
   } catch {
@@ -1408,7 +1416,7 @@ async function setProviderProxy(nodeId: string) {
     const updated = await updateProvider(provider.value.id, {
       proxy: { node_id: nodeId, enabled: true },
     })
-    provider.value = updated
+    applyProviderSnapshot(updated)
     providerProxyPopoverOpen.value = false
     showSuccess(legacyT('代理节点已设置'))
     emit('refresh')
@@ -1424,7 +1432,7 @@ async function clearProviderProxy() {
   savingProviderProxy.value = true
   try {
     const updated = await updateProvider(provider.value.id, { proxy: null })
-    provider.value = updated
+    applyProviderSnapshot(updated)
     providerProxyPopoverOpen.value = false
     showSuccess(legacyT('已清除提供商代理'))
     emit('refresh')
@@ -1447,7 +1455,7 @@ function handleEditEndpoint(_endpoint: ProviderEndpoint) {
 }
 
 async function handleEndpointChanged() {
-  await Promise.all([loadProvider(), loadEndpoints()])
+  await Promise.all([loadProvider(), loadEndpoints(), loadMappingPreview()])
   emit('refresh')
 }
 
@@ -1562,7 +1570,7 @@ async function confirmDeleteKey() {
     await deleteEndpointKey(keyId)
     showSuccess(legacyT('密钥已删除'))
     // 刷新端点列表及模型数据（删除 Key 触发自动解除模型关联）
-    await loadEndpoints()
+    await Promise.all([loadProvider(), loadEndpoints(), loadMappingPreview()])
     emit('refresh')
   } catch (err: unknown) {
     showError(localizedApiError(err, '删除密钥失败'), legacyT('错误'))
@@ -1573,7 +1581,7 @@ async function handleRecoverKey(key: EndpointAPIKey) {
   try {
     const result = await recoverKeyHealth(key.id)
     showSuccess(legacyT(result.message || 'Key已完全恢复'))
-    await loadEndpoints()
+    await Promise.all([loadProvider(), loadEndpoints()])
     emit('refresh')
   } catch (err: unknown) {
     showError(localizedApiError(err, 'Key恢复失败'), legacyT('错误'))
@@ -1625,11 +1633,15 @@ async function handleRefreshOAuth(key: EndpointAPIKey) {
     } else {
       showSuccess(legacyT(feedback.message))
     }
-    // Antigravity：token 刷新后可能完成了账号激活，触发配额获取
-    // （不 emit('refresh')，避免触发全局 provider 余额刷新）
-    void autoRefreshQuotaInBackground()
+    emit('refresh')
+    // Token 刷新可能激活账号并更新配额，完成后再同步一次父列表。
+    void autoRefreshQuotaInBackground().then((changed) => {
+      if (changed) emit('refresh')
+    })
   } catch (err: unknown) {
     showError(localizedApiError(err, 'Token 刷新失败'), legacyT('错误'))
+    await Promise.all([loadProvider(), loadEndpoints()])
+    emit('refresh')
   } finally {
     refreshingOAuthKeyId.value = null
   }
@@ -1692,9 +1704,12 @@ async function handleClearOAuthInvalid(key: EndpointAPIKey) {
         }
       }
     }
-    await loadEndpoints()
+    await Promise.all([loadProvider(), loadEndpoints()])
+    emit('refresh')
   } catch (err: unknown) {
     showError(localizedApiError(err, '清除失败'), legacyT('错误'))
+    await Promise.all([loadProvider(), loadEndpoints()])
+    emit('refresh')
   } finally {
     clearingOAuthInvalidKeyId.value = null
   }
@@ -1755,8 +1770,11 @@ async function handleConsumeCodexResetCredit(key: EndpointAPIKey) {
     if (result.refresh_status === 'failed') {
       showWarning(legacyT(result.refresh_error || '重置请求已处理，但最新配额刷新失败'))
     }
+    emit('refresh')
   } catch (err: unknown) {
     showError(localizedApiError(err, 'Codex 重置机会使用失败'), legacyT('错误'))
+    await Promise.all([loadProvider(), loadEndpoints()])
+    emit('refresh')
   } finally {
     consumingCodexResetCreditKeyId.value = null
   }
@@ -2707,13 +2725,13 @@ function applyQuotaResults(
 }
 
 // 通用的自动刷新配额函数（支持 Codex、Gemini CLI、Antigravity、Kiro、Windsurf 和 ChatGPT Web）
-async function autoRefreshQuotaInBackground() {
+async function autoRefreshQuotaInBackground(): Promise<boolean> {
   const providerId = props.providerId
-  if (!providerId) return
-  if (refreshingQuota.value) return
+  if (!providerId) return false
+  if (refreshingQuota.value) return false
 
   const providerType = provider.value?.provider_type
-  if (providerType !== 'codex' && providerType !== 'gemini_cli' && providerType !== 'antigravity' && providerType !== 'kiro' && providerType !== 'windsurf' && providerType !== 'chatgpt_web' && providerType !== 'grok') return
+  if (providerType !== 'codex' && providerType !== 'gemini_cli' && providerType !== 'antigravity' && providerType !== 'kiro' && providerType !== 'windsurf' && providerType !== 'chatgpt_web' && providerType !== 'grok') return false
 
   // 检查是否需要刷新
   let shouldRefresh = false
@@ -2732,7 +2750,7 @@ async function autoRefreshQuotaInBackground() {
   } else if (providerType === 'chatgpt_web') {
     shouldRefresh = shouldAutoRefreshChatGPTWebQuota()
   }
-  if (!shouldRefresh) return
+  if (!shouldRefresh) return false
 
   let hadCachedQuota = false
   if (providerType === 'codex') {
@@ -2758,10 +2776,12 @@ async function autoRefreshQuotaInBackground() {
     if (result.success <= 0 && applied === 0 && !hadCachedQuota && providerType === 'antigravity') {
       showError(legacyT('没有获取到配额信息（请检查账号是否已授权、project_id 是否存在）'), legacyT('提示'))
     }
+    return applied > 0
   } catch (err: unknown) {
     if (!hadCachedQuota && providerType === 'antigravity') {
       showError(localizedApiError(err, '后台刷新配额失败'), legacyT('错误'))
     }
+    return false
   } finally {
     refreshingQuota.value = false
   }
@@ -2792,10 +2812,12 @@ async function openAntigravityQuotaDialog(key: EndpointAPIKey) {
 }
 
 async function handleKeyChanged() {
-  await Promise.all([loadEndpoints(), loadMappingPreview()])
+  await Promise.all([loadProvider(), loadEndpoints(), loadMappingPreview()])
   emit('refresh')
   // 添加/修改 key 后自动获取已支持 provider 的配额（新 key 的 upstream_metadata 为空）
-  void autoRefreshQuotaInBackground()
+  void autoRefreshQuotaInBackground().then((changed) => {
+    if (changed) emit('refresh')
+  })
 }
 
 // 切换密钥启用状态
@@ -2805,8 +2827,10 @@ async function toggleKeyActive(key: EndpointAPIKey) {
   togglingKeyId.value = key.id
   try {
     const newStatus = !key.is_active
-    await updateProviderKey(key.id, { is_active: newStatus })
+    const updated = await updateProviderKey(key.id, { is_active: newStatus })
+    Object.assign(key, updated)
     key.is_active = newStatus
+    await Promise.all([loadProvider(), loadEndpoints()])
     showSuccess(legacyT(newStatus ? '密钥已启用' : '密钥已停用'))
     emit('refresh')
   } catch (err: unknown) {
@@ -2885,20 +2909,20 @@ function handleBatchAssignDialogOpenUpdate(value: boolean) {
 
 // 处理批量关联完成
 async function handleBatchAssignChanged() {
-  await Promise.all([loadEndpoints(), loadMappingPreview()])
+  await Promise.all([loadProvider(), loadEndpoints(), loadMappingPreview()])
   emit('refresh')
 }
 
 // 处理模型映射变更
 async function handleModelMappingChanged() {
-  await Promise.all([loadEndpoints(), loadMappingPreview()])
+  await Promise.all([loadProvider(), loadEndpoints(), loadMappingPreview()])
   emit('refresh')
 }
 
 // 处理模型保存完成
 async function handleModelSaved() {
   editingModel.value = null
-  await Promise.all([loadEndpoints(), loadMappingPreview()])
+  await Promise.all([loadProvider(), loadEndpoints(), loadMappingPreview()])
   emit('refresh')
 }
 
@@ -3738,7 +3762,7 @@ async function loadProvider() {
     void loadSystemFormatConversionConfig()
     const providerData = await getProvider(props.providerId)
     if (requestId !== providerLoadRequestId) return
-    provider.value = providerData
+    applyProviderSnapshot(providerData)
     keyPageSize.value = getProviderKeysPageSize(providerData.provider_type)
 
     if (!provider.value) {

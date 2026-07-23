@@ -39,6 +39,7 @@ export interface QuotaWindowSnapshot {
   reset_at?: number | null
   reset_seconds?: number | null
   window_minutes?: number | null
+  usage_reset_at?: number | null
   is_exhausted?: boolean | null
   usage?: QuotaWindowUsageSnapshot | null
 }

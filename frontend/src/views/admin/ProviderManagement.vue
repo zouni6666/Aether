@@ -568,7 +568,13 @@ async function loadProviders(options: { cacheTtlMs?: number } = {}) {
       cacheTtlMs: options.cacheTtlMs ?? 0,
     })
     if (requestId !== providersRequestId) return
-    providers.value = response.items
+    const existingProviders = new Map(providers.value.map(provider => [provider.id, provider]))
+    providers.value = response.items.map((item) => {
+      const existing = existingProviders.get(item.id)
+      if (!existing) return item
+      Object.assign(existing, item)
+      return existing
+    })
     total.value = response.total
     // 异步加载配置了 ops 的 provider 的余额数据
     loadBalances(providers.value)
@@ -639,8 +645,8 @@ function openProviderDrawer(providerId: string) {
 function mergeUpdatedProvider(updated: ProviderWithEndpointsSummary) {
   const index = providers.value.findIndex(p => p.id === updated.id)
   if (index !== -1) {
-    providers.value[index] = updated
-    loadBalances([updated], false)
+    Object.assign(providers.value[index], updated)
+    loadBalances([providers.value[index]], false)
   }
 }
 

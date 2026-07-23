@@ -126,6 +126,8 @@
       class="h-7 w-7"
       :disabled="toggling"
       :title="legacyT(apiKey.is_active ? '点击停用' : '点击启用')"
+      :aria-label="legacyT(apiKey.is_active ? '点击停用' : '点击启用')"
+      data-testid="provider-key-toggle-active"
       @click="$emit('toggleActive')"
     >
       <Power class="w-3.5 h-3.5" />
