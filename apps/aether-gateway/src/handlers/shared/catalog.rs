@@ -306,6 +306,18 @@ fn build_provider_key_oauth_status_snapshot(key: &StoredProviderCatalogKey) -> V
     if let Some(reason) =
         tagged_oauth_invalid_reason(invalid_reason.as_deref(), OAUTH_REQUEST_FAILED_PREFIX)
     {
+        if admin_provider_quota_pure::codex_looks_like_token_invalidated(Some(&reason)) {
+            return json!({
+                "code": "invalid",
+                "label": "已失效",
+                "reason": reason,
+                "expires_at": expires_at_unix_secs,
+                "invalid_at": invalid_at_unix_secs,
+                "source": "oauth_invalid",
+                "requires_reauth": true,
+                "expiring_soon": false,
+            });
+        }
         return json!({
             "code": "check_failed",
             "label": "检查失败",
@@ -4037,6 +4049,26 @@ mod tests {
         );
         assert_eq!(account.get("blocked"), Some(&json!(true)));
         assert_eq!(account.get("source"), Some(&json!("oauth_invalid")));
+    }
+
+    #[test]
+    fn provider_key_status_snapshot_payload_upgrades_deleted_agent_runtime_to_invalid() {
+        let mut key = sample_catalog_key();
+        key.auth_type = "oauth".to_string();
+        key.oauth_invalid_at_unix_secs = Some(1_784_728_663);
+        key.oauth_invalid_reason =
+            Some("[REQUEST_FAILED] Agent runtime has been deleted.".to_string());
+
+        let payload = provider_key_status_snapshot_payload(&key, "codex");
+        let oauth = payload
+            .get("oauth")
+            .and_then(Value::as_object)
+            .expect("oauth snapshot should be object");
+
+        assert_eq!(oauth.get("code"), Some(&json!("invalid")));
+        assert_eq!(oauth.get("label"), Some(&json!("已失效")));
+        assert_eq!(oauth.get("invalid_at"), Some(&json!(1_784_728_663u64)));
+        assert_eq!(oauth.get("requires_reauth"), Some(&json!(true)));
     }
 
     #[test]

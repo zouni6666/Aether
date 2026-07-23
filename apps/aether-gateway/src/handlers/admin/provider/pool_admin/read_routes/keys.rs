@@ -807,6 +807,26 @@ mod tests {
     }
 
     #[test]
+    fn oauth_status_filter_matches_deleted_agent_runtime_as_invalid() {
+        let mut key = sample_key("oauth");
+        key.oauth_invalid_at_unix_secs = Some(1_784_728_663);
+        key.oauth_invalid_reason =
+            Some("[REQUEST_FAILED] Agent runtime has been deleted.".to_string());
+        let status_snapshot = provider_key_status_snapshot_payload(&key, "codex");
+
+        assert_eq!(
+            admin_pool_oauth_status_filter(
+                &key,
+                "codex",
+                None,
+                status_snapshot.get("oauth").and_then(Value::as_object),
+                1_784_729_000,
+            ),
+            Some("invalid")
+        );
+    }
+
+    #[test]
     fn codex_cycle_usage_request_uses_actual_monthly_window_boundaries() {
         let key = sample_key("oauth");
         let reset_at = 5_000_000u64;

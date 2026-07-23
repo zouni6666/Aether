@@ -451,6 +451,16 @@ fn resolve_from_oauth_invalid_reason(reason: Option<&str>) -> Option<PoolAccount
         } else {
             cleaned
         };
+        if oauth_request_failure_indicates_invalid_identity(&reason) {
+            return Some(PoolAccountState {
+                blocked: true,
+                code: Some("oauth_token_invalid".to_string()),
+                label: Some("Token 失效".to_string()),
+                reason: Some(reason),
+                source: Some("oauth_invalid".to_string()),
+                recoverable: false,
+            });
+        }
         return Some(PoolAccountState {
             blocked: false,
             code: Some("oauth_request_failed".to_string()),
@@ -483,6 +493,13 @@ fn resolve_from_oauth_invalid_reason(reason: Option<&str>) -> Option<PoolAccount
         });
     }
     None
+}
+
+fn oauth_request_failure_indicates_invalid_identity(reason: &str) -> bool {
+    reason
+        .trim()
+        .to_ascii_lowercase()
+        .contains("agent runtime has been deleted")
 }
 
 pub fn resolve_pool_account_state(
@@ -549,6 +566,24 @@ pub fn resolve_account_status_snapshot(
             source: Some("oauth_invalid".to_string()),
             recoverable: code == "oauth_token_expired",
         };
+    }
+
+    if let Some(cleaned) = tagged_reason(&text, "REQUEST_FAILED") {
+        let reason = if cleaned.is_empty() {
+            "账号状态检查失败".to_string()
+        } else {
+            cleaned
+        };
+        if oauth_request_failure_indicates_invalid_identity(&reason) {
+            return AccountStatusSnapshot {
+                code: "oauth_token_invalid".to_string(),
+                label: Some("Token 失效".to_string()),
+                reason: Some(reason),
+                blocked: true,
+                source: Some("oauth_invalid".to_string()),
+                recoverable: false,
+            };
+        }
     }
 
     if tagged_reason(&text, "REFRESH_FAILED").is_some() {
@@ -737,6 +772,34 @@ mod tests {
         assert_eq!(snapshot.label.as_deref(), Some("Token 失效"));
         assert!(snapshot.blocked);
         assert!(!snapshot.recoverable);
+    }
+
+    #[test]
+    fn deleted_agent_runtime_request_failure_is_hard_invalid() {
+        let reason = "[REQUEST_FAILED] Agent runtime has been deleted.";
+        let state = resolve_pool_account_state(Some("codex"), None, Some(reason));
+        let snapshot = resolve_account_status_snapshot(Some("codex"), None, Some(reason));
+
+        assert!(state.blocked);
+        assert_eq!(state.code.as_deref(), Some("oauth_token_invalid"));
+        assert!(!state.recoverable);
+        assert_eq!(snapshot.code, "oauth_token_invalid");
+        assert_eq!(snapshot.label.as_deref(), Some("Token 失效"));
+        assert!(snapshot.blocked);
+        assert!(!snapshot.recoverable);
+    }
+
+    #[test]
+    fn transient_request_failure_remains_recoverable() {
+        let state = resolve_pool_account_state(
+            Some("codex"),
+            None,
+            Some("[REQUEST_FAILED] upstream request timed out"),
+        );
+
+        assert!(!state.blocked);
+        assert_eq!(state.code.as_deref(), Some("oauth_request_failed"));
+        assert!(state.recoverable);
     }
 
     #[test]

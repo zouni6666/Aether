@@ -1299,6 +1299,7 @@ pub fn codex_looks_like_token_invalidated(message: Option<&str>) -> bool {
         || lowered.contains("authentication token has been invalidated")
         || lowered.contains("token has been invalidated")
         || lowered.contains("token invalidated")
+        || lowered.contains("agent runtime has been deleted")
         || lowered.contains("personal access token owner is inactive")
         || lowered.contains("biscuit_baker_service_auth_credential_error_status")
         || lowered.contains("auth_credential")
@@ -2174,6 +2175,16 @@ mod tests {
             ),
             Some(format!(
                 "{OAUTH_EXPIRED_PREFIX}biscuit_baker_service_auth_credential_error_status"
+            ))
+        );
+    }
+
+    #[test]
+    fn codex_runtime_invalid_reason_marks_deleted_agent_runtime_as_invalid() {
+        assert_eq!(
+            codex_runtime_invalid_reason(403, Some("Agent runtime has been deleted.")),
+            Some(format!(
+                "{OAUTH_EXPIRED_PREFIX}Agent runtime has been deleted."
             ))
         );
     }

@@ -467,6 +467,18 @@ fn build_oauth_status_snapshot_value(key: &StoredProviderCatalogKey) -> Value {
         });
     }
     if let Some(reason) = tagged_reason(invalid_reason.as_deref(), OAUTH_REQUEST_FAILED_PREFIX) {
+        if admin_provider_quota_pure::codex_looks_like_token_invalidated(Some(&reason)) {
+            return json!({
+                "code": "invalid",
+                "label": "已失效",
+                "reason": reason,
+                "expires_at": expires_at_unix_secs,
+                "invalid_at": invalid_at_unix_secs,
+                "source": "oauth_invalid",
+                "requires_reauth": true,
+                "expiring_soon": false,
+            });
+        }
         return json!({
             "code": "check_failed",
             "label": "检查失败",
