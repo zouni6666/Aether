@@ -3,9 +3,14 @@ import { reactive } from 'vue'
 
 import {
   EMBEDDING_API_FORMATS,
+  buildGlobalModelPriceSyncPlan,
   buildGlobalModelCreatePayload,
   buildGlobalModelUpdatePayload,
   cloneTieredPricingConfig,
+  findGlobalModelByName,
+  mergeModelsDevPricingPreference,
+  readModelsDevPricingPreference,
+  tieredPricingConfigsEqual,
 } from '../global-model-form-helpers'
 import type { TieredPricingConfig } from '@/api/endpoints/types'
 
@@ -88,5 +93,93 @@ describe('global model form pricing presets', () => {
 
     cloned.tiers[0].input_price_per_1m = 9
     expect(pricing.tiers[0].input_price_per_1m).toBe(3)
+  })
+
+  it('matches existing models by normalized model ID', () => {
+    const existingModel = { id: 'model-1', name: ' Claude-Sonnet-5 ' }
+
+    expect(findGlobalModelByName([existingModel], 'claude-sonnet-5')).toBe(existingModel)
+    expect(findGlobalModelByName([existingModel], 'claude-opus-5')).toBeUndefined()
+  })
+
+  it('compares pricing independently of object key order', () => {
+    const currentPricing = {
+      processing_tiers: {
+        priority: { price_multiplier: 2 },
+      },
+      tiers: [{
+        output_price_per_1m: 15,
+        input_price_per_1m: 3,
+        up_to: null,
+      }],
+    } as TieredPricingConfig
+    const onlinePricing = {
+      tiers: [{
+        up_to: null,
+        input_price_per_1m: 3,
+        output_price_per_1m: 15,
+      }],
+      processing_tiers: {
+        priority: { price_multiplier: 2 },
+      },
+    } as TieredPricingConfig
+
+    expect(tieredPricingConfigsEqual(currentPricing, onlinePricing)).toBe(true)
+    onlinePricing.tiers[0].output_price_per_1m = 16
+    expect(tieredPricingConfigsEqual(currentPricing, onlinePricing)).toBe(false)
+  })
+
+  it('groups models by their selected provider pricing sync state', () => {
+    const makeGlobalModel = (id: string, name: string, inputPrice: number) => ({
+      id,
+      name,
+      display_name: name,
+      is_active: true,
+      default_tiered_pricing: {
+        tiers: [{ up_to: null, input_price_per_1m: inputPrice, output_price_per_1m: 10 }],
+      },
+      created_at: '2026-07-23T00:00:00Z',
+    })
+    const makeOnlineModel = (modelId: string, inputPrice?: number) => ({
+      providerId: 'anthropic',
+      providerName: 'Anthropic',
+      modelId,
+      modelName: modelId,
+      tieredPricing: inputPrice === undefined
+        ? undefined
+        : { tiers: [{ up_to: null, input_price_per_1m: inputPrice, output_price_per_1m: 10 }] },
+    })
+    const currentModel = makeGlobalModel('current', 'current-model', 2)
+    const staleModel = makeGlobalModel('stale', 'stale-model', 3)
+    const unavailableModel = makeGlobalModel('missing', 'missing-model', 4)
+
+    const plan = buildGlobalModelPriceSyncPlan(
+      [currentModel, staleModel, unavailableModel],
+      [makeOnlineModel('current-model', 2), makeOnlineModel('stale-model', 5)],
+    )
+
+    expect(plan.unchanged.map(entry => entry.model.id)).toEqual(['current'])
+    expect(plan.syncable.map(entry => entry.model.id)).toEqual(['stale'])
+    expect(plan.unavailable.map(model => model.id)).toEqual(['missing'])
+  })
+
+  it('persists and removes the online pricing preference without replacing other config', () => {
+    const config = {
+      streaming: true,
+      billing: { video: { price_per_second_by_resolution: { '720p': 0.04 } } },
+    }
+    const enabledConfig = mergeModelsDevPricingPreference(config, {
+      enabled: true,
+      provider_id: 'anthropic',
+      provider_name: 'Anthropic',
+    })
+
+    expect(readModelsDevPricingPreference(enabledConfig)).toEqual({
+      enabled: true,
+      provider_id: 'anthropic',
+      provider_name: 'Anthropic',
+    })
+    expect(enabledConfig).toMatchObject(config)
+    expect(mergeModelsDevPricingPreference(enabledConfig, null)).toEqual(config)
   })
 })

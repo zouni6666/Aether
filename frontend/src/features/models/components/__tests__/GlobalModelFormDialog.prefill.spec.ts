@@ -9,6 +9,7 @@ import {
 } from 'vue'
 
 import type { ModelsDevModelItem } from '@/api/models-dev'
+import type { GlobalModelResponse } from '@/api/global-models'
 import GlobalModelFormDialog from '../GlobalModelFormDialog.vue'
 
 const modelsDevMocks = vi.hoisted(() => ({
@@ -17,6 +18,7 @@ const modelsDevMocks = vi.hoisted(() => ({
 
 const globalModelMocks = vi.hoisted(() => ({
   createGlobalModel: vi.fn(),
+  listGlobalModels: vi.fn(),
   updateGlobalModel: vi.fn(),
 }))
 
@@ -27,6 +29,7 @@ vi.mock('@/api/models-dev', () => ({
 
 vi.mock('@/api/global-models', () => ({
   createGlobalModel: globalModelMocks.createGlobalModel,
+  listGlobalModels: globalModelMocks.listGlobalModels,
   updateGlobalModel: globalModelMocks.updateGlobalModel,
 }))
 
@@ -89,6 +92,24 @@ const freshPreset: ModelsDevModelItem = {
   },
 }
 
+function buildExistingStaleModel(): GlobalModelResponse {
+  return {
+    id: 'global-stale-model',
+    name: 'stale-model',
+    display_name: 'Configured Stale Model',
+    is_active: true,
+    default_tiered_pricing: {
+      tiers: [{
+        up_to: null,
+        input_price_per_1m: 9,
+        output_price_per_1m: 18,
+      }],
+    },
+    config: { streaming: true },
+    created_at: '2026-07-23T00:00:00Z',
+  }
+}
+
 function mountDialog() {
   const root = document.createElement('div')
   document.body.appendChild(root)
@@ -144,7 +165,10 @@ beforeEach(() => {
   modelsDevMocks.getModelsDevList.mockResolvedValue([stalePreset, freshPreset])
   globalModelMocks.createGlobalModel.mockReset()
   globalModelMocks.createGlobalModel.mockResolvedValue({})
+  globalModelMocks.listGlobalModels.mockReset()
+  globalModelMocks.listGlobalModels.mockResolvedValue({ models: [], total: 0 })
   globalModelMocks.updateGlobalModel.mockReset()
+  globalModelMocks.updateGlobalModel.mockResolvedValue({})
   Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
     value: vi.fn(),
     configurable: true,
@@ -277,5 +301,98 @@ describe('GlobalModelFormDialog preset replacement', () => {
       priority: { price_multiplier: 2.5 },
     })
     expect(payload.default_tiered_pricing.processing_tiers).not.toHaveProperty('standard')
+  })
+
+  it('marks an existing model and updates only its online pricing after confirmation', async () => {
+    const existingStaleModel = buildExistingStaleModel()
+    globalModelMocks.listGlobalModels.mockResolvedValue({
+      models: [existingStaleModel],
+      total: 1,
+    })
+    mountDialog()
+    await settle()
+
+    expect(document.body.textContent).toContain('已添加')
+    expect(document.body.textContent).toContain('价格可更新')
+
+    findButton('Stale Model').click()
+    await settle()
+
+    expect(document.body.textContent).toContain('仅更新该模型的价格配置')
+    expect(document.body.querySelector<HTMLInputElement>('[data-testid="tier-input-price"]')?.value).toBe('9')
+    expect(findExactButton('请选择在线价格').disabled).toBe(true)
+
+    findButton('使用在线价格').click()
+    await settle()
+
+    expect(document.body.querySelector<HTMLInputElement>('[data-testid="tier-input-price"]')?.value).toBe('1')
+    findExactButton('同步价格').click()
+    await settle()
+
+    expect(globalModelMocks.updateGlobalModel).toHaveBeenCalledOnce()
+    expect(globalModelMocks.updateGlobalModel).toHaveBeenCalledWith(
+      existingStaleModel.id,
+      { default_tiered_pricing: stalePreset.tieredPricing },
+    )
+    expect(globalModelMocks.createGlobalModel).not.toHaveBeenCalled()
+  })
+
+  it('auto-applies online pricing without submitting it', async () => {
+    const existingStaleModel = buildExistingStaleModel()
+    globalModelMocks.listGlobalModels.mockResolvedValue({
+      models: [existingStaleModel],
+      total: 1,
+    })
+    mountDialog()
+    await settle()
+
+    findButton('Stale Model').click()
+    await settle()
+    const autoApplySwitch = document.body.querySelector<HTMLButtonElement>(
+      '[role="switch"][aria-label="选择已有模型时自动应用在线价格"]',
+    )
+    if (!autoApplySwitch) throw new Error('Missing automatic online pricing switch')
+    autoApplySwitch.click()
+    await settle()
+
+    expect(document.body.querySelector<HTMLInputElement>('[data-testid="tier-input-price"]')?.value).toBe('1')
+    expect(findExactButton('保存并同步价格').disabled).toBe(false)
+    expect(globalModelMocks.updateGlobalModel).not.toHaveBeenCalled()
+  })
+
+  it('persists the selected online pricing source when automatic apply is enabled', async () => {
+    const existingStaleModel = buildExistingStaleModel()
+    globalModelMocks.listGlobalModels.mockResolvedValue({
+      models: [existingStaleModel],
+      total: 1,
+    })
+    mountDialog()
+    await settle()
+
+    findButton('Stale Model').click()
+    await settle()
+    const autoApplySwitch = document.body.querySelector<HTMLButtonElement>(
+      '[role="switch"][aria-label="选择已有模型时自动应用在线价格"]',
+    )
+    if (!autoApplySwitch) throw new Error('Missing automatic online pricing switch')
+    autoApplySwitch.click()
+    await settle()
+    findExactButton('保存并同步价格').click()
+    await settle()
+
+    expect(globalModelMocks.updateGlobalModel).toHaveBeenCalledWith(
+      existingStaleModel.id,
+      {
+        default_tiered_pricing: stalePreset.tieredPricing,
+        config: {
+          streaming: true,
+          models_dev_pricing: {
+            enabled: true,
+            provider_id: 'openai',
+            provider_name: 'OpenAI',
+          },
+        },
+      },
+    )
   })
 })
