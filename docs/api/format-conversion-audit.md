@@ -9,6 +9,7 @@ Statuses:
 - `native`: emitted as a target-native field without semantic change.
 - `mapped`: converted through canonical/provider-specific mapping.
 - `extension-preserved`: preserved in same-format canonical roundtrip or target-approved extension namespace.
+- `transport-only`: audited client transport metadata intentionally omitted when the target has no compatible transport channel.
 - `unaudited`: rejected because the source field is not in the audited provider schema inventory for cross-format conversion.
 - `unsupported`: rejected because the request/field shape is outside the supported conversion surface, independent of schema drift.
 - `lossy-blocked`: conversion fails closed.
@@ -83,6 +84,7 @@ Provider schema refresh is not a runtime dependency. Same-format runtime paths d
 | `top_p` | generation | `top_p` | native |
 | `top_logprobs` | generation | `top_logprobs` | native |
 | `metadata` | canonical metadata | `metadata` | native |
+| `client_metadata` | Responses client transport metadata | none | transport-only; omitted |
 | `parallel_tool_calls` | canonical bool | `parallel_tool_calls` | native |
 | `text.format` | canonical response format | `response_format` | mapped |
 | `text.verbosity` | Responses extension | `verbosity` | mapped |
