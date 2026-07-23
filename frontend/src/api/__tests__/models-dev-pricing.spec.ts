@@ -63,6 +63,36 @@ describe('buildModelsDevTieredPricing', () => {
     })
   })
 
+  it('allows special token dimensions only when they use the base token price', () => {
+    expect(buildModelsDevTieredPricing({
+      input: 1,
+      output: 2,
+      input_audio: 1,
+      output_audio: 2,
+      reasoning: 2,
+    })).toEqual({
+      tiers: [{ up_to: null, input_price_per_1m: 1, output_price_per_1m: 2 }],
+    })
+  })
+
+  it.each([
+    { input: 1, output: 2, reasoning: 4 },
+    { input: 1, output: 2, input_audio: 3 },
+    { input: 1, output: 2, output_audio: 5 },
+    {
+      input: 1,
+      output: 2,
+      tiers: [{
+        input: 3,
+        output: 4,
+        input_audio: 9,
+        tier: { type: 'context', size: 100_000 },
+      }],
+    },
+  ])('rejects pricing dimensions the billing engine cannot settle independently', (cost) => {
+    expect(buildModelsDevTieredPricing(cost)).toBeNull()
+  })
+
   it('omits an empty base band when context pricing starts at zero', () => {
     expect(buildModelsDevTieredPricing({
       input: 1,

@@ -9,6 +9,7 @@ import {
 } from 'vue'
 
 import type { ModelsDevModelItem } from '@/api/models-dev'
+import type { GlobalModelResponse } from '@/api/global-models'
 import GlobalModelFormDialog from '../GlobalModelFormDialog.vue'
 
 const modelsDevMocks = vi.hoisted(() => ({
@@ -17,6 +18,7 @@ const modelsDevMocks = vi.hoisted(() => ({
 
 const globalModelMocks = vi.hoisted(() => ({
   createGlobalModel: vi.fn(),
+  listGlobalModels: vi.fn(),
   updateGlobalModel: vi.fn(),
 }))
 
@@ -27,6 +29,7 @@ vi.mock('@/api/models-dev', () => ({
 
 vi.mock('@/api/global-models', () => ({
   createGlobalModel: globalModelMocks.createGlobalModel,
+  listGlobalModels: globalModelMocks.listGlobalModels,
   updateGlobalModel: globalModelMocks.updateGlobalModel,
 }))
 
@@ -89,6 +92,35 @@ const freshPreset: ModelsDevModelItem = {
   },
 }
 
+const unsupportedPreset: ModelsDevModelItem = {
+  providerId: 'openai',
+  providerName: 'OpenAI',
+  modelId: 'reasoning-priced-model',
+  modelName: 'Reasoning Priced Model',
+  official: true,
+  inputPrice: 1,
+  outputPrice: 2,
+  pricingUnsupportedFields: ['reasoning'],
+}
+
+function buildExistingStaleModel(): GlobalModelResponse {
+  return {
+    id: 'global-stale-model',
+    name: 'stale-model',
+    display_name: 'Configured Stale Model',
+    is_active: true,
+    default_tiered_pricing: {
+      tiers: [{
+        up_to: null,
+        input_price_per_1m: 9,
+        output_price_per_1m: 18,
+      }],
+    },
+    config: { streaming: true },
+    created_at: '2026-07-23T00:00:00Z',
+  }
+}
+
 function mountDialog() {
   const root = document.createElement('div')
   document.body.appendChild(root)
@@ -140,11 +172,15 @@ async function setInput(input: HTMLInputElement | null, value: string) {
 }
 
 beforeEach(() => {
+  localStorage.clear()
   modelsDevMocks.getModelsDevList.mockReset()
-  modelsDevMocks.getModelsDevList.mockResolvedValue([stalePreset, freshPreset])
+  modelsDevMocks.getModelsDevList.mockResolvedValue([stalePreset, freshPreset, unsupportedPreset])
   globalModelMocks.createGlobalModel.mockReset()
-  globalModelMocks.createGlobalModel.mockResolvedValue({})
+  globalModelMocks.createGlobalModel.mockResolvedValue({ id: 'created-model' })
+  globalModelMocks.listGlobalModels.mockReset()
+  globalModelMocks.listGlobalModels.mockResolvedValue({ models: [], total: 0 })
   globalModelMocks.updateGlobalModel.mockReset()
+  globalModelMocks.updateGlobalModel.mockResolvedValue({})
   Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
     value: vi.fn(),
     configurable: true,
@@ -234,6 +270,16 @@ describe('GlobalModelFormDialog preset replacement', () => {
         ],
       },
     })
+    expect(JSON.parse(
+      localStorage.getItem('aether:models-dev-pricing-sources:v1') || 'null',
+    )).toMatchObject({
+      models: {
+        'created-model': {
+          provider_id: 'openai',
+          provider_name: 'OpenAI',
+        },
+      },
+    })
     expect(payload.config).not.toHaveProperty('description')
     expect(payload.config).not.toHaveProperty('billing')
     expect(payload.default_tiered_pricing).not.toHaveProperty('processing_tiers')
@@ -277,5 +323,83 @@ describe('GlobalModelFormDialog preset replacement', () => {
       priority: { price_multiplier: 2.5 },
     })
     expect(payload.default_tiered_pricing.processing_tiers).not.toHaveProperty('standard')
+  })
+
+  it('marks an existing model and updates only its online pricing after confirmation', async () => {
+    const existingStaleModel = buildExistingStaleModel()
+    localStorage.setItem('aether:models-dev-pricing-sources:v1', JSON.stringify({
+      version: 1,
+      models: {
+        [existingStaleModel.id]: {
+          provider_id: 'openai',
+          provider_name: 'OpenAI',
+        },
+      },
+    }))
+    globalModelMocks.listGlobalModels.mockResolvedValue({
+      models: [existingStaleModel],
+      total: 1,
+    })
+    mountDialog()
+    await settle()
+
+    expect(document.body.textContent).toContain('已添加')
+    expect(document.body.textContent).toContain('价格可更新')
+    expect(document.body.textContent).toContain('上次来源')
+
+    findButton('Stale Model').click()
+    await settle()
+
+    expect(document.body.textContent).toContain('仅更新该模型的价格配置')
+    expect(document.body.querySelector<HTMLInputElement>('[data-testid="tier-input-price"]')?.value).toBe('9')
+    expect(document.body.querySelector('[aria-label="选择已有模型时自动应用在线价格"]')).toBeNull()
+    expect(findExactButton('请选择在线价格').disabled).toBe(true)
+
+    findButton('使用在线价格').click()
+    await settle()
+
+    expect(document.body.querySelector<HTMLInputElement>('[data-testid="tier-input-price"]')?.value).toBe('1')
+    findExactButton('同步价格').click()
+    await settle()
+
+    expect(globalModelMocks.updateGlobalModel).toHaveBeenCalledOnce()
+    expect(globalModelMocks.updateGlobalModel).toHaveBeenCalledWith(
+      existingStaleModel.id,
+      { default_tiered_pricing: stalePreset.tieredPricing },
+    )
+    expect(JSON.parse(
+      localStorage.getItem('aether:models-dev-pricing-sources:v1') || 'null',
+    )).toMatchObject({
+      models: {
+        [existingStaleModel.id]: {
+          provider_id: 'openai',
+          provider_name: 'OpenAI',
+        },
+      },
+    })
+    expect(globalModelMocks.createGlobalModel).not.toHaveBeenCalled()
+  })
+
+  it('blocks manual updates when the online source has unsupported pricing dimensions', async () => {
+    const existingModel = {
+      ...buildExistingStaleModel(),
+      id: 'reasoning-priced-global-model',
+      name: unsupportedPreset.modelId,
+      display_name: unsupportedPreset.modelName,
+    }
+    globalModelMocks.listGlobalModels.mockResolvedValue({
+      models: [existingModel],
+      total: 1,
+    })
+    mountDialog()
+    await settle()
+
+    expect(document.body.textContent).toContain('计价不兼容')
+    findButton(unsupportedPreset.modelName).click()
+    await settle()
+
+    expect(document.body.textContent).toContain('无法独立结算推理 Token')
+    expect(findExactButton('暂无在线价格').disabled).toBe(true)
+    expect(globalModelMocks.updateGlobalModel).not.toHaveBeenCalled()
   })
 })
