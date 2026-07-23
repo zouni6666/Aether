@@ -1,7 +1,7 @@
 use crate::handlers::shared::{json_string_list, unix_secs_to_rfc3339};
 use crate::provider_key_auth::{
     provider_key_auth_config_is_agent_identity, provider_key_auth_config_uses_header_authorization,
-    provider_key_auth_semantics, provider_key_can_refresh_oauth,
+    provider_key_auth_semantics, provider_key_can_export_oauth, provider_key_can_refresh_oauth,
     provider_key_configured_api_formats, provider_key_inherits_provider_api_formats,
 };
 use crate::AppState;
@@ -168,6 +168,19 @@ pub(crate) fn masked_catalog_api_key(state: &AppState, key: &StoredProviderCatal
     }
 }
 
+pub(crate) fn masked_catalog_api_key_for_provider(
+    state: &AppState,
+    key: &StoredProviderCatalogKey,
+    provider_type: &str,
+) -> String {
+    let auth_config = parse_catalog_auth_config_json(state, key);
+    if provider_key_auth_config_is_agent_identity(provider_type, auth_config.as_ref()) {
+        "[Agent Identity]".to_string()
+    } else {
+        masked_catalog_api_key(state, key)
+    }
+}
+
 pub(crate) fn parse_catalog_auth_config_json(
     state: &AppState,
     key: &StoredProviderCatalogKey,
@@ -306,6 +319,18 @@ fn build_provider_key_oauth_status_snapshot(key: &StoredProviderCatalogKey) -> V
     if let Some(reason) =
         tagged_oauth_invalid_reason(invalid_reason.as_deref(), OAUTH_REQUEST_FAILED_PREFIX)
     {
+        if admin_provider_quota_pure::codex_looks_like_token_invalidated(Some(&reason)) {
+            return json!({
+                "code": "invalid",
+                "label": "已失效",
+                "reason": reason,
+                "expires_at": expires_at_unix_secs,
+                "invalid_at": invalid_at_unix_secs,
+                "source": "oauth_invalid",
+                "requires_reauth": true,
+                "expiring_soon": false,
+            });
+        }
         return json!({
             "code": "check_failed",
             "label": "检查失败",
@@ -2496,11 +2521,11 @@ pub(crate) fn build_admin_provider_key_response(
     );
     payload.insert(
         "api_key_masked".to_string(),
-        json!(if agent_identity {
-            "[Agent Identity]".to_string()
-        } else {
-            masked_catalog_api_key(state, key)
-        }),
+        json!(masked_catalog_api_key_for_provider(
+            state,
+            key,
+            provider_type,
+        )),
     );
     payload.insert("api_key_plain".to_string(), serde_json::Value::Null);
     payload.insert("auth_type".to_string(), json!(key.auth_type));
@@ -2529,12 +2554,17 @@ pub(crate) fn build_admin_provider_key_response(
         "can_refresh_oauth".to_string(),
         json!(provider_key_can_refresh_oauth(
             auth_semantics,
+            provider_type,
             auth_config.as_ref()
         )),
     );
     payload.insert(
         "can_export_oauth".to_string(),
-        json!(auth_semantics.can_export_oauth()),
+        json!(provider_key_can_export_oauth(
+            auth_semantics,
+            provider_type,
+            auth_config.as_ref()
+        )),
     );
     payload.insert(
         "can_edit_oauth".to_string(),
@@ -2872,6 +2902,46 @@ mod tests {
         let masked = masked_catalog_api_key(&state, &key);
         assert!(masked.contains("***"));
         assert_ne!(masked, "***ERROR***");
+    }
+
+    #[test]
+    fn provider_aware_mask_labels_agent_identity_without_exposing_placeholder() {
+        let state = AppState::new().expect("gateway should build");
+        let encrypted_placeholder =
+            encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "__placeholder__")
+                .expect("placeholder ciphertext should build");
+        let encrypted_auth_config = encrypt_python_fernet_plaintext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            r#"{"provider_type":"codex","auth_mode":"agentIdentity","agent_runtime_id":"runtime-1","agent_private_key":"base64-private-key","task_id":"task-1"}"#,
+        )
+        .expect("auth config ciphertext should build");
+        let key = StoredProviderCatalogKey::new(
+            "key-agent".to_string(),
+            "provider-codex".to_string(),
+            "agent".to_string(),
+            "oauth".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build")
+        .with_transport_fields(
+            Some(json!(["openai:responses"])),
+            encrypted_placeholder,
+            Some(encrypted_auth_config),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("key transport should build");
+
+        assert_eq!(
+            masked_catalog_api_key_for_provider(&state, &key, "codex"),
+            "[Agent Identity]"
+        );
+        assert!(!masked_catalog_api_key_for_provider(&state, &key, "codex").contains("placeholder"));
     }
 
     #[test]
@@ -4037,6 +4107,26 @@ mod tests {
         );
         assert_eq!(account.get("blocked"), Some(&json!(true)));
         assert_eq!(account.get("source"), Some(&json!("oauth_invalid")));
+    }
+
+    #[test]
+    fn provider_key_status_snapshot_payload_upgrades_deleted_agent_runtime_to_invalid() {
+        let mut key = sample_catalog_key();
+        key.auth_type = "oauth".to_string();
+        key.oauth_invalid_at_unix_secs = Some(1_784_728_663);
+        key.oauth_invalid_reason =
+            Some("[REQUEST_FAILED] Agent runtime has been deleted.".to_string());
+
+        let payload = provider_key_status_snapshot_payload(&key, "codex");
+        let oauth = payload
+            .get("oauth")
+            .and_then(Value::as_object)
+            .expect("oauth snapshot should be object");
+
+        assert_eq!(oauth.get("code"), Some(&json!("invalid")));
+        assert_eq!(oauth.get("label"), Some(&json!("已失效")));
+        assert_eq!(oauth.get("invalid_at"), Some(&json!(1_784_728_663u64)));
+        assert_eq!(oauth.get("requires_reauth"), Some(&json!(true)));
     }
 
     #[test]

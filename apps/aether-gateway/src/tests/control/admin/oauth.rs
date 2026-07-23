@@ -8969,6 +8969,137 @@ async fn gateway_allows_management_token_with_pool_write_for_provider_oauth_batc
 }
 
 #[test]
+fn gateway_prevents_pool_write_token_from_importing_agent_identity_via_batch_routes() {
+    run_admin_oauth_test(
+        "gateway_prevents_pool_write_token_from_importing_agent_identity_via_batch_routes",
+        gateway_prevents_pool_write_token_from_importing_agent_identity_via_batch_routes_impl,
+    );
+}
+
+async fn gateway_prevents_pool_write_token_from_importing_agent_identity_via_batch_routes_impl() {
+    let raw_token = "ae-provider-oauth-agent-identity-pool-write";
+    let state = AppState::new().expect("gateway should build");
+    let admin_user = state
+        .create_local_auth_user_with_settings(
+            Some("provider-oauth-agent-identity-pool@example.com".to_string()),
+            true,
+            "admin".to_string(),
+            "hash".to_string(),
+            "admin".to_string(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("admin user should be created")
+        .expect("admin user should exist");
+    let mut management_token = sample_management_token(
+        "token-provider-oauth-agent-identity-pool",
+        &admin_user.id,
+        "provider-oauth-agent-identity-pool",
+        true,
+    );
+    management_token.token.allowed_ips = None;
+    management_token.token.permissions = Some(json!(["admin:pool:read", "admin:pool:write"]));
+    let management_token_repository =
+        Arc::new(InMemoryManagementTokenRepository::seed_with_hashes(
+            vec![management_token],
+            vec![(
+                hash_management_token(raw_token),
+                "token-provider-oauth-agent-identity-pool".to_string(),
+            )],
+        ));
+
+    let mut provider = sample_provider("provider-codex", "codex", 10);
+    provider.provider_type = "codex".to_string();
+    let endpoint = sample_endpoint(
+        "endpoint-codex-agent-identity",
+        "provider-codex",
+        "openai:chat",
+        "https://chatgpt.com/backend-api/codex",
+    );
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![endpoint],
+        vec![],
+    ));
+    let data_state =
+        GatewayDataState::with_management_token_repository_for_tests(management_token_repository)
+            .attach_provider_catalog_repository_for_tests(provider_catalog_repository.clone())
+            .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY);
+    let gateway = build_router_with_state(state.with_data_state_for_tests(data_state));
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let credentials = json!({
+        "auth_mode": "agentIdentity",
+        "agent_runtime_id": "runtime-rbac-guard",
+        "agent_private_key": "MC4CAQAwBQYDK2VwBCIEIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "task_id": "task-rbac-guard"
+    })
+    .to_string();
+    let client = reqwest::Client::new();
+    for path in [
+        "/api/admin/provider-oauth/providers/provider-codex/batch-import",
+        "/api/admin/provider-oauth/providers/provider-codex/batch-import/tasks",
+    ] {
+        let response = client
+            .post(format!("{gateway_url}{path}"))
+            .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+            .bearer_auth(raw_token)
+            .json(&json!({ "credentials": credentials }))
+            .send()
+            .await
+            .expect("request should succeed");
+
+        let status = response.status();
+        let payload: serde_json::Value = response.json().await.expect("json body should parse");
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "path={path} payload={payload}"
+        );
+        assert_eq!(
+            payload["detail"],
+            "Agent Identity JSON 必须使用专属导入接口"
+        );
+    }
+
+    let dedicated_response = client
+        .post(format!(
+            "{gateway_url}/api/admin/provider-oauth/providers/provider-codex/agent-identity-import/tasks"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .bearer_auth(raw_token)
+        .json(&json!({ "credentials": credentials }))
+        .send()
+        .await
+        .expect("request should succeed");
+    let dedicated_status = dedicated_response.status();
+    let dedicated_payload: serde_json::Value = dedicated_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(
+        dedicated_status,
+        StatusCode::FORBIDDEN,
+        "payload={dedicated_payload}"
+    );
+    assert_eq!(
+        dedicated_payload["required_permission"],
+        "admin:provider_oauth:write"
+    );
+
+    let keys = provider_catalog_repository
+        .list_keys_by_provider_ids(&["provider-codex".to_string()])
+        .await
+        .expect("keys should load");
+    assert!(keys.is_empty());
+
+    gateway_handle.abort();
+}
+
+#[test]
 fn gateway_rejects_management_token_without_pool_write_for_provider_oauth_batch_import() {
     run_admin_oauth_test(
         "gateway_rejects_management_token_without_pool_write_for_provider_oauth_batch_import",

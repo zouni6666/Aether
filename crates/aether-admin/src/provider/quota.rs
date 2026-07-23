@@ -200,6 +200,18 @@ pub fn extract_execution_error_message(result: &ExecutionResult) -> Option<Strin
         .filter(|value| !value.is_empty())
 }
 
+/// Keeps the structured upstream error intact for classifiers that depend on fields such as
+/// `error.code`, while retaining the execution-error fallback used by transport failures.
+pub fn extract_execution_error_detail(result: &ExecutionResult) -> Option<String> {
+    result
+        .body
+        .as_ref()
+        .and_then(|body| body.json_body.as_ref())
+        .and_then(|body| serde_json::to_string(body).ok())
+        .filter(|value| !value.is_empty())
+        .or_else(|| extract_execution_error_message(result))
+}
+
 pub fn quota_refresh_success_invalid_state(
     key: &StoredProviderCatalogKey,
 ) -> (Option<u64>, Option<String>) {
@@ -1299,6 +1311,7 @@ pub fn codex_looks_like_token_invalidated(message: Option<&str>) -> bool {
         || lowered.contains("authentication token has been invalidated")
         || lowered.contains("token has been invalidated")
         || lowered.contains("token invalidated")
+        || lowered.contains("agent runtime has been deleted")
         || lowered.contains("personal access token owner is inactive")
         || lowered.contains("biscuit_baker_service_auth_credential_error_status")
         || lowered.contains("auth_credential")
@@ -2109,7 +2122,7 @@ pub fn parse_chatgpt_web_conversation_init_response(
 #[cfg(test)]
 mod tests {
     use super::{
-        codex_build_invalid_state, codex_runtime_invalid_reason,
+        codex_build_invalid_state, codex_runtime_invalid_reason, extract_execution_error_detail,
         normalize_codex_reset_credit_consume_outcome, parse_antigravity_usage_response,
         parse_chatgpt_web_conversation_init_response, parse_codex_backend_me_response,
         parse_codex_usage_headers, parse_codex_wham_reset_credits_detail_response,
@@ -2120,9 +2133,42 @@ mod tests {
         should_auto_remove_structured_reason, OAUTH_ACCOUNT_BLOCK_PREFIX, OAUTH_EXPIRED_PREFIX,
         OAUTH_REFRESH_FAILED_PREFIX, OAUTH_REQUEST_FAILED_PREFIX,
     };
+    use aether_contracts::{ExecutionResult, ResponseBody};
     use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
     use serde_json::json;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn execution_error_detail_preserves_structured_code_and_message() {
+        let result = ExecutionResult {
+            request_id: "quota-agent-identity".to_string(),
+            candidate_id: None,
+            status_code: 401,
+            headers: BTreeMap::new(),
+            body: Some(ResponseBody {
+                json_body: Some(json!({
+                    "error": {
+                        "code": "invalid_task_id",
+                        "message": "registered task is no longer valid"
+                    }
+                })),
+                body_bytes_b64: None,
+            }),
+            telemetry: None,
+            error: None,
+        };
+
+        let detail = extract_execution_error_detail(&result)
+            .expect("structured execution error should be retained");
+        assert!(detail.contains(r#""code":"invalid_task_id""#));
+        assert!(detail.contains(r#""message":"registered task is no longer valid""#));
+        assert!(
+            aether_provider_transport::is_codex_agent_identity_invalid_task_response(
+                result.status_code,
+                Some(&detail),
+            )
+        );
+    }
 
     #[test]
     fn provider_auto_remove_quota_exhausted_keys_defaults_to_false() {
@@ -2174,6 +2220,16 @@ mod tests {
             ),
             Some(format!(
                 "{OAUTH_EXPIRED_PREFIX}biscuit_baker_service_auth_credential_error_status"
+            ))
+        );
+    }
+
+    #[test]
+    fn codex_runtime_invalid_reason_marks_deleted_agent_runtime_as_invalid() {
+        assert_eq!(
+            codex_runtime_invalid_reason(403, Some("Agent runtime has been deleted.")),
+            Some(format!(
+                "{OAUTH_EXPIRED_PREFIX}Agent runtime has been deleted."
             ))
         );
     }

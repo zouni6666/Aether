@@ -98,7 +98,9 @@ use crate::execution_runtime::{
     resolve_local_candidate_failover_analysis_stream, should_fallback_to_control_stream,
     should_retry_next_local_candidate_stream, LocalFailoverDecision,
 };
-use crate::execution_runtime::{MAX_STREAM_PREFETCH_BYTES, MAX_STREAM_PREFETCH_FRAMES};
+use crate::execution_runtime::{
+    MAX_ERROR_BODY_BYTES, MAX_STREAM_PREFETCH_BYTES, MAX_STREAM_PREFETCH_FRAMES,
+};
 use crate::log_ids::short_request_id;
 use crate::orchestration::{
     apply_local_execution_effect, build_local_error_flow_metadata, cyber_continue_failover_enabled,
@@ -1120,15 +1122,125 @@ async fn execute_in_process_stream_with_oauth_retry(
 ) -> Result<DirectUpstreamStreamExecution, InProcessStreamExecutionError> {
     let mut execution = execute_in_process_stream(state, plan, trace_id).await?;
     apply_stream_summary_report_context(&mut execution, report_context);
+    let response_text = if execution.status_code == 401
+        && stream_plan_uses_codex_agent_identity(state, plan).await
+    {
+        prefetch_direct_stream_error_body(&mut execution).await
+    } else {
+        None
+    };
     if execution.status_code >= 400
-        && refresh_oauth_plan_auth_for_retry(state, plan, execution.status_code, None, trace_id)
-            .await
+        && refresh_oauth_plan_auth_for_retry(
+            state,
+            plan,
+            execution.status_code,
+            response_text.as_deref(),
+            trace_id,
+        )
+        .await
     {
         drop(execution);
         execution = execute_in_process_stream(state, plan, trace_id).await?;
         apply_stream_summary_report_context(&mut execution, report_context);
     }
     Ok(execution)
+}
+
+async fn stream_plan_uses_codex_agent_identity(state: &AppState, plan: &ExecutionPlan) -> bool {
+    state
+        .read_provider_transport_snapshot(&plan.provider_id, &plan.endpoint_id, &plan.key_id)
+        .await
+        .ok()
+        .flatten()
+        .as_ref()
+        .is_some_and(aether_provider_transport::is_codex_agent_identity_transport)
+}
+
+async fn next_direct_upstream_response_chunk(
+    response: &mut DirectUpstreamResponse,
+) -> Result<Option<Bytes>, String> {
+    match response {
+        DirectUpstreamResponse::Reqwest(response) => response
+            .chunk()
+            .await
+            .map_err(|err| format_upstream_request_error(&err)),
+        DirectUpstreamResponse::HyperH2c(response) => loop {
+            let Some(frame) = response.body_mut().frame().await else {
+                return Ok(None);
+            };
+            let frame = frame.map_err(|err| format_hyper_error_chain(&err))?;
+            if let Ok(chunk) = frame.into_data() {
+                return Ok(Some(chunk));
+            }
+        },
+        DirectUpstreamResponse::BrowserWreq(response) => response
+            .chunk()
+            .await
+            .map_err(|err| format_wreq_upstream_request_error(&err)),
+        DirectUpstreamResponse::LocalTunnel(response) => response.next_chunk().await,
+    }
+}
+
+async fn prefetch_direct_stream_error_body(
+    execution: &mut DirectUpstreamStreamExecution,
+) -> Option<String> {
+    let mut inspected = Vec::with_capacity(MAX_ERROR_BODY_BYTES);
+    let mut fully_buffered = false;
+    while inspected.len() < MAX_ERROR_BODY_BYTES {
+        let next_chunk = if execution.prefetched_body.is_empty() {
+            match await_direct_passthrough_first_item(
+                next_direct_upstream_response_chunk(&mut execution.response),
+                execution.started_at,
+                execution.stream_first_byte_timeout,
+            )
+            .await
+            {
+                Ok(item) => item,
+                Err(_) => break,
+            }
+        } else {
+            next_direct_upstream_response_chunk(&mut execution.response).await
+        };
+        let chunk = match next_chunk {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => {
+                fully_buffered = true;
+                break;
+            }
+            Err(error) => {
+                execution.prefetched_body.push_back(Err(error));
+                break;
+            }
+        };
+        if chunk.is_empty() {
+            continue;
+        }
+
+        let remaining = MAX_ERROR_BODY_BYTES.saturating_sub(inspected.len());
+        inspected.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        execution.prefetched_body.push_back(Ok(chunk));
+
+        let response_text = String::from_utf8_lossy(&inspected);
+        if aether_provider_transport::is_codex_agent_identity_invalid_task_response(
+            execution.status_code,
+            Some(response_text.as_ref()),
+        ) {
+            break;
+        }
+    }
+
+    if inspected.is_empty() {
+        return None;
+    }
+    if fully_buffered {
+        let (body_json, _) = decode_stream_error_body(&execution.headers, &inspected);
+        if let Some(body_json) = body_json {
+            if let Ok(response_text) = serde_json::to_string(&body_json) {
+                return Some(response_text);
+            }
+        }
+    }
+    Some(String::from_utf8_lossy(&inspected).into_owned())
 }
 
 fn should_use_direct_sse_passthrough(
@@ -1184,9 +1296,10 @@ fn should_use_direct_sse_passthrough(
 type DirectUpstreamByteStream = BoxStream<'static, Result<Bytes, String>>;
 
 fn direct_upstream_response_byte_stream(
+    prefetched_body: VecDeque<Result<Bytes, String>>,
     response: DirectUpstreamResponse,
 ) -> DirectUpstreamByteStream {
-    match response {
+    let response_stream = match response {
         DirectUpstreamResponse::Reqwest(response) => response
             .bytes_stream()
             .map(|item| item.map_err(|err| format_upstream_request_error(&err)))
@@ -1213,7 +1326,10 @@ fn direct_upstream_response_byte_stream(
             }
         }
         .boxed(),
-    }
+    };
+    futures_stream::iter(prefetched_body)
+        .chain(response_stream)
+        .boxed()
 }
 
 async fn await_direct_passthrough_first_item<T, F>(
@@ -1952,12 +2068,14 @@ impl DirectPassthroughFinalizerCore {
 
 fn build_direct_passthrough_inline_body_stream(
     finalizer: DirectPassthroughFinalizer,
+    prefetched_body: VecDeque<Result<Bytes, String>>,
     response: DirectUpstreamResponse,
     upstream_started_at: Instant,
     stream_first_byte_timeout: Option<Duration>,
 ) -> impl futures_util::Stream<Item = Result<Bytes, IoError>> + Send + 'static {
     let state = DirectPassthroughInlineBodyState::new(
         finalizer,
+        prefetched_body,
         response,
         upstream_started_at,
         stream_first_byte_timeout,
@@ -1982,13 +2100,17 @@ struct DirectPassthroughInlineBodyState {
 impl DirectPassthroughInlineBodyState {
     fn new(
         finalizer: DirectPassthroughFinalizer,
+        prefetched_body: VecDeque<Result<Bytes, String>>,
         response: DirectUpstreamResponse,
         upstream_started_at: Instant,
         stream_first_byte_timeout: Option<Duration>,
     ) -> Self {
         Self {
             finalizer: Some(finalizer),
-            upstream: Some(direct_upstream_response_byte_stream(response)),
+            upstream: Some(direct_upstream_response_byte_stream(
+                prefetched_body,
+                response,
+            )),
             upstream_control_filter: Some(SseControlBlockFilter::default()),
             upstream_started_at,
             stream_first_byte_timeout,
@@ -2271,6 +2393,7 @@ async fn execute_stream_from_direct_passthrough(
         mut headers,
         provider_api_format: _,
         stream_summary_report_context: _,
+        prefetched_body,
         response,
         started_at: upstream_started_at,
         stream_first_byte_timeout,
@@ -2405,6 +2528,7 @@ async fn execute_stream_from_direct_passthrough(
         });
         let body_stream = build_direct_passthrough_inline_body_stream(
             finalizer,
+            prefetched_body,
             response,
             upstream_started_at,
             stream_first_byte_timeout,
@@ -2480,7 +2604,7 @@ async fn execute_stream_from_direct_passthrough(
         let mut last_client_chunk_elapsed_ms = 0u64;
         let mut downstream_dropped = false;
         let mut terminal_failure: Option<StreamFailureReport> = None;
-        let mut upstream = direct_upstream_response_byte_stream(response);
+        let mut upstream = direct_upstream_response_byte_stream(prefetched_body, response);
         let mut observed_first_upstream_body = false;
         let mut observed_first_client_send = false;
 
@@ -6333,8 +6457,8 @@ mod tests {
     use std::collections::BTreeMap;
     use std::convert::Infallible;
     use std::sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex,
     };
     use std::time::{Duration, Instant};
 
@@ -6371,7 +6495,9 @@ mod tests {
     use axum::extract::ws::Message;
     use axum::extract::Request;
     use axum::routing::any;
-    use axum::{http::header, http::HeaderValue, Router};
+    use axum::{
+        http::header, http::HeaderValue, http::StatusCode, response::IntoResponse, Json, Router,
+    };
     use base64::Engine as _;
     use futures_util::StreamExt as _;
     use serde_json::{json, Value};
@@ -6380,10 +6506,12 @@ mod tests {
     use super::{
         build_sse_body_stream, build_stream_sync_payload,
         client_format_allows_proxy_generated_sse_control_blocks,
+        direct_upstream_response_byte_stream,
         ensure_stream_terminal_summary_for_missing_observed_finish,
-        execute_execution_runtime_stream, execute_stream_from_frame_stream,
-        maybe_apply_kiro_prompt_cache_usage_to_stream_summary, merge_stream_terminal_summary,
-        parse_direct_passthrough_mode, prefetched_openai_responses_body_has_output_boundary,
+        execute_execution_runtime_stream, execute_in_process_stream_with_oauth_retry,
+        execute_stream_from_frame_stream, maybe_apply_kiro_prompt_cache_usage_to_stream_summary,
+        merge_stream_terminal_summary, parse_direct_passthrough_mode,
+        prefetch_direct_stream_error_body, prefetched_openai_responses_body_has_output_boundary,
         record_sync_terminal_usage_with_handoff,
         record_sync_terminal_usage_with_handoff_after_spawn, should_limit_direct_finalize_prefetch,
         should_probe_success_failover_before_stream, should_skip_direct_finalize_prefetch,
@@ -6399,6 +6527,7 @@ mod tests {
     use crate::stage_metrics::RequestStageTrace;
     use crate::tunnel::{tunnel_protocol, TunnelProxyConn};
     use crate::AppState;
+    use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
 
     fn provider_catalog_stop_429_for_plan(
         plan: &ExecutionPlan,
@@ -6479,6 +6608,124 @@ mod tests {
         .expect("key transport should build");
 
         InMemoryProviderCatalogReadRepository::seed(vec![provider], vec![endpoint], vec![key])
+    }
+
+    fn provider_catalog_for_stream_auth_plan(
+        plan: &ExecutionPlan,
+        provider_type: &str,
+        auth_type: &str,
+        auth_config: Option<Value>,
+    ) -> InMemoryProviderCatalogReadRepository {
+        let provider = StoredProviderCatalogProvider::new(
+            plan.provider_id.clone(),
+            plan.provider_id.clone(),
+            Some("https://provider.example".to_string()),
+            provider_type.to_string(),
+        )
+        .expect("provider should build");
+        let endpoint = StoredProviderCatalogEndpoint::new(
+            plan.endpoint_id.clone(),
+            plan.provider_id.clone(),
+            plan.provider_api_format.clone(),
+            None,
+            None,
+            true,
+        )
+        .expect("endpoint should build")
+        .with_transport_fields(
+            plan.url.clone(),
+            None,
+            None,
+            Some(2),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("endpoint transport should build");
+        let encrypted_auth_config = auth_config.map(|config| {
+            encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, &config.to_string())
+                .expect("auth config should encrypt")
+        });
+        let key = StoredProviderCatalogKey::new(
+            plan.key_id.clone(),
+            plan.provider_id.clone(),
+            plan.key_id.clone(),
+            auth_type.to_string(),
+            None,
+            true,
+        )
+        .expect("key should build")
+        .with_transport_fields(
+            Some(json!([plan.provider_api_format.clone()])),
+            None,
+            encrypted_auth_config,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("key transport should build");
+
+        InMemoryProviderCatalogReadRepository::seed(vec![provider], vec![endpoint], vec![key])
+    }
+
+    fn direct_stream_test_plan(request_id: &str, url: String) -> ExecutionPlan {
+        ExecutionPlan {
+            request_id: request_id.to_string(),
+            candidate_id: Some(format!("candidate-{request_id}")),
+            provider_name: Some("codex".to_string()),
+            provider_id: format!("provider-{request_id}"),
+            endpoint_id: format!("endpoint-{request_id}"),
+            key_id: format!("key-{request_id}"),
+            method: "POST".to_string(),
+            url,
+            headers: BTreeMap::from([
+                ("content-type".to_string(), "application/json".to_string()),
+                (
+                    "authorization".to_string(),
+                    "AgentAssertion stale-task".to_string(),
+                ),
+            ]),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({"stream": true})),
+            stream: true,
+            client_api_format: "openai:responses".to_string(),
+            provider_api_format: "openai:responses".to_string(),
+            model_name: Some("gpt-5".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: Some(ExecutionTimeouts {
+                connect_ms: Some(30_000),
+                first_byte_ms: Some(30_000),
+                ..ExecutionTimeouts::default()
+            }),
+        }
+    }
+
+    fn agent_identity_test_auth_config(task_id: &str) -> Value {
+        json!({
+            "provider_type": "codex",
+            "auth_mode": "agentIdentity",
+            "agent_runtime_id": "runtime-test",
+            "agent_private_key": "MC4CAQAwBQYDK2VwBCIEIAcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcH",
+            "task_id": task_id
+        })
+    }
+
+    async fn collect_direct_execution_body(
+        mut execution: crate::execution_runtime::DirectUpstreamStreamExecution,
+    ) -> Result<Vec<u8>, String> {
+        let prefetched_body = std::mem::take(&mut execution.prefetched_body);
+        let mut stream = direct_upstream_response_byte_stream(prefetched_body, execution.response);
+        let mut body = Vec::new();
+        while let Some(item) = stream.next().await {
+            body.extend_from_slice(&item?);
+        }
+        Ok(body)
     }
 
     fn codex_cyber_policy_plan(request_id: &str) -> ExecutionPlan {
@@ -6607,6 +6854,326 @@ mod tests {
 
     fn test_state() -> AppState {
         AppState::new().expect("gateway state should build")
+    }
+
+    #[tokio::test]
+    async fn agent_identity_stream_error_prefetch_is_bounded_and_replayed() {
+        let upstream_body = format!(
+            "{}{}",
+            "x".repeat(crate::execution_runtime::MAX_ERROR_BODY_BYTES),
+            "body-after-inspection-limit"
+        );
+        let expected_body = upstream_body.clone().into_bytes();
+        let listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("address should resolve");
+        let server = tokio::spawn(async move {
+            let app = Router::new().route(
+                "/responses",
+                any(move || {
+                    let body = upstream_body.clone();
+                    async move { (StatusCode::UNAUTHORIZED, body) }
+                }),
+            );
+            axum::serve(listener, app)
+                .await
+                .expect("server should start");
+        });
+        let plan =
+            direct_stream_test_plan("bounded-agent-error", format!("http://{addr}/responses"));
+        let mut execution = crate::execution_runtime::DirectSyncExecutionRuntime::new()
+            .execute_stream(&plan)
+            .await
+            .expect("stream headers should execute");
+
+        let inspected = prefetch_direct_stream_error_body(&mut execution)
+            .await
+            .expect("error body should be inspected");
+
+        assert_eq!(
+            inspected.len(),
+            crate::execution_runtime::MAX_ERROR_BODY_BYTES
+        );
+        let replayed = collect_direct_execution_body(execution)
+            .await
+            .expect("prefetched response should replay");
+        assert_eq!(replayed, expected_body);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn non_agent_stream_401_is_not_prefetched_and_body_passes_through() {
+        let upstream_body = br#"{"error":{"code":"ordinary_unauthorized","message":"sign in"}}"#;
+        let listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("address should resolve");
+        let server = tokio::spawn(async move {
+            let app = Router::new().route(
+                "/responses",
+                any(|| async {
+                    (
+                        StatusCode::UNAUTHORIZED,
+                        [(header::CONTENT_TYPE, "application/json")],
+                        upstream_body.as_slice(),
+                    )
+                }),
+            );
+            axum::serve(listener, app)
+                .await
+                .expect("server should start");
+        });
+        let mut plan = direct_stream_test_plan("non-agent-401", format!("http://{addr}/responses"));
+        plan.provider_name = Some("openai".to_string());
+        let repository = provider_catalog_for_stream_auth_plan(&plan, "openai", "api_key", None);
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_provider_transport_reader_for_tests(
+                    Arc::new(repository),
+                    DEVELOPMENT_ENCRYPTION_KEY,
+                ),
+            );
+
+        let execution = execute_in_process_stream_with_oauth_retry(
+            &state,
+            &mut plan,
+            "trace-non-agent-401",
+            None,
+        )
+        .await
+        .expect("stream request should execute");
+
+        assert!(execution.prefetched_body.is_empty());
+        let replayed = collect_direct_execution_body(execution)
+            .await
+            .expect("response body should pass through");
+        assert_eq!(replayed, upstream_body);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn agent_identity_stream_non_task_401_replays_original_body_without_refresh() {
+        let upstream_body =
+            br#"{"error":{"code":"account_disabled","message":"account unavailable"}}"#;
+        let listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("address should resolve");
+        let task_registration_hits = Arc::new(AtomicUsize::new(0));
+        let task_registration_hits_for_server = Arc::clone(&task_registration_hits);
+        let server = tokio::spawn(async move {
+            let app = Router::new()
+                .route(
+                    "/responses",
+                    any(|| async {
+                        (
+                            StatusCode::UNAUTHORIZED,
+                            [(header::CONTENT_TYPE, "application/json")],
+                            upstream_body.as_slice(),
+                        )
+                    }),
+                )
+                .route(
+                    "/api/accounts/v1/agent/runtime-test/task/register",
+                    any(move || {
+                        let hits = Arc::clone(&task_registration_hits_for_server);
+                        async move {
+                            hits.fetch_add(1, Ordering::SeqCst);
+                            Json(json!({"task_id": "unexpected-task"}))
+                        }
+                    }),
+                );
+            axum::serve(listener, app)
+                .await
+                .expect("server should start");
+        });
+        let mut plan =
+            direct_stream_test_plan("agent-non-task-401", format!("http://{addr}/responses"));
+        let repository = Arc::new(provider_catalog_for_stream_auth_plan(
+            &plan,
+            "codex",
+            "oauth",
+            Some(agent_identity_test_auth_config("task-old")),
+        ));
+        let oauth_refresh =
+            aether_provider_transport::LocalOAuthRefreshCoordinator::with_adapters_for_tests(vec![
+                Arc::new(
+                    aether_provider_transport::CodexAgentIdentityRefreshAdapter::default()
+                        .with_auth_api_base_url_for_tests(format!("http://{addr}/api/accounts")),
+                ),
+            ]);
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_provider_catalog_repository_for_tests(
+                    repository,
+                )
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            )
+            .with_oauth_refresh_coordinator_for_tests(oauth_refresh);
+
+        let execution = execute_in_process_stream_with_oauth_retry(
+            &state,
+            &mut plan,
+            "trace-agent-non-task-401",
+            None,
+        )
+        .await
+        .expect("stream request should execute");
+
+        assert!(!execution.prefetched_body.is_empty());
+        assert_eq!(task_registration_hits.load(Ordering::SeqCst), 0);
+        let replayed = collect_direct_execution_body(execution)
+            .await
+            .expect("response body should replay");
+        assert_eq!(replayed, upstream_body);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn agent_identity_stream_invalid_task_refreshes_and_retries_once() {
+        let upstream_hits = Arc::new(AtomicUsize::new(0));
+        let upstream_hits_for_server = Arc::clone(&upstream_hits);
+        let task_registration_hits = Arc::new(AtomicUsize::new(0));
+        let task_registration_hits_for_server = Arc::clone(&task_registration_hits);
+        let observed_authorization = Arc::new(Mutex::new(Vec::<String>::new()));
+        let observed_authorization_for_server = Arc::clone(&observed_authorization);
+        let listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("address should resolve");
+        let server = tokio::spawn(async move {
+            let app = Router::new()
+                .route(
+                    "/responses",
+                    any(move |request: Request| {
+                        let hits = Arc::clone(&upstream_hits_for_server);
+                        let authorizations = Arc::clone(&observed_authorization_for_server);
+                        async move {
+                            let authorization = request
+                                .headers()
+                                .get(header::AUTHORIZATION)
+                                .and_then(|value| value.to_str().ok())
+                                .unwrap_or_default()
+                                .to_string();
+                            authorizations
+                                .lock()
+                                .expect("authorization mutex should lock")
+                                .push(authorization);
+                            if hits.fetch_add(1, Ordering::SeqCst) == 0 {
+                                (
+                                    StatusCode::UNAUTHORIZED,
+                                    Json(json!({
+                                        "error": {
+                                            "code": "invalid_task_id",
+                                            "message": "registered task expired"
+                                        }
+                                    })),
+                                )
+                                    .into_response()
+                            } else {
+                                (StatusCode::OK, Json(json!({"ok": true}))).into_response()
+                            }
+                        }
+                    }),
+                )
+                .route(
+                    "/api/accounts/v1/agent/runtime-test/task/register",
+                    any(move || {
+                        let hits = Arc::clone(&task_registration_hits_for_server);
+                        async move {
+                            hits.fetch_add(1, Ordering::SeqCst);
+                            Json(json!({"task_id": "task-new"}))
+                        }
+                    }),
+                );
+            axum::serve(listener, app)
+                .await
+                .expect("server should start");
+        });
+        let mut plan =
+            direct_stream_test_plan("agent-invalid-task", format!("http://{addr}/responses"));
+        let repository = Arc::new(provider_catalog_for_stream_auth_plan(
+            &plan,
+            "codex",
+            "oauth",
+            Some(agent_identity_test_auth_config("task-old")),
+        ));
+        let oauth_refresh =
+            aether_provider_transport::LocalOAuthRefreshCoordinator::with_adapters_for_tests(vec![
+                Arc::new(
+                    aether_provider_transport::CodexAgentIdentityRefreshAdapter::default()
+                        .with_auth_api_base_url_for_tests(format!("http://{addr}/api/accounts")),
+                ),
+            ]);
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_provider_catalog_repository_for_tests(
+                    repository,
+                )
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            )
+            .with_oauth_refresh_coordinator_for_tests(oauth_refresh);
+        let transport = state
+            .read_provider_transport_snapshot(&plan.provider_id, &plan.endpoint_id, &plan.key_id)
+            .await
+            .expect("transport should load")
+            .expect("transport should exist");
+        let initial_authorization = match state
+            .resolve_local_oauth_request_auth(&transport)
+            .await
+            .expect("initial Agent Identity auth should resolve")
+            .expect("initial Agent Identity auth should exist")
+        {
+            aether_provider_transport::LocalResolvedOAuthRequestAuth::Header { name, value } => {
+                assert_eq!(name, "authorization");
+                value
+            }
+            aether_provider_transport::LocalResolvedOAuthRequestAuth::Kiro(_) => {
+                panic!("Agent Identity should resolve to header auth")
+            }
+        };
+        assert!(
+            aether_provider_transport::codex_agent_identity_authorization_matches_transport(
+                &transport,
+                &initial_authorization,
+            )
+        );
+        plan.headers
+            .insert("authorization".to_string(), initial_authorization.clone());
+
+        let execution = execute_in_process_stream_with_oauth_retry(
+            &state,
+            &mut plan,
+            "trace-agent-invalid-task",
+            None,
+        )
+        .await
+        .expect("stream request should recover");
+
+        assert_eq!(execution.status_code, 200);
+        assert!(execution.prefetched_body.is_empty());
+        assert_eq!(upstream_hits.load(Ordering::SeqCst), 2);
+        assert_eq!(task_registration_hits.load(Ordering::SeqCst), 1);
+        let authorizations = observed_authorization
+            .lock()
+            .expect("authorization mutex should lock");
+        assert_eq!(authorizations.len(), 2);
+        assert_eq!(authorizations[0], initial_authorization);
+        assert!(authorizations[1].starts_with("AgentAssertion "));
+        assert_ne!(authorizations[1], authorizations[0]);
+        drop(authorizations);
+        let replayed = collect_direct_execution_body(execution)
+            .await
+            .expect("retried response body should read");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&replayed).expect("response should be JSON"),
+            json!({"ok": true})
+        );
+        server.abort();
     }
 
     struct BlockingStreamingRequestCandidateRepository {

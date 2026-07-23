@@ -978,6 +978,7 @@ fn standard_request_root_field_is_audited(source: FormatId, key: &str) -> bool {
         FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact => matches!(
             key,
             "background"
+                | "client_metadata"
                 | "context_management"
                 | "conversation"
                 | "include"
@@ -1418,6 +1419,7 @@ fn request_extension_key_is_cross_format_safe(
             FormatId::OpenAiChat,
             "openai_responses" | "openai_cli",
             "stream"
+                | "client_metadata"
                 | "store"
                 | "service_tier"
                 | "safety_identifier"
@@ -3779,6 +3781,26 @@ mod tests {
             error,
             super::FormatError::LossyConversionBlocked { ref field, .. } if field == "include"
         ));
+    }
+
+    #[test]
+    fn pure_openai_responses_to_chat_ignores_client_transport_metadata() {
+        let body = json!({
+            "model": "gpt-source",
+            "input": [{"role": "user", "content": "hello"}],
+            "client_metadata": {
+                "session_id": "session-123",
+                "thread_id": "thread-123"
+            }
+        });
+
+        let converted = convert_request_pure("openai:responses", "openai:chat", &body)
+            .expect("client transport metadata should not block cross-format conversion")
+            .value;
+
+        assert_eq!(converted["model"], "gpt-source");
+        assert_eq!(converted["messages"][0]["content"], "hello");
+        assert!(converted.get("client_metadata").is_none());
     }
 
     #[test]

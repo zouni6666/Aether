@@ -1465,6 +1465,7 @@ mod tests {
             .compare_and_update_provider_catalog_key_health_state(
                 &aether_data_contracts::repository::provider_catalog::ProviderCatalogKeyHealthStateUpdate {
                     key_id: "key-1".to_string(),
+                    expected_encrypted_auth_config: None,
                     expected_health_by_format: None,
                     expected_circuit_breaker_by_format: None,
                     health_by_format: Some(health_by_format),

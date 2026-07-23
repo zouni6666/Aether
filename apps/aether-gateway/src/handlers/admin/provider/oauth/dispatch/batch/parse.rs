@@ -78,6 +78,36 @@ pub(super) fn parse_admin_provider_oauth_batch_import_request(
     }
 }
 
+fn json_value_contains_agent_identity(value: &serde_json::Value) -> bool {
+    if value.as_object().is_some_and(|_| {
+        aether_provider_transport::is_codex_agent_identity_auth_config_value(value)
+    }) {
+        return true;
+    }
+    match value {
+        serde_json::Value::Array(items) => items.iter().any(json_value_contains_agent_identity),
+        serde_json::Value::Object(object) => {
+            object.values().any(json_value_contains_agent_identity)
+        }
+        _ => false,
+    }
+}
+
+pub(super) fn admin_provider_oauth_batch_contains_agent_identity(raw_credentials: &str) -> bool {
+    let raw = raw_credentials.trim();
+    if raw.is_empty() {
+        return false;
+    }
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
+        return json_value_contains_agent_identity(&value);
+    }
+    raw.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .any(|value| json_value_contains_agent_identity(&value))
+}
+
 fn coerce_admin_provider_oauth_import_str(value: Option<&serde_json::Value>) -> Option<String> {
     value
         .and_then(serde_json::Value::as_str)
@@ -623,6 +653,47 @@ pub(super) fn parse_admin_provider_oauth_batch_import_entries(
         .collect()
 }
 
+pub(super) fn parse_admin_provider_oauth_agent_identity_import_entries(
+    raw_credentials: &str,
+) -> Result<Vec<AdminProviderOAuthBatchImportEntry>, String> {
+    let raw = raw_credentials.trim();
+    if raw.is_empty() {
+        return Err("Agent Identity 凭据不能为空".to_string());
+    }
+    let value = serde_json::from_str::<serde_json::Value>(raw)
+        .map_err(|error| format!("Agent Identity JSON 解析失败: {error}"))?;
+    let entries = match &value {
+        serde_json::Value::Array(items) => items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                extract_admin_provider_oauth_batch_import_entry("codex", item).unwrap_or_else(
+                    || {
+                        parse_error_entry(format!(
+                            "第 {} 个条目没有可导入的 Agent Identity 凭据",
+                            index + 1
+                        ))
+                    },
+                )
+            })
+            .collect(),
+        serde_json::Value::Object(object) => parse_sub2api_export_accounts("codex", object)
+            .unwrap_or_else(|| {
+                vec![
+                    extract_admin_provider_oauth_batch_import_entry("codex", &value)
+                        .unwrap_or_else(|| {
+                            parse_error_entry("没有可导入的 Agent Identity 凭据".to_string())
+                        }),
+                ]
+            }),
+        _ => return Err("Agent Identity 凭据必须是 JSON 对象、数组或 sub2api 导出".to_string()),
+    };
+    if entries.is_empty() {
+        return Err("Agent Identity 凭据不能为空".to_string());
+    }
+    Ok(entries)
+}
+
 fn parse_error_entry(error: String) -> AdminProviderOAuthBatchImportEntry {
     AdminProviderOAuthBatchImportEntry {
         parse_error: Some(error),
@@ -811,6 +882,7 @@ pub(super) fn build_admin_provider_oauth_batch_task_state(
     task_id: &str,
     provider_id: &str,
     provider_type: &str,
+    import_kind: &str,
     status: &str,
     total: usize,
     processed: usize,
@@ -839,6 +911,7 @@ pub(super) fn build_admin_provider_oauth_batch_task_state(
         "task_id": task_id,
         "provider_id": provider_id,
         "provider_type": provider_type,
+        "import_kind": import_kind,
         "status": status,
         "total": total,
         "processed": processed,
@@ -860,6 +933,7 @@ pub(super) fn build_admin_provider_oauth_batch_task_state(
 #[cfg(test)]
 mod tests {
     use super::{
+        admin_provider_oauth_batch_contains_agent_identity,
         apply_admin_provider_oauth_batch_import_hints,
         parse_admin_provider_oauth_batch_import_entries,
     };
@@ -872,6 +946,37 @@ mod tests {
             URL_SAFE_NO_PAD.encode(serde_json::to_vec(&value).expect("jwt json should serialize"))
         };
         format!("{}.{}.signature", encode(header), encode(payload))
+    }
+
+    #[test]
+    fn ordinary_batch_guard_detects_agent_identity_in_all_json_shapes() {
+        let single = json!({
+            "auth_mode": "agentIdentity",
+            "agent_runtime_id": "runtime-1",
+            "agent_private_key": "private-key"
+        });
+        assert!(admin_provider_oauth_batch_contains_agent_identity(
+            &single.to_string()
+        ));
+        assert!(admin_provider_oauth_batch_contains_agent_identity(
+            &json!([{"refresh_token":"ordinary"}, single.clone()]).to_string()
+        ));
+        assert!(admin_provider_oauth_batch_contains_agent_identity(
+            &format!("ordinary-token\n{}", single)
+        ));
+        assert!(admin_provider_oauth_batch_contains_agent_identity(
+            &json!({
+                "type": "sub2api-data",
+                "accounts": [{"credentials": single.clone()}]
+            })
+            .to_string()
+        ));
+        assert!(!admin_provider_oauth_batch_contains_agent_identity(
+            &json!([{"refresh_token":"ordinary"}]).to_string()
+        ));
+        assert!(!admin_provider_oauth_batch_contains_agent_identity(
+            "ordinary-token"
+        ));
     }
 
     #[test]

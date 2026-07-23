@@ -13,7 +13,10 @@ use super::progress::{
     maybe_report_admin_provider_oauth_batch_import_progress,
     AdminProviderOAuthBatchProgressReporter,
 };
-use crate::handlers::admin::provider::oauth::duplicates::find_duplicate_provider_oauth_key;
+use crate::handlers::admin::provider::oauth::duplicates::{
+    acquire_codex_oauth_account_locks, find_duplicate_provider_oauth_key,
+    release_codex_oauth_account_locks,
+};
 use crate::handlers::admin::provider::oauth::provisioning::build_provider_oauth_auth_config_from_token_payload;
 use crate::handlers::admin::provider::oauth::provisioning::{
     create_provider_oauth_catalog_key, provider_oauth_active_api_formats,
@@ -53,38 +56,92 @@ fn sanitize_windsurf_batch_import_error(error: &OAuthError) -> String {
     }
 }
 
-fn copy_codex_agent_identity_field(
+const CODEX_AGENT_IDENTITY_SAFE_FIELDS: &[(&str, &[&str])] = &[
+    ("agent_runtime_id", &["agent_runtime_id", "agentRuntimeId"]),
+    (
+        "agent_private_key",
+        &["agent_private_key", "agentPrivateKey"],
+    ),
+    ("task_id", &["task_id", "taskId"]),
+    (
+        "account_id",
+        &[
+            "account_id",
+            "accountId",
+            "chatgpt_account_id",
+            "chatgptAccountId",
+        ],
+    ),
+    (
+        "account_user_id",
+        &[
+            "account_user_id",
+            "accountUserId",
+            "chatgpt_account_user_id",
+            "chatgptAccountUserId",
+        ],
+    ),
+    (
+        "user_id",
+        &["user_id", "userId", "chatgpt_user_id", "chatgptUserId"],
+    ),
+    ("email", &["email"]),
+    (
+        "plan_type",
+        &[
+            "plan_type",
+            "planType",
+            "chatgpt_plan_type",
+            "chatgptPlanType",
+        ],
+    ),
+    ("account_name", &["account_name", "accountName"]),
+    (
+        "is_fedramp",
+        &[
+            "is_fedramp",
+            "chatgpt_account_is_fedramp",
+            "chatgptAccountIsFedramp",
+        ],
+    ),
+    ("workspace_id", &["workspace_id", "workspaceId"]),
+];
+
+fn copy_codex_agent_identity_safe_fields(
     auth_config: &mut Map<String, Value>,
-    nested: &Map<String, Value>,
-    canonical_key: &str,
-    aliases: &[&str],
+    preferred: Option<&Map<String, Value>>,
+    fallback: &Map<String, Value>,
 ) {
-    if auth_config.contains_key(canonical_key) {
-        return;
-    }
-    if let Some(value) = aliases.iter().find_map(|key| nested.get(*key)).cloned() {
-        auth_config.insert(canonical_key.to_string(), value);
-    }
-}
-
-fn remove_codex_agent_identity_oauth_tokens(auth_config: &mut Map<String, Value>) {
-    for key in [
-        "access_token",
-        "accessToken",
-        "refresh_token",
-        "refreshToken",
-        "id_token",
-        "idToken",
-        "expires_at",
-        "expiresAt",
-        "expires_in",
-        "expiresIn",
-    ] {
-        auth_config.remove(key);
+    for (canonical_key, aliases) in CODEX_AGENT_IDENTITY_SAFE_FIELDS {
+        if auth_config.contains_key(*canonical_key) {
+            continue;
+        }
+        let value = preferred
+            .and_then(|map| aliases.iter().find_map(|key| map.get(*key)))
+            .or_else(|| aliases.iter().find_map(|key| fallback.get(*key)))
+            .cloned();
+        let Some(value) = value else {
+            continue;
+        };
+        let type_is_allowed = if *canonical_key == "is_fedramp" {
+            value.is_boolean()
+        } else {
+            value.as_str().is_some_and(|text| !text.trim().is_empty())
+        };
+        if !type_is_allowed {
+            continue;
+        }
+        auth_config.insert((*canonical_key).to_string(), value);
     }
 }
 
-fn codex_agent_identity_auth_config_from_import(
+fn sanitize_codex_agent_identity_nested_fields(nested: &Map<String, Value>) -> Map<String, Value> {
+    let mut sanitized = Map::new();
+    copy_codex_agent_identity_safe_fields(&mut sanitized, None, nested);
+    sanitized
+}
+
+pub(super) fn codex_agent_identity_auth_config_from_import(
     entry: &AdminProviderOAuthBatchImportEntry,
 ) -> Result<Option<Map<String, Value>>, String> {
     let Some(raw_credentials) = entry.raw_credentials.as_ref() else {
@@ -93,81 +150,24 @@ fn codex_agent_identity_auth_config_from_import(
     if !aether_provider_transport::is_codex_agent_identity_auth_config_value(raw_credentials) {
         return Ok(None);
     }
-    let mut auth_config = raw_credentials
+    let root = raw_credentials
         .as_object()
-        .cloned()
         .ok_or_else(|| "Agent Identity 凭据必须是 JSON 对象".to_string())?;
-    remove_codex_agent_identity_oauth_tokens(&mut auth_config);
-    for nested_key in ["agent_identity", "agentIdentity"] {
-        if let Some(nested) = auth_config
-            .get_mut(nested_key)
-            .and_then(Value::as_object_mut)
-        {
-            remove_codex_agent_identity_oauth_tokens(nested);
-        }
-    }
-    let nested = auth_config
+    let nested = root
         .get("agent_identity")
-        .or_else(|| auth_config.get("agentIdentity"))
+        .or_else(|| root.get("agentIdentity"))
         .and_then(Value::as_object)
         .cloned();
-    let root = auth_config.clone();
-    for (canonical_key, aliases) in [
-        (
-            "agent_runtime_id",
-            &["agent_runtime_id", "agentRuntimeId"][..],
-        ),
-        (
-            "agent_private_key",
-            &["agent_private_key", "agentPrivateKey"][..],
-        ),
-        ("task_id", &["task_id", "taskId"][..]),
-        (
-            "account_id",
-            &[
-                "account_id",
-                "accountId",
-                "chatgpt_account_id",
-                "chatgptAccountId",
-            ][..],
-        ),
-        (
-            "account_user_id",
-            &[
-                "account_user_id",
-                "accountUserId",
-                "chatgpt_account_user_id",
-                "chatgptAccountUserId",
-            ][..],
-        ),
-        (
-            "user_id",
-            &["user_id", "userId", "chatgpt_user_id", "chatgptUserId"][..],
-        ),
-        ("email", &["email"][..]),
-        (
-            "plan_type",
-            &[
-                "plan_type",
-                "planType",
-                "chatgpt_plan_type",
-                "chatgptPlanType",
-            ][..],
-        ),
-        ("account_name", &["account_name", "accountName"][..]),
-        (
-            "is_fedramp",
-            &[
-                "is_fedramp",
-                "chatgpt_account_is_fedramp",
-                "chatgptAccountIsFedramp",
-            ][..],
-        ),
-    ] {
-        if let Some(nested) = nested.as_ref() {
-            copy_codex_agent_identity_field(&mut auth_config, nested, canonical_key, aliases);
+    let mut auth_config = Map::new();
+    copy_codex_agent_identity_safe_fields(&mut auth_config, nested.as_ref(), root);
+    if let Some(nested) = nested.as_ref() {
+        let sanitized_nested = sanitize_codex_agent_identity_nested_fields(nested);
+        if !sanitized_nested.is_empty() {
+            auth_config.insert(
+                "agent_identity".to_string(),
+                Value::Object(sanitized_nested),
+            );
         }
-        copy_codex_agent_identity_field(&mut auth_config, &root, canonical_key, aliases);
     }
     auth_config.insert("provider_type".to_string(), json!("codex"));
     auth_config.insert("auth_mode".to_string(), json!("agentIdentity"));
@@ -548,10 +548,49 @@ pub(super) async fn execute_admin_provider_oauth_batch_import(
             }
         }
 
+        let is_agent_identity = provider_type.eq_ignore_ascii_case("codex")
+            && aether_provider_transport::is_codex_agent_identity_auth_config_value(
+                &Value::Object(auth_config.clone()),
+            );
+        let codex_oauth_account_leases =
+            if provider_type.eq_ignore_ascii_case("codex") && !is_agent_identity {
+                match acquire_codex_oauth_account_locks(
+                    state,
+                    provider_id,
+                    &auth_config,
+                    "batch-import",
+                )
+                .await
+                {
+                    Ok(leases) => leases,
+                    Err(error) => {
+                        failed += 1;
+                        results.push(json!({
+                            "index": index,
+                            "status": "error",
+                            "error": error.detail(),
+                            "replaced": false,
+                        }));
+                        maybe_report_admin_provider_oauth_batch_import_progress(
+                            &mut progress,
+                            entries.len(),
+                            success,
+                            failed,
+                            &results,
+                        )
+                        .await;
+                        continue;
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+
         let duplicate =
             match find_duplicate_provider_oauth_key(state, provider_id, &auth_config, None).await {
                 Ok(value) => value,
                 Err(detail) => {
+                    release_codex_oauth_account_locks(state, codex_oauth_account_leases).await;
                     failed += 1;
                     results.push(json!({
                         "index": index,
@@ -573,7 +612,7 @@ pub(super) async fn execute_admin_provider_oauth_batch_import(
 
         let replaced = duplicate.is_some();
         let (persisted_key, key_name) = if let Some(existing_key) = duplicate {
-            match update_existing_provider_oauth_catalog_key(
+            let update_result = update_existing_provider_oauth_catalog_key(
                 state,
                 &existing_key,
                 provider_type,
@@ -583,10 +622,15 @@ pub(super) async fn execute_admin_provider_oauth_batch_import(
                 key_proxy.clone(),
                 expires_at,
             )
-            .await?
-            {
-                Some(key) => (key, existing_key.name.clone()),
-                None => {
+            .await;
+            match update_result {
+                Err(error) => {
+                    release_codex_oauth_account_locks(state, codex_oauth_account_leases).await;
+                    return Err(error);
+                }
+                Ok(Some(key)) => (key, existing_key.name.clone()),
+                Ok(None) => {
+                    release_codex_oauth_account_locks(state, codex_oauth_account_leases).await;
                     failed += 1;
                     results.push(json!({
                         "index": index,
@@ -611,7 +655,7 @@ pub(super) async fn execute_admin_provider_oauth_batch_import(
                 &auth_config,
                 Some(index),
             );
-            match create_provider_oauth_catalog_key(
+            let create_result = create_provider_oauth_catalog_key(
                 state,
                 provider_id,
                 provider_type,
@@ -622,10 +666,15 @@ pub(super) async fn execute_admin_provider_oauth_batch_import(
                 key_proxy.clone(),
                 expires_at,
             )
-            .await?
-            {
-                Some(key) => (key, key_name),
-                None => {
+            .await;
+            match create_result {
+                Err(error) => {
+                    release_codex_oauth_account_locks(state, codex_oauth_account_leases).await;
+                    return Err(error);
+                }
+                Ok(Some(key)) => (key, key_name),
+                Ok(None) => {
+                    release_codex_oauth_account_locks(state, codex_oauth_account_leases).await;
                     failed += 1;
                     results.push(json!({
                         "index": index,
@@ -645,6 +694,7 @@ pub(super) async fn execute_admin_provider_oauth_batch_import(
                 }
             }
         };
+        release_codex_oauth_account_locks(state, codex_oauth_account_leases).await;
 
         spawn_provider_oauth_account_state_refresh_after_update(
             state.cloned_app(),
@@ -726,13 +776,24 @@ mod tests {
                     "credentials":{
                         "auth_mode":"agentIdentity",
                         "id_token":"stale-id-token",
+                        "sessionToken":"stale-session-token",
+                        "apiKey":"stale-api-key",
+                        "cookie":"stale-cookie",
+                        "headers":{
+                            "authorization":"Bearer stale-bearer-token",
+                            "cookie":"stale-header-cookie",
+                            "x-api-key":"stale-header-api-key"
+                        },
+                        "profile":{"token":"stale-deep-token"},
                         "agent_identity":{
                             "agent_runtime_id":"runtime-1",
                             "agent_private_key":"MC4CAQAwBQYDK2VwBCIEIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
                             "accountId":"account-1",
                             "chatgptUserId":"user-1",
                             "chatgptAccountIsFedramp":true,
-                            "access_token":"stale-access-token"
+                            "access_token":"stale-access-token",
+                            "refreshToken":"stale-refresh-token",
+                            "headers":{"authorization":"Bearer stale-nested-bearer"}
                         }
                     }
                 }]
@@ -761,5 +822,35 @@ mod tests {
             .get("agent_identity")
             .and_then(serde_json::Value::as_object)
             .is_some_and(|nested| !nested.contains_key("access_token")));
+        let serialized = serde_json::to_string(&auth_config).expect("auth config should serialize");
+        for secret in [
+            "stale-id-token",
+            "stale-session-token",
+            "stale-api-key",
+            "stale-cookie",
+            "stale-bearer-token",
+            "stale-header-cookie",
+            "stale-header-api-key",
+            "stale-deep-token",
+            "stale-access-token",
+            "stale-refresh-token",
+            "stale-nested-bearer",
+        ] {
+            assert!(!serialized.contains(secret), "secret leaked: {secret}");
+        }
+        for forbidden_key in [
+            "access_token",
+            "refreshToken",
+            "sessionToken",
+            "apiKey",
+            "cookie",
+            "headers",
+            "profile",
+        ] {
+            assert!(
+                !serialized.contains(forbidden_key),
+                "forbidden key persisted: {forbidden_key}"
+            );
+        }
     }
 }

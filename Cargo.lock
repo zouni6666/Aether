@@ -535,6 +535,7 @@ version = "0.1.0"
 dependencies = [
  "aether-data-contracts",
  "aether-pool-core",
+ "aether-provider-transport",
  "serde_json",
  "url",
  "uuid",

@@ -13,11 +13,11 @@ use crypto_box::{
 };
 use ed25519_dalek::{
     pkcs8::{DecodePrivateKey, EncodePrivateKey},
-    Signer, SigningKey,
+    Signature, Signer, SigningKey, Verifier,
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
-use sha2::{Digest, Sha512};
+use sha2::{Digest, Sha256, Sha512};
 use thiserror::Error;
 use url::Url;
 
@@ -40,9 +40,17 @@ const ASSERTION_PREFIX: &str = "AgentAssertion ";
 const CODEX_AGENT_IDENTITY_AGENT_HARNESS_ID: &str = "codex-cli";
 const CODEX_AGENT_IDENTITY_RUNNING_LOCATION: &str = "local";
 
+/// The AgentAssertion scheme is generated internally after an Agent Identity
+/// task has been registered.  Keep the scheme check separate from envelope
+/// validation so a malformed in-flight assertion is still treated as an
+/// Agent-originated request by defensive runtime state writers.
+pub fn is_codex_agent_identity_authorization(value: &str) -> bool {
+    encoded_agent_identity_assertion(value).is_some()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CodexAgentIdentityEnrollmentError {
-    #[error("ChatGPT Session Token 不能为空")]
+    #[error("ChatGPT Access Token 不能为空")]
     MissingSessionToken,
     #[error("Agent Identity 注册请求失败")]
     RegistrationRequestFailed,
@@ -65,6 +73,14 @@ struct AgentIdentityCredentials {
     runtime_id: String,
     signing_key: SigningKey,
     task_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentIdentityAssertionEnvelope {
+    agent_runtime_id: String,
+    task_id: String,
+    timestamp: String,
+    signature: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -143,6 +159,90 @@ impl CodexAgentIdentityRefreshAdapter {
     }
 }
 
+/// Returns a stable, non-secret fingerprint for the Agent Identity key pair
+/// and runtime. The task id is deliberately excluded so task rotation does not
+/// look like a credential replacement.
+pub fn codex_agent_identity_credential_fingerprint(config: &Value) -> Option<String> {
+    let credentials = agent_identity_credentials(config).ok()?;
+    Some(agent_identity_credential_fingerprint_from_credentials(
+        &credentials,
+    ))
+}
+
+pub fn codex_agent_identity_transport_credential_fingerprint(
+    transport: &GatewayProviderTransportSnapshot,
+) -> Option<String> {
+    CodexAgentIdentityRefreshAdapter::config_from_transport(transport)
+        .and_then(|config| codex_agent_identity_credential_fingerprint(&config))
+}
+
+/// Returns the fencing generation for a transport/config entry, including the
+/// current task id. It is safe to log/compare but must never be used as a key.
+pub fn codex_agent_identity_refresh_fingerprint(
+    transport: &GatewayProviderTransportSnapshot,
+    entry: Option<&CachedOAuthEntry>,
+) -> Option<String> {
+    let transport_config = CodexAgentIdentityRefreshAdapter::config_from_transport(transport)?;
+    let transport_credentials = agent_identity_credentials(&transport_config).ok()?;
+    let transport_credential_fingerprint =
+        agent_identity_credential_fingerprint_from_credentials(&transport_credentials);
+    let config = entry
+        .filter(|entry| {
+            entry.source_fingerprint.as_deref() == Some(transport_credential_fingerprint.as_str())
+        })
+        .and_then(CodexAgentIdentityRefreshAdapter::config_from_entry)
+        .filter(|entry_config| {
+            agent_identity_credentials(entry_config)
+                .ok()
+                .is_some_and(|entry_credentials| {
+                    entry_credentials.task_id == transport_credentials.task_id
+                })
+        })
+        .unwrap_or(transport_config);
+    codex_agent_identity_config_refresh_fingerprint(&config)
+}
+
+pub fn codex_agent_identity_config_refresh_fingerprint(config: &Value) -> Option<String> {
+    let credentials = agent_identity_credentials(config).ok()?;
+    let credential_fingerprint =
+        agent_identity_credential_fingerprint_from_credentials(&credentials);
+    let task_id = credentials.task_id.as_deref().unwrap_or_default();
+    let mut digest = Sha256::new();
+    digest.update(credential_fingerprint.as_bytes());
+    digest.update([0]);
+    digest.update(task_id.as_bytes());
+    Some(URL_SAFE_NO_PAD.encode(digest.finalize()))
+}
+
+pub fn codex_agent_identity_cached_entry_from_transport(
+    transport: &GatewayProviderTransportSnapshot,
+) -> Option<CachedOAuthEntry> {
+    let config = CodexAgentIdentityRefreshAdapter::config_from_transport(transport)?;
+    let credentials = agent_identity_credentials(&config).ok()?;
+    let task_id = credentials.task_id.as_deref()?;
+    let auth_header_value = build_agent_assertion(&credentials, task_id, Utc::now()).ok()?;
+    Some(CachedOAuthEntry {
+        provider_type: CODEX_AGENT_IDENTITY_CACHED_ENTRY_PROVIDER_TYPE.to_string(),
+        auth_header_name: AUTHORIZATION_HEADER.to_string(),
+        auth_header_value,
+        expires_at_unix_secs: None,
+        metadata: Some(config),
+        source_fingerprint: Some(agent_identity_credential_fingerprint_from_credentials(
+            &credentials,
+        )),
+    })
+}
+
+fn agent_identity_credential_fingerprint_from_credentials(
+    credentials: &AgentIdentityCredentials,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(credentials.runtime_id.as_bytes());
+    digest.update([0]);
+    digest.update(credentials.signing_key.to_bytes());
+    URL_SAFE_NO_PAD.encode(digest.finalize())
+}
+
 pub fn is_codex_agent_identity_auth_config_value(config: &Value) -> bool {
     let Some(root) = config.as_object() else {
         return false;
@@ -168,6 +268,90 @@ pub fn is_codex_agent_identity_transport(transport: &GatewayProviderTransportSna
             .is_some_and(is_codex_agent_identity_auth_config_value)
 }
 
+/// Verifies that an in-flight AgentAssertion was signed by the exact Agent
+/// Identity credential and task represented by the current transport.
+pub fn codex_agent_identity_authorization_matches_transport(
+    transport: &GatewayProviderTransportSnapshot,
+    authorization: &str,
+) -> bool {
+    if !is_codex_agent_identity_transport(transport) {
+        return false;
+    }
+    let Some(encoded) = encoded_agent_identity_assertion(authorization) else {
+        return false;
+    };
+    let Ok(envelope_bytes) = URL_SAFE_NO_PAD.decode(encoded) else {
+        return false;
+    };
+    let Ok(envelope) = serde_json::from_slice::<AgentIdentityAssertionEnvelope>(&envelope_bytes)
+    else {
+        return false;
+    };
+    let Some(config) = CodexAgentIdentityRefreshAdapter::config_from_transport(transport) else {
+        return false;
+    };
+    let Ok(credentials) = agent_identity_credentials(&config) else {
+        return false;
+    };
+    let Some(current_task_id) = credentials.task_id.as_deref() else {
+        return false;
+    };
+    let runtime_id = envelope.agent_runtime_id.trim();
+    let task_id = envelope.task_id.trim();
+    let timestamp = envelope.timestamp.trim();
+    if runtime_id != credentials.runtime_id || task_id != current_task_id || timestamp.is_empty() {
+        return false;
+    }
+    let Ok(signature_bytes) = STANDARD.decode(envelope.signature.trim()) else {
+        return false;
+    };
+    let Ok(signature) = Signature::from_slice(&signature_bytes) else {
+        return false;
+    };
+    let payload = format!("{runtime_id}:{task_id}:{timestamp}");
+    credentials
+        .signing_key
+        .verifying_key()
+        .verify(payload.as_bytes(), &signature)
+        .is_ok()
+}
+
+/// Agent task rotation may change only task_id. Any other auth_config change
+/// means the caller must rebuild the whole request from a fresh transport.
+pub fn codex_agent_identity_transport_allows_task_rotation_from(
+    initial: &GatewayProviderTransportSnapshot,
+    current: &GatewayProviderTransportSnapshot,
+) -> bool {
+    let Some(initial_config) = CodexAgentIdentityRefreshAdapter::config_from_transport(initial)
+        .and_then(agent_identity_config_without_task)
+    else {
+        return false;
+    };
+    let Some(current_config) = CodexAgentIdentityRefreshAdapter::config_from_transport(current)
+        .and_then(agent_identity_config_without_task)
+    else {
+        return false;
+    };
+    initial_config == current_config
+}
+
+pub fn codex_agent_identity_entry_allows_task_rotation_from(
+    initial: &GatewayProviderTransportSnapshot,
+    entry: &CachedOAuthEntry,
+) -> bool {
+    let Some(initial_config) = CodexAgentIdentityRefreshAdapter::config_from_transport(initial)
+        .and_then(agent_identity_config_without_task)
+    else {
+        return false;
+    };
+    let Some(entry_config) = CodexAgentIdentityRefreshAdapter::config_from_entry(entry)
+        .and_then(agent_identity_config_without_task)
+    else {
+        return false;
+    };
+    initial_config == entry_config
+}
+
 pub fn is_codex_agent_identity_cached_entry(entry: &CachedOAuthEntry) -> bool {
     entry
         .provider_type
@@ -177,6 +361,18 @@ pub fn is_codex_agent_identity_cached_entry(entry: &CachedOAuthEntry) -> bool {
 
 pub fn validate_codex_agent_identity_auth_config(config: &Value) -> Result<(), String> {
     agent_identity_credentials(config).map(|_| ())
+}
+
+pub fn codex_agent_identity_auth_config_has_task_id(config: &Value) -> bool {
+    let Some(root) = config.as_object() else {
+        return false;
+    };
+    string_from_maps(
+        root,
+        agent_identity_nested_object(root),
+        &["task_id", "taskId"],
+    )
+    .is_some()
 }
 
 /// Returns whether an upstream response proves that the registered Agent Identity task is no
@@ -228,6 +424,22 @@ fn agent_identity_nested_object(root: &Map<String, Value>) -> Option<&Map<String
         .and_then(Value::as_object)
 }
 
+fn agent_identity_config_without_task(mut config: Value) -> Option<Value> {
+    if !is_codex_agent_identity_auth_config_value(&config) {
+        return None;
+    }
+    let root = config.as_object_mut()?;
+    root.remove("task_id");
+    root.remove("taskId");
+    for nested_key in ["agent_identity", "agentIdentity"] {
+        if let Some(nested) = root.get_mut(nested_key).and_then(Value::as_object_mut) {
+            nested.remove("task_id");
+            nested.remove("taskId");
+        }
+    }
+    Some(config)
+}
+
 fn string_from_map(map: &Map<String, Value>, keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|key| {
         map.get(*key)
@@ -277,6 +489,19 @@ fn agent_identity_credentials(config: &Value) -> Result<AgentIdentityCredentials
 
 fn agent_identity_timestamp(now: DateTime<Utc>) -> String {
     now.to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+fn encoded_agent_identity_assertion(value: &str) -> Option<&str> {
+    let mut parts = value.split_ascii_whitespace();
+    let scheme = parts.next()?;
+    let encoded = parts.next()?;
+    if !scheme.eq_ignore_ascii_case(ASSERTION_PREFIX.trim())
+        || encoded.is_empty()
+        || parts.next().is_some()
+    {
+        return None;
+    }
+    Some(encoded)
 }
 
 fn build_agent_assertion(
@@ -373,20 +598,44 @@ fn agent_runtime_id_from_registration_response(body: &str) -> Result<String, ()>
         .ok_or(())
 }
 
-/// Uses a ChatGPT session token once to register a fresh Agent Identity. The returned config
-/// contains only the generated signing credentials and is deliberately free of the session token.
+/// Uses a ChatGPT access token once to register a fresh Agent Identity. The returned config
+/// contains only the generated signing credentials and is deliberately free of the access token.
+pub async fn register_codex_agent_identity_from_access_token(
+    executor: &dyn OAuthHttpExecutor,
+    access_token: &str,
+    network: OAuthNetworkContext,
+) -> Result<Map<String, Value>, CodexAgentIdentityEnrollmentError> {
+    register_codex_agent_identity_from_access_token_with_auth_api_base_url(
+        executor,
+        access_token,
+        network,
+        CODEX_AGENT_IDENTITY_AUTH_API_BASE_URL,
+    )
+    .await
+}
+
+/// Registers an Agent Identity and its initial task for backwards compatibility.
+pub async fn create_codex_agent_identity_from_access_token(
+    executor: &dyn OAuthHttpExecutor,
+    access_token: &str,
+    network: OAuthNetworkContext,
+) -> Result<Map<String, Value>, CodexAgentIdentityEnrollmentError> {
+    create_codex_agent_identity_from_session_token_with_auth_api_base_url(
+        executor,
+        access_token,
+        network,
+        CODEX_AGENT_IDENTITY_AUTH_API_BASE_URL,
+    )
+    .await
+}
+
+/// Backwards-compatible alias for callers using the original, inaccurate name.
 pub async fn create_codex_agent_identity_from_session_token(
     executor: &dyn OAuthHttpExecutor,
     session_token: &str,
     network: OAuthNetworkContext,
 ) -> Result<Map<String, Value>, CodexAgentIdentityEnrollmentError> {
-    create_codex_agent_identity_from_session_token_with_auth_api_base_url(
-        executor,
-        session_token,
-        network,
-        CODEX_AGENT_IDENTITY_AUTH_API_BASE_URL,
-    )
-    .await
+    create_codex_agent_identity_from_access_token(executor, session_token, network).await
 }
 
 async fn create_codex_agent_identity_from_session_token_with_auth_api_base_url(
@@ -395,75 +644,13 @@ async fn create_codex_agent_identity_from_session_token_with_auth_api_base_url(
     network: OAuthNetworkContext,
     auth_api_base_url: &str,
 ) -> Result<Map<String, Value>, CodexAgentIdentityEnrollmentError> {
-    let session_token = session_token.trim();
-    if session_token.is_empty() {
-        return Err(CodexAgentIdentityEnrollmentError::MissingSessionToken);
-    }
-
-    let signing_key = generate_agent_identity_signing_key();
-    let private_key_der = signing_key
-        .to_pkcs8_der()
-        .map_err(|_| CodexAgentIdentityEnrollmentError::KeyGenerationFailed)?;
-    let agent_private_key = STANDARD.encode(private_key_der.as_bytes());
-    let agent_public_key = agent_identity_ssh_public_key(&signing_key);
-    let registration_url = agent_registration_url(auth_api_base_url)
-        .map_err(|_| CodexAgentIdentityEnrollmentError::RegistrationRequestFailed)?;
-    let registration_response = executor
-        .execute(OAuthHttpRequest {
-            request_id: CODEX_AGENT_IDENTITY_AGENT_REGISTRATION_REQUEST_ID.to_string(),
-            method: reqwest::Method::POST,
-            url: registration_url,
-            headers: BTreeMap::from([
-                ("accept".to_string(), "application/json".to_string()),
-                ("content-type".to_string(), "application/json".to_string()),
-                (
-                    "authorization".to_string(),
-                    format!("Bearer {session_token}"),
-                ),
-                (
-                    "user-agent".to_string(),
-                    aether_ai_formats::CODEX_CLIENT_USER_AGENT.to_string(),
-                ),
-                (
-                    "originator".to_string(),
-                    aether_ai_formats::CODEX_CLIENT_ORIGINATOR.to_string(),
-                ),
-            ]),
-            content_type: Some("application/json".to_string()),
-            json_body: Some(json!({
-                "abom": {
-                    "agent_version": aether_ai_formats::CODEX_CLIENT_VERSION,
-                    "agent_harness_id": CODEX_AGENT_IDENTITY_AGENT_HARNESS_ID,
-                    "running_location": CODEX_AGENT_IDENTITY_RUNNING_LOCATION,
-                },
-                "agent_public_key": agent_public_key,
-            })),
-            body_bytes: None,
-            network: network.clone(),
-        })
-        .await
-        .map_err(|_| CodexAgentIdentityEnrollmentError::RegistrationRequestFailed)?;
-    if !(200..300).contains(&registration_response.status_code) {
-        return Err(CodexAgentIdentityEnrollmentError::RegistrationRejected {
-            status_code: registration_response.status_code,
-        });
-    }
-    let agent_runtime_id =
-        agent_runtime_id_from_registration_response(registration_response.body_text.as_str())
-            .map_err(|_| CodexAgentIdentityEnrollmentError::InvalidRegistrationResponse)?;
-
-    let mut auth_config = Map::from_iter([
-        (
-            "provider_type".to_string(),
-            json!(CODEX_AGENT_IDENTITY_PROVIDER_TYPE),
-        ),
-        (
-            "auth_mode".to_string(),
-            json!(CODEX_AGENT_IDENTITY_AUTH_MODE),
-        ),
-        ("agent_runtime_id".to_string(), json!(agent_runtime_id)),
-        ("agent_private_key".to_string(), json!(agent_private_key)),
-    ]);
+    let mut auth_config = register_codex_agent_identity_from_access_token_with_auth_api_base_url(
+        executor,
+        session_token,
+        network.clone(),
+        auth_api_base_url,
+    )
+    .await?;
     let config_value = Value::Object(auth_config.clone());
     let credentials = agent_identity_credentials(&config_value)
         .map_err(|_| CodexAgentIdentityEnrollmentError::KeyGenerationFailed)?;
@@ -500,6 +687,84 @@ async fn create_codex_agent_identity_from_session_token_with_auth_api_base_url(
         task_id_from_registration_response(&credentials, task_response.body_text.as_str())
             .map_err(|_| CodexAgentIdentityEnrollmentError::InvalidTaskRegistrationResponse)?;
     auth_config.insert("task_id".to_string(), Value::String(task_id));
+    validate_codex_agent_identity_auth_config(&Value::Object(auth_config.clone()))
+        .map_err(|_| CodexAgentIdentityEnrollmentError::KeyGenerationFailed)?;
+    Ok(auth_config)
+}
+
+async fn register_codex_agent_identity_from_access_token_with_auth_api_base_url(
+    executor: &dyn OAuthHttpExecutor,
+    access_token: &str,
+    network: OAuthNetworkContext,
+    auth_api_base_url: &str,
+) -> Result<Map<String, Value>, CodexAgentIdentityEnrollmentError> {
+    let access_token = access_token.trim();
+    if access_token.is_empty() {
+        return Err(CodexAgentIdentityEnrollmentError::MissingSessionToken);
+    }
+
+    let signing_key = generate_agent_identity_signing_key();
+    let private_key_der = signing_key
+        .to_pkcs8_der()
+        .map_err(|_| CodexAgentIdentityEnrollmentError::KeyGenerationFailed)?;
+    let agent_private_key = STANDARD.encode(private_key_der.as_bytes());
+    let agent_public_key = agent_identity_ssh_public_key(&signing_key);
+    let registration_url = agent_registration_url(auth_api_base_url)
+        .map_err(|_| CodexAgentIdentityEnrollmentError::RegistrationRequestFailed)?;
+    let response = executor
+        .execute(OAuthHttpRequest {
+            request_id: CODEX_AGENT_IDENTITY_AGENT_REGISTRATION_REQUEST_ID.to_string(),
+            method: reqwest::Method::POST,
+            url: registration_url,
+            headers: BTreeMap::from([
+                ("accept".to_string(), "application/json".to_string()),
+                ("content-type".to_string(), "application/json".to_string()),
+                (
+                    "authorization".to_string(),
+                    format!("Bearer {access_token}"),
+                ),
+                (
+                    "user-agent".to_string(),
+                    aether_ai_formats::CODEX_CLIENT_USER_AGENT.to_string(),
+                ),
+                (
+                    "originator".to_string(),
+                    aether_ai_formats::CODEX_CLIENT_ORIGINATOR.to_string(),
+                ),
+            ]),
+            content_type: Some("application/json".to_string()),
+            json_body: Some(json!({
+                "abom": {
+                    "agent_version": aether_ai_formats::CODEX_CLIENT_VERSION,
+                    "agent_harness_id": CODEX_AGENT_IDENTITY_AGENT_HARNESS_ID,
+                    "running_location": CODEX_AGENT_IDENTITY_RUNNING_LOCATION,
+                },
+                "agent_public_key": agent_public_key,
+            })),
+            body_bytes: None,
+            network,
+        })
+        .await
+        .map_err(|_| CodexAgentIdentityEnrollmentError::RegistrationRequestFailed)?;
+    if !(200..300).contains(&response.status_code) {
+        return Err(CodexAgentIdentityEnrollmentError::RegistrationRejected {
+            status_code: response.status_code,
+        });
+    }
+    let agent_runtime_id = agent_runtime_id_from_registration_response(response.body_text.as_str())
+        .map_err(|_| CodexAgentIdentityEnrollmentError::InvalidRegistrationResponse)?;
+    let auth_config = Map::from_iter([
+        (
+            "provider_type".to_string(),
+            json!(CODEX_AGENT_IDENTITY_PROVIDER_TYPE),
+        ),
+        (
+            "auth_mode".to_string(),
+            json!(CODEX_AGENT_IDENTITY_AUTH_MODE),
+        ),
+        ("agent_runtime_id".to_string(), json!(agent_runtime_id)),
+        ("agent_private_key".to_string(), json!(agent_private_key)),
+    ]);
     validate_codex_agent_identity_auth_config(&Value::Object(auth_config.clone()))
         .map_err(|_| CodexAgentIdentityEnrollmentError::KeyGenerationFailed)?;
     Ok(auth_config)
@@ -592,9 +857,40 @@ impl LocalOAuthRefreshAdapter for CodexAgentIdentityRefreshAdapter {
 
     fn resolve_cached(
         &self,
-        _transport: &GatewayProviderTransportSnapshot,
+        transport: &GatewayProviderTransportSnapshot,
         entry: &CachedOAuthEntry,
     ) -> Option<LocalResolvedOAuthRequestAuth> {
+        let current_fingerprint = codex_agent_identity_transport_credential_fingerprint(transport)?;
+        if entry.source_fingerprint.as_deref() != Some(current_fingerprint.as_str()) {
+            return None;
+        }
+        let transport_config = Self::config_from_transport(transport)?;
+        let entry_config = Self::config_from_entry(entry)?;
+        let transport_task = agent_identity_credentials(&transport_config).ok()?.task_id;
+        let entry_task = agent_identity_credentials(&entry_config).ok()?.task_id;
+        if transport_task != entry_task {
+            return None;
+        }
+        Self::resolve_from_config(&entry_config)
+    }
+
+    fn resolve_fenced_cached(
+        &self,
+        transport: &GatewayProviderTransportSnapshot,
+        entry: &CachedOAuthEntry,
+    ) -> Option<LocalResolvedOAuthRequestAuth> {
+        self.resolve_cached(transport, entry)
+    }
+
+    fn resolve_refreshed(
+        &self,
+        transport: &GatewayProviderTransportSnapshot,
+        entry: &CachedOAuthEntry,
+    ) -> Option<LocalResolvedOAuthRequestAuth> {
+        let current_fingerprint = codex_agent_identity_transport_credential_fingerprint(transport)?;
+        if entry.source_fingerprint.as_deref() != Some(current_fingerprint.as_str()) {
+            return None;
+        }
         Self::config_from_entry(entry).and_then(|config| Self::resolve_from_config(&config))
     }
 
@@ -616,6 +912,36 @@ impl LocalOAuthRefreshAdapter for CodexAgentIdentityRefreshAdapter {
         Self::preferred_config(transport, entry)
             .and_then(|config| agent_identity_credentials(&config).ok())
             .is_some_and(|credentials| credentials.task_id.is_none())
+    }
+
+    fn refresh_fingerprint(
+        &self,
+        transport: &GatewayProviderTransportSnapshot,
+        entry: Option<&CachedOAuthEntry>,
+    ) -> Option<String> {
+        codex_agent_identity_refresh_fingerprint(transport, entry)
+    }
+
+    fn cached_entry_from_transport(
+        &self,
+        transport: &GatewayProviderTransportSnapshot,
+    ) -> Option<CachedOAuthEntry> {
+        codex_agent_identity_cached_entry_from_transport(transport)
+    }
+
+    fn should_backoff_after_error(&self, error: &LocalOAuthRefreshError) -> bool {
+        match error {
+            LocalOAuthRefreshError::HttpStatus { status_code, .. } => {
+                *status_code == 429 || *status_code >= 500
+            }
+            LocalOAuthRefreshError::Transport { .. }
+            | LocalOAuthRefreshError::TransportMessage { .. }
+            | LocalOAuthRefreshError::InvalidResponse { .. } => true,
+        }
+    }
+
+    fn requires_distributed_refresh_lock(&self) -> bool {
+        true
     }
 
     async fn refresh(
@@ -676,6 +1002,9 @@ impl LocalOAuthRefreshAdapter for CodexAgentIdentityRefreshAdapter {
             auth_header_value,
             expires_at_unix_secs: None,
             metadata: Some(config),
+            source_fingerprint: Some(agent_identity_credential_fingerprint_from_credentials(
+                &updated_credentials,
+            )),
         }))
     }
 }
@@ -693,16 +1022,22 @@ mod tests {
 
     use super::{
         agent_identity_credentials, build_agent_assertion,
+        codex_agent_identity_authorization_matches_transport,
+        codex_agent_identity_cached_entry_from_transport,
+        codex_agent_identity_config_refresh_fingerprint, codex_agent_identity_refresh_fingerprint,
+        codex_agent_identity_transport_allows_task_rotation_from,
         create_codex_agent_identity_from_session_token_with_auth_api_base_url,
         decrypt_agent_task_id, is_codex_agent_identity_auth_config_value,
-        is_codex_agent_identity_invalid_task_response, task_id_from_registration_response,
-        validate_codex_agent_identity_auth_config, with_agent_identity_task_id,
-        CodexAgentIdentityEnrollmentError, CodexAgentIdentityRefreshAdapter,
-        CODEX_AGENT_IDENTITY_CACHED_ENTRY_PROVIDER_TYPE,
+        is_codex_agent_identity_authorization, is_codex_agent_identity_invalid_task_response,
+        register_codex_agent_identity_from_access_token_with_auth_api_base_url,
+        task_id_from_registration_response, validate_codex_agent_identity_auth_config,
+        with_agent_identity_task_id, CodexAgentIdentityEnrollmentError,
+        CodexAgentIdentityRefreshAdapter, CODEX_AGENT_IDENTITY_CACHED_ENTRY_PROVIDER_TYPE,
     };
     use crate::oauth_refresh::{
         LocalOAuthHttpExecutor, LocalOAuthHttpRequest, LocalOAuthHttpResponse,
-        LocalOAuthRefreshAdapter, LocalOAuthRefreshError, LocalResolvedOAuthRequestAuth,
+        LocalOAuthRefreshAdapter, LocalOAuthRefreshCoordinator, LocalOAuthRefreshError,
+        LocalResolvedOAuthRequestAuth,
     };
     use crate::snapshot::{
         GatewayProviderTransportEndpoint, GatewayProviderTransportKey,
@@ -827,6 +1162,79 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_agent_assertion_authorization_scheme_without_parsing_secrets() {
+        assert!(is_codex_agent_identity_authorization(
+            "AgentAssertion assertion-envelope"
+        ));
+        assert!(is_codex_agent_identity_authorization(
+            "agentassertion\tassertion-envelope"
+        ));
+        assert!(!is_codex_agent_identity_authorization(
+            "Bearer access-token"
+        ));
+        assert!(!is_codex_agent_identity_authorization("AgentAssertion"));
+    }
+
+    #[test]
+    fn assertion_match_binds_runtime_task_and_signing_key_generation() {
+        let config = test_auth_config(Some("task-test"));
+        let credentials = agent_identity_credentials(&config).expect("credentials should parse");
+        let assertion = build_agent_assertion(
+            &credentials,
+            "task-test",
+            Utc.with_ymd_and_hms(2030, 1, 2, 3, 4, 5).unwrap(),
+        )
+        .expect("assertion should build");
+
+        assert!(codex_agent_identity_authorization_matches_transport(
+            &sample_transport(config.clone()),
+            &assertion,
+        ));
+        assert!(!codex_agent_identity_authorization_matches_transport(
+            &sample_transport(test_auth_config(Some("task-replaced"))),
+            &assertion,
+        ));
+
+        let replacement_key = SigningKey::from_bytes(&[8u8; 32])
+            .to_pkcs8_der()
+            .expect("replacement key should encode");
+        let mut replacement_config = config;
+        replacement_config["agent_private_key"] =
+            json!(STANDARD.encode(replacement_key.as_bytes()));
+        assert!(!codex_agent_identity_authorization_matches_transport(
+            &sample_transport(replacement_config),
+            &assertion,
+        ));
+    }
+
+    #[test]
+    fn task_rotation_context_rejects_metadata_and_credential_replacement() {
+        let initial = sample_transport(test_auth_config(Some("task-old")));
+        let rotated = sample_transport(test_auth_config(Some("task-new")));
+        assert!(codex_agent_identity_transport_allows_task_rotation_from(
+            &initial, &rotated
+        ));
+
+        let mut metadata_rewrite = test_auth_config(Some("task-new"));
+        metadata_rewrite["account_id"] = json!("account-replaced");
+        assert!(!codex_agent_identity_transport_allows_task_rotation_from(
+            &initial,
+            &sample_transport(metadata_rewrite),
+        ));
+
+        let replacement_key = SigningKey::from_bytes(&[9u8; 32])
+            .to_pkcs8_der()
+            .expect("replacement key should encode");
+        let mut credential_rewrite = test_auth_config(Some("task-new"));
+        credential_rewrite["agent_private_key"] =
+            json!(STANDARD.encode(replacement_key.as_bytes()));
+        assert!(!codex_agent_identity_transport_allows_task_rotation_from(
+            &initial,
+            &sample_transport(credential_rewrite),
+        ));
+    }
+
+    #[test]
     fn decrypts_sealed_task_registration_response() {
         let config = test_auth_config(None);
         let credentials = agent_identity_credentials(&config).expect("credentials should parse");
@@ -884,6 +1292,16 @@ mod tests {
         assert!(updated.get("taskId").is_none());
         assert_eq!(updated["agent_identity"]["task_id"], "new-task");
         assert!(updated["agent_identity"].get("taskId").is_none());
+    }
+
+    #[test]
+    fn refresh_fingerprint_fences_task_generation_not_only_keypair() {
+        let pending = test_auth_config(None);
+        let registered = test_auth_config(Some("task-winner"));
+        assert_ne!(
+            codex_agent_identity_config_refresh_fingerprint(&pending),
+            codex_agent_identity_config_refresh_fingerprint(&registered)
+        );
     }
 
     #[derive(Clone)]
@@ -1010,6 +1428,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn register_only_returns_pending_config_without_registering_task() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let executor = RecordingEnrollmentExecutor {
+            requests: Arc::clone(&requests),
+            responses: Arc::new(Mutex::new(vec![OAuthHttpResponse {
+                status_code: 200,
+                body_text: r#"{"agent_runtime_id":"runtime-pending"}"#.to_string(),
+                json_body: None,
+            }])),
+        };
+        let config = register_codex_agent_identity_from_access_token_with_auth_api_base_url(
+            &executor,
+            "access-token-for-test-only",
+            OAuthNetworkContext::direct_identity(),
+            "https://auth.test/api/accounts",
+        )
+        .await
+        .expect("register-only enrollment should succeed");
+        validate_codex_agent_identity_auth_config(&serde_json::Value::Object(config.clone()))
+            .expect("pending config should be valid");
+        assert_eq!(
+            config.get("agent_runtime_id"),
+            Some(&json!("runtime-pending"))
+        );
+        assert!(!config.contains_key("task_id"));
+        let requests = requests.lock().expect("recording lock should hold");
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].url.ends_with("/v1/agent/register"));
+    }
+
+    #[tokio::test]
     async fn enrollment_error_does_not_echo_session_token_or_response_body() {
         let executor = RecordingEnrollmentExecutor {
             requests: Arc::new(Mutex::new(Vec::new())),
@@ -1066,9 +1515,10 @@ mod tests {
                 .and_then(|value| value.get("task_id")),
             Some(&json!("task-registered"))
         );
+        assert!(adapter.resolve_cached(&transport, &entry).is_none());
         let cached_auth = adapter
-            .resolve_cached(&transport, &entry)
-            .expect("cached task should create a new assertion");
+            .resolve_refreshed(&transport, &entry)
+            .expect("new refresh result should create an assertion");
         assert!(matches!(
             cached_auth,
             LocalResolvedOAuthRequestAuth::Header { ref name, ref value }
@@ -1091,6 +1541,120 @@ mod tests {
         assert!(requests[0].json_body.as_ref().unwrap()["signature"]
             .as_str()
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn rejects_cached_task_after_agent_credential_rotation() {
+        let transport = sample_transport(test_auth_config(None));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let adapter = CodexAgentIdentityRefreshAdapter::default()
+            .with_auth_api_base_url_for_tests("https://auth.test/api/accounts");
+        let entry = adapter
+            .refresh(
+                &RecordingExecutor {
+                    requests: Arc::clone(&requests),
+                },
+                &transport,
+                None,
+            )
+            .await
+            .expect("registration should succeed")
+            .expect("registration should return an entry");
+        let mut rotated_config = test_auth_config(Some("task-rotated"));
+        rotated_config["agent_runtime_id"] = json!("runtime-rotated");
+        let rotated_transport = sample_transport(rotated_config);
+
+        assert!(adapter.resolve_cached(&rotated_transport, &entry).is_none());
+        assert!(adapter
+            .resolve_without_refresh(&rotated_transport)
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn rejects_cached_task_after_remote_task_rotation() {
+        let transport = sample_transport(test_auth_config(None));
+        let adapter = CodexAgentIdentityRefreshAdapter::default()
+            .with_auth_api_base_url_for_tests("https://auth.test/api/accounts");
+        let entry = adapter
+            .refresh(
+                &RecordingExecutor {
+                    requests: Arc::new(Mutex::new(Vec::new())),
+                },
+                &transport,
+                None,
+            )
+            .await
+            .expect("registration should succeed")
+            .expect("registration should return an entry");
+        let rotated_transport = sample_transport(test_auth_config(Some("task-new-winner")));
+
+        assert!(adapter.resolve_cached(&rotated_transport, &entry).is_none());
+        assert!(adapter
+            .resolve_without_refresh(&rotated_transport)
+            .is_some());
+    }
+
+    #[test]
+    fn newer_transport_task_is_authoritative_over_stale_local_cache() {
+        let stale_transport = sample_transport(test_auth_config(Some("task-stale")));
+        let stale_entry = codex_agent_identity_cached_entry_from_transport(&stale_transport)
+            .expect("stale transport should produce a cache entry");
+        let current_config = test_auth_config(Some("task-current"));
+        let current_transport = sample_transport(current_config.clone());
+
+        assert_eq!(
+            codex_agent_identity_refresh_fingerprint(&current_transport, Some(&stale_entry)),
+            codex_agent_identity_config_refresh_fingerprint(&current_config)
+        );
+        assert!(CodexAgentIdentityRefreshAdapter::default()
+            .resolve_fenced_cached(&current_transport, &stale_entry)
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn distributed_waiter_reuses_reloaded_transport_not_stale_cache() {
+        let stale_transport = sample_transport(test_auth_config(Some("task-stale")));
+        let stale_entry = codex_agent_identity_cached_entry_from_transport(&stale_transport)
+            .expect("stale transport should produce a cache entry");
+        let expected = codex_agent_identity_refresh_fingerprint(&stale_transport, None)
+            .expect("stale transport should have a generation");
+        let current_transport = sample_transport(test_auth_config(Some("task-current")));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let coordinator = LocalOAuthRefreshCoordinator::with_adapters_for_tests(vec![Arc::new(
+            CodexAgentIdentityRefreshAdapter::default()
+                .with_auth_api_base_url_for_tests("https://auth.test/api/accounts"),
+        )]);
+        coordinator
+            .store_cached_entry(current_transport.key.id.as_str(), stale_entry)
+            .await;
+
+        let resolution = coordinator
+            .force_refresh_with_result_fenced(
+                &RecordingExecutor {
+                    requests: Arc::clone(&requests),
+                },
+                &current_transport,
+                None,
+                None,
+                Some(expected.as_str()),
+            )
+            .await
+            .expect("waiter resolution should succeed")
+            .expect("waiter should reuse the DB winner");
+
+        assert!(resolution.reused_refresh);
+        assert_eq!(
+            resolution
+                .refreshed_entry
+                .as_ref()
+                .and_then(|entry| entry.metadata.as_ref())
+                .and_then(|config| config.get("task_id")),
+            Some(&json!("task-current"))
+        );
+        assert!(requests
+            .lock()
+            .expect("recording lock should hold")
+            .is_empty());
     }
 
     #[test]

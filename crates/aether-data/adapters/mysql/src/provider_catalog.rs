@@ -9,8 +9,9 @@ use sqlx::{
 
 use aether_data_contracts::repository::provider_catalog::{
     ProviderCatalogKeyAdaptiveStateUpdate, ProviderCatalogKeyHealthStateUpdate,
-    ProviderCatalogKeyListQuery, ProviderCatalogKeyRuntimeMetadataUpdate,
-    ProviderCatalogKeyStatusSnapshotUpdate, ProviderCatalogReadRepository, ProviderCatalogSnapshot,
+    ProviderCatalogKeyListQuery, ProviderCatalogKeyOAuthRuntimeStateCasUpdate,
+    ProviderCatalogKeyRuntimeMetadataUpdate, ProviderCatalogKeyStatusSnapshotUpdate,
+    ProviderCatalogReadRepository, ProviderCatalogSnapshot,
     ProviderCatalogUpstreamMetadataNamespaceUpdate, ProviderCatalogWriteRepository,
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
     StoredProviderCatalogKeyMaintenanceSummary, StoredProviderCatalogKeyPage,
@@ -1019,6 +1020,89 @@ WHERE id = ?
         Ok(rows_affected > 0)
     }
 
+    pub async fn compare_and_update_key_oauth_runtime_state(
+        &self,
+        update: &ProviderCatalogKeyOAuthRuntimeStateCasUpdate,
+    ) -> Result<bool, DataLayerError> {
+        validate_non_empty(&update.key_id, "provider catalog key_id")?;
+        validate_non_empty(
+            &update.encrypted_auth_config,
+            "provider catalog OAuth auth_config",
+        )?;
+        if update
+            .encrypted_api_key_update
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err(DataLayerError::InvalidInput(
+                "provider catalog OAuth api_key update must not be empty".to_string(),
+            ));
+        }
+        if !update.status_snapshot_patch.is_object() {
+            return Err(DataLayerError::InvalidInput(
+                "provider catalog status snapshot patch must be an object".to_string(),
+            ));
+        }
+        if update
+            .upstream_metadata_patch
+            .as_ref()
+            .is_some_and(|patch| !patch.is_object())
+        {
+            return Err(DataLayerError::InvalidInput(
+                "provider catalog upstream metadata patch must be an object".to_string(),
+            ));
+        }
+        let mut builder =
+            QueryBuilder::<MySql>::new("UPDATE provider_api_keys SET oauth_invalid_at = ");
+        builder
+            .push_bind(optional_i64_from_u64(
+                update.oauth_invalid_at_unix_secs,
+                "provider_api_keys.oauth_invalid_at",
+            )?)
+            .push(", oauth_invalid_reason = ")
+            .push_bind(update.oauth_invalid_reason.as_deref())
+            .push(", auth_config = ")
+            .push_bind(&update.encrypted_auth_config);
+        if let Some(encrypted_api_key) = update.encrypted_api_key_update.as_deref() {
+            builder.push(", api_key = ").push_bind(encrypted_api_key);
+        }
+        if let Some(expires_at_unix_secs) = update.expires_at_unix_secs_update {
+            builder
+                .push(", expires_at = ")
+                .push_bind(optional_i64_from_u64(
+                    expires_at_unix_secs,
+                    "provider_api_keys.expires_at",
+                )?);
+        }
+        if let Some(metadata_patch) = update.upstream_metadata_patch.as_ref() {
+            builder.push(", upstream_metadata = ");
+            push_upstream_metadata_shallow_patch(&mut builder, metadata_patch)?;
+        }
+        builder.push(", status_snapshot = ");
+        push_status_snapshot_shallow_patch(&mut builder, &update.status_snapshot_patch)?;
+        if update.reset_error_count {
+            builder.push(", error_count = 0");
+        }
+        builder
+            .push(", updated_at = ")
+            .push_bind(
+                update
+                    .updated_at_unix_secs
+                    .unwrap_or_else(current_unix_secs) as i64,
+            )
+            .push(" WHERE id = ")
+            .push_bind(&update.key_id)
+            .push(" AND auth_config <=> ")
+            .push_bind(update.expected_encrypted_auth_config.as_deref());
+        let rows_affected = builder
+            .build()
+            .execute(&self.pool)
+            .await
+            .map_sql_err()?
+            .rows_affected();
+        Ok(rows_affected > 0)
+    }
+
     pub async fn update_key_health_state(
         &self,
         key_id: &str,
@@ -1153,6 +1237,13 @@ WHERE id = ?
             .push_bind(optional_i64_from_u32(expected.last_rpm_peak))
             .push(" AND concurrent_429_count <=> ")
             .push_bind(optional_i64_from_u32(expected.concurrent_429_count));
+        if let Some(expected_encrypted_auth_config) =
+            update.expected_encrypted_auth_config.as_deref()
+        {
+            builder
+                .push(" AND auth_config <=> ")
+                .push_bind(expected_encrypted_auth_config);
+        }
         let rows_affected = builder
             .build()
             .execute(&self.pool)
@@ -1267,6 +1358,7 @@ SET health_by_format = ?, circuit_breaker_by_format = ?, updated_at = ?
 WHERE id = ?
   AND JSON_EXTRACT(health_by_format, '$') <=> CAST(? AS JSON)
   AND JSON_EXTRACT(circuit_breaker_by_format, '$') <=> CAST(? AS JSON)
+  AND (? IS NULL OR auth_config <=> ?)
 "#,
         )
         .bind(optional_json_to_string(
@@ -1287,6 +1379,8 @@ WHERE id = ?
             &update.expected_circuit_breaker_by_format,
             "provider_api_keys.circuit_breaker_by_format",
         )?)
+        .bind(update.expected_encrypted_auth_config.as_deref())
+        .bind(update.expected_encrypted_auth_config.as_deref())
         .execute(&self.pool)
         .await
         .map_sql_err()?
@@ -1616,6 +1710,13 @@ impl ProviderCatalogWriteRepository for MysqlProviderCatalogReadRepository {
         .await
     }
 
+    async fn compare_and_update_key_oauth_runtime_state(
+        &self,
+        update: &ProviderCatalogKeyOAuthRuntimeStateCasUpdate,
+    ) -> Result<bool, DataLayerError> {
+        Self::compare_and_update_key_oauth_runtime_state(self, update).await
+    }
+
     async fn update_key_health_state(
         &self,
         key_id: &str,
@@ -1751,6 +1852,42 @@ fn push_status_snapshot_shallow_patch<'args>(
         let value = serde_json::to_string(value).map_err(|err| {
             DataLayerError::UnexpectedValue(format!(
                 "provider_api_keys.status_snapshot value is not serializable: {err}"
+            ))
+        })?;
+        builder.push(", ").push_bind(path).push(", CAST(");
+        builder.push_bind(value).push(" AS JSON)");
+    }
+    builder.push(")");
+    Ok(())
+}
+
+fn push_upstream_metadata_shallow_patch<'args>(
+    builder: &mut QueryBuilder<'args, MySql>,
+    patch: &serde_json::Value,
+) -> Result<(), DataLayerError> {
+    let object = patch.as_object().ok_or_else(|| {
+        DataLayerError::InvalidInput(
+            "provider catalog upstream metadata patch must be an object".to_string(),
+        )
+    })?;
+    if object.is_empty() {
+        builder.push("COALESCE(NULLIF(upstream_metadata, ''), '{}')");
+        return Ok(());
+    }
+
+    builder.push("JSON_SET(COALESCE(NULLIF(upstream_metadata, ''), '{}')");
+    for (field, value) in object {
+        let path = format!(
+            "$.{}",
+            serde_json::to_string(field).map_err(|err| {
+                DataLayerError::UnexpectedValue(format!(
+                    "provider_api_keys.upstream_metadata field is not serializable: {err}"
+                ))
+            })?
+        );
+        let value = serde_json::to_string(value).map_err(|err| {
+            DataLayerError::UnexpectedValue(format!(
+                "provider_api_keys.upstream_metadata value is not serializable: {err}"
             ))
         })?;
         builder.push(", ").push_bind(path).push(", CAST(");

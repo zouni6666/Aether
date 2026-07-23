@@ -78,17 +78,14 @@ pub(crate) fn build_admin_update_provider_key_record_with_existing_keys(
         .and_then(serde_json::Value::as_object)
         .cloned();
 
-    if target_auth_type == "oauth"
-        && provider.provider_type.trim().eq_ignore_ascii_case("codex")
-        && auth_config
-            .as_ref()
-            .is_some_and(aether_provider_transport::is_codex_agent_identity_auth_config_value)
+    if auth_config
+        .as_ref()
+        .is_some_and(aether_provider_transport::is_codex_agent_identity_auth_config_value)
     {
-        aether_provider_transport::validate_codex_agent_identity_auth_config(
-            auth_config
-                .as_ref()
-                .expect("Agent Identity auth_config was checked"),
-        )?;
+        return Err(
+            "Agent Identity 凭据必须通过专属创建或导入接口管理，不能通过通用 Key 接口写入"
+                .to_string(),
+        );
     }
 
     match target_auth_type.as_str() {

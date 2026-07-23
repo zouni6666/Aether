@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::error::Error as _;
 use std::future::Future;
 use std::io::Read;
@@ -607,6 +607,7 @@ pub(crate) struct DirectUpstreamStreamExecution {
     pub(crate) headers: BTreeMap<String, String>,
     pub(crate) provider_api_format: String,
     pub(crate) stream_summary_report_context: Value,
+    pub(crate) prefetched_body: VecDeque<Result<Bytes, String>>,
     pub(crate) response: DirectUpstreamResponse,
     pub(crate) started_at: Instant,
     pub(crate) stream_first_byte_timeout: Option<Duration>,
@@ -711,6 +712,7 @@ impl DirectSyncExecutionRuntime {
             headers,
             provider_api_format: plan.provider_api_format.clone(),
             stream_summary_report_context,
+            prefetched_body: VecDeque::new(),
             response: response.into_direct_upstream_response(),
             started_at,
             stream_first_byte_timeout: resolve_stream_first_byte_timeout(plan),
@@ -824,6 +826,7 @@ pub(crate) async fn execute_stream_plan_via_local_tunnel(
         headers,
         provider_api_format: plan.provider_api_format.clone(),
         stream_summary_report_context: build_stream_summary_report_context(plan),
+        prefetched_body: VecDeque::new(),
         response: DirectUpstreamResponse::LocalTunnel(response),
         started_at,
         stream_first_byte_timeout: resolve_stream_first_byte_timeout(plan),

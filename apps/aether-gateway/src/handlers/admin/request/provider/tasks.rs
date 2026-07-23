@@ -16,6 +16,10 @@ use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+fn provider_skips_automatic_key_cleanup(provider: &StoredProviderCatalogProvider) -> bool {
+    provider.provider_type.trim().eq_ignore_ascii_case("codex")
+}
+
 impl<'a> AdminAppState<'a> {
     pub(crate) async fn clear_admin_provider_pool_cooldown(&self, provider_id: &str, key_id: &str) {
         crate::handlers::admin::provider::pool::runtime::clear_admin_provider_pool_cooldown(
@@ -368,6 +372,13 @@ impl<'a> AdminAppState<'a> {
     ) -> Result<usize, GatewayError> {
         use aether_admin::provider::pool as admin_provider_pool_pure;
 
+        // Codex OAuth credentials can be replaced by a long-lived Agent
+        // Identity under the same key id. Until deletes support an auth_config
+        // CAS, automatic cleanup must retain every Codex key.
+        if provider_skips_automatic_key_cleanup(provider) {
+            return Ok(0);
+        }
+
         let banned_keys = self
             .list_provider_catalog_keys_by_provider_ids(std::slice::from_ref(&provider.id))
             .await?
@@ -407,6 +418,10 @@ impl<'a> AdminAppState<'a> {
         provider_type: &str,
     ) -> Result<usize, GatewayError> {
         use aether_admin::provider::pool as admin_provider_pool_pure;
+
+        if provider_skips_automatic_key_cleanup(provider) {
+            return Ok(0);
+        }
 
         let keys = self
             .list_provider_catalog_keys_by_provider_ids(std::slice::from_ref(&provider.id))
@@ -847,5 +862,28 @@ impl<'a> AdminAppState<'a> {
             "model_sync": model_sync,
         }))
         .into_response())
+    }
+}
+
+#[cfg(test)]
+mod automatic_cleanup_tests {
+    use super::provider_skips_automatic_key_cleanup;
+    use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider;
+
+    fn provider(provider_type: &str) -> StoredProviderCatalogProvider {
+        StoredProviderCatalogProvider::new(
+            format!("provider-{provider_type}"),
+            provider_type.to_string(),
+            None,
+            provider_type.to_string(),
+        )
+        .expect("provider should build")
+    }
+
+    #[test]
+    fn codex_automatic_cleanup_is_disabled_for_replaceable_agent_credentials() {
+        assert!(provider_skips_automatic_key_cleanup(&provider("codex")));
+        assert!(provider_skips_automatic_key_cleanup(&provider("CoDeX")));
+        assert!(!provider_skips_automatic_key_cleanup(&provider("kiro")));
     }
 }
