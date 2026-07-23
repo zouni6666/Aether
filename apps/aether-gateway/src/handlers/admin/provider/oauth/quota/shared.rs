@@ -14,8 +14,9 @@ use aether_contracts::{
     ResolvedTransportProfile, EXECUTION_REQUEST_ACCEPT_INVALID_CERTS_HEADER,
 };
 use aether_data_contracts::repository::provider_catalog::{
-    ProviderCatalogKeyRuntimeMetadataUpdate, ProviderCatalogKeyStatusSnapshotUpdate,
-    StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
+    ProviderCatalogKeyOAuthRuntimeStateCasUpdate, ProviderCatalogKeyRuntimeMetadataUpdate,
+    ProviderCatalogKeyStatusSnapshotUpdate, StoredProviderCatalogEndpoint,
+    StoredProviderCatalogKey,
 };
 use aether_provider_pool::{ProviderPoolQuotaRequestSpec, ProviderPoolService};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -200,6 +201,10 @@ pub(super) fn extract_execution_error_message(result: &ExecutionResult) -> Optio
     admin_provider_quota_pure::extract_execution_error_message(result)
 }
 
+fn extract_execution_error_detail(result: &ExecutionResult) -> Option<String> {
+    admin_provider_quota_pure::extract_execution_error_detail(result)
+}
+
 pub(super) fn quota_refresh_success_invalid_state(
     key: &StoredProviderCatalogKey,
 ) -> (Option<u64>, Option<String>) {
@@ -299,6 +304,86 @@ pub(crate) async fn persist_provider_quota_refresh_state(
         std::future::ready(()),
     )
     .await
+}
+
+/// Persist a Codex Agent Identity quota response only when the exact encrypted
+/// auth_config used for the request is still installed. Metadata, OAuth state,
+/// and their status projection share one repository CAS so a replacement cannot
+/// receive any portion of an older response.
+pub(crate) async fn persist_fenced_provider_quota_refresh_state(
+    state: &AdminAppState<'_>,
+    key_id: &str,
+    expected_encrypted_auth_config: &str,
+    metadata_update: Option<&serde_json::Value>,
+    oauth_invalid_at_unix_secs: Option<u64>,
+    oauth_invalid_reason: Option<String>,
+) -> Result<bool, GatewayError> {
+    let expected_encrypted_auth_config = expected_encrypted_auth_config.trim();
+    if expected_encrypted_auth_config.is_empty() {
+        return Ok(false);
+    }
+    if metadata_update.is_some_and(|value| !value.is_object()) {
+        return Err(GatewayError::Internal(
+            "fenced quota metadata update must be an object".to_string(),
+        ));
+    }
+    let Some(mut latest_key) = state
+        .read_provider_catalog_keys_by_ids(&[key_id.to_string()])
+        .await?
+        .into_iter()
+        .next()
+    else {
+        return Ok(false);
+    };
+    if latest_key.encrypted_auth_config.as_deref() != Some(expected_encrypted_auth_config) {
+        return Ok(false);
+    }
+
+    let quota_snapshot_provider_type =
+        metadata_update.and_then(aether_provider_pool::provider_pool_quota_metadata_provider_type);
+    if let Some(metadata_update) = metadata_update {
+        latest_key.upstream_metadata = Some(merge_upstream_metadata(
+            latest_key.upstream_metadata.as_ref(),
+            metadata_update,
+        ));
+    }
+    latest_key.oauth_invalid_at_unix_secs = oauth_invalid_at_unix_secs;
+    latest_key.oauth_invalid_reason = oauth_invalid_reason;
+    if let Some(provider_type) = quota_snapshot_provider_type.as_deref() {
+        latest_key.status_snapshot = sync_provider_key_quota_status_snapshot(
+            latest_key.status_snapshot.as_ref(),
+            provider_type,
+            latest_key.upstream_metadata.as_ref(),
+            "refresh_api",
+        );
+    }
+    latest_key.status_snapshot =
+        sync_provider_key_oauth_status_snapshot(latest_key.status_snapshot.as_ref(), &latest_key);
+    latest_key.updated_at_unix_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs());
+
+    state
+        .app()
+        .compare_and_update_provider_catalog_key_oauth_runtime_state(
+            &ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
+                key_id: key_id.to_string(),
+                expected_encrypted_auth_config: Some(expected_encrypted_auth_config.to_string()),
+                encrypted_auth_config: expected_encrypted_auth_config.to_string(),
+                encrypted_api_key_update: None,
+                expires_at_unix_secs_update: None,
+                oauth_invalid_at_unix_secs: latest_key.oauth_invalid_at_unix_secs,
+                oauth_invalid_reason: latest_key.oauth_invalid_reason.clone(),
+                upstream_metadata_patch: metadata_update.cloned(),
+                status_snapshot_patch: provider_quota_refresh_status_patch(
+                    latest_key.status_snapshot.as_ref(),
+                ),
+                reset_error_count: false,
+                updated_at_unix_secs: latest_key.updated_at_unix_secs,
+            },
+        )
+        .await
 }
 
 async fn persist_provider_quota_refresh_state_after_read<F>(
@@ -452,7 +537,7 @@ pub(super) async fn execute_provider_quota_plan(
             if !crate::provider_transport::is_codex_agent_identity_transport(transport)
                 || !crate::provider_transport::is_codex_agent_identity_invalid_task_response(
                     result.status_code,
-                    extract_execution_error_message(&result).as_deref(),
+                    extract_execution_error_detail(&result).as_deref(),
                 )
             {
                 return Ok(ProviderQuotaExecutionOutcome::Response(result));

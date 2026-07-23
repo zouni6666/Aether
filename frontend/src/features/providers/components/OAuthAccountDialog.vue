@@ -725,19 +725,11 @@
           class="flex flex-col gap-3 justify-center transition-opacity duration-150"
           :class="mode === 'agent_identity' ? 'opacity-100' : 'opacity-0 pointer-events-none'"
         >
-          <div class="space-y-1">
-            <label class="text-xs font-medium">
-              {{ legacyT('ChatGPT Session Token') }}
-            </label>
-            <p class="text-[11px] text-muted-foreground">
-              {{ legacyT('仅用于一次性注册，成功后不会保存 Token。') }}
-            </p>
-          </div>
           <Textarea
-            v-model="agentIdentitySessionToken"
+            v-model="agentIdentityInput"
             :disabled="creatingAgentIdentity"
-            :placeholder="legacyT('粘贴 ChatGPT Session Token（JWT）')"
-            class="min-h-[230px] text-xs font-mono break-all !rounded-xl"
+            :placeholder="legacyT('粘贴 AT 或 ChatGPT auth/session JSON')"
+            class="min-h-[200px] text-xs font-mono break-all !rounded-xl"
             autocomplete="off"
             spellcheck="false"
           />
@@ -778,7 +770,7 @@
         :disabled="!canCreateAgentIdentity"
         @click="handleCreateAgentIdentity"
       >
-        {{ creatingAgentIdentity ? legacyT('创建中...') : legacyT('创建并导入 Agent Identity') }}
+        {{ creatingAgentIdentity ? legacyT('创建中...') : legacyT('创建') }}
       </Button>
     </template>
   </Dialog>
@@ -833,7 +825,7 @@ const emit = defineEmits<{
   saved: []
 }>()
 
-const { success, error: showError } = useToast()
+const { success, warning, error: showError } = useToast()
 const { copyToClipboard } = useClipboard()
 const { legacyT, locale } = useI18n()
 const proxyNodesStore = useProxyNodesStore()
@@ -987,7 +979,7 @@ const windsurfImportMethod = ref<WindsurfImportMethod>('email_password')
 const windsurfEmail = ref('')
 const windsurfPassword = ref('')
 const windsurfAccountName = ref('')
-const agentIdentitySessionToken = ref('')
+const agentIdentityInput = ref('')
 const creatingAgentIdentity = ref(false)
 let agentIdentityRequestId = 0
 
@@ -1077,7 +1069,7 @@ const canImport = computed(() => {
 
 const canCreateAgentIdentity = computed(() =>
   isCodexProvider.value
-  && agentIdentitySessionToken.value.trim().length > 0
+  && agentIdentityInput.value.trim().length > 0
   && !creatingAgentIdentity.value
 )
 
@@ -1383,7 +1375,7 @@ function resetForm() {
   windsurfEmail.value = ''
   windsurfPassword.value = ''
   windsurfAccountName.value = ''
-  agentIdentitySessionToken.value = ''
+  agentIdentityInput.value = ''
   creatingAgentIdentity.value = false
   proxyPopoverOpen.value = false
   selectedProxyNodeId.value = ''
@@ -1760,6 +1752,33 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+type AgentIdentityAccessTokenResolution =
+  | { ok: true, accessToken: string }
+  | { ok: false, message: string }
+
+function resolveAgentIdentityAccessToken(input: string): AgentIdentityAccessTokenResolution {
+  const normalized = input.trim()
+  if (!normalized.startsWith('{') && !normalized.startsWith('[')) {
+    return { ok: true, accessToken: normalized }
+  }
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(normalized)
+  } catch {
+    return { ok: false, message: 'ChatGPT auth/session JSON 格式无效' }
+  }
+  if (!isObjectRecord(parsed)) {
+    return { ok: false, message: 'ChatGPT auth/session JSON 缺少 accessToken' }
+  }
+
+  const accessToken = normalizeStringField(parsed.accessToken)
+    ?? normalizeStringField(parsed.access_token)
+  return accessToken
+    ? { ok: true, accessToken }
+    : { ok: false, message: 'ChatGPT auth/session JSON 缺少 accessToken' }
+}
+
 function isCodexAgentIdentityObject(root: Record<string, unknown>): boolean {
   const nestedValue = root.agent_identity ?? root.agentIdentity
   const nested = isObjectRecord(nestedValue) ? nestedValue : null
@@ -1908,18 +1927,26 @@ async function handleImport() {
 async function handleCreateAgentIdentity() {
   if (!canCreateAgentIdentity.value || !props.providerId) return
 
-  const sessionToken = agentIdentitySessionToken.value.trim()
+  const resolvedInput = resolveAgentIdentityAccessToken(agentIdentityInput.value)
+  if (!resolvedInput.ok) {
+    showError(legacyT(resolvedInput.message), legacyT('格式错误'))
+    return
+  }
   const requestId = ++agentIdentityRequestId
   creatingAgentIdentity.value = true
   try {
     const result = await importProviderRefreshToken(props.providerId, {
-      session_token: sessionToken,
-      create_agent_identity_from_session_token: true,
+      access_token: resolvedInput.accessToken,
+      create_agent_identity: true,
       proxy_node_id: selectedProxyNodeId.value || undefined,
     })
     if (requestId !== agentIdentityRequestId) return
 
-    success(getOAuthSuccessMessage('创建', result))
+    if (result.task_ready === false) {
+      warning(legacyT('Agent Identity 已保存，任务将在后台初始化'), legacyT('已保存'))
+    } else {
+      success(getOAuthSuccessMessage('创建', result))
+    }
     emit('saved')
     handleClose()
   } catch (err: unknown) {

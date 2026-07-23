@@ -44,9 +44,7 @@ use crate::handlers::shared::provider_pool::{
 use crate::orchestration::local_execution_candidate_metadata_from_report_context;
 use crate::scheduler::affinity::SCHEDULER_AFFINITY_TTL;
 use crate::scheduler::config::{read_scheduler_ordering_config, SchedulerSchedulingMode};
-use crate::{
-    provider_transport::snapshot::GatewayProviderTransportProvider, AppState, GatewayError,
-};
+use crate::AppState;
 
 const POOL_SCORE_FEEDBACK_GATE_MAX_ENTRIES: usize = 50_000;
 const HEALTH_SUCCESS_PERSIST_GATE_MAX_ENTRIES: usize = 50_000;
@@ -253,6 +251,21 @@ struct PoolFeedbackContext {
     sticky_session_token: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+enum LocalExecutionAuthConfigFence {
+    Unfenced,
+    Fenced(String),
+}
+
+impl LocalExecutionAuthConfigFence {
+    fn encrypted_auth_config(&self) -> Option<&str> {
+        match self {
+            Self::Unfenced => None,
+            Self::Fenced(ciphertext) => Some(ciphertext),
+        }
+    }
+}
+
 const ADAPTIVE_RPM_RECENT_CANDIDATE_LIMIT: usize = 512;
 const LOCAL_EXECUTION_SCHEDULER_AFFINITY_MAX_ENTRIES: usize = 10_000;
 
@@ -405,6 +418,73 @@ async fn local_execution_plan_uses_pool(state: &AppState, plan: &ExecutionPlan) 
     admin_provider_pool_config_from_config_value(transport.provider.config.as_ref()).is_some()
 }
 
+async fn capture_local_execution_auth_config_fence(
+    state: &AppState,
+    plan: &ExecutionPlan,
+) -> Option<LocalExecutionAuthConfigFence> {
+    let transport = match state
+        .read_provider_transport_snapshot(&plan.provider_id, &plan.endpoint_id, &plan.key_id)
+        .await
+    {
+        Ok(Some(transport)) => transport,
+        Ok(None) => return None,
+        Err(err) => {
+            warn!(
+                provider_id = %plan.provider_id,
+                endpoint_id = %plan.endpoint_id,
+                key_id = %plan.key_id,
+                error = ?err,
+                "gateway orchestration effects: failed to read transport for credential fencing"
+            );
+            return None;
+        }
+    };
+    if !transport
+        .provider
+        .provider_type
+        .trim()
+        .eq_ignore_ascii_case("codex")
+        || !transport.key.auth_type.trim().eq_ignore_ascii_case("oauth")
+    {
+        return Some(LocalExecutionAuthConfigFence::Unfenced);
+    }
+
+    let authorization = execution_plan_authorization(plan)?;
+    let current_uses_agent_identity =
+        crate::provider_transport::is_codex_agent_identity_transport(&transport);
+    let authorization_matches = if current_uses_agent_identity {
+        crate::provider_transport::codex_agent_identity_authorization_matches_transport(
+            &transport,
+            authorization,
+        )
+    } else if crate::provider_transport::is_codex_agent_identity_authorization(authorization) {
+        false
+    } else {
+        execution_plan_bearer_matches_transport(plan, &transport)
+    };
+    if !authorization_matches {
+        return None;
+    }
+
+    match state
+        .capture_provider_transport_auth_config_fence(&transport)
+        .await
+    {
+        Ok(Some(ciphertext)) => Some(LocalExecutionAuthConfigFence::Fenced(ciphertext)),
+        Ok(None) => None,
+        Err(err) => {
+            warn!(
+                provider_id = %plan.provider_id,
+                endpoint_id = %plan.endpoint_id,
+                key_id = %plan.key_id,
+                error = ?err,
+                "gateway orchestration effects: failed to capture credential fence"
+            );
+            None
+        }
+    }
+}
+
 async fn local_scheduler_affinity_matches_failed_target(
     state: &AppState,
     plan: &ExecutionPlan,
@@ -480,6 +560,7 @@ async fn resolve_pool_feedback_context(
     context: LocalExecutionEffectContext<'_>,
 ) -> Option<PoolFeedbackContext> {
     let plan = context.plan;
+    capture_local_execution_auth_config_fence(state, plan).await?;
     let transport = match state
         .read_provider_transport_snapshot(&plan.provider_id, &plan.endpoint_id, &plan.key_id)
         .await
@@ -602,6 +683,11 @@ async fn record_adaptive_rate_limit_effect(
     context: LocalExecutionEffectContext<'_>,
     effect: LocalAdaptiveRateLimitEffect<'_>,
 ) {
+    let Some(auth_config_fence) =
+        capture_local_execution_auth_config_fence(state, context.plan).await
+    else {
+        return;
+    };
     let effect_lock = PROVIDER_KEY_EFFECT_LOCKS.lock_for(&context.plan.key_id);
     let _effect_guard = effect_lock.lock().await;
     let observed_at_unix_secs = current_unix_secs();
@@ -626,6 +712,12 @@ async fn record_adaptive_rate_limit_effect(
         else {
             return;
         };
+        if auth_config_fence
+            .encrypted_auth_config()
+            .is_some_and(|expected| current_key.encrypted_auth_config.as_deref() != Some(expected))
+        {
+            return;
+        }
         let Some(projection) = project_local_adaptive_rate_limit(
             &current_key,
             effect.classification,
@@ -648,6 +740,9 @@ async fn record_adaptive_rate_limit_effect(
         next.last_rpm_peak = projection.last_rpm_peak;
         let update = ProviderCatalogKeyAdaptiveStateUpdate {
             key_id: context.plan.key_id.clone(),
+            expected_encrypted_auth_config: auth_config_fence
+                .encrypted_auth_config()
+                .map(ToOwned::to_owned),
             expected,
             next,
             status_snapshot_patch: adaptive_status_snapshot_patch(&projection.status_snapshot),
@@ -705,6 +800,11 @@ async fn record_adaptive_success_effect(
     context: LocalExecutionEffectContext<'_>,
     _effect: LocalAdaptiveSuccessEffect,
 ) {
+    let Some(auth_config_fence) =
+        capture_local_execution_auth_config_fence(state, context.plan).await
+    else {
+        return;
+    };
     let observed_at_unix_secs = current_unix_secs();
     let Some(current_key) = state
         .read_provider_catalog_keys_by_ids(std::slice::from_ref(&context.plan.key_id))
@@ -714,6 +814,12 @@ async fn record_adaptive_success_effect(
     else {
         return;
     };
+    if auth_config_fence
+        .encrypted_auth_config()
+        .is_some_and(|expected| current_key.encrypted_auth_config.as_deref() != Some(expected))
+    {
+        return;
+    }
     if current_key.rpm_limit.is_some()
         || current_key
             .learned_rpm_limit
@@ -757,6 +863,12 @@ async fn record_adaptive_success_effect(
         else {
             return;
         };
+        if auth_config_fence
+            .encrypted_auth_config()
+            .is_some_and(|expected| current_key.encrypted_auth_config.as_deref() != Some(expected))
+        {
+            return;
+        }
         if current_key.rpm_limit.is_some()
             || current_key
                 .learned_rpm_limit
@@ -778,6 +890,9 @@ async fn record_adaptive_success_effect(
         next.last_probe_increase_at_unix_secs = projection.last_probe_increase_at_unix_secs;
         let update = ProviderCatalogKeyAdaptiveStateUpdate {
             key_id: context.plan.key_id.clone(),
+            expected_encrypted_auth_config: auth_config_fence
+                .encrypted_auth_config()
+                .map(ToOwned::to_owned),
             expected,
             next,
             status_snapshot_patch: adaptive_status_snapshot_patch(&projection.status_snapshot),
@@ -853,6 +968,11 @@ async fn record_health_failure_effect(
     if api_format.is_empty() {
         return;
     }
+    let Some(auth_config_fence) =
+        capture_local_execution_auth_config_fence(state, context.plan).await
+    else {
+        return;
+    };
 
     let effect_lock = PROVIDER_KEY_EFFECT_LOCKS.lock_for(&context.plan.key_id);
     let _effect_guard = effect_lock.lock().await;
@@ -869,6 +989,12 @@ async fn record_health_failure_effect(
         else {
             return;
         };
+        if auth_config_fence
+            .encrypted_auth_config()
+            .is_some_and(|expected| current_key.encrypted_auth_config.as_deref() != Some(expected))
+        {
+            return;
+        }
         let Some(health_by_format) = project_local_failure_health(
             current_key.health_by_format.as_ref(),
             api_format,
@@ -897,6 +1023,9 @@ async fn record_health_failure_effect(
         };
         let update = ProviderCatalogKeyHealthStateUpdate {
             key_id: context.plan.key_id.clone(),
+            expected_encrypted_auth_config: auth_config_fence
+                .encrypted_auth_config()
+                .map(ToOwned::to_owned),
             expected_health_by_format: current_key.health_by_format,
             expected_circuit_breaker_by_format: current_key.circuit_breaker_by_format,
             health_by_format: Some(health_by_format),
@@ -934,6 +1063,11 @@ async fn record_health_success_effect(
     if api_format.is_empty() {
         return;
     }
+    let Some(auth_config_fence) =
+        capture_local_execution_auth_config_fence(state, context.plan).await
+    else {
+        return;
+    };
 
     // Health updates replace both JSON snapshots in one write. Serialize the success
     // read/project/write with failure and circuit-clear effects for this provider key so a
@@ -953,6 +1087,12 @@ async fn record_health_success_effect(
         else {
             return;
         };
+        if auth_config_fence
+            .encrypted_auth_config()
+            .is_some_and(|expected| current_key.encrypted_auth_config.as_deref() != Some(expected))
+        {
+            return;
+        }
         let Some(health_by_format) =
             project_local_success_health(current_key.health_by_format.as_ref(), api_format)
         else {
@@ -991,6 +1131,9 @@ async fn record_health_success_effect(
         };
         let update = ProviderCatalogKeyHealthStateUpdate {
             key_id: context.plan.key_id.clone(),
+            expected_encrypted_auth_config: auth_config_fence
+                .encrypted_auth_config()
+                .map(ToOwned::to_owned),
             expected_health_by_format: current_key.health_by_format,
             expected_circuit_breaker_by_format: current_key.circuit_breaker_by_format,
             health_by_format: Some(health_by_format),
@@ -1104,6 +1247,12 @@ async fn record_pool_error_effect(
     };
 
     clear_pool_key_circuit_breaker(state, context).await;
+    if capture_local_execution_auth_config_fence(state, context.plan)
+        .await
+        .is_none()
+    {
+        return;
+    }
     record_admin_provider_pool_error(
         state.runtime_state.as_ref(),
         &context.plan.provider_id,
@@ -1135,6 +1284,11 @@ async fn clear_pool_key_circuit_breaker(
     state: &AppState,
     context: LocalExecutionEffectContext<'_>,
 ) {
+    let Some(auth_config_fence) =
+        capture_local_execution_auth_config_fence(state, context.plan).await
+    else {
+        return;
+    };
     let effect_lock = PROVIDER_KEY_EFFECT_LOCKS.lock_for(&context.plan.key_id);
     let _effect_guard = effect_lock.lock().await;
 
@@ -1147,11 +1301,20 @@ async fn clear_pool_key_circuit_breaker(
         else {
             return;
         };
+        if auth_config_fence
+            .encrypted_auth_config()
+            .is_some_and(|expected| current_key.encrypted_auth_config.as_deref() != Some(expected))
+        {
+            return;
+        }
         if current_key.circuit_breaker_by_format.is_none() {
             return;
         }
         let update = ProviderCatalogKeyHealthStateUpdate {
             key_id: context.plan.key_id.clone(),
+            expected_encrypted_auth_config: auth_config_fence
+                .encrypted_auth_config()
+                .map(ToOwned::to_owned),
             expected_health_by_format: current_key.health_by_format.clone(),
             expected_circuit_breaker_by_format: current_key.circuit_breaker_by_format,
             health_by_format: current_key.health_by_format,
@@ -1188,6 +1351,12 @@ async fn record_oauth_invalidation_effect(
     }
 
     let plan = context.plan;
+    // Agent assertions are long-lived credential requests whose task can rotate
+    // while the response is in flight. Runtime 401/403 handling must not project
+    // that response onto whichever credential generation is stored later.
+    if execution_plan_uses_codex_agent_identity(plan) {
+        return;
+    }
     let transport = match state
         .read_provider_transport_snapshot(&plan.provider_id, &plan.endpoint_id, &plan.key_id)
         .await
@@ -1202,7 +1371,21 @@ async fn record_oauth_invalidation_effect(
             return;
         }
     };
+    // The inverse replacement is equally unsafe: a response sent with an old
+    // bearer token must not invalidate a newly installed Agent Identity.
+    if crate::provider_transport::is_codex_agent_identity_transport(&transport) {
+        return;
+    }
     if !transport.key.auth_type.trim().eq_ignore_ascii_case("oauth") {
+        return;
+    }
+    if transport
+        .provider
+        .provider_type
+        .trim()
+        .eq_ignore_ascii_case("codex")
+        && !execution_plan_bearer_matches_transport(plan, &transport)
+    {
         return;
     }
 
@@ -1214,11 +1397,27 @@ async fn record_oauth_invalidation_effect(
         return;
     };
 
+    let expected_auth_config = match state
+        .capture_provider_transport_auth_config_fence(&transport)
+        .await
+    {
+        Ok(Some(ciphertext)) => ciphertext,
+        Ok(None) => return,
+        Err(err) => {
+            warn!(
+                "gateway orchestration effects: failed to capture oauth invalidation fence for provider {} endpoint {} key {}: {:?}",
+                plan.provider_id, plan.endpoint_id, plan.key_id, err
+            );
+            return;
+        }
+    };
+
     if let Err(err) = state
-        .mark_provider_catalog_key_oauth_invalid(
+        .mark_provider_catalog_key_oauth_invalid_fenced(
             &plan.key_id,
             transport.provider.provider_type.as_str(),
             invalid_reason.as_str(),
+            expected_auth_config.as_str(),
         )
         .await
     {
@@ -1227,98 +1426,34 @@ async fn record_oauth_invalidation_effect(
             plan.provider_id, plan.endpoint_id, plan.key_id, err
         );
     }
-    record_pool_score_schedule_feedback(
-        state,
-        context,
-        Some(false),
-        Some(PoolMemberHardState::AuthInvalid),
-        Some(-2_000),
-        serde_json::json!({
-            "last_request_feedback": {
-                "source": "oauth_invalidation",
-                "status_code": effect.status_code,
-                "reason": invalid_reason.as_str()
-            }
-        }),
-    )
-    .await;
-
-    match auto_remove_runtime_oauth_invalid_key(
-        state,
-        &transport.provider,
-        &plan.key_id,
-        invalid_reason.as_str(),
-    )
-    .await
-    {
-        Ok(true) => {
-            tracing::info!(
-                provider_id = %plan.provider_id,
-                endpoint_id = %plan.endpoint_id,
-                key_id = %plan.key_id,
-                provider_type = %transport.provider.provider_type,
-                event_name = "auto_removed_oauth_runtime_invalid",
-                "gateway auto-removed runtime invalid oauth key"
-            );
-        }
-        Ok(false) => {}
-        Err(err) => {
-            warn!(
-                "gateway orchestration effects: failed to auto-remove oauth invalid key for provider {} endpoint {} key {}: {:?}",
-                plan.provider_id, plan.endpoint_id, plan.key_id, err
-            );
-        }
-    }
 }
 
-async fn auto_remove_runtime_oauth_invalid_key(
-    state: &AppState,
-    provider: &GatewayProviderTransportProvider,
-    key_id: &str,
-    invalid_reason: &str,
-) -> Result<bool, GatewayError> {
-    if !admin_provider_quota_pure::provider_auto_remove_banned_keys(provider.config.as_ref()) {
-        return Ok(false);
-    }
+fn execution_plan_uses_codex_agent_identity(plan: &ExecutionPlan) -> bool {
+    execution_plan_authorization(plan)
+        .is_some_and(crate::provider_transport::is_codex_agent_identity_authorization)
+}
 
-    let key_ids = [key_id.to_string()];
-    let Some(key) = state
-        .read_provider_catalog_keys_by_ids(&key_ids)
-        .await?
-        .into_iter()
-        .next()
-    else {
-        return Ok(false);
-    };
-    if key.provider_id != provider.id {
-        return Ok(false);
-    }
+fn execution_plan_authorization(plan: &ExecutionPlan) -> Option<&str> {
+    plan.headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+        .map(|(_, value)| value.as_str())
+}
 
-    if !admin_provider_quota_pure::should_auto_remove_oauth_invalid_key(
-        &key,
-        Some(invalid_reason),
-        true,
-        current_unix_secs(),
-    ) {
-        return Ok(false);
-    }
-
-    let deleted_key_id = key.id.clone();
-    if !state.delete_provider_catalog_key(&deleted_key_id).await? {
-        return Ok(false);
-    }
-    state
-        .cleanup_deleted_provider_catalog_refs(
-            &provider.id,
-            false,
-            &[],
-            std::slice::from_ref(&deleted_key_id),
-        )
-        .await?;
-    let _ = state
-        .invalidate_local_oauth_refresh_entry(&deleted_key_id)
-        .await;
-    Ok(true)
+fn execution_plan_bearer_matches_transport(
+    plan: &ExecutionPlan,
+    transport: &crate::provider_transport::GatewayProviderTransportSnapshot,
+) -> bool {
+    let current_token = transport.key.decrypted_api_key.trim();
+    !current_token.is_empty()
+        && plan.headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("authorization")
+                && value
+                    .trim()
+                    .strip_prefix("Bearer ")
+                    .map(str::trim)
+                    .is_some_and(|token| token == current_token)
+        })
 }
 
 fn resolve_local_oauth_invalid_reason(
@@ -1407,6 +1542,12 @@ async fn record_pool_score_schedule_feedback(
     score_reason_patch: Value,
 ) {
     if context.plan.provider_id.trim().is_empty() || context.plan.key_id.trim().is_empty() {
+        return;
+    }
+    if capture_local_execution_auth_config_fence(state, context.plan)
+        .await
+        .is_none()
+    {
         return;
     }
     if !pool_score_feedback_gate_allows(context.plan, succeeded, hard_state, score_delta) {
@@ -1560,7 +1701,8 @@ mod tests {
     };
     use aether_data_contracts::repository::pool_scores::PoolMemberHardState;
     use aether_data_contracts::repository::provider_catalog::{
-        StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
+        ProviderCatalogKeyAdaptiveState, StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
+        StoredProviderCatalogProvider,
     };
     use aether_test_support::ManagedRedisServer;
     use serde_json::{json, Value};
@@ -1720,7 +1862,10 @@ mod tests {
             key_id: "key-codex-cli-local-1".to_string(),
             method: "POST".to_string(),
             url: "https://chatgpt.com/backend-api/codex".to_string(),
-            headers: BTreeMap::new(),
+            headers: BTreeMap::from([(
+                "authorization".to_string(),
+                "Bearer __placeholder__".to_string(),
+            )]),
             content_type: Some("application/json".to_string()),
             content_encoding: None,
             body: RequestBody::from_json(json!({"model":"gpt-5.4"})),
@@ -1732,6 +1877,15 @@ mod tests {
             transport_profile: None,
             timeouts: None,
         }
+    }
+
+    fn sample_codex_agent_identity_plan() -> ExecutionPlan {
+        let mut plan = sample_codex_plan();
+        plan.headers.insert(
+            "Authorization".to_string(),
+            "AgentAssertion in-flight-assertion".to_string(),
+        );
+        plan
     }
 
     fn sample_codex_provider() -> StoredProviderCatalogProvider {
@@ -1818,6 +1972,19 @@ mod tests {
         .expect("key transport should build")
     }
 
+    fn sample_codex_agent_identity_key() -> StoredProviderCatalogKey {
+        let mut key = sample_codex_key();
+        key.name = "Agent Identity".to_string();
+        key.encrypted_auth_config = Some(
+            encrypt_python_fernet_plaintext(
+                DEVELOPMENT_ENCRYPTION_KEY,
+                r#"{"provider_type":"codex","auth_mode":"agentIdentity","agent_runtime_id":"runtime-current","agent_private_key":"MC4CAQAwBQYDK2VwBCIEIAcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcH","task_id":"task-current"}"#,
+            )
+            .expect("Agent Identity auth config should encrypt"),
+        );
+        key
+    }
+
     fn codex_state() -> AppState {
         codex_state_with_provider(sample_codex_provider())
     }
@@ -1827,10 +1994,17 @@ mod tests {
     }
 
     fn codex_state_with_provider(provider: StoredProviderCatalogProvider) -> AppState {
+        codex_state_with_provider_and_key(provider, sample_codex_key())
+    }
+
+    fn codex_state_with_provider_and_key(
+        provider: StoredProviderCatalogProvider,
+        key: StoredProviderCatalogKey,
+    ) -> AppState {
         let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
             vec![provider],
             vec![sample_codex_endpoint()],
-            vec![sample_codex_key()],
+            vec![key],
         ));
         AppState::new()
             .expect("gateway state should build")
@@ -2744,7 +2918,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oauth_invalidation_auto_removes_inactive_pat_owner_when_enabled() {
+    async fn oauth_invalidation_retains_inactive_pat_owner_when_auto_remove_is_enabled() {
         let state = codex_state_with_auto_remove();
         let plan = sample_codex_plan();
 
@@ -2763,13 +2937,16 @@ mod tests {
         )
         .await;
 
-        let keys = state
+        let stored_key = state
             .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
             .await
-            .expect("provider catalog keys should load");
-        assert!(
-            keys.is_empty(),
-            "hard-invalid PAT owner should be auto removed"
+            .expect("provider catalog keys should load")
+            .into_iter()
+            .next()
+            .expect("runtime invalidation must not race-delete a replacement key");
+        assert_eq!(
+            stored_key.oauth_invalid_reason.as_deref(),
+            Some("[OAUTH_EXPIRED] Personal access token owner is inactive.")
         );
     }
 
@@ -2804,6 +2981,253 @@ mod tests {
             stored_key.oauth_invalid_reason.as_deref(),
             Some("[OAUTH_EXPIRED] session expired")
         );
+    }
+
+    #[tokio::test]
+    async fn oauth_invalidation_does_not_mutate_replacement_after_agent_request() {
+        let state = codex_state_with_auto_remove();
+        let plan = sample_codex_agent_identity_plan();
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: None,
+            },
+            LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
+                status_code: 403,
+                response_text: Some(
+                    r#"{"error":{"code":"biscuit_baker_service_auth_credential_error_status","message":"Personal access token owner is inactive."},"status":403}"#,
+                ),
+            }),
+        )
+        .await;
+
+        let stored_key = state
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
+            .await
+            .expect("provider catalog keys should load")
+            .into_iter()
+            .next()
+            .expect("replacement OAuth key should not be removed");
+        assert_eq!(stored_key.oauth_invalid_at_unix_secs, None);
+        assert_eq!(stored_key.oauth_invalid_reason, None);
+    }
+
+    #[tokio::test]
+    async fn oauth_invalidation_does_not_mutate_agent_replacement_after_bearer_request() {
+        let state = codex_state_with_provider_and_key(
+            sample_codex_provider_with_auto_remove(),
+            sample_codex_agent_identity_key(),
+        );
+        let mut plan = sample_codex_plan();
+        plan.headers.insert(
+            "authorization".to_string(),
+            "Bearer old-access-token".to_string(),
+        );
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: None,
+            },
+            LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
+                status_code: 403,
+                response_text: Some(
+                    r#"{"error":{"code":"biscuit_baker_service_auth_credential_error_status","message":"Personal access token owner is inactive."},"status":403}"#,
+                ),
+            }),
+        )
+        .await;
+
+        let stored_key = state
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
+            .await
+            .expect("provider catalog keys should load")
+            .into_iter()
+            .next()
+            .expect("Agent Identity replacement should not be removed");
+        assert_eq!(stored_key.oauth_invalid_at_unix_secs, None);
+        assert_eq!(stored_key.oauth_invalid_reason, None);
+    }
+
+    #[tokio::test]
+    async fn health_failure_updates_codex_key_for_current_bearer_request() {
+        let state = codex_state();
+        let plan = sample_codex_plan();
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: None,
+            },
+            LocalExecutionEffect::HealthFailure(LocalHealthFailureEffect {
+                status_code: 503,
+                classification: LocalFailoverClassification::RetryUpstreamFailure,
+            }),
+        )
+        .await;
+
+        let stored_key = state
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
+            .await
+            .expect("provider catalog keys should load")
+            .into_iter()
+            .next()
+            .expect("stored key should exist");
+        assert_eq!(
+            stored_key
+                .health_by_format
+                .as_ref()
+                .and_then(|value| value.get("openai:responses"))
+                .and_then(|value| value.get("consecutive_failures"))
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn health_failure_does_not_mutate_codex_bearer_replacement() {
+        let mut replacement = sample_codex_key();
+        replacement.encrypted_api_key = Some(
+            encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "replacement-token")
+                .expect("replacement token should encrypt"),
+        );
+        replacement.encrypted_auth_config = Some(
+            encrypt_python_fernet_plaintext(
+                DEVELOPMENT_ENCRYPTION_KEY,
+                r#"{"provider_type":"codex","refresh_token":"replacement-refresh-token"}"#,
+            )
+            .expect("replacement auth config should encrypt"),
+        );
+        let expected_health = replacement.health_by_format.clone();
+        let expected_circuit = replacement.circuit_breaker_by_format.clone();
+        let state = codex_state_with_provider_and_key(sample_codex_provider(), replacement);
+        let plan = sample_codex_plan();
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: None,
+            },
+            LocalExecutionEffect::HealthFailure(LocalHealthFailureEffect {
+                status_code: 503,
+                classification: LocalFailoverClassification::RetryUpstreamFailure,
+            }),
+        )
+        .await;
+
+        let stored_key = state
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
+            .await
+            .expect("provider catalog keys should load")
+            .into_iter()
+            .next()
+            .expect("replacement key should exist");
+        assert_eq!(stored_key.health_by_format, expected_health);
+        assert_eq!(stored_key.circuit_breaker_by_format, expected_circuit);
+    }
+
+    #[tokio::test]
+    async fn adaptive_rate_limit_does_not_mutate_codex_bearer_replacement() {
+        let mut replacement = sample_codex_key();
+        replacement.encrypted_api_key = Some(
+            encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "replacement-token")
+                .expect("replacement token should encrypt"),
+        );
+        replacement.encrypted_auth_config = Some(
+            encrypt_python_fernet_plaintext(
+                DEVELOPMENT_ENCRYPTION_KEY,
+                r#"{"provider_type":"codex","refresh_token":"replacement-refresh-token"}"#,
+            )
+            .expect("replacement auth config should encrypt"),
+        );
+        replacement.learned_rpm_limit = Some(12);
+        replacement.rpm_429_count = Some(1);
+        let expected_adaptive_state = ProviderCatalogKeyAdaptiveState::from(&replacement);
+        let state = codex_state_with_provider_and_key(sample_codex_provider(), replacement);
+        let plan = sample_codex_plan();
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: None,
+            },
+            LocalExecutionEffect::AdaptiveRateLimit(LocalAdaptiveRateLimitEffect {
+                status_code: 429,
+                classification: LocalFailoverClassification::RetryUpstreamFailure,
+                headers: Some(&BTreeMap::from([(
+                    "x-ratelimit-limit-requests".to_string(),
+                    "42".to_string(),
+                )])),
+            }),
+        )
+        .await;
+
+        let stored_key = state
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
+            .await
+            .expect("provider catalog keys should load")
+            .into_iter()
+            .next()
+            .expect("replacement key should exist");
+        assert_eq!(
+            ProviderCatalogKeyAdaptiveState::from(&stored_key),
+            expected_adaptive_state
+        );
+    }
+
+    #[tokio::test]
+    async fn pool_error_does_not_clear_codex_bearer_replacement_circuit() {
+        let legacy_circuit = json!({
+            "openai:responses": {
+                "open": true,
+                "reason": "replacement-state"
+            }
+        });
+        let mut replacement = sample_codex_key();
+        replacement.encrypted_api_key = Some(
+            encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "replacement-token")
+                .expect("replacement token should encrypt"),
+        );
+        replacement.encrypted_auth_config = Some(
+            encrypt_python_fernet_plaintext(
+                DEVELOPMENT_ENCRYPTION_KEY,
+                r#"{"provider_type":"codex","refresh_token":"replacement-refresh-token"}"#,
+            )
+            .expect("replacement auth config should encrypt"),
+        );
+        replacement.circuit_breaker_by_format = Some(legacy_circuit.clone());
+        let state = codex_state_with_provider_and_key(sample_codex_provider(), replacement);
+        let plan = sample_codex_plan();
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: None,
+            },
+            LocalExecutionEffect::PoolError(LocalPoolErrorEffect {
+                status_code: 401,
+                classification: LocalFailoverClassification::StopErrorPattern,
+                headers: &BTreeMap::new(),
+                error_body: Some(r#"{"error":{"message":"account has been deactivated"}}"#),
+            }),
+        )
+        .await;
+
+        let stored_key = state
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
+            .await
+            .expect("provider catalog keys should load")
+            .into_iter()
+            .next()
+            .expect("replacement key should exist");
+        assert_eq!(stored_key.circuit_breaker_by_format, Some(legacy_circuit));
     }
 
     #[tokio::test]

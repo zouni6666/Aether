@@ -90,6 +90,7 @@ impl<'a> AdminAppState<'a> {
         provider_id: &str,
         provider_type: &str,
         pkce_verifier: Option<&str>,
+        expected_encrypted_auth_config: Option<&str>,
     ) -> Result<String, GatewayError> {
         let nonce = aether_admin::provider::state::generate_provider_oauth_nonce();
         let payload = json!({
@@ -98,6 +99,7 @@ impl<'a> AdminAppState<'a> {
             "provider_id": provider_id,
             "provider_type": provider_type,
             "pkce_verifier": pkce_verifier,
+            "expected_encrypted_auth_config": expected_encrypted_auth_config,
             "created_at": aether_admin::provider::state::current_unix_secs(),
         });
         let key = provider_oauth_state_storage_key(&nonce);

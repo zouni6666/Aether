@@ -93,14 +93,7 @@ fn build_codex_wham_headers(
         .filter(|value| !value.is_empty());
 
     let is_agent_identity = auth_config
-        .and_then(Value::as_object)
-        .and_then(|object| {
-            object
-                .get("auth_mode")
-                .or_else(|| object.get("authMode"))
-                .and_then(Value::as_str)
-        })
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("agentIdentity"));
+        .is_some_and(aether_provider_transport::is_codex_agent_identity_auth_config_value);
 
     if is_agent_identity {
         let Some((name, value)) = resolved_oauth_auth else {

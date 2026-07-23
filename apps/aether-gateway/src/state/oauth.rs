@@ -4,7 +4,9 @@ use super::{
     ProviderTransportSnapshotFlightResult, PROVIDER_TRANSPORT_SNAPSHOT_CACHE_MAX_ENTRIES,
     PROVIDER_TRANSPORT_SNAPSHOT_CACHE_STALE_TTL, PROVIDER_TRANSPORT_SNAPSHOT_CACHE_TTL,
 };
-use crate::handlers::shared::default_provider_key_status_snapshot;
+use crate::handlers::shared::{
+    decrypt_catalog_secret_with_fallbacks, default_provider_key_status_snapshot,
+};
 use crate::provider_transport::LocalOAuthHttpExecutor;
 
 use super::super::provider_transport;
@@ -15,8 +17,10 @@ use aether_contracts::{
     EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER, EXECUTION_REQUEST_HTTP1_ONLY_HEADER,
 };
 use aether_data_contracts::repository::provider_catalog::{
-    ProviderCatalogKeyStatusSnapshotUpdate, StoredProviderCatalogKey,
+    ProviderCatalogKeyOAuthRuntimeStateCasUpdate, ProviderCatalogKeyStatusSnapshotUpdate,
+    StoredProviderCatalogKey,
 };
+use aether_runtime_state::RuntimeLockLease;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use dashmap::{mapref::entry::Entry as DashMapEntry, DashMap};
 use flate2::read::{DeflateDecoder, GzDecoder};
@@ -31,6 +35,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use aether_crypto::encrypt_python_fernet_plaintext;
 
 const LOCAL_OAUTH_HTTP_TIMEOUT_MS: u64 = 30_000;
+const REMOTE_OAUTH_REFRESH_WAIT_TIMEOUT: Duration = Duration::from_secs(35);
+const REMOTE_OAUTH_REFRESH_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const OAUTH_ACCOUNT_BLOCK_PREFIX: &str = "[ACCOUNT_BLOCK] ";
 const OAUTH_EXPIRED_PREFIX: &str = "[OAUTH_EXPIRED] ";
 const OAUTH_REFRESH_FAILED_PREFIX: &str = "[REFRESH_FAILED] ";
@@ -56,6 +62,12 @@ enum ProviderTransportSnapshotInflightRegistration {
     Leader(ProviderTransportSnapshotInflightGuard),
     Follower(Arc<ProviderTransportSnapshotFlight>),
     Retry,
+}
+
+pub(crate) enum AgentIdentityAuthConfigFence {
+    NotAgentIdentity,
+    Current(String),
+    StaleGeneration,
 }
 
 struct ProviderTransportSnapshotInflightGuard {
@@ -146,6 +158,57 @@ fn local_oauth_refresh_entry_should_stay_memory_only(
         .trim()
         .eq_ignore_ascii_case(provider_transport::vertex::VERTEX_SERVICE_ACCOUNT_PROVIDER_TYPE)
         && provider_transport::is_vertex_service_account_transport_context(transport)
+}
+
+fn local_oauth_transport_context_allows_reload(
+    initial: &provider_transport::GatewayProviderTransportSnapshot,
+    current: &provider_transport::GatewayProviderTransportSnapshot,
+) -> bool {
+    let initial_is_agent = provider_transport::is_codex_agent_identity_transport(initial);
+    let current_is_agent = provider_transport::is_codex_agent_identity_transport(current);
+    if initial_is_agent || current_is_agent {
+        return initial_is_agent
+            && current_is_agent
+            && provider_transport::codex_agent_identity_transport_allows_task_rotation_from(
+                initial, current,
+            );
+    }
+    if initial
+        .provider
+        .provider_type
+        .trim()
+        .eq_ignore_ascii_case("codex")
+        && initial.key.auth_type.trim().eq_ignore_ascii_case("oauth")
+    {
+        let initial_config = initial
+            .key
+            .decrypted_auth_config
+            .as_deref()
+            .and_then(|value| serde_json::from_str::<Value>(value).ok());
+        let current_config = current
+            .key
+            .decrypted_auth_config
+            .as_deref()
+            .and_then(|value| serde_json::from_str::<Value>(value).ok());
+        return current
+            .provider
+            .provider_type
+            .trim()
+            .eq_ignore_ascii_case("codex")
+            && current.key.auth_type.trim().eq_ignore_ascii_case("oauth")
+            && initial_config == current_config
+            && initial.key.decrypted_api_key == current.key.decrypted_api_key;
+    }
+    true
+}
+
+fn discard_failed_local_oauth_refresh_resolution(
+    resolution: &mut Option<provider_transport::LocalOAuthResolution>,
+) {
+    if let Some(resolution) = resolution.as_mut() {
+        resolution.auth = None;
+        resolution.refreshed_entry = None;
+    }
 }
 
 fn oauth_auth_config_refresh_token_fingerprint(auth_config: Option<&str>) -> Option<String> {
@@ -1288,17 +1351,66 @@ impl AppState {
         Ok(updated)
     }
 
+    pub(crate) async fn compare_and_update_provider_catalog_key_oauth_runtime_state(
+        &self,
+        update: &ProviderCatalogKeyOAuthRuntimeStateCasUpdate,
+    ) -> Result<bool, GatewayError> {
+        let updated = self
+            .data
+            .compare_and_update_provider_catalog_key_oauth_runtime_state(update)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        // A conflict means another instance/admin changed the credential.
+        self.clear_provider_transport_snapshot_cache();
+        Ok(updated)
+    }
+
     pub(crate) async fn resolve_local_oauth_request_auth(
         &self,
         transport: &provider_transport::GatewayProviderTransportSnapshot,
     ) -> Result<Option<provider_transport::LocalResolvedOAuthRequestAuth>, GatewayError> {
         let distributed_lock = self.runtime_state.as_ref();
         let lock_owner = format!("aether-gateway-{}", std::process::id());
+        let initial_transport = transport.clone();
         let mut current_transport = transport.clone();
         let executor = GatewayLocalOAuthHttpExecutor { state: self };
 
         for _ in 0..2 {
-            let resolution = match self
+            if !local_oauth_transport_context_allows_reload(&initial_transport, &current_transport)
+            {
+                return Ok(None);
+            }
+            let expected_auth_config = if current_transport
+                .key
+                .decrypted_auth_config
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty())
+            {
+                match self
+                    .capture_provider_transport_auth_config_fence(&current_transport)
+                    .await?
+                {
+                    Some(ciphertext) => Some(ciphertext),
+                    None => {
+                        let Some(reloaded) = self
+                            .read_provider_transport_snapshot_uncached(
+                                &current_transport.provider.id,
+                                &current_transport.endpoint.id,
+                                &current_transport.key.id,
+                            )
+                            .await?
+                        else {
+                            return Ok(None);
+                        };
+                        current_transport = reloaded;
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+            let mut resolution = match self
                 .oauth_refresh
                 .resolve_with_result(
                     &executor,
@@ -1352,9 +1464,29 @@ impl AppState {
             if let Some(refreshed_entry) = resolution
                 .as_ref()
                 .and_then(|resolution| resolution.refreshed_entry.as_ref())
+                .cloned()
             {
+                if provider_transport::is_codex_agent_identity_transport(&initial_transport)
+                    && !provider_transport::codex_agent_identity_entry_allows_task_rotation_from(
+                        &initial_transport,
+                        &refreshed_entry,
+                    )
+                {
+                    discard_failed_local_oauth_refresh_resolution(&mut resolution);
+                    self.release_local_oauth_refresh_lease(
+                        resolution
+                            .as_mut()
+                            .and_then(|resolution| resolution.distributed_lease.take()),
+                    )
+                    .await;
+                    return Ok(None);
+                }
                 if let Err(err) = self
-                    .persist_local_oauth_refresh_entry(&current_transport, refreshed_entry)
+                    .persist_local_oauth_refresh_entry(
+                        &current_transport,
+                        &refreshed_entry,
+                        expected_auth_config.as_deref(),
+                    )
                     .await
                 {
                     tracing::warn!(
@@ -1366,6 +1498,7 @@ impl AppState {
                     let _ = self
                         .invalidate_local_oauth_refresh_entry(&current_transport.key.id)
                         .await;
+                    discard_failed_local_oauth_refresh_resolution(&mut resolution);
                 } else {
                     self.oauth_refresh
                         .store_cached_entry(
@@ -1375,6 +1508,13 @@ impl AppState {
                         .await;
                 }
             }
+
+            self.release_local_oauth_refresh_lease(
+                resolution
+                    .as_mut()
+                    .and_then(|resolution| resolution.distributed_lease.take()),
+            )
+            .await;
 
             return Ok(resolution.and_then(|resolution| resolution.auth));
         }
@@ -1391,8 +1531,11 @@ impl AppState {
     > {
         let distributed_lock = self.runtime_state.as_ref();
         let lock_owner = format!("aether-gateway-admin-{}", std::process::id());
+        let initial_transport = transport.clone();
         let mut current_transport = transport.clone();
         current_transport.key.decrypted_api_key = "__placeholder__".to_string();
+        let expected_refresh_fingerprint =
+            provider_transport::codex_agent_identity_refresh_fingerprint(&current_transport, None);
         let executor = GatewayLocalOAuthHttpExecutor { state: self };
         let transport_refresh_token_fingerprint = oauth_auth_config_refresh_token_fingerprint(
             current_transport.key.decrypted_auth_config.as_deref(),
@@ -1413,13 +1556,51 @@ impl AppState {
         );
 
         for _ in 0..2 {
-            let resolution = self
+            if !local_oauth_transport_context_allows_reload(&initial_transport, &current_transport)
+            {
+                return Ok(None);
+            }
+            let expected_auth_config = match self
+                .capture_provider_transport_auth_config_fence(&current_transport)
+                .await
+                .map_err(
+                    |err| provider_transport::LocalOAuthRefreshError::InvalidResponse {
+                        provider_type: "gateway",
+                        message: format!("{err:?}"),
+                    },
+                )? {
+                Some(ciphertext) => Some(ciphertext),
+                None if current_transport.key.decrypted_auth_config.is_some() => {
+                    let Some(reloaded) = self
+                        .read_provider_transport_snapshot_uncached(
+                            &current_transport.provider.id,
+                            &current_transport.endpoint.id,
+                            &current_transport.key.id,
+                        )
+                        .await
+                        .map_err(|err| {
+                            provider_transport::LocalOAuthRefreshError::InvalidResponse {
+                                provider_type: "gateway",
+                                message: format!("{err:?}"),
+                            }
+                        })?
+                    else {
+                        return Ok(None);
+                    };
+                    current_transport = reloaded;
+                    current_transport.key.decrypted_api_key = "__placeholder__".to_string();
+                    continue;
+                }
+                None => None,
+            };
+            let mut resolution = self
                 .oauth_refresh
-                .force_refresh_with_result(
+                .force_refresh_with_result_fenced(
                     &executor,
                     &current_transport,
                     Some(distributed_lock),
                     Some(lock_owner.as_str()),
+                    expected_refresh_fingerprint.as_deref(),
                 )
                 .await?;
 
@@ -1444,12 +1625,67 @@ impl AppState {
                 continue;
             }
 
+            if resolution
+                .as_ref()
+                .is_some_and(|resolution| resolution.reused_refresh)
+            {
+                let reused_entry = resolution
+                    .as_ref()
+                    .and_then(|resolution| resolution.refreshed_entry.clone());
+                if reused_entry.as_ref().is_some_and(|entry| {
+                    provider_transport::is_codex_agent_identity_transport(&initial_transport)
+                        && !provider_transport::codex_agent_identity_entry_allows_task_rotation_from(
+                            &initial_transport,
+                            entry,
+                        )
+                }) {
+                    self.release_local_oauth_refresh_lease(
+                        resolution
+                            .as_mut()
+                            .and_then(|resolution| resolution.distributed_lease.take()),
+                    )
+                    .await;
+                    return Ok(None);
+                }
+                if let Some(entry) = reused_entry.as_ref() {
+                    self.oauth_refresh
+                        .store_cached_entry(current_transport.key.id.trim(), entry.clone())
+                        .await;
+                }
+                self.release_local_oauth_refresh_lease(
+                    resolution
+                        .as_mut()
+                        .and_then(|resolution| resolution.distributed_lease.take()),
+                )
+                .await;
+                return Ok(reused_entry);
+            }
+
             if let Some(refreshed_entry) = resolution
                 .as_ref()
                 .and_then(|resolution| resolution.refreshed_entry.as_ref())
+                .cloned()
             {
+                if provider_transport::is_codex_agent_identity_transport(&initial_transport)
+                    && !provider_transport::codex_agent_identity_entry_allows_task_rotation_from(
+                        &initial_transport,
+                        &refreshed_entry,
+                    )
+                {
+                    self.release_local_oauth_refresh_lease(
+                        resolution
+                            .as_mut()
+                            .and_then(|resolution| resolution.distributed_lease.take()),
+                    )
+                    .await;
+                    return Ok(None);
+                }
                 if let Err(err) = self
-                    .persist_local_oauth_refresh_entry(&current_transport, refreshed_entry)
+                    .persist_local_oauth_refresh_entry(
+                        &current_transport,
+                        &refreshed_entry,
+                        expected_auth_config.as_deref(),
+                    )
                     .await
                 {
                     tracing::warn!(
@@ -1461,6 +1697,12 @@ impl AppState {
                     let _ = self
                         .invalidate_local_oauth_refresh_entry(&current_transport.key.id)
                         .await;
+                    self.release_local_oauth_refresh_lease(
+                        resolution
+                            .as_mut()
+                            .and_then(|resolution| resolution.distributed_lease.take()),
+                    )
+                    .await;
                     return Err(
                         provider_transport::LocalOAuthRefreshError::InvalidResponse {
                             provider_type: "gateway",
@@ -1471,8 +1713,21 @@ impl AppState {
                 self.oauth_refresh
                     .store_cached_entry(current_transport.key.id.trim(), refreshed_entry.clone())
                     .await;
-                return Ok(Some(refreshed_entry.clone()));
+                self.release_local_oauth_refresh_lease(
+                    resolution
+                        .as_mut()
+                        .and_then(|resolution| resolution.distributed_lease.take()),
+                )
+                .await;
+                return Ok(Some(refreshed_entry));
             }
+
+            self.release_local_oauth_refresh_lease(
+                resolution
+                    .as_mut()
+                    .and_then(|resolution| resolution.distributed_lease.take()),
+            )
+            .await;
 
             return Ok(None);
         }
@@ -1482,6 +1737,80 @@ impl AppState {
 
     pub(crate) async fn invalidate_local_oauth_refresh_entry(&self, key_id: &str) -> bool {
         self.oauth_refresh.invalidate_cached_entry(key_id).await
+    }
+
+    async fn release_local_oauth_refresh_lease(&self, lease: Option<RuntimeLockLease>) {
+        let Some(lease) = lease else {
+            return;
+        };
+        if let Err(err) = self.runtime_state.lock_release(&lease).await {
+            tracing::warn!(
+                key_id = %lease.key,
+                error = ?err,
+                "gateway local oauth refresh distributed lease release failed"
+            );
+        }
+    }
+
+    pub(crate) async fn capture_agent_identity_auth_config_fence(
+        &self,
+        transport: &provider_transport::GatewayProviderTransportSnapshot,
+    ) -> Result<AgentIdentityAuthConfigFence, GatewayError> {
+        if !provider_transport::is_codex_agent_identity_transport(transport) {
+            return Ok(AgentIdentityAuthConfigFence::NotAgentIdentity);
+        }
+        match self
+            .capture_provider_transport_auth_config_fence(transport)
+            .await?
+        {
+            Some(ciphertext) => Ok(AgentIdentityAuthConfigFence::Current(ciphertext)),
+            None => Ok(AgentIdentityAuthConfigFence::StaleGeneration),
+        }
+    }
+
+    pub(crate) async fn capture_provider_transport_auth_config_fence(
+        &self,
+        transport: &provider_transport::GatewayProviderTransportSnapshot,
+    ) -> Result<Option<String>, GatewayError> {
+        let key_id = transport.key.id.trim();
+        let stored = self
+            .data
+            .list_provider_catalog_keys_by_ids(&[key_id.to_string()])
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?
+            .into_iter()
+            .next();
+        let Some(ciphertext) = stored.and_then(|key| key.encrypted_auth_config) else {
+            return Ok(None);
+        };
+        let plaintext =
+            decrypt_catalog_secret_with_fallbacks(self.data.encryption_key(), ciphertext.as_str())
+                .ok_or_else(|| {
+                    GatewayError::Internal(
+                        "provider auth_config could not be verified for runtime fencing"
+                            .to_string(),
+                    )
+                })?;
+        let config = serde_json::from_str::<Value>(&plaintext)
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        let transport_config = transport
+            .key
+            .decrypted_auth_config
+            .as_deref()
+            .and_then(|value| serde_json::from_str::<Value>(value).ok())
+            .ok_or_else(|| {
+                GatewayError::Internal(
+                    "provider transport auth_config could not be verified for runtime fencing"
+                        .to_string(),
+                )
+            })?;
+        // Fingerprints intentionally ignore unrelated JSON fields. The fence,
+        // however, must reject an admin rewrite that keeps the same key pair
+        // and task while changing metadata or policy fields.
+        if config != transport_config {
+            return Ok(None);
+        }
+        Ok(Some(ciphertext))
     }
 
     pub(crate) async fn mark_provider_catalog_key_oauth_invalid(
@@ -1554,10 +1883,89 @@ impl AppState {
         Ok(updated)
     }
 
+    pub(crate) async fn mark_provider_catalog_key_oauth_invalid_fenced(
+        &self,
+        key_id: &str,
+        provider_type: &str,
+        invalid_reason: &str,
+        expected_encrypted_auth_config: &str,
+    ) -> Result<bool, GatewayError> {
+        let invalid_reason = invalid_reason.trim();
+        let expected_encrypted_auth_config = expected_encrypted_auth_config.trim();
+        if invalid_reason.is_empty() || expected_encrypted_auth_config.is_empty() {
+            return Ok(false);
+        }
+
+        let Some(mut latest_key) = self
+            .data
+            .list_provider_catalog_keys_by_ids(&[key_id.to_string()])
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?
+            .into_iter()
+            .next()
+        else {
+            return Ok(false);
+        };
+        if latest_key.encrypted_auth_config.as_deref() != Some(expected_encrypted_auth_config)
+            || !provider_key_is_oauth_managed(&latest_key, provider_type)
+        {
+            return Ok(false);
+        }
+
+        let now_unix_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        let (oauth_invalid_at_unix_secs, oauth_invalid_reason) = merge_runtime_oauth_invalid_state(
+            provider_type,
+            &latest_key,
+            invalid_reason,
+            now_unix_secs,
+        );
+        if oauth_invalid_at_unix_secs == latest_key.oauth_invalid_at_unix_secs
+            && oauth_invalid_reason == latest_key.oauth_invalid_reason
+        {
+            return Ok(false);
+        }
+        latest_key.oauth_invalid_at_unix_secs = oauth_invalid_at_unix_secs;
+        latest_key.oauth_invalid_reason = oauth_invalid_reason;
+        latest_key.updated_at_unix_secs = Some(now_unix_secs);
+        let current_status_snapshot = latest_key.status_snapshot.take();
+        latest_key.status_snapshot =
+            sync_provider_key_oauth_status_snapshot(current_status_snapshot, &latest_key);
+
+        let updated = self
+            .compare_and_update_provider_catalog_key_oauth_runtime_state(
+                &ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
+                    key_id: key_id.to_string(),
+                    expected_encrypted_auth_config: Some(
+                        expected_encrypted_auth_config.to_string(),
+                    ),
+                    encrypted_auth_config: expected_encrypted_auth_config.to_string(),
+                    encrypted_api_key_update: None,
+                    expires_at_unix_secs_update: None,
+                    oauth_invalid_at_unix_secs: latest_key.oauth_invalid_at_unix_secs,
+                    oauth_invalid_reason: latest_key.oauth_invalid_reason.clone(),
+                    upstream_metadata_patch: None,
+                    status_snapshot_patch: provider_key_oauth_status_snapshot_update(&latest_key)
+                        .status_snapshot_patch,
+                    reset_error_count: false,
+                    updated_at_unix_secs: latest_key.updated_at_unix_secs,
+                },
+            )
+            .await?;
+        if updated {
+            let _ = self.invalidate_local_oauth_refresh_entry(key_id).await;
+        }
+        Ok(updated)
+    }
+
     async fn persist_local_oauth_refresh_entry(
         &self,
         transport: &provider_transport::GatewayProviderTransportSnapshot,
         entry: &provider_transport::CachedOAuthEntry,
+        expected_auth_config: Option<&str>,
     ) -> Result<(), GatewayError> {
         let key_id = transport.key.id.trim();
         if key_id.is_empty() {
@@ -1593,6 +2001,29 @@ impl AppState {
                 encrypt_python_fernet_plaintext(encryption_key, &auth_config)
                     .map_err(|err| GatewayError::Internal(err.to_string()))?;
 
+            let source_fingerprint = entry.source_fingerprint.as_deref().ok_or_else(|| {
+                GatewayError::Internal(
+                    "Agent Identity task registration omitted its credential fingerprint"
+                        .to_string(),
+                )
+            })?;
+            let transport_fingerprint =
+                provider_transport::codex_agent_identity_transport_credential_fingerprint(
+                    transport,
+                )
+                .ok_or_else(|| {
+                    GatewayError::Internal(
+                        "Agent Identity transport credential fingerprint is unavailable"
+                            .to_string(),
+                    )
+                })?;
+            if source_fingerprint != transport_fingerprint {
+                return Err(GatewayError::Internal(
+                    "Agent Identity credential changed while task registration was in flight"
+                        .to_string(),
+                ));
+            }
+
             let Some(mut latest_key) = self
                 .data
                 .list_provider_catalog_keys_by_ids(&[key_id.to_string()])
@@ -1603,13 +2034,46 @@ impl AppState {
             else {
                 return Ok(());
             };
-
-            latest_key.encrypted_auth_config = Some(encrypted_auth_config);
-            latest_key.encrypted_api_key = Some(
-                encrypt_python_fernet_plaintext(encryption_key, "__placeholder__")
-                    .map_err(|err| GatewayError::Internal(err.to_string()))?,
-            );
-            latest_key.expires_at_unix_secs = None;
+            let expected_encrypted_auth_config =
+                expected_auth_config.map(str::to_string).ok_or_else(|| {
+                    GatewayError::Internal(
+                        "Agent Identity task registration has no starting auth_config fence"
+                            .to_string(),
+                    )
+                })?;
+            if latest_key.encrypted_auth_config.as_deref()
+                != Some(expected_encrypted_auth_config.as_str())
+            {
+                return Err(GatewayError::Internal(
+                    "Agent Identity auth_config changed while task registration was in flight"
+                        .to_string(),
+                ));
+            }
+            let latest_auth_config = decrypt_catalog_secret_with_fallbacks(
+                Some(encryption_key),
+                expected_encrypted_auth_config.as_str(),
+            )
+            .and_then(|value| serde_json::from_str::<Value>(&value).ok())
+            .ok_or_else(|| {
+                GatewayError::Internal(
+                    "Agent Identity current auth_config could not be verified".to_string(),
+                )
+            })?;
+            let latest_fingerprint =
+                provider_transport::codex_agent_identity_credential_fingerprint(
+                    &latest_auth_config,
+                )
+                .ok_or_else(|| {
+                    GatewayError::Internal(
+                        "Agent Identity current credential fingerprint is unavailable".to_string(),
+                    )
+                })?;
+            if latest_fingerprint != source_fingerprint {
+                return Err(GatewayError::Internal(
+                    "Agent Identity credential changed before task registration persistence"
+                        .to_string(),
+                ));
+            }
             let (oauth_invalid_at_unix_secs, oauth_invalid_reason) =
                 local_oauth_refresh_success_invalid_state(&latest_key);
             latest_key.oauth_invalid_at_unix_secs = oauth_invalid_at_unix_secs;
@@ -1625,11 +2089,30 @@ impl AppState {
             latest_key.status_snapshot =
                 sync_provider_key_oauth_status_snapshot(current_status_snapshot, &latest_key);
             let updated = self
-                .update_provider_catalog_key(&latest_key)
-                .await?
-                .is_some();
-            if updated {
-                self.clear_provider_transport_snapshot_cache();
+                .compare_and_update_provider_catalog_key_oauth_runtime_state(
+                    &ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
+                        key_id: key_id.to_string(),
+                        expected_encrypted_auth_config: Some(expected_encrypted_auth_config),
+                        encrypted_auth_config,
+                        encrypted_api_key_update: None,
+                        expires_at_unix_secs_update: None,
+                        oauth_invalid_at_unix_secs: latest_key.oauth_invalid_at_unix_secs,
+                        oauth_invalid_reason: latest_key.oauth_invalid_reason.clone(),
+                        upstream_metadata_patch: None,
+                        status_snapshot_patch: provider_key_oauth_status_snapshot_update(
+                            &latest_key,
+                        )
+                        .status_snapshot_patch,
+                        reset_error_count: false,
+                        updated_at_unix_secs: latest_key.updated_at_unix_secs,
+                    },
+                )
+                .await?;
+            if !updated {
+                return Err(GatewayError::Internal(
+                    "Agent Identity credential changed during task registration persistence"
+                        .to_string(),
+                ));
             }
             tracing::info!(
                 key_id = %key_id,
@@ -1664,6 +2147,19 @@ impl AppState {
             .map(|value| encrypt_python_fernet_plaintext(encryption_key, value.as_str()))
             .transpose()
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        let requires_fenced_persistence = transport
+            .provider
+            .provider_type
+            .trim()
+            .eq_ignore_ascii_case("codex")
+            && transport.key.auth_type.trim().eq_ignore_ascii_case("oauth");
+        if requires_fenced_persistence
+            && (expected_auth_config.is_none() || encrypted_auth_config.is_none())
+        {
+            return Err(GatewayError::Internal(
+                "Codex OAuth refresh persistence is missing its auth_config fence".to_string(),
+            ));
+        }
 
         let Some(mut latest_key) = self
             .data
@@ -1676,6 +2172,7 @@ impl AppState {
             return Ok(());
         };
 
+        let observed_encrypted_auth_config = latest_key.encrypted_auth_config.clone();
         latest_key.encrypted_api_key = Some(encrypted_api_key.clone());
         latest_key.encrypted_auth_config = encrypted_auth_config.clone();
         latest_key.expires_at_unix_secs = entry.expires_at_unix_secs;
@@ -1693,32 +2190,68 @@ impl AppState {
         let current_status_snapshot = latest_key.status_snapshot.take();
         latest_key.status_snapshot =
             sync_provider_key_oauth_status_snapshot(current_status_snapshot, &latest_key);
-        let mut updated = self
-            .update_provider_catalog_key_oauth_credentials(
-                key_id,
-                &encrypted_api_key,
-                encrypted_auth_config.as_deref(),
-                entry.expires_at_unix_secs,
-            )
-            .await?;
-        if updated {
-            updated = self
-                .update_provider_catalog_key_oauth_runtime_state(
+        let used_fenced_persistence =
+            expected_auth_config.is_some() && encrypted_auth_config.is_some();
+        let updated = if let (Some(expected_auth_config), Some(encrypted_auth_config)) =
+            (expected_auth_config, encrypted_auth_config.as_deref())
+        {
+            if observed_encrypted_auth_config.as_deref() != Some(expected_auth_config) {
+                false
+            } else {
+                self.compare_and_update_provider_catalog_key_oauth_runtime_state(
+                    &ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
+                        key_id: key_id.to_string(),
+                        expected_encrypted_auth_config: Some(expected_auth_config.to_string()),
+                        encrypted_auth_config: encrypted_auth_config.to_string(),
+                        encrypted_api_key_update: Some(encrypted_api_key.clone()),
+                        expires_at_unix_secs_update: Some(entry.expires_at_unix_secs),
+                        oauth_invalid_at_unix_secs: latest_key.oauth_invalid_at_unix_secs,
+                        oauth_invalid_reason: latest_key.oauth_invalid_reason.clone(),
+                        upstream_metadata_patch: None,
+                        status_snapshot_patch: provider_key_oauth_status_snapshot_update(
+                            &latest_key,
+                        )
+                        .status_snapshot_patch,
+                        reset_error_count: false,
+                        updated_at_unix_secs: latest_key.updated_at_unix_secs,
+                    },
+                )
+                .await?
+            }
+        } else {
+            let mut updated = self
+                .update_provider_catalog_key_oauth_credentials(
                     key_id,
-                    latest_key.oauth_invalid_at_unix_secs,
-                    latest_key.oauth_invalid_reason.as_deref(),
-                    None,
-                    latest_key.updated_at_unix_secs,
+                    &encrypted_api_key,
+                    encrypted_auth_config.as_deref(),
+                    entry.expires_at_unix_secs,
                 )
                 .await?;
-        }
-        if updated {
-            updated = self
-                .update_provider_catalog_key_status_snapshot(
-                    &provider_key_oauth_status_snapshot_update(&latest_key),
-                )
-                .await?;
-            self.clear_provider_transport_snapshot_cache();
+            if updated {
+                updated = self
+                    .update_provider_catalog_key_oauth_runtime_state(
+                        key_id,
+                        latest_key.oauth_invalid_at_unix_secs,
+                        latest_key.oauth_invalid_reason.as_deref(),
+                        None,
+                        latest_key.updated_at_unix_secs,
+                    )
+                    .await?;
+            }
+            if updated {
+                updated = self
+                    .update_provider_catalog_key_status_snapshot(
+                        &provider_key_oauth_status_snapshot_update(&latest_key),
+                    )
+                    .await?;
+                self.clear_provider_transport_snapshot_cache();
+            }
+            updated
+        };
+        if !updated && (requires_fenced_persistence || used_fenced_persistence) {
+            return Err(GatewayError::Internal(
+                "Codex OAuth credential changed during refresh persistence".to_string(),
+            ));
         }
         let metadata_refresh_token_fingerprint =
             oauth_metadata_refresh_token_fingerprint(entry.metadata.as_ref())
@@ -1756,6 +2289,22 @@ impl AppState {
             return Ok(false);
         }
 
+        let transport_has_auth_config = transport
+            .key
+            .decrypted_auth_config
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty());
+        let expected_auth_config = if transport_has_auth_config {
+            self.capture_provider_transport_auth_config_fence(transport)
+                .await?
+        } else {
+            None
+        };
+        if transport_has_auth_config && expected_auth_config.is_none() {
+            return Ok(false);
+        }
+
         let Some(mut latest_key) = self
             .data
             .list_provider_catalog_keys_by_ids(&[key_id.to_string()])
@@ -1768,6 +2317,13 @@ impl AppState {
         };
 
         if !provider_key_is_oauth_managed(&latest_key, transport.provider.provider_type.as_str()) {
+            return Ok(false);
+        }
+
+        if expected_auth_config
+            .as_deref()
+            .is_some_and(|expected| latest_key.encrypted_auth_config.as_deref() != Some(expected))
+        {
             return Ok(false);
         }
 
@@ -1800,34 +2356,71 @@ impl AppState {
             latest_key.status_snapshot =
                 sync_provider_key_oauth_status_snapshot(current_status_snapshot, &latest_key);
 
-            updated = self
-                .update_provider_catalog_key_oauth_runtime_state(
-                    key_id,
-                    latest_key.oauth_invalid_at_unix_secs,
-                    latest_key.oauth_invalid_reason.as_deref(),
-                    None,
-                    latest_key.updated_at_unix_secs,
-                )
-                .await?;
-            if updated {
+            if let Some(expected_auth_config) = expected_auth_config.as_ref() {
                 updated = self
-                    .update_provider_catalog_key_status_snapshot(
-                        &provider_key_oauth_status_snapshot_update(&latest_key),
+                    .compare_and_update_provider_catalog_key_oauth_runtime_state(
+                        &ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
+                            key_id: key_id.to_string(),
+                            expected_encrypted_auth_config: Some(expected_auth_config.clone()),
+                            encrypted_auth_config: expected_auth_config.clone(),
+                            encrypted_api_key_update: None,
+                            expires_at_unix_secs_update: None,
+                            oauth_invalid_at_unix_secs: latest_key.oauth_invalid_at_unix_secs,
+                            oauth_invalid_reason: latest_key.oauth_invalid_reason.clone(),
+                            upstream_metadata_patch: None,
+                            status_snapshot_patch: provider_key_oauth_status_snapshot_update(
+                                &latest_key,
+                            )
+                            .status_snapshot_patch,
+                            reset_error_count: false,
+                            updated_at_unix_secs: latest_key.updated_at_unix_secs,
+                        },
                     )
                     .await?;
+                if !updated {
+                    return Ok(false);
+                }
+            } else {
+                updated = self
+                    .update_provider_catalog_key_oauth_runtime_state(
+                        key_id,
+                        latest_key.oauth_invalid_at_unix_secs,
+                        latest_key.oauth_invalid_reason.as_deref(),
+                        None,
+                        latest_key.updated_at_unix_secs,
+                    )
+                    .await?;
+                if updated {
+                    updated = self
+                        .update_provider_catalog_key_status_snapshot(
+                            &provider_key_oauth_status_snapshot_update(&latest_key),
+                        )
+                        .await?;
+                }
+            }
+            if updated {
                 self.clear_provider_transport_snapshot_cache();
                 let _ = self.invalidate_local_oauth_refresh_entry(key_id).await;
             }
         }
 
-        let auto_removed = if admin_provider_quota_pure::provider_auto_remove_banned_keys(
-            transport.provider.config.as_ref(),
-        ) && admin_provider_quota_pure::should_auto_remove_oauth_invalid_key(
-            &latest_key,
-            None,
-            access_token_invalid_proven,
-            now_unix_secs,
-        ) {
+        // Codex credentials are replaceable under a stable key id. Without a
+        // conditional delete, refresh failure handling must retain them after
+        // writing the generation-fenced marker.
+        let auto_removed = if !transport
+            .provider
+            .provider_type
+            .trim()
+            .eq_ignore_ascii_case("codex")
+            && admin_provider_quota_pure::provider_auto_remove_banned_keys(
+                transport.provider.config.as_ref(),
+            )
+            && admin_provider_quota_pure::should_auto_remove_oauth_invalid_key(
+                &latest_key,
+                None,
+                access_token_invalid_proven,
+                now_unix_secs,
+            ) {
             self.clear_provider_transport_snapshot_cache();
             if self.delete_provider_catalog_key(key_id).await? {
                 let deleted_key_ids = [key_id.to_string()];
@@ -2042,7 +2635,8 @@ impl AppState {
             return Ok(None);
         }
 
-        for _ in 0..20 {
+        let deadline = tokio::time::Instant::now() + REMOTE_OAUTH_REFRESH_WAIT_TIMEOUT;
+        loop {
             let Some(reloaded_transport) = self
                 .read_provider_transport_snapshot_uncached(
                     &transport.provider.id,
@@ -2058,7 +2652,11 @@ impl AppState {
                 return Ok(Some(reloaded_transport));
             }
 
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                break;
+            }
+            tokio::time::sleep(REMOTE_OAUTH_REFRESH_POLL_INTERVAL.min(deadline - now)).await;
         }
 
         Ok(None)
@@ -2185,6 +2783,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
+    use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
     use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
     use aether_data_contracts::repository::provider_catalog::{
         ProviderCatalogKeyListQuery, ProviderCatalogReadRepository, ProviderCatalogWriteRepository,
@@ -2198,9 +2797,10 @@ mod tests {
     use tokio::sync::Notify;
 
     use super::{
-        AppState, ProviderTransportSnapshotCacheKey, ProviderTransportSnapshotFlight,
-        ProviderTransportSnapshotFlightResult, ProviderTransportSnapshotInflightRegistration,
-        PROVIDER_TRANSPORT_SNAPSHOT_CACHE_STALE_TTL, PROVIDER_TRANSPORT_SNAPSHOT_CACHE_TTL,
+        AgentIdentityAuthConfigFence, AppState, ProviderTransportSnapshotCacheKey,
+        ProviderTransportSnapshotFlight, ProviderTransportSnapshotFlightResult,
+        ProviderTransportSnapshotInflightRegistration, PROVIDER_TRANSPORT_SNAPSHOT_CACHE_STALE_TTL,
+        PROVIDER_TRANSPORT_SNAPSHOT_CACHE_TTL,
     };
     use crate::data::GatewayDataState;
 
@@ -2260,6 +2860,53 @@ mod tests {
             None,
         )
         .expect("key transport should build")
+    }
+
+    fn codex_oauth_state(
+        auth_config: &serde_json::Value,
+        access_token: &str,
+    ) -> (AppState, Arc<InMemoryProviderCatalogReadRepository>, String) {
+        let mut provider = sample_provider();
+        provider.provider_type = "codex".to_string();
+        let encrypted_auth_config =
+            encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, &auth_config.to_string())
+                .expect("auth config should encrypt");
+        let encrypted_api_key =
+            encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, access_token)
+                .expect("api key should encrypt");
+        let key = StoredProviderCatalogKey::new(
+            "key-1".to_string(),
+            "provider-1".to_string(),
+            "Codex OAuth".to_string(),
+            "oauth".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build")
+        .with_transport_fields(
+            Some(json!(["openai:chat"])),
+            encrypted_api_key,
+            Some(encrypted_auth_config.clone()),
+            None,
+            Some(json!({"openai:chat": 1})),
+            None,
+            Some(4_102_444_800),
+            None,
+            None,
+        )
+        .expect("key transport should build");
+        let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![provider],
+            vec![sample_endpoint()],
+            vec![key],
+        ));
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(repository.clone())
+                    .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            );
+        (state, repository, encrypted_auth_config)
     }
 
     fn state_with_global_format_conversion(enabled: bool) -> AppState {
@@ -3114,10 +3761,178 @@ mod tests {
             auth_header_value: "Bearer access-token".to_string(),
             expires_at_unix_secs: Some(4_102_444_800),
             metadata: None,
+            source_fingerprint: None,
         };
 
         assert!(super::local_oauth_refresh_entry_should_stay_memory_only(
             &transport, &entry
         ));
+    }
+
+    #[test]
+    fn failed_refresh_persistence_discards_provisional_auth_and_cache_entry() {
+        let mut resolution = Some(crate::provider_transport::LocalOAuthResolution {
+            auth: Some(
+                crate::provider_transport::LocalResolvedOAuthRequestAuth::Header {
+                    name: "authorization".to_string(),
+                    value: "AgentAssertion provisional".to_string(),
+                },
+            ),
+            refreshed_entry: Some(crate::provider_transport::CachedOAuthEntry {
+                provider_type: "codex_agent_identity".to_string(),
+                auth_header_name: "authorization".to_string(),
+                auth_header_value: "AgentAssertion provisional".to_string(),
+                expires_at_unix_secs: None,
+                metadata: None,
+                source_fingerprint: Some("credential-generation".to_string()),
+            }),
+            refresh_in_flight: false,
+            reused_refresh: false,
+            distributed_lease: None,
+        });
+
+        super::discard_failed_local_oauth_refresh_resolution(&mut resolution);
+
+        let resolution = resolution.expect("resolution should remain allocated for lease release");
+        assert!(resolution.auth.is_none());
+        assert!(resolution.refreshed_entry.is_none());
+    }
+
+    #[test]
+    fn remote_refresh_wait_outlives_upstream_http_timeout() {
+        assert!(
+            super::REMOTE_OAUTH_REFRESH_WAIT_TIMEOUT
+                > Duration::from_millis(super::LOCAL_OAUTH_HTTP_TIMEOUT_MS)
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_auth_config_fence_rejects_metadata_only_rewrite() {
+        let initial_config = json!({
+            "provider_type": "codex",
+            "auth_mode": "agentIdentity",
+            "agent_runtime_id": "runtime-1",
+            "agent_private_key": "MC4CAQAwBQYDK2VwBCIEIAcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcH",
+            "task_id": "task-1",
+            "email": "before@example.com"
+        });
+        let (state, repository, _) = codex_oauth_state(&initial_config, "__placeholder__");
+        let transport = state
+            .read_provider_transport_snapshot("provider-1", "endpoint-1", "key-1")
+            .await
+            .expect("transport should load")
+            .expect("transport should exist");
+
+        let mut replaced = repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key should load")
+            .pop()
+            .expect("key should exist");
+        let mut replacement_config = initial_config;
+        replacement_config["email"] = json!("after@example.com");
+        replaced.encrypted_auth_config = Some(
+            encrypt_python_fernet_plaintext(
+                DEVELOPMENT_ENCRYPTION_KEY,
+                &replacement_config.to_string(),
+            )
+            .expect("replacement config should encrypt"),
+        );
+        repository
+            .update_key(&replaced)
+            .await
+            .expect("replacement should persist");
+
+        assert!(matches!(
+            state
+                .capture_agent_identity_auth_config_fence(&transport)
+                .await
+                .expect("fence should resolve"),
+            AgentIdentityAuthConfigFence::StaleGeneration
+        ));
+    }
+
+    #[tokio::test]
+    async fn stale_bearer_refresh_cannot_overwrite_agent_replacement() {
+        let initial_config = json!({
+            "provider_type": "codex",
+            "refresh_token": "refresh-old",
+            "email": "before@example.com",
+            "expires_at": 4102444800_u64
+        });
+        let (state, repository, expected_auth_config) =
+            codex_oauth_state(&initial_config, "access-old");
+        let transport = state
+            .read_provider_transport_snapshot("provider-1", "endpoint-1", "key-1")
+            .await
+            .expect("transport should load")
+            .expect("transport should exist");
+
+        let replacement_config = json!({
+            "provider_type": "codex",
+            "auth_mode": "agentIdentity",
+            "agent_runtime_id": "runtime-new",
+            "agent_private_key": "MC4CAQAwBQYDK2VwBCIEIAcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcH",
+            "task_id": "task-new"
+        });
+        let replacement_auth_config = encrypt_python_fernet_plaintext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            &replacement_config.to_string(),
+        )
+        .expect("replacement config should encrypt");
+        let replacement_api_key =
+            encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "__placeholder__")
+                .expect("replacement api key should encrypt");
+        let mut replaced = repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key should load")
+            .pop()
+            .expect("key should exist");
+        replaced.encrypted_auth_config = Some(replacement_auth_config.clone());
+        replaced.encrypted_api_key = Some(replacement_api_key.clone());
+        replaced.expires_at_unix_secs = None;
+        repository
+            .update_key(&replaced)
+            .await
+            .expect("replacement should persist");
+
+        let refreshed_entry = crate::provider_transport::CachedOAuthEntry {
+            provider_type: "codex".to_string(),
+            auth_header_name: "authorization".to_string(),
+            auth_header_value: "Bearer access-refreshed-old".to_string(),
+            expires_at_unix_secs: Some(4_102_555_900),
+            metadata: Some(json!({
+                "provider_type": "codex",
+                "refresh_token": "refresh-rotated-old",
+                "email": "before@example.com",
+                "expires_at": 4102555900_u64
+            })),
+            source_fingerprint: None,
+        };
+        assert!(state
+            .persist_local_oauth_refresh_entry(
+                &transport,
+                &refreshed_entry,
+                Some(expected_auth_config.as_str()),
+            )
+            .await
+            .is_err());
+
+        let stored = repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key should reload")
+            .pop()
+            .expect("replacement should remain");
+        assert_eq!(
+            stored.encrypted_auth_config.as_deref(),
+            Some(replacement_auth_config.as_str())
+        );
+        assert_eq!(
+            stored.encrypted_api_key.as_deref(),
+            Some(replacement_api_key.as_str())
+        );
+        assert_eq!(stored.expires_at_unix_secs, None);
     }
 }

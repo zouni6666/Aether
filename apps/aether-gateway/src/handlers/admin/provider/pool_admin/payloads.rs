@@ -5,7 +5,7 @@ use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::{provider_key_status_snapshot_payload, unix_secs_to_rfc3339};
 use crate::provider_key_auth::{
     provider_key_auth_config_is_agent_identity, provider_key_auth_config_uses_header_authorization,
-    provider_key_auth_semantics, provider_key_can_refresh_oauth,
+    provider_key_auth_semantics, provider_key_can_export_oauth, provider_key_can_refresh_oauth,
     provider_key_effective_api_formats,
 };
 use aether_admin::provider::pool as admin_provider_pool_pure;
@@ -1228,12 +1228,17 @@ pub(super) fn build_admin_pool_key_payload(
         "can_refresh_oauth".to_string(),
         json!(provider_key_can_refresh_oauth(
             auth_semantics,
+            provider_type,
             auth_config.as_ref()
         )),
     );
     payload.insert(
         "can_export_oauth".to_string(),
-        json!(auth_semantics.can_export_oauth()),
+        json!(provider_key_can_export_oauth(
+            auth_semantics,
+            provider_type,
+            auth_config.as_ref()
+        )),
     );
     payload.insert(
         "can_edit_oauth".to_string(),

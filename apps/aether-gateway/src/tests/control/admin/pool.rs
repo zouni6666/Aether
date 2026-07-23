@@ -3147,6 +3147,8 @@ async fn gateway_pool_keys_classify_oauth_credentials() {
         .expect("Agent Identity key should exist");
     assert_eq!(agent_identity_key["oauth_header_auth"], false);
     assert_eq!(agent_identity_key["agent_identity"], true);
+    assert_eq!(agent_identity_key["can_refresh_oauth"], true);
+    assert_eq!(agent_identity_key["can_export_oauth"], false);
 }
 
 #[tokio::test]

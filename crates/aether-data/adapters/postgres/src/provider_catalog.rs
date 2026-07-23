@@ -11,9 +11,10 @@ use sqlx::{
 use aether_data_contracts::repository::provider_catalog::{
     ProviderCatalogKeyAdaptiveStateUpdate, ProviderCatalogKeyHealthStateUpdate,
     ProviderCatalogKeyListOrder, ProviderCatalogKeyListQuery,
-    ProviderCatalogKeyRuntimeMetadataUpdate, ProviderCatalogKeyStatusSnapshotUpdate,
-    ProviderCatalogReadRepository, ProviderCatalogUpstreamMetadataNamespaceUpdate,
-    ProviderCatalogWriteRepository, StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
+    ProviderCatalogKeyOAuthRuntimeStateCasUpdate, ProviderCatalogKeyRuntimeMetadataUpdate,
+    ProviderCatalogKeyStatusSnapshotUpdate, ProviderCatalogReadRepository,
+    ProviderCatalogUpstreamMetadataNamespaceUpdate, ProviderCatalogWriteRepository,
+    StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
     StoredProviderCatalogKeyMaintenanceSummary, StoredProviderCatalogKeyPage,
     StoredProviderCatalogKeyStats, StoredProviderCatalogProvider,
 };
@@ -390,6 +391,7 @@ SET
 WHERE id = $1
   AND health_by_format::jsonb IS NOT DISTINCT FROM $4::jsonb
   AND circuit_breaker_by_format::jsonb IS NOT DISTINCT FROM $5::jsonb
+  AND ($6::text IS NULL OR auth_config IS NOT DISTINCT FROM $6)
 "#;
 
 const KEY_RUNTIME_METADATA_CAS_SQL: &str = r#"
@@ -873,6 +875,84 @@ WHERE id = $1
         .bind(oauth_invalid_reason)
         .bind(encrypted_auth_config_update)
         .bind(updated_at_unix_secs.map(|value| value as f64))
+        .execute(&self.pool)
+        .await
+        .map_postgres_err()?
+        .rows_affected();
+        Ok(rows_affected > 0)
+    }
+
+    pub async fn compare_and_update_key_oauth_runtime_state(
+        &self,
+        update: &ProviderCatalogKeyOAuthRuntimeStateCasUpdate,
+    ) -> Result<bool, DataLayerError> {
+        if update.key_id.trim().is_empty()
+            || update.encrypted_auth_config.trim().is_empty()
+            || update
+                .encrypted_api_key_update
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
+            || !update.status_snapshot_patch.is_object()
+            || update
+                .upstream_metadata_patch
+                .as_ref()
+                .is_some_and(|patch| !patch.is_object())
+        {
+            return Err(DataLayerError::InvalidInput(
+                "provider catalog OAuth runtime CAS requires key_id, auth_config, and object status patch"
+                    .to_string(),
+            ));
+        }
+        let rows_affected = sqlx::query(
+            r#"
+UPDATE provider_api_keys
+SET
+  oauth_invalid_at = CASE
+    WHEN $2::double precision IS NULL THEN NULL
+    ELSE TO_TIMESTAMP($2::double precision)
+  END,
+  oauth_invalid_reason = $3,
+  auth_config = $4,
+  api_key = CASE
+    WHEN $5::text IS NULL THEN api_key
+    ELSE $5
+  END,
+  expires_at = CASE
+    WHEN $6::boolean IS FALSE THEN expires_at
+    WHEN $7::double precision IS NULL THEN NULL
+    ELSE TO_TIMESTAMP($7::double precision)
+  END,
+  upstream_metadata = CASE
+    WHEN $8::jsonb IS NULL THEN upstream_metadata
+    ELSE COALESCE(upstream_metadata, '{}'::jsonb) || $8::jsonb
+  END,
+  status_snapshot = (COALESCE(status_snapshot::jsonb, '{}'::jsonb) || $9::jsonb)::json,
+  error_count = CASE WHEN $10::boolean THEN 0 ELSE error_count END,
+  updated_at = CASE
+    WHEN $11::double precision IS NULL THEN NOW()
+    ELSE TO_TIMESTAMP($11::double precision)
+  END
+WHERE id = $1
+  AND auth_config IS NOT DISTINCT FROM $12
+"#,
+        )
+        .bind(&update.key_id)
+        .bind(update.oauth_invalid_at_unix_secs.map(|value| value as f64))
+        .bind(update.oauth_invalid_reason.as_deref())
+        .bind(&update.encrypted_auth_config)
+        .bind(update.encrypted_api_key_update.as_deref())
+        .bind(update.expires_at_unix_secs_update.is_some())
+        .bind(
+            update
+                .expires_at_unix_secs_update
+                .flatten()
+                .map(|value| value as f64),
+        )
+        .bind(update.upstream_metadata_patch.as_ref())
+        .bind(&update.status_snapshot_patch)
+        .bind(update.reset_error_count)
+        .bind(update.updated_at_unix_secs.map(|value| value as f64))
+        .bind(update.expected_encrypted_auth_config.as_deref())
         .execute(&self.pool)
         .await
         .map_postgres_err()?
@@ -2230,6 +2310,7 @@ WHERE id = $1
   AND CAST(EXTRACT(EPOCH FROM last_probe_increase_at) AS BIGINT) IS NOT DISTINCT FROM $19
   AND last_rpm_peak IS NOT DISTINCT FROM $20
   AND concurrent_429_count IS NOT DISTINCT FROM $21
+  AND ($22::text IS NULL OR auth_config IS NOT DISTINCT FROM $22)
 "#,
         )
         .bind(&update.key_id)
@@ -2264,6 +2345,7 @@ WHERE id = $1
         )
         .bind(expected.last_rpm_peak.map(|value| value as i32))
         .bind(expected.concurrent_429_count.map(|value| value as i32))
+        .bind(update.expected_encrypted_auth_config.as_deref())
         .execute(&self.pool)
         .await
         .map_postgres_err()?
@@ -2336,6 +2418,7 @@ WHERE id = $1
             .bind(&update.circuit_breaker_by_format)
             .bind(&update.expected_health_by_format)
             .bind(&update.expected_circuit_breaker_by_format)
+            .bind(update.expected_encrypted_auth_config.as_deref())
             .execute(&self.pool)
             .await
             .map_postgres_err()?
@@ -2601,6 +2684,13 @@ impl ProviderCatalogWriteRepository for SqlxProviderCatalogReadRepository {
             updated_at_unix_secs,
         )
         .await
+    }
+
+    async fn compare_and_update_key_oauth_runtime_state(
+        &self,
+        update: &ProviderCatalogKeyOAuthRuntimeStateCasUpdate,
+    ) -> Result<bool, DataLayerError> {
+        Self::compare_and_update_key_oauth_runtime_state(self, update).await
     }
 
     async fn update_key_health_state(
