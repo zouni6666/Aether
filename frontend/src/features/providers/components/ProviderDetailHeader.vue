@@ -91,6 +91,8 @@
           variant="ghost"
           size="icon"
           :title="legacyT(provider.is_active ? '点击停用' : '点击启用')"
+          :aria-label="legacyT(provider.is_active ? '点击停用' : '点击启用')"
+          data-testid="provider-toggle-active"
           @click="$emit('toggleStatus', provider)"
         >
           <Power class="w-4 h-4" />

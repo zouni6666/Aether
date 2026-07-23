@@ -516,6 +516,8 @@
                       class="h-7 w-7 text-foreground hover:text-foreground"
                       :disabled="togglingKeyId === key.key_id"
                       :title="key.is_active ? '禁用' : '启用'"
+                      :aria-label="key.is_active ? '禁用账号' : '启用账号'"
+                      :data-testid="`pool-toggle-active-desktop-${key.key_id}`"
                       @click="toggleKeyActive(key)"
                     >
                       <Power class="w-3.5 h-3.5" />
@@ -847,6 +849,8 @@
                     class="h-7 w-7 shrink-0 text-foreground hover:text-foreground"
                     :disabled="togglingKeyId === key.key_id"
                     :title="key.is_active ? '禁用' : '启用'"
+                    :aria-label="key.is_active ? '禁用账号' : '启用账号'"
+                    :data-testid="`pool-toggle-active-mobile-${key.key_id}`"
                     @click="toggleKeyActive(key)"
                   >
                     <Power class="w-3.5 h-3.5" />
@@ -1124,6 +1128,8 @@ import {
   type PoolStatsDisplay,
   type PoolStatsMetric,
 } from '@/features/pool/utils/poolStatsDisplay'
+import { resetCodexCycleUsageWindows } from '@/features/pool/utils/poolCycleStats'
+import { mergePoolKeyQuotaSnapshots } from '@/features/pool/utils/poolQuotaRefresh'
 import { getCodexQuotaWindowPresentation } from '@/utils/codexQuotaWindow'
 import { getOAuthOrgBadge } from '@/utils/oauthIdentity'
 import { formatOAuthPlanType, getOAuthPlanTypeClass } from '@/utils/oauthPlanType'
@@ -1312,9 +1318,11 @@ async function loadOverview(options: { cacheTtlMs?: number, silent?: boolean } =
     if (requestId !== overviewRequestId) return
     if (!options.silent) {
       showError(parseApiError(err))
+    } else {
+      showWarning(parseApiError(err, '同步 Provider 概览失败'))
     }
   } finally {
-    if (requestId === overviewRequestId && !options.silent) {
+    if (requestId === overviewRequestId) {
       overviewLoading.value = false
     }
   }
@@ -1323,11 +1331,15 @@ async function loadOverview(options: { cacheTtlMs?: number, silent?: boolean } =
 async function handleSchedulingSaved(updatedProvider: ProviderWithEndpointsSummary) {
   // 优先回写保存接口返回值，避免弹窗立即重开时读到旧配置。
   if (selectedProviderId.value && updatedProvider.id === selectedProviderId.value) {
-    selectedProviderData.value = updatedProvider
+    if (selectedProviderData.value) {
+      Object.assign(selectedProviderData.value, updatedProvider)
+    } else {
+      selectedProviderData.value = updatedProvider
+    }
   }
   showSchedulingDialog.value = false
   showAdvancedDialog.value = false
-  await loadOverview()
+  await loadOverview({ silent: true })
 }
 
 // --- Provider Selection ---
@@ -1699,15 +1711,23 @@ async function selectProvider(
   if (requestId !== selectProviderRequestId) return
 }
 
-async function loadProviderData(id: string) {
+async function loadProviderData(id: string, options: { preserveOnError?: boolean } = {}) {
   const requestId = ++providerDataRequestId
   try {
     const providerData = await getProvider(id)
     if (requestId !== providerDataRequestId || selectedProviderId.value !== id) return
-    selectedProviderData.value = providerData
+    if (selectedProviderData.value?.id === providerData.id) {
+      Object.assign(selectedProviderData.value, providerData)
+    } else {
+      selectedProviderData.value = providerData
+    }
   } catch {
     if (requestId !== providerDataRequestId || selectedProviderId.value !== id) return
-    selectedProviderData.value = null
+    if (options.preserveOnError) {
+      showWarning('同步 Provider 详情失败，已保留当前数据')
+    } else {
+      selectedProviderData.value = null
+    }
   }
 }
 
@@ -2069,30 +2089,76 @@ function resetKeyPage(page = currentPage.value, pageSizeValue = pageSize.value):
 }
 
 function refreshOverviewInBackground(): void {
-  void loadOverview()
+  void loadOverview({ silent: true })
+}
+
+function clampActiveKeyCount(current: unknown, total: unknown, delta: number): number {
+  const currentValue = Number(current)
+  const nextValue = Math.max(0, (Number.isFinite(currentValue) ? currentValue : 0) + delta)
+  const totalValue = Number(total)
+  if (!Number.isFinite(totalValue)) return nextValue
+  return Math.min(Math.max(0, totalValue), nextValue)
+}
+
+function isManualInactiveReason(reason: { code?: string; source?: string }): boolean {
+  const code = String(reason.code || '').trim().toLowerCase()
+  return code === 'inactive' || code === 'manual_disabled'
+}
+
+function applyPoolKeyActiveState(key: PoolKeyDetail, nextStatus: boolean): void {
+  const previousStatus = key.is_active
+  key.is_active = nextStatus
+
+  if (nextStatus) {
+    const remainingReasons = (key.scheduling_reasons ?? []).filter(
+      reason => !isManualInactiveReason(reason),
+    )
+    key.scheduling_reasons = remainingReasons
+    const remainingBlockingReason = remainingReasons.find(reason => reason.blocking)
+    if (remainingBlockingReason) {
+      key.scheduling_reason = remainingBlockingReason.code
+      key.scheduling_label = remainingBlockingReason.label
+      key.scheduling_status = remainingBlockingReason.code === 'cooldown' ? 'degraded' : 'blocked'
+    } else if (key.cooldown_reason) {
+      key.scheduling_reason = 'cooldown'
+      key.scheduling_label = '冷却中'
+      key.scheduling_status = 'degraded'
+    } else {
+      key.scheduling_reason = 'available'
+      key.scheduling_label = '可用'
+      key.scheduling_status = 'available'
+    }
+  } else {
+    key.scheduling_label = '已禁用'
+    key.scheduling_status = 'blocked'
+    key.scheduling_reason = 'inactive'
+    key.scheduling_reasons = [{
+      code: 'inactive',
+      label: '已禁用',
+      blocking: true,
+      source: 'manual',
+      ttl_seconds: null,
+      detail: null,
+    }]
+  }
+
+  if (previousStatus === nextStatus) return
+  const delta = nextStatus ? 1 : -1
+  const overview = poolProviders.value.find(item => item.provider_id === selectedProviderId.value)
+  if (overview) {
+    overview.active_keys = clampActiveKeyCount(overview.active_keys, overview.total_keys, delta)
+  }
+  if (selectedProviderData.value) {
+    selectedProviderData.value.active_keys = clampActiveKeyCount(
+      selectedProviderData.value.active_keys,
+      selectedProviderData.value.total_keys,
+      delta,
+    )
+  }
 }
 
 function applyQuotaRefreshResultToCurrentPage(result: Awaited<ReturnType<typeof refreshProviderQuota>>): void {
-  const quotaByKeyId = new Map<string, NonNullable<NonNullable<typeof result.results>[number]['quota_snapshot']>>()
-  for (const item of result.results) {
-    if (item.status === 'success' && item.quota_snapshot) {
-      quotaByKeyId.set(item.key_id, item.quota_snapshot)
-    }
-  }
-  if (quotaByKeyId.size === 0) return
-
-  keyPage.value.keys = keyPage.value.keys.map((key) => {
-    const quotaSnapshot = quotaByKeyId.get(key.key_id)
-    if (!quotaSnapshot) return key
-    return {
-      ...key,
-      quota_updated_at: quotaSnapshot.updated_at ?? quotaSnapshot.observed_at ?? key.quota_updated_at ?? null,
-      status_snapshot: {
-        ...(key.status_snapshot ?? {}),
-        quota: quotaSnapshot,
-      },
-    }
-  })
+  keyPage.value.keys = mergePoolKeyQuotaSnapshots(keyPage.value.keys, result.results)
 }
 
 function normalizeQuotaUpdatedAt(raw: number | null | undefined): number | null {
@@ -2139,7 +2205,7 @@ const currentPageQuotaRefreshStats = computed(() => {
 })
 
 async function refreshCurrentPageQuotaInBackground(
-  options: { silent?: boolean; reloadAfter?: boolean } = {},
+  options: { silent?: boolean; reloadAfter?: boolean | 'silent' } = {},
 ): Promise<boolean> {
   if (!selectedProviderId.value || !quotaRefreshSupported.value) return false
 
@@ -2169,7 +2235,7 @@ async function refreshCurrentPageQuotaInBackground(
 
     // 刷新当前页数据，展示最新额度与状态
     if (selectedProviderId.value === providerId && options.reloadAfter !== false) {
-      await loadKeys()
+      await loadKeys({ silent: options.reloadAfter === 'silent' })
     }
 
     if (!options.silent) {
@@ -2216,7 +2282,7 @@ async function refreshCurrentPage() {
   }
 }
 
-async function loadKeys(options: { cacheTtlMs?: number } = {}) {
+async function loadKeys(options: { cacheTtlMs?: number, silent?: boolean } = {}) {
   if (!selectedProviderId.value) return
   const requestId = ++keysRequestId
   const providerId = selectedProviderId.value
@@ -2225,7 +2291,9 @@ async function loadKeys(options: { cacheTtlMs?: number } = {}) {
   const search = searchQuery.value || undefined
   const status = statusFilter.value
   const sortByValue = sortBy.value || undefined
-  keysLoading.value = true
+  if (!options.silent) {
+    keysLoading.value = true
+  }
   try {
     const nextPage = await listPoolKeys(providerId, {
       page,
@@ -2251,9 +2319,13 @@ async function loadKeys(options: { cacheTtlMs?: number } = {}) {
     keysLoadedOnce.value = true
   } catch (err) {
     if (requestId !== keysRequestId || selectedProviderId.value !== providerId) return
-    resetKeyPage(page, pageSizeValue)
-    keysLoadedOnce.value = true
-    showError(parseApiError(err))
+    if (!options.silent) {
+      resetKeyPage(page, pageSizeValue)
+      keysLoadedOnce.value = true
+      showError(parseApiError(err))
+    } else {
+      showWarning(parseApiError(err, '同步账号列表失败'))
+    }
   } finally {
     if (requestId === keysRequestId) {
       keysLoading.value = false
@@ -2465,12 +2537,12 @@ function closeKeyBatchEditDialog(): void {
 
 async function handleKeyBatchEditSaved(): Promise<void> {
   resetPoolKeySelection(true)
-  await Promise.all([loadKeys(), loadOverview()])
+  await Promise.all([loadKeys({ silent: true }), loadOverview({ silent: true })])
 }
 
 async function handleDialogSaved() {
   editingKeyDetail.value = null
-  await loadKeys()
+  await loadKeys({ silent: true })
 }
 
 function closeKeyFormDialog() {
@@ -2647,7 +2719,7 @@ async function handleRefreshOAuth(key: PoolKeyDetail) {
     if (target) {
       target.oauth_expires_at = refreshedExpiresAt
     }
-    await loadKeys()
+    await loadKeys({ silent: true })
     if (refreshedExpiresAt != null) {
       const reloadedTarget = keyPage.value.keys.find(k => k.key_id === key.key_id)
       if (
@@ -2671,7 +2743,7 @@ async function handleRefreshOAuth(key: PoolKeyDetail) {
     }
   } catch (err) {
     showError(parseApiError(err, 'Token 刷新失败'))
-    await loadKeys()
+    await Promise.all([loadKeys({ silent: true }), loadOverview({ silent: true })])
   } finally {
     refreshingOAuthKeyId.value = null
   }
@@ -2683,8 +2755,20 @@ async function clearCooldown(keyId: string) {
   try {
     const res = await clearPoolCooldown(selectedProviderId.value, keyId)
     success(res.message)
-    await loadKeys()
-    refreshOverviewInBackground()
+    const key = keyPage.value.keys.find(item => item.key_id === keyId)
+    if (key) {
+      key.cooldown_reason = null
+      key.cooldown_ttl_seconds = null
+      if (key.scheduling_reason === 'cooldown') {
+        key.scheduling_reason = key.is_active ? 'available' : 'inactive'
+        key.scheduling_status = key.is_active ? 'available' : 'blocked'
+        key.scheduling_label = key.is_active ? '可用' : '已禁用'
+      }
+      key.scheduling_reasons = key.scheduling_reasons?.filter(
+        item => item.code !== 'cooldown',
+      )
+    }
+    await Promise.all([loadKeys({ silent: true }), loadOverview({ silent: true })])
   } catch (err) {
     showError(parseApiError(err))
   }
@@ -2704,7 +2788,17 @@ async function handleResetCycleStats(key: PoolKeyDetail) {
   try {
     const result = await resetProviderKeyCycleStats(key.key_id)
     success(result.message || '周期统计已重置')
-    await loadKeys()
+    if (key.status_snapshot?.quota?.windows) {
+      const resetAt = Number(result.reset_at)
+      key.status_snapshot = {
+        ...key.status_snapshot,
+        quota: {
+          ...key.status_snapshot.quota,
+          windows: resetCodexCycleUsageWindows(key.status_snapshot.quota.windows, resetAt),
+        },
+      }
+    }
+    await loadKeys({ silent: true })
   } catch (err) {
     showError(parseApiError(err, '重置周期统计失败'))
   } finally {
@@ -2718,21 +2812,9 @@ async function toggleKeyActive(key: PoolKeyDetail) {
   try {
     const nextStatus = !key.is_active
     await updateProviderKey(key.key_id, { is_active: nextStatus })
-    key.is_active = nextStatus
-    if (nextStatus) {
-      delete key.scheduling_label
-      delete key.scheduling_status
-      if (key.scheduling_reason === 'manual_disabled') {
-        delete key.scheduling_reason
-      }
-    } else {
-      key.scheduling_label = '禁用'
-      key.scheduling_status = 'blocked'
-      key.scheduling_reason = 'manual_disabled'
-    }
+    applyPoolKeyActiveState(key, nextStatus)
+    await Promise.all([loadKeys({ silent: true }), loadOverview({ silent: true })])
     success(nextStatus ? '账号已启用' : '账号已停用')
-    await loadKeys()
-    refreshOverviewInBackground()
   } catch (err) {
     showError(parseApiError(err))
   } finally {
@@ -2775,9 +2857,9 @@ async function handleProviderDrawerRefresh(): Promise<void> {
   if (!providerId) return
 
   await Promise.all([
-    loadKeys(),
+    loadKeys({ silent: true }),
     loadOverview({ silent: true }),
-    loadProviderData(providerId),
+    loadProviderData(providerId, { preserveOnError: true }),
   ])
   resetPoolKeySelection(true)
 }
@@ -2789,8 +2871,13 @@ async function openProviderEditDialog(provider?: ProviderWithEndpointsSummary): 
   try {
     const latest = await getProvider(providerId)
     if (selectedProviderId.value !== providerId) return
-    selectedProviderData.value = latest
-    providerToEdit.value = latest
+    if (selectedProviderData.value?.id === latest.id) {
+      Object.assign(selectedProviderData.value, latest)
+      providerToEdit.value = selectedProviderData.value
+    } else {
+      selectedProviderData.value = latest
+      providerToEdit.value = latest
+    }
   } catch (err) {
     if (selectedProviderId.value !== providerId) return
     const fallbackProvider = provider ?? selectedProviderData.value
@@ -2806,11 +2893,16 @@ async function openProviderEditDialog(provider?: ProviderWithEndpointsSummary): 
 
 async function handleProviderEditSaved(updatedProvider: ProviderWithEndpointsSummary): Promise<void> {
   if (selectedProviderId.value === updatedProvider.id) {
-    selectedProviderData.value = updatedProvider
-    providerToEdit.value = updatedProvider
+    if (selectedProviderData.value) {
+      Object.assign(selectedProviderData.value, updatedProvider)
+      providerToEdit.value = selectedProviderData.value
+    } else {
+      selectedProviderData.value = updatedProvider
+      providerToEdit.value = updatedProvider
+    }
   }
   providerEditDialogOpen.value = false
-  await loadOverview()
+  await loadOverview({ silent: true })
 }
 
 async function toggleSelectedProviderStatus(provider?: ProviderWithEndpointsSummary): Promise<void> {
@@ -2834,11 +2926,15 @@ async function toggleSelectedProviderStatus(provider?: ProviderWithEndpointsSumm
   try {
     const updated = await updateProvider(providerId, { is_active: nextStatus })
     Object.assign(current, updated)
-    if (selectedProviderId.value === providerId) {
-      selectedProviderData.value = updated
+    if (selectedProviderId.value === providerId && selectedProviderData.value !== current) {
+      if (selectedProviderData.value) {
+        Object.assign(selectedProviderData.value, updated)
+      } else {
+        selectedProviderData.value = updated
+      }
     }
     success(nextStatus ? '提供商已启用' : '提供商已禁用')
-    await loadOverview()
+    await loadOverview({ silent: true })
   } catch (err) {
     showError(parseApiError(err, nextStatus ? '启用提供商失败' : '禁用提供商失败'))
   } finally {
@@ -2848,14 +2944,14 @@ async function toggleSelectedProviderStatus(provider?: ProviderWithEndpointsSumm
 
 async function handleAccountBatchChanged(): Promise<void> {
   resetPoolKeySelection(true)
-  await Promise.all([loadKeys(), loadOverview()])
+  await Promise.all([loadKeys({ silent: true }), loadOverview({ silent: true })])
 }
 
 async function handleAccountDialogSaved() {
   showImportDialog.value = false
-  await Promise.all([loadKeys(), loadOverview()])
+  await Promise.all([loadKeys({ silent: true }), loadOverview({ silent: true })])
   // 导入账号后补一次静默额度刷新，避免新账号在列表里暂无额度信息
-  await refreshCurrentPageQuotaInBackground({ silent: true })
+  await refreshCurrentPageQuotaInBackground({ silent: true, reloadAfter: 'silent' })
 }
 
 // --- Formatting ---

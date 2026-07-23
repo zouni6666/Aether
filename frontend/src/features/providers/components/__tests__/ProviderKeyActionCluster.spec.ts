@@ -128,6 +128,7 @@ describe('ProviderKeyActionCluster', () => {
     expect(root.querySelector('button[title="Recover key"]')).toBeTruthy()
     expect(root.querySelector('button[title="代理: Tokyo"]')).toBeTruthy()
     expect(root.querySelector('button[title="配额详情"]')).toBeTruthy()
+    expect(root.querySelector('[data-testid="provider-key-toggle-active"]')?.getAttribute('aria-label')).toBe('点击停用')
 
     unmount()
   })
@@ -176,6 +177,24 @@ describe('ProviderKeyActionCluster', () => {
     expect(onDelete).toHaveBeenCalledTimes(1)
     expect(onClearProxy).toHaveBeenCalledTimes(1)
     expect(onSetProxy).toHaveBeenCalledWith('proxy-node-2')
+
+    unmount()
+  })
+
+  it('offers an enable action for an inactive account', () => {
+    const onToggleActive = vi.fn()
+    const { root, unmount } = mount({
+      apiKey: createProviderKey({ is_active: false }),
+      onToggleActive,
+    })
+
+    const enableButton = root.querySelector('[data-testid="provider-key-toggle-active"]') as HTMLButtonElement | null
+    expect(enableButton).toBeTruthy()
+    expect(enableButton?.getAttribute('title')).toBe('点击启用')
+    expect(enableButton?.getAttribute('aria-label')).toBe('点击启用')
+
+    enableButton?.click()
+    expect(onToggleActive).toHaveBeenCalledTimes(1)
 
     unmount()
   })

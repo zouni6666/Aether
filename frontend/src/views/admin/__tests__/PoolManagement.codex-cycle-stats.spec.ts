@@ -873,8 +873,45 @@ describe('PoolManagement Codex cycle stats mode', () => {
 
   it('resets Codex cycle stats from the action column', async () => {
     const codexKey = createPoolKey('codex')
+    const resetKey = createPoolKey('codex', {
+      status_snapshot: {
+        ...codexKey.status_snapshot,
+        quota: {
+          ...codexKey.status_snapshot?.quota,
+          windows: [
+            {
+              code: '5h',
+              scope: 'account',
+              window_minutes: 300,
+              usage_reset_at: 123,
+              usage: { request_count: 0, total_tokens: 0, total_cost_usd: '0.00000000' },
+            },
+            {
+              code: 'spark_preview',
+              scope: 'account',
+              window_minutes: 300,
+              usage: { request_count: 12, total_tokens: 500, total_cost_usd: '0.01' },
+            },
+            {
+              code: 'model_window',
+              scope: 'model',
+              window_minutes: 300,
+              usage: { request_count: 9, total_tokens: 400, total_cost_usd: '0.02' },
+            },
+            {
+              code: 'lifetime',
+              scope: 'account',
+              window_minutes: 0,
+              usage: { request_count: 8, total_tokens: 300, total_cost_usd: '0.03' },
+            },
+          ],
+        },
+      },
+    })
     endpointMocks.getPoolOverview.mockResolvedValue({ items: [createOverview('codex')] })
-    endpointMocks.listPoolKeys.mockResolvedValue(createKeyPage(codexKey))
+    endpointMocks.listPoolKeys
+      .mockResolvedValueOnce(createKeyPage(codexKey))
+      .mockResolvedValue(createKeyPage(resetKey))
     endpointMocks.getProvider.mockResolvedValue(createProvider('codex'))
 
     const root = mountPoolManagement()
@@ -888,6 +925,100 @@ describe('PoolManagement Codex cycle stats mode', () => {
 
     expect(endpointMocks.resetProviderKeyCycleStats).toHaveBeenCalledWith(codexKey.key_id)
     expect(endpointMocks.listPoolKeys).toHaveBeenCalledTimes(2)
+    expect(root.querySelector('[data-testid="pool-stats-cycle-request_count"]')?.textContent?.trim()).toBe('-/0')
+  })
+
+  it('toggles a pool account and silently revalidates the current key page', async () => {
+    const inactiveKey = createPoolKey('codex', {
+      is_active: false,
+      cooldown_reason: 'rate_limited_429',
+      cooldown_ttl_seconds: 60,
+      scheduling_status: 'blocked',
+      scheduling_reason: 'inactive',
+      scheduling_label: '已禁用',
+      scheduling_reasons: [{
+        code: 'inactive',
+        label: '已禁用',
+        blocking: true,
+        source: 'manual',
+      }],
+    })
+    const enabledKey = createPoolKey('codex', {
+      is_active: true,
+      cooldown_reason: 'rate_limited_429',
+      cooldown_ttl_seconds: 60,
+      scheduling_status: 'degraded',
+      scheduling_reason: 'cooldown',
+      scheduling_label: '冷却中',
+      scheduling_reasons: [{
+        code: 'cooldown',
+        label: '冷却中',
+        blocking: true,
+        source: 'pool',
+        ttl_seconds: 60,
+        detail: 'rate_limited_429',
+      }],
+    })
+    endpointMocks.getPoolOverview.mockResolvedValue({
+      items: [{ ...createOverview('codex'), active_keys: 0 }],
+    })
+    endpointMocks.listPoolKeys
+      .mockResolvedValueOnce(createKeyPage(inactiveKey))
+      .mockResolvedValue(createKeyPage(enabledKey))
+    endpointMocks.getProvider.mockResolvedValue(createProvider('codex', {
+      total_keys: 1,
+      active_keys: 0,
+    }))
+    endpointMocks.updateProviderKey.mockResolvedValue({ ...inactiveKey, is_active: true })
+
+    const root = mountPoolManagement()
+    await settle()
+
+    const toggleButton = root.querySelector<HTMLButtonElement>(
+      `[data-testid="pool-toggle-active-desktop-${inactiveKey.key_id}"]`,
+    )
+    expect(toggleButton).not.toBeNull()
+    expect(toggleButton?.getAttribute('aria-label')).toBe('启用账号')
+    const listCallsBeforeToggle = endpointMocks.listPoolKeys.mock.calls.length
+
+    toggleButton?.click()
+    await settle()
+
+    expect(endpointMocks.updateProviderKey).toHaveBeenCalledWith(inactiveKey.key_id, { is_active: true })
+    expect(toggleButton?.getAttribute('aria-label')).toBe('禁用账号')
+    expect(endpointMocks.listPoolKeys).toHaveBeenCalledTimes(listCallsBeforeToggle + 1)
+    expect(root.textContent).toContain('冷却中')
+  })
+
+  it('revalidates the pool page when OAuth refresh fails after server-side invalidation', async () => {
+    const oauthKey = createPoolKey('codex', {
+      auth_type: 'oauth',
+      oauth_managed: true,
+      can_refresh_oauth: true,
+      status_snapshot: {
+        ...createPoolKey('codex').status_snapshot,
+        oauth: { code: 'expired', expires_at: 1 },
+      },
+    })
+    endpointMocks.getPoolOverview.mockResolvedValue({ items: [createOverview('codex')] })
+    endpointMocks.listPoolKeys
+      .mockResolvedValueOnce(createKeyPage(oauthKey))
+      .mockResolvedValue({ total: 0, page: 1, page_size: 50, keys: [] })
+    endpointMocks.getProvider.mockResolvedValue(createProvider('codex'))
+    endpointMocks.refreshProviderOAuth.mockRejectedValue(new Error('OAuth invalid'))
+
+    const root = mountPoolManagement()
+    await settle()
+
+    const refreshButton = Array.from(root.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.title === '重新授权')
+    expect(refreshButton).not.toBeUndefined()
+    refreshButton?.click()
+    await settle()
+
+    expect(endpointMocks.refreshProviderOAuth).toHaveBeenCalledWith(oauthKey.key_id)
+    expect(endpointMocks.listPoolKeys).toHaveBeenCalledTimes(2)
+    expect(root.textContent).not.toContain(oauthKey.key_name)
   })
 
   it('hides the stats mode switch for non-Codex providers and keeps account totals', async () => {
