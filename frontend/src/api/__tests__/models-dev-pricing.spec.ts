@@ -63,6 +63,14 @@ describe('buildModelsDevTieredPricing', () => {
     })
   })
 
+  it('fails closed when a legacy long-context copy has no authoritative tier boundary', () => {
+    expect(buildModelsDevTieredPricing({
+      input: 5,
+      output: 30,
+      context_over_200k: { input: 10, output: 45 },
+    })).toBeNull()
+  })
+
   it('allows special token dimensions only when they use the base token price', () => {
     expect(buildModelsDevTieredPricing({
       input: 1,
@@ -214,7 +222,7 @@ describe('resolveModelsDevTieredPricing', () => {
     expect(resolveModelsDevTieredPricing('openai', 'gpt-5.6-sol', undefined)).toBeNull()
   })
 
-  it('keeps a models.dev fast cost as an explicit Priority catalog when bands differ', () => {
+  it('collapses a flat models.dev Fast cost to the Standard first band multiplier', () => {
     expect(resolveModelsDevTieredPricing('openai', 'gpt-5.6-sol', {
       input: 5,
       output: 30,
@@ -235,10 +243,79 @@ describe('resolveModelsDevTieredPricing', () => {
       ],
       processing_tiers: {
         priority: {
-          tiers: [{ up_to: null, input_price_per_1m: 10, output_price_per_1m: 60 }],
+          price_multiplier: 2,
         },
       },
     })
+  })
+
+  it('maps the GPT-5.6 Fast cost and ignores the legacy context copy', () => {
+    expect(resolveModelsDevTieredPricing('openai', 'gpt-5.6-sol', {
+      input: 5,
+      output: 30,
+      cache_read: 0.5,
+      cache_write: 6.25,
+      tiers: [{
+        input: 10,
+        output: 45,
+        cache_read: 1,
+        cache_write: 12.5,
+        tier: { type: 'context', size: 272_000 },
+      }],
+      context_over_200k: {
+        input: 10,
+        output: 45,
+        cache_read: 1,
+        cache_write: 12.5,
+      },
+    }, {
+      fast: {
+        cost: {
+          input: 10,
+          output: 60,
+          cache_read: 1,
+          cache_write: 12.5,
+        },
+        provider: { body: { service_tier: 'priority' } },
+      },
+    })).toEqual({
+      tiers: [
+        {
+          up_to: 271_999,
+          input_price_per_1m: 5,
+          output_price_per_1m: 30,
+          cache_creation_price_per_1m: 6.25,
+          cache_read_price_per_1m: 0.5,
+        },
+        {
+          up_to: null,
+          input_price_per_1m: 10,
+          output_price_per_1m: 45,
+          cache_creation_price_per_1m: 12.5,
+          cache_read_price_per_1m: 1,
+        },
+      ],
+      processing_tiers: {
+        priority: { price_multiplier: 2 },
+      },
+    })
+  })
+
+  it('fails closed when an experimental mode tries to supply context tiers', () => {
+    expect(resolveModelsDevTieredPricing('openai', 'gpt-5.6-sol', {
+      input: 5,
+      output: 30,
+      tiers: [{ input: 10, output: 45, tier: { type: 'context', size: 272_000 } }],
+    }, {
+      fast: {
+        cost: {
+          input: 10,
+          output: 60,
+          tiers: [{ input: 20, output: 90, tier: { type: 'context', size: 272_000 } }],
+        },
+        provider: { body: { service_tier: 'priority' } },
+      },
+    })?.processing_tiers).toBeUndefined()
   })
 
   it('uses a multiplier only when every fast price has the same ratio', () => {
@@ -266,6 +343,27 @@ describe('resolveModelsDevTieredPricing', () => {
       },
     })?.processing_tiers).toEqual({
       fast: { price_multiplier: 6 },
+    })
+  })
+
+  it('keeps a non-uniform Fast cost as one explicit unbounded band', () => {
+    expect(resolveModelsDevTieredPricing('openai', 'future-model', {
+      input: 5,
+      output: 30,
+      tiers: [{
+        input: 10,
+        output: 45,
+        tier: { type: 'context', size: 272_000 },
+      }],
+    }, {
+      fast: {
+        cost: { input: 10, output: 75 },
+        provider: { body: { service_tier: 'priority' } },
+      },
+    })?.processing_tiers).toEqual({
+      priority: {
+        tiers: [{ up_to: null, input_price_per_1m: 10, output_price_per_1m: 75 }],
+      },
     })
   })
 

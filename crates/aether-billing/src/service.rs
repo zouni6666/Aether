@@ -1457,6 +1457,55 @@ mod tests {
     }
 
     #[test]
+    fn fast_multiplier_uses_one_fixed_first_band_above_context_threshold() {
+        let pricing = BillingModelPricingSnapshot {
+            default_tiered_pricing: Some(json!({
+                "tiers": [
+                    {
+                        "up_to": 271999,
+                        "input_price_per_1m": 5.0,
+                        "output_price_per_1m": 30.0
+                    },
+                    {
+                        "up_to": null,
+                        "input_price_per_1m": 10.0,
+                        "output_price_per_1m": 45.0
+                    }
+                ],
+                "processing_tiers": {
+                    "priority": {"price_multiplier": 2.0}
+                }
+            })),
+            model_tiered_pricing: None,
+            ..pricing()
+        };
+
+        for input_tokens in [271_999, 272_000, 300_000] {
+            let result = BillingService::new()
+                .calculate(
+                    &pricing,
+                    &processing_usage(Some("priority"), Some("priority"), input_tokens),
+                )
+                .expect("Fast pricing should settle at every context size");
+            assert_eq!(
+                result.cost_result.status,
+                BillingSnapshotStatus::Complete,
+                "context: {input_tokens}"
+            );
+            assert_eq!(
+                result.cost_result.snapshot.resolved_variables["input_price_per_1m"],
+                json!(10.0),
+                "Fast must use the first Standard band at context {input_tokens}"
+            );
+            assert_eq!(
+                result.cost_result.snapshot.resolved_variables["output_price_per_1m"],
+                json!(60.0),
+                "Fast output must remain fixed at context {input_tokens}"
+            );
+        }
+    }
+
+    #[test]
     fn processing_catalog_boundaries_match_context_and_priority_contracts() {
         let cases = [
             (

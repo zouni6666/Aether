@@ -18,6 +18,8 @@ export interface ModelsDevCostTier extends ModelsDevTokenCost {
 }
 
 export interface ModelsDevCost extends ModelsDevTokenCost {
+  /** Legacy copy; `tiers` remains the authoritative source for exact boundaries. */
+  context_over_200k?: ModelsDevTokenCost
   tiers?: ModelsDevCostTier[]
 }
 
@@ -30,7 +32,18 @@ const TOKEN_PRICE_FIELDS = [
   'cache_read_price_per_1m',
 ] as const
 const PROCESSING_MODE_FALLBACK_KEYS = new Set(['fast', 'priority', 'flex', 'batch'])
+// Models.dev experimental Fast/priority prices are flat even when Standard has
+// context bands. Their multiplier is relative to the first Standard band only.
+const FLAT_MULTIPLIER_PROCESSING_TIERS = new Set(['fast', 'priority'])
 const DEFAULT_PROCESSING_TIER_MULTIPLIER = 1
+
+type ParsedTokenPrices = Pick<
+  PricingTier,
+  | 'input_price_per_1m'
+  | 'output_price_per_1m'
+  | 'cache_creation_price_per_1m'
+  | 'cache_read_price_per_1m'
+>
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -74,24 +87,27 @@ export function getModelsDevUnsupportedPricingFields(
   return [...unsupportedFields]
 }
 
-function parseTokenPrices(value: unknown): Omit<PricingTier, 'up_to'> | null {
+function parseTokenPrices(value: unknown): ParsedTokenPrices | null {
   if (!isRecord(value) || !isPrice(value.input) || !isPrice(value.output)) return null
-  if (value.cache_write !== undefined && !isPrice(value.cache_write)) return null
-  if (value.cache_read !== undefined && !isPrice(value.cache_read)) return null
+  const cacheWrite = value.cache_write
+  const cacheRead = value.cache_read
 
-  return {
+  const prices: ParsedTokenPrices = {
     input_price_per_1m: value.input,
     output_price_per_1m: value.output,
-    ...(value.cache_write === undefined
-      ? {}
-      : { cache_creation_price_per_1m: value.cache_write }),
-    ...(value.cache_read === undefined
-      ? {}
-      : { cache_read_price_per_1m: value.cache_read }),
   }
+  if (cacheWrite !== undefined) {
+    if (!isPrice(cacheWrite)) return null
+    prices.cache_creation_price_per_1m = cacheWrite
+  }
+  if (cacheRead !== undefined) {
+    if (!isPrice(cacheRead)) return null
+    prices.cache_read_price_per_1m = cacheRead
+  }
+  return prices
 }
 
-function parseContextTier(value: unknown): { size: number; prices: Omit<PricingTier, 'up_to'> } | null {
+function parseContextTier(value: unknown): { size: number; prices: ParsedTokenPrices } | null {
   if (!isRecord(value) || !isRecord(value.tier)) return null
   if (
     value.tier.type !== 'context'
@@ -112,7 +128,9 @@ export function buildModelsDevTieredPricing(cost: unknown): TieredPricingConfig 
 
   const rawTiers = cost.tiers
   if (rawTiers !== undefined && !Array.isArray(rawTiers)) return null
-  const contextTiers = (rawTiers ?? []).map(parseContextTier)
+  // The compatibility copy omits the exact starting boundary; importing it alone could underbill.
+  if (rawTiers === undefined && cost.context_over_200k !== undefined) return null
+  const contextTiers = (Array.isArray(rawTiers) ? rawTiers : []).map(parseContextTier)
   if (contextTiers.some(tier => tier === null)) return null
 
   const sortedTiers = contextTiers
@@ -171,6 +189,26 @@ function uniformPriceMultiplier(
   return candidate === 0 ? DEFAULT_PROCESSING_TIER_MULTIPLIER : candidate
 }
 
+function collapseToFirstPricingTier(pricing: TieredPricingConfig): TieredPricingConfig {
+  const firstTier = pricing.tiers[0]
+  if (!firstTier) return pricing
+  return {
+    ...pricing,
+    tiers: [{ ...firstTier, up_to: null }],
+  }
+}
+
+/**
+ * Experimental mode costs use models.dev's flat `Cost` shape. Rejecting a
+ * context-tier extension here keeps a future/invalid upstream shape from being
+ * silently interpreted as a different billing contract.
+ */
+function buildExperimentalModePricing(cost: unknown): TieredPricingConfig | null {
+  if (!isRecord(cost)) return null
+  if (cost.tiers !== undefined || cost.context_over_200k !== undefined) return null
+  return buildModelsDevTieredPricing(cost)
+}
+
 export function resolveModelsDevTieredPricing(
   _providerId: string,
   _modelId: string,
@@ -185,8 +223,6 @@ export function resolveModelsDevTieredPricing(
   const seenProcessingTiers = new Set<string>()
   for (const [modeKey, rawMode] of Object.entries(experimentalModes)) {
     if (!isRecord(rawMode)) continue
-    const modePricing = buildModelsDevTieredPricing(rawMode.cost)
-    if (!modePricing) continue
 
     const provider = isRecord(rawMode.provider) ? rawMode.provider : null
     const body = provider && isRecord(provider.body) ? provider.body : null
@@ -212,7 +248,13 @@ export function resolveModelsDevTieredPricing(
       continue
     }
 
-    const multiplier = uniformPriceMultiplier(standard, modePricing)
+    const modePricing = buildExperimentalModePricing(rawMode.cost)
+    if (!modePricing) continue
+
+    const multiplierBase = FLAT_MULTIPLIER_PROCESSING_TIERS.has(processingTier)
+      ? collapseToFirstPricingTier(standard)
+      : standard
+    const multiplier = uniformPriceMultiplier(multiplierBase, modePricing)
     seenProcessingTiers.add(processingTier)
     processingTierEntries.push([processingTier, multiplier === null
       ? { tiers: modePricing.tiers }

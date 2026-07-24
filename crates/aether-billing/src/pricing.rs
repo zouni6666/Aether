@@ -360,13 +360,14 @@ impl BillingModelPricingSnapshot {
         } else {
             BillingPricingSource::Mixed
         };
-        let pricing = multiply_pricing_catalog(standard, multiplier).ok_or_else(|| {
-            invalid_processing_tier_error(
-                multiplier_source,
-                processing_tier,
-                "price_multiplier produced an invalid pricing catalog",
-            )
-        })?;
+        let pricing =
+            multiply_pricing_catalog(standard, multiplier, processing_tier).ok_or_else(|| {
+                invalid_processing_tier_error(
+                    multiplier_source,
+                    processing_tier,
+                    "price_multiplier produced an invalid pricing catalog",
+                )
+            })?;
         Ok((pricing, source))
     }
 
@@ -587,7 +588,11 @@ fn invalid_processing_tier_error(
     ))
 }
 
-fn multiply_pricing_catalog(pricing: &Value, multiplier: f64) -> Option<Value> {
+fn multiply_pricing_catalog(
+    pricing: &Value,
+    multiplier: f64,
+    processing_tier: &str,
+) -> Option<Value> {
     if !multiplier.is_finite() || multiplier < 0.0 {
         return None;
     }
@@ -596,6 +601,12 @@ fn multiply_pricing_catalog(pricing: &Value, multiplier: f64) -> Option<Value> {
     // A resolved catalog is self-contained. Keeping the source overlays here would make every
     // settlement snapshot recursively carry unrelated processing-tier configuration.
     object.remove("processing_tiers");
+
+    // Fast pricing is flat: its multiplier applies to Standard's first band at every context size.
+    // Fast prices are fixed from the base Standard band; long-context premiums do not stack.
+    if matches!(processing_tier, "priority" | "fast") {
+        collapse_token_tiers_to_first(object)?;
+    }
 
     if let Some(tiers) = object.get_mut("tiers").and_then(Value::as_array_mut) {
         for tier in tiers.iter_mut().filter_map(Value::as_object_mut) {
@@ -644,6 +655,24 @@ fn multiply_pricing_catalog(pricing: &Value, multiplier: f64) -> Option<Value> {
     }
 
     Some(multiplied)
+}
+
+fn collapse_token_tiers_to_first(object: &mut serde_json::Map<String, Value>) -> Option<()> {
+    let Some(tiers_value) = object.get_mut("tiers") else {
+        return Some(());
+    };
+    if tiers_value.is_null() {
+        return Some(());
+    }
+    let tiers = tiers_value.as_array_mut()?;
+    let Some(mut first_tier) = tiers.first().cloned() else {
+        return Some(());
+    };
+    first_tier
+        .as_object_mut()?
+        .insert("up_to".to_string(), Value::Null);
+    *tiers = vec![first_tier];
+    Some(())
 }
 
 fn multiply_price_fields(
@@ -989,7 +1018,7 @@ mod tests {
     }
 
     #[test]
-    fn processing_multiplier_materializes_known_prices_without_touching_bounds_or_extensions() {
+    fn fast_processing_multiplier_materializes_known_prices_and_preserves_extensions() {
         let mut pricing = snapshot(
             Some(json!({
                 "tiers": [{
@@ -1038,7 +1067,10 @@ mod tests {
             Some(BillingPricingSource::ProviderOverride)
         );
         assert_eq!(resolution.processing_tier_price_multiplier, Some(2.5));
-        assert_eq!(catalog.pointer("/tiers/0/up_to"), Some(&json!(272000)));
+        assert_eq!(
+            catalog.pointer("/tiers/0/up_to"),
+            Some(&serde_json::Value::Null)
+        );
         assert_eq!(
             catalog.pointer("/tiers/0/input_price_per_1m"),
             Some(&json!(5.0))
@@ -1107,6 +1139,119 @@ mod tests {
                 "unknown field changed at {pointer}"
             );
         }
+    }
+
+    #[test]
+    fn fast_multipliers_flatten_multiband_standard_while_flex_preserves_all_bands() {
+        let pricing = snapshot(
+            Some(json!({
+                "tiers": [
+                    {
+                        "up_to": 272000,
+                        "input_price_per_1m": 2.0,
+                        "output_price_per_1m": 4.0,
+                        "cache_creation_price_per_1m": 6.0,
+                        "cache_read_price_per_1m": 8.0,
+                        "future_tier_option": "first"
+                    },
+                    {
+                        "up_to": null,
+                        "input_price_per_1m": 5.0,
+                        "output_price_per_1m": 7.0,
+                        "cache_creation_price_per_1m": 9.0,
+                        "cache_read_price_per_1m": 11.0,
+                        "future_tier_option": "second"
+                    }
+                ],
+                "image_output_price_default": 10.0,
+                "future_catalog_option": 31,
+                "processing_tiers": {
+                    "priority": {"price_multiplier": 2.0},
+                    "fast": {"price_multiplier": 3.0},
+                    "flex": {"price_multiplier": 4.0}
+                }
+            })),
+            None,
+        );
+
+        for (tier, expected_tiers, expected_image_price, expected_multiplier) in [
+            (
+                "priority",
+                json!([{
+                    "up_to": null,
+                    "input_price_per_1m": 4.0,
+                    "output_price_per_1m": 8.0,
+                    "cache_creation_price_per_1m": 12.0,
+                    "cache_read_price_per_1m": 16.0,
+                    "future_tier_option": "first"
+                }]),
+                json!(20.0),
+                2.0,
+            ),
+            (
+                "fast",
+                json!([{
+                    "up_to": null,
+                    "input_price_per_1m": 6.0,
+                    "output_price_per_1m": 12.0,
+                    "cache_creation_price_per_1m": 18.0,
+                    "cache_read_price_per_1m": 24.0,
+                    "future_tier_option": "first"
+                }]),
+                json!(30.0),
+                3.0,
+            ),
+        ] {
+            let resolution = pricing.resolve_pricing(Some(tier), None);
+            let catalog = resolution
+                .tiered_pricing
+                .as_ref()
+                .expect("fast multiplier should materialize a pricing catalog");
+
+            assert_eq!(catalog["tiers"], expected_tiers, "{tier}");
+            assert_eq!(
+                catalog["image_output_price_default"], expected_image_price,
+                "{tier}"
+            );
+            assert_eq!(catalog["future_catalog_option"], json!(31), "{tier}");
+            assert!(catalog.get("processing_tiers").is_none(), "{tier}");
+            assert_eq!(
+                resolution.processing_tier_price_multiplier,
+                Some(expected_multiplier),
+                "{tier}"
+            );
+        }
+
+        let flex = pricing.resolve_pricing(Some("flex"), None);
+        let flex_catalog = flex
+            .tiered_pricing
+            .as_ref()
+            .expect("flex multiplier should materialize a pricing catalog");
+        assert_eq!(
+            flex_catalog["tiers"],
+            json!([
+                {
+                    "up_to": 272000,
+                    "input_price_per_1m": 8.0,
+                    "output_price_per_1m": 16.0,
+                    "cache_creation_price_per_1m": 24.0,
+                    "cache_read_price_per_1m": 32.0,
+                    "future_tier_option": "first"
+                },
+                {
+                    "up_to": null,
+                    "input_price_per_1m": 20.0,
+                    "output_price_per_1m": 28.0,
+                    "cache_creation_price_per_1m": 36.0,
+                    "cache_read_price_per_1m": 44.0,
+                    "future_tier_option": "second"
+                }
+            ])
+        );
+        assert_eq!(flex_catalog["image_output_price_default"], json!(40.0));
+        assert_eq!(flex_catalog["future_catalog_option"], json!(31));
+        assert!(flex_catalog.get("processing_tiers").is_none());
+        assert_eq!(flex.processing_tier_price_multiplier, Some(4.0));
     }
 
     #[test]

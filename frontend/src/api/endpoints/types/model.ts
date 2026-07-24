@@ -35,7 +35,7 @@ export interface ImageOutputPriceRange {
 
 /** 按处理层级覆盖的费率配置。允许图像或未来计费字段独立扩展。 */
 export interface ProcessingTierPricingConfig {
-  /** 相对 Standard 目录的统一价格倍率。新写入应与显式目录二选一；读取混合配置时显式目录优先。 */
+  /** 相对 Standard 的统一倍率；Fast/priority 以首档作为固定基准，其他层级缩放完整目录。 */
   price_multiplier?: number
   tiers?: PricingTier[]
   image_output_prices?: Record<string, ImageOutputQualityPricing> | null

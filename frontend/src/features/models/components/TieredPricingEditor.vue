@@ -98,7 +98,7 @@
         <div class="space-y-1">
           <Label class="text-xs font-medium">层级倍率（相对 Standard）</Label>
           <p class="text-xs text-muted-foreground">
-            该层级按 Standard 的完整价格目录统一缩放。
+            该层级按 Standard 基准价格统一缩放。
           </p>
         </div>
         <Button

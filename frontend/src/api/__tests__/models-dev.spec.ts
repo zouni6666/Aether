@@ -2,18 +2,21 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const apiMocks = vi.hoisted(() => ({
   get: vi.fn(),
+  delete: vi.fn(),
 }))
 
 vi.mock('@/api/client', () => ({
-  default: { get: apiMocks.get },
+  default: { get: apiMocks.get, delete: apiMocks.delete },
 }))
 
-import { clearModelsDevCache, getModelsDevList } from '@/api/models-dev'
+import { clearModelsDevCache, getModelsDevList, refreshModelsDevList } from '@/api/models-dev'
 
 beforeEach(() => {
   clearModelsDevCache()
   localStorage.clear()
   apiMocks.get.mockReset()
+  apiMocks.delete.mockReset()
+  apiMocks.delete.mockResolvedValue({ data: { cleared: true } })
 })
 
 describe('getModelsDevList', () => {
@@ -34,7 +37,15 @@ describe('getModelsDevList', () => {
                 input: ['text', 'image'],
                 output: ['text', 'image'],
               },
-              cost: { input: 2, output: 4 },
+              cost: {
+                input: 2,
+                output: 4,
+                tiers: [{
+                  input: 4,
+                  output: 8,
+                  tier: { type: 'context', size: 100_000 },
+                }],
+              },
               experimental: {
                 modes: {
                   fast: {
@@ -85,5 +96,30 @@ describe('getModelsDevList', () => {
       pricingUnsupportedFields: ['input_audio'],
     })
     expect(audioPriced?.tieredPricing).toBeUndefined()
+  })
+
+  it('clears the gateway cache before rebuilding the online model list', async () => {
+    apiMocks.get.mockResolvedValue({
+      data: {
+        openai: {
+          name: 'OpenAI',
+          official: true,
+          models: {
+            'gpt-test': {
+              id: 'gpt-test',
+              name: 'GPT Test',
+              cost: { input: 2, output: 4 },
+            },
+          },
+        },
+      },
+    })
+
+    await getModelsDevList(false)
+    await refreshModelsDevList(false)
+
+    expect(apiMocks.delete).toHaveBeenCalledOnce()
+    expect(apiMocks.delete).toHaveBeenCalledWith('/api/admin/models/external/cache')
+    expect(apiMocks.get).toHaveBeenCalledTimes(2)
   })
 })

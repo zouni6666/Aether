@@ -8,6 +8,7 @@ import {
   getModelsDevUnsupportedPricingFields,
   resolveModelsDevTieredPricing,
   type ModelsDevCost,
+  type ModelsDevTokenCost,
   type ModelsDevUnsupportedPricingField,
 } from './models-dev-pricing'
 import type { TieredPricingConfig } from './endpoints/types'
@@ -46,7 +47,9 @@ export interface ModelsDevModel {
   cost?: ModelsDevCost
   experimental?: {
     modes?: Record<string, {
-      cost?: ModelsDevCost
+      // models.dev experimental modes use the flat Cost shape; context tiers
+      // belong to the parent model cost only.
+      cost?: ModelsDevTokenCost
       provider?: {
         body?: Record<string, unknown>
         headers?: Record<string, string>
@@ -254,6 +257,18 @@ export async function getModelsDevList(officialOnly: boolean = true): Promise<Mo
     return modelsListCache.filter(m => m.official)
   }
   return modelsListCache
+}
+
+/**
+ * 清理前后端 models.dev 缓存后重新获取模型目录。
+ * 编辑模型的价格同步使用此入口，避免只命中浏览器或网关的旧缓存。
+ */
+export async function refreshModelsDevList(
+  officialOnly: boolean = true,
+): Promise<ModelsDevModelItem[]> {
+  await api.delete('/api/admin/models/external/cache')
+  clearModelsDevCache()
+  return getModelsDevList(officialOnly)
 }
 
 /**

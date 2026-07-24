@@ -311,6 +311,8 @@
       :model="editingModel"
       @update:open="handleModelDialogUpdate"
       @success="handleModelFormSuccess"
+      @edit-model="editModel"
+      @pricing-synced="handleModelPricingSynced"
     />
 
     <!-- 模型详情抽屉 -->
@@ -1821,6 +1823,23 @@ async function handleModelFormSuccess() {
 async function editModel(model: GlobalModelResponse) {
   editingModel.value = model
   createModelDialogOpen.value = true
+}
+
+function handleModelPricingSynced(model: GlobalModelResponse) {
+  const updatePricing = (models: GlobalModelResponse[]) => {
+    const current = models.find(entry => entry.id === model.id)
+    if (current) {
+      current.default_tiered_pricing = cloneTieredPricingConfig(model.default_tiered_pricing)
+    }
+  }
+  updatePricing(globalModels.value)
+  updatePricing(batchManageModels.value)
+  if (editingModel.value?.id === model.id) {
+    editingModel.value.default_tiered_pricing = cloneTieredPricingConfig(model.default_tiered_pricing)
+  }
+  if (selectedModel.value?.id === model.id) {
+    selectedModel.value.default_tiered_pricing = cloneTieredPricingConfig(model.default_tiered_pricing)
+  }
 }
 
 async function deleteModel(model: GlobalModelResponse) {
