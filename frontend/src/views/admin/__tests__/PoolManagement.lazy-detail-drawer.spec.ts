@@ -8,13 +8,16 @@ const source = readFileSync(
 )
 
 describe('PoolManagement provider detail drawer', () => {
-  it('keeps the heavy drawer out of the initial route chunk', () => {
+  it('keeps the heavy drawer out of the initial route chunk and prefetches it when idle', () => {
     expect(source).not.toContain(
       "import ProviderDetailDrawer from '@/features/providers/components/ProviderDetailDrawer.vue'",
     )
     expect(source).toContain(
-      "() => import('@/features/providers/components/ProviderDetailDrawer.vue')",
+      "const loadProviderDetailDrawer = () => import('@/features/providers/components/ProviderDetailDrawer.vue')",
     )
+    expect(source).toContain('defineAsyncComponent(loadProviderDetailDrawer)')
+    expect(source).toContain('scheduleProviderDetailDrawerPrefetch()')
+    expect(source).toContain('@prefetch-provider="prefetchProviderDetailDrawer"')
   })
 
   it('only mounts the drawer after the provider detail action is opened', () => {
@@ -23,7 +26,8 @@ describe('PoolManagement provider detail drawer', () => {
       ?.split('/>')[0]
 
     expect(drawerTemplate).toBeTruthy()
-    expect(drawerTemplate).toContain('v-if="providerDrawerOpen && selectedProviderId"')
+    expect(drawerTemplate).toContain('v-if="providerDrawerMounted && selectedProviderId"')
     expect(source).toContain('@view-provider="openProviderDrawer"')
+    expect(source).toContain('providerDrawerMounted.value = true')
   })
 })

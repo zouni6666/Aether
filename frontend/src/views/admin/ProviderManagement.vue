@@ -221,7 +221,7 @@
   />
 
   <ProviderDetailDrawer
-    v-if="providerDrawerOpen"
+    v-if="providerDrawerMounted"
     :open="providerDrawerOpen"
     :provider-id="selectedProviderId"
     :initial-provider="selectedProvider"
@@ -310,6 +310,7 @@ const providerToEdit = ref<ProviderWithEndpointsSummary | null>(null)
 const priorityDialogOpen = ref(false)
 const priorityMode = ref<'provider' | 'global_key'>('provider')
 const providerDrawerOpen = ref(false)
+const providerDrawerMounted = ref(false)
 const selectedProviderId = ref<string | null>(null)
 const selectedProvider = computed<ProviderWithEndpointsSummary | null>(() => {
   if (!selectedProviderId.value) return null
@@ -639,6 +640,7 @@ async function handleProviderBatchChanged() {
 // 打开提供商详情抽屉
 function openProviderDrawer(providerId: string) {
   selectedProviderId.value = providerId
+  providerDrawerMounted.value = true
   providerDrawerOpen.value = true
 }
 

@@ -8,6 +8,18 @@ const source = readFileSync(
 )
 
 describe('ProviderDetailDrawer loading priorities', () => {
+  it('plays the drawer transition when the lazily mounted component first appears', () => {
+    const transitionTemplate = source
+      .split('<Transition')[1]
+      ?.split('>')[0]
+
+    expect(transitionTemplate).toContain('name="drawer"')
+    expect(transitionTemplate).toContain('appear')
+    expect(source).toContain('class="drawer-panel relative')
+    expect(source).toContain('.drawer-enter-from .drawer-panel')
+    expect(source).not.toContain('.drawer-enter-from .relative')
+  })
+
   it('loads mapping preview after first-screen provider data', () => {
     const openWatcher = source
       .split('// 合并监听 providerId 和 open')[1]
@@ -28,5 +40,18 @@ describe('ProviderDetailDrawer loading priorities', () => {
     expect(source).toContain(':loading="loadingProviderMappingPreview"')
     expect(source).not.toContain(':loading="loadingProviderModels || loadingProviderKeys"')
     expect(source).not.toContain(':loading="loadingProviderEndpoints || loadingProviderKeys || loadingProviderModels || loadingProviderMappingPreview"')
+  })
+
+  it('does not mount closed child dialogs or blur the page behind the drawer', () => {
+    expect(source).toContain('class="absolute inset-0 bg-black/30"')
+    expect(source).not.toContain('backdrop-blur-sm')
+    expect(source).toContain('v-if="provider && open && endpointDialogOpen"')
+    expect(source).toContain('v-if="open && keyFormDialogOpen"')
+    expect(source).toContain('v-if="open && oauthAccountDialogOpen && provider"')
+    expect(source).toContain('v-if="open && oauthKeyEditDialogOpen"')
+    expect(source).toContain('v-if="open && keyPermissionsDialogOpen"')
+    expect(source).toContain('v-if="open && modelFormDialogOpen && provider"')
+    expect(source).toContain('v-if="open && batchAssignDialogOpen && provider"')
+    expect(source).toContain('v-if="open && failoverRulesDialogOpen"')
   })
 })

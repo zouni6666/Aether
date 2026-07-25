@@ -8,7 +8,7 @@ vi.mock('@/api/client', () => ({
   },
 }))
 
-import { getProviderMappingPreview, getProvidersSummary } from '@/api/endpoints/providers'
+import { getProvider, getProviderMappingPreview, getProvidersSummary } from '@/api/endpoints/providers'
 
 const provider = {
   id: 'provider-1',
@@ -42,6 +42,30 @@ describe('getProvidersSummary', () => {
 
     expect(result).toMatchObject({ total: 1, page: 2, page_size: 20 })
     expect(result.items).toHaveLength(1)
+  })
+})
+
+describe('getProvider', () => {
+  beforeEach(() => {
+    getMock.mockReset()
+  })
+
+  it('deduplicates concurrent detail requests without caching the settled result', async () => {
+    let resolveRequest: ((value: { data: typeof provider }) => void) | undefined
+    getMock.mockImplementation(() => new Promise((resolve) => {
+      resolveRequest = resolve
+    }))
+
+    const firstRequest = getProvider('provider-1')
+    const secondRequest = getProvider('provider-1')
+
+    expect(getMock).toHaveBeenCalledTimes(1)
+    resolveRequest?.({ data: provider })
+    await expect(Promise.all([firstRequest, secondRequest])).resolves.toHaveLength(2)
+
+    getMock.mockResolvedValue({ data: provider })
+    await getProvider('provider-1')
+    expect(getMock).toHaveBeenCalledTimes(2)
   })
 })
 

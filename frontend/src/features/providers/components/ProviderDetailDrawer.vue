@@ -1,7 +1,10 @@
 <template>
   <!-- 自定义抽屉 -->
   <Teleport to="body">
-    <Transition name="drawer">
+    <Transition
+      name="drawer"
+      appear
+    >
       <div
         v-if="open && (loading || provider)"
         class="fixed inset-0 z-50 flex justify-end"
@@ -9,12 +12,12 @@
       >
         <!-- 背景遮罩 -->
         <div
-          class="absolute inset-0 bg-black/30 backdrop-blur-sm"
+          class="absolute inset-0 bg-black/30"
           @click="handleBackdropClick"
         />
 
         <!-- 抽屉内容 -->
-        <Card class="relative h-full w-full sm:w-[700px] sm:max-w-[90vw] rounded-none shadow-2xl overflow-y-auto">
+        <Card class="drawer-panel relative h-full w-full sm:w-[700px] sm:max-w-[90vw] rounded-none shadow-2xl overflow-y-auto">
           <!-- 加载状态 -->
           <div
             v-if="loading"
@@ -810,7 +813,7 @@
 
   <!-- 端点表单对话框（管理/编辑） -->
   <EndpointFormDialog
-    v-if="provider && open"
+    v-if="provider && open && endpointDialogOpen"
     v-model="endpointDialogOpen"
     :provider="provider"
     :endpoints="endpoints"
@@ -822,7 +825,7 @@
 
   <!-- 密钥编辑对话框 -->
   <KeyFormDialog
-    v-if="open"
+    v-if="open && keyFormDialogOpen"
     :open="keyFormDialogOpen"
     :endpoint="currentEndpoint"
     :editing-key="editingKey"
@@ -834,7 +837,7 @@
   />
 
   <ProviderKeyBatchImportDialog
-    v-if="open && provider?.provider_type === 'custom'"
+    v-if="open && keyBatchImportDialogOpen && provider?.provider_type === 'custom'"
     :open="keyBatchImportDialogOpen"
     :provider-id="provider.id"
     :provider-name="provider.name"
@@ -845,7 +848,7 @@
 
   <!-- OAuth 账号对话框 -->
   <OAuthAccountDialog
-    v-if="open && provider"
+    v-if="open && oauthAccountDialogOpen && provider"
     :open="oauthAccountDialogOpen"
     :provider-id="provider.id"
     :provider-type="provider.provider_type"
@@ -855,7 +858,7 @@
 
   <!-- OAuth 密钥编辑对话框 -->
   <OAuthKeyEditDialog
-    v-if="open"
+    v-if="open && oauthKeyEditDialogOpen"
     :open="oauthKeyEditDialogOpen"
     :editing-key="editingKey"
     @close="oauthKeyEditDialogOpen = false"
@@ -864,7 +867,7 @@
 
   <!-- 模型权限对话框 -->
   <KeyAllowedModelsEditDialog
-    v-if="open"
+    v-if="open && keyPermissionsDialogOpen"
     :open="keyPermissionsDialogOpen"
     :api-key="editingKey"
     :provider-id="providerId || ''"
@@ -874,7 +877,7 @@
 
   <!-- 删除密钥确认对话框 -->
   <AlertDialog
-    v-if="open"
+    v-if="open && deleteKeyConfirmOpen"
     :model-value="deleteKeyConfirmOpen"
     :title="legacyT('删除密钥')"
     :description="formatDeleteKeyConfirmDescription()"
@@ -888,7 +891,7 @@
 
   <!-- 添加/编辑模型对话框 -->
   <ProviderModelFormDialog
-    v-if="open && provider"
+    v-if="open && modelFormDialogOpen && provider"
     :open="modelFormDialogOpen"
     :provider-id="provider.id"
     :provider-name="provider.name"
@@ -899,7 +902,7 @@
 
   <!-- 批量关联模型对话框 -->
   <BatchAssignModelsDialog
-    v-if="open && provider"
+    v-if="open && batchAssignDialogOpen && provider"
     :open="batchAssignDialogOpen"
     :provider-id="provider.id"
     :provider-name="provider.name"
@@ -921,6 +924,7 @@
 
   <!-- 故障转移规则弹窗 -->
   <FailoverRulesDialog
+    v-if="open && failoverRulesDialogOpen"
     :open="failoverRulesDialogOpen"
     :provider="provider ?? null"
     @update:open="failoverRulesDialogOpen = $event"
@@ -3908,8 +3912,8 @@ useEscapeKey(() => {
   transition: opacity 0.3s ease;
 }
 
-.drawer-enter-active .relative,
-.drawer-leave-active .relative {
+.drawer-enter-active .drawer-panel,
+.drawer-leave-active .drawer-panel {
   transition: transform 0.3s ease;
 }
 
@@ -3918,16 +3922,16 @@ useEscapeKey(() => {
   opacity: 0;
 }
 
-.drawer-enter-from .relative {
+.drawer-enter-from .drawer-panel {
   transform: translateX(100%);
 }
 
-.drawer-leave-to .relative {
+.drawer-leave-to .drawer-panel {
   transform: translateX(100%);
 }
 
-.drawer-enter-to .relative,
-.drawer-leave-from .relative {
+.drawer-enter-to .drawer-panel,
+.drawer-leave-from .drawer-panel {
   transform: translateX(0);
 }
 

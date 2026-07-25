@@ -35,6 +35,8 @@ describe('PoolManagementHeader', () => {
           refreshLoading: false,
           refreshTitle: '刷新',
           onViewProvider: () => events.push('viewProvider'),
+          onImport: () => events.push('import'),
+          onPrefetchProvider: () => events.push('prefetchProvider'),
           onScheduling: () => events.push('scheduling'),
           onDemandMetrics: () => events.push('demandMetrics'),
           onAdvanced: () => events.push('advanced'),
@@ -51,7 +53,10 @@ describe('PoolManagementHeader', () => {
     app.use(createI18n())
     app.mount(root)
 
-    root.querySelector<HTMLButtonElement>('[title="查看详情"]')?.click()
+    const mobileViewProviderButton = root.querySelector<HTMLButtonElement>('[title="查看详情"]')
+    mobileViewProviderButton?.dispatchEvent(new Event('pointerenter'))
+    mobileViewProviderButton?.click()
+    root.querySelector<HTMLButtonElement>('[title="导入账号"]')?.click()
     root.querySelector<HTMLButtonElement>('[title="点击调整号池调度"]')?.click()
     root.querySelector<HTMLButtonElement>('[title="查看自适应热池指标"]')?.click()
     const desktopActions = root.querySelector('[data-testid="pool-header-actions"]')
@@ -67,7 +72,9 @@ describe('PoolManagementHeader', () => {
     root.querySelector<HTMLButtonElement>('[title="刷新"]')?.click()
 
     expect(events).toEqual([
+      'prefetchProvider',
       'viewProvider',
+      'import',
       'scheduling',
       'demandMetrics',
       'advanced',
@@ -75,8 +82,11 @@ describe('PoolManagementHeader', () => {
       'batchAction:refresh_quota',
       'refresh',
     ])
+    const viewProviderButton = desktopActions?.querySelector<HTMLButtonElement>('[title="查看详情"]')
+    const importButton = desktopActions?.querySelector<HTMLButtonElement>('[title="导入账号"]')
     expect(selectAllButton?.textContent?.trim()).toBe('')
     expect(selectAllButton?.getAttribute('title')).toBe('全选')
+    expect(viewProviderButton?.nextElementSibling).toBe(importButton)
     expect(advancedButton?.nextElementSibling).toBe(selectAllButton)
     expect(selectAllButton?.nextElementSibling).toBe(batchActionsButton)
     expect(batchActionsButton?.getAttribute('title')).toBe('选择执行动作')

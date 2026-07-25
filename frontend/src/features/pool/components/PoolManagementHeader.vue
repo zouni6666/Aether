@@ -90,6 +90,8 @@
             size="icon"
             class="h-8 w-8 shrink-0"
             :title="action.title"
+            @pointerenter="action.key === 'viewProvider' && emit('prefetchProvider')"
+            @focus="action.key === 'viewProvider' && emit('prefetchProvider')"
             @click="emit(action.event)"
           >
             <component
@@ -249,6 +251,8 @@
           class="h-8 w-8"
           :data-testid="action.key === 'demandMetrics' ? 'pool-demand-metrics-button' : undefined"
           :title="action.title"
+          @pointerenter="action.key === 'viewProvider' && emit('prefetchProvider')"
+          @focus="action.key === 'viewProvider' && emit('prefetchProvider')"
           @click="emit(action.event)"
         >
           <component
@@ -329,6 +333,7 @@ import {
   Settings2,
   SlidersHorizontal,
   SquareCheckBig,
+  Upload,
 } from 'lucide-vue-next'
 import {
   Button,
@@ -352,12 +357,14 @@ import {
 } from '@/features/pool/utils/poolBatchActions'
 
 type HeaderActionEvent =
+  | 'import'
   | 'scheduling'
   | 'viewProvider'
   | 'demandMetrics'
   | 'advanced'
 
 type HeaderActionKey =
+  | 'import'
   | 'scheduling'
   | 'viewProvider'
   | 'demandMetrics'
@@ -395,6 +402,8 @@ const emit = defineEmits<{
   'update:providerId': [value: string]
   'update:status': [value: string]
   'update:search': [value: string]
+  import: []
+  prefetchProvider: []
   scheduling: []
   viewProvider: []
   demandMetrics: []
@@ -428,6 +437,7 @@ const selectedCountLabel = computed(() => legacyT(`已选 ${Math.max(0, props.se
 const mobileActions = computed<HeaderAction[]>(() => {
   const actions: HeaderAction[] = [
     { key: 'viewProvider', title: legacyT('查看详情'), event: 'viewProvider', icon: Eye },
+    { key: 'import', title: legacyT('导入账号'), event: 'import', icon: Upload },
     { key: 'scheduling', title: legacyT('号池调度'), event: 'scheduling', icon: SlidersHorizontal },
   ]
   if (props.showAdaptiveHotPoolMetricsButton) {
@@ -442,6 +452,7 @@ const mobileActions = computed<HeaderAction[]>(() => {
 const desktopActions = computed<HeaderAction[]>(() => {
   const actions: HeaderAction[] = [
     { key: 'viewProvider', title: legacyT('查看详情'), event: 'viewProvider', icon: Eye },
+    { key: 'import', title: legacyT('导入账号'), event: 'import', icon: Upload },
   ]
   if (props.showAdaptiveHotPoolMetricsButton) {
     actions.push({ key: 'demandMetrics', title: legacyT('查看自适应热池指标'), event: 'demandMetrics', icon: Activity })

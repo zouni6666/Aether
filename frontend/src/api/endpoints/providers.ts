@@ -94,8 +94,10 @@ export async function getProvidersSummary(
  * 获取单个 Provider 的详细信息
  */
 export async function getProvider(providerId: string): Promise<ProviderWithEndpointsSummary> {
-  const response = await client.get<ProviderWithEndpointsSummary>(`/api/admin/providers/${providerId}/summary`)
-  return normalizeProviderSummary(response.data)
+  return dedupedRequest(`providers:detail:${providerId}`, async () => {
+    const response = await client.get<ProviderWithEndpointsSummary>(`/api/admin/providers/${providerId}/summary`)
+    return normalizeProviderSummary(response.data)
+  })
 }
 
 /**

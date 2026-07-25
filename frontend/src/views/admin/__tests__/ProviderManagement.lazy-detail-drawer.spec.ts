@@ -23,6 +23,7 @@ describe('ProviderManagement detail drawer loading', () => {
       ?.split('/>')[0]
 
     expect(drawerTemplate).toBeTruthy()
-    expect(drawerTemplate).toContain('v-if="providerDrawerOpen"')
+    expect(drawerTemplate).toContain('v-if="providerDrawerMounted"')
+    expect(source).toContain('providerDrawerMounted.value = true')
   })
 })

@@ -21,6 +21,8 @@
         :refresh-loading="refreshCurrentPageLoading"
         :refresh-title="refreshButtonTitle"
         @view-provider="openProviderDrawer"
+        @prefetch-provider="prefetchProviderDetailDrawer"
+        @import="showImportDialog = true"
         @scheduling="openSchedulingDialog"
         @demand-metrics="showDemandMetricsDialog = true"
         @advanced="showAdvancedDialog = true"
@@ -949,7 +951,7 @@
       :samples="providerDemandMetricSamples"
     />
     <ProviderDetailDrawer
-      v-if="providerDrawerOpen && selectedProviderId"
+      v-if="providerDrawerMounted && selectedProviderId"
       :open="providerDrawerOpen"
       :provider-id="selectedProviderId"
       :initial-provider="selectedProviderData"
@@ -1157,9 +1159,12 @@ import {
   getQuotaDisplayText,
 } from '@/utils/providerKeyQuota'
 
-const ProviderDetailDrawer = defineAsyncComponent(
-  () => import('@/features/providers/components/ProviderDetailDrawer.vue'),
-)
+const loadProviderDetailDrawer = () => import('@/features/providers/components/ProviderDetailDrawer.vue')
+const ProviderDetailDrawer = defineAsyncComponent(loadProviderDetailDrawer)
+
+function prefetchProviderDetailDrawer(): void {
+  void loadProviderDetailDrawer().catch(() => {})
+}
 
 type PoolKeyScore = NonNullable<PoolKeyDetail['pool_score']>
 
@@ -1193,6 +1198,8 @@ let selectProviderRequestId = 0
 let providerDataRequestId = 0
 let keysRequestId = 0
 let keysSearchDebounceTimer: number | null = null
+let providerDetailDrawerPrefetchIdleId: number | null = null
+let providerDetailDrawerPrefetchTimer: number | null = null
 const keysSearchPending = ref(false)
 let demandMetricsPollingTimer: number | null = null
 let demandMetricsRequestId = 0
@@ -1203,6 +1210,38 @@ const POOL_KEYS_CACHE_TTL_MS = 10 * 1000
 const POOL_SCHEDULING_PRESETS_CACHE_TTL_MS = 5 * 60 * 1000
 const POOL_DEMAND_METRICS_SAMPLES_LIMIT = 120
 const POOL_DEMAND_METRICS_POLL_INTERVAL_MS = 10 * 1000
+
+type IdleCallbackWindow = typeof window & {
+  requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number
+  cancelIdleCallback?: (handle: number) => void
+}
+
+function scheduleProviderDetailDrawerPrefetch(): void {
+  const idleWindow = window as IdleCallbackWindow
+  if (idleWindow.requestIdleCallback) {
+    providerDetailDrawerPrefetchIdleId = idleWindow.requestIdleCallback(() => {
+      providerDetailDrawerPrefetchIdleId = null
+      prefetchProviderDetailDrawer()
+    }, { timeout: 1500 })
+    return
+  }
+  providerDetailDrawerPrefetchTimer = window.setTimeout(() => {
+    providerDetailDrawerPrefetchTimer = null
+    prefetchProviderDetailDrawer()
+  }, 800)
+}
+
+function cancelProviderDetailDrawerPrefetch(): void {
+  const idleWindow = window as IdleCallbackWindow
+  if (providerDetailDrawerPrefetchIdleId !== null) {
+    idleWindow.cancelIdleCallback?.(providerDetailDrawerPrefetchIdleId)
+    providerDetailDrawerPrefetchIdleId = null
+  }
+  if (providerDetailDrawerPrefetchTimer !== null) {
+    clearTimeout(providerDetailDrawerPrefetchTimer)
+    providerDetailDrawerPrefetchTimer = null
+  }
+}
 
 interface PoolDemandMetricSample {
   providerId: string
@@ -2827,6 +2866,7 @@ const showImportDialog = ref(false)
 const showSchedulingDialog = ref(false)
 const showAdvancedDialog = ref(false)
 const providerDrawerOpen = ref(false)
+const providerDrawerMounted = ref(false)
 const providerEditDialogOpen = ref(false)
 const providerToEdit = ref<ProviderWithEndpointsSummary | null>(null)
 const showAccountBatchDialog = ref(false)
@@ -2848,7 +2888,9 @@ watch(showAccountBatchDialog, (open) => {
 })
 
 function openProviderDrawer(): void {
+  prefetchProviderDetailDrawer()
   if (!selectedProviderId.value) return
+  providerDrawerMounted.value = true
   providerDrawerOpen.value = true
 }
 
@@ -3914,9 +3956,11 @@ onMounted(() => {
   startCountdownTimer()
   void loadSchedulingPresetMetas({ cacheTtlMs: POOL_SCHEDULING_PRESETS_CACHE_TTL_MS })
   void loadOverview({ cacheTtlMs: POOL_OVERVIEW_CACHE_TTL_MS })
+  scheduleProviderDetailDrawerPrefetch()
 })
 
 onBeforeUnmount(() => {
+  cancelProviderDetailDrawerPrefetch()
   stopDemandMetricsPolling()
   if (keysSearchDebounceTimer !== null) {
     clearTimeout(keysSearchDebounceTimer)
