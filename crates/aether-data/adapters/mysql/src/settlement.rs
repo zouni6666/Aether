@@ -94,6 +94,13 @@ ON DUPLICATE KEY UPDATE
   updated_at = VALUES(updated_at)
 "#;
 
+const ENQUEUE_PROVIDER_MONTHLY_USAGE_DELTA_SQL: &str = r#"
+INSERT INTO usage_counter_deltas (
+  id, request_id, kind, target_id, total_cost_usd_delta, created_at
+)
+VALUES (?, ?, 'provider_monthly', ?, ?, ?)
+"#;
+
 #[derive(Debug, Clone)]
 pub struct MysqlSettlementRepository {
     pool: MysqlPool,
@@ -136,6 +143,36 @@ fn now_unix_secs() -> Result<i64, DataLayerError> {
             .as_secs(),
     )
     .map_err(|_| DataLayerError::InvalidInput("timestamp overflow".to_string()))
+}
+
+async fn enqueue_provider_monthly_usage_delta_mysql(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    request_id: &str,
+    provider_id: &str,
+    total_cost_usd_delta: f64,
+    created_at: i64,
+) -> Result<(), DataLayerError> {
+    let request_id = request_id.trim();
+    let provider_id = provider_id.trim();
+    if request_id.is_empty() || provider_id.is_empty() || total_cost_usd_delta == 0.0 {
+        return Ok(());
+    }
+    if !total_cost_usd_delta.is_finite() {
+        return Err(DataLayerError::UnexpectedValue(format!(
+            "provider monthly usage delta is not finite for {provider_id}"
+        )));
+    }
+
+    sqlx::query(ENQUEUE_PROVIDER_MONTHLY_USAGE_DELTA_SQL)
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(request_id)
+        .bind(provider_id)
+        .bind(total_cost_usd_delta)
+        .bind(created_at)
+        .execute(&mut **tx)
+        .await
+        .map_sql_err()?;
+    Ok(())
 }
 
 #[derive(Debug, Default)]
@@ -622,30 +659,14 @@ WHERE id = ?
                 .as_deref()
                 .filter(|value| !value.is_empty())
             {
-                sqlx::query(
-                    r#"
-UPDATE providers
-SET
-  monthly_used_usd = COALESCE(monthly_used_usd, 0) + ?,
-  updated_at = ?
-WHERE id = ?
-"#,
+                enqueue_provider_monthly_usage_delta_mysql(
+                    &mut tx,
+                    &input.request_id,
+                    provider_id,
+                    input.actual_total_cost_usd,
+                    updated_at,
                 )
-                .bind(input.actual_total_cost_usd)
-                .bind(updated_at)
-                .bind(provider_id)
-                .execute(&mut *tx)
-                .await
-                .map_sql_err()?;
-
-                settlement.provider_monthly_used_usd = sqlx::query_scalar::<_, Option<f64>>(
-                    "SELECT monthly_used_usd FROM providers WHERE id = ? LIMIT 1",
-                )
-                .bind(provider_id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_sql_err()?
-                .flatten();
+                .await?;
             }
         }
 
@@ -683,6 +704,10 @@ WHERE id = ?
 #[cfg(test)]
 mod tests {
     use super::MysqlSettlementRepository;
+    use crate::run_migrations;
+    use aether_data_contracts::repository::settlement::{
+        SettlementWriteRepository, UsageSettlementInput,
+    };
 
     #[tokio::test]
     async fn repository_builds_from_lazy_pool() {
@@ -693,5 +718,133 @@ mod tests {
         );
 
         let _repository = MysqlSettlementRepository::new(pool);
+    }
+
+    #[tokio::test]
+    async fn mysql_repository_settles_once_and_enqueues_provider_delta_when_url_is_set() {
+        let Some(database_url) = std::env::var("AETHER_TEST_MYSQL_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        else {
+            eprintln!(
+                "skipping mysql settlement parity test because AETHER_TEST_MYSQL_URL is unset"
+            );
+            return;
+        };
+        let pool = sqlx::mysql::MySqlPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .expect("mysql pool should connect");
+        run_migrations(&pool)
+            .await
+            .expect("mysql migrations should run");
+        cleanup_settlement_rows(&pool).await;
+
+        sqlx::query(
+            r#"
+INSERT INTO providers (id, name, provider_type, monthly_used_usd, created_at, updated_at)
+VALUES ('settlement-provider-1', 'Settlement Provider', 'openai', 5.0, 1, 1)
+"#,
+        )
+        .execute(&pool)
+        .await
+        .expect("provider should seed");
+        sqlx::query(
+            r#"
+INSERT INTO wallets (id, user_id, balance, gift_balance, limit_mode, created_at, updated_at)
+VALUES ('settlement-wallet-1', 'settlement-user-1', 10.0, 2.0, 'finite', 1, 1)
+"#,
+        )
+        .execute(&pool)
+        .await
+        .expect("wallet should seed");
+        sqlx::query(
+            r#"
+INSERT INTO `usage` (
+  request_id, user_id, provider_id, status, billing_status,
+  total_cost_usd, actual_total_cost_usd
+)
+VALUES (
+  'settlement-request-1', 'settlement-user-1', 'settlement-provider-1',
+  'completed', 'pending', 3.0, 6.0
+)
+"#,
+        )
+        .execute(&pool)
+        .await
+        .expect("usage should seed");
+
+        let repository = MysqlSettlementRepository::new(pool.clone());
+        let input = UsageSettlementInput {
+            request_id: "settlement-request-1".to_string(),
+            user_id: Some("settlement-user-1".to_string()),
+            api_key_id: None,
+            api_key_is_standalone: false,
+            provider_id: Some("settlement-provider-1".to_string()),
+            status: "completed".to_string(),
+            billing_status: "pending".to_string(),
+            total_cost_usd: 3.0,
+            actual_total_cost_usd: 6.0,
+            finalized_at_unix_secs: Some(1_234),
+        };
+        let first = repository
+            .settle_usage(input.clone())
+            .await
+            .expect("settlement should run")
+            .expect("usage should exist");
+        let second = repository
+            .settle_usage(input)
+            .await
+            .expect("second settlement should run")
+            .expect("usage should exist");
+        assert_eq!(first.billing_status, "settled");
+        assert_eq!(first.provider_monthly_used_usd, None);
+        assert_eq!(second.finalized_at_unix_secs, Some(1_234));
+
+        let wallet: (f64, f64, f64) = sqlx::query_as(
+            "SELECT balance, gift_balance, total_consumed FROM wallets WHERE id = 'settlement-wallet-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("wallet should load");
+        assert_eq!(wallet, (4.0, 2.0, 6.0));
+        let provider_used: f64 = sqlx::query_scalar(
+            "SELECT monthly_used_usd FROM providers WHERE id = 'settlement-provider-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("provider should load");
+        assert_eq!(provider_used, 5.0);
+        let provider_delta: (i64, f64) = sqlx::query_as(
+            r#"
+SELECT CAST(COUNT(*) AS SIGNED), COALESCE(SUM(total_cost_usd_delta), 0)
+FROM usage_counter_deltas
+WHERE request_id = 'settlement-request-1'
+  AND kind = 'provider_monthly'
+  AND target_id = 'settlement-provider-1'
+"#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("provider delta should load");
+        assert_eq!(provider_delta, (1, 6.0));
+
+        cleanup_settlement_rows(&pool).await;
+    }
+
+    async fn cleanup_settlement_rows(pool: &sqlx::MySqlPool) {
+        for sql in [
+            "DELETE FROM usage_counter_deltas WHERE request_id = 'settlement-request-1'",
+            "DELETE FROM usage_settlement_snapshots WHERE request_id = 'settlement-request-1'",
+            "DELETE FROM `usage` WHERE request_id = 'settlement-request-1'",
+            "DELETE FROM wallets WHERE id = 'settlement-wallet-1'",
+            "DELETE FROM providers WHERE id = 'settlement-provider-1'",
+        ] {
+            sqlx::query(sql)
+                .execute(pool)
+                .await
+                .expect("settlement cleanup should succeed");
+        }
     }
 }

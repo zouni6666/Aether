@@ -1,3 +1,7 @@
+use crate::handlers::admin::provider::shared::support::{
+    provider_transfer_limit_from_config, PROVIDER_MAX_TRANSFER_COUNT_CONFIG_KEY,
+    PROVIDER_MAX_TRANSFER_TIMEOUT_SECONDS_CONFIG_KEY,
+};
 use crate::handlers::admin::shared::unix_secs_to_rfc3339;
 use crate::handlers::public::{request_candidate_event_unix_ms, request_candidate_status_label};
 use crate::orchestration::codex_cyber_flag_passthrough_enabled;
@@ -126,6 +130,12 @@ pub(crate) fn build_admin_provider_summary_value(
     let config = provider_config
         .as_ref()
         .and_then(serde_json::Value::as_object);
+    let max_transfer_count =
+        provider_transfer_limit_from_config(config, PROVIDER_MAX_TRANSFER_COUNT_CONFIG_KEY);
+    let max_transfer_timeout_seconds = provider_transfer_limit_from_config(
+        config,
+        PROVIDER_MAX_TRANSFER_TIMEOUT_SECONDS_CONFIG_KEY,
+    );
     let provider_ops_config = config.and_then(|cfg| cfg.get("provider_ops"));
     let ops_configured = provider_ops_config.is_some_and(json_truthy);
     let ops_architecture_id = provider_ops_config
@@ -184,6 +194,8 @@ pub(crate) fn build_admin_provider_summary_value(
         "quota_last_reset_at": quota_last_reset_at,
         "quota_expires_at": quota_expires_at,
         "max_retries": provider.max_retries,
+        "max_transfer_count": max_transfer_count,
+        "max_transfer_timeout_seconds": max_transfer_timeout_seconds,
         "proxy": provider.proxy.clone(),
         "stream_first_byte_timeout": provider.stream_first_byte_timeout_secs,
         "request_timeout": provider.request_timeout_secs,

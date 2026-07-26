@@ -138,6 +138,13 @@ impl LocalExecutionAttemptSource<AiStreamAttempt> for LocalOpenAiChatStreamAttem
         }
         Ok(drained)
     }
+
+    async fn skip_provider(&mut self, provider_id: &str) -> Result<(), GatewayError> {
+        self.prefetched_attempts
+            .retain(|attempt| attempt.eligible.candidate.provider_id != provider_id);
+        self.candidates.skip_provider(provider_id);
+        Ok(())
+    }
 }
 
 impl LocalOpenAiChatStreamAttemptSource<'_> {

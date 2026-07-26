@@ -12,6 +12,11 @@ pub async fn export_postgres_jsonl(
     domains: Vec<ExportDomain>,
     created_at_unix_secs: u64,
 ) -> Result<String, DataLayerError> {
+    let mut tx = pool.begin().await.map_sql_err()?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .map_sql_err()?;
     let manifest = DataExportManifest::new(
         created_at_unix_secs,
         Some(DatabaseDriver::Postgres),
@@ -20,12 +25,16 @@ pub async fn export_postgres_jsonl(
     let mut records = vec![DataExportRecord::manifest(manifest)];
 
     for domain in domains {
+        if domain == ExportDomain::Auxiliary {
+            export_postgres_auxiliary_records(&mut tx, &mut records).await?;
+            continue;
+        }
         if domain == ExportDomain::Billing {
-            export_postgres_billing_records(pool, &mut records).await?;
+            export_postgres_billing_records(&mut tx, &mut records).await?;
             continue;
         }
         if domain == ExportDomain::Wallets {
-            export_postgres_wallet_records(pool, &mut records).await?;
+            export_postgres_wallet_records(&mut tx, &mut records).await?;
             continue;
         }
         let (table_name, id_column) = postgres_domain_table(domain)?;
@@ -34,7 +43,7 @@ pub async fn export_postgres_jsonl(
         let sql = format!(
             "SELECT {export_id_sql} AS export_id, to_jsonb(t) AS payload FROM {table_name} AS t ORDER BY {order_by}"
         );
-        let rows = sqlx::query(&sql).fetch_all(pool).await.map_sql_err()?;
+        let rows = sqlx::query(&sql).fetch_all(&mut *tx).await.map_sql_err()?;
         for row in rows {
             let id = row.try_get::<String, _>("export_id").map_sql_err()?;
             let payload = row.try_get::<Value, _>("payload").map_sql_err()?;
@@ -42,6 +51,7 @@ pub async fn export_postgres_jsonl(
         }
     }
 
+    tx.commit().await.map_sql_err()?;
     encode_jsonl(&records)
 }
 
@@ -57,19 +67,27 @@ pub async fn import_postgres_plan(
     pool: &crate::driver::postgres::PostgresPool,
     plan: &DataImportPlan,
 ) -> Result<usize, DataLayerError> {
+    let mut tx = pool.begin().await.map_sql_err()?;
     let mut imported = 0usize;
     let mut column_cache = BTreeMap::<String, PostgresImportColumns>::new();
     for domain in &plan.manifest.domains {
+        if *domain == ExportDomain::Auxiliary {
+            for row in plan.rows(*domain) {
+                import_postgres_auxiliary_row(&mut tx, row, &mut column_cache).await?;
+                imported = imported.saturating_add(1);
+            }
+            continue;
+        }
         if *domain == ExportDomain::Billing {
             for row in plan.rows(*domain) {
-                import_postgres_billing_row(pool, row, &mut column_cache).await?;
+                import_postgres_billing_row(&mut tx, row, &mut column_cache).await?;
                 imported = imported.saturating_add(1);
             }
             continue;
         }
         if *domain == ExportDomain::Wallets {
             for row in plan.rows(*domain) {
-                import_postgres_wallet_row(pool, row, &mut column_cache).await?;
+                import_postgres_wallet_row(&mut tx, row, &mut column_cache).await?;
                 imported = imported.saturating_add(1);
             }
             continue;
@@ -81,10 +99,10 @@ pub async fn import_postgres_plan(
             continue;
         }
         let target_columns =
-            postgres_import_columns_cached(pool, &mut column_cache, table_name).await?;
+            postgres_import_columns_cached(&mut tx, &mut column_cache, table_name).await?;
         for row in rows {
             import_postgres_row(
-                pool,
+                &mut tx,
                 table_name,
                 &conflict_columns,
                 *domain,
@@ -95,7 +113,50 @@ pub async fn import_postgres_plan(
             imported = imported.saturating_add(1);
         }
     }
+    if !plan.rows(ExportDomain::Auxiliary).is_empty() {
+        reset_postgres_auxiliary_sequences(&mut tx).await?;
+    }
+    tx.commit().await.map_sql_err()?;
     Ok(imported)
+}
+
+async fn reset_postgres_auxiliary_sequences(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), DataLayerError> {
+    for table in AUXILIARY_TABLES {
+        let [primary_key] = table.primary_key else {
+            continue;
+        };
+        let relation_name = format!("public.{}", table.name);
+        let sequence =
+            sqlx::query_scalar::<_, Option<String>>("SELECT pg_get_serial_sequence($1, $2)")
+                .bind(&relation_name)
+                .bind(*primary_key)
+                .fetch_one(&mut **tx)
+                .await
+                .map_sql_err()?;
+        let Some(sequence) = sequence else {
+            continue;
+        };
+
+        let table_sql = postgres_quote_identifier(table.name)?;
+        let primary_key_sql = postgres_quote_identifier(primary_key)?;
+        let maximum = sqlx::query_scalar::<_, Option<i64>>(&format!(
+            "SELECT MAX({primary_key_sql})::bigint FROM public.{table_sql}"
+        ))
+        .fetch_one(&mut **tx)
+        .await
+        .map_sql_err()?;
+        let (value, is_called) = maximum.map_or((1_i64, false), |value| (value, true));
+        sqlx::query("SELECT setval($1::regclass, $2, $3)")
+            .bind(sequence)
+            .bind(value)
+            .bind(is_called)
+            .execute(&mut **tx)
+            .await
+            .map_sql_err()?;
+    }
+    Ok(())
 }
 
 fn postgres_domain_table(
@@ -125,7 +186,42 @@ fn postgres_domain_table(
             "postgres billing export uses multiple tables and must be handled as a domain"
                 .to_string(),
         )),
+        ExportDomain::Auxiliary => Err(DataLayerError::InvalidInput(
+            "postgres auxiliary export uses multiple tables and must be handled as a domain"
+                .to_string(),
+        )),
     }
+}
+
+async fn export_postgres_auxiliary_records(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    records: &mut Vec<DataExportRecord>,
+) -> Result<(), DataLayerError> {
+    for table in AUXILIARY_TABLES {
+        let table_sql = postgres_quote_identifier(table.name)?;
+        let order_sql = table
+            .primary_key
+            .iter()
+            .map(|column| postgres_quote_identifier(column).map(|column| format!("{column} ASC")))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(", ");
+        let rows = sqlx::query(&format!(
+            "SELECT to_jsonb(t) AS payload FROM public.{table_sql} AS t ORDER BY {order_sql}"
+        ))
+        .fetch_all(&mut **tx)
+        .await
+        .map_sql_err()?;
+        for row in rows {
+            let payload = row.try_get::<Value, _>("payload").map_sql_err()?;
+            let id = auxiliary_row_id(*table, &payload)?;
+            records.push(DataExportRecord::row(
+                ExportDomain::Auxiliary,
+                id,
+                payload_with_table(payload, table.name)?,
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn postgres_export_id_sql(domain: ExportDomain, id_column: &str) -> String {
@@ -145,7 +241,7 @@ fn postgres_conflict_columns(domain: ExportDomain, id_column: &str) -> Vec<&str>
 }
 
 async fn postgres_import_columns_cached(
-    pool: &crate::driver::postgres::PostgresPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     cache: &mut BTreeMap<String, PostgresImportColumns>,
     table_name: &str,
 ) -> Result<PostgresImportColumns, DataLayerError> {
@@ -153,13 +249,13 @@ async fn postgres_import_columns_cached(
         return Ok(columns.clone());
     }
 
-    let columns = load_postgres_import_columns(pool, table_name).await?;
+    let columns = load_postgres_import_columns(&mut **tx, table_name).await?;
     cache.insert(table_name.to_string(), columns.clone());
     Ok(columns)
 }
 
-pub(super) async fn load_postgres_import_columns(
-    pool: &crate::driver::postgres::PostgresPool,
+pub(super) async fn load_postgres_import_columns<'e>(
+    executor: impl sqlx::Executor<'e, Database = sqlx::Postgres>,
     table_name: &str,
 ) -> Result<PostgresImportColumns, DataLayerError> {
     let (schema_name, relation_name) = postgres_table_parts(table_name)?;
@@ -173,7 +269,7 @@ WHERE table_schema = $1
     )
     .bind(schema_name)
     .bind(relation_name)
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await
     .map_sql_err()?;
 
@@ -223,7 +319,7 @@ fn postgres_table_parts(table_name: &str) -> Result<(&str, &str), DataLayerError
 }
 
 async fn export_postgres_billing_records(
-    pool: &crate::driver::postgres::PostgresPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     records: &mut Vec<DataExportRecord>,
 ) -> Result<(), DataLayerError> {
     for (table_name, export_table, id_column) in [
@@ -238,7 +334,7 @@ async fn export_postgres_billing_records(
         let sql = format!(
             "SELECT {id_column}::text AS export_id, to_jsonb(t) || jsonb_build_object('__table', '{export_table}') AS payload FROM {table_name} AS t ORDER BY {id_column} ASC"
         );
-        let rows = sqlx::query(&sql).fetch_all(pool).await.map_sql_err()?;
+        let rows = sqlx::query(&sql).fetch_all(&mut **tx).await.map_sql_err()?;
         for row in rows {
             let id = row.try_get::<String, _>("export_id").map_sql_err()?;
             let payload = row.try_get::<Value, _>("payload").map_sql_err()?;
@@ -253,14 +349,14 @@ async fn export_postgres_billing_records(
 }
 
 async fn export_postgres_wallet_records(
-    pool: &crate::driver::postgres::PostgresPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     records: &mut Vec<DataExportRecord>,
 ) -> Result<(), DataLayerError> {
     for (table_name, export_table, id_column) in postgres_wallet_tables() {
         let sql = format!(
             "SELECT {id_column}::text AS export_id, to_jsonb(t) || jsonb_build_object('__table', '{export_table}') AS payload FROM {table_name} AS t ORDER BY {id_column} ASC"
         );
-        let rows = sqlx::query(&sql).fetch_all(pool).await.map_sql_err()?;
+        let rows = sqlx::query(&sql).fetch_all(&mut **tx).await.map_sql_err()?;
         for row in rows {
             let id = row.try_get::<String, _>("export_id").map_sql_err()?;
             let payload = row.try_get::<Value, _>("payload").map_sql_err()?;
@@ -275,7 +371,7 @@ async fn export_postgres_wallet_records(
 }
 
 async fn import_postgres_row(
-    pool: &crate::driver::postgres::PostgresPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     table_name: &str,
     conflict_columns: &[&str],
     domain: ExportDomain,
@@ -316,7 +412,7 @@ async fn import_postgres_row(
 
     sqlx::query(&sql)
         .bind(&payload)
-        .execute(pool)
+        .execute(&mut **tx)
         .await
         .map_sql_err()?;
     Ok(())
@@ -351,7 +447,7 @@ pub(super) fn normalize_postgres_import_payload(
             }
             normalized.insert(
                 column_name.clone(),
-                normalize_postgres_import_value(column_name, target_column, value)?,
+                normalize_postgres_import_value(table_name, column_name, target_column, value)?,
             );
             continue;
         }
@@ -380,6 +476,7 @@ pub(super) fn normalize_postgres_import_payload(
 }
 
 fn normalize_postgres_import_value(
+    table_name: &str,
     column_name: &str,
     target_column: &PostgresImportColumn,
     value: &Value,
@@ -392,7 +489,10 @@ fn normalize_postgres_import_value(
         return normalize_postgres_boolean_value(column_name, value);
     }
     if is_postgres_timestamp_column(target_column) {
-        return normalize_postgres_timestamp_value(column_name, value);
+        return normalize_postgres_timestamp_value(table_name, column_name, value);
+    }
+    if is_postgres_bytea_column(target_column) {
+        return postgres_bytea_json_value(column_name, value);
     }
     if is_postgres_json_column(target_column) {
         return normalize_postgres_json_value(value);
@@ -450,6 +550,7 @@ fn normalize_postgres_boolean_value(
 }
 
 fn normalize_postgres_timestamp_value(
+    table_name: &str,
     column_name: &str,
     value: &Value,
 ) -> Result<Value, DataLayerError> {
@@ -465,7 +566,7 @@ fn normalize_postgres_timestamp_value(
         )));
     };
 
-    let datetime = if column_name.ends_with("_unix_ms")
+    let datetime = if import_timestamp_uses_millis(table_name, column_name)
         || timestamp >= 100_000_000_000
         || timestamp <= -100_000_000_000
     {
@@ -497,17 +598,17 @@ fn normalize_postgres_json_value(value: &Value) -> Result<Value, DataLayerError>
 }
 
 async fn import_postgres_billing_row(
-    pool: &crate::driver::postgres::PostgresPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     row: &ExportRow,
     column_cache: &mut BTreeMap<String, PostgresImportColumns>,
 ) -> Result<(), DataLayerError> {
     let (export_table_name, payload) = billing_payload_table(row)?;
-    let table_name = postgres_billing_table_name(&export_table_name)?;
-    let target_columns = postgres_import_columns_cached(pool, column_cache, table_name).await?;
+    let (table_name, conflict_column) = postgres_billing_table_name(&export_table_name)?;
+    let target_columns = postgres_import_columns_cached(tx, column_cache, table_name).await?;
     import_postgres_row(
-        pool,
+        tx,
         table_name,
-        &["id"],
+        &[conflict_column],
         ExportDomain::Billing,
         &ExportRow {
             id: row.id.clone(),
@@ -518,27 +619,66 @@ async fn import_postgres_billing_row(
     .await
 }
 
-fn postgres_billing_table_name(table_name: &str) -> Result<&'static str, DataLayerError> {
+async fn import_postgres_auxiliary_row(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    row: &ExportRow,
+    column_cache: &mut BTreeMap<String, PostgresImportColumns>,
+) -> Result<(), DataLayerError> {
+    let (table_name, payload) = domain_payload_table(row, "auxiliary", None)?;
+    let table = auxiliary_table(&table_name)?;
+    let target_table = format!("public.{}", postgres_quote_identifier(table.name)?);
+    let target_columns = postgres_import_columns_cached(tx, column_cache, &target_table).await?;
+    import_postgres_row(
+        tx,
+        &target_table,
+        table.primary_key,
+        ExportDomain::Auxiliary,
+        &ExportRow {
+            id: row.id.clone(),
+            payload,
+        },
+        &target_columns,
+    )
+    .await
+}
+
+fn postgres_billing_table_name(
+    table_name: &str,
+) -> Result<(&'static str, &'static str), DataLayerError> {
     match table_name {
-        "billing_rules" => Ok("public.billing_rules"),
-        "dimension_collectors" => Ok("public.dimension_collectors"),
-        "usage_settlement_snapshots" => Ok("public.usage_settlement_snapshots"),
+        "billing_rules" => Ok(("public.billing_rules", "id")),
+        "dimension_collectors" => Ok(("public.dimension_collectors", "id")),
+        "usage_settlement_snapshots" => Ok(("public.usage_settlement_snapshots", "request_id")),
         other => Err(DataLayerError::InvalidInput(format!(
             "unsupported postgres billing export table '{other}'"
         ))),
     }
 }
 
+#[cfg(test)]
+mod billing_table_tests {
+    use super::postgres_billing_table_name;
+
+    #[test]
+    fn settlement_snapshot_import_uses_request_id_conflict_key() {
+        assert_eq!(
+            postgres_billing_table_name("usage_settlement_snapshots")
+                .expect("settlement snapshot table should be supported"),
+            ("public.usage_settlement_snapshots", "request_id")
+        );
+    }
+}
+
 async fn import_postgres_wallet_row(
-    pool: &crate::driver::postgres::PostgresPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     row: &ExportRow,
     column_cache: &mut BTreeMap<String, PostgresImportColumns>,
 ) -> Result<(), DataLayerError> {
     let (export_table_name, payload) = domain_payload_table(row, "wallet", Some("wallets"))?;
     let (table_name, id_column) = postgres_wallet_table_name(&export_table_name)?;
-    let target_columns = postgres_import_columns_cached(pool, column_cache, table_name).await?;
+    let target_columns = postgres_import_columns_cached(tx, column_cache, table_name).await?;
     import_postgres_row(
-        pool,
+        tx,
         table_name,
         &[id_column],
         ExportDomain::Wallets,

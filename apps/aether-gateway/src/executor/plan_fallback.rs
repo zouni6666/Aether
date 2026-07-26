@@ -3,7 +3,9 @@ use crate::ai_serving::api::{
 };
 use crate::control::GatewayControlDecision;
 use crate::executor::{
-    execute_stream_plan_and_reports, execute_sync_plan_and_reports, LocalExecutionRequestOutcome,
+    execute_stream_plan_and_reports_with_transfer_tracker,
+    execute_sync_plan_and_reports_with_transfer_tracker, LocalExecutionRequestOutcome,
+    ProviderTransferTracker,
 };
 use crate::{AiExecutionPlanPayload, AppState, GatewayError, GatewayFallbackReason};
 
@@ -17,6 +19,7 @@ pub(crate) async fn maybe_execute_sync_via_plan_fallback(
     _plan_kind: &str,
     _bypass_cache_key: String,
     _fallback_reason: GatewayFallbackReason,
+    transfer_tracker: &ProviderTransferTracker,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
     let body_is_empty =
         body_base64.is_none() && body_json.as_object().is_some_and(|value| value.is_empty());
@@ -47,7 +50,7 @@ pub(crate) async fn maybe_execute_sync_via_plan_fallback(
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
 
-    execute_sync_plan_and_reports(
+    execute_sync_plan_and_reports_with_transfer_tracker(
         state,
         parts,
         trace_id,
@@ -58,6 +61,7 @@ pub(crate) async fn maybe_execute_sync_via_plan_fallback(
             report_kind,
             report_context,
         }],
+        transfer_tracker,
     )
     .await
 }
@@ -72,6 +76,7 @@ pub(crate) async fn maybe_execute_stream_via_plan_fallback(
     _plan_kind: &str,
     _bypass_cache_key: String,
     _fallback_reason: GatewayFallbackReason,
+    transfer_tracker: &ProviderTransferTracker,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
     let Some(payload) = maybe_build_stream_plan_payload(
         state,
@@ -99,7 +104,7 @@ pub(crate) async fn maybe_execute_stream_via_plan_fallback(
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
 
-    execute_stream_plan_and_reports(
+    execute_stream_plan_and_reports_with_transfer_tracker(
         state,
         trace_id,
         decision,
@@ -109,6 +114,7 @@ pub(crate) async fn maybe_execute_stream_via_plan_fallback(
             report_kind,
             report_context,
         }],
+        transfer_tracker,
     )
     .await
 }

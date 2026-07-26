@@ -607,6 +607,22 @@ WHERE provider_id IS NOT NULL
             .await?;
             sqlite_execute_if_table(
                 tx,
+                "usage_routing_snapshots",
+                "usage_routing_provider_refs_cleared",
+                r#"
+UPDATE usage_routing_snapshots
+SET selected_provider_id = NULL,
+    selected_endpoint_id = NULL,
+    selected_provider_api_key_id = NULL
+WHERE selected_provider_id IS NOT NULL
+   OR selected_endpoint_id IS NOT NULL
+   OR selected_provider_api_key_id IS NOT NULL
+"#,
+                summary,
+            )
+            .await?;
+            sqlite_execute_if_table(
+                tx,
                 "request_candidates",
                 "request_candidate_provider_refs_cleared",
                 r#"
@@ -695,6 +711,14 @@ WHERE request_count <> 0
    OR total_response_time_ms <> 0
    OR last_used_at IS NOT NULL
 "#,
+                summary,
+            )
+            .await?;
+            sqlite_execute_if_table(
+                tx,
+                "global_models",
+                "global_model_usage_stats_reset",
+                "UPDATE global_models SET usage_count = 0 WHERE usage_count <> 0",
                 summary,
             )
             .await?;
@@ -1249,4 +1273,133 @@ pub(super) fn map_admin_system_stats(
             .map_sql_err()?
             .max(0) as u64,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{purge_sqlite_admin_system_data, AdminSystemPurgeSummary, AdminSystemPurgeTarget};
+
+    #[tokio::test]
+    async fn usage_purge_removes_pending_counters_and_resets_model_usage() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool should connect");
+        crate::lifecycle::migrate::run_sqlite_migrations(&pool)
+            .await
+            .expect("sqlite migrations should run");
+
+        sqlx::raw_sql(
+            r#"
+INSERT INTO users (id, email, username, created_at, updated_at)
+VALUES ('purge-user', 'purge@example.com', 'purge-user', 1, 1);
+INSERT INTO global_models (id, name, usage_count, created_at, updated_at)
+VALUES ('purge-model', 'purge-model', 7, 1, 1);
+INSERT INTO "usage" (
+  request_id, user_id, provider_name, model, status, billing_status,
+  created_at_unix_ms, updated_at_unix_secs
+) VALUES ('purge-request', 'purge-user', 'provider', 'purge-model', 'completed', 'settled', 1, 1);
+INSERT INTO usage_counter_deltas (
+  id, request_id, kind, target_id, request_count_delta, created_at
+) VALUES ('purge-delta', 'purge-request', 'model', 'purge-model', 1, 1);
+INSERT INTO user_model_usage_counts (
+  id, user_id, model, usage_count, created_at, updated_at
+) VALUES ('purge-user-model', 'purge-user', 'purge-model', 7, 1, 1);
+"#,
+        )
+        .execute(&pool)
+        .await
+        .expect("usage purge fixtures should insert");
+
+        let mut tx = pool.begin().await.expect("purge transaction should begin");
+        let mut summary = AdminSystemPurgeSummary::default();
+        purge_sqlite_admin_system_data(&mut tx, AdminSystemPurgeTarget::Usage, &mut summary)
+            .await
+            .expect("usage purge should succeed");
+        tx.commit().await.expect("purge transaction should commit");
+
+        let usage_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM \"usage\"")
+            .fetch_one(&pool)
+            .await
+            .expect("usage count should load");
+        let delta_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM usage_counter_deltas")
+            .fetch_one(&pool)
+            .await
+            .expect("counter delta count should load");
+        let user_model_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM user_model_usage_counts")
+                .fetch_one(&pool)
+                .await
+                .expect("user model count should load");
+        let model_usage_count: i64 =
+            sqlx::query_scalar("SELECT usage_count FROM global_models WHERE id = 'purge-model'")
+                .fetch_one(&pool)
+                .await
+                .expect("global model usage count should load");
+
+        assert_eq!(usage_count, 0);
+        assert_eq!(delta_count, 0);
+        assert_eq!(user_model_count, 0);
+        assert_eq!(model_usage_count, 0);
+        assert_eq!(summary.affected.get("usage_counter_deltas"), Some(&1));
+        assert_eq!(summary.affected.get("user_model_usage_counts"), Some(&1));
+        assert_eq!(
+            summary.affected.get("global_model_usage_stats_reset"),
+            Some(&1)
+        );
+    }
+
+    #[tokio::test]
+    async fn config_purge_clears_canonical_routing_provider_refs() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool should connect");
+        crate::lifecycle::migrate::run_sqlite_migrations(&pool)
+            .await
+            .expect("sqlite migrations should run");
+
+        sqlx::raw_sql(
+            r#"
+INSERT INTO "usage" (
+  request_id, provider_name, model, status, billing_status,
+  created_at_unix_ms, updated_at_unix_secs
+) VALUES ('routing-purge-request', 'provider', 'model', 'completed', 'settled', 1, 1);
+INSERT INTO usage_routing_snapshots (
+  request_id, selected_provider_id, selected_endpoint_id,
+  selected_provider_api_key_id, created_at, updated_at
+) VALUES (
+  'routing-purge-request', 'provider-1', 'endpoint-1', 'key-1', 1, 1
+);
+"#,
+        )
+        .execute(&pool)
+        .await
+        .expect("routing purge fixture should insert");
+
+        let mut tx = pool.begin().await.expect("purge transaction should begin");
+        let mut summary = AdminSystemPurgeSummary::default();
+        purge_sqlite_admin_system_data(&mut tx, AdminSystemPurgeTarget::Config, &mut summary)
+            .await
+            .expect("config purge should succeed");
+        tx.commit().await.expect("purge transaction should commit");
+
+        let refs = sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>)>(
+            r#"
+SELECT selected_provider_id, selected_endpoint_id, selected_provider_api_key_id
+FROM usage_routing_snapshots
+WHERE request_id = 'routing-purge-request'
+"#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("routing refs should load");
+        assert_eq!(refs, (None, None, None));
+        assert_eq!(
+            summary.affected.get("usage_routing_provider_refs_cleared"),
+            Some(&1)
+        );
+    }
 }

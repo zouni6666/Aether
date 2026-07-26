@@ -554,6 +554,259 @@ columns = ["user_id"]
 name = "usage_wallet_id_idx"
 columns = ["wallet_id"]
 
+[table.usage_body_blobs]
+domain = "usage"
+order = 11
+primary_key = ["body_ref"]
+
+[[table.usage_body_blobs.columns]]
+name = "body_ref"
+type = "text"
+length = 160
+
+[[table.usage_body_blobs.columns]]
+name = "request_id"
+type = "text"
+length = 128
+
+[[table.usage_body_blobs.columns]]
+name = "body_field"
+type = "text"
+length = 50
+
+[[table.usage_body_blobs.columns]]
+name = "payload_gzip"
+type = "bytes"
+
+[[table.usage_body_blobs.columns]]
+name = "created_at"
+type = "timestamp"
+
+[[table.usage_body_blobs.columns]]
+name = "updated_at"
+type = "timestamp"
+
+[[table.usage_body_blobs.uniques]]
+name = "usage_body_blobs_request_id_field_key"
+columns = ["request_id", "body_field"]
+
+[[table.usage_body_blobs.indexes]]
+name = "ix_usage_body_blobs_request_id"
+columns = ["request_id"]
+
+[[table.usage_body_blobs.foreign_keys]]
+name = "usage_body_blobs_request_id_fkey"
+columns = ["request_id"]
+references_table = "usage"
+references_columns = ["request_id"]
+on_delete = "cascade"
+
+[table.usage_http_audits]
+domain = "usage"
+order = 12
+primary_key = ["request_id"]
+
+[[table.usage_http_audits.columns]]
+name = "request_id"
+type = "text"
+length = 128
+
+[[table.usage_http_audits.columns]]
+name = "request_headers"
+type = "json"
+nullable = true
+
+[[table.usage_http_audits.columns]]
+name = "provider_request_headers"
+type = "json"
+nullable = true
+
+[[table.usage_http_audits.columns]]
+name = "response_headers"
+type = "json"
+nullable = true
+
+[[table.usage_http_audits.columns]]
+name = "client_response_headers"
+type = "json"
+nullable = true
+
+[[table.usage_http_audits.columns]]
+name = "request_body_ref"
+type = "text"
+length = 160
+nullable = true
+
+[[table.usage_http_audits.columns]]
+name = "provider_request_body_ref"
+type = "text"
+length = 160
+nullable = true
+
+[[table.usage_http_audits.columns]]
+name = "response_body_ref"
+type = "text"
+length = 160
+nullable = true
+
+[[table.usage_http_audits.columns]]
+name = "client_response_body_ref"
+type = "text"
+length = 160
+nullable = true
+
+[[table.usage_http_audits.columns]]
+name = "request_body_state"
+type = "text"
+length = 32
+nullable = true
+
+[[table.usage_http_audits.columns]]
+name = "provider_request_body_state"
+type = "text"
+length = 32
+nullable = true
+
+[[table.usage_http_audits.columns]]
+name = "response_body_state"
+type = "text"
+length = 32
+nullable = true
+
+[[table.usage_http_audits.columns]]
+name = "client_response_body_state"
+type = "text"
+length = 32
+nullable = true
+
+[[table.usage_http_audits.columns]]
+name = "body_capture_mode"
+type = "text"
+length = 32
+default = "none"
+
+[[table.usage_http_audits.columns]]
+name = "created_at"
+type = "timestamp"
+
+[[table.usage_http_audits.columns]]
+name = "updated_at"
+type = "timestamp"
+
+[[table.usage_http_audits.indexes]]
+name = "ix_usage_http_audits_updated_at"
+columns = ["updated_at"]
+
+[[table.usage_http_audits.foreign_keys]]
+name = "usage_http_audits_request_id_fkey"
+columns = ["request_id"]
+references_table = "usage"
+references_columns = ["request_id"]
+on_delete = "cascade"
+
+[table.usage_routing_snapshots]
+domain = "usage"
+order = 13
+primary_key = ["request_id"]
+
+[[table.usage_routing_snapshots.columns]]
+name = "request_id"
+type = "text"
+length = 128
+
+[[table.usage_routing_snapshots.columns]]
+name = "candidate_id"
+type = "text"
+length = 160
+nullable = true
+
+[[table.usage_routing_snapshots.columns]]
+name = "candidate_index"
+type = "int64"
+nullable = true
+
+[[table.usage_routing_snapshots.columns]]
+name = "key_name"
+type = "text"
+length = 255
+nullable = true
+
+[[table.usage_routing_snapshots.columns]]
+name = "planner_kind"
+type = "text"
+length = 120
+nullable = true
+
+[[table.usage_routing_snapshots.columns]]
+name = "route_family"
+type = "text"
+length = 80
+nullable = true
+
+[[table.usage_routing_snapshots.columns]]
+name = "route_kind"
+type = "text"
+length = 80
+nullable = true
+
+[[table.usage_routing_snapshots.columns]]
+name = "execution_path"
+type = "text"
+length = 80
+nullable = true
+
+[[table.usage_routing_snapshots.columns]]
+name = "local_execution_runtime_miss_reason"
+type = "text"
+length = 255
+nullable = true
+
+[[table.usage_routing_snapshots.columns]]
+name = "selected_provider_id"
+type = "text_id"
+length = 100
+nullable = true
+
+[[table.usage_routing_snapshots.columns]]
+name = "selected_endpoint_id"
+type = "text_id"
+length = 100
+nullable = true
+
+[[table.usage_routing_snapshots.columns]]
+name = "selected_provider_api_key_id"
+type = "text_id"
+length = 100
+nullable = true
+
+[[table.usage_routing_snapshots.columns]]
+name = "has_format_conversion"
+type = "bool"
+nullable = true
+
+[[table.usage_routing_snapshots.columns]]
+name = "created_at"
+type = "timestamp"
+
+[[table.usage_routing_snapshots.columns]]
+name = "updated_at"
+type = "timestamp"
+
+[[table.usage_routing_snapshots.indexes]]
+name = "ix_usage_routing_snapshots_route_family_kind"
+columns = ["route_family", "route_kind"]
+
+[[table.usage_routing_snapshots.indexes]]
+name = "ix_usage_routing_snapshots_candidate_id"
+columns = ["candidate_id"]
+
+[[table.usage_routing_snapshots.foreign_keys]]
+name = "usage_routing_snapshots_request_id_fkey"
+columns = ["request_id"]
+references_table = "usage"
+references_columns = ["request_id"]
+on_delete = "cascade"
+
 [table.usage_counter_deltas]
 domain = "usage"
 order = 15
@@ -726,6 +979,147 @@ type = "float64"
 nullable = true
 
 [[table.usage_settlement_snapshots.columns]]
+name = "billing_snapshot_schema_version"
+type = "text"
+length = 20
+nullable = true
+
+[[table.usage_settlement_snapshots.columns]]
+name = "billing_snapshot_status"
+type = "text"
+length = 20
+nullable = true
+
+[[table.usage_settlement_snapshots.columns]]
+name = "rate_multiplier"
+type = "float64"
+nullable = true
+
+[[table.usage_settlement_snapshots.columns]]
+name = "is_free_tier"
+type = "bool"
+nullable = true
+
+[[table.usage_settlement_snapshots.columns]]
+name = "input_price_per_1m"
+type = "float64"
+nullable = true
+
+[[table.usage_settlement_snapshots.columns]]
+name = "output_price_per_1m"
+type = "float64"
+nullable = true
+
+[[table.usage_settlement_snapshots.columns]]
+name = "cache_creation_price_per_1m"
+type = "float64"
+nullable = true
+
+[[table.usage_settlement_snapshots.columns]]
+name = "cache_read_price_per_1m"
+type = "float64"
+nullable = true
+
+[[table.usage_settlement_snapshots.columns]]
+name = "price_per_request"
+type = "float64"
+nullable = true
+
+[[table.usage_settlement_snapshots.columns]]
+name = "settlement_snapshot_schema_version"
+type = "text"
+length = 20
+nullable = true
+
+[[table.usage_settlement_snapshots.columns]]
+name = "settlement_snapshot"
+type = "json"
+nullable = true
+
+[[table.usage_settlement_snapshots.columns]]
+name = "billing_dimensions"
+type = "json"
+nullable = true
+
+[[table.usage_settlement_snapshots.columns]]
+name = "billing_input_tokens"
+type = "int64"
+nullable = true
+
+[[table.usage_settlement_snapshots.columns]]
+name = "billing_effective_input_tokens"
+type = "int64"
+nullable = true
+
+[[table.usage_settlement_snapshots.columns]]
+name = "billing_output_tokens"
+type = "int64"
+nullable = true
+
+[[table.usage_settlement_snapshots.columns]]
+name = "billing_cache_creation_tokens"
+type = "int64"
+nullable = true
+
+[[table.usage_settlement_snapshots.columns]]
+name = "billing_cache_creation_5m_tokens"
+type = "int64"
+nullable = true
+
+[[table.usage_settlement_snapshots.columns]]
+name = "billing_cache_creation_1h_tokens"
+type = "int64"
+nullable = true
+
+[[table.usage_settlement_snapshots.columns]]
+name = "billing_cache_read_tokens"
+type = "int64"
+nullable = true
+
+[[table.usage_settlement_snapshots.columns]]
+name = "billing_total_input_context"
+type = "int64"
+nullable = true
+
+[[table.usage_settlement_snapshots.columns]]
+name = "billing_cache_creation_cost_usd"
+type = "float64"
+nullable = true
+
+[[table.usage_settlement_snapshots.columns]]
+name = "billing_cache_read_cost_usd"
+type = "float64"
+nullable = true
+
+[[table.usage_settlement_snapshots.columns]]
+name = "billing_total_cost_usd"
+type = "float64"
+nullable = true
+
+[[table.usage_settlement_snapshots.columns]]
+name = "billing_actual_total_cost_usd"
+type = "float64"
+nullable = true
+
+[[table.usage_settlement_snapshots.columns]]
+name = "billing_pricing_source"
+type = "text"
+length = 50
+nullable = true
+
+[[table.usage_settlement_snapshots.columns]]
+name = "billing_rule_id"
+type = "text"
+length = 100
+nullable = true
+
+[[table.usage_settlement_snapshots.columns]]
+name = "billing_rule_version"
+type = "text"
+length = 50
+nullable = true
+
+[[table.usage_settlement_snapshots.columns]]
 name = "finalized_at"
 type = "unix_seconds"
 nullable = true
@@ -745,3 +1139,11 @@ columns = ["billing_status"]
 [[table.usage_settlement_snapshots.indexes]]
 name = "usage_settlement_snapshots_wallet_id_idx"
 columns = ["wallet_id"]
+
+[[table.usage_settlement_snapshots.indexes]]
+name = "ix_usage_settlement_snapshots_schema_version"
+columns = ["settlement_snapshot_schema_version"]
+
+[[table.usage_settlement_snapshots.indexes]]
+name = "ix_usage_settlement_snapshots_pricing_source"
+columns = ["billing_pricing_source"]

@@ -205,6 +205,46 @@
           </div>
         </div>
 
+        <!-- 提供商内转移限制（仅编辑模式） -->
+        <div
+          v-if="isEditMode"
+          class="grid grid-cols-2 gap-2 sm:gap-4"
+        >
+          <div class="min-w-0 space-y-1.5">
+            <Label
+              for="max-transfer-count"
+              class="whitespace-nowrap text-xs sm:text-sm"
+            >
+              {{ legacyT('最大转移次数') }}
+            </Label>
+            <Input
+              id="max-transfer-count"
+              :model-value="form.max_transfer_count"
+              type="number"
+              min="0"
+              step="1"
+              @update:model-value="(v) => form.max_transfer_count = parseNumberInput(v, { min: 0 }) ?? 0"
+            />
+          </div>
+          <div class="min-w-0 space-y-1.5">
+            <Label
+              for="max-transfer-timeout-seconds"
+              class="whitespace-nowrap text-xs sm:text-sm"
+            >
+              {{ legacyT('最大转移超时') }}
+              <span class="text-xs text-muted-foreground">{{ legacyT('(秒)') }}</span>
+            </Label>
+            <Input
+              id="max-transfer-timeout-seconds"
+              :model-value="form.max_transfer_timeout_seconds"
+              type="number"
+              min="0"
+              step="1"
+              @update:model-value="(v) => form.max_transfer_timeout_seconds = parseNumberInput(v, { min: 0 }) ?? 0"
+            />
+          </div>
+        </div>
+
         <!-- 月卡配置 -->
         <div
           v-if="form.billing_type === 'monthly_quota'"
@@ -410,6 +450,8 @@ const form = ref({
   concurrent_limit: undefined as number | undefined,
   // 请求配置
   max_retries: undefined as number | undefined,
+  max_transfer_count: 0,
+  max_transfer_timeout_seconds: 0,
   // 超时配置（秒）
   stream_first_byte_timeout: undefined as number | undefined,
   request_timeout: undefined as number | undefined,
@@ -438,6 +480,8 @@ function resetForm() {
     concurrent_limit: undefined,
     // 请求配置
     max_retries: undefined,
+    max_transfer_count: 0,
+    max_transfer_timeout_seconds: 0,
     // 超时配置
     stream_first_byte_timeout: undefined,
     request_timeout: undefined,
@@ -470,6 +514,8 @@ function loadProviderData() {
     concurrent_limit: undefined,
     // 请求配置
     max_retries: props.provider.max_retries ?? undefined,
+    max_transfer_count: props.provider.max_transfer_count ?? 0,
+    max_transfer_timeout_seconds: props.provider.max_transfer_timeout_seconds ?? 0,
     // 超时配置
     stream_first_byte_timeout: props.provider.stream_first_byte_timeout ?? undefined,
     request_timeout: props.provider.request_timeout ?? undefined,
@@ -541,6 +587,8 @@ const handleSubmit = async () => {
       is_active: form.value.is_active,
       // 请求配置
       max_retries: form.value.max_retries ?? undefined,
+      max_transfer_count: form.value.max_transfer_count,
+      max_transfer_timeout_seconds: form.value.max_transfer_timeout_seconds,
       // 超时配置（null 表示清除，使用全局配置）
       stream_first_byte_timeout: form.value.stream_first_byte_timeout ?? null,
       request_timeout: form.value.request_timeout ?? null,

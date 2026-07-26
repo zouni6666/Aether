@@ -99,32 +99,6 @@ impl SqliteVideoTaskRepository {
         .map_sql_err()?;
         row.as_ref().map(map_video_task_row).transpose()
     }
-
-    async fn reload_ids(&self, ids: &[String]) -> Result<Vec<StoredVideoTask>, DataLayerError> {
-        if ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut builder = QueryBuilder::<Sqlite>::new(VIDEO_TASK_COLUMNS);
-        builder.push(" WHERE id IN (");
-        {
-            let mut separated = builder.separated(", ");
-            for id in ids {
-                separated.push_bind(id);
-            }
-        }
-        builder.push(")");
-        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
-        let mut tasks = rows
-            .iter()
-            .map(map_video_task_row)
-            .collect::<Result<Vec<_>, _>>()?;
-        tasks.sort_by(|left, right| {
-            left.next_poll_at_unix_secs
-                .cmp(&right.next_poll_at_unix_secs)
-                .then_with(|| left.updated_at_unix_secs.cmp(&right.updated_at_unix_secs))
-        });
-        Ok(tasks)
-    }
 }
 
 #[async_trait]
@@ -320,20 +294,70 @@ impl VideoTaskWriteRepository for SqliteVideoTaskRepository {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let due = self.list_due(now_unix_secs, limit).await?;
-        let ids = due.iter().map(|task| task.id.clone()).collect::<Vec<_>>();
-        for id in &ids {
-            sqlx::query(
-                "UPDATE video_tasks SET next_poll_at = ?, updated_at = MAX(updated_at, ?) WHERE id = ?",
-            )
-            .bind(u64_to_i64(claim_until_unix_secs, "video task claim_until")?)
-            .bind(u64_to_i64(now_unix_secs, "video task now")?)
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_sql_err()?;
+        let now = u64_to_i64(now_unix_secs, "video task now")?;
+        let claim_until = u64_to_i64(claim_until_unix_secs, "video task claim_until")?;
+        let limit = limit_i64(limit, "due video task claim limit")?;
+        let mut tx = self.pool.begin().await.map_sql_err()?;
+        let claimed_rows = sqlx::query(
+            r#"
+UPDATE video_tasks
+SET next_poll_at = ?,
+    updated_at = MAX(updated_at, ?)
+WHERE id IN (
+  SELECT id
+  FROM video_tasks
+  WHERE status IN ('submitted', 'queued', 'processing')
+    AND next_poll_at IS NOT NULL
+    AND next_poll_at <= ?
+    AND poll_count < max_poll_count
+  ORDER BY next_poll_at ASC, updated_at ASC
+  LIMIT ?
+)
+  AND status IN ('submitted', 'queued', 'processing')
+  AND next_poll_at IS NOT NULL
+  AND next_poll_at <= ?
+  AND poll_count < max_poll_count
+RETURNING id
+"#,
+        )
+        .bind(claim_until)
+        .bind(now)
+        .bind(now)
+        .bind(limit)
+        .bind(now)
+        .fetch_all(&mut *tx)
+        .await
+        .map_sql_err()?;
+        let ids = claimed_rows
+            .iter()
+            .map(|row| row.try_get::<String, _>("id").map_sql_err())
+            .collect::<Result<Vec<_>, _>>()?;
+        if ids.is_empty() {
+            tx.commit().await.map_sql_err()?;
+            return Ok(Vec::new());
         }
-        self.reload_ids(&ids).await
+
+        let mut reload = QueryBuilder::<Sqlite>::new(VIDEO_TASK_COLUMNS);
+        reload.push(" WHERE id IN (");
+        {
+            let mut separated = reload.separated(", ");
+            for id in &ids {
+                separated.push_bind(id);
+            }
+        }
+        reload.push(")");
+        let rows = reload.build().fetch_all(&mut *tx).await.map_sql_err()?;
+        let mut tasks = rows
+            .iter()
+            .map(map_video_task_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        tasks.sort_by(|left, right| {
+            left.next_poll_at_unix_secs
+                .cmp(&right.next_poll_at_unix_secs)
+                .then_with(|| left.updated_at_unix_secs.cmp(&right.updated_at_unix_secs))
+        });
+        tx.commit().await.map_sql_err()?;
+        Ok(tasks)
     }
 }
 
@@ -681,6 +705,8 @@ mod tests {
         UpsertVideoTask, VideoTaskLookupKey, VideoTaskQueryFilter, VideoTaskReadRepository,
         VideoTaskStatus, VideoTaskWriteRepository,
     };
+    use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+    use std::{sync::Arc, time::Duration};
 
     #[tokio::test]
     async fn sqlite_repository_writes_and_reads_video_tasks() {
@@ -775,6 +801,69 @@ mod tests {
             .expect("active task should update")
             .expect("active task should exist");
         assert_eq!(updated.progress_percent, 50);
+    }
+
+    #[tokio::test]
+    async fn sqlite_claim_due_does_not_return_one_task_to_multiple_workers() {
+        const WORKERS: usize = 8;
+
+        let database_path = std::env::temp_dir().join(format!(
+            "aether-sqlite-video-claim-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let options = SqliteConnectOptions::new()
+            .filename(&database_path)
+            .create_if_missing(true)
+            .foreign_keys(true)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
+        let pool = SqlitePoolOptions::new()
+            .max_connections(WORKERS as u32)
+            .connect_with(options)
+            .await
+            .expect("concurrent sqlite pool should connect");
+        run_migrations(&pool)
+            .await
+            .expect("sqlite migrations should run");
+
+        let task_id = "task-concurrent-claim";
+        let repository = SqliteVideoTaskRepository::new(pool.clone());
+        repository
+            .upsert(sample_task(task_id, VideoTaskStatus::Submitted, 100))
+            .await
+            .expect("claimable sqlite task should insert");
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(WORKERS + 1));
+        let mut workers = tokio::task::JoinSet::new();
+        for _ in 0..WORKERS {
+            let worker_repository = repository.clone();
+            let worker_barrier = barrier.clone();
+            workers.spawn(async move {
+                worker_barrier.wait().await;
+                worker_repository.claim_due(100, 130, 1).await
+            });
+        }
+        barrier.wait().await;
+
+        let mut results = Vec::with_capacity(WORKERS);
+        while let Some(result) = workers.join_next().await {
+            results.push(result);
+        }
+        let followup_result = repository.claim_due(100, 130, 1).await;
+        pool.close().await;
+        let _ = std::fs::remove_file(&database_path);
+
+        let mut claimed_ids = Vec::new();
+        for result in results {
+            let claimed = result
+                .expect("sqlite claim worker should join")
+                .expect("sqlite claim should execute");
+            claimed_ids.extend(claimed.into_iter().map(|task| task.id));
+        }
+        assert_eq!(claimed_ids, vec![task_id.to_string()]);
+        assert!(followup_result
+            .expect("follow-up sqlite claim should execute")
+            .is_empty());
     }
 
     fn sample_task(

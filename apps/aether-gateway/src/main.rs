@@ -85,10 +85,17 @@ enum ExportDomainArg {
     Endpoints,
     Models,
     GlobalModels,
+    AuthModules,
+    OAuthProviders,
+    UserOAuthLinks,
+    UserGroups,
+    UserGroupMembers,
+    ProxyNodes,
     SystemConfigs,
     Wallets,
     Usage,
     Billing,
+    Auxiliary,
 }
 
 impl From<ExportDomainArg> for ExportDomain {
@@ -101,10 +108,17 @@ impl From<ExportDomainArg> for ExportDomain {
             ExportDomainArg::Endpoints => ExportDomain::Endpoints,
             ExportDomainArg::Models => ExportDomain::Models,
             ExportDomainArg::GlobalModels => ExportDomain::GlobalModels,
+            ExportDomainArg::AuthModules => ExportDomain::AuthModules,
+            ExportDomainArg::OAuthProviders => ExportDomain::OAuthProviders,
+            ExportDomainArg::UserOAuthLinks => ExportDomain::UserOAuthLinks,
+            ExportDomainArg::UserGroups => ExportDomain::UserGroups,
+            ExportDomainArg::UserGroupMembers => ExportDomain::UserGroupMembers,
+            ExportDomainArg::ProxyNodes => ExportDomain::ProxyNodes,
             ExportDomainArg::SystemConfigs => ExportDomain::SystemConfigs,
             ExportDomainArg::Wallets => ExportDomain::Wallets,
             ExportDomainArg::Usage => ExportDomain::Usage,
             ExportDomainArg::Billing => ExportDomain::Billing,
+            ExportDomainArg::Auxiliary => ExportDomain::Auxiliary,
         }
     }
 }
@@ -586,14 +600,23 @@ impl GatewayDataArgs {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned);
+        let legacy_postgres_url = self
+            .postgres_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+        let generic_database_url = std::env::var("DATABASE_URL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
 
-        match (self.effective_database_driver(), configured_url) {
-            (Some(DatabaseDriver::Sqlite), None) => Some(DEFAULT_SQLITE_DATABASE_URL.to_string()),
-            (_, Some(url)) => Some(url),
-            (None, None) => self.effective_postgres_url(),
-            (Some(DatabaseDriver::Postgres), None) => self.effective_postgres_url(),
-            (Some(DatabaseDriver::Mysql), None) => None,
-        }
+        resolve_database_url(
+            self.effective_database_driver(),
+            configured_url,
+            legacy_postgres_url,
+            generic_database_url,
+        )
     }
 
     fn effective_sql_database_config(&self) -> Option<SqlDatabaseConfig> {
@@ -647,20 +670,6 @@ impl GatewayDataArgs {
                 .unwrap_or(auto.statement_cache_capacity),
             require_ssl: driver != DatabaseDriver::Sqlite && self.postgres_require_ssl,
         }
-    }
-
-    fn effective_postgres_url(&self) -> Option<String> {
-        self.postgres_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned)
-            .or_else(|| {
-                std::env::var("DATABASE_URL")
-                    .ok()
-                    .map(|value| value.trim().to_string())
-                    .filter(|value| !value.is_empty())
-            })
     }
 
     fn effective_redis_url(&self) -> Option<String> {
@@ -722,6 +731,25 @@ impl GatewayDataArgs {
             }
             None => config,
         }
+    }
+}
+
+fn resolve_database_url(
+    driver: Option<DatabaseDriver>,
+    configured_url: Option<String>,
+    legacy_postgres_url: Option<String>,
+    generic_database_url: Option<String>,
+) -> Option<String> {
+    if configured_url.is_some() {
+        return configured_url;
+    }
+
+    match driver {
+        Some(DatabaseDriver::Sqlite) => {
+            generic_database_url.or_else(|| Some(DEFAULT_SQLITE_DATABASE_URL.to_string()))
+        }
+        Some(DatabaseDriver::Mysql) => generic_database_url,
+        Some(DatabaseDriver::Postgres) | None => legacy_postgres_url.or(generic_database_url),
     }
 }
 
@@ -1708,7 +1736,7 @@ fn validate_deployment_topology(
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "AETHER_GATEWAY_VIDEO_TASK_STORE_PATH must be unset when AETHER_GATEWAY_DEPLOYMENT_TOPOLOGY=multi-node; use shared Postgres-backed state instead",
+            "AETHER_GATEWAY_VIDEO_TASK_STORE_PATH must be unset when AETHER_GATEWAY_DEPLOYMENT_TOPOLOGY=multi-node; use shared SQL-backed state instead",
         ));
     }
 
@@ -1764,7 +1792,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     init_service_runtime(args.runtime_config()?)?;
     let sql_database_config = args.data.effective_sql_database_config();
-    let data_postgres_url = args.data.effective_postgres_url();
     let data_redis_url = args.data.effective_redis_url();
     let runtime_backend =
         args.effective_runtime_backend(sql_database_config.as_ref(), data_redis_url.as_deref());
@@ -1932,7 +1959,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .as_ref()
             .map(|database| database.pool.max_connections)
             .unwrap_or_default(),
-        data_postgres_configured = data_postgres_url.is_some(),
+        data_postgres_configured = sql_database_config
+            .as_ref()
+            .is_some_and(|database| database.driver == DatabaseDriver::Postgres),
         runtime_redis_configured = matches!(runtime_backend, RuntimeBackendArg::Redis),
         data_redis_url_supplied = data_redis_url.is_some(),
         data_has_encryption_key = data_config.encryption_key().is_some(),
@@ -1989,7 +2018,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "usage persistence requires a configured Postgres data backend; set AETHER_GATEWAY_DATA_POSTGRES_URL before starting aether-gateway",
+            "usage persistence requires a configured shared SQL data backend; set AETHER_DATABASE_DRIVER and AETHER_DATABASE_URL before starting aether-gateway",
         )
         .into());
     }
@@ -2752,6 +2781,42 @@ mod tests {
     }
 
     #[test]
+    fn explicit_mysql_driver_accepts_generic_database_url() {
+        let url = super::resolve_database_url(
+            Some(DatabaseDriver::Mysql),
+            None,
+            Some("postgres://legacy/aether".to_string()),
+            Some("mysql://root:root@localhost/aether".to_string()),
+        );
+
+        assert_eq!(url.as_deref(), Some("mysql://root:root@localhost/aether"));
+    }
+
+    #[test]
+    fn explicit_sqlite_driver_accepts_generic_database_url() {
+        let url = super::resolve_database_url(
+            Some(DatabaseDriver::Sqlite),
+            None,
+            Some("postgres://legacy/aether".to_string()),
+            Some("sqlite:///opt/aether/data/aether.db".to_string()),
+        );
+
+        assert_eq!(url.as_deref(), Some("sqlite:///opt/aether/data/aether.db"));
+    }
+
+    #[test]
+    fn postgres_legacy_url_keeps_precedence_over_generic_database_url() {
+        let url = super::resolve_database_url(
+            Some(DatabaseDriver::Postgres),
+            None,
+            Some("postgres://legacy/aether".to_string()),
+            Some("postgres://generic/aether".to_string()),
+        );
+
+        assert_eq!(url.as_deref(), Some("postgres://legacy/aether"));
+    }
+
+    #[test]
     fn gateway_data_pool_auto_sizes_server_databases_from_runtime_cpu() {
         let mut args = test_args();
         args.data.database_driver = Some(DatabaseDriverArg::Postgres);
@@ -3276,6 +3341,23 @@ mod tests {
             RuntimeBackendArg::Memory,
         )
         .expect("single-node sqlite memory runtime should be accepted");
+    }
+
+    #[test]
+    fn multi_node_accepts_mysql_database_backend() {
+        let mut args = test_args();
+        args.deployment_topology = DeploymentTopologyArg::MultiNode;
+        args.node_role = NodeRoleArg::Frontdoor;
+        args.video_task_store_path = None;
+        let database = test_database(DatabaseDriver::Mysql, 8);
+
+        super::validate_deployment_topology(
+            &args,
+            Some(&database),
+            Some("redis://127.0.0.1/0"),
+            RuntimeBackendArg::Redis,
+        )
+        .expect("multi-node mysql with shared redis should be accepted");
     }
 
     #[test]

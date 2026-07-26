@@ -453,13 +453,171 @@ fn create_table_names(sql: &str) -> BTreeSet<String> {
             let trimmed = line.trim_start();
             let table_part = trimmed
                 .strip_prefix("CREATE TABLE IF NOT EXISTS public.")
-                .or_else(|| trimmed.strip_prefix("CREATE TABLE IF NOT EXISTS "))?;
+                .or_else(|| trimmed.strip_prefix("CREATE TABLE IF NOT EXISTS "))
+                .or_else(|| trimmed.strip_prefix("CREATE TABLE public."))
+                .or_else(|| trimmed.strip_prefix("CREATE TABLE "))?;
             let table_name = table_part
                 .split(|ch: char| ch.is_ascii_whitespace() || ch == '(')
                 .next()?;
-            Some(table_name.trim_matches('"').to_string())
+            Some(
+                table_name
+                    .trim_matches(|ch| ch == '"' || ch == '`')
+                    .to_string(),
+            )
         })
         .collect()
+}
+
+#[test]
+fn portable_driver_migrations_create_the_postgres_table_set() {
+    let mut postgres_tables = POSTGRES_MIGRATOR
+        .iter()
+        .filter(|migration| migration.migration_type.is_up_migration())
+        .flat_map(|migration| create_table_names(migration.sql.as_ref()))
+        .collect::<BTreeSet<_>>();
+    postgres_tables.remove("schema_backfills");
+
+    let mysql_tables = super::mysql::MIGRATOR
+        .iter()
+        .filter(|migration| migration.migration_type.is_up_migration())
+        .flat_map(|migration| create_table_names(migration.sql.as_ref()))
+        .collect::<BTreeSet<_>>();
+    let sqlite_tables = super::sqlite::MIGRATOR
+        .iter()
+        .filter(|migration| migration.migration_type.is_up_migration())
+        .flat_map(|migration| create_table_names(migration.sql.as_ref()))
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(mysql_tables, postgres_tables, "MySQL table set drifted");
+    assert_eq!(sqlite_tables, postgres_tables, "SQLite table set drifted");
+}
+
+#[tokio::test]
+async fn migrated_sqlite_columns_match_the_generated_logical_schema() {
+    const GENERATED_SQLITE_SCHEMA: &[&str] = &[
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/schema/generated/sqlite/baseline/001_identity.sql"
+        )),
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/schema/generated/sqlite/baseline/002_provider_catalog.sql"
+        )),
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/schema/generated/sqlite/baseline/003_auth_config.sql"
+        )),
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/schema/generated/sqlite/baseline/004_proxy_nodes.sql"
+        )),
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/schema/generated/sqlite/baseline/005_wallet_billing.sql"
+        )),
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/schema/generated/sqlite/baseline/006_usage.sql"
+        )),
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/schema/generated/sqlite/baseline/007_stats.sql"
+        )),
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/schema/generated/sqlite/baseline/008_background_tasks.sql"
+        )),
+    ];
+
+    let migrated = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("migrated sqlite pool should connect");
+    super::run_sqlite_migrations(&migrated)
+        .await
+        .expect("sqlite migrations should run");
+
+    let generated = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("generated sqlite pool should connect");
+    for source in GENERATED_SQLITE_SCHEMA {
+        sqlx::raw_sql(source)
+            .execute(&generated)
+            .await
+            .expect("generated sqlite schema fragment should run");
+    }
+
+    let migrated_tables = sqlite_portable_table_names(&migrated).await;
+    let generated_tables = sqlite_portable_table_names(&generated).await;
+    assert_eq!(migrated_tables, generated_tables);
+
+    for table in generated_tables {
+        let migrated_columns = sqlite_table_column_names(&migrated, &table).await;
+        let generated_columns = sqlite_table_column_names(&generated, &table).await;
+        assert_eq!(
+            migrated_columns, generated_columns,
+            "SQLite migration columns drifted for table {table}"
+        );
+    }
+
+    let migrated_indexes = sqlite_named_index_names(&migrated).await;
+    let generated_indexes = sqlite_named_index_names(&generated).await;
+    let missing_indexes = generated_indexes
+        .difference(&migrated_indexes)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert!(
+        missing_indexes.is_empty(),
+        "SQLite migrations are missing generated logical indexes: {missing_indexes:?}"
+    );
+}
+
+async fn sqlite_portable_table_names(pool: &SqlitePool) -> BTreeSet<String> {
+    query_scalar::<_, String>(
+        r#"
+SELECT name
+FROM sqlite_master
+WHERE type = 'table'
+  AND name NOT LIKE 'sqlite_%'
+  AND name NOT IN ('_sqlx_migrations', 'schema_backfills')
+ORDER BY name
+"#,
+    )
+    .fetch_all(pool)
+    .await
+    .expect("sqlite table names should load")
+    .into_iter()
+    .collect()
+}
+
+async fn sqlite_table_column_names(pool: &SqlitePool, table: &str) -> BTreeSet<String> {
+    query_scalar::<_, String>("SELECT name FROM pragma_table_info(?) ORDER BY cid")
+        .bind(table)
+        .fetch_all(pool)
+        .await
+        .expect("sqlite table columns should load")
+        .into_iter()
+        .collect()
+}
+
+async fn sqlite_named_index_names(pool: &SqlitePool) -> BTreeSet<String> {
+    query_scalar::<_, String>(
+        r#"
+SELECT name
+FROM sqlite_master
+WHERE type = 'index'
+  AND sql IS NOT NULL
+ORDER BY name
+"#,
+    )
+    .fetch_all(pool)
+    .await
+    .expect("sqlite named indexes should load")
+    .into_iter()
+    .collect()
 }
 
 #[test]
@@ -862,6 +1020,9 @@ fn mysql_and_sqlite_migrations_include_enabled_incrementals() {
             20260527000000,
             20260528000000,
             20260528020000,
+            20260725010000,
+            20260725020000,
+            20260725030000,
         ]
     );
     assert_eq!(
@@ -889,8 +1050,302 @@ fn mysql_and_sqlite_migrations_include_enabled_incrementals() {
             20260527000000,
             20260528000000,
             20260528020000,
+            20260725000000,
+            20260725010000,
+            20260725020000,
+            20260725030000,
+            20260725040000,
         ]
     );
+}
+
+#[tokio::test]
+async fn sqlite_imported_timestamp_migration_normalizes_text_storage() {
+    let pool = SqlitePool::connect("sqlite::memory:")
+        .await
+        .expect("sqlite pool should connect");
+    super::run_sqlite_migrations(&pool)
+        .await
+        .expect("sqlite migrations should run");
+
+    query(
+        r#"
+INSERT INTO global_models (id, name, created_at, updated_at)
+VALUES
+  ('timestamp-rfc3339', 'timestamp-rfc3339', '1970-01-01T00:00:01Z', '1970-01-01T08:00:02+08:00'),
+  ('timestamp-sqlalchemy', 'timestamp-sqlalchemy', '1970-01-01 00:00:03.123456', '1970-01-01 00:00:04.987654'),
+  ('timestamp-integer', 'timestamp-integer', 5, 6);
+"#,
+    )
+    .execute(&pool)
+    .await
+    .expect("timestamp fixtures should insert");
+    query(
+        r#"
+INSERT INTO "usage" (request_id, created_at_unix_ms, updated_at_unix_secs)
+VALUES ('timestamp-usage', '1970-01-01T00:00:01.234900Z', '1970-01-01T00:00:02Z');
+"#,
+    )
+    .execute(&pool)
+    .await
+    .expect("usage timestamp fixture should insert");
+
+    let migration = super::sqlite::MIGRATOR
+        .iter()
+        .find(|migration| migration.version == 20260725000000)
+        .expect("timestamp normalization migration should be embedded");
+    sqlx::raw_sql(migration.sql.as_ref())
+        .execute(&pool)
+        .await
+        .expect("timestamp normalization migration should apply");
+
+    let rows = sqlx::query_as::<_, (String, i64, i64, String, String)>(
+        r#"
+SELECT id, created_at, updated_at, typeof(created_at), typeof(updated_at)
+FROM global_models
+WHERE id LIKE 'timestamp-%'
+ORDER BY id
+"#,
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("normalized timestamps should decode as integers");
+
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "timestamp-integer".to_string(),
+                5,
+                6,
+                "integer".to_string(),
+                "integer".to_string(),
+            ),
+            (
+                "timestamp-rfc3339".to_string(),
+                1,
+                2,
+                "integer".to_string(),
+                "integer".to_string(),
+            ),
+            (
+                "timestamp-sqlalchemy".to_string(),
+                3,
+                4,
+                "integer".to_string(),
+                "integer".to_string(),
+            ),
+        ]
+    );
+
+    let usage_timestamps = sqlx::query_as::<_, (i64, i64, String, String)>(
+        r#"
+SELECT created_at_unix_ms, updated_at_unix_secs,
+       typeof(created_at_unix_ms), typeof(updated_at_unix_secs)
+FROM "usage"
+WHERE request_id = 'timestamp-usage'
+"#,
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("normalized usage timestamps should decode as integers");
+    assert_eq!(
+        usage_timestamps,
+        (1, 2, "integer".to_string(), "integer".to_string())
+    );
+}
+
+#[tokio::test]
+async fn sqlite_imported_timestamp_migration_rejects_non_integer_storage() {
+    let pool = SqlitePool::connect("sqlite::memory:")
+        .await
+        .expect("sqlite pool should connect");
+    super::run_sqlite_migrations(&pool)
+        .await
+        .expect("sqlite migrations should run");
+    query(
+        r#"
+INSERT INTO global_models (id, name, created_at, updated_at)
+VALUES ('timestamp-invalid', 'timestamp-invalid', 1.5, 1);
+"#,
+    )
+    .execute(&pool)
+    .await
+    .expect("non-integer timestamp fixture should insert");
+
+    let migration = super::sqlite::MIGRATOR
+        .iter()
+        .find(|migration| migration.version == 20260725000000)
+        .expect("timestamp normalization migration should be embedded");
+    let err = sqlx::raw_sql(migration.sql.as_ref())
+        .execute(&pool)
+        .await
+        .expect_err("non-integer timestamp should fail the migration");
+    assert!(err
+        .to_string()
+        .contains("imported_timestamp_storage_must_be_integer"));
+}
+
+#[tokio::test]
+async fn sqlite_remaining_timestamp_migration_repairs_other_repository_domains() {
+    let pool = SqlitePool::connect("sqlite::memory:")
+        .await
+        .expect("sqlite pool should connect");
+    super::run_sqlite_migrations(&pool)
+        .await
+        .expect("sqlite migrations should run");
+
+    query(
+        r#"
+INSERT INTO users (id, email, username, auth_source, created_at, updated_at)
+VALUES ('timestamp-user', 'timestamp@example.com', 'timestamp-user', 'local', 1, 1);
+
+INSERT INTO audit_logs (id, event_type, description, created_at)
+VALUES ('timestamp-audit', 'test', 'test', '1970-01-01T00:00:01Z');
+
+INSERT INTO request_candidates (
+  id, request_id, candidate_index, status, created_at, started_at, finished_at
+) VALUES (
+  'timestamp-candidate', 'timestamp-request', 0, 'success',
+  '1970-01-01T00:00:02Z', '1970-01-01T00:00:03Z', '1970-01-01T00:00:04Z'
+);
+
+INSERT INTO stats_daily (id, date, created_at, updated_at)
+VALUES (
+  'timestamp-stats', '1970-01-02',
+  '1970-01-01T00:00:05Z', '1970-01-01T00:00:06Z'
+);
+
+INSERT INTO user_sessions (
+  id, user_id, client_device_id, refresh_token_hash,
+  last_seen_at, expires_at, created_at, updated_at
+) VALUES (
+  'timestamp-session', 'timestamp-user', 'device', 'hash',
+  '1970-01-01T00:00:07Z', '1970-01-01T00:00:08Z',
+  '1970-01-01T00:00:09Z', '1970-01-01T00:00:10Z'
+);
+"#,
+    )
+    .execute(&pool)
+    .await
+    .expect("remaining timestamp fixtures should insert");
+
+    let migration = super::sqlite::MIGRATOR
+        .iter()
+        .find(|migration| migration.version == 20260725040000)
+        .expect("remaining timestamp migration should be embedded");
+    sqlx::raw_sql(migration.sql.as_ref())
+        .execute(&pool)
+        .await
+        .expect("remaining timestamp migration should apply");
+
+    let audit = sqlx::query_as::<_, (i64, String)>(
+        "SELECT created_at, typeof(created_at) FROM audit_logs WHERE id = 'timestamp-audit'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("normalized audit timestamp should load");
+    assert_eq!(audit, (1, "integer".to_string()));
+
+    let candidate = sqlx::query_as::<_, (i64, i64, i64, String, String, String)>(
+        r#"
+SELECT created_at, started_at, finished_at,
+       typeof(created_at), typeof(started_at), typeof(finished_at)
+FROM request_candidates
+WHERE id = 'timestamp-candidate'
+"#,
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("normalized candidate timestamps should load");
+    assert_eq!(
+        candidate,
+        (
+            2,
+            3,
+            4,
+            "integer".to_string(),
+            "integer".to_string(),
+            "integer".to_string(),
+        )
+    );
+
+    let stats = sqlx::query_as::<_, (i64, i64, i64, String, String, String)>(
+        r#"
+SELECT date, created_at, updated_at,
+       typeof(date), typeof(created_at), typeof(updated_at)
+FROM stats_daily
+WHERE id = 'timestamp-stats'
+"#,
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("normalized stats timestamps should load");
+    assert_eq!(
+        stats,
+        (
+            86_400,
+            5,
+            6,
+            "integer".to_string(),
+            "integer".to_string(),
+            "integer".to_string(),
+        )
+    );
+
+    let session = sqlx::query_as::<_, (i64, i64, i64, i64, String, String, String, String)>(
+        r#"
+SELECT last_seen_at, expires_at, created_at, updated_at,
+       typeof(last_seen_at), typeof(expires_at), typeof(created_at), typeof(updated_at)
+FROM user_sessions
+WHERE id = 'timestamp-session'
+"#,
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("normalized session timestamps should load");
+    assert_eq!(
+        session,
+        (
+            7,
+            8,
+            9,
+            10,
+            "integer".to_string(),
+            "integer".to_string(),
+            "integer".to_string(),
+            "integer".to_string(),
+        )
+    );
+}
+
+#[tokio::test]
+async fn sqlite_remaining_timestamp_migration_rejects_invalid_storage() {
+    let pool = SqlitePool::connect("sqlite::memory:")
+        .await
+        .expect("sqlite pool should connect");
+    super::run_sqlite_migrations(&pool)
+        .await
+        .expect("sqlite migrations should run");
+    query(
+        r#"
+INSERT INTO audit_logs (id, event_type, description, created_at)
+VALUES ('timestamp-invalid-audit', 'test', 'test', 1.5);
+"#,
+    )
+    .execute(&pool)
+    .await
+    .expect("invalid timestamp fixture should insert");
+
+    let migration = super::sqlite::MIGRATOR
+        .iter()
+        .find(|migration| migration.version == 20260725040000)
+        .expect("remaining timestamp migration should be embedded");
+    let err = sqlx::raw_sql(migration.sql.as_ref())
+        .execute(&pool)
+        .await
+        .expect_err("invalid remaining timestamp should fail the migration");
+    assert!(err.to_string().contains("invalid_count = 0"));
 }
 
 #[tokio::test]

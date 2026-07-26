@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use async_trait::async_trait;
-use sqlx::{mysql::MySqlRow, MySql, QueryBuilder, Row};
+use sqlx::{mysql::MySqlRow, MySql, MySqlConnection, QueryBuilder, Row};
 
 use aether_data_contracts::repository::candidates::{
     request_candidate_lifecycle_would_regress, PublicHealthStatusCount, PublicHealthTimelineBucket,
@@ -50,24 +50,6 @@ pub struct MysqlRequestCandidateRepository {
 impl MysqlRequestCandidateRepository {
     pub fn new(pool: MysqlPool) -> Self {
         Self { pool }
-    }
-
-    async fn find_by_unique(
-        &self,
-        request_id: &str,
-        candidate_index: u32,
-        retry_index: u32,
-    ) -> Result<Option<StoredRequestCandidate>, DataLayerError> {
-        let row = sqlx::query(&format!(
-            "{CANDIDATE_COLUMNS} WHERE request_id = ? AND candidate_index = ? AND retry_index = ? LIMIT 1"
-        ))
-        .bind(request_id)
-        .bind(to_i32(candidate_index)?)
-        .bind(to_i32(retry_index)?)
-        .fetch_optional(&self.pool)
-        .await
-        .map_sql_err()?;
-        row.as_ref().map(map_candidate_row).transpose()
     }
 }
 
@@ -237,16 +219,50 @@ impl RequestCandidateWriteRepository for MysqlRequestCandidateRepository {
         candidate: UpsertRequestCandidateRecord,
     ) -> Result<StoredRequestCandidate, DataLayerError> {
         candidate.validate()?;
-        let existing = self
-            .find_by_unique(
-                &candidate.request_id,
-                candidate.candidate_index,
-                candidate.retry_index,
-            )
-            .await?;
-        let merged = merge_candidate(candidate, existing)?;
-        upsert_merged_candidate(&self.pool, &merged).await?;
-        Ok(merged)
+        let mut tx = self.pool.begin().await.map_sql_err()?;
+        match upsert_candidate_in_transaction(&mut tx, candidate).await {
+            Ok(candidate) => {
+                tx.commit().await.map_sql_err()?;
+                Ok(candidate)
+            }
+            Err(err) => {
+                tx.rollback().await.map_sql_err()?;
+                Err(err)
+            }
+        }
+    }
+
+    async fn upsert_many(
+        &self,
+        candidates: Vec<UpsertRequestCandidateRecord>,
+    ) -> Result<usize, DataLayerError> {
+        if candidates.is_empty() {
+            return Ok(0);
+        }
+        for candidate in &candidates {
+            candidate.validate()?;
+        }
+
+        let mut tx = self.pool.begin().await.map_sql_err()?;
+        let result: Result<usize, DataLayerError> = async {
+            let mut persisted = 0usize;
+            for candidate in candidates {
+                upsert_candidate_in_transaction(&mut tx, candidate).await?;
+                persisted = persisted.saturating_add(1);
+            }
+            Ok(persisted)
+        }
+        .await;
+        match result {
+            Ok(persisted) => {
+                tx.commit().await.map_sql_err()?;
+                Ok(persisted)
+            }
+            Err(err) => {
+                tx.rollback().await.map_sql_err()?;
+                Err(err)
+            }
+        }
     }
 
     async fn delete_created_before(
@@ -282,8 +298,90 @@ WHERE id IN (
     }
 }
 
+async fn upsert_candidate_in_transaction(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    candidate: UpsertRequestCandidateRecord,
+) -> Result<StoredRequestCandidate, DataLayerError> {
+    // Write first so both existing rows and previously empty unique keys are locked
+    // before the Rust merge reads their latest committed state.
+    let insert_candidate = merge_candidate(candidate.clone(), None)?;
+    insert_candidate_if_absent(tx, &insert_candidate).await?;
+    let existing = find_by_unique_for_update(
+        tx,
+        &candidate.request_id,
+        candidate.candidate_index,
+        candidate.retry_index,
+    )
+    .await?
+    .ok_or_else(|| {
+        DataLayerError::UnexpectedValue(
+            "request candidate row was not locked after insert-if-absent".to_string(),
+        )
+    })?;
+    let merged = merge_candidate(candidate, Some(existing))?;
+    upsert_merged_candidate(tx, &merged).await?;
+    find_by_unique_for_update(
+        tx,
+        &merged.request_id,
+        merged.candidate_index,
+        merged.retry_index,
+    )
+    .await?
+    .ok_or_else(|| {
+        DataLayerError::UnexpectedValue(
+            "request candidate row disappeared after atomic upsert".to_string(),
+        )
+    })
+}
+
+async fn insert_candidate_if_absent(
+    connection: &mut MySqlConnection,
+    candidate: &StoredRequestCandidate,
+) -> Result<(), DataLayerError> {
+    sqlx::query(
+        r#"
+INSERT INTO request_candidates (
+  id, request_id, candidate_index, retry_index, status, created_at
+)
+VALUES (?, ?, ?, ?, ?, ?)
+ON DUPLICATE KEY UPDATE id = id
+"#,
+    )
+    .bind(&candidate.id)
+    .bind(&candidate.request_id)
+    .bind(to_i32(candidate.candidate_index)?)
+    .bind(to_i32(candidate.retry_index)?)
+    .bind(status_to_database(candidate.status))
+    .bind(u64_to_i64(
+        candidate.created_at_unix_ms,
+        "request candidate created_at",
+    )?)
+    .execute(connection)
+    .await
+    .map_sql_err()?;
+    Ok(())
+}
+
+async fn find_by_unique_for_update(
+    connection: &mut MySqlConnection,
+    request_id: &str,
+    candidate_index: u32,
+    retry_index: u32,
+) -> Result<Option<StoredRequestCandidate>, DataLayerError> {
+    let row = sqlx::query(&format!(
+        "{CANDIDATE_COLUMNS} WHERE request_id = ? AND candidate_index = ? AND retry_index = ? LIMIT 1 FOR UPDATE"
+    ))
+    .bind(request_id)
+    .bind(to_i32(candidate_index)?)
+    .bind(to_i32(retry_index)?)
+    .fetch_optional(connection)
+    .await
+    .map_sql_err()?;
+    row.as_ref().map(map_candidate_row).transpose()
+}
+
 async fn upsert_merged_candidate(
-    pool: &MysqlPool,
+    connection: &mut MySqlConnection,
     candidate: &StoredRequestCandidate,
 ) -> Result<(), DataLayerError> {
     sqlx::query(
@@ -405,7 +503,7 @@ ON DUPLICATE KEY UPDATE
         candidate.finished_at_unix_ms,
         "request candidate finished_at",
     )?)
-    .execute(pool)
+    .execute(connection)
     .await
     .map_sql_err()?;
     Ok(())
@@ -776,9 +874,10 @@ mod tests {
     use super::MysqlRequestCandidateRepository;
     use crate::run_migrations;
     use aether_data_contracts::repository::candidates::{
-        RequestCandidateReadRepository, RequestCandidateStatus, StoredRequestCandidate,
-        UpsertRequestCandidateRecord,
+        RequestCandidateReadRepository, RequestCandidateStatus, RequestCandidateWriteRepository,
+        StoredRequestCandidate, UpsertRequestCandidateRecord,
     };
+    use serde_json::json;
 
     #[tokio::test]
     async fn repository_builds_from_lazy_pool() {
@@ -792,7 +891,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mysql_atomic_conflict_keeps_candidate_lifecycle_monotonic_when_configured() {
+    async fn mysql_concurrent_and_batch_upserts_are_atomic_when_configured() {
         let Some(database_url) = std::env::var("AETHER_TEST_MYSQL_URL")
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -803,7 +902,7 @@ mod tests {
             return;
         };
         let pool = sqlx::mysql::MySqlPoolOptions::new()
-            .max_connections(2)
+            .max_connections(12)
             .connect(&database_url)
             .await
             .expect("mysql test pool should connect");
@@ -811,103 +910,172 @@ mod tests {
             .await
             .expect("mysql migrations should run");
         let repository = MysqlRequestCandidateRepository::new(pool.clone());
-        let request_id = format!("candidate-lifecycle-{}", uuid::Uuid::new_v4());
-
-        let terminal = stored_candidate(
+        let request_id = format!("candidate-concurrency-{}", uuid::Uuid::new_v4());
+        let mut initial = sample_upsert(
             &request_id,
-            "terminal",
-            0,
-            RequestCandidateStatus::Success,
-            Some(123),
-            Some(2_000_002),
-        );
-        super::upsert_merged_candidate(&pool, &terminal)
-            .await
-            .expect("terminal candidate should insert");
-        let stale_streaming = stored_candidate(
-            &request_id,
-            "stale-streaming",
-            0,
-            RequestCandidateStatus::Streaming,
-            Some(9_999),
-            Some(9_999_999),
-        );
-        super::upsert_merged_candidate(&pool, &stale_streaming)
-            .await
-            .expect("stale streaming conflict should execute");
-
-        let streaming = stored_candidate(
-            &request_id,
-            "streaming",
-            1,
-            RequestCandidateStatus::Streaming,
-            None,
-            None,
-        );
-        super::upsert_merged_candidate(&pool, &streaming)
-            .await
-            .expect("streaming candidate should insert");
-        let stale_pending = stored_candidate(
-            &request_id,
-            "stale-pending",
-            1,
+            "initial",
             RequestCandidateStatus::Pending,
-            None,
-            None,
+            Some(json!({"initial": true})),
+            3_000_000,
         );
-        super::upsert_merged_candidate(&pool, &stale_pending)
+        initial.is_cached = Some(false);
+        repository
+            .upsert(initial)
             .await
-            .expect("stale pending conflict should execute");
+            .expect("initial candidate should insert");
 
-        let pending = stored_candidate(
-            &request_id,
-            "pending",
-            2,
-            RequestCandidateStatus::Pending,
-            Some(321),
-            None,
-        );
-        super::upsert_merged_candidate(&pool, &pending)
-            .await
-            .expect("pending candidate should insert");
-        let stale_available = stored_candidate(
-            &request_id,
-            "stale-available",
-            2,
-            RequestCandidateStatus::Available,
-            Some(9_999),
-            Some(9_999_999),
-        );
-        super::upsert_merged_candidate(&pool, &stale_available)
-            .await
-            .expect("stale available conflict should execute");
+        const WRITERS: usize = 8;
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(WRITERS));
+        let mut tasks = Vec::new();
+        for writer in 0..WRITERS {
+            let repository = repository.clone();
+            let request_id = request_id.clone();
+            let barrier = barrier.clone();
+            tasks.push(tokio::spawn(async move {
+                let status = if writer == 0 {
+                    RequestCandidateStatus::Success
+                } else {
+                    RequestCandidateStatus::Streaming
+                };
+                let mut extra_data = serde_json::Map::new();
+                extra_data.insert(format!("writer_{writer}"), json!(writer));
+                let mut candidate = sample_upsert(
+                    &request_id,
+                    format!("writer-{writer}").as_str(),
+                    status,
+                    Some(serde_json::Value::Object(extra_data)),
+                    3_100_000 + u64::try_from(writer).expect("writer index should fit") * 10,
+                );
+                if writer != 0 {
+                    candidate.latency_ms = Some(9_000 + writer as u64);
+                    candidate.finished_at_unix_ms = Some(9_000_000 + writer as u64);
+                }
+                barrier.wait().await;
+                repository.upsert(candidate).await
+            }));
+        }
+        for task in tasks {
+            task.await
+                .expect("candidate writer should join")
+                .expect("candidate writer should persist");
+        }
 
         let candidates = repository
             .list_by_request_id(&request_id)
             .await
             .expect("mysql request candidates should load");
-        let terminal = candidates
-            .iter()
-            .find(|candidate| candidate.candidate_index == 0)
-            .expect("terminal candidate should remain");
-        assert_eq!(terminal.status, RequestCandidateStatus::Success);
-        assert_eq!(terminal.latency_ms, Some(123));
-        assert_eq!(terminal.finished_at_unix_ms, Some(2_000_002));
-        let streaming = candidates
-            .iter()
-            .find(|candidate| candidate.candidate_index == 1)
-            .expect("streaming candidate should remain");
-        assert_eq!(streaming.status, RequestCandidateStatus::Streaming);
-        let pending = candidates
-            .iter()
-            .find(|candidate| candidate.candidate_index == 2)
-            .expect("pending candidate should remain");
-        assert_eq!(pending.status, RequestCandidateStatus::Pending);
-        assert_eq!(pending.latency_ms, Some(321));
-        assert_eq!(pending.finished_at_unix_ms, None);
+        assert_eq!(candidates.len(), 1);
+        let candidate = &candidates[0];
+        assert_eq!(candidate.id, "initial");
+        assert_eq!(candidate.status, RequestCandidateStatus::Success);
+        assert_eq!(candidate.latency_ms, Some(123));
+        assert_eq!(candidate.finished_at_unix_ms, Some(3_100_002));
+        let extra_data = candidate
+            .extra_data
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .expect("merged extra data should be an object");
+        assert_eq!(extra_data.get("initial"), Some(&json!(true)));
+        for writer in 0..WRITERS {
+            assert_eq!(
+                extra_data.get(format!("writer_{writer}").as_str()),
+                Some(&json!(writer))
+            );
+        }
 
-        sqlx::query("DELETE FROM request_candidates WHERE request_id = ?")
+        let batch_request_id = format!("candidate-batch-{}", uuid::Uuid::new_v4());
+        let mut pending = sample_upsert(
+            &batch_request_id,
+            "batch-first",
+            RequestCandidateStatus::Pending,
+            Some(json!({"pending": true})),
+            4_000_000,
+        );
+        pending.is_cached = Some(false);
+        let mut streaming = sample_upsert(
+            &batch_request_id,
+            "batch-second",
+            RequestCandidateStatus::Streaming,
+            Some(json!({"streaming": true})),
+            4_000_100,
+        );
+        streaming.is_cached = None;
+        let mut success = sample_upsert(
+            &batch_request_id,
+            "batch-third",
+            RequestCandidateStatus::Success,
+            Some(json!({"success": true})),
+            4_000_200,
+        );
+        success.is_cached = Some(true);
+        let mut late_pending = sample_upsert(
+            &batch_request_id,
+            "batch-fourth",
+            RequestCandidateStatus::Pending,
+            Some(json!({"late": true})),
+            4_000_300,
+        );
+        late_pending.is_cached = None;
+        late_pending.latency_ms = Some(9_999);
+        late_pending.finished_at_unix_ms = Some(9_999_999);
+        assert_eq!(
+            repository
+                .upsert_many(vec![pending, streaming, success, late_pending])
+                .await
+                .expect("ordered batch should persist"),
+            4
+        );
+        let batch_candidates = repository
+            .list_by_request_id(&batch_request_id)
+            .await
+            .expect("batch candidate should load");
+        assert_eq!(batch_candidates.len(), 1);
+        assert_eq!(batch_candidates[0].id, "batch-first");
+        assert_eq!(batch_candidates[0].status, RequestCandidateStatus::Success);
+        assert!(batch_candidates[0].is_cached);
+        assert_eq!(batch_candidates[0].latency_ms, Some(123));
+        assert_eq!(batch_candidates[0].finished_at_unix_ms, Some(4_000_202));
+        assert_eq!(
+            batch_candidates[0].extra_data,
+            Some(json!({
+                "pending": true,
+                "streaming": true,
+                "success": true,
+                "late": true
+            }))
+        );
+
+        let rollback_request_id = format!("candidate-rollback-{}", uuid::Uuid::new_v4());
+        let valid = sample_upsert(
+            &rollback_request_id,
+            "rollback-valid",
+            RequestCandidateStatus::Pending,
+            None,
+            5_000_000,
+        );
+        let mut invalid = sample_upsert(
+            &rollback_request_id,
+            "rollback-invalid",
+            RequestCandidateStatus::Success,
+            None,
+            5_000_100,
+        );
+        invalid.candidate_index = 1;
+        invalid.latency_ms = Some(u64::MAX);
+        repository
+            .upsert_many(vec![valid, invalid])
+            .await
+            .expect_err("invalid later row should roll back the batch");
+        assert!(repository
+            .list_by_request_id(&rollback_request_id)
+            .await
+            .expect("rolled-back batch should be readable")
+            .is_empty());
+
+        sqlx::query("DELETE FROM request_candidates WHERE request_id IN (?, ?, ?)")
             .bind(&request_id)
+            .bind(&batch_request_id)
+            .bind(&rollback_request_id)
             .execute(&pool)
             .await
             .expect("mysql candidate test rows should clean up");
@@ -984,40 +1152,38 @@ mod tests {
         );
     }
 
-    fn stored_candidate(
+    fn sample_upsert(
         request_id: &str,
         id: &str,
-        candidate_index: u32,
         status: RequestCandidateStatus,
-        latency_ms: Option<i32>,
-        finished_at_unix_ms: Option<i64>,
-    ) -> StoredRequestCandidate {
-        StoredRequestCandidate::new(
-            id.to_string(),
-            request_id.to_string(),
-            Some("user-1".to_string()),
-            Some("key-1".to_string()),
-            None,
-            None,
-            i32::try_from(candidate_index).expect("candidate index should fit"),
-            0,
-            Some("provider-1".to_string()),
-            Some("endpoint-1".to_string()),
-            Some("provider-key-1".to_string()),
+        extra_data: Option<serde_json::Value>,
+        created_at_unix_ms: u64,
+    ) -> UpsertRequestCandidateRecord {
+        UpsertRequestCandidateRecord {
+            id: id.to_string(),
+            request_id: request_id.to_string(),
+            user_id: Some("user-1".to_string()),
+            api_key_id: Some("key-1".to_string()),
+            username: Some("user".to_string()),
+            api_key_name: Some("Key".to_string()),
+            candidate_index: 0,
+            retry_index: 0,
+            provider_id: Some("provider-1".to_string()),
+            endpoint_id: Some("endpoint-1".to_string()),
+            key_id: Some("provider-key-1".to_string()),
             status,
-            None,
-            false,
-            Some(200),
-            None,
-            None,
-            latency_ms,
-            None,
-            None,
-            None,
-            2_000_000,
-            Some(2_000_001),
-            finished_at_unix_ms,
-        )
-        .expect("stored candidate should build")
+            skip_reason: None,
+            is_cached: Some(false),
+            status_code: Some(200),
+            error_type: None,
+            error_message: None,
+            latency_ms: Some(123),
+            concurrent_requests: Some(2),
+            extra_data,
+            required_capabilities: Some(json!({"streaming": true})),
+            created_at_unix_ms: Some(created_at_unix_ms),
+            started_at_unix_ms: Some(created_at_unix_ms + 1),
+            finished_at_unix_ms: Some(created_at_unix_ms + 2),
+        }
     }
 }

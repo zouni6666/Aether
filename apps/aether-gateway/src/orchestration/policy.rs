@@ -12,6 +12,8 @@ pub(crate) const CYBER_CONTINUE_FAILOVER_CONFIG_KEY: &str = "cyber_continue_fail
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LocalFailoverPolicy {
     pub(crate) max_retries: Option<u64>,
+    pub(crate) max_transfer_count: u64,
+    pub(crate) max_transfer_timeout_seconds: u64,
     pub(crate) stop_status_codes: BTreeSet<u16>,
     pub(crate) continue_status_codes: BTreeSet<u16>,
     pub(crate) success_failover_patterns: Vec<LocalFailoverRegexRule>,
@@ -24,6 +26,8 @@ impl Default for LocalFailoverPolicy {
     fn default() -> Self {
         Self {
             max_retries: None,
+            max_transfer_count: 0,
+            max_transfer_timeout_seconds: 0,
             stop_status_codes: BTreeSet::new(),
             continue_status_codes: BTreeSet::new(),
             success_failover_patterns: Vec::new(),
@@ -63,6 +67,8 @@ pub(crate) async fn resolve_local_failover_policy(
         key_id = %plan.key_id,
         source = "transport_snapshot",
         max_retries = ?policy.max_retries,
+        max_transfer_count = policy.max_transfer_count,
+        max_transfer_timeout_seconds = policy.max_transfer_timeout_seconds,
         stop_status_code_count = policy.stop_status_codes.len(),
         continue_status_code_count = policy.continue_status_codes.len(),
         success_failover_pattern_count = policy.success_failover_patterns.len(),
@@ -87,6 +93,7 @@ pub(crate) async fn cyber_continue_failover_enabled(state: &AppState) -> bool {
 pub(crate) fn local_failover_policy_from_transport(
     transport: &GatewayProviderTransportSnapshot,
 ) -> LocalFailoverPolicy {
+    let provider_config = transport.provider.config.as_ref();
     let rules = transport
         .provider
         .config
@@ -111,6 +118,14 @@ pub(crate) fn local_failover_policy_from_transport(
 
     LocalFailoverPolicy {
         max_retries,
+        max_transfer_count: provider_config
+            .and_then(|value| value.get("max_transfer_count"))
+            .and_then(parse_u64_value)
+            .unwrap_or(0),
+        max_transfer_timeout_seconds: provider_config
+            .and_then(|value| value.get("max_transfer_timeout_seconds"))
+            .and_then(parse_u64_value)
+            .unwrap_or(0),
         retry_client_errors_by_default:
             crate::ai_serving::api_format_defaults_to_client_error_failover(
                 &transport.endpoint.api_format,
@@ -161,6 +176,14 @@ pub(crate) fn local_failover_policy_from_report_context(
 
     Some(LocalFailoverPolicy {
         max_retries: object.get("max_retries").and_then(parse_u64_value),
+        max_transfer_count: object
+            .get("max_transfer_count")
+            .and_then(parse_u64_value)
+            .unwrap_or(0),
+        max_transfer_timeout_seconds: object
+            .get("max_transfer_timeout_seconds")
+            .and_then(parse_u64_value)
+            .unwrap_or(0),
         stop_status_codes: object
             .get("stop_status_codes")
             .map(parse_status_code_list)
@@ -208,6 +231,8 @@ fn parse_status_code_list(value: &Value) -> BTreeSet<u16> {
 fn local_failover_policy_to_value(policy: &LocalFailoverPolicy) -> Value {
     json!({
         "max_retries": policy.max_retries,
+        "max_transfer_count": policy.max_transfer_count,
+        "max_transfer_timeout_seconds": policy.max_transfer_timeout_seconds,
         "stop_status_codes": policy.stop_status_codes.iter().copied().collect::<Vec<_>>(),
         "continue_status_codes": policy.continue_status_codes.iter().copied().collect::<Vec<_>>(),
         "success_failover_patterns": policy.success_failover_patterns.iter().map(local_failover_regex_rule_to_value).collect::<Vec<_>>(),
@@ -385,6 +410,8 @@ mod tests {
                 Some(5),
                 Some(4),
                 Some(json!({
+                    "max_transfer_count": 10,
+                    "max_transfer_timeout_seconds": 60,
                     "failover_rules": {
                         "max_retries": 2,
                         "continue_status_codes": [429],
@@ -400,6 +427,8 @@ mod tests {
             local_failover_policy_from_report_context(Some(&report_context)),
             Some(LocalFailoverPolicy {
                 max_retries: Some(2),
+                max_transfer_count: 10,
+                max_transfer_timeout_seconds: 60,
                 stop_status_codes: [400].into_iter().collect(),
                 continue_status_codes: [429].into_iter().collect(),
                 success_failover_patterns: vec![LocalFailoverRegexRule {
@@ -414,6 +443,33 @@ mod tests {
                 retry_client_errors_by_default: true,
             })
         );
+    }
+
+    #[test]
+    fn transfer_limits_are_read_only_from_top_level_provider_config() {
+        let top_level = local_failover_policy_from_transport(&sample_transport(
+            None,
+            None,
+            Some(json!({
+                "max_transfer_count": 3,
+                "max_transfer_timeout_seconds": 45,
+            })),
+        ));
+        assert_eq!(top_level.max_transfer_count, 3);
+        assert_eq!(top_level.max_transfer_timeout_seconds, 45);
+
+        let nested = local_failover_policy_from_transport(&sample_transport(
+            None,
+            None,
+            Some(json!({
+                "failover_rules": {
+                    "max_transfer_count": 8,
+                    "max_transfer_timeout_seconds": 90,
+                }
+            })),
+        ));
+        assert_eq!(nested.max_transfer_count, 0);
+        assert_eq!(nested.max_transfer_timeout_seconds, 0);
     }
 
     #[test]

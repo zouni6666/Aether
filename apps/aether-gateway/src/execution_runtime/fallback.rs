@@ -936,6 +936,8 @@ mod tests {
             policy,
             LocalFailoverPolicy {
                 max_retries: Some(1),
+                max_transfer_count: 0,
+                max_transfer_timeout_seconds: 0,
                 stop_status_codes: [503].into_iter().collect(),
                 continue_status_codes: [409, 429].into_iter().collect(),
                 success_failover_patterns: Vec::new(),

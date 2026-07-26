@@ -23,64 +23,155 @@
     </template>
 
     <template #sidebar>
-      <!-- HEADER (Brand) -->
-      <div class="shrink-0 flex items-center px-6 h-20">
-        <RouterLink
-          to="/"
-          class="flex items-center gap-3 group transition-opacity hover:opacity-80"
+      <div class="flex h-full w-full min-w-0 flex-col overflow-hidden">
+        <!-- HEADER (Brand) -->
+        <div
+          class="group/sidebar-brand relative flex shrink-0 items-center transition-[height,padding] [transition-duration:240ms] [transition-timing-function:cubic-bezier(0.4,0,0.2,1)] motion-reduce:transition-none"
+          :class="sidebarCollapsed ? 'h-16 px-4' : 'h-20 px-6'"
         >
-          <HeaderLogo
-            size="h-9 w-9"
-            class-name="text-[#191919] dark:text-white"
-          />
-          <div class="flex flex-col justify-center">
-            <h1 class="text-lg font-bold text-[#191919] dark:text-white leading-none">
-              {{ siteName }}
-            </h1>
-            <span class="text-[10px] text-[#91918d] dark:text-muted-foreground leading-none mt-1.5 font-medium tracking-wide">{{ siteSubtitle }}</span>
-          </div>
-        </RouterLink>
-      </div>
-
-      <!-- NAVIGATION -->
-      <div class="flex-1 overflow-y-auto py-2 scrollbar-none">
-        <SidebarNav
-          :items="navigation"
-          :is-active="isNavActive"
-          @prefetch="prefetchNavigationItem"
-        />
-      </div>
-
-      <!-- FOOTER (Profile) -->
-      <div class="p-4 border-t border-[#3d3929]/5 dark:border-white/5">
-        <div class="flex items-center justify-between p-2 rounded-xl">
-          <div class="flex items-center gap-3 min-w-0">
-            <div class="w-8 h-8 rounded-full bg-[#f0f0eb] dark:bg-white/10 border border-black/5 flex items-center justify-center text-xs font-bold text-[#3d3929] dark:text-[#d4a27f] shrink-0">
-              {{ authStore.user?.username?.substring(0, 2).toUpperCase() }}
-            </div>
-            <div class="flex flex-col min-w-0">
-              <span class="text-xs font-semibold leading-none truncate opacity-90 text-foreground">{{ authStore.user?.username }}</span>
-              <span class="text-[10px] opacity-50 leading-none mt-1.5 text-muted-foreground">{{ currentRoleLabel }}</span>
-            </div>
-          </div>
-
-          <div class="flex items-center gap-1">
+          <Transition
+            name="sidebar-mode"
+            mode="out-in"
+          >
             <RouterLink
-              to="/dashboard/settings"
-              class="p-1.5 hover:bg-muted/50 rounded-md text-muted-foreground hover:text-foreground transition-colors"
-              :title="t('common.settings')"
+              v-if="!sidebarCollapsed"
+              key="expanded-brand"
+              to="/"
+              class="group flex w-full min-w-0 items-center gap-3 pr-10 transition-opacity hover:opacity-80"
             >
-              <Settings class="w-4 h-4" />
+              <HeaderLogo
+                size="h-9 w-9"
+                class-name="shrink-0 text-[#191919] dark:text-white"
+              />
+              <div class="flex min-w-0 flex-col justify-center">
+                <h1 class="truncate text-lg font-bold leading-none text-[#191919] dark:text-white">
+                  {{ siteName }}
+                </h1>
+                <span class="mt-1.5 truncate text-[10px] font-medium leading-none tracking-wide text-[#91918d] dark:text-muted-foreground">{{ siteSubtitle }}</span>
+              </div>
             </RouterLink>
-            <button
-              class="p-1.5 rounded-md text-muted-foreground hover:text-red-500 transition-colors"
-              :title="t('common.logout')"
-              @click="handleLogout"
+
+            <div
+              v-else
+              key="collapsed-brand"
+              aria-hidden="true"
+              class="flex h-8 w-8 transform-gpu items-center justify-center transition-[opacity,transform] duration-200 ease-out will-change-[opacity,transform] group-hover/sidebar-brand:scale-90 group-hover/sidebar-brand:opacity-0 motion-reduce:transition-none"
             >
-              <LogOut class="w-4 h-4" />
-            </button>
-          </div>
+              <HeaderLogo
+                size="h-8 w-8"
+                class-name="shrink-0 text-[#191919] dark:text-white"
+              />
+            </div>
+          </Transition>
+
+          <button
+            type="button"
+            class="absolute top-1/2 z-10 flex h-8 w-8 shrink-0 -translate-y-1/2 transform-gpu items-center justify-center rounded-md text-muted-foreground transition-[right,color,background-color,opacity,transform] [transition-duration:240ms] [transition-timing-function:cubic-bezier(0.4,0,0.2,1)] hover:bg-muted/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary motion-reduce:transition-none"
+            :class="sidebarCollapsed ? 'right-[15px] scale-90 opacity-0 will-change-[right,opacity,transform] group-hover/sidebar-brand:scale-100 group-hover/sidebar-brand:opacity-100 focus-visible:scale-100 focus-visible:bg-[#faf9f5] focus-visible:opacity-100 dark:focus-visible:bg-[#1e1c19]' : 'right-3 opacity-100'"
+            :aria-label="sidebarCollapsed ? t('nav.expandSidebar') : t('nav.collapseSidebar')"
+            :aria-expanded="!sidebarCollapsed"
+            :title="sidebarCollapsed ? t('nav.expandSidebar') : t('nav.collapseSidebar')"
+            @click="sidebarCollapsed = !sidebarCollapsed"
+          >
+            <Transition
+              name="sidebar-icon"
+              mode="out-in"
+            >
+              <PanelLeftOpen
+                v-if="sidebarCollapsed"
+                key="open"
+                class="h-4 w-4"
+              />
+              <PanelLeftClose
+                v-else
+                key="close"
+                class="h-4 w-4"
+              />
+            </Transition>
+          </button>
         </div>
+
+        <!-- NAVIGATION -->
+        <div
+          class="flex-1 overflow-y-auto transition-[padding] [transition-duration:240ms] [transition-timing-function:cubic-bezier(0.4,0,0.2,1)] scrollbar-none motion-reduce:transition-none"
+          :class="sidebarCollapsed ? 'pb-2 pt-0' : 'py-2'"
+        >
+          <Transition
+            name="sidebar-mode"
+            mode="out-in"
+          >
+            <div
+              :key="sidebarCollapsed ? 'collapsed-nav' : 'expanded-nav'"
+              class="w-full"
+              :class="sidebarCollapsed ? 'max-w-16' : ''"
+            >
+              <SidebarNav
+                :items="navigation"
+                :is-active="isNavActive"
+                :collapsed="sidebarCollapsed"
+                @prefetch="prefetchNavigationItem"
+              />
+            </div>
+          </Transition>
+        </div>
+
+        <!-- FOOTER (Profile) -->
+        <Transition
+          name="sidebar-mode"
+          mode="out-in"
+        >
+          <div
+            :key="sidebarCollapsed ? 'collapsed-footer' : 'expanded-footer'"
+            class="border-t border-[#3d3929]/5 dark:border-white/5"
+            :class="sidebarCollapsed ? 'max-w-16 p-2' : 'p-4'"
+          >
+            <div
+              class="flex items-center"
+              :class="sidebarCollapsed ? 'flex-col gap-2 rounded-lg p-1' : 'justify-between rounded-xl p-2'"
+            >
+              <div
+                class="flex min-w-0 items-center"
+                :class="sidebarCollapsed ? 'justify-center' : 'gap-3'"
+              >
+                <div
+                  class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-black/5 bg-[#f0f0eb] text-xs font-bold text-[#3d3929] dark:bg-white/10 dark:text-[#d4a27f]"
+                  :title="sidebarCollapsed ? authStore.user?.username : undefined"
+                >
+                  {{ authStore.user?.username?.substring(0, 2).toUpperCase() }}
+                </div>
+                <div
+                  v-if="!sidebarCollapsed"
+                  class="flex min-w-0 flex-col"
+                >
+                  <span class="truncate text-xs font-semibold leading-none text-foreground opacity-90">{{ authStore.user?.username }}</span>
+                  <span class="mt-1.5 text-[10px] leading-none text-muted-foreground opacity-50">{{ currentRoleLabel }}</span>
+                </div>
+              </div>
+
+              <div
+                class="flex items-center gap-1"
+                :class="sidebarCollapsed ? 'flex-col' : ''"
+              >
+                <RouterLink
+                  to="/dashboard/settings"
+                  class="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+                  :aria-label="sidebarCollapsed ? t('common.settings') : undefined"
+                  :title="t('common.settings')"
+                >
+                  <Settings class="h-4 w-4" />
+                </RouterLink>
+                <button
+                  class="rounded-md p-1.5 text-muted-foreground transition-colors hover:text-red-500"
+                  :aria-label="sidebarCollapsed ? t('common.logout') : undefined"
+                  :title="t('common.logout')"
+                  @click="handleLogout"
+                >
+                  <LogOut class="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+          </div>
+        </Transition>
       </div>
     </template>
 
@@ -392,6 +483,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
+import { useLocalStorage } from '@vueuse/core'
 import { useRoute, useRouter } from 'vue-router'
 import { marked } from 'marked'
 import { useAuthStore } from '@/stores/auth'
@@ -419,6 +511,8 @@ import {
   ChevronRight,
   Menu,
   X,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from 'lucide-vue-next'
 
 import GithubIcon from '@/components/icons/GithubIcon.vue'
@@ -441,6 +535,7 @@ const isAdmin = computed(() => authStore.user?.role === 'admin')
 
 const showAuthError = ref(false)
 const mobileMenuOpen = ref(false)
+const sidebarCollapsed = useLocalStorage('aether-sidebar-collapsed', false)
 const requiredAnnouncements = ref<Announcement[]>([])
 const acknowledgingRequiredAnnouncement = ref(false)
 const requiredAnnouncementOpen = computed({
@@ -1143,8 +1238,8 @@ const breadcrumbs = computed(() => buildBreadcrumbs({
 
 // Styling Classes (Editorial)
 const sidebarClasses = computed(() => {
-    // Fixed width, border right, background match
-    return `w-[260px] flex flex-col hidden lg:flex border-r border-[#3d3929]/5 dark:border-white/5 bg-[#faf9f5] dark:bg-[#1e1c19] h-screen sticky top-0`
+    const widthClass = sidebarCollapsed.value ? 'w-16' : 'w-[260px]'
+    return `${widthClass} flex-col hidden lg:flex border-r border-[#3d3929]/5 dark:border-white/5 bg-[#faf9f5] dark:bg-[#1e1c19] h-screen sticky top-0 transition-[width] [transition-duration:240ms] [transition-timing-function:cubic-bezier(0.4,0,0.2,1)] motion-reduce:transition-none`
 })
 
 const contentClasses = computed(() => {
@@ -1160,6 +1255,38 @@ const mainClasses = computed(() => {
 </script>
 
 <style scoped>
+.sidebar-mode-enter-active {
+  transition: opacity 120ms ease-out;
+}
+
+.sidebar-mode-leave-active {
+  transition: opacity 60ms ease-in;
+}
+
+.sidebar-mode-enter-from,
+.sidebar-mode-leave-to {
+  opacity: 0;
+}
+
+.sidebar-icon-enter-active,
+.sidebar-icon-leave-active {
+  transition: opacity 60ms ease;
+}
+
+.sidebar-icon-enter-from,
+.sidebar-icon-leave-to {
+  opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-mode-enter-active,
+  .sidebar-mode-leave-active,
+  .sidebar-icon-enter-active,
+  .sidebar-icon-leave-active {
+    transition: none;
+  }
+}
+
 .scrollbar-none::-webkit-scrollbar { display: none; }
 .scrollbar-none { -ms-overflow-style: none; scrollbar-width: none; }
 </style>

@@ -36,6 +36,18 @@ where
         attempt: &Attempt,
     ) -> Result<Option<Self::Response>, Self::Error>;
 
+    async fn should_skip_attempt(&self, _attempt: &Attempt) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
+
+    async fn record_attempt_started(&self, _attempt: &Attempt) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn record_attempt_failed(&self, _attempt: &Attempt) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     async fn mark_unused_attempts(&self, attempts: Vec<Attempt>) -> Result<(), Self::Error>;
 
     async fn build_exhaustion(
@@ -57,6 +69,11 @@ where
     let mut last_attempted = None;
 
     while let Some(attempt) = remaining.next() {
+        if port.should_skip_attempt(&attempt).await? {
+            port.mark_unused_attempts(vec![attempt]).await?;
+            continue;
+        }
+        port.record_attempt_started(&attempt).await?;
         let response = match port.execute_attempt(&attempt).await {
             Ok(response) => response,
             Err(err) => {
@@ -68,6 +85,8 @@ where
             port.mark_unused_attempts(remaining.collect()).await?;
             return Ok(AiAttemptLoopOutcome::Responded(response));
         }
+
+        port.record_attempt_failed(&attempt).await?;
 
         // Exhaustion diagnostics are only needed after an attempt fails. Keep
         // the common successful path free of a deep plan/report-context clone.

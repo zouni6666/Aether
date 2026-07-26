@@ -1,6 +1,8 @@
 use crate::handlers::admin::provider::shared::payloads::AdminProviderCreateRequest;
 use crate::handlers::admin::provider::shared::support::{
-    normalize_provider_billing_type, parse_optional_rfc3339_unix_secs,
+    normalize_provider_billing_type, normalize_provider_transfer_limit,
+    normalize_provider_transfer_limit_json, parse_optional_rfc3339_unix_secs,
+    PROVIDER_MAX_TRANSFER_COUNT_CONFIG_KEY, PROVIDER_MAX_TRANSFER_TIMEOUT_SECONDS_CONFIG_KEY,
 };
 use crate::handlers::admin::provider::write::normalize::normalize_chat_pii_redaction_config;
 use crate::handlers::admin::provider::write::normalize::normalize_pool_advanced_config;
@@ -114,6 +116,27 @@ pub(crate) async fn build_admin_create_provider_record(
     let mut config_map = normalize_json_object(payload.config, "config")?
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default();
+    for (field_name, payload_value) in [
+        (
+            PROVIDER_MAX_TRANSFER_COUNT_CONFIG_KEY,
+            payload.max_transfer_count,
+        ),
+        (
+            PROVIDER_MAX_TRANSFER_TIMEOUT_SECONDS_CONFIG_KEY,
+            payload.max_transfer_timeout_seconds,
+        ),
+    ] {
+        let value = match payload_value {
+            Some(value) => Some(normalize_provider_transfer_limit(value, field_name)?),
+            None => config_map
+                .get(field_name)
+                .map(|value| normalize_provider_transfer_limit_json(value, field_name))
+                .transpose()?,
+        };
+        if let Some(value) = value {
+            config_map.insert(field_name.to_string(), json!(value));
+        }
+    }
     if let Some(value) = normalize_pool_advanced_config(payload.pool_advanced)? {
         config_map.insert("pool_advanced".to_string(), value);
     }

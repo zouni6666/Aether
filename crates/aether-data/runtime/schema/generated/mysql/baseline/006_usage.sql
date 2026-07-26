@@ -111,6 +111,63 @@ CREATE TABLE IF NOT EXISTS `usage` (
     KEY usage_wallet_id_idx (`wallet_id`)
 );
 
+CREATE TABLE IF NOT EXISTS usage_body_blobs (
+    `body_ref` VARCHAR(160) NOT NULL,
+    `request_id` VARCHAR(128) NOT NULL,
+    `body_field` VARCHAR(50) NOT NULL,
+    `payload_gzip` LONGBLOB NOT NULL,
+    `created_at` BIGINT NOT NULL,
+    `updated_at` BIGINT NOT NULL,
+    PRIMARY KEY (`body_ref`),
+    UNIQUE KEY usage_body_blobs_request_id_field_key (`request_id`, `body_field`),
+    KEY ix_usage_body_blobs_request_id (`request_id`),
+    CONSTRAINT usage_body_blobs_request_id_fkey FOREIGN KEY (`request_id`) REFERENCES usage (`request_id`) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS usage_http_audits (
+    `request_id` VARCHAR(128) NOT NULL,
+    `request_headers` JSON,
+    `provider_request_headers` JSON,
+    `response_headers` JSON,
+    `client_response_headers` JSON,
+    `request_body_ref` VARCHAR(160),
+    `provider_request_body_ref` VARCHAR(160),
+    `response_body_ref` VARCHAR(160),
+    `client_response_body_ref` VARCHAR(160),
+    `request_body_state` VARCHAR(32),
+    `provider_request_body_state` VARCHAR(32),
+    `response_body_state` VARCHAR(32),
+    `client_response_body_state` VARCHAR(32),
+    `body_capture_mode` VARCHAR(32) NOT NULL DEFAULT 'none',
+    `created_at` BIGINT NOT NULL,
+    `updated_at` BIGINT NOT NULL,
+    PRIMARY KEY (`request_id`),
+    KEY ix_usage_http_audits_updated_at (`updated_at`),
+    CONSTRAINT usage_http_audits_request_id_fkey FOREIGN KEY (`request_id`) REFERENCES usage (`request_id`) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS usage_routing_snapshots (
+    `request_id` VARCHAR(128) NOT NULL,
+    `candidate_id` VARCHAR(160),
+    `candidate_index` BIGINT,
+    `key_name` VARCHAR(255),
+    `planner_kind` VARCHAR(120),
+    `route_family` VARCHAR(80),
+    `route_kind` VARCHAR(80),
+    `execution_path` VARCHAR(80),
+    `local_execution_runtime_miss_reason` VARCHAR(255),
+    `selected_provider_id` VARCHAR(100),
+    `selected_endpoint_id` VARCHAR(100),
+    `selected_provider_api_key_id` VARCHAR(100),
+    `has_format_conversion` TINYINT(1),
+    `created_at` BIGINT NOT NULL,
+    `updated_at` BIGINT NOT NULL,
+    PRIMARY KEY (`request_id`),
+    KEY ix_usage_routing_snapshots_route_family_kind (`route_family`, `route_kind`),
+    KEY ix_usage_routing_snapshots_candidate_id (`candidate_id`),
+    CONSTRAINT usage_routing_snapshots_request_id_fkey FOREIGN KEY (`request_id`) REFERENCES usage (`request_id`) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS usage_counter_deltas (
     `id` VARCHAR(36) NOT NULL,
     `request_id` VARCHAR(128) NOT NULL,
@@ -149,11 +206,40 @@ CREATE TABLE IF NOT EXISTS usage_settlement_snapshots (
     `wallet_gift_balance_before` DOUBLE,
     `wallet_gift_balance_after` DOUBLE,
     `provider_monthly_used_usd` DOUBLE,
+    `billing_snapshot_schema_version` VARCHAR(20),
+    `billing_snapshot_status` VARCHAR(20),
+    `rate_multiplier` DOUBLE,
+    `is_free_tier` TINYINT(1),
+    `input_price_per_1m` DOUBLE,
+    `output_price_per_1m` DOUBLE,
+    `cache_creation_price_per_1m` DOUBLE,
+    `cache_read_price_per_1m` DOUBLE,
+    `price_per_request` DOUBLE,
+    `settlement_snapshot_schema_version` VARCHAR(20),
+    `settlement_snapshot` JSON,
+    `billing_dimensions` JSON,
+    `billing_input_tokens` BIGINT,
+    `billing_effective_input_tokens` BIGINT,
+    `billing_output_tokens` BIGINT,
+    `billing_cache_creation_tokens` BIGINT,
+    `billing_cache_creation_5m_tokens` BIGINT,
+    `billing_cache_creation_1h_tokens` BIGINT,
+    `billing_cache_read_tokens` BIGINT,
+    `billing_total_input_context` BIGINT,
+    `billing_cache_creation_cost_usd` DOUBLE,
+    `billing_cache_read_cost_usd` DOUBLE,
+    `billing_total_cost_usd` DOUBLE,
+    `billing_actual_total_cost_usd` DOUBLE,
+    `billing_pricing_source` VARCHAR(50),
+    `billing_rule_id` VARCHAR(100),
+    `billing_rule_version` VARCHAR(50),
     `finalized_at` BIGINT,
     `created_at` BIGINT NOT NULL,
     `updated_at` BIGINT NOT NULL,
     PRIMARY KEY (`request_id`),
     KEY usage_settlement_snapshots_billing_status_idx (`billing_status`),
-    KEY usage_settlement_snapshots_wallet_id_idx (`wallet_id`)
+    KEY usage_settlement_snapshots_wallet_id_idx (`wallet_id`),
+    KEY ix_usage_settlement_snapshots_schema_version (`settlement_snapshot_schema_version`),
+    KEY ix_usage_settlement_snapshots_pricing_source (`billing_pricing_source`)
 );
 

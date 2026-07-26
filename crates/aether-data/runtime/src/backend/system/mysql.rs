@@ -861,6 +861,22 @@ WHERE provider_id IS NOT NULL
             .await?;
             mysql_execute_if_table(
                 tx,
+                "usage_routing_snapshots",
+                "usage_routing_provider_refs_cleared",
+                r#"
+UPDATE usage_routing_snapshots
+SET selected_provider_id = NULL,
+    selected_endpoint_id = NULL,
+    selected_provider_api_key_id = NULL
+WHERE selected_provider_id IS NOT NULL
+   OR selected_endpoint_id IS NOT NULL
+   OR selected_provider_api_key_id IS NOT NULL
+"#,
+                summary,
+            )
+            .await?;
+            mysql_execute_if_table(
+                tx,
                 "request_candidates",
                 "request_candidate_provider_refs_cleared",
                 r#"
@@ -949,6 +965,14 @@ WHERE request_count <> 0
    OR total_response_time_ms <> 0
    OR last_used_at IS NOT NULL
 "#,
+                summary,
+            )
+            .await?;
+            mysql_execute_if_table(
+                tx,
+                "global_models",
+                "global_model_usage_stats_reset",
+                "UPDATE global_models SET usage_count = 0 WHERE usage_count <> 0",
                 summary,
             )
             .await?;

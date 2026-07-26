@@ -19,7 +19,7 @@ use crate::control::GatewayControlDecision;
 use crate::{AppState, GatewayError, GatewayFallbackReason};
 
 use super::{
-    build_direct_plan_bypass_cache_key, execute_sync_plan_and_reports,
+    build_direct_plan_bypass_cache_key, execute_sync_plan_and_reports_with_transfer_tracker,
     maybe_execute_sync_via_local_decision, maybe_execute_sync_via_local_gemini_files_decision,
     maybe_execute_sync_via_local_image_decision,
     maybe_execute_sync_via_local_openai_responses_decision,
@@ -27,6 +27,7 @@ use super::{
     maybe_execute_sync_via_local_standard_decision, maybe_execute_sync_via_local_video_decision,
     maybe_execute_sync_via_plan_fallback, maybe_execute_sync_via_remote_decision,
     parse_local_request_body, should_skip_direct_plan, LocalExecutionRequestOutcome,
+    ProviderTransferTracker,
 };
 
 pub(crate) async fn maybe_execute_via_sync_decision_path(
@@ -73,6 +74,7 @@ pub(crate) async fn maybe_execute_via_sync_decision_path(
         plan_kind,
         bypass_cache_key,
         scheduler_supported: supports_sync_execution_decision_kind(plan_kind),
+        transfer_tracker: ProviderTransferTracker::default(),
     };
 
     Ok(from_ai_serving_outcome(
@@ -91,6 +93,7 @@ struct GatewaySyncExecutionPathPort<'a> {
     plan_kind: &'a str,
     bypass_cache_key: String,
     scheduler_supported: bool,
+    transfer_tracker: ProviderTransferTracker,
 }
 
 #[async_trait]
@@ -116,6 +119,7 @@ impl AiSyncExecutionPathPort for GatewaySyncExecutionPathPort<'_> {
                     self.trace_id,
                     self.decision,
                     self.plan_kind,
+                    &self.transfer_tracker,
                 )
                 .await?
             }
@@ -127,6 +131,7 @@ impl AiSyncExecutionPathPort for GatewaySyncExecutionPathPort<'_> {
                     self.trace_id,
                     self.decision,
                     self.plan_kind,
+                    &self.transfer_tracker,
                 )
                 .await?
             }
@@ -139,6 +144,7 @@ impl AiSyncExecutionPathPort for GatewaySyncExecutionPathPort<'_> {
                     self.trace_id,
                     self.decision,
                     self.plan_kind,
+                    &self.transfer_tracker,
                 )
                 .await?
             }
@@ -150,6 +156,7 @@ impl AiSyncExecutionPathPort for GatewaySyncExecutionPathPort<'_> {
                     self.decision,
                     self.body_json,
                     self.plan_kind,
+                    &self.transfer_tracker,
                 )
                 .await?
             }
@@ -161,6 +168,7 @@ impl AiSyncExecutionPathPort for GatewaySyncExecutionPathPort<'_> {
                     self.decision,
                     self.body_json,
                     self.plan_kind,
+                    &self.transfer_tracker,
                 )
                 .await?
             }
@@ -172,6 +180,7 @@ impl AiSyncExecutionPathPort for GatewaySyncExecutionPathPort<'_> {
                     self.decision,
                     self.body_json,
                     self.plan_kind,
+                    &self.transfer_tracker,
                 )
                 .await?
             }
@@ -183,6 +192,7 @@ impl AiSyncExecutionPathPort for GatewaySyncExecutionPathPort<'_> {
                     self.decision,
                     self.body_json,
                     self.plan_kind,
+                    &self.transfer_tracker,
                 )
                 .await?
             }
@@ -196,6 +206,7 @@ impl AiSyncExecutionPathPort for GatewaySyncExecutionPathPort<'_> {
                     self.trace_id,
                     self.decision,
                     self.plan_kind,
+                    &self.transfer_tracker,
                 )
                 .await?
             }
@@ -233,6 +244,7 @@ impl AiSyncExecutionPathPort for GatewaySyncExecutionPathPort<'_> {
             self.plan_kind,
             self.bypass_cache_key.clone(),
             gateway_fallback_reason(reason),
+            &self.transfer_tracker,
         )
         .await?;
         Ok(to_ai_serving_outcome(outcome))
@@ -342,6 +354,7 @@ async fn maybe_execute_local_video_task_follow_up_sync(
     trace_id: &str,
     decision: &GatewayControlDecision,
     plan_kind: &str,
+    transfer_tracker: &ProviderTransferTracker,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
     if !matches!(
         plan_kind,
@@ -375,7 +388,7 @@ async fn maybe_execute_local_video_task_follow_up_sync(
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
 
-    execute_sync_plan_and_reports(
+    execute_sync_plan_and_reports_with_transfer_tracker(
         state,
         parts,
         trace_id,
@@ -386,6 +399,7 @@ async fn maybe_execute_local_video_task_follow_up_sync(
             report_kind: follow_up.report_kind,
             report_context: follow_up.report_context,
         }],
+        transfer_tracker,
     )
     .await
 }

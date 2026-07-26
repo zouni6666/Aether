@@ -271,6 +271,11 @@ impl LocalExecutionAttemptSource<AiSyncAttempt> for LocalOpenAiImageSyncAttemptS
         }
         Ok(drained)
     }
+
+    async fn skip_provider(&mut self, provider_id: &str) -> Result<(), GatewayError> {
+        self.candidates.skip_provider(provider_id);
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -293,6 +298,11 @@ impl LocalExecutionAttemptSource<AiStreamAttempt> for LocalOpenAiImageStreamAtte
             }
         }
         Ok(drained)
+    }
+
+    async fn skip_provider(&mut self, provider_id: &str) -> Result<(), GatewayError> {
+        self.candidates.skip_provider(provider_id);
+        Ok(())
     }
 }
 

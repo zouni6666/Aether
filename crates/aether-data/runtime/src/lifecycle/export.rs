@@ -3,6 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 #[cfg(all(feature = "postgres", feature = "sqlite"))]
 use futures_util::TryStreamExt;
 use serde_json::Value;
+#[cfg(all(feature = "postgres", feature = "sqlite"))]
+use sqlx::Acquire;
 use sqlx::Row;
 #[cfg(any(feature = "mysql", feature = "sqlite"))]
 use sqlx::{Column, TypeInfo, ValueRef};
@@ -41,7 +43,8 @@ use postgres::{
 #[cfg(all(test, feature = "postgres", feature = "mysql", feature = "sqlite"))]
 use postgres::normalize_postgres_import_payload;
 
-pub const EXPORT_FORMAT_VERSION: u32 = 1;
+pub const EXPORT_FORMAT_VERSION: u32 = 2;
+const MIN_SUPPORTED_EXPORT_FORMAT_VERSION: u32 = 1;
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
@@ -65,6 +68,7 @@ pub enum ExportDomain {
     Wallets,
     Usage,
     Billing,
+    Auxiliary,
 }
 
 impl ExportDomain {
@@ -87,8 +91,294 @@ impl ExportDomain {
             Self::Wallets => "wallets",
             Self::Usage => "usage",
             Self::Billing => "billing",
+            Self::Auxiliary => "auxiliary",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AuxiliaryTable {
+    name: &'static str,
+    primary_key: &'static [&'static str],
+}
+
+const AUXILIARY_TABLES: &[AuxiliaryTable] = &[
+    AuxiliaryTable {
+        name: "audit_logs",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "announcements",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "announcement_reads",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "management_tokens",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "user_preferences",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "user_sessions",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "ldap_configs",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "pool_member_scores",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "api_key_provider_mappings",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "provider_usage_tracking",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "gemini_file_mappings",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "routing_groups",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "routing_group_versions",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "routing_group_bindings",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "proxy_node_events",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "proxy_node_metrics_1m",
+        primary_key: &["node_id", "bucket_start_unix_secs"],
+    },
+    AuxiliaryTable {
+        name: "proxy_node_metrics_1h",
+        primary_key: &["node_id", "bucket_start_unix_secs"],
+    },
+    AuxiliaryTable {
+        name: "user_invite_codes",
+        primary_key: &["user_id"],
+    },
+    AuxiliaryTable {
+        name: "user_referrals",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "referral_rewards",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "payment_gateway_configs",
+        primary_key: &["provider"],
+    },
+    AuxiliaryTable {
+        name: "billing_plans",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "user_plan_entitlements",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "entitlement_usage_ledgers",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "request_candidates",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "video_tasks",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "usage_body_blobs",
+        primary_key: &["body_ref"],
+    },
+    AuxiliaryTable {
+        name: "usage_http_audits",
+        primary_key: &["request_id"],
+    },
+    AuxiliaryTable {
+        name: "usage_routing_snapshots",
+        primary_key: &["request_id"],
+    },
+    AuxiliaryTable {
+        name: "usage_counter_deltas",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "background_task_runs",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "background_task_events",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "stats_hourly",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "stats_summary",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "stats_hourly_user",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "stats_hourly_user_model",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "user_model_usage_counts",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "stats_hourly_model",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "stats_hourly_provider",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "stats_daily",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "stats_daily_model",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "stats_daily_provider",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "stats_daily_api_key",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "stats_daily_error",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "stats_user_daily",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "stats_user_summary",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "stats_user_daily_model",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "stats_user_daily_provider",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "stats_user_daily_api_format",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "stats_daily_model_provider",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "stats_user_daily_model_provider",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "stats_daily_cost_savings",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "stats_daily_cost_savings_provider",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "stats_daily_cost_savings_model",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "stats_daily_cost_savings_model_provider",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "stats_user_daily_cost_savings",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "stats_user_daily_cost_savings_provider",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "stats_user_daily_cost_savings_model",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
+        name: "stats_user_daily_cost_savings_model_provider",
+        primary_key: &["id"],
+    },
+];
+
+fn auxiliary_table(table_name: &str) -> Result<AuxiliaryTable, DataLayerError> {
+    AUXILIARY_TABLES
+        .iter()
+        .copied()
+        .find(|table| table.name == table_name)
+        .ok_or_else(|| {
+            DataLayerError::InvalidInput(format!(
+                "unsupported auxiliary export table '{table_name}'"
+            ))
+        })
+}
+
+fn auxiliary_row_id(table: AuxiliaryTable, payload: &Value) -> Result<String, DataLayerError> {
+    let object = payload.as_object().ok_or_else(|| {
+        DataLayerError::UnexpectedValue(format!(
+            "auxiliary export row in table '{}' is not a JSON object",
+            table.name
+        ))
+    })?;
+    let key = table
+        .primary_key
+        .iter()
+        .map(|column| {
+            object
+                .get(*column)
+                .filter(|value| !value.is_null())
+                .cloned()
+                .ok_or_else(|| {
+                    DataLayerError::UnexpectedValue(format!(
+                        "auxiliary export row in table '{}' has null or missing primary key column '{}'",
+                        table.name, column
+                    ))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let encoded = serde_json::to_string(&key)
+        .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?;
+    Ok(format!("{}:{encoded}", table.name))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -229,10 +519,166 @@ const USAGE_REQUEST_BODY_DETAIL_COLUMNS: &[&str] = &[
     "client_response_body_compressed",
 ];
 
+const USAGE_HTTP_BODY_DETAIL_COLUMNS: &[&str] = &[
+    "request_body_ref",
+    "provider_request_body_ref",
+    "response_body_ref",
+    "client_response_body_ref",
+    "request_body_state",
+    "provider_request_body_state",
+    "response_body_state",
+    "client_response_body_state",
+    "body_capture_mode",
+];
+
 #[cfg(all(feature = "postgres", feature = "sqlite"))]
-const REQUEST_BODY_DETAIL_TABLES: &[&str] = &["usage_body_blobs", "usage_http_audits"];
+const REQUEST_BODY_DETAIL_TABLES: &[&str] = &["usage_body_blobs"];
 #[cfg(all(feature = "postgres", feature = "sqlite"))]
 const LIFECYCLE_TABLES: &[&str] = &["_sqlx_migrations", "schema_backfills"];
+
+fn import_column_stores_timestamp(column_name: &str) -> bool {
+    column_name.ends_with("_at")
+        || column_name.ends_with("_unix_secs")
+        || column_name.ends_with("_unix_ms")
+        || column_name.ends_with("_date")
+        || matches!(
+            column_name,
+            "start_time" | "end_time" | "window_start" | "window_end" | "hour_utc" | "date"
+        )
+}
+
+fn import_timestamp_uses_millis(table_name: &str, column_name: &str) -> bool {
+    if !column_name.ends_with("_unix_ms") {
+        return false;
+    }
+
+    // This legacy field is named `_unix_ms`, but every repository and API path
+    // has always stored and consumed it as Unix seconds.
+    let relation_name = table_name
+        .rsplit('.')
+        .next()
+        .unwrap_or(table_name)
+        .trim_matches(['"', '`']);
+    !(relation_name == "usage" && column_name == "created_at_unix_ms")
+}
+
+fn normalize_imported_integer_timestamp(
+    driver_name: &str,
+    table_name: &str,
+    column_name: &str,
+    value: &Value,
+) -> Result<Option<i64>, DataLayerError> {
+    let invalid = || {
+        DataLayerError::InvalidInput(format!(
+            "{driver_name} import timestamp column '{column_name}' must contain an integer or supported datetime"
+        ))
+    };
+
+    let timestamp = match value {
+        Value::Null => return Ok(None),
+        Value::Number(value) => value
+            .as_i64()
+            .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+            .ok_or_else(invalid)?,
+        Value::String(value) => {
+            if let Ok(timestamp) = value.trim().parse::<i64>() {
+                timestamp
+            } else {
+                let datetime = parse_imported_datetime(value).ok_or_else(invalid)?;
+                if import_timestamp_uses_millis(table_name, column_name) {
+                    datetime.timestamp_millis()
+                } else {
+                    datetime.timestamp()
+                }
+            }
+        }
+        Value::Bool(_) | Value::Array(_) | Value::Object(_) => return Err(invalid()),
+    };
+    Ok(Some(timestamp))
+}
+
+fn parse_imported_datetime(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let value = value.trim();
+    if let Ok(datetime) = chrono::DateTime::parse_from_rfc3339(value) {
+        return Some(datetime.with_timezone(&chrono::Utc));
+    }
+    if let Ok(datetime) = chrono::DateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f%:z") {
+        return Some(datetime.with_timezone(&chrono::Utc));
+    }
+    for format in ["%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S%.f"] {
+        if let Ok(datetime) = chrono::NaiveDateTime::parse_from_str(value, format) {
+            return Some(datetime.and_utc());
+        }
+    }
+    chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .ok()
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+        .map(|datetime| datetime.and_utc())
+}
+
+#[cfg(any(feature = "mysql", feature = "postgres", feature = "sqlite"))]
+fn normalize_imported_binary(
+    driver_name: &str,
+    column_name: &str,
+    value: &Value,
+) -> Result<Option<Vec<u8>>, DataLayerError> {
+    let invalid = |detail: &str| {
+        DataLayerError::InvalidInput(format!(
+            "{driver_name} import binary column '{column_name}' {detail}"
+        ))
+    };
+    match value {
+        Value::Null => Ok(None),
+        Value::Array(values) => values
+            .iter()
+            .map(|value| {
+                value
+                    .as_u64()
+                    .and_then(|value| u8::try_from(value).ok())
+                    .ok_or_else(|| invalid("contains a non-byte array value"))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some),
+        Value::String(value) => {
+            let encoded = value
+                .trim()
+                .strip_prefix("\\x")
+                .ok_or_else(|| invalid("must use PostgreSQL \\x hex encoding"))?;
+            if !encoded.len().is_multiple_of(2) {
+                return Err(invalid("contains odd-length hex data"));
+            }
+            let mut bytes = Vec::with_capacity(encoded.len() / 2);
+            for index in (0..encoded.len()).step_by(2) {
+                let byte = u8::from_str_radix(&encoded[index..index + 2], 16).map_err(|err| {
+                    invalid(&format!(
+                        "contains invalid hex data at byte {}: {err}",
+                        index / 2
+                    ))
+                })?;
+                bytes.push(byte);
+            }
+            Ok(Some(bytes))
+        }
+        Value::Bool(_) | Value::Number(_) | Value::Object(_) => {
+            Err(invalid("must contain a byte array or PostgreSQL hex value"))
+        }
+    }
+}
+
+#[cfg(feature = "postgres")]
+fn postgres_bytea_json_value(column_name: &str, value: &Value) -> Result<Value, DataLayerError> {
+    let Some(bytes) = normalize_imported_binary("postgres", column_name, value)? else {
+        return Ok(Value::Null);
+    };
+    let mut encoded = String::with_capacity(2 + bytes.len() * 2);
+    encoded.push_str("\\x");
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}")
+            .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?;
+    }
+    Ok(Value::String(encoded))
+}
 
 pub fn encode_jsonl(records: &[DataExportRecord]) -> Result<String, DataLayerError> {
     validate_export_records(records)?;
@@ -300,10 +746,12 @@ pub fn validate_export_records(records: &[DataExportRecord]) -> Result<(), DataL
             "export JSONL must start with a manifest record".to_string(),
         ));
     };
-    if manifest.format_version != EXPORT_FORMAT_VERSION {
+    if !(MIN_SUPPORTED_EXPORT_FORMAT_VERSION..=EXPORT_FORMAT_VERSION)
+        .contains(&manifest.format_version)
+    {
         return Err(DataLayerError::InvalidInput(format!(
-            "unsupported export format version {}; expected {}",
-            manifest.format_version, EXPORT_FORMAT_VERSION
+            "unsupported export format version {}; supported versions are {} through {}",
+            manifest.format_version, MIN_SUPPORTED_EXPORT_FORMAT_VERSION, EXPORT_FORMAT_VERSION
         )));
     }
 
@@ -369,6 +817,7 @@ pub fn sqlite_core_export_domains() -> Vec<ExportDomain> {
         ExportDomain::Wallets,
         ExportDomain::Usage,
         ExportDomain::Billing,
+        ExportDomain::Auxiliary,
     ]
 }
 
@@ -490,23 +939,39 @@ pub async fn copy_database_records(
     import_database_jsonl(target, &encode_jsonl(&records)?).await
 }
 
-fn omit_request_body_details_from_records(records: &mut [DataExportRecord]) {
-    for record in records {
+fn omit_request_body_details_from_records(records: &mut Vec<DataExportRecord>) {
+    records.retain_mut(|record| {
         let DataExportRecord::Row {
-            domain: ExportDomain::Usage,
-            payload,
-            ..
+            domain, payload, ..
         } = record
         else {
-            continue;
+            return true;
         };
-
-        if let Some(object) = payload.as_object_mut() {
-            for column_name in USAGE_REQUEST_BODY_DETAIL_COLUMNS {
-                object.remove(*column_name);
+        let Some(object) = payload.as_object_mut() else {
+            return true;
+        };
+        match *domain {
+            ExportDomain::Usage => {
+                for column_name in USAGE_REQUEST_BODY_DETAIL_COLUMNS {
+                    object.remove(*column_name);
+                }
             }
+            ExportDomain::Auxiliary
+                if object.get("__table").and_then(Value::as_str) == Some("usage_body_blobs") =>
+            {
+                return false;
+            }
+            ExportDomain::Auxiliary
+                if object.get("__table").and_then(Value::as_str) == Some("usage_http_audits") =>
+            {
+                for column_name in USAGE_HTTP_BODY_DETAIL_COLUMNS {
+                    object.remove(*column_name);
+                }
+            }
+            _ => {}
         }
-    }
+        true
+    });
 }
 
 #[cfg(all(feature = "postgres", feature = "sqlite"))]
@@ -522,24 +987,24 @@ async fn copy_postgres_to_sqlite_from_target_schema(
         crate::driver::postgres::PostgresPoolFactory::new(source.to_postgres_config()?)?
             .connect_lazy()?;
     let sqlite_pool = crate::driver::sqlite::SqlitePoolFactory::new(target)?.connect_lazy()?;
+    let mut postgres_tx = postgres_pool.begin().await.map_sql_err()?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *postgres_tx)
+        .await
+        .map_sql_err()?;
 
-    let source_tables = load_postgres_public_table_names(&postgres_pool).await?;
+    let source_tables = load_postgres_public_table_names(&mut postgres_tx).await?;
     let target_tables = load_sqlite_copy_table_names(&sqlite_pool).await?;
 
     ensure_no_nonempty_source_tables_outside_target_schema(
-        &postgres_pool,
+        &mut postgres_tx,
         &source_tables,
         &target_tables,
         options,
     )
     .await?;
 
-    let mut imported = 0usize;
-    sqlx::raw_sql("PRAGMA foreign_keys = OFF")
-        .execute(&sqlite_pool)
-        .await
-        .map_sql_err()?;
-
+    let mut table_plans = Vec::new();
     for table_name in target_tables {
         if copy_table_is_lifecycle(&table_name)
             || copy_table_is_sqlite_internal(&table_name)
@@ -550,7 +1015,7 @@ async fn copy_postgres_to_sqlite_from_target_schema(
         }
 
         let table_plan = build_postgres_sqlite_copy_table_plan(
-            &postgres_pool,
+            &mut postgres_tx,
             &sqlite_pool,
             &table_name,
             options,
@@ -559,22 +1024,39 @@ async fn copy_postgres_to_sqlite_from_target_schema(
         if table_plan.columns.is_empty() {
             continue;
         }
-        imported = imported.saturating_add(
-            copy_postgres_sqlite_table(&postgres_pool, &sqlite_pool, &table_plan).await?,
-        );
+        table_plans.push(table_plan);
     }
 
-    sqlx::raw_sql("PRAGMA foreign_keys = ON")
-        .execute(&sqlite_pool)
+    let mut connection = sqlite_pool.acquire().await.map_sql_err()?;
+    sqlx::raw_sql("PRAGMA foreign_keys = OFF")
+        .execute(&mut *connection)
         .await
         .map_sql_err()?;
-    ensure_sqlite_foreign_key_check_passes(&sqlite_pool).await?;
+    let copy_result = async {
+        let mut tx = connection.begin().await.map_sql_err()?;
+        let mut imported = 0usize;
+        for table_plan in &table_plans {
+            imported = imported.saturating_add(
+                copy_postgres_sqlite_table(&mut postgres_tx, &mut tx, table_plan).await?,
+            );
+        }
+        ensure_sqlite_foreign_key_check_passes(&mut tx).await?;
+        tx.commit().await.map_sql_err()?;
+        Ok::<_, DataLayerError>(imported)
+    }
+    .await;
+    sqlx::raw_sql("PRAGMA foreign_keys = ON")
+        .execute(&mut *connection)
+        .await
+        .map_sql_err()?;
+    let imported = copy_result?;
+    postgres_tx.commit().await.map_sql_err()?;
     Ok(imported)
 }
 
 #[cfg(all(feature = "postgres", feature = "sqlite"))]
 async fn ensure_no_nonempty_source_tables_outside_target_schema(
-    postgres_pool: &crate::driver::postgres::PostgresPool,
+    postgres_tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     source_tables: &BTreeSet<String>,
     target_tables: &BTreeSet<String>,
     options: DataCopyOptions,
@@ -587,7 +1069,7 @@ async fn ensure_no_nonempty_source_tables_outside_target_schema(
         {
             continue;
         }
-        if postgres_public_table_has_rows(postgres_pool, table_name).await? {
+        if postgres_public_table_has_rows(postgres_tx, table_name).await? {
             missing.push(table_name.clone());
         }
     }
@@ -603,21 +1085,27 @@ async fn ensure_no_nonempty_source_tables_outside_target_schema(
 
 #[cfg(all(feature = "postgres", feature = "sqlite"))]
 async fn build_postgres_sqlite_copy_table_plan(
-    postgres_pool: &crate::driver::postgres::PostgresPool,
+    postgres_tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     sqlite_pool: &crate::driver::sqlite::SqlitePool,
     table_name: &str,
     options: DataCopyOptions,
 ) -> Result<SchemaCopyTable, DataLayerError> {
     let sqlite_columns = load_sqlite_copy_columns(sqlite_pool, table_name).await?;
     let postgres_columns =
-        load_postgres_import_columns(postgres_pool, &format!("public.{table_name}")).await?;
-    let source_has_rows = postgres_public_table_has_rows(postgres_pool, table_name).await?;
+        load_postgres_import_columns(&mut **postgres_tx, &format!("public.{table_name}")).await?;
+    let source_has_rows = postgres_public_table_has_rows(postgres_tx, table_name).await?;
     let mut columns = Vec::new();
 
     for sqlite_column in sqlite_columns {
         if options.omit_request_body_details
             && table_name == "usage"
             && USAGE_REQUEST_BODY_DETAIL_COLUMNS.contains(&sqlite_column.name.as_str())
+        {
+            continue;
+        }
+        if options.omit_request_body_details
+            && table_name == "usage_http_audits"
+            && USAGE_HTTP_BODY_DETAIL_COLUMNS.contains(&sqlite_column.name.as_str())
         {
             continue;
         }
@@ -652,13 +1140,13 @@ async fn build_postgres_sqlite_copy_table_plan(
 
 #[cfg(all(feature = "postgres", feature = "sqlite"))]
 async fn copy_postgres_sqlite_table(
-    postgres_pool: &crate::driver::postgres::PostgresPool,
-    sqlite_pool: &crate::driver::sqlite::SqlitePool,
+    postgres_tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    sqlite_tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     table: &SchemaCopyTable,
 ) -> Result<usize, DataLayerError> {
     let source_sql = postgres_schema_copy_select_sql(table)?;
     let target_sql = sqlite_schema_copy_insert_sql(table)?;
-    let mut rows = sqlx::query(&source_sql).fetch(postgres_pool);
+    let mut rows = sqlx::query(&source_sql).fetch(&mut **postgres_tx);
     let mut imported = 0usize;
 
     while let Some(row) = rows.try_next().await.map_sql_err()? {
@@ -679,7 +1167,7 @@ async fn copy_postgres_sqlite_table(
             })?;
             query = bind_sqlite_copy_value(query, value, &column.sqlite)?;
         }
-        query.execute(sqlite_pool).await.map_sql_err()?;
+        query.execute(&mut **sqlite_tx).await.map_sql_err()?;
         imported = imported.saturating_add(1);
     }
 
@@ -694,7 +1182,7 @@ fn postgres_schema_copy_select_sql(table: &SchemaCopyTable) -> Result<String, Da
     );
     let mut payload_parts = Vec::new();
     for column in &table.columns {
-        if let Some(expr) = postgres_schema_copy_override_expr(column)? {
+        if let Some(expr) = postgres_schema_copy_override_expr(&table.table_name, column)? {
             payload_parts.push(sql_string_literal(&column.sqlite.name));
             payload_parts.push(expr);
         }
@@ -729,6 +1217,7 @@ fn postgres_schema_copy_select_sql(table: &SchemaCopyTable) -> Result<String, Da
 
 #[cfg(all(feature = "postgres", feature = "sqlite"))]
 fn postgres_schema_copy_override_expr(
+    table_name: &str,
     column: &SchemaCopyColumn,
 ) -> Result<Option<String>, DataLayerError> {
     let column_sql = format!("t.{}", postgres_quote_identifier(&column.sqlite.name)?);
@@ -755,7 +1244,7 @@ fn postgres_schema_copy_override_expr(
         } else {
             column_sql.clone()
         };
-        let multiplier = if sqlite_copy_column_stores_unix_millis(&column.sqlite.name) {
+        let multiplier = if import_timestamp_uses_millis(table_name, &column.sqlite.name) {
             " * 1000"
         } else {
             ""
@@ -778,14 +1267,46 @@ fn sqlite_schema_copy_insert_sql(table: &SchemaCopyTable) -> Result<String, Data
         .collect::<Result<Vec<_>, _>>()?
         .join(", ");
     let placeholder_sql = vec!["?"; table.columns.len()].join(", ");
+    let mut primary_key = table
+        .columns
+        .iter()
+        .filter(|column| column.sqlite.primary_key_position > 0)
+        .collect::<Vec<_>>();
+    primary_key.sort_by_key(|column| column.sqlite.primary_key_position);
+    if primary_key.is_empty() {
+        return Ok(format!(
+            "INSERT INTO {table_sql} ({column_sql}) VALUES ({placeholder_sql})"
+        ));
+    }
+
+    let conflict_columns = primary_key
+        .iter()
+        .map(|column| sqlite_quote_identifier(&column.sqlite.name))
+        .collect::<Result<Vec<_>, _>>()?
+        .join(", ");
+    let update_sql = table
+        .columns
+        .iter()
+        .filter(|column| column.sqlite.primary_key_position == 0)
+        .map(|column| {
+            let quoted = sqlite_quote_identifier(&column.sqlite.name)?;
+            Ok(format!("{quoted} = excluded.{quoted}"))
+        })
+        .collect::<Result<Vec<_>, DataLayerError>>()?
+        .join(", ");
+    let conflict_sql = if update_sql.is_empty() {
+        format!("ON CONFLICT ({conflict_columns}) DO NOTHING")
+    } else {
+        format!("ON CONFLICT ({conflict_columns}) DO UPDATE SET {update_sql}")
+    };
     Ok(format!(
-        "INSERT OR REPLACE INTO {table_sql} ({column_sql}) VALUES ({placeholder_sql})"
+        "INSERT INTO {table_sql} ({column_sql}) VALUES ({placeholder_sql}) {conflict_sql}"
     ))
 }
 
 #[cfg(all(feature = "postgres", feature = "sqlite"))]
 async fn load_postgres_public_table_names(
-    pool: &crate::driver::postgres::PostgresPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<BTreeSet<String>, DataLayerError> {
     let rows = sqlx::query(
         r#"
@@ -796,7 +1317,7 @@ WHERE table_schema = 'public'
 ORDER BY table_name
 "#,
     )
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_sql_err()?;
 
@@ -872,24 +1393,24 @@ async fn load_sqlite_copy_columns(
 
 #[cfg(all(feature = "postgres", feature = "sqlite"))]
 async fn postgres_public_table_has_rows(
-    pool: &crate::driver::postgres::PostgresPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     table_name: &str,
 ) -> Result<bool, DataLayerError> {
     let table_sql = format!("public.{}", postgres_quote_identifier(table_name)?);
     sqlx::query_scalar::<_, bool>(&format!(
         "SELECT EXISTS (SELECT 1 FROM {table_sql} LIMIT 1)"
     ))
-    .fetch_one(pool)
+    .fetch_one(&mut **tx)
     .await
     .map_sql_err()
 }
 
 #[cfg(all(feature = "postgres", feature = "sqlite"))]
 async fn ensure_sqlite_foreign_key_check_passes(
-    pool: &crate::driver::sqlite::SqlitePool,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
 ) -> Result<(), DataLayerError> {
     let rows = sqlx::query("PRAGMA foreign_key_check")
-        .fetch_all(pool)
+        .fetch_all(&mut **tx)
         .await
         .map_sql_err()?;
     if rows.is_empty() {
@@ -936,11 +1457,6 @@ fn sqlite_copy_column_is_required(column: &SqliteCopyColumn) -> bool {
 }
 
 #[cfg(all(feature = "postgres", feature = "sqlite"))]
-fn sqlite_copy_column_stores_unix_millis(column_name: &str) -> bool {
-    column_name.ends_with("_unix_ms")
-}
-
-#[cfg(all(feature = "postgres", feature = "sqlite"))]
 fn sqlite_copy_affinity(column: &SqliteCopyColumn) -> SqliteCopyAffinity {
     let declared_type = column.declared_type.to_ascii_uppercase();
     if declared_type.contains("INT") {
@@ -962,7 +1478,7 @@ fn sqlite_copy_affinity(column: &SqliteCopyColumn) -> SqliteCopyAffinity {
     }
 }
 
-#[cfg(all(feature = "postgres", feature = "sqlite"))]
+#[cfg(feature = "postgres")]
 fn is_postgres_bytea_column(column: &PostgresImportColumn) -> bool {
     column.data_type == "bytea" || column.udt_name == "bytea"
 }
@@ -1194,7 +1710,17 @@ fn filter_import_payload(
     for (column_name, value) in object {
         if target_columns.contains(column_name) {
             filtered.insert(column_name.clone(), value.clone());
+            continue;
         }
+        if value.is_null() {
+            continue;
+        }
+        return Err(DataLayerError::InvalidInput(format!(
+            "{} export row '{}' contains column '{}' that does not exist in {driver_name} table '{table_name}'",
+            domain.as_str(),
+            row.id,
+            column_name
+        )));
     }
 
     if filtered.is_empty() {
@@ -1208,7 +1734,6 @@ fn filter_import_payload(
     Ok(filtered)
 }
 
-#[cfg(any(feature = "mysql", feature = "sqlite"))]
 fn payload_with_table(payload: Value, table_name: &str) -> Result<Value, DataLayerError> {
     let mut object = payload.as_object().cloned().ok_or_else(|| {
         DataLayerError::UnexpectedValue("export row payload must be a JSON object".to_string())
@@ -1218,7 +1743,6 @@ fn payload_with_table(payload: Value, table_name: &str) -> Result<Value, DataLay
     Ok(Value::Object(object))
 }
 
-#[cfg(any(feature = "mysql", feature = "sqlite"))]
 fn normalize_billing_payload(
     table_name: &str,
     object: &mut serde_json::Map<String, Value>,

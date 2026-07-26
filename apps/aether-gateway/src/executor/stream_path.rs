@@ -21,14 +21,14 @@ use crate::stage_metrics::observe_gateway_stage_ms;
 use crate::{AppState, GatewayError, GatewayFallbackReason};
 
 use super::{
-    build_direct_plan_bypass_cache_key, execute_stream_plan_and_reports,
+    build_direct_plan_bypass_cache_key, execute_stream_plan_and_reports_with_transfer_tracker,
     maybe_execute_stream_via_local_decision, maybe_execute_stream_via_local_gemini_files_decision,
     maybe_execute_stream_via_local_image_decision,
     maybe_execute_stream_via_local_openai_responses_decision,
     maybe_execute_stream_via_local_same_format_provider_decision,
     maybe_execute_stream_via_local_standard_decision, maybe_execute_stream_via_plan_fallback,
     maybe_execute_stream_via_remote_decision, parse_local_request_body, should_skip_direct_plan,
-    LocalExecutionRequestOutcome,
+    LocalExecutionRequestOutcome, ProviderTransferTracker,
 };
 
 pub(crate) async fn maybe_execute_via_stream_decision_path(
@@ -86,6 +86,7 @@ pub(crate) async fn maybe_execute_via_stream_decision_path(
     if skip_direct_plan {
         return Ok(LocalExecutionRequestOutcome::NoPath);
     }
+    let transfer_tracker = ProviderTransferTracker::default();
 
     if plan_kind == OPENAI_CHAT_STREAM_PLAN_KIND
         && supports_stream_execution_decision_kind(plan_kind)
@@ -101,6 +102,7 @@ pub(crate) async fn maybe_execute_via_stream_decision_path(
             body_base64,
             plan_kind,
             bypass_cache_key,
+            &transfer_tracker,
         )
         .await;
         observe_gateway_stage_ms(
@@ -120,6 +122,7 @@ pub(crate) async fn maybe_execute_via_stream_decision_path(
         plan_kind,
         bypass_cache_key,
         scheduler_supported: supports_stream_execution_decision_kind(plan_kind),
+        transfer_tracker,
     };
 
     Ok(from_ai_serving_outcome(
@@ -137,10 +140,17 @@ async fn execute_openai_chat_stream_fast_path(
     body_base64: Option<String>,
     plan_kind: &str,
     bypass_cache_key: String,
+    transfer_tracker: &ProviderTransferTracker,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
     let started_at = std::time::Instant::now();
     let local_outcome = maybe_execute_stream_via_local_decision(
-        state, parts, trace_id, decision, body_json, plan_kind,
+        state,
+        parts,
+        trace_id,
+        decision,
+        body_json,
+        plan_kind,
+        transfer_tracker,
     )
     .await?;
     observe_gateway_stage_ms(
@@ -176,6 +186,7 @@ async fn execute_openai_chat_stream_fast_path(
         plan_kind,
         bypass_cache_key,
         GatewayFallbackReason::RemoteDecisionMiss,
+        transfer_tracker,
     )
     .await?;
     observe_gateway_stage_ms(
@@ -195,6 +206,7 @@ struct GatewayStreamExecutionPathPort<'a> {
     plan_kind: &'a str,
     bypass_cache_key: String,
     scheduler_supported: bool,
+    transfer_tracker: ProviderTransferTracker,
 }
 
 #[async_trait]
@@ -224,6 +236,7 @@ impl AiStreamExecutionPathPort for GatewayStreamExecutionPathPort<'_> {
                     self.trace_id,
                     self.decision,
                     self.plan_kind,
+                    &self.transfer_tracker,
                 )
                 .await?
             }
@@ -236,6 +249,7 @@ impl AiStreamExecutionPathPort for GatewayStreamExecutionPathPort<'_> {
                     self.trace_id,
                     self.decision,
                     self.plan_kind,
+                    &self.transfer_tracker,
                 )
                 .await?
             }
@@ -247,6 +261,7 @@ impl AiStreamExecutionPathPort for GatewayStreamExecutionPathPort<'_> {
                     self.decision,
                     self.body_json,
                     self.plan_kind,
+                    &self.transfer_tracker,
                 )
                 .await?
             }
@@ -258,6 +273,7 @@ impl AiStreamExecutionPathPort for GatewayStreamExecutionPathPort<'_> {
                     self.decision,
                     self.body_json,
                     self.plan_kind,
+                    &self.transfer_tracker,
                 )
                 .await?
             }
@@ -269,6 +285,7 @@ impl AiStreamExecutionPathPort for GatewayStreamExecutionPathPort<'_> {
                     self.decision,
                     self.body_json,
                     self.plan_kind,
+                    &self.transfer_tracker,
                 )
                 .await?
             }
@@ -280,6 +297,7 @@ impl AiStreamExecutionPathPort for GatewayStreamExecutionPathPort<'_> {
                     self.decision,
                     self.body_json,
                     self.plan_kind,
+                    &self.transfer_tracker,
                 )
                 .await?
             }
@@ -290,6 +308,7 @@ impl AiStreamExecutionPathPort for GatewayStreamExecutionPathPort<'_> {
                     self.trace_id,
                     self.decision,
                     self.plan_kind,
+                    &self.transfer_tracker,
                 )
                 .await?
             }
@@ -335,6 +354,7 @@ impl AiStreamExecutionPathPort for GatewayStreamExecutionPathPort<'_> {
             self.plan_kind,
             self.bypass_cache_key.clone(),
             gateway_fallback_reason(reason),
+            &self.transfer_tracker,
         )
         .await?;
         Ok(to_ai_serving_outcome(outcome))
@@ -440,6 +460,7 @@ async fn maybe_execute_local_video_task_content_stream(
     trace_id: &str,
     decision: &GatewayControlDecision,
     plan_kind: &str,
+    transfer_tracker: &ProviderTransferTracker,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
     if plan_kind != OPENAI_VIDEO_CONTENT_PLAN_KIND
         || decision.route_family.as_deref() != Some("openai")
@@ -481,7 +502,7 @@ async fn maybe_execute_local_video_task_content_stream(
         )),
         crate::video_tasks::LocalVideoTaskContentAction::StreamPlan(plan) => {
             let plan = *plan;
-            execute_stream_plan_and_reports(
+            execute_stream_plan_and_reports_with_transfer_tracker(
                 state,
                 trace_id,
                 decision,
@@ -491,6 +512,7 @@ async fn maybe_execute_local_video_task_content_stream(
                     report_kind: None,
                     report_context: None,
                 }],
+                transfer_tracker,
             )
             .await
         }

@@ -11,8 +11,9 @@ pub(crate) use crate::request_candidate_runtime::{
     persist_available_local_candidate, persist_skipped_local_candidate,
 };
 pub(crate) use candidate_loop::{
-    execute_stream_plan_and_reports, execute_sync_plan_and_reports,
-    mark_unused_local_candidate_items,
+    execute_stream_plan_and_reports, execute_stream_plan_and_reports_with_transfer_tracker,
+    execute_sync_plan_and_reports, execute_sync_plan_and_reports_with_transfer_tracker,
+    mark_unused_local_candidate_items, ProviderTransferTracker,
 };
 pub(crate) use orchestration::*;
 pub(crate) use outcome::{

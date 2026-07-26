@@ -340,6 +340,8 @@ async fn gateway_handles_admin_provider_summary_locally_with_trusted_admin_princ
     assert_eq!(payload["billing_type"], "monthly_quota");
     assert_eq!(payload["monthly_quota_usd"], 100.0);
     assert_eq!(payload["monthly_used_usd"], 12.5);
+    assert_eq!(payload["max_transfer_count"], 0);
+    assert_eq!(payload["max_transfer_timeout_seconds"], 0);
     assert_eq!(payload["total_endpoints"], 2);
     assert_eq!(payload["active_endpoints"], 2);
     assert_eq!(payload["total_keys"], 2);
@@ -832,6 +834,8 @@ async fn gateway_updates_admin_provider_locally_with_trusted_admin_principal() {
             "is_active": false,
             "concurrent_limit": 8,
             "max_retries": 6,
+            "max_transfer_count": 10,
+            "max_transfer_timeout_seconds": 60,
             "request_timeout": aether_contracts::MAX_EXECUTION_REQUEST_TIMEOUT_SECS,
             "stream_first_byte_timeout": 11.0,
             "enable_format_conversion": false,
@@ -860,6 +864,8 @@ async fn gateway_updates_admin_provider_locally_with_trusted_admin_principal() {
     assert_eq!(payload["enable_format_conversion"], false);
     assert_eq!(payload["is_active"], false);
     assert_eq!(payload["max_retries"], 6);
+    assert_eq!(payload["max_transfer_count"], 10);
+    assert_eq!(payload["max_transfer_timeout_seconds"], 60);
     assert_eq!(
         payload["request_timeout"].as_f64(),
         Some(aether_contracts::MAX_EXECUTION_REQUEST_TIMEOUT_SECS as f64)
@@ -888,6 +894,29 @@ async fn gateway_updates_admin_provider_locally_with_trusted_admin_principal() {
         .expect("request should succeed");
     assert_eq!(invalid_timeout_response.status(), StatusCode::BAD_REQUEST);
 
+    for (field_name, value) in [
+        ("max_transfer_count", -1),
+        ("max_transfer_timeout_seconds", -1),
+    ] {
+        let invalid_transfer_response = reqwest::Client::new()
+            .patch(format!("{gateway_url}/api/admin/providers/provider-openai"))
+            .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+            .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+            .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+            .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+            .json(&json!({ (field_name): value }))
+            .send()
+            .await
+            .expect("request should succeed");
+        let status = invalid_transfer_response.status();
+        let payload: serde_json::Value = invalid_transfer_response
+            .json()
+            .await
+            .expect("json body should parse");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(payload["detail"], format!("{field_name} 必须是非负整数"));
+    }
+
     let disable_response = reqwest::Client::new()
         .patch(format!("{gateway_url}/api/admin/providers/provider-openai"))
         .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
@@ -895,6 +924,7 @@ async fn gateway_updates_admin_provider_locally_with_trusted_admin_principal() {
         .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
         .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
         .json(&json!({
+            "max_transfer_count": null,
             "config": {
                 "chat_pii_redaction": {"enabled": false}
             }
@@ -912,6 +942,8 @@ async fn gateway_updates_admin_provider_locally_with_trusted_admin_principal() {
         json!({"enabled": false})
     );
     assert_eq!(disable_payload["pool_advanced"], json!({}));
+    assert_eq!(disable_payload["max_transfer_count"], 0);
+    assert_eq!(disable_payload["max_transfer_timeout_seconds"], 60);
     assert_eq!(
         disable_payload["failover_rules"],
         json!({"strategy": "ordered"})
@@ -945,6 +977,22 @@ async fn gateway_updates_admin_provider_locally_with_trusted_admin_principal() {
     assert_eq!(
         updated_provider.request_timeout_secs,
         Some(aether_contracts::MAX_EXECUTION_REQUEST_TIMEOUT_SECS as f64)
+    );
+    assert_eq!(
+        updated_provider
+            .config
+            .as_ref()
+            .and_then(|value| value.get("max_transfer_count"))
+            .and_then(serde_json::Value::as_u64),
+        Some(0)
+    );
+    assert_eq!(
+        updated_provider
+            .config
+            .as_ref()
+            .and_then(|value| value.get("max_transfer_timeout_seconds"))
+            .and_then(serde_json::Value::as_u64),
+        Some(60)
     );
     assert_eq!(
         updated_provider
@@ -1022,6 +1070,8 @@ async fn gateway_creates_admin_provider_locally_with_trusted_admin_principal() {
             "website": "codex.example",
             "keep_priority_on_conversion": true,
             "max_retries": 7,
+            "max_transfer_count": 12,
+            "max_transfer_timeout_seconds": 90,
             "request_timeout": aether_contracts::MAX_EXECUTION_REQUEST_TIMEOUT_SECS,
             "config": {"chat_pii_redaction": {"enabled": true}},
             "pool_advanced": {},
@@ -1057,6 +1107,22 @@ async fn gateway_creates_admin_provider_locally_with_trusted_admin_principal() {
     assert_eq!(created.website.as_deref(), Some("https://codex.example"));
     assert!(created.enable_format_conversion);
     assert_eq!(created.max_retries, Some(7));
+    assert_eq!(
+        created
+            .config
+            .as_ref()
+            .and_then(|value| value.get("max_transfer_count"))
+            .and_then(serde_json::Value::as_u64),
+        Some(12)
+    );
+    assert_eq!(
+        created
+            .config
+            .as_ref()
+            .and_then(|value| value.get("max_transfer_timeout_seconds"))
+            .and_then(serde_json::Value::as_u64),
+        Some(90)
+    );
     assert_eq!(
         created.request_timeout_secs,
         Some(aether_contracts::MAX_EXECUTION_REQUEST_TIMEOUT_SECS as f64)

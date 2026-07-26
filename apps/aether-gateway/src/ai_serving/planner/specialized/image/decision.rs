@@ -13,7 +13,8 @@ use crate::ai_serving::transport::{
 };
 use crate::ai_serving::{ai_local_execution_contract_for_formats, PlannerAppState};
 use crate::{
-    append_execution_contract_fields_to_value, AiExecutionDecision, AppState, GatewayError,
+    append_execution_contract_fields_to_value, append_local_failover_policy_to_value,
+    AiExecutionDecision, AppState, GatewayError,
 };
 
 use super::request::resolve_local_openai_image_candidate_payload_parts;
@@ -131,6 +132,7 @@ pub(super) async fn maybe_build_local_openai_image_decision_payload_for_candidat
         spec_metadata.api_format,
         provider_api_format.as_str(),
     );
+    let report_context = append_local_failover_policy_to_value(report_context, &transport);
     let request_encoding = resolve_transport_request_encoding_policy(&transport);
 
     let mut decision = build_ai_execution_decision_response(AiExecutionDecisionResponseParts {

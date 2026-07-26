@@ -1902,15 +1902,22 @@ fn lifecycle_backfills_are_partitioned_by_driver() {
         ));
         for required in [
             format!("use crate::driver::{driver}::{pool}"),
+            format!("sqlx::migrate!(\"./backfills/{driver}\")"),
+            "static BACKFILL_MIGRATOR".to_string(),
+            "ENSURE_SCHEMA_BACKFILLS_TABLE_SQL".to_string(),
+            "LIST_APPLIED_BACKFILLS_SQL".to_string(),
+            "INSERT_APPLIED_BACKFILL_SQL".to_string(),
             "pub async fn run_backfills".to_string(),
             "pub async fn pending_backfills".to_string(),
+            "ensure_schema_backfills_table".to_string(),
+            "validate_applied_backfills".to_string(),
         ] {
             assert!(
                 source.contains(&required),
                 "backfill/{driver}.rs should own {required}"
             );
         }
-        for forbidden in ["PgPool", "BACKFILL_MIGRATOR", "schema_backfills"] {
+        for forbidden in ["PgPool", "PgConnection", "crate::driver::postgres"] {
             assert!(
                 !source.contains(forbidden),
                 "backfill/{driver}.rs should not depend on PostgreSQL via {forbidden}"

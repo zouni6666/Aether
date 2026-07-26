@@ -586,22 +586,6 @@ VALUES ('target-key-1', 'target-user-1', 'hash-target-key', 'target key', 1, 1)
             .await
             .expect("sqlite migrations should run");
 
-        for (column, ty) in [
-            ("request_body", "TEXT"),
-            ("response_body", "TEXT"),
-            ("provider_request_body", "TEXT"),
-            ("client_response_body", "TEXT"),
-            ("request_body_compressed", "BLOB"),
-            ("response_body_compressed", "BLOB"),
-            ("provider_request_body_compressed", "BLOB"),
-            ("client_response_body_compressed", "BLOB"),
-        ] {
-            sqlx::query(&format!(r#"ALTER TABLE "usage" ADD COLUMN {column} {ty}"#))
-                .execute(backend.pool())
-                .await
-                .expect("legacy body column should be added");
-        }
-
         sqlx::query(
             r#"
 INSERT INTO "usage" (
@@ -842,24 +826,39 @@ WHERE billing_date = '2026-05-03'
         sqlx::query(
             r#"
 INSERT INTO "usage" (
-  request_id, user_id, api_key_id, provider_name, model, status, billing_status,
+  request_id, user_id, api_key_id, provider_name, model, api_format, status, billing_status,
   status_code, error_category, input_tokens, output_tokens,
   cache_creation_input_tokens, cache_read_input_tokens, total_cost_usd,
-  actual_total_cost_usd, response_time_ms, created_at_unix_ms, updated_at_unix_secs
+  actual_total_cost_usd, cache_creation_cost_usd, cache_read_cost_usd,
+  input_price_per_1m, response_time_ms, first_byte_time_ms,
+  created_at_unix_ms, updated_at_unix_secs
 ) VALUES
-  ('stats-1', 'user-1', 'key-1', 'provider-a', 'model-a', 'completed', 'settled',
-   200, NULL, 10, 20, 1, 2, 0.30, 0.25, 100, 3600000, 3600),
-  ('stats-2', 'user-2', 'key-2', 'provider-b', 'model-b', 'failed', 'void',
-   500, 'upstream_error', 5, 7, 0, 1, 0.20, 0.20, 300, 3610000, 3610),
-  ('stats-pending', 'user-3', 'key-3', 'provider-a', 'model-a', 'pending', 'pending',
-   NULL, NULL, 100, 100, 0, 0, 9.99, 9.99, 50, 3620000, 3620),
-  ('stats-unknown-provider', 'user-4', 'key-4', 'unknown', 'model-a', 'completed', 'settled',
-   200, NULL, 100, 100, 0, 0, 9.99, 9.99, 50, 3630000, 3630)
+  ('stats-1', 'user-1', 'key-1', 'provider-a', 'model-a', 'openai', 'completed', 'settled',
+   200, NULL, 10, 20, 1, 2, 0.30, 0.25, 0.01, 0.02, 10.0, 100, 50, 3600, 3600),
+  ('stats-2', 'user-2', 'key-2', 'provider-b', 'model-b', 'claude', 'failed', 'void',
+   500, 'upstream_error', 5, 7, 0, 1, 0.20, 0.20, 0.00, 0.01, 20.0, 300, 200, 3610, 3610),
+  ('stats-pending', 'user-3', 'key-3', 'provider-a', 'model-a', 'openai', 'pending', 'pending',
+   NULL, NULL, 100, 100, 0, 0, 9.99, 9.99, 0.00, 0.00, 0.0, 50, 25, 3620, 3620),
+  ('stats-unknown-provider', 'user-4', 'key-4', 'unknown', 'model-a', 'openai', 'completed', 'settled',
+   200, NULL, 100, 100, 0, 0, 9.99, 9.99, 0.00, 0.00, 0.0, 50, 25, 3630, 3630)
 "#,
         )
         .execute(backend.pool())
         .await
         .expect("usage stats rows should seed");
+
+        sqlx::query(
+            r#"
+INSERT INTO request_candidates (
+  id, request_id, candidate_index, retry_index, status, created_at
+) VALUES
+  ('stats-candidate-1', 'stats-fallback', 0, 0, 'failed', 3600000),
+  ('stats-candidate-2', 'stats-fallback', 1, 0, 'success', 3610000)
+"#,
+        )
+        .execute(backend.pool())
+        .await
+        .expect("fallback candidates should seed");
 
         let target_hour = chrono::DateTime::<chrono::Utc>::from_timestamp(3600, 0)
             .expect("target hour should be valid");
@@ -896,6 +895,66 @@ WHERE hour_utc = 3600
         assert_eq!(hourly_row.3, 15);
         assert!((hourly_row.4 - 0.50).abs() < f64::EPSILON);
 
+        let enriched_hourly: (f64, i64, i64, i64, i64, i64) = sqlx::query_as(
+            r#"
+SELECT response_time_sum_ms, response_time_samples, cache_hit_total_requests,
+       cache_hit_requests, completed_total_requests, settled_total_requests
+FROM stats_hourly
+WHERE hour_utc = 3600
+"#,
+        )
+        .fetch_one(backend.pool())
+        .await
+        .expect("enriched hourly stats row should load");
+        assert!((enriched_hourly.0 - 400.0).abs() < f64::EPSILON);
+        assert_eq!(enriched_hourly.1, 2);
+        assert_eq!(enriched_hourly.2, 4);
+        assert_eq!(enriched_hourly.3, 2);
+        assert_eq!(enriched_hourly.4, 2);
+        assert_eq!(enriched_hourly.5, 2);
+
+        assert_eq!(sqlite_count(backend.pool(), "stats_hourly_user").await, 2);
+        assert_eq!(
+            sqlite_count(backend.pool(), "stats_hourly_user_model").await,
+            2
+        );
+        assert_eq!(sqlite_count(backend.pool(), "stats_hourly_model").await, 2);
+        assert_eq!(
+            sqlite_count(backend.pool(), "stats_hourly_provider").await,
+            2
+        );
+        let hourly_user = sqlx::query_as::<_, (i64, i64, i64, i64, i64, f64)>(
+            r#"
+SELECT total_requests, success_requests, error_requests, input_tokens, output_tokens, total_cost
+FROM stats_hourly_user
+WHERE hour_utc = 3600 AND user_id = 'user-2'
+"#,
+        )
+        .fetch_one(backend.pool())
+        .await
+        .expect("hourly user stats row should load");
+        assert_eq!(hourly_user.0, 1);
+        assert_eq!(hourly_user.1, 0);
+        assert_eq!(hourly_user.2, 1);
+        assert_eq!(hourly_user.3, 5);
+        assert_eq!(hourly_user.4, 7);
+        assert!((hourly_user.5 - 0.20).abs() < f64::EPSILON);
+        let hourly_model = sqlx::query_as::<_, (i64, i64, i64, f64, f64)>(
+            r#"
+SELECT total_requests, input_tokens, output_tokens, total_cost, avg_response_time_ms
+FROM stats_hourly_model
+WHERE hour_utc = 3600 AND model = 'model-a'
+"#,
+        )
+        .fetch_one(backend.pool())
+        .await
+        .expect("hourly model stats row should load");
+        assert_eq!(hourly_model.0, 1);
+        assert_eq!(hourly_model.1, 10);
+        assert_eq!(hourly_model.2, 20);
+        assert!((hourly_model.3 - 0.30).abs() < f64::EPSILON);
+        assert!((hourly_model.4 - 100.0).abs() < f64::EPSILON);
+
         let second_hourly = backend
             .aggregate_stats_hourly(&StatsHourlyAggregationInput {
                 target_hour_utc: target_hour,
@@ -919,13 +978,13 @@ WHERE hour_utc = 3600
         assert_eq!(daily.total_requests, 2);
         assert_eq!(daily.model_rows, 2);
         assert_eq!(daily.provider_rows, 2);
-        assert_eq!(daily.api_key_rows, 2);
+        assert_eq!(daily.api_key_rows, 4);
         assert_eq!(daily.error_rows, 1);
         assert_eq!(daily.user_rows, 2);
 
-        let daily_row = sqlx::query_as::<_, (i64, i64, i64, i64)>(
+        let daily_row = sqlx::query_as::<_, (i64, i64, i64, i64, i64)>(
             r#"
-SELECT total_requests, success_requests, error_requests, unique_models
+SELECT total_requests, success_requests, error_requests, unique_models, fallback_count
 FROM stats_daily
 WHERE "date" = 0
 "#,
@@ -933,6 +992,167 @@ WHERE "date" = 0
         .fetch_one(backend.pool())
         .await
         .expect("daily stats row should load");
-        assert_eq!(daily_row, (2, 1, 1, 2));
+        assert_eq!(daily_row, (2, 1, 1, 2, 1));
+
+        assert_eq!(sqlite_count(backend.pool(), "stats_daily_model").await, 2);
+        assert_eq!(
+            sqlite_count(backend.pool(), "stats_daily_provider").await,
+            2
+        );
+        assert_eq!(sqlite_count(backend.pool(), "stats_daily_api_key").await, 4);
+        assert_eq!(sqlite_count(backend.pool(), "stats_daily_error").await, 1);
+        assert_eq!(sqlite_count(backend.pool(), "stats_user_daily").await, 2);
+        let daily_model = sqlx::query_as::<_, (i64, i64, i64, i64, i64, f64, f64)>(
+            r#"
+SELECT total_requests, input_tokens, output_tokens, cache_creation_tokens,
+       cache_read_tokens, total_cost, avg_response_time_ms
+FROM stats_daily_model
+WHERE "date" = 0 AND model = 'model-a'
+"#,
+        )
+        .fetch_one(backend.pool())
+        .await
+        .expect("daily model stats row should load");
+        assert_eq!(daily_model.0, 1);
+        assert_eq!(daily_model.1, 10);
+        assert_eq!(daily_model.2, 20);
+        assert_eq!(daily_model.3, 1);
+        assert_eq!(daily_model.4, 2);
+        assert!((daily_model.5 - 0.30).abs() < f64::EPSILON);
+        assert!((daily_model.6 - 100.0).abs() < f64::EPSILON);
+        let daily_error = sqlx::query_as::<_, (String, Option<String>, Option<String>, i64)>(
+            r#"
+SELECT error_category, provider_name, model, count
+FROM stats_daily_error
+WHERE "date" = 0
+"#,
+        )
+        .fetch_one(backend.pool())
+        .await
+        .expect("daily error stats row should load");
+        assert_eq!(
+            daily_error,
+            (
+                "upstream_error".to_string(),
+                Some("provider-b".to_string()),
+                Some("model-b".to_string()),
+                1,
+            )
+        );
+        let daily_user = sqlx::query_as::<_, (i64, i64, i64, i64, i64, f64)>(
+            r#"
+SELECT total_requests, success_requests, error_requests, input_tokens, output_tokens, total_cost
+FROM stats_user_daily
+WHERE "date" = 0 AND user_id = 'user-2'
+"#,
+        )
+        .fetch_one(backend.pool())
+        .await
+        .expect("daily user stats row should load");
+        assert_eq!(daily_user.0, 1);
+        assert_eq!(daily_user.1, 0);
+        assert_eq!(daily_user.2, 1);
+        assert_eq!(daily_user.3, 5);
+        assert_eq!(daily_user.4, 7);
+        assert!((daily_user.5 - 0.20).abs() < f64::EPSILON);
+
+        let enriched_daily =
+            sqlx::query_as::<_, (i64, i64, f64, i64, i64, i64, i64, i64, i64, Option<i64>)>(
+                r#"
+SELECT effective_input_tokens, total_input_context, response_time_sum_ms,
+       response_time_samples, cache_hit_total_requests, cache_hit_requests,
+       completed_total_requests, completed_cache_hit_requests,
+       settled_total_requests, p50_response_time_ms
+FROM stats_daily
+WHERE "date" = 0
+"#,
+            )
+            .fetch_one(backend.pool())
+            .await
+            .expect("enriched daily stats row should load");
+        assert_eq!(enriched_daily.0, 13);
+        assert_eq!(enriched_daily.1, 17);
+        assert!((enriched_daily.2 - 400.0).abs() < f64::EPSILON);
+        assert_eq!(enriched_daily.3, 2);
+        assert_eq!(enriched_daily.4, 4);
+        assert_eq!(enriched_daily.5, 2);
+        assert_eq!(enriched_daily.6, 2);
+        assert_eq!(enriched_daily.7, 1);
+        assert_eq!(enriched_daily.8, 2);
+        assert_eq!(enriched_daily.9, None);
+
+        for (table, expected) in [
+            ("stats_user_summary", 2),
+            ("stats_user_daily_model", 2),
+            ("stats_user_daily_provider", 2),
+            ("stats_user_daily_api_format", 2),
+            ("stats_daily_model_provider", 2),
+            ("stats_user_daily_model_provider", 2),
+            ("stats_daily_cost_savings", 1),
+            ("stats_daily_cost_savings_provider", 3),
+            ("stats_daily_cost_savings_model", 2),
+            ("stats_daily_cost_savings_model_provider", 3),
+            ("stats_user_daily_cost_savings", 4),
+            ("stats_user_daily_cost_savings_provider", 4),
+            ("stats_user_daily_cost_savings_model", 4),
+            ("stats_user_daily_cost_savings_model_provider", 4),
+        ] {
+            assert_eq!(
+                sqlite_count(backend.pool(), table).await,
+                expected,
+                "{table}"
+            );
+        }
+
+        let model_rollup: (i64, i64, i64, f64, i64) = sqlx::query_as(
+            r#"
+SELECT total_requests, effective_input_tokens, total_tokens,
+       response_time_sum_ms, successful_response_time_samples
+FROM stats_user_daily_model
+WHERE user_id = 'user-1' AND "date" = 0 AND model = 'model-a'
+"#,
+        )
+        .fetch_one(backend.pool())
+        .await
+        .expect("advanced user model row should load");
+        assert_eq!(model_rollup.0, 1);
+        assert_eq!(model_rollup.1, 8);
+        assert_eq!(model_rollup.2, 31);
+        assert!((model_rollup.3 - 100.0).abs() < f64::EPSILON);
+        assert_eq!(model_rollup.4, 1);
+
+        let savings: (i64, f64, f64, f64) = sqlx::query_as(
+            r#"
+SELECT cache_read_tokens, cache_read_cost, cache_creation_cost, estimated_full_cost
+FROM stats_daily_cost_savings
+WHERE "date" = 0
+"#,
+        )
+        .fetch_one(backend.pool())
+        .await
+        .expect("daily cost savings row should load");
+        assert_eq!(savings.0, 3);
+        assert!((savings.1 - 0.03).abs() < 1e-12);
+        assert!((savings.2 - 0.01).abs() < 1e-12);
+        assert!((savings.3 - 0.00004).abs() < 1e-12);
+
+        let summary: (i64, i64, i64) = sqlx::query_as(
+            r#"
+SELECT all_time_requests, all_time_input_tokens, active_days
+FROM stats_user_summary
+WHERE user_id = 'user-1'
+"#,
+        )
+        .fetch_one(backend.pool())
+        .await
+        .expect("user summary row should load");
+        assert_eq!(summary, (1, 10, 1));
+
+        let global_summary: (i64, i64) =
+            sqlx::query_as("SELECT all_time_requests, all_time_input_tokens FROM stats_summary")
+                .fetch_one(backend.pool())
+                .await
+                .expect("global stats summary should load");
+        assert_eq!(global_summary, (2, 15));
     }
 }

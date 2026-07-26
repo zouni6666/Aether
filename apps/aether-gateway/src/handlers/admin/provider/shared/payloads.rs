@@ -157,6 +157,10 @@ pub(crate) struct AdminProviderCreateRequest {
     #[serde(default)]
     pub(crate) max_retries: Option<i32>,
     #[serde(default)]
+    pub(crate) max_transfer_count: Option<i64>,
+    #[serde(default)]
+    pub(crate) max_transfer_timeout_seconds: Option<i64>,
+    #[serde(default)]
     pub(crate) proxy: Option<serde_json::Value>,
     #[serde(
         default,
@@ -211,6 +215,10 @@ pub(crate) struct AdminProviderUpdateRequest {
     pub(crate) concurrent_limit: Option<i32>,
     #[serde(default)]
     pub(crate) max_retries: Option<i32>,
+    #[serde(default)]
+    pub(crate) max_transfer_count: Option<i64>,
+    #[serde(default)]
+    pub(crate) max_transfer_timeout_seconds: Option<i64>,
     #[serde(default)]
     pub(crate) proxy: Option<serde_json::Value>,
     #[serde(

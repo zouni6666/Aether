@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::Utc;
-use sqlx::{mysql::MySqlRow, Row};
+use sqlx::{mysql::MySqlRow, MySql, QueryBuilder, Row};
 
 use aether_data_contracts::repository::wallet::{
     redeem_code_credits_recharge_balance, redeem_code_payment_method,
@@ -17,11 +17,13 @@ use aether_data_contracts::repository::wallet::{
     RedeemWalletCodeInput, RedeemWalletCodeOutcome, StoredAdminPaymentCallback,
     StoredAdminPaymentCallbackPage, StoredAdminPaymentOrder, StoredAdminPaymentOrderPage,
     StoredAdminRedeemCode, StoredAdminRedeemCodeBatch, StoredAdminRedeemCodeBatchPage,
-    StoredAdminRedeemCodePage, StoredAdminWalletLedgerPage, StoredAdminWalletListPage,
-    StoredAdminWalletRefund, StoredAdminWalletRefundPage, StoredAdminWalletRefundRequestPage,
-    StoredAdminWalletTransaction, StoredAdminWalletTransactionPage, StoredWalletDailyUsageLedger,
+    StoredAdminRedeemCodePage, StoredAdminWalletLedgerItem, StoredAdminWalletLedgerPage,
+    StoredAdminWalletListItem, StoredAdminWalletListPage, StoredAdminWalletRefund,
+    StoredAdminWalletRefundPage, StoredAdminWalletRefundRequestItem,
+    StoredAdminWalletRefundRequestPage, StoredAdminWalletTransaction,
+    StoredAdminWalletTransactionPage, StoredWalletDailyUsageLedger,
     StoredWalletDailyUsageLedgerPage, StoredWalletSnapshot, WalletLookupKey, WalletMutationOutcome,
-    WalletReadRepository, WalletReadSeed, WalletReadSnapshot, WalletWriteRepository,
+    WalletReadRepository, WalletWriteRepository,
 };
 use aether_data_contracts::DataLayerError;
 
@@ -37,38 +39,60 @@ impl MysqlWalletReadRepository {
     pub fn new(pool: MysqlPool) -> Self {
         Self { pool }
     }
+}
 
-    async fn load_snapshot(&self) -> Result<WalletReadSnapshot, DataLayerError> {
-        Ok(WalletReadSnapshot::new(WalletReadSeed {
-            wallets: self.load_wallets().await?,
-            payment_orders: self.load_payment_orders().await?,
-            payment_callbacks: self.load_payment_callbacks().await?,
-            wallet_transactions: self.load_wallet_transactions().await?,
-            refunds: self.load_refunds().await?,
-            redeem_batches: self.load_redeem_batches().await?,
-            redeem_codes: self.load_redeem_codes().await?,
-        }))
-    }
-
-    async fn load_wallets(&self) -> Result<Vec<StoredWalletSnapshot>, DataLayerError> {
-        let rows = sqlx::query(
-            r#"
+const ADMIN_WALLET_LIST_SELECT_SQL: &str = r#"
 SELECT
-  id, user_id, api_key_id, balance, gift_balance, limit_mode, currency,
-  status, total_recharged, total_consumed, total_refunded, total_adjusted,
-  updated_at AS updated_at_unix_secs
-FROM wallets
-"#,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_sql_err()?;
-        rows.iter().map(map_wallet_row).collect()
-    }
+  w.id, w.user_id, w.api_key_id, w.balance, w.gift_balance, w.limit_mode,
+  w.currency, w.status, w.total_recharged, w.total_consumed, w.total_refunded,
+  w.total_adjusted, users.username AS user_name, api_keys.name AS api_key_name,
+  w.created_at AS created_at_unix_ms, w.updated_at AS updated_at_unix_secs
+FROM wallets w
+LEFT JOIN users ON users.id = w.user_id
+LEFT JOIN api_keys ON api_keys.id = w.api_key_id
+WHERE 1 = 1
+"#;
 
-    async fn load_payment_orders(&self) -> Result<Vec<StoredAdminPaymentOrder>, DataLayerError> {
-        let rows = sqlx::query(
-            r#"
+const ADMIN_WALLET_LEDGER_SELECT_SQL: &str = r#"
+SELECT
+  tx.id, tx.wallet_id, tx.category, tx.reason_code, tx.amount,
+  tx.balance_before, tx.balance_after, tx.recharge_balance_before,
+  tx.recharge_balance_after, tx.gift_balance_before, tx.gift_balance_after,
+  tx.link_type, tx.link_id, tx.operator_id, tx.description,
+  w.user_id, w.api_key_id, w.status AS wallet_status,
+  wallet_users.username AS wallet_user_name,
+  api_keys.name AS api_key_name,
+  operator_users.username AS operator_name,
+  operator_users.email AS operator_email,
+  tx.created_at AS created_at_unix_ms
+FROM wallet_transactions tx
+JOIN wallets w ON w.id = tx.wallet_id
+LEFT JOIN users wallet_users ON wallet_users.id = w.user_id
+LEFT JOIN api_keys ON api_keys.id = w.api_key_id
+LEFT JOIN users operator_users ON operator_users.id = tx.operator_id
+WHERE 1 = 1
+"#;
+
+const ADMIN_WALLET_REFUND_REQUEST_SELECT_SQL: &str = r#"
+SELECT
+  rr.id, rr.refund_no, rr.wallet_id, rr.user_id, rr.payment_order_id,
+  rr.source_type, rr.source_id, rr.refund_mode, rr.amount_usd, rr.status,
+  rr.reason, rr.failure_reason, rr.gateway_refund_id, rr.payout_method,
+  rr.payout_reference, rr.payout_proof, rr.requested_by, rr.approved_by,
+  rr.processed_by, w.user_id AS wallet_user_id, w.api_key_id AS wallet_api_key_id,
+  w.status AS wallet_status, wallet_users.username AS wallet_user_name,
+  api_keys.name AS api_key_name, rr.created_at AS created_at_unix_ms,
+  rr.updated_at AS updated_at_unix_secs,
+  rr.processed_at AS processed_at_unix_secs,
+  rr.completed_at AS completed_at_unix_secs
+FROM refund_requests rr
+JOIN wallets w ON w.id = rr.wallet_id
+LEFT JOIN users wallet_users ON wallet_users.id = w.user_id
+LEFT JOIN api_keys ON api_keys.id = w.api_key_id
+WHERE w.user_id IS NOT NULL
+"#;
+
+const ADMIN_PAYMENT_ORDER_SELECT_SQL: &str = r#"
 SELECT
   id, order_no, wallet_id, user_id, amount_usd, pay_amount, pay_currency,
   exchange_rate, refunded_amount_usd, refundable_amount_usd, payment_method,
@@ -79,129 +103,325 @@ SELECT
   credited_at AS credited_at_unix_secs,
   expires_at AS expires_at_unix_secs
 FROM payment_orders
-"#,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_sql_err()?;
-        rows.iter().map(map_payment_order_row).collect()
-    }
+WHERE 1 = 1
+"#;
 
-    async fn load_payment_callbacks(
-        &self,
-    ) -> Result<Vec<StoredAdminPaymentCallback>, DataLayerError> {
-        let rows = sqlx::query(
-            r#"
+const ADMIN_PAYMENT_CALLBACK_SELECT_SQL: &str = r#"
 SELECT
   id, payment_order_id, payment_method, callback_key, order_no,
   gateway_order_id, payload_hash, signature_valid, status, payload,
   error_message, created_at AS created_at_unix_ms,
   processed_at AS processed_at_unix_secs
 FROM payment_callbacks
-"#,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_sql_err()?;
-        rows.iter().map(map_payment_callback_row).collect()
-    }
+WHERE 1 = 1
+"#;
 
-    async fn load_wallet_transactions(
-        &self,
-    ) -> Result<Vec<StoredAdminWalletTransaction>, DataLayerError> {
-        let rows = sqlx::query(
-            r#"
-SELECT
-  tx.id, tx.wallet_id, tx.category, tx.reason_code, tx.amount,
-  tx.balance_before, tx.balance_after, tx.recharge_balance_before,
-  tx.recharge_balance_after, tx.gift_balance_before, tx.gift_balance_after,
-  tx.link_type, tx.link_id, tx.operator_id, tx.description,
-  operator_users.username AS operator_name,
-  operator_users.email AS operator_email,
-  tx.created_at AS created_at_unix_ms
-FROM wallet_transactions tx
-LEFT JOIN users operator_users ON operator_users.id = tx.operator_id
-"#,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_sql_err()?;
-        rows.iter().map(map_wallet_transaction_row).collect()
-    }
-
-    async fn load_refunds(&self) -> Result<Vec<StoredAdminWalletRefund>, DataLayerError> {
-        let rows = sqlx::query(
-            r#"
-SELECT
-  id, refund_no, wallet_id, user_id, payment_order_id, source_type,
-  source_id, refund_mode, amount_usd, status, reason, failure_reason,
-  gateway_refund_id, payout_method, payout_reference, payout_proof,
-  requested_by, approved_by, processed_by,
-  created_at AS created_at_unix_ms,
-  updated_at AS updated_at_unix_secs,
-  processed_at AS processed_at_unix_secs,
-  completed_at AS completed_at_unix_secs
-FROM refund_requests
-"#,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_sql_err()?;
-        rows.iter().map(map_refund_row).collect()
-    }
-
-    async fn load_redeem_batches(&self) -> Result<Vec<StoredAdminRedeemCodeBatch>, DataLayerError> {
-        let rows = sqlx::query(
-            r#"
+const ADMIN_REDEEM_BATCH_SELECT_SQL: &str = r#"
 SELECT
   batches.id, batches.name, batches.amount_usd, batches.currency,
   batches.balance_bucket, batches.total_count,
-  CAST(COALESCE(SUM(CASE WHEN codes.status = 'redeemed' THEN 1 ELSE 0 END), 0) AS SIGNED) AS redeemed_count,
-  CAST(COALESCE(SUM(CASE WHEN codes.status = 'active' THEN 1 ELSE 0 END), 0) AS SIGNED) AS active_count,
+  CAST(COALESCE(stats.redeemed_count, 0) AS SIGNED) AS redeemed_count,
+  CAST(COALESCE(stats.active_count, 0) AS SIGNED) AS active_count,
   batches.status, batches.description, batches.created_by,
   batches.expires_at AS expires_at_unix_secs,
   batches.created_at AS created_at_unix_ms,
   batches.updated_at AS updated_at_unix_secs
 FROM redeem_code_batches AS batches
-LEFT JOIN redeem_codes AS codes ON codes.batch_id = batches.id
-GROUP BY
-  batches.id, batches.name, batches.amount_usd, batches.currency,
-  batches.balance_bucket, batches.total_count, batches.status,
-  batches.description, batches.created_by, batches.expires_at,
-  batches.created_at, batches.updated_at
-"#,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_sql_err()?;
-        rows.iter().map(map_redeem_batch_row).collect()
-    }
+LEFT JOIN (
+  SELECT
+    batch_id,
+    SUM(CASE WHEN status = 'redeemed' THEN 1 ELSE 0 END) AS redeemed_count,
+    SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active_count
+  FROM redeem_codes
+  GROUP BY batch_id
+) AS stats ON stats.batch_id = batches.id
+WHERE 1 = 1
+"#;
 
-    async fn load_redeem_codes(&self) -> Result<Vec<StoredAdminRedeemCode>, DataLayerError> {
-        let rows = sqlx::query(
-            r#"
-SELECT
-  codes.id, codes.batch_id, batches.name AS batch_name, codes.code_prefix,
-  codes.code_suffix, codes.status, codes.redeemed_by_user_id,
-  redeemed_users.username AS redeemed_by_user_name,
-  codes.redeemed_wallet_id, codes.redeemed_payment_order_id,
-  orders.order_no AS redeemed_order_no,
-  codes.redeemed_at AS redeemed_at_unix_secs,
-  codes.disabled_by,
-  batches.expires_at AS expires_at_unix_secs,
-  codes.created_at AS created_at_unix_ms,
-  codes.updated_at AS updated_at_unix_secs
-FROM redeem_codes AS codes
-JOIN redeem_code_batches AS batches ON batches.id = codes.batch_id
-LEFT JOIN users AS redeemed_users ON redeemed_users.id = codes.redeemed_by_user_id
-LEFT JOIN payment_orders AS orders ON orders.id = codes.redeemed_payment_order_id
-"#,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_sql_err()?;
-        rows.iter().map(map_redeem_code_row).collect()
+fn wallets_by_owner_ids_builder<'a>(
+    owner_column: &'static str,
+    owner_ids: &'a [String],
+) -> QueryBuilder<'a, MySql> {
+    assert!(matches!(owner_column, "user_id" | "api_key_id"));
+    let mut builder = QueryBuilder::<MySql>::new(wallet_select_sql(""));
+    builder.push("WHERE ").push(owner_column).push(" IN (");
+    let mut separated = builder.separated(", ");
+    for owner_id in owner_ids {
+        separated.push_bind(owner_id);
     }
+    separated.push_unseparated(") ORDER BY id ASC");
+    builder
+}
+
+fn push_admin_wallet_filters<'a>(
+    builder: &mut QueryBuilder<'a, MySql>,
+    query: &'a AdminWalletListQuery,
+) {
+    if let Some(status) = query.status.as_deref() {
+        builder.push(" AND w.status = ").push_bind(status);
+    }
+    match query.owner_type.as_deref() {
+        Some("user") => {
+            builder.push(" AND w.user_id IS NOT NULL");
+        }
+        Some("api_key") => {
+            builder.push(" AND w.api_key_id IS NOT NULL");
+        }
+        _ => {}
+    }
+}
+
+fn admin_wallet_count_builder<'a>(query: &'a AdminWalletListQuery) -> QueryBuilder<'a, MySql> {
+    let mut builder =
+        QueryBuilder::<MySql>::new("SELECT COUNT(*) AS total FROM wallets w WHERE 1 = 1");
+    push_admin_wallet_filters(&mut builder, query);
+    builder
+}
+
+fn admin_wallet_list_builder<'a>(
+    query: &'a AdminWalletListQuery,
+    limit: i64,
+    offset: i64,
+) -> QueryBuilder<'a, MySql> {
+    let mut builder = QueryBuilder::<MySql>::new(ADMIN_WALLET_LIST_SELECT_SQL);
+    push_admin_wallet_filters(&mut builder, query);
+    builder
+        .push(" ORDER BY w.updated_at DESC, w.id DESC LIMIT ")
+        .push_bind(limit)
+        .push(" OFFSET ")
+        .push_bind(offset);
+    builder
+}
+
+fn push_admin_wallet_ledger_filters<'a>(
+    builder: &mut QueryBuilder<'a, MySql>,
+    query: &'a AdminWalletLedgerQuery,
+) {
+    if let Some(category) = query.category.as_deref() {
+        builder.push(" AND tx.category = ").push_bind(category);
+    }
+    if let Some(reason_code) = query.reason_code.as_deref() {
+        builder
+            .push(" AND tx.reason_code = ")
+            .push_bind(reason_code);
+    }
+    match query.owner_type.as_deref() {
+        Some("user") => {
+            builder.push(" AND w.user_id IS NOT NULL");
+        }
+        Some("api_key") => {
+            builder.push(" AND w.api_key_id IS NOT NULL");
+        }
+        _ => {}
+    }
+}
+
+fn admin_wallet_ledger_count_builder<'a>(
+    query: &'a AdminWalletLedgerQuery,
+) -> QueryBuilder<'a, MySql> {
+    let mut builder = QueryBuilder::<MySql>::new(
+        "SELECT COUNT(*) AS total FROM wallet_transactions tx JOIN wallets w ON w.id = tx.wallet_id WHERE 1 = 1",
+    );
+    push_admin_wallet_ledger_filters(&mut builder, query);
+    builder
+}
+
+fn admin_wallet_ledger_list_builder<'a>(
+    query: &'a AdminWalletLedgerQuery,
+    limit: i64,
+    offset: i64,
+) -> QueryBuilder<'a, MySql> {
+    let mut builder = QueryBuilder::<MySql>::new(ADMIN_WALLET_LEDGER_SELECT_SQL);
+    push_admin_wallet_ledger_filters(&mut builder, query);
+    builder
+        .push(" ORDER BY tx.created_at DESC, tx.id DESC LIMIT ")
+        .push_bind(limit)
+        .push(" OFFSET ")
+        .push_bind(offset);
+    builder
+}
+
+fn push_admin_wallet_refund_request_filters<'a>(
+    builder: &mut QueryBuilder<'a, MySql>,
+    query: &'a AdminWalletRefundRequestListQuery,
+) {
+    if let Some(status) = query.status.as_deref() {
+        builder.push(" AND rr.status = ").push_bind(status);
+    }
+}
+
+fn admin_wallet_refund_request_count_builder<'a>(
+    query: &'a AdminWalletRefundRequestListQuery,
+) -> QueryBuilder<'a, MySql> {
+    let mut builder = QueryBuilder::<MySql>::new(
+        "SELECT COUNT(*) AS total FROM refund_requests rr JOIN wallets w ON w.id = rr.wallet_id WHERE w.user_id IS NOT NULL",
+    );
+    push_admin_wallet_refund_request_filters(&mut builder, query);
+    builder
+}
+
+fn admin_wallet_refund_request_list_builder<'a>(
+    query: &'a AdminWalletRefundRequestListQuery,
+    limit: i64,
+    offset: i64,
+) -> QueryBuilder<'a, MySql> {
+    let mut builder = QueryBuilder::<MySql>::new(ADMIN_WALLET_REFUND_REQUEST_SELECT_SQL);
+    push_admin_wallet_refund_request_filters(&mut builder, query);
+    builder
+        .push(" ORDER BY rr.created_at DESC, rr.id DESC LIMIT ")
+        .push_bind(limit)
+        .push(" OFFSET ")
+        .push_bind(offset);
+    builder
+}
+
+fn push_admin_payment_order_filters<'a>(
+    builder: &mut QueryBuilder<'a, MySql>,
+    query: &'a AdminPaymentOrderListQuery,
+    now: i64,
+) {
+    if let Some(payment_method) = query.payment_method.as_deref() {
+        builder
+            .push(" AND payment_method = ")
+            .push_bind(payment_method);
+    }
+    if let Some(status) = query.status.as_deref() {
+        builder
+            .push(" AND (CASE WHEN status = 'pending' AND expires_at IS NOT NULL AND expires_at < ")
+            .push_bind(now)
+            .push(" THEN 'expired' ELSE status END) = ")
+            .push_bind(status);
+    }
+}
+
+fn admin_payment_order_count_builder<'a>(
+    query: &'a AdminPaymentOrderListQuery,
+    now: i64,
+) -> QueryBuilder<'a, MySql> {
+    let mut builder =
+        QueryBuilder::<MySql>::new("SELECT COUNT(*) AS total FROM payment_orders WHERE 1 = 1");
+    push_admin_payment_order_filters(&mut builder, query, now);
+    builder
+}
+
+fn admin_payment_order_list_builder<'a>(
+    query: &'a AdminPaymentOrderListQuery,
+    now: i64,
+    limit: i64,
+    offset: i64,
+) -> QueryBuilder<'a, MySql> {
+    let mut builder = QueryBuilder::<MySql>::new(ADMIN_PAYMENT_ORDER_SELECT_SQL);
+    push_admin_payment_order_filters(&mut builder, query, now);
+    builder
+        .push(" ORDER BY created_at DESC, id DESC LIMIT ")
+        .push_bind(limit)
+        .push(" OFFSET ")
+        .push_bind(offset);
+    builder
+}
+
+fn push_admin_payment_callback_filter<'a>(
+    builder: &mut QueryBuilder<'a, MySql>,
+    payment_method: Option<&'a str>,
+) {
+    if let Some(payment_method) = payment_method {
+        builder
+            .push(" AND payment_method = ")
+            .push_bind(payment_method);
+    }
+}
+
+fn admin_payment_callback_count_builder(payment_method: Option<&str>) -> QueryBuilder<'_, MySql> {
+    let mut builder =
+        QueryBuilder::<MySql>::new("SELECT COUNT(*) AS total FROM payment_callbacks WHERE 1 = 1");
+    push_admin_payment_callback_filter(&mut builder, payment_method);
+    builder
+}
+
+fn admin_payment_callback_list_builder(
+    payment_method: Option<&str>,
+    limit: i64,
+    offset: i64,
+) -> QueryBuilder<'_, MySql> {
+    let mut builder = QueryBuilder::<MySql>::new(ADMIN_PAYMENT_CALLBACK_SELECT_SQL);
+    push_admin_payment_callback_filter(&mut builder, payment_method);
+    builder
+        .push(" ORDER BY created_at DESC, id DESC LIMIT ")
+        .push_bind(limit)
+        .push(" OFFSET ")
+        .push_bind(offset);
+    builder
+}
+
+fn push_admin_redeem_batch_filter<'a>(
+    builder: &mut QueryBuilder<'a, MySql>,
+    query: &'a AdminRedeemCodeBatchListQuery,
+) {
+    if let Some(status) = query.status.as_deref() {
+        builder.push(" AND batches.status = ").push_bind(status);
+    }
+}
+
+fn admin_redeem_batch_count_builder<'a>(
+    query: &'a AdminRedeemCodeBatchListQuery,
+) -> QueryBuilder<'a, MySql> {
+    let mut builder = QueryBuilder::<MySql>::new(
+        "SELECT COUNT(*) AS total FROM redeem_code_batches AS batches WHERE 1 = 1",
+    );
+    push_admin_redeem_batch_filter(&mut builder, query);
+    builder
+}
+
+fn admin_redeem_batch_list_builder<'a>(
+    query: &'a AdminRedeemCodeBatchListQuery,
+    limit: i64,
+    offset: i64,
+) -> QueryBuilder<'a, MySql> {
+    let mut builder = QueryBuilder::<MySql>::new(ADMIN_REDEEM_BATCH_SELECT_SQL);
+    push_admin_redeem_batch_filter(&mut builder, query);
+    builder
+        .push(" ORDER BY batches.created_at DESC, batches.id DESC LIMIT ")
+        .push_bind(limit)
+        .push(" OFFSET ")
+        .push_bind(offset);
+    builder
+}
+
+fn push_admin_redeem_code_filters<'a>(
+    builder: &mut QueryBuilder<'a, MySql>,
+    query: &'a AdminRedeemCodeListQuery,
+) {
+    builder
+        .push(" AND codes.batch_id = ")
+        .push_bind(&query.batch_id);
+    if let Some(status) = query.status.as_deref() {
+        builder.push(" AND codes.status = ").push_bind(status);
+    }
+}
+
+fn admin_redeem_code_count_builder<'a>(
+    query: &'a AdminRedeemCodeListQuery,
+) -> QueryBuilder<'a, MySql> {
+    let mut builder = QueryBuilder::<MySql>::new(
+        "SELECT COUNT(*) AS total FROM redeem_codes AS codes WHERE 1 = 1",
+    );
+    push_admin_redeem_code_filters(&mut builder, query);
+    builder
+}
+
+fn admin_redeem_code_list_builder<'a>(
+    query: &'a AdminRedeemCodeListQuery,
+    limit: i64,
+    offset: i64,
+) -> QueryBuilder<'a, MySql> {
+    let mut builder = QueryBuilder::<MySql>::new(redeem_code_select_sql("WHERE 1 = 1"));
+    push_admin_redeem_code_filters(&mut builder, query);
+    builder
+        .push(" ORDER BY codes.created_at DESC, codes.id DESC LIMIT ")
+        .push_bind(limit)
+        .push(" OFFSET ")
+        .push_bind(offset);
+    builder
 }
 
 #[async_trait]
@@ -210,7 +430,18 @@ impl WalletReadRepository for MysqlWalletReadRepository {
         &self,
         key: WalletLookupKey<'_>,
     ) -> Result<Option<StoredWalletSnapshot>, DataLayerError> {
-        Ok(self.load_snapshot().await?.find(key))
+        let (where_clause, bind) = match key {
+            WalletLookupKey::WalletId(value) => ("WHERE id = ? LIMIT 1", value),
+            WalletLookupKey::UserId(value) => ("WHERE user_id = ? LIMIT 1", value),
+            WalletLookupKey::ApiKeyId(value) => ("WHERE api_key_id = ? LIMIT 1", value),
+        };
+        let sql = wallet_select_sql(where_clause);
+        let row = sqlx::query(&sql)
+            .bind(bind)
+            .fetch_optional(&self.pool)
+            .await
+            .map_sql_err()?;
+        row.as_ref().map(map_wallet_row).transpose()
     }
 
     async fn update_auth_user_wallet_limit_mode(
@@ -347,44 +578,111 @@ impl WalletReadRepository for MysqlWalletReadRepository {
         &self,
         user_ids: &[String],
     ) -> Result<Vec<StoredWalletSnapshot>, DataLayerError> {
-        Ok(self
-            .load_snapshot()
-            .await?
-            .list_wallets_by_user_ids(user_ids))
+        if user_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut builder = wallets_by_owner_ids_builder("user_id", user_ids);
+        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
+        rows.iter().map(map_wallet_row).collect()
     }
 
     async fn list_wallets_by_api_key_ids(
         &self,
         api_key_ids: &[String],
     ) -> Result<Vec<StoredWalletSnapshot>, DataLayerError> {
-        Ok(self
-            .load_snapshot()
-            .await?
-            .list_wallets_by_api_key_ids(api_key_ids))
+        if api_key_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut builder = wallets_by_owner_ids_builder("api_key_id", api_key_ids);
+        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
+        rows.iter().map(map_wallet_row).collect()
     }
 
     async fn list_admin_wallets(
         &self,
         query: &AdminWalletListQuery,
     ) -> Result<StoredAdminWalletListPage, DataLayerError> {
-        Ok(self.load_snapshot().await?.list_admin_wallets(query))
+        let mut count_builder = admin_wallet_count_builder(query);
+        let total = read_count_row(
+            count_builder
+                .build()
+                .fetch_one(&self.pool)
+                .await
+                .map_sql_err()?,
+        )?;
+        let mut list_builder = admin_wallet_list_builder(
+            query,
+            i64_from_usize(query.limit, "wallet limit")?,
+            i64_from_usize(query.offset, "wallet offset")?,
+        );
+        let rows = list_builder
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_sql_err()?;
+        let items = rows
+            .iter()
+            .map(map_admin_wallet_list_item_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(StoredAdminWalletListPage { items, total })
     }
 
     async fn list_admin_wallet_ledger(
         &self,
         query: &AdminWalletLedgerQuery,
     ) -> Result<StoredAdminWalletLedgerPage, DataLayerError> {
-        Ok(self.load_snapshot().await?.list_admin_wallet_ledger(query))
+        let mut count_builder = admin_wallet_ledger_count_builder(query);
+        let total = read_count_row(
+            count_builder
+                .build()
+                .fetch_one(&self.pool)
+                .await
+                .map_sql_err()?,
+        )?;
+        let mut list_builder = admin_wallet_ledger_list_builder(
+            query,
+            i64_from_usize(query.limit, "wallet ledger limit")?,
+            i64_from_usize(query.offset, "wallet ledger offset")?,
+        );
+        let rows = list_builder
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_sql_err()?;
+        let items = rows
+            .iter()
+            .map(map_admin_wallet_ledger_item_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(StoredAdminWalletLedgerPage { items, total })
     }
 
     async fn list_admin_wallet_refund_requests(
         &self,
         query: &AdminWalletRefundRequestListQuery,
     ) -> Result<StoredAdminWalletRefundRequestPage, DataLayerError> {
-        Ok(self
-            .load_snapshot()
-            .await?
-            .list_admin_wallet_refund_requests(query))
+        let mut count_builder = admin_wallet_refund_request_count_builder(query);
+        let total = read_count_row(
+            count_builder
+                .build()
+                .fetch_one(&self.pool)
+                .await
+                .map_sql_err()?,
+        )?;
+        let mut list_builder = admin_wallet_refund_request_list_builder(
+            query,
+            i64_from_usize(query.limit, "wallet refund request limit")?,
+            i64_from_usize(query.offset, "wallet refund request offset")?,
+        );
+        let rows = list_builder
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_sql_err()?;
+        let items = rows
+            .iter()
+            .map(map_admin_wallet_refund_request_item_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(StoredAdminWalletRefundRequestPage { items, total })
     }
 
     async fn list_admin_wallet_transactions(
@@ -393,10 +691,41 @@ impl WalletReadRepository for MysqlWalletReadRepository {
         limit: usize,
         offset: usize,
     ) -> Result<StoredAdminWalletTransactionPage, DataLayerError> {
-        Ok(self
-            .load_snapshot()
-            .await?
-            .list_admin_wallet_transactions(wallet_id, limit, offset))
+        let total = read_count_row(
+            sqlx::query("SELECT COUNT(*) AS total FROM wallet_transactions WHERE wallet_id = ?")
+                .bind(wallet_id)
+                .fetch_one(&self.pool)
+                .await
+                .map_sql_err()?,
+        )?;
+        let rows = sqlx::query(
+            r#"
+SELECT
+  tx.id, tx.wallet_id, tx.category, tx.reason_code, tx.amount,
+  tx.balance_before, tx.balance_after, tx.recharge_balance_before,
+  tx.recharge_balance_after, tx.gift_balance_before, tx.gift_balance_after,
+  tx.link_type, tx.link_id, tx.operator_id, tx.description,
+  operator_users.username AS operator_name,
+  operator_users.email AS operator_email,
+  tx.created_at AS created_at_unix_ms
+FROM wallet_transactions tx
+LEFT JOIN users operator_users ON operator_users.id = tx.operator_id
+WHERE tx.wallet_id = ?
+ORDER BY tx.created_at DESC, tx.id DESC
+LIMIT ? OFFSET ?
+"#,
+        )
+        .bind(wallet_id)
+        .bind(i64_from_usize(limit, "wallet transaction limit")?)
+        .bind(i64_from_usize(offset, "wallet transaction offset")?)
+        .fetch_all(&self.pool)
+        .await
+        .map_sql_err()?;
+        let items = rows
+            .iter()
+            .map(map_wallet_transaction_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(StoredAdminWalletTransactionPage { items, total })
     }
 
     async fn find_wallet_today_usage(
@@ -444,7 +773,7 @@ WHERE wallet_id = ?
             .bind(wallet_id)
             .bind(billing_timezone)
             .bind(billing_date)
-            .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+            .bind(i64_from_usize(limit, "wallet daily usage history limit")?)
             .fetch_all(&self.pool)
             .await
             .map_sql_err()?;
@@ -464,30 +793,72 @@ WHERE wallet_id = ?
         limit: usize,
         offset: usize,
     ) -> Result<StoredAdminWalletRefundPage, DataLayerError> {
-        Ok(self
-            .load_snapshot()
-            .await?
-            .list_admin_wallet_refunds(wallet_id, limit, offset))
+        let total = read_count_row(
+            sqlx::query("SELECT COUNT(*) AS total FROM refund_requests WHERE wallet_id = ?")
+                .bind(wallet_id)
+                .fetch_one(&self.pool)
+                .await
+                .map_sql_err()?,
+        )?;
+        let sql = refund_select_sql(
+            "WHERE wallet_id = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+        );
+        let rows = sqlx::query(&sql)
+            .bind(wallet_id)
+            .bind(i64_from_usize(limit, "wallet refund limit")?)
+            .bind(i64_from_usize(offset, "wallet refund offset")?)
+            .fetch_all(&self.pool)
+            .await
+            .map_sql_err()?;
+        let items = rows
+            .iter()
+            .map(map_refund_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(StoredAdminWalletRefundPage { items, total })
     }
 
     async fn list_admin_payment_orders(
         &self,
         query: &AdminPaymentOrderListQuery,
     ) -> Result<StoredAdminPaymentOrderPage, DataLayerError> {
-        Ok(self
-            .load_snapshot()
-            .await?
-            .list_admin_payment_orders(query, current_unix_secs_i64().max(0) as u64))
+        let now = current_unix_secs_i64();
+        let mut count_builder = admin_payment_order_count_builder(query, now);
+        let total = read_count_row(
+            count_builder
+                .build()
+                .fetch_one(&self.pool)
+                .await
+                .map_sql_err()?,
+        )?;
+        let mut list_builder = admin_payment_order_list_builder(
+            query,
+            now,
+            i64_from_usize(query.limit, "payment order limit")?,
+            i64_from_usize(query.offset, "payment order offset")?,
+        );
+        let rows = list_builder
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_sql_err()?;
+        let items = rows
+            .iter()
+            .map(map_payment_order_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(StoredAdminPaymentOrderPage { items, total })
     }
 
     async fn find_admin_payment_order(
         &self,
         order_id: &str,
     ) -> Result<Option<StoredAdminPaymentOrder>, DataLayerError> {
-        Ok(self
-            .load_snapshot()
-            .await?
-            .find_admin_payment_order(order_id))
+        let sql = payment_order_select_sql("WHERE id = ? LIMIT 1");
+        let row = sqlx::query(&sql)
+            .bind(order_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_sql_err()?;
+        row.as_ref().map(map_payment_order_row).transpose()
     }
 
     async fn list_wallet_payment_orders_by_user_id(
@@ -496,27 +867,83 @@ WHERE wallet_id = ?
         limit: usize,
         offset: usize,
     ) -> Result<StoredAdminPaymentOrderPage, DataLayerError> {
-        Ok(self
-            .load_snapshot()
-            .await?
-            .list_wallet_payment_orders_by_user_id(user_id, limit, offset))
+        let total = read_count_row(
+            sqlx::query("SELECT COUNT(*) AS total FROM payment_orders WHERE user_id = ?")
+                .bind(user_id)
+                .fetch_one(&self.pool)
+                .await
+                .map_sql_err()?,
+        )?;
+        let rows = sqlx::query(
+            r#"
+SELECT
+  id, order_no, wallet_id, user_id, amount_usd, pay_amount, pay_currency,
+  exchange_rate, refunded_amount_usd, refundable_amount_usd, payment_method,
+  payment_provider, payment_channel, order_kind, product_id, product_snapshot,
+  gateway_order_id, gateway_response,
+  CASE
+    WHEN status = 'pending' AND expires_at IS NOT NULL AND expires_at < ? THEN 'expired'
+    ELSE status
+  END AS status,
+  created_at AS created_at_unix_ms,
+  paid_at AS paid_at_unix_secs,
+  credited_at AS credited_at_unix_secs,
+  expires_at AS expires_at_unix_secs
+FROM payment_orders
+WHERE user_id = ?
+ORDER BY created_at DESC, id DESC
+LIMIT ? OFFSET ?
+"#,
+        )
+        .bind(current_unix_secs_i64())
+        .bind(user_id)
+        .bind(i64_from_usize(limit, "wallet payment order limit")?)
+        .bind(i64_from_usize(offset, "wallet payment order offset")?)
+        .fetch_all(&self.pool)
+        .await
+        .map_sql_err()?;
+        let items = rows
+            .iter()
+            .map(map_payment_order_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(StoredAdminPaymentOrderPage { items, total })
     }
 
     async fn count_pending_refunds_by_user_id(&self, user_id: &str) -> Result<u64, DataLayerError> {
-        Ok(self
-            .load_snapshot()
-            .await?
-            .count_pending_refunds_by_user_id(user_id))
+        read_count_row(
+            sqlx::query(
+                r#"
+SELECT COUNT(*) AS total
+FROM refund_requests
+WHERE user_id = ?
+  AND status IN ('pending_approval', 'approved', 'processing')
+"#,
+            )
+            .bind(user_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_sql_err()?,
+        )
     }
 
     async fn count_pending_payment_orders_by_user_id(
         &self,
         user_id: &str,
     ) -> Result<u64, DataLayerError> {
-        Ok(self
-            .load_snapshot()
-            .await?
-            .count_pending_payment_orders_by_user_id(user_id))
+        read_count_row(
+            sqlx::query(
+                r#"
+SELECT COUNT(*) AS total
+FROM payment_orders
+WHERE user_id = ?
+  AND status IN ('pending', 'paid')
+"#,
+            )
+            .bind(user_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_sql_err()?,
+        )
     }
 
     async fn find_wallet_payment_order_by_user_id(
@@ -524,10 +951,34 @@ WHERE wallet_id = ?
         user_id: &str,
         order_id: &str,
     ) -> Result<Option<StoredAdminPaymentOrder>, DataLayerError> {
-        Ok(self
-            .load_snapshot()
-            .await?
-            .find_wallet_payment_order_by_user_id(user_id, order_id))
+        let row = sqlx::query(
+            r#"
+SELECT
+  id, order_no, wallet_id, user_id, amount_usd, pay_amount, pay_currency,
+  exchange_rate, refunded_amount_usd, refundable_amount_usd, payment_method,
+  payment_provider, payment_channel, order_kind, product_id, product_snapshot,
+  gateway_order_id, gateway_response,
+  CASE
+    WHEN status = 'pending' AND expires_at IS NOT NULL AND expires_at < ? THEN 'expired'
+    ELSE status
+  END AS status,
+  created_at AS created_at_unix_ms,
+  paid_at AS paid_at_unix_secs,
+  credited_at AS credited_at_unix_secs,
+  expires_at AS expires_at_unix_secs
+FROM payment_orders
+WHERE user_id = ?
+  AND id = ?
+LIMIT 1
+"#,
+        )
+        .bind(current_unix_secs_i64())
+        .bind(user_id)
+        .bind(order_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_sql_err()?;
+        row.as_ref().map(map_payment_order_row).transpose()
     }
 
     async fn find_pending_plan_purchase_order_by_user_id(
@@ -561,10 +1012,14 @@ LIMIT 1
         wallet_id: &str,
         refund_id: &str,
     ) -> Result<Option<StoredAdminWalletRefund>, DataLayerError> {
-        Ok(self
-            .load_snapshot()
-            .await?
-            .find_wallet_refund(wallet_id, refund_id))
+        let sql = refund_select_sql("WHERE wallet_id = ? AND id = ? LIMIT 1");
+        let row = sqlx::query(&sql)
+            .bind(wallet_id)
+            .bind(refund_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_sql_err()?;
+        row.as_ref().map(map_refund_row).transpose()
     }
 
     async fn list_admin_payment_callbacks(
@@ -573,37 +1028,100 @@ LIMIT 1
         limit: usize,
         offset: usize,
     ) -> Result<StoredAdminPaymentCallbackPage, DataLayerError> {
-        Ok(self
-            .load_snapshot()
-            .await?
-            .list_admin_payment_callbacks(payment_method, limit, offset))
+        let mut count_builder = admin_payment_callback_count_builder(payment_method);
+        let total = read_count_row(
+            count_builder
+                .build()
+                .fetch_one(&self.pool)
+                .await
+                .map_sql_err()?,
+        )?;
+        let mut list_builder = admin_payment_callback_list_builder(
+            payment_method,
+            i64_from_usize(limit, "payment callback limit")?,
+            i64_from_usize(offset, "payment callback offset")?,
+        );
+        let rows = list_builder
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_sql_err()?;
+        let items = rows
+            .iter()
+            .map(map_payment_callback_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(StoredAdminPaymentCallbackPage { items, total })
     }
 
     async fn list_admin_redeem_code_batches(
         &self,
         query: &AdminRedeemCodeBatchListQuery,
     ) -> Result<StoredAdminRedeemCodeBatchPage, DataLayerError> {
-        Ok(self
-            .load_snapshot()
-            .await?
-            .list_admin_redeem_code_batches(query))
+        let mut count_builder = admin_redeem_batch_count_builder(query);
+        let total = read_count_row(
+            count_builder
+                .build()
+                .fetch_one(&self.pool)
+                .await
+                .map_sql_err()?,
+        )?;
+        let mut list_builder = admin_redeem_batch_list_builder(
+            query,
+            i64_from_usize(query.limit, "redeem code batch limit")?,
+            i64_from_usize(query.offset, "redeem code batch offset")?,
+        );
+        let rows = list_builder
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_sql_err()?;
+        let items = rows
+            .iter()
+            .map(map_redeem_batch_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(StoredAdminRedeemCodeBatchPage { items, total })
     }
 
     async fn find_admin_redeem_code_batch(
         &self,
         batch_id: &str,
     ) -> Result<Option<StoredAdminRedeemCodeBatch>, DataLayerError> {
-        Ok(self
-            .load_snapshot()
-            .await?
-            .find_admin_redeem_code_batch(batch_id))
+        let sql = redeem_batch_select_sql("WHERE batches.id = ?");
+        let row = sqlx::query(&sql)
+            .bind(batch_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_sql_err()?;
+        row.as_ref().map(map_redeem_batch_row).transpose()
     }
 
     async fn list_admin_redeem_codes(
         &self,
         query: &AdminRedeemCodeListQuery,
     ) -> Result<StoredAdminRedeemCodePage, DataLayerError> {
-        Ok(self.load_snapshot().await?.list_admin_redeem_codes(query))
+        let mut count_builder = admin_redeem_code_count_builder(query);
+        let total = read_count_row(
+            count_builder
+                .build()
+                .fetch_one(&self.pool)
+                .await
+                .map_sql_err()?,
+        )?;
+        let mut list_builder = admin_redeem_code_list_builder(
+            query,
+            i64_from_usize(query.limit, "redeem code limit")?,
+            i64_from_usize(query.offset, "redeem code offset")?,
+        );
+        let rows = list_builder
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_sql_err()?;
+        let items = rows
+            .iter()
+            .map(map_redeem_code_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(StoredAdminRedeemCodePage { items, total })
     }
 }
 
@@ -3157,8 +3675,121 @@ fn map_wallet_row(row: &MySqlRow) -> Result<StoredWalletSnapshot, DataLayerError
     )
 }
 
+fn map_admin_wallet_list_item_row(
+    row: &MySqlRow,
+) -> Result<StoredAdminWalletListItem, DataLayerError> {
+    Ok(StoredAdminWalletListItem {
+        id: get(row, "id")?,
+        user_id: get(row, "user_id")?,
+        api_key_id: get(row, "api_key_id")?,
+        balance: get(row, "balance")?,
+        gift_balance: get(row, "gift_balance")?,
+        limit_mode: get(row, "limit_mode")?,
+        currency: get(row, "currency")?,
+        status: get(row, "status")?,
+        total_recharged: get(row, "total_recharged")?,
+        total_consumed: get(row, "total_consumed")?,
+        total_refunded: get(row, "total_refunded")?,
+        total_adjusted: get(row, "total_adjusted")?,
+        user_name: get(row, "user_name")?,
+        api_key_name: get(row, "api_key_name")?,
+        created_at_unix_ms: optional_timestamp(
+            get(row, "created_at_unix_ms")?,
+            "wallets.created_at",
+        )?,
+        updated_at_unix_secs: optional_timestamp(
+            get(row, "updated_at_unix_secs")?,
+            "wallets.updated_at",
+        )?,
+    })
+}
+
+fn map_admin_wallet_ledger_item_row(
+    row: &MySqlRow,
+) -> Result<StoredAdminWalletLedgerItem, DataLayerError> {
+    Ok(StoredAdminWalletLedgerItem {
+        id: get(row, "id")?,
+        wallet_id: get(row, "wallet_id")?,
+        category: get(row, "category")?,
+        reason_code: get(row, "reason_code")?,
+        amount: get(row, "amount")?,
+        balance_before: get(row, "balance_before")?,
+        balance_after: get(row, "balance_after")?,
+        recharge_balance_before: get(row, "recharge_balance_before")?,
+        recharge_balance_after: get(row, "recharge_balance_after")?,
+        gift_balance_before: get(row, "gift_balance_before")?,
+        gift_balance_after: get(row, "gift_balance_after")?,
+        link_type: get(row, "link_type")?,
+        link_id: get(row, "link_id")?,
+        operator_id: get(row, "operator_id")?,
+        operator_name: get(row, "operator_name")?,
+        operator_email: get(row, "operator_email")?,
+        description: get(row, "description")?,
+        wallet_user_id: get(row, "user_id")?,
+        wallet_user_name: get(row, "wallet_user_name")?,
+        wallet_api_key_id: get(row, "api_key_id")?,
+        api_key_name: get(row, "api_key_name")?,
+        wallet_status: get(row, "wallet_status")?,
+        created_at_unix_ms: optional_timestamp(
+            get(row, "created_at_unix_ms")?,
+            "wallet_transactions.created_at",
+        )?,
+    })
+}
+
+fn map_admin_wallet_refund_request_item_row(
+    row: &MySqlRow,
+) -> Result<StoredAdminWalletRefundRequestItem, DataLayerError> {
+    Ok(StoredAdminWalletRefundRequestItem {
+        id: get(row, "id")?,
+        refund_no: get(row, "refund_no")?,
+        wallet_id: get(row, "wallet_id")?,
+        user_id: get(row, "user_id")?,
+        payment_order_id: get(row, "payment_order_id")?,
+        source_type: get(row, "source_type")?,
+        source_id: get(row, "source_id")?,
+        refund_mode: get(row, "refund_mode")?,
+        amount_usd: get(row, "amount_usd")?,
+        status: get(row, "status")?,
+        reason: get(row, "reason")?,
+        failure_reason: get(row, "failure_reason")?,
+        gateway_refund_id: get(row, "gateway_refund_id")?,
+        payout_method: get(row, "payout_method")?,
+        payout_reference: get(row, "payout_reference")?,
+        payout_proof: optional_json(get(row, "payout_proof")?, "refund_requests.payout_proof")?,
+        requested_by: get(row, "requested_by")?,
+        approved_by: get(row, "approved_by")?,
+        processed_by: get(row, "processed_by")?,
+        wallet_user_id: get(row, "wallet_user_id")?,
+        wallet_user_name: get(row, "wallet_user_name")?,
+        wallet_api_key_id: get(row, "wallet_api_key_id")?,
+        api_key_name: get(row, "api_key_name")?,
+        wallet_status: get(row, "wallet_status")?,
+        created_at_unix_ms: optional_timestamp(
+            get(row, "created_at_unix_ms")?,
+            "refund_requests.created_at",
+        )?,
+        updated_at_unix_secs: optional_timestamp(
+            get(row, "updated_at_unix_secs")?,
+            "refund_requests.updated_at",
+        )?,
+        processed_at_unix_secs: optional_timestamp(
+            get(row, "processed_at_unix_secs")?,
+            "refund_requests.processed_at",
+        )?,
+        completed_at_unix_secs: optional_timestamp(
+            get(row, "completed_at_unix_secs")?,
+            "refund_requests.completed_at",
+        )?,
+    })
+}
+
 fn current_unix_secs_i64() -> i64 {
     Utc::now().timestamp().max(0)
+}
+
+fn i64_from_usize(value: usize, field_name: &str) -> Result<i64, DataLayerError> {
+    i64::try_from(value).map_err(|_| DataLayerError::InvalidInput(format!("{field_name} overflow")))
 }
 
 fn json_string(value: &serde_json::Value, field_name: &str) -> Result<String, DataLayerError> {
@@ -4207,6 +4838,10 @@ where
     for<'r> T: sqlx::Decode<'r, sqlx::MySql> + sqlx::Type<sqlx::MySql>,
 {
     row.try_get(field).map_sql_err()
+}
+
+fn read_count_row(row: MySqlRow) -> Result<u64, DataLayerError> {
+    nonnegative_u64(get(&row, "total")?, "count total")
 }
 
 fn optional_json(

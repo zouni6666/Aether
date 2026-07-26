@@ -3,7 +3,7 @@ use std::io::Read;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_ai_formats::UPSTREAM_IS_STREAM_KEY;
-use aether_data_contracts::repository::usage::{parse_usage_body_ref, UsageBodyField};
+use aether_data_contracts::repository::usage::UsageBodyField;
 use async_trait::async_trait;
 use flate2::read::GzDecoder;
 use sqlx::{sqlite::SqliteRow, QueryBuilder, Row, Sqlite};
@@ -27,28 +27,46 @@ use aether_data_contracts::repository::usage::{
     UsageAuditAggregationGroupBy, UsageAuditAggregationQuery, UsageAuditKeywordSearchQuery,
     UsageAuditListQuery, UsageAuditSummaryQuery, UsageBreakdownGroupBy, UsageBreakdownSummaryQuery,
     UsageCacheAffinityHitSummaryQuery, UsageCacheAffinityIntervalGroupBy,
-    UsageCacheAffinityIntervalQuery, UsageCacheHitSummaryQuery, UsageCostSavingsSummaryQuery,
-    UsageDailyHeatmapQuery, UsageDashboardDailyBreakdownQuery, UsageDashboardProviderCountsQuery,
-    UsageDashboardSummaryQuery, UsageErrorDistributionQuery, UsageLeaderboardGroupBy,
-    UsageLeaderboardQuery, UsageMonitoringErrorCountQuery, UsageMonitoringErrorListQuery,
-    UsagePerformancePercentilesQuery, UsageProviderPerformanceQuery, UsageReadRepository,
-    UsageSettledCostSummaryQuery, UsageTimeSeriesGranularity, UsageTimeSeriesQuery,
-    UsageWriteRepository,
+    UsageCacheAffinityIntervalQuery, UsageCacheHitSummaryQuery, UsageCleanupExecutionMode,
+    UsageCleanupPreviewCounts, UsageCleanupSummary, UsageCleanupTargets, UsageCleanupWindow,
+    UsageCostSavingsSummaryQuery, UsageDailyHeatmapQuery, UsageDashboardDailyBreakdownQuery,
+    UsageDashboardProviderCountsQuery, UsageDashboardSummaryQuery, UsageErrorDistributionQuery,
+    UsageLeaderboardGroupBy, UsageLeaderboardQuery, UsageMonitoringErrorCountQuery,
+    UsageMonitoringErrorListQuery, UsagePerformancePercentilesQuery, UsageProviderPerformanceQuery,
+    UsageReadRepository, UsageSettledCostSummaryQuery, UsageTimeSeriesGranularity,
+    UsageTimeSeriesQuery, UsageWriteRepository,
 };
 use aether_data_contracts::DataLayerError;
+
+mod cleanup;
+mod counters;
+mod http_capture;
+mod snapshots;
 
 const USAGE_COLUMNS: &str = r#"
 SELECT
   id,
-  request_id,
+  "usage".request_id,
   user_id,
   api_key_id,
   provider_name,
   model,
   target_model,
-  provider_id,
-  provider_endpoint_id,
-  provider_api_key_id,
+  CASE
+    WHEN usage_routing_snapshots.request_id IS NOT NULL
+    THEN usage_routing_snapshots.selected_provider_id
+    ELSE "usage".provider_id
+  END AS provider_id,
+  CASE
+    WHEN usage_routing_snapshots.request_id IS NOT NULL
+    THEN usage_routing_snapshots.selected_endpoint_id
+    ELSE "usage".provider_endpoint_id
+  END AS provider_endpoint_id,
+  CASE
+    WHEN usage_routing_snapshots.request_id IS NOT NULL
+    THEN usage_routing_snapshots.selected_provider_api_key_id
+    ELSE "usage".provider_api_key_id
+  END AS provider_api_key_id,
   request_type,
   api_format,
   api_family,
@@ -56,43 +74,199 @@ SELECT
   endpoint_api_format,
   provider_api_family,
   provider_endpoint_kind,
-  has_format_conversion,
+  CASE
+    WHEN usage_routing_snapshots.request_id IS NOT NULL
+    THEN COALESCE(usage_routing_snapshots.has_format_conversion, 0)
+    ELSE COALESCE("usage".has_format_conversion, 0)
+  END AS has_format_conversion,
   is_stream,
   upstream_is_stream,
   input_tokens,
-  output_tokens,
+  COALESCE(usage_settlement_snapshots.billing_output_tokens, "usage".output_tokens, 0)
+    AS output_tokens,
   total_tokens,
-  cache_creation_input_tokens,
-  cache_creation_ephemeral_5m_input_tokens,
-  cache_creation_ephemeral_1h_input_tokens,
-  cache_read_input_tokens,
-  CAST(cache_creation_cost_usd AS REAL) AS cache_creation_cost_usd,
-  CAST(cache_read_cost_usd AS REAL) AS cache_read_cost_usd,
-  CAST(output_price_per_1m AS REAL) AS output_price_per_1m,
-  CAST(total_cost_usd AS REAL) AS total_cost_usd,
-  CAST(actual_total_cost_usd AS REAL) AS actual_total_cost_usd,
+  COALESCE(
+    usage_settlement_snapshots.billing_cache_creation_tokens,
+    CASE
+      WHEN usage_settlement_snapshots.billing_cache_creation_5m_tokens IS NOT NULL
+        OR usage_settlement_snapshots.billing_cache_creation_1h_tokens IS NOT NULL
+      THEN COALESCE(usage_settlement_snapshots.billing_cache_creation_5m_tokens, 0)
+        + COALESCE(usage_settlement_snapshots.billing_cache_creation_1h_tokens, 0)
+    END,
+    "usage".cache_creation_input_tokens,
+    0
+  ) AS cache_creation_input_tokens,
+  COALESCE(
+    usage_settlement_snapshots.billing_cache_creation_5m_tokens,
+    "usage".cache_creation_ephemeral_5m_input_tokens,
+    0
+  ) AS cache_creation_ephemeral_5m_input_tokens,
+  COALESCE(
+    usage_settlement_snapshots.billing_cache_creation_1h_tokens,
+    "usage".cache_creation_ephemeral_1h_input_tokens,
+    0
+  ) AS cache_creation_ephemeral_1h_input_tokens,
+  COALESCE(
+    usage_settlement_snapshots.billing_cache_read_tokens,
+    "usage".cache_read_input_tokens,
+    0
+  ) AS cache_read_input_tokens,
+  CAST(COALESCE(
+    usage_settlement_snapshots.billing_cache_creation_cost_usd,
+    "usage".cache_creation_cost_usd,
+    0
+  ) AS REAL) AS cache_creation_cost_usd,
+  CAST(COALESCE(
+    usage_settlement_snapshots.billing_cache_read_cost_usd,
+    "usage".cache_read_cost_usd,
+    0
+  ) AS REAL) AS cache_read_cost_usd,
+  CAST(COALESCE(
+    usage_settlement_snapshots.output_price_per_1m,
+    "usage".output_price_per_1m
+  ) AS REAL) AS output_price_per_1m,
+  CAST(COALESCE(
+    usage_settlement_snapshots.billing_total_cost_usd,
+    "usage".total_cost_usd,
+    0
+  ) AS REAL) AS total_cost_usd,
+  CAST(COALESCE(
+    usage_settlement_snapshots.billing_actual_total_cost_usd,
+    "usage".actual_total_cost_usd,
+    0
+  ) AS REAL) AS actual_total_cost_usd,
   status_code,
   error_message,
   error_category,
   response_time_ms,
   first_byte_time_ms,
   status,
-  billing_status,
+  COALESCE(usage_settlement_snapshots.billing_status, "usage".billing_status)
+    AS billing_status,
+  COALESCE(usage_http_audits.request_headers, "usage".request_headers) AS request_headers,
+  "usage".request_body,
+  "usage".request_body_compressed,
+  COALESCE(
+    usage_http_audits.provider_request_headers,
+    "usage".provider_request_headers
+  ) AS provider_request_headers,
+  "usage".provider_request_body,
+  "usage".provider_request_body_compressed,
+  COALESCE(usage_http_audits.response_headers, "usage".response_headers) AS response_headers,
+  "usage".response_body,
+  "usage".response_body_compressed,
+  COALESCE(
+    usage_http_audits.client_response_headers,
+    "usage".client_response_headers
+  ) AS client_response_headers,
+  "usage".client_response_body,
+  "usage".client_response_body_compressed,
+  usage_http_audits.request_body_ref AS http_request_body_ref,
+  usage_http_audits.provider_request_body_ref AS http_provider_request_body_ref,
+  usage_http_audits.response_body_ref AS http_response_body_ref,
+  usage_http_audits.client_response_body_ref AS http_client_response_body_ref,
+  usage_http_audits.request_body_state AS http_request_body_state,
+  usage_http_audits.provider_request_body_state AS http_provider_request_body_state,
+  usage_http_audits.response_body_state AS http_response_body_state,
+  usage_http_audits.client_response_body_state AS http_client_response_body_state,
   request_metadata,
-  candidate_id,
-  candidate_index,
-  NULL AS username,
-  NULL AS api_key_name,
-  key_name,
-  planner_kind,
-  route_family,
-  route_kind,
-  execution_path,
-  local_execution_runtime_miss_reason,
-  finalized_at AS finalized_at_unix_secs,
+  CASE
+    WHEN usage_routing_snapshots.request_id IS NOT NULL
+    THEN usage_routing_snapshots.candidate_id
+    ELSE "usage".candidate_id
+  END AS routing_candidate_id,
+  CASE
+    WHEN usage_routing_snapshots.request_id IS NOT NULL
+    THEN usage_routing_snapshots.candidate_index
+    ELSE "usage".candidate_index
+  END AS routing_candidate_index,
+  "usage".username AS username,
+  "usage".api_key_name AS api_key_name,
+  CASE
+    WHEN usage_routing_snapshots.request_id IS NOT NULL
+    THEN usage_routing_snapshots.key_name
+    ELSE "usage".key_name
+  END AS routing_key_name,
+  CASE
+    WHEN usage_routing_snapshots.request_id IS NOT NULL
+    THEN usage_routing_snapshots.planner_kind
+    ELSE "usage".planner_kind
+  END AS routing_planner_kind,
+  CASE
+    WHEN usage_routing_snapshots.request_id IS NOT NULL
+    THEN usage_routing_snapshots.route_family
+    ELSE "usage".route_family
+  END AS routing_route_family,
+  CASE
+    WHEN usage_routing_snapshots.request_id IS NOT NULL
+    THEN usage_routing_snapshots.route_kind
+    ELSE "usage".route_kind
+  END AS routing_route_kind,
+  CASE
+    WHEN usage_routing_snapshots.request_id IS NOT NULL
+    THEN usage_routing_snapshots.execution_path
+    ELSE "usage".execution_path
+  END AS routing_execution_path,
+  CASE
+    WHEN usage_routing_snapshots.request_id IS NOT NULL
+    THEN usage_routing_snapshots.local_execution_runtime_miss_reason
+    ELSE "usage".local_execution_runtime_miss_reason
+  END AS routing_local_execution_runtime_miss_reason,
+  usage_settlement_snapshots.billing_snapshot_schema_version
+    AS settlement_billing_snapshot_schema_version,
+  usage_settlement_snapshots.billing_snapshot_status AS settlement_billing_snapshot_status,
+  CAST(usage_settlement_snapshots.rate_multiplier AS REAL) AS settlement_rate_multiplier,
+  usage_settlement_snapshots.is_free_tier AS settlement_is_free_tier,
+  CAST(usage_settlement_snapshots.input_price_per_1m AS REAL)
+    AS settlement_input_price_per_1m,
+  CAST(usage_settlement_snapshots.output_price_per_1m AS REAL)
+    AS settlement_output_price_per_1m,
+  CAST(usage_settlement_snapshots.cache_creation_price_per_1m AS REAL)
+    AS settlement_cache_creation_price_per_1m,
+  CAST(usage_settlement_snapshots.cache_read_price_per_1m AS REAL)
+    AS settlement_cache_read_price_per_1m,
+  CAST(usage_settlement_snapshots.price_per_request AS REAL)
+    AS settlement_price_per_request,
+  usage_settlement_snapshots.settlement_snapshot_schema_version
+    AS settlement_snapshot_schema_version,
+  usage_settlement_snapshots.settlement_snapshot AS settlement_snapshot,
+  usage_settlement_snapshots.billing_dimensions AS settlement_billing_dimensions,
+  usage_settlement_snapshots.billing_input_tokens AS settlement_billing_input_tokens,
+  usage_settlement_snapshots.billing_effective_input_tokens
+    AS settlement_billing_effective_input_tokens,
+  usage_settlement_snapshots.billing_output_tokens AS settlement_billing_output_tokens,
+  usage_settlement_snapshots.billing_cache_creation_tokens
+    AS settlement_billing_cache_creation_tokens,
+  usage_settlement_snapshots.billing_cache_creation_5m_tokens
+    AS settlement_billing_cache_creation_5m_tokens,
+  usage_settlement_snapshots.billing_cache_creation_1h_tokens
+    AS settlement_billing_cache_creation_1h_tokens,
+  usage_settlement_snapshots.billing_cache_read_tokens
+    AS settlement_billing_cache_read_tokens,
+  usage_settlement_snapshots.billing_total_input_context
+    AS settlement_billing_total_input_context,
+  CAST(usage_settlement_snapshots.billing_cache_creation_cost_usd AS REAL)
+    AS settlement_billing_cache_creation_cost_usd,
+  CAST(usage_settlement_snapshots.billing_cache_read_cost_usd AS REAL)
+    AS settlement_billing_cache_read_cost_usd,
+  CAST(usage_settlement_snapshots.billing_total_cost_usd AS REAL)
+    AS settlement_billing_total_cost_usd,
+  CAST(usage_settlement_snapshots.billing_actual_total_cost_usd AS REAL)
+    AS settlement_billing_actual_total_cost_usd,
+  usage_settlement_snapshots.billing_pricing_source AS settlement_billing_pricing_source,
+  usage_settlement_snapshots.billing_rule_id AS settlement_billing_rule_id,
+  usage_settlement_snapshots.billing_rule_version AS settlement_billing_rule_version,
+  COALESCE(usage_settlement_snapshots.finalized_at, "usage".finalized_at)
+    AS finalized_at_unix_secs,
   created_at_unix_ms,
   updated_at_unix_secs
 FROM "usage"
+LEFT JOIN usage_http_audits
+  ON usage_http_audits.request_id = "usage".request_id
+LEFT JOIN usage_routing_snapshots
+  ON usage_routing_snapshots.request_id = "usage".request_id
+LEFT JOIN usage_settlement_snapshots
+  ON usage_settlement_snapshots.request_id = "usage".request_id
 "#;
 
 const UPSERT_USAGE_SQL: &str = r#"
@@ -274,6 +448,102 @@ ON CONFLICT (request_id) DO UPDATE SET
     END
 "#;
 
+const SQLITE_FIRST_BYTE_BATCH_SIZE: usize = 32;
+const UPSERT_FIRST_BYTE_BATCH_PREFIX_SQL: &str = r#"
+INSERT INTO "usage" (
+  id,
+  request_id,
+  user_id,
+  api_key_id,
+  provider_name,
+  model,
+  target_model,
+  provider_id,
+  provider_endpoint_id,
+  provider_api_key_id,
+  request_type,
+  api_format,
+  api_family,
+  endpoint_kind,
+  endpoint_api_format,
+  provider_api_family,
+  provider_endpoint_kind,
+  has_format_conversion,
+  is_stream,
+  upstream_is_stream,
+  status_code,
+  response_time_ms,
+  first_byte_time_ms,
+  status,
+  billing_status,
+  request_metadata,
+  created_at,
+  created_at_unix_ms,
+  updated_at_unix_secs
+)
+"#;
+
+const UPSERT_FIRST_BYTE_BATCH_UPDATE_PREFIX_SQL: &str = r#"
+ON CONFLICT (request_id)
+DO UPDATE SET
+  user_id = COALESCE(excluded.user_id, "usage".user_id),
+  api_key_id = COALESCE(excluded.api_key_id, "usage".api_key_id),
+  provider_name = excluded.provider_name,
+  model = excluded.model,
+  target_model = COALESCE(excluded.target_model, "usage".target_model),
+  provider_id = COALESCE(excluded.provider_id, "usage".provider_id),
+  provider_endpoint_id = COALESCE(excluded.provider_endpoint_id, "usage".provider_endpoint_id),
+  provider_api_key_id = COALESCE(excluded.provider_api_key_id, "usage".provider_api_key_id),
+  request_type = COALESCE(excluded.request_type, "usage".request_type),
+  api_format = COALESCE(excluded.api_format, "usage".api_format),
+  api_family = COALESCE(excluded.api_family, "usage".api_family),
+  endpoint_kind = COALESCE(excluded.endpoint_kind, "usage".endpoint_kind),
+  endpoint_api_format = COALESCE(excluded.endpoint_api_format, "usage".endpoint_api_format),
+  provider_api_family = COALESCE(excluded.provider_api_family, "usage".provider_api_family),
+  provider_endpoint_kind = COALESCE(
+    excluded.provider_endpoint_kind,
+    "usage".provider_endpoint_kind
+  ),
+  has_format_conversion =
+"#;
+
+const UPSERT_FIRST_BYTE_BATCH_UPDATE_SUFFIX_SQL: &str = r#",
+  is_stream = 1,
+  upstream_is_stream = COALESCE(
+    CASE json_type(excluded.request_metadata, '$.upstream_is_stream')
+      WHEN 'true' THEN 1
+      WHEN 'false' THEN 0
+      ELSE NULL
+    END,
+    "usage".upstream_is_stream,
+    "usage".is_stream,
+    1
+  ),
+  status_code = COALESCE(excluded.status_code, "usage".status_code),
+  response_time_ms = CASE
+    WHEN excluded.response_time_ms IS NULL OR excluded.response_time_ms = 0
+      THEN "usage".response_time_ms
+    ELSE excluded.response_time_ms
+  END,
+  first_byte_time_ms = CASE
+    WHEN "usage".first_byte_time_ms IS NOT NULL AND "usage".first_byte_time_ms <> 0
+      THEN "usage".first_byte_time_ms
+    WHEN excluded.first_byte_time_ms IS NULL OR excluded.first_byte_time_ms = 0
+      THEN "usage".first_byte_time_ms
+    ELSE excluded.first_byte_time_ms
+  END,
+  status = 'streaming',
+  request_metadata = COALESCE("usage".request_metadata, excluded.request_metadata),
+  updated_at_unix_secs = MAX(
+    COALESCE(NULLIF("usage".updated_at_unix_secs, 0), 0),
+    COALESCE(NULLIF(excluded.updated_at_unix_secs, 0), 0),
+    COALESCE("usage".created_at_unix_ms, 0)
+  )
+WHERE "usage".billing_status = 'pending'
+  AND "usage".status IN ('pending', 'streaming')
+  AND "usage".finalized_at IS NULL
+"#;
+
 const SELECT_STALE_PENDING_USAGE_BATCH_SQL: &str = r#"
 SELECT
   "usage".request_id,
@@ -407,35 +677,84 @@ END
 "#;
 
 const SQLITE_USAGE_CANONICAL_TOTAL_TOKENS_EXPR: &str = r#"
-(
-  CASE
-    WHEN (
-      LOWER(COALESCE(endpoint_api_format, api_format, '')) = 'openai'
-      OR LOWER(COALESCE(endpoint_api_format, api_format, '')) LIKE 'openai:%'
-      OR LOWER(COALESCE(endpoint_api_format, api_format, '')) = 'gemini'
-      OR LOWER(COALESCE(endpoint_api_format, api_format, '')) LIKE 'gemini:%'
-      OR LOWER(COALESCE(endpoint_api_format, api_format, '')) = 'google'
-      OR LOWER(COALESCE(endpoint_api_format, api_format, '')) LIKE 'google:%'
-    )
-    AND COALESCE(input_tokens, 0) > 0
-    AND COALESCE(cache_read_input_tokens, 0) > 0
-    THEN MAX(COALESCE(input_tokens, 0) - COALESCE(cache_read_input_tokens, 0), 0)
-    ELSE MAX(COALESCE(input_tokens, 0), 0)
-  END
-  + MAX(COALESCE(output_tokens, 0), 0)
-  + (
+MAX(
+  COALESCE(
     CASE
-      WHEN COALESCE(cache_creation_input_tokens, 0) = 0
-           AND (
-             COALESCE(cache_creation_ephemeral_5m_input_tokens, 0)
-             + COALESCE(cache_creation_ephemeral_1h_input_tokens, 0)
-           ) > 0
-      THEN COALESCE(cache_creation_ephemeral_5m_input_tokens, 0)
-         + COALESCE(cache_creation_ephemeral_1h_input_tokens, 0)
-      ELSE MAX(COALESCE(cache_creation_input_tokens, 0), 0)
-    END
-  )
-  + MAX(COALESCE(cache_read_input_tokens, 0), 0)
+      WHEN settlement.billing_effective_input_tokens IS NOT NULL THEN
+        MAX(settlement.billing_effective_input_tokens, 0)
+        + MAX(COALESCE(settlement.billing_output_tokens, "usage".output_tokens, 0), 0)
+        + MAX(
+            COALESCE(
+              settlement.billing_cache_creation_tokens,
+              CASE
+                WHEN settlement.billing_cache_creation_5m_tokens IS NOT NULL
+                  OR settlement.billing_cache_creation_1h_tokens IS NOT NULL
+                THEN COALESCE(settlement.billing_cache_creation_5m_tokens, 0)
+                   + COALESCE(settlement.billing_cache_creation_1h_tokens, 0)
+              END,
+              CASE
+                WHEN COALESCE("usage".cache_creation_input_tokens, 0) = 0
+                     AND (
+                       COALESCE("usage".cache_creation_ephemeral_5m_input_tokens, 0)
+                       + COALESCE("usage".cache_creation_ephemeral_1h_input_tokens, 0)
+                     ) > 0
+                THEN COALESCE("usage".cache_creation_ephemeral_5m_input_tokens, 0)
+                   + COALESCE("usage".cache_creation_ephemeral_1h_input_tokens, 0)
+                ELSE COALESCE("usage".cache_creation_input_tokens, 0)
+              END,
+              0
+            ),
+            0
+          )
+        + MAX(
+            COALESCE(
+              settlement.billing_cache_read_tokens,
+              "usage".cache_read_input_tokens,
+              0
+            ),
+            0
+          )
+      WHEN settlement.billing_total_input_context IS NOT NULL THEN
+        MAX(settlement.billing_total_input_context, 0)
+        + MAX(COALESCE(settlement.billing_output_tokens, "usage".output_tokens, 0), 0)
+    END,
+    NULLIF(MAX(COALESCE("usage".total_tokens, 0), 0), 0),
+    (
+      CASE
+        WHEN (
+          LOWER(COALESCE("usage".endpoint_api_format, "usage".api_format, '')) = 'openai'
+          OR LOWER(COALESCE("usage".endpoint_api_format, "usage".api_format, '')) LIKE 'openai:%'
+          OR LOWER(COALESCE("usage".endpoint_api_format, "usage".api_format, '')) = 'gemini'
+          OR LOWER(COALESCE("usage".endpoint_api_format, "usage".api_format, '')) LIKE 'gemini:%'
+          OR LOWER(COALESCE("usage".endpoint_api_format, "usage".api_format, '')) = 'google'
+          OR LOWER(COALESCE("usage".endpoint_api_format, "usage".api_format, '')) LIKE 'google:%'
+        )
+        AND COALESCE("usage".input_tokens, 0) > 0
+        AND COALESCE("usage".cache_read_input_tokens, 0) > 0
+        THEN MAX(
+          COALESCE("usage".input_tokens, 0) - COALESCE("usage".cache_read_input_tokens, 0),
+          0
+        )
+        ELSE MAX(COALESCE("usage".input_tokens, 0), 0)
+      END
+      + MAX(COALESCE("usage".output_tokens, 0), 0)
+      + (
+        CASE
+          WHEN COALESCE("usage".cache_creation_input_tokens, 0) = 0
+               AND (
+                 COALESCE("usage".cache_creation_ephemeral_5m_input_tokens, 0)
+                 + COALESCE("usage".cache_creation_ephemeral_1h_input_tokens, 0)
+               ) > 0
+          THEN COALESCE("usage".cache_creation_ephemeral_5m_input_tokens, 0)
+             + COALESCE("usage".cache_creation_ephemeral_1h_input_tokens, 0)
+          ELSE MAX(COALESCE("usage".cache_creation_input_tokens, 0), 0)
+        END
+      )
+      + MAX(COALESCE("usage".cache_read_input_tokens, 0), 0)
+    ),
+    0
+  ),
+  0
 )
 "#;
 
@@ -742,7 +1061,7 @@ fn push_sqlite_usage_order_limit_offset(
     if newest_first {
         builder.push(" ORDER BY created_at_unix_ms DESC, id ASC");
     } else {
-        builder.push(" ORDER BY created_at_unix_ms ASC, request_id ASC");
+        builder.push(" ORDER BY created_at_unix_ms ASC, \"usage\".request_id ASC");
     }
     if let Some(limit) = limit {
         builder.push(" LIMIT ").push_bind(limit as i64);
@@ -1055,6 +1374,61 @@ fn parse_usage_json_text(raw: &str) -> Result<serde_json::Value, DataLayerError>
 #[derive(Debug, Clone)]
 pub struct SqliteUsageWriteRepository {
     pool: SqlitePool,
+}
+
+#[derive(Debug)]
+struct PreparedFirstByteUsage {
+    usage: UpsertUsageRecord,
+    request_metadata_json: Option<String>,
+    response_time_ms: Option<i64>,
+    first_byte_time_ms: Option<i64>,
+    created_at_unix_secs: i64,
+    updated_at_unix_secs: i64,
+}
+
+impl PreparedFirstByteUsage {
+    fn try_from_usage(usage: UpsertUsageRecord) -> Result<Self, DataLayerError> {
+        usage.validate()?;
+        if usage.status != "streaming" || usage.billing_status != "pending" {
+            return Err(DataLayerError::InvalidInput(
+                "first-byte usage upsert requires streaming status with pending billing"
+                    .to_string(),
+            ));
+        }
+
+        let usage = strip_deprecated_usage_display_fields(usage);
+        let request_metadata_json = usage
+            .request_metadata
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|err| DataLayerError::InvalidInput(err.to_string()))?;
+        let response_time_ms = usage
+            .response_time_ms
+            .map(|value| to_i64(value, "usage.response_time_ms"))
+            .transpose()?;
+        let first_byte_time_ms = usage
+            .first_byte_time_ms
+            .map(|value| to_i64(value, "usage.first_byte_time_ms"))
+            .transpose()?;
+        let created_at_unix_secs = to_i64(
+            usage
+                .created_at_unix_ms
+                .unwrap_or(usage.updated_at_unix_secs),
+            "usage.created_at_unix_ms",
+        )?;
+        let updated_at_unix_secs =
+            to_i64(usage.updated_at_unix_secs, "usage.updated_at_unix_secs")?;
+
+        Ok(Self {
+            usage,
+            request_metadata_json,
+            response_time_ms,
+            first_byte_time_ms,
+            created_at_unix_secs,
+            updated_at_unix_secs,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1466,7 +1840,7 @@ LEFT JOIN first_byte_percentiles ON first_byte_percentiles.provider_id = provide
         mut builder: QueryBuilder<'_, Sqlite>,
     ) -> Result<Vec<StoredRequestUsageAudit>, DataLayerError> {
         let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
-        rows.iter().map(map_usage_row).collect()
+        rows.iter().map(|row| map_usage_row(row, false)).collect()
     }
 
     pub async fn list_usage_audits(
@@ -1484,7 +1858,7 @@ LEFT JOIN first_byte_percentiles ON first_byte_percentiles.provider_id = provide
         );
 
         let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
-        rows.iter().map(map_usage_row).collect()
+        rows.iter().map(|row| map_usage_row(row, false)).collect()
     }
 
     pub async fn count_usage_audits(
@@ -1514,7 +1888,7 @@ LEFT JOIN first_byte_percentiles ON first_byte_percentiles.provider_id = provide
         );
 
         let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
-        rows.iter().map(map_usage_row).collect()
+        rows.iter().map(|row| map_usage_row(row, false)).collect()
     }
 
     pub async fn count_usage_audits_by_keyword_search(
@@ -1543,7 +1917,7 @@ SELECT
   COUNT(*) AS total_requests,
   COALESCE(SUM(MAX(COALESCE(input_tokens, 0), 0)), 0) AS input_tokens,
   COALESCE(SUM(MAX(COALESCE(output_tokens, 0), 0)), 0) AS output_tokens,
-  COALESCE(SUM(MAX(COALESCE(total_tokens, 0), 0)), 0) AS recorded_total_tokens,
+  COALESCE(SUM({total_tokens_expr}), 0) AS recorded_total_tokens,
   COALESCE(SUM({cache_creation_expr}), 0) AS cache_creation_tokens,
   COALESCE(SUM(MAX(COALESCE(cache_creation_ephemeral_5m_input_tokens, 0), 0)), 0)
     AS cache_creation_ephemeral_5m_tokens,
@@ -1566,8 +1940,11 @@ SELECT
     END
   ), 0) AS error_requests
 FROM "usage"
+LEFT JOIN usage_settlement_snapshots AS settlement
+  ON settlement.request_id = "usage".request_id
 "#,
-            cache_creation_expr = SQLITE_USAGE_CACHE_CREATION_TOKENS_EXPR
+            cache_creation_expr = SQLITE_USAGE_CACHE_CREATION_TOKENS_EXPR,
+            total_tokens_expr = SQLITE_USAGE_CANONICAL_TOTAL_TOKENS_EXPR
         ));
         let mut has_where = false;
         push_sqlite_usage_summary_filters(&mut builder, query, &mut has_where);
@@ -1613,7 +1990,7 @@ SELECT
   {display_expr} AS display_name,
   {secondary_expr} AS secondary_name,
   COUNT(*) AS request_count,
-  COALESCE(SUM(MAX(COALESCE(total_tokens, 0), 0)), 0) AS total_tokens,
+  COALESCE(SUM({total_tokens_expr}), 0) AS total_tokens,
   COALESCE(SUM(MAX(COALESCE(output_tokens, 0), 0)), 0) AS output_tokens,
   COALESCE(SUM({effective_input_expr}), 0) AS effective_input_tokens,
   COALESCE(SUM({total_input_context_expr}), 0) AS total_input_context,
@@ -1629,11 +2006,14 @@ SELECT
   {avg_response_expr} AS avg_response_time_ms,
   {success_count_expr} AS success_count
 FROM "usage"
+LEFT JOIN usage_settlement_snapshots AS settlement
+  ON settlement.request_id = "usage".request_id
 "#,
             effective_input_expr = SQLITE_USAGE_EFFECTIVE_INPUT_TOKENS_EXPR,
             total_input_context_expr = SQLITE_USAGE_TOTAL_INPUT_CONTEXT_EXPR,
             secondary_expr = secondary_expr,
-            cache_creation_expr = SQLITE_USAGE_CACHE_CREATION_TOKENS_EXPR
+            cache_creation_expr = SQLITE_USAGE_CACHE_CREATION_TOKENS_EXPR,
+            total_tokens_expr = SQLITE_USAGE_CANONICAL_TOTAL_TOKENS_EXPR
         ));
         let mut has_where = false;
         push_sqlite_usage_where(&mut builder, &mut has_where);
@@ -1722,16 +2102,17 @@ WHERE user_id IN (
             );
         }
 
-        let mut builder = QueryBuilder::<Sqlite>::new(
+        let mut builder = QueryBuilder::<Sqlite>::new(format!(
             r#"
 SELECT
   "usage".user_id,
   COUNT(*) AS request_count,
-  COALESCE(SUM(MAX(COALESCE("usage".total_tokens, 0), 0)), 0) AS total_tokens
+  COALESCE(SUM({total_tokens_expr}), 0) AS total_tokens
 FROM "usage"
 JOIN (
 "#,
-        );
+            total_tokens_expr = SQLITE_USAGE_CANONICAL_TOTAL_TOKENS_EXPR
+        ));
         for (index, user_id) in unique_user_ids.iter().enumerate() {
             if index > 0 {
                 builder.push(" UNION ALL ");
@@ -1747,6 +2128,8 @@ JOIN (
         builder.push(
             r#"
 ) AS requested ON requested.user_id = "usage".user_id
+LEFT JOIN usage_settlement_snapshots AS settlement
+  ON settlement.request_id = "usage".request_id
 WHERE "usage".created_at_unix_ms >= requested.cutoff_unix_secs
   AND "usage".status NOT IN ('pending', 'streaming')
   AND "usage".provider_name NOT IN ('unknown', 'pending')
@@ -1946,12 +2329,14 @@ impl UsageReadRepository for SqliteUsageReadRepository {
         &self,
         id: &str,
     ) -> Result<Option<StoredRequestUsageAudit>, DataLayerError> {
-        let row = sqlx::query(&format!("{USAGE_COLUMNS} WHERE id = ? LIMIT 1"))
+        let row = sqlx::query(&format!("{USAGE_COLUMNS} WHERE \"usage\".id = ? LIMIT 1"))
             .bind(id)
             .fetch_optional(&self.pool)
             .await
             .map_sql_err()?;
-        row.as_ref().map(map_usage_row).transpose()
+        row.as_ref()
+            .map(|row| map_usage_row(row, false))
+            .transpose()
     }
 
     async fn list_by_ids(
@@ -1962,7 +2347,7 @@ impl UsageReadRepository for SqliteUsageReadRepository {
             return Ok(Vec::new());
         }
         let mut builder = QueryBuilder::<Sqlite>::new(USAGE_COLUMNS);
-        builder.push(" WHERE id IN (");
+        builder.push(" WHERE \"usage\".id IN (");
         {
             let mut separated = builder.separated(", ");
             for id in ids {
@@ -1977,61 +2362,30 @@ impl UsageReadRepository for SqliteUsageReadRepository {
         &self,
         request_id: &str,
     ) -> Result<Option<StoredRequestUsageAudit>, DataLayerError> {
-        let row = sqlx::query(&format!("{USAGE_COLUMNS} WHERE request_id = ? LIMIT 1"))
-            .bind(request_id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_sql_err()?;
-        row.as_ref().map(map_usage_row).transpose()
+        let row = sqlx::query(&format!(
+            "{USAGE_COLUMNS} WHERE \"usage\".request_id = ? LIMIT 1"
+        ))
+        .bind(request_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_sql_err()?;
+        let usage = row
+            .as_ref()
+            .map(|row| map_usage_row(row, true))
+            .transpose()?;
+        match usage {
+            Some(usage) => http_capture::hydrate_usage_body_refs(&self.pool, usage)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
     }
 
     async fn resolve_body_ref(
         &self,
         body_ref: &str,
     ) -> Result<Option<serde_json::Value>, DataLayerError> {
-        let has_blob_table: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'usage_body_blobs'",
-        )
-        .fetch_one(&self.pool)
-        .await
-        .map_sql_err()?;
-        if has_blob_table > 0 {
-            let blob_row =
-                sqlx::query("SELECT payload_gzip FROM usage_body_blobs WHERE body_ref = ? LIMIT 1")
-                    .bind(body_ref)
-                    .fetch_optional(&self.pool)
-                    .await
-                    .map_sql_err()?;
-            if let Some(row) = blob_row.as_ref() {
-                let payload_gzip = row.try_get::<Vec<u8>, _>("payload_gzip").map_sql_err()?;
-                return inflate_usage_json_value(&payload_gzip).map(Some);
-            }
-        }
-
-        let Some((request_id, field)) = parse_usage_body_ref(body_ref) else {
-            return Ok(None);
-        };
-        let (inline_column, compressed_column) = sqlite_usage_body_sql_columns(field);
-        let row = sqlx::query(&format!(
-            "SELECT {inline_column} AS inline_body, {compressed_column} AS compressed_body FROM \"usage\" WHERE request_id = ? LIMIT 1"
-        ))
-        .bind(request_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_sql_err()?;
-        let Some(row) = row.as_ref() else {
-            return Ok(None);
-        };
-        if let Some(raw) = row
-            .try_get::<Option<String>, _>("inline_body")
-            .map_sql_err()?
-        {
-            return parse_usage_json_text(&raw).map(Some);
-        }
-        row.try_get::<Option<Vec<u8>>, _>("compressed_body")
-            .map_sql_err()?
-            .map(|bytes| inflate_usage_json_value(&bytes))
-            .transpose()
+        http_capture::resolve_body_ref(&self.pool, body_ref).await
     }
 
     async fn list_usage_audits(
@@ -2362,6 +2716,8 @@ SELECT
   COALESCE(SUM(CASE WHEN response_time_ms IS NOT NULL THEN 1 ELSE 0 END), 0)
     AS response_time_samples
 FROM "usage"
+LEFT JOIN usage_settlement_snapshots AS settlement
+  ON settlement.request_id = "usage".request_id
 "#,
             effective_input_expr = SQLITE_USAGE_EFFECTIVE_INPUT_TOKENS_EXPR,
             total_tokens_expr = SQLITE_USAGE_CANONICAL_TOTAL_TOKENS_EXPR,
@@ -2426,14 +2782,17 @@ SELECT
   model,
   provider_name AS provider,
   COUNT(*) AS requests,
-  COALESCE(SUM(MAX(COALESCE(total_tokens, 0), 0)), 0) AS total_tokens,
+  COALESCE(SUM({total_tokens_expr}), 0) AS total_tokens,
   COALESCE(SUM(COALESCE(CAST(total_cost_usd AS REAL), 0)), 0) AS total_cost_usd,
   COALESCE(SUM(CASE WHEN response_time_ms IS NOT NULL THEN MAX(COALESCE(response_time_ms, 0), 0) ELSE 0 END), 0)
     AS response_time_sum_ms,
   COALESCE(SUM(CASE WHEN response_time_ms IS NOT NULL THEN 1 ELSE 0 END), 0)
     AS response_time_samples
 FROM "usage"
-"#
+LEFT JOIN usage_settlement_snapshots AS settlement
+  ON settlement.request_id = "usage".request_id
+"#,
+            total_tokens_expr = SQLITE_USAGE_CANONICAL_TOTAL_TOKENS_EXPR
         ));
         let mut has_where = false;
         push_sqlite_usage_range(
@@ -2536,7 +2895,7 @@ SELECT
   {group_expr} AS group_key,
   COUNT(*) AS request_count,
   COALESCE(SUM(MAX(COALESCE(input_tokens, 0), 0)), 0) AS input_tokens,
-  COALESCE(SUM(MAX(COALESCE(total_tokens, 0), 0)), 0) AS total_tokens,
+  COALESCE(SUM({total_tokens_expr}), 0) AS total_tokens,
   COALESCE(SUM(MAX(COALESCE(output_tokens, 0), 0)), 0) AS output_tokens,
   COALESCE(SUM({effective_input_expr}), 0) AS effective_input_tokens,
   COALESCE(SUM({total_input_context_expr}), 0) AS total_input_context,
@@ -2559,11 +2918,14 @@ SELECT
   COALESCE(SUM(CASE WHEN response_time_ms IS NOT NULL THEN 1 ELSE 0 END), 0)
     AS overall_response_time_samples
 FROM "usage"
+LEFT JOIN usage_settlement_snapshots AS settlement
+  ON settlement.request_id = "usage".request_id
 "#,
             effective_input_expr = SQLITE_USAGE_EFFECTIVE_INPUT_TOKENS_EXPR,
             total_input_context_expr = SQLITE_USAGE_TOTAL_INPUT_CONTEXT_EXPR,
             cache_creation_expr = SQLITE_USAGE_CACHE_CREATION_TOKENS_EXPR,
-            success_flag_expr = SQLITE_USAGE_SUCCESS_FLAG_EXPR
+            success_flag_expr = SQLITE_USAGE_SUCCESS_FLAG_EXPR,
+            total_tokens_expr = SQLITE_USAGE_CANONICAL_TOTAL_TOKENS_EXPR
         ));
         let mut has_where = false;
         push_sqlite_usage_range(
@@ -3459,6 +3821,8 @@ SELECT
   COALESCE(SUM({total_tokens_expr}), 0) AS total_tokens,
   COALESCE(SUM(COALESCE(CAST(total_cost_usd AS REAL), 0)), 0) AS total_cost_usd
 FROM "usage"
+LEFT JOIN usage_settlement_snapshots AS settlement
+  ON settlement.request_id = "usage".request_id
 "#,
             total_tokens_expr = SQLITE_USAGE_CANONICAL_TOTAL_TOKENS_EXPR
         ));
@@ -3531,22 +3895,25 @@ FROM "usage"
             return Ok(BTreeMap::new());
         }
 
-        let mut builder = QueryBuilder::<Sqlite>::new(
+        let mut builder = QueryBuilder::<Sqlite>::new(format!(
             r#"
 SELECT
-  api_key_id,
-  COALESCE(SUM(MAX(COALESCE(total_tokens, 0), 0)), 0) AS total_tokens
+  "usage".api_key_id,
+  COALESCE(SUM({total_tokens_expr}), 0) AS total_tokens
 FROM "usage"
-WHERE api_key_id IN (
+LEFT JOIN usage_settlement_snapshots AS settlement
+  ON settlement.request_id = "usage".request_id
+WHERE "usage".api_key_id IN (
 "#,
-        );
+            total_tokens_expr = SQLITE_USAGE_CANONICAL_TOTAL_TOKENS_EXPR
+        ));
         {
             let mut separated = builder.separated(", ");
             for api_key_id in api_key_ids {
                 separated.push_bind(api_key_id.clone());
             }
         }
-        builder.push(") GROUP BY api_key_id ORDER BY api_key_id ASC");
+        builder.push(") GROUP BY \"usage\".api_key_id ORDER BY \"usage\".api_key_id ASC");
 
         let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
         let mut totals = BTreeMap::new();
@@ -3567,25 +3934,30 @@ WHERE api_key_id IN (
             return Ok(BTreeMap::new());
         }
 
-        let mut builder = QueryBuilder::<Sqlite>::new(
+        let mut builder = QueryBuilder::<Sqlite>::new(format!(
             r#"
 SELECT
-  provider_api_key_id,
+  "usage".provider_api_key_id,
   COUNT(*) AS request_count,
-  COALESCE(SUM(MAX(COALESCE(total_tokens, 0), 0)), 0) AS total_tokens,
-  COALESCE(SUM(COALESCE(CAST(total_cost_usd AS REAL), 0)), 0) AS total_cost_usd,
-  MAX(created_at_unix_ms) AS last_used_at_unix_secs
+  COALESCE(SUM({total_tokens_expr}), 0) AS total_tokens,
+  COALESCE(SUM(COALESCE(CAST("usage".total_cost_usd AS REAL), 0)), 0) AS total_cost_usd,
+  MAX("usage".created_at_unix_ms) AS last_used_at_unix_secs
 FROM "usage"
-WHERE provider_api_key_id IN (
+LEFT JOIN usage_settlement_snapshots AS settlement
+  ON settlement.request_id = "usage".request_id
+WHERE "usage".provider_api_key_id IN (
 "#,
-        );
+            total_tokens_expr = SQLITE_USAGE_CANONICAL_TOTAL_TOKENS_EXPR
+        ));
         {
             let mut separated = builder.separated(", ");
             for provider_api_key_id in provider_api_key_ids {
                 separated.push_bind(provider_api_key_id.clone());
             }
         }
-        builder.push(") GROUP BY provider_api_key_id ORDER BY provider_api_key_id ASC");
+        builder.push(
+            ") GROUP BY \"usage\".provider_api_key_id ORDER BY \"usage\".provider_api_key_id ASC",
+        );
 
         let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
         let mut summaries = BTreeMap::new();
@@ -3632,18 +4004,21 @@ WHERE provider_api_key_id IN (
                 ));
             }
 
-            let row = sqlx::query(
+            let row = sqlx::query(&format!(
                 r#"
 SELECT
   COUNT(*) AS request_count,
-  COALESCE(SUM(MAX(COALESCE(total_tokens, 0), 0)), 0) AS total_tokens,
-  COALESCE(SUM(COALESCE(CAST(total_cost_usd AS REAL), 0)), 0) AS total_cost_usd
+  COALESCE(SUM({total_tokens_expr}), 0) AS total_tokens,
+  COALESCE(SUM(COALESCE(CAST("usage".total_cost_usd AS REAL), 0)), 0) AS total_cost_usd
 FROM "usage"
-WHERE provider_api_key_id = ?
-  AND created_at_unix_ms >= ?
-  AND created_at_unix_ms < ?
+LEFT JOIN usage_settlement_snapshots AS settlement
+  ON settlement.request_id = "usage".request_id
+WHERE "usage".provider_api_key_id = ?
+  AND "usage".created_at_unix_ms >= ?
+  AND "usage".created_at_unix_ms < ?
 "#,
-            )
+                total_tokens_expr = SQLITE_USAGE_CANONICAL_TOTAL_TOKENS_EXPR
+            ))
             .bind(provider_api_key_id)
             .bind(request.start_unix_secs as i64)
             .bind(request.end_unix_secs as i64)
@@ -3736,6 +4111,22 @@ WHERE provider_id = ?
 
         Ok(summaries.into_values().collect())
     }
+
+    async fn read_usage_counter_health(
+        &self,
+    ) -> Result<aether_data_contracts::repository::usage::UsageCounterHealthSnapshot, DataLayerError>
+    {
+        counters::read_health(&self.pool).await
+    }
+
+    async fn read_usage_counter_pending_health(
+        &self,
+    ) -> Result<
+        aether_data_contracts::repository::usage::UsageCounterPendingHealthSnapshot,
+        DataLayerError,
+    > {
+        counters::read_pending_health(&self.pool).await
+    }
 }
 
 fn map_sqlite_usage_daily_summary(
@@ -3757,6 +4148,12 @@ fn usage_current_unix_secs() -> u64 {
         .unwrap_or_default()
 }
 
+fn first_byte_transition_allowed(existing: &StoredRequestUsageAudit) -> bool {
+    existing.billing_status == "pending"
+        && matches!(existing.status.as_str(), "pending" | "streaming")
+        && existing.finalized_at_unix_secs.is_none()
+}
+
 impl SqliteUsageWriteRepository {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
@@ -3766,48 +4163,299 @@ impl SqliteUsageWriteRepository {
         &self,
         request_id: &str,
     ) -> Result<Option<StoredRequestUsageAudit>, DataLayerError> {
-        let row = sqlx::query(&format!("{USAGE_COLUMNS} WHERE request_id = ? LIMIT 1"))
-            .bind(request_id)
-            .fetch_optional(&self.pool)
+        let row = sqlx::query(&format!(
+            "{USAGE_COLUMNS} WHERE \"usage\".request_id = ? LIMIT 1"
+        ))
+        .bind(request_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_sql_err()?;
+        let usage = row
+            .as_ref()
+            .map(|row| map_usage_row(row, true))
+            .transpose()?;
+        match usage {
+            Some(usage) => http_capture::hydrate_usage_body_refs(&self.pool, usage)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    async fn upsert_in_tx(
+        tx: &mut sqlx::Transaction<'_, Sqlite>,
+        usage: UpsertUsageRecord,
+    ) -> Result<(), DataLayerError> {
+        let mut usage = strip_deprecated_usage_display_fields(usage);
+        usage.validate()?;
+        let prepared_capture = http_capture::prepare_usage_http_capture(&mut usage)?;
+        let existing = counters::lock_and_load_usage(tx, &usage.request_id).await?;
+        let recovers_terminal_failure = existing.as_ref().is_some_and(|existing| {
+            usage_can_recover_terminal_failure(
+                &existing.status,
+                &existing.billing_status,
+                &usage.status,
+                &usage.billing_status,
+            )
+        });
+        if existing.as_ref().is_some_and(|existing| {
+            (existing.billing_status == "settled" || existing.billing_status == "void")
+                && !recovers_terminal_failure
+        }) {
+            return Ok(());
+        }
+
+        let capture_update_allowed = recovers_terminal_failure
+            || http_capture::capture_update_allowed(existing.as_ref(), &usage.status);
+        if capture_update_allowed {
+            http_capture::apply_previous_metadata_tombstones(&mut usage, existing.as_ref());
+        }
+        let prepared_snapshots = capture_update_allowed
+            .then(|| snapshots::from_usage(&usage))
+            .transpose()?;
+        bind_upsert(sqlx::query(UPSERT_USAGE_SQL), &usage)?
+            .execute(&mut **tx)
             .await
             .map_sql_err()?;
-        row.as_ref().map(map_usage_row).transpose()
+        if capture_update_allowed {
+            http_capture::sync_usage_http_capture(tx, &usage.request_id, &prepared_capture).await?;
+            let (routing_snapshot, settlement_snapshot) = prepared_snapshots
+                .as_ref()
+                .expect("capture-allowed usage has prepared snapshots");
+            snapshots::sync(
+                tx,
+                &usage.request_id,
+                routing_snapshot,
+                settlement_snapshot,
+                matches!(usage.status.as_str(), "completed" | "failed" | "cancelled"),
+            )
+            .await?;
+        }
+        counters::enqueue_usage_transition_for_request(tx, &usage.request_id, existing.as_ref())
+            .await
+    }
+
+    async fn execute_first_byte_batch(
+        tx: &mut sqlx::Transaction<'_, Sqlite>,
+        rows: &[&PreparedFirstByteUsage],
+        preserve_existing_format_conversion: bool,
+    ) -> Result<(), DataLayerError> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        let mut builder = QueryBuilder::<Sqlite>::new(UPSERT_FIRST_BYTE_BATCH_PREFIX_SQL);
+        builder.push_values(rows, |mut values, row| {
+            values
+                .push_bind(row.usage.request_id.clone())
+                .push_bind(row.usage.request_id.clone())
+                .push_bind(row.usage.user_id.clone())
+                .push_bind(row.usage.api_key_id.clone())
+                .push_bind(row.usage.provider_name.clone())
+                .push_bind(row.usage.model.clone())
+                .push_bind(row.usage.target_model.clone())
+                .push_bind(row.usage.provider_id.clone())
+                .push_bind(row.usage.provider_endpoint_id.clone())
+                .push_bind(row.usage.provider_api_key_id.clone())
+                .push_bind(row.usage.request_type.clone())
+                .push_bind(row.usage.api_format.clone())
+                .push_bind(row.usage.api_family.clone())
+                .push_bind(row.usage.endpoint_kind.clone())
+                .push_bind(row.usage.endpoint_api_format.clone())
+                .push_bind(row.usage.provider_api_family.clone())
+                .push_bind(row.usage.provider_endpoint_kind.clone())
+                .push_bind(row.usage.has_format_conversion.unwrap_or(false))
+                .push("1")
+                .push_bind(
+                    row.usage
+                        .request_metadata
+                        .as_ref()
+                        .and_then(serde_json::Value::as_object)
+                        .and_then(|metadata| metadata.get(UPSTREAM_IS_STREAM_KEY))
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(true),
+                )
+                .push_bind(row.usage.status_code.map(i64::from))
+                .push_bind(row.response_time_ms)
+                .push_bind(row.first_byte_time_ms)
+                .push("'streaming'")
+                .push("'pending'")
+                .push_bind(row.request_metadata_json.clone())
+                .push_bind(row.created_at_unix_secs)
+                .push_bind(row.created_at_unix_secs)
+                .push_bind(row.updated_at_unix_secs);
+        });
+        builder.push(UPSERT_FIRST_BYTE_BATCH_UPDATE_PREFIX_SQL);
+        if preserve_existing_format_conversion {
+            builder.push("COALESCE(\"usage\".has_format_conversion, 0)");
+        } else {
+            builder.push(
+                "COALESCE(excluded.has_format_conversion, \"usage\".has_format_conversion, 0)",
+            );
+        }
+        builder.push(UPSERT_FIRST_BYTE_BATCH_UPDATE_SUFFIX_SQL);
+        builder.build().execute(&mut **tx).await.map_sql_err()?;
+        Ok(())
+    }
+
+    async fn upsert_first_byte_many_native(
+        &self,
+        usages: Vec<UpsertUsageRecord>,
+    ) -> Result<(), DataLayerError> {
+        if usages.is_empty() {
+            return Ok(());
+        }
+
+        let mut request_id_counts = BTreeMap::<String, usize>::new();
+        for usage in &usages {
+            *request_id_counts
+                .entry(usage.request_id.clone())
+                .or_default() += 1;
+        }
+        let mut batch_rows = Vec::new();
+        let mut fallback_rows = Vec::new();
+        for (sequence, usage) in usages.into_iter().enumerate() {
+            let prepared = PreparedFirstByteUsage::try_from_usage(usage)?;
+            if request_id_counts
+                .get(&prepared.usage.request_id)
+                .copied()
+                .unwrap_or_default()
+                == 1
+            {
+                batch_rows.push(prepared);
+            } else {
+                fallback_rows.push((sequence, prepared));
+            }
+        }
+
+        let mut tx = self.pool.begin().await.map_sql_err()?;
+        let mut before = BTreeMap::<String, Option<StoredRequestUsageAudit>>::new();
+        let request_ids = batch_rows
+            .iter()
+            .map(|row| row.usage.request_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        for request_id in request_ids {
+            let existing = counters::lock_and_load_usage(&mut tx, &request_id).await?;
+            before.insert(request_id, existing);
+        }
+        let eligible_rows = batch_rows
+            .iter()
+            .filter(|row| {
+                before
+                    .get(&row.usage.request_id)
+                    .and_then(Option::as_ref)
+                    .is_none_or(first_byte_transition_allowed)
+            })
+            .collect::<Vec<_>>();
+        for preserve_existing_format_conversion in [true, false] {
+            let matching = eligible_rows
+                .iter()
+                .copied()
+                .filter(|row| {
+                    row.usage.has_format_conversion.is_none() == preserve_existing_format_conversion
+                })
+                .collect::<Vec<_>>();
+            for chunk in matching.chunks(SQLITE_FIRST_BYTE_BATCH_SIZE) {
+                Self::execute_first_byte_batch(&mut tx, chunk, preserve_existing_format_conversion)
+                    .await?;
+            }
+        }
+        for row in eligible_rows {
+            counters::enqueue_usage_transition_for_request(
+                &mut tx,
+                &row.usage.request_id,
+                before.get(&row.usage.request_id).and_then(Option::as_ref),
+            )
+            .await?;
+        }
+
+        fallback_rows.sort_by_key(|(sequence, _)| *sequence);
+        for (_, row) in fallback_rows {
+            let existing = counters::lock_and_load_usage(&mut tx, &row.usage.request_id).await?;
+            if existing
+                .as_ref()
+                .is_some_and(|existing| !first_byte_transition_allowed(existing))
+            {
+                continue;
+            }
+            Self::execute_first_byte_batch(
+                &mut tx,
+                &[&row],
+                row.usage.has_format_conversion.is_none(),
+            )
+            .await?;
+            counters::enqueue_usage_transition_for_request(
+                &mut tx,
+                &row.usage.request_id,
+                existing.as_ref(),
+            )
+            .await?;
+        }
+
+        tx.commit().await.map_sql_err()
     }
 }
 
 #[async_trait]
 impl UsageWriteRepository for SqliteUsageWriteRepository {
+    fn supports_first_byte_usage_fast_path(&self) -> bool {
+        true
+    }
+
+    fn supports_first_byte_usage_batch(&self) -> bool {
+        true
+    }
+
+    fn supports_pending_usage_batch(&self) -> bool {
+        true
+    }
+
     async fn upsert(
         &self,
         usage: UpsertUsageRecord,
     ) -> Result<StoredRequestUsageAudit, DataLayerError> {
-        let usage = strip_deprecated_usage_display_fields(usage);
         usage.validate()?;
+        let request_id = usage.request_id.clone();
+        let mut tx = self.pool.begin().await.map_sql_err()?;
+        Self::upsert_in_tx(&mut tx, usage).await?;
+        tx.commit().await.map_sql_err()?;
+        self.find_by_request_id(&request_id).await?.ok_or_else(|| {
+            DataLayerError::UnexpectedValue("usage upsert returned no row".to_string())
+        })
+    }
 
-        if let Some(existing) = self.find_by_request_id(&usage.request_id).await? {
-            if (existing.billing_status == "settled" || existing.billing_status == "void")
-                && !usage_can_recover_terminal_failure(
-                    &existing.status,
-                    &existing.billing_status,
-                    &usage.status,
-                    &usage.billing_status,
-                )
-            {
-                return Ok(existing);
+    async fn upsert_first_byte(&self, usage: UpsertUsageRecord) -> Result<(), DataLayerError> {
+        self.upsert_first_byte_many_native(vec![usage]).await
+    }
+
+    async fn upsert_first_byte_many(
+        &self,
+        usages: Vec<UpsertUsageRecord>,
+    ) -> Result<(), DataLayerError> {
+        self.upsert_first_byte_many_native(usages).await
+    }
+
+    async fn upsert_pending_many(
+        &self,
+        usages: Vec<UpsertUsageRecord>,
+    ) -> Result<(), DataLayerError> {
+        if usages.is_empty() {
+            return Ok(());
+        }
+        for usage in &usages {
+            usage.validate()?;
+            if usage.status != "pending" || usage.billing_status != "pending" {
+                return Err(DataLayerError::InvalidInput(
+                    "pending usage batch requires pending status with pending billing".to_string(),
+                ));
             }
         }
 
-        bind_upsert(sqlx::query(UPSERT_USAGE_SQL), &usage)?
-            .execute(&self.pool)
-            .await
-            .map_sql_err()?;
-        self.rebuild_api_key_usage_stats().await?;
-        self.rebuild_provider_api_key_usage_stats().await?;
-        self.find_by_request_id(&usage.request_id)
-            .await?
-            .ok_or_else(|| {
-                DataLayerError::UnexpectedValue("usage upsert returned no row".to_string())
-            })
+        let mut tx = self.pool.begin().await.map_sql_err()?;
+        for usage in usages {
+            Self::upsert_in_tx(&mut tx, usage).await?;
+        }
+        tx.commit().await.map_sql_err()
     }
 
     async fn rebuild_api_key_usage_stats(&self) -> Result<u64, DataLayerError> {
@@ -3824,19 +4472,28 @@ SET total_requests = 0,
         .await
         .map_sql_err()?;
 
-        let rows = sqlx::query(
+        let rows = sqlx::query(&format!(
             r#"
 SELECT
-  api_key_id,
+  "usage".api_key_id,
   COUNT(*) AS total_requests,
-  COALESCE(SUM(total_tokens), 0) AS total_tokens,
-  CAST(COALESCE(SUM(total_cost_usd), 0) AS REAL) AS total_cost_usd,
-  MAX(updated_at_unix_secs) AS last_used_at
+  COALESCE(SUM({total_tokens_expr}), 0) AS total_tokens,
+  CAST(COALESCE(SUM("usage".total_cost_usd), 0) AS REAL) AS total_cost_usd,
+  MAX(COALESCE(
+    "usage".created_at,
+    "usage".created_at_unix_ms,
+    "usage".updated_at_unix_secs
+  )) AS last_used_at
 FROM "usage"
-WHERE api_key_id IS NOT NULL AND api_key_id <> ''
-GROUP BY api_key_id
+LEFT JOIN usage_settlement_snapshots AS settlement
+  ON settlement.request_id = "usage".request_id
+WHERE "usage".api_key_id IS NOT NULL
+  AND TRIM("usage".api_key_id) <> ''
+  AND "usage".status NOT IN ('pending', 'streaming')
+GROUP BY "usage".api_key_id
 "#,
-        )
+            total_tokens_expr = SQLITE_USAGE_CANONICAL_TOTAL_TOKENS_EXPR
+        ))
         .fetch_all(&self.pool)
         .await
         .map_sql_err()?;
@@ -3888,31 +4545,34 @@ SET request_count = 0,
         let rows = sqlx::query(&format!(
             r#"
 SELECT
-  provider_api_key_id,
+  "usage".provider_api_key_id,
   COUNT(*) AS request_count,
   COALESCE(SUM({success_flag_expr}), 0) AS success_count,
   COALESCE(SUM({error_flag_expr}), 0) AS error_count,
   COALESCE(SUM(CASE
-    WHEN status IN ('pending', 'streaming') THEN 0
-    ELSE MAX(COALESCE(total_tokens, 0), 0)
+    WHEN "usage".status IN ('pending', 'streaming') THEN 0
+    ELSE {total_tokens_expr}
   END), 0) AS total_tokens,
   COALESCE(SUM(CASE
-    WHEN status IN ('pending', 'streaming') THEN 0
-    ELSE COALESCE(CAST(total_cost_usd AS REAL), 0)
+    WHEN "usage".status IN ('pending', 'streaming') THEN 0
+    ELSE COALESCE(CAST("usage".total_cost_usd AS REAL), 0)
   END), 0) AS total_cost_usd,
   COALESCE(SUM(CASE
-    WHEN {success_flag_expr} = 1 AND response_time_ms IS NOT NULL
-    THEN MAX(COALESCE(response_time_ms, 0), 0)
+    WHEN {success_flag_expr} = 1 AND "usage".response_time_ms IS NOT NULL
+    THEN MAX(COALESCE("usage".response_time_ms, 0), 0)
     ELSE 0
   END), 0) AS total_response_time_ms,
-  MAX(created_at_unix_ms) AS last_used_at
+  MAX("usage".created_at_unix_ms) AS last_used_at
 FROM "usage"
-WHERE provider_api_key_id IS NOT NULL
-  AND TRIM(provider_api_key_id) <> ''
-GROUP BY provider_api_key_id
+LEFT JOIN usage_settlement_snapshots AS settlement
+  ON settlement.request_id = "usage".request_id
+WHERE "usage".provider_api_key_id IS NOT NULL
+  AND TRIM("usage".provider_api_key_id) <> ''
+GROUP BY "usage".provider_api_key_id
 "#,
             success_flag_expr = SQLITE_PROVIDER_KEY_SUCCESS_FLAG_EXPR,
-            error_flag_expr = SQLITE_PROVIDER_KEY_ERROR_FLAG_EXPR
+            error_flag_expr = SQLITE_PROVIDER_KEY_ERROR_FLAG_EXPR,
+            total_tokens_expr = SQLITE_USAGE_CANONICAL_TOTAL_TOKENS_EXPR
         ))
         .fetch_all(&self.pool)
         .await
@@ -3968,7 +4628,6 @@ WHERE id = ?
             return Ok(PendingUsageCleanupSummary::default());
         }
 
-        let cutoff_unix_ms = cutoff_unix_secs.saturating_mul(1000);
         let now_unix_ms = now_unix_secs.saturating_mul(1000);
         let mut summary = PendingUsageCleanupSummary::default();
         let batch_size_u64 = u64::try_from(batch_size).map_err(|_| {
@@ -3980,7 +4639,7 @@ WHERE id = ?
         loop {
             let mut tx = self.pool.begin().await.map_sql_err()?;
             let stale_rows = sqlx::query(SELECT_STALE_PENDING_USAGE_BATCH_SQL)
-                .bind(to_i64(cutoff_unix_ms, "stale pending usage cutoff")?)
+                .bind(to_i64(cutoff_unix_secs, "stale pending usage cutoff")?)
                 .bind(to_i64(batch_size_u64, "stale pending usage batch size")?)
                 .fetch_all(&mut *tx)
                 .await
@@ -4114,6 +4773,71 @@ WHERE request_id = ?
 
         Ok(summary)
     }
+
+    async fn flush_usage_counter_deltas(
+        &self,
+        batch_size: usize,
+    ) -> Result<aether_data_contracts::repository::usage::UsageCounterFlushSummary, DataLayerError>
+    {
+        counters::flush(&self.pool, batch_size).await
+    }
+
+    async fn enqueue_proxy_node_counter_delta(
+        &self,
+        delta: aether_data_contracts::repository::usage::ProxyNodeCounterDelta,
+    ) -> Result<bool, DataLayerError> {
+        counters::enqueue_proxy_node(&self.pool, delta).await
+    }
+
+    async fn enqueue_management_token_counter_delta(
+        &self,
+        delta: aether_data_contracts::repository::usage::ManagementTokenCounterDelta,
+    ) -> Result<bool, DataLayerError> {
+        counters::enqueue_management_token(&self.pool, delta).await
+    }
+
+    async fn enqueue_api_key_last_used_delta(
+        &self,
+        delta: aether_data_contracts::repository::usage::ApiKeyLastUsedDelta,
+    ) -> Result<bool, DataLayerError> {
+        counters::enqueue_api_key_last_used(&self.pool, delta).await
+    }
+
+    async fn cleanup_processed_usage_counter_deltas(
+        &self,
+        cutoff_unix_secs: u64,
+        batch_size: usize,
+    ) -> Result<usize, DataLayerError> {
+        counters::cleanup_processed(&self.pool, cutoff_unix_secs, batch_size).await
+    }
+
+    async fn cleanup_usage(
+        &self,
+        window: &UsageCleanupWindow,
+        batch_size: usize,
+        auto_delete_expired_keys: bool,
+        targets: UsageCleanupTargets,
+        mode: UsageCleanupExecutionMode,
+    ) -> Result<UsageCleanupSummary, DataLayerError> {
+        cleanup::cleanup_usage(
+            &self.pool,
+            window,
+            batch_size,
+            auto_delete_expired_keys,
+            targets,
+            mode,
+        )
+        .await
+    }
+
+    async fn preview_usage_cleanup(
+        &self,
+        window: &UsageCleanupWindow,
+        targets: UsageCleanupTargets,
+        mode: UsageCleanupExecutionMode,
+    ) -> Result<UsageCleanupPreviewCounts, DataLayerError> {
+        cleanup::preview_usage_cleanup(&self.pool, window, targets, mode).await
+    }
 }
 
 struct StalePendingUsageRow {
@@ -4188,6 +4912,33 @@ INSERT INTO usage_settlement_snapshots (
 ON CONFLICT (request_id)
 DO UPDATE SET
   billing_status = excluded.billing_status,
+  billing_snapshot_schema_version = NULL,
+  billing_snapshot_status = NULL,
+  settlement_snapshot_schema_version = NULL,
+  settlement_snapshot = NULL,
+  billing_dimensions = NULL,
+  billing_input_tokens = NULL,
+  billing_effective_input_tokens = NULL,
+  billing_output_tokens = NULL,
+  billing_cache_creation_tokens = NULL,
+  billing_cache_creation_5m_tokens = NULL,
+  billing_cache_creation_1h_tokens = NULL,
+  billing_cache_read_tokens = NULL,
+  billing_total_input_context = NULL,
+  billing_cache_creation_cost_usd = NULL,
+  billing_cache_read_cost_usd = NULL,
+  billing_total_cost_usd = NULL,
+  billing_actual_total_cost_usd = NULL,
+  billing_pricing_source = NULL,
+  billing_rule_id = NULL,
+  billing_rule_version = NULL,
+  rate_multiplier = NULL,
+  is_free_tier = NULL,
+  input_price_per_1m = NULL,
+  output_price_per_1m = NULL,
+  cache_creation_price_per_1m = NULL,
+  cache_read_price_per_1m = NULL,
+  price_per_request = NULL,
   finalized_at = COALESCE(usage_settlement_snapshots.finalized_at, excluded.finalized_at),
   updated_at = excluded.updated_at
 "#,
@@ -4293,7 +5044,7 @@ fn bind_upsert<'q>(
         .unwrap_or(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens);
     let created_at = usage
         .created_at_unix_ms
-        .unwrap_or(usage.updated_at_unix_secs.saturating_mul(1000));
+        .unwrap_or(usage.updated_at_unix_secs);
     let request_metadata = usage
         .request_metadata
         .as_ref()
@@ -4369,7 +5120,10 @@ fn bind_upsert<'q>(
     Ok(query)
 }
 
-fn map_usage_row(row: &SqliteRow) -> Result<StoredRequestUsageAudit, DataLayerError> {
+fn map_usage_row(
+    row: &SqliteRow,
+    resolve_legacy_compressed: bool,
+) -> Result<StoredRequestUsageAudit, DataLayerError> {
     let mut audit = StoredRequestUsageAudit::new(
         row.try_get("id").map_sql_err()?,
         row.try_get("request_id").map_sql_err()?,
@@ -4428,24 +5182,13 @@ fn map_usage_row(row: &SqliteRow) -> Result<StoredRequestUsageAudit, DataLayerEr
         .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?;
     audit.client_family = usage_request_metadata_client_family(audit.request_metadata.as_ref())
         .map(ToOwned::to_owned);
+    http_capture::hydrate_usage_row(row, &mut audit, resolve_legacy_compressed)?;
     let upstream_is_stream = row
         .try_get::<Option<i64>, _>("upstream_is_stream")
         .map_sql_err()?
         .map(|value| value != 0);
     merge_usage_stream_metadata(&mut audit.request_metadata, upstream_is_stream);
-    audit.candidate_id = row.try_get("candidate_id").map_sql_err()?;
-    audit.candidate_index = row
-        .try_get::<Option<i64>, _>("candidate_index")
-        .map_sql_err()?
-        .map(|value| value as u64);
-    audit.key_name = row.try_get("key_name").map_sql_err()?;
-    audit.planner_kind = row.try_get("planner_kind").map_sql_err()?;
-    audit.route_family = row.try_get("route_family").map_sql_err()?;
-    audit.route_kind = row.try_get("route_kind").map_sql_err()?;
-    audit.execution_path = row.try_get("execution_path").map_sql_err()?;
-    audit.local_execution_runtime_miss_reason = row
-        .try_get("local_execution_runtime_miss_reason")
-        .map_sql_err()?;
+    snapshots::hydrate_row(row, &mut audit)?;
     Ok(audit)
 }
 

@@ -7,12 +7,6 @@ pub(crate) fn unix_secs(value: DateTime<Utc>) -> i64 {
     value.timestamp().max(0)
 }
 
-pub(crate) fn unix_ms(value: i64) -> Result<i64, DataLayerError> {
-    value.checked_mul(1000).ok_or_else(|| {
-        DataLayerError::InvalidInput(format!("timestamp overflow while converting {value} to ms"))
-    })
-}
-
 pub(crate) fn utc_from_unix_secs(
     value: i64,
     field_name: &str,

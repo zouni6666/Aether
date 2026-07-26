@@ -1,4 +1,12 @@
 use super::*;
+use sqlx::Acquire;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct MysqlImportColumns {
+    names: ImportColumnNames,
+    data_types: BTreeMap<String, String>,
+    primary_key: Vec<String>,
+}
 
 pub async fn export_mysql_core_jsonl(
     pool: &crate::driver::mysql::MysqlPool,
@@ -12,6 +20,12 @@ pub async fn export_mysql_jsonl(
     domains: Vec<ExportDomain>,
     created_at_unix_secs: u64,
 ) -> Result<String, DataLayerError> {
+    let mut connection = pool.acquire().await.map_sql_err()?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *connection)
+        .await
+        .map_sql_err()?;
+    let mut tx = connection.begin().await.map_sql_err()?;
     let manifest = DataExportManifest::new(
         created_at_unix_secs,
         Some(DatabaseDriver::Mysql),
@@ -20,24 +34,29 @@ pub async fn export_mysql_jsonl(
     let mut records = vec![DataExportRecord::manifest(manifest)];
 
     for domain in domains {
+        if domain == ExportDomain::Auxiliary {
+            export_mysql_auxiliary_records(&mut tx, &mut records).await?;
+            continue;
+        }
         if domain == ExportDomain::Billing {
-            export_mysql_billing_records(pool, &mut records).await?;
+            export_mysql_billing_records(&mut tx, &mut records).await?;
             continue;
         }
         if domain == ExportDomain::Wallets {
-            export_mysql_wallet_records(pool, &mut records).await?;
+            export_mysql_wallet_records(&mut tx, &mut records).await?;
             continue;
         }
         let (table_name, id_column) = mysql_domain_table(domain)?;
         let order_by = export_order_by(domain, id_column);
         let sql = format!("SELECT * FROM {table_name} ORDER BY {order_by}");
-        let rows = sqlx::query(&sql).fetch_all(pool).await.map_sql_err()?;
+        let rows = sqlx::query(&sql).fetch_all(&mut *tx).await.map_sql_err()?;
         for row in rows {
             let id = mysql_export_row_id(domain, &row, id_column)?;
             records.push(DataExportRecord::row(domain, id, mysql_row_payload(&row)?));
         }
     }
 
+    tx.commit().await.map_sql_err()?;
     encode_jsonl(&records)
 }
 
@@ -53,31 +72,40 @@ pub async fn import_mysql_plan(
     pool: &crate::driver::mysql::MysqlPool,
     plan: &DataImportPlan,
 ) -> Result<usize, DataLayerError> {
+    let mut tx = pool.begin().await.map_sql_err()?;
     let mut imported = 0usize;
-    let mut column_cache = BTreeMap::<String, ImportColumnNames>::new();
+    let mut column_cache = BTreeMap::<String, MysqlImportColumns>::new();
     for domain in &plan.manifest.domains {
+        if *domain == ExportDomain::Auxiliary {
+            for row in plan.rows(*domain) {
+                import_mysql_auxiliary_row(&mut tx, row, &mut column_cache).await?;
+                imported = imported.saturating_add(1);
+            }
+            continue;
+        }
         if *domain == ExportDomain::Billing {
             for row in plan.rows(*domain) {
-                import_mysql_billing_row(pool, row, &mut column_cache).await?;
+                import_mysql_billing_row(&mut tx, row, &mut column_cache).await?;
                 imported = imported.saturating_add(1);
             }
             continue;
         }
         if *domain == ExportDomain::Wallets {
             for row in plan.rows(*domain) {
-                import_mysql_wallet_row(pool, row, &mut column_cache).await?;
+                import_mysql_wallet_row(&mut tx, row, &mut column_cache).await?;
                 imported = imported.saturating_add(1);
             }
             continue;
         }
         let (table_name, _id_column) = mysql_domain_table(*domain)?;
         let target_columns =
-            mysql_import_columns_cached(pool, &mut column_cache, table_name).await?;
+            mysql_import_columns_cached(&mut tx, &mut column_cache, table_name).await?;
         for row in plan.rows(*domain) {
-            import_mysql_row(pool, table_name, *domain, row, &target_columns).await?;
+            import_mysql_row(&mut tx, table_name, *domain, row, &target_columns).await?;
             imported = imported.saturating_add(1);
         }
     }
+    tx.commit().await.map_sql_err()?;
     Ok(imported)
 }
 
@@ -106,7 +134,40 @@ fn mysql_domain_table(
         ExportDomain::Billing => Err(DataLayerError::InvalidInput(
             "mysql billing export uses multiple tables and must be handled as a domain".to_string(),
         )),
+        ExportDomain::Auxiliary => Err(DataLayerError::InvalidInput(
+            "mysql auxiliary export uses multiple tables and must be handled as a domain"
+                .to_string(),
+        )),
     }
+}
+
+async fn export_mysql_auxiliary_records(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    records: &mut Vec<DataExportRecord>,
+) -> Result<(), DataLayerError> {
+    for table in AUXILIARY_TABLES {
+        let table_sql = mysql_quote_identifier(table.name)?;
+        let order_sql = table
+            .primary_key
+            .iter()
+            .map(|column| mysql_quote_identifier(column).map(|column| format!("{column} ASC")))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(", ");
+        let rows = sqlx::query(&format!("SELECT * FROM {table_sql} ORDER BY {order_sql}"))
+            .fetch_all(&mut **tx)
+            .await
+            .map_sql_err()?;
+        for row in rows {
+            let payload = mysql_row_payload(&row)?;
+            let id = auxiliary_row_id(*table, &payload)?;
+            records.push(DataExportRecord::row(
+                ExportDomain::Auxiliary,
+                id,
+                payload_with_table(payload, table.name)?,
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn mysql_export_row_id(
@@ -139,7 +200,7 @@ fn mysql_required_export_text(
 }
 
 async fn export_mysql_billing_records(
-    pool: &crate::driver::mysql::MysqlPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
     records: &mut Vec<DataExportRecord>,
 ) -> Result<(), DataLayerError> {
     for (table_name, id_column) in [
@@ -148,7 +209,7 @@ async fn export_mysql_billing_records(
         ("usage_settlement_snapshots", "request_id"),
     ] {
         let sql = format!("SELECT * FROM {table_name} ORDER BY {id_column} ASC");
-        let rows = sqlx::query(&sql).fetch_all(pool).await.map_sql_err()?;
+        let rows = sqlx::query(&sql).fetch_all(&mut **tx).await.map_sql_err()?;
         for row in rows {
             let id = row
                 .try_get::<Option<String>, _>(id_column)
@@ -169,12 +230,12 @@ async fn export_mysql_billing_records(
 }
 
 async fn export_mysql_wallet_records(
-    pool: &crate::driver::mysql::MysqlPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
     records: &mut Vec<DataExportRecord>,
 ) -> Result<(), DataLayerError> {
     for (table_name, id_column) in mysql_wallet_tables() {
         let sql = format!("SELECT * FROM {table_name} ORDER BY {id_column} ASC");
-        let rows = sqlx::query(&sql).fetch_all(pool).await.map_sql_err()?;
+        let rows = sqlx::query(&sql).fetch_all(&mut **tx).await.map_sql_err()?;
         for row in rows {
             let id = row
                 .try_get::<Option<String>, _>(id_column)
@@ -195,55 +256,138 @@ async fn export_mysql_wallet_records(
 }
 
 async fn import_mysql_row(
-    pool: &crate::driver::mysql::MysqlPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
     table_name: &str,
     domain: ExportDomain,
     row: &ExportRow,
-    target_columns: &ImportColumnNames,
+    target_columns: &MysqlImportColumns,
 ) -> Result<(), DataLayerError> {
-    let object = filter_import_payload("mysql", table_name, domain, row, target_columns)?;
+    let object = filter_import_payload("mysql", table_name, domain, row, &target_columns.names)?;
 
     let columns = object.keys().map(String::as_str).collect::<Vec<_>>();
+    for primary_key in &target_columns.primary_key {
+        if object.get(primary_key).is_none_or(Value::is_null) {
+            return Err(DataLayerError::InvalidInput(format!(
+                "{} export row '{}' is missing non-null primary key column '{}' for mysql table '{}'",
+                domain.as_str(),
+                row.id,
+                primary_key,
+                table_name
+            )));
+        }
+    }
+
+    let primary_key_predicate = target_columns
+        .primary_key
+        .iter()
+        .map(|column| mysql_quote_identifier(column).map(|column| format!("{column} = ?")))
+        .collect::<Result<Vec<_>, _>>()?
+        .join(" AND ");
+    let lock_sql =
+        format!("SELECT 1 FROM {table_name} WHERE {primary_key_predicate} LIMIT 1 FOR UPDATE");
+    let mut lock_query = sqlx::query(&lock_sql);
+    for column in &target_columns.primary_key {
+        lock_query =
+            bind_mysql_import_column(lock_query, &object, target_columns, table_name, column)?;
+    }
+    let exists = lock_query
+        .fetch_optional(&mut **tx)
+        .await
+        .map_sql_err()?
+        .is_some();
+
+    if exists {
+        let update_columns = columns
+            .iter()
+            .copied()
+            .filter(|column| !target_columns.primary_key.iter().any(|key| key == column))
+            .collect::<Vec<_>>();
+        if update_columns.is_empty() {
+            return Ok(());
+        }
+        let update_sql = update_columns
+            .iter()
+            .map(|column| mysql_quote_identifier(column).map(|column| format!("{column} = ?")))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(", ");
+        let sql = format!("UPDATE {table_name} SET {update_sql} WHERE {primary_key_predicate}");
+        let mut query = sqlx::query(&sql);
+        for column in update_columns {
+            query = bind_mysql_import_column(query, &object, target_columns, table_name, column)?;
+        }
+        for column in &target_columns.primary_key {
+            query = bind_mysql_import_column(query, &object, target_columns, table_name, column)?;
+        }
+        query.execute(&mut **tx).await.map_sql_err()?;
+        return Ok(());
+    }
+
     let column_sql = columns
         .iter()
         .map(|column| mysql_quote_identifier(column))
         .collect::<Result<Vec<_>, _>>()?
         .join(", ");
     let placeholder_sql = vec!["?"; columns.len()].join(", ");
-    let update_sql = columns
-        .iter()
-        .map(|column| {
-            let quoted = mysql_quote_identifier(column)?;
-            Ok(format!("{quoted} = VALUES({quoted})"))
-        })
-        .collect::<Result<Vec<_>, DataLayerError>>()?
-        .join(", ");
-    let sql = format!(
-        "INSERT INTO {table_name} ({column_sql}) VALUES ({placeholder_sql}) ON DUPLICATE KEY UPDATE {update_sql}"
-    );
+    let sql = format!("INSERT INTO {table_name} ({column_sql}) VALUES ({placeholder_sql})");
     let mut query = sqlx::query(&sql);
     for column in columns {
-        let value = object
-            .get(column)
-            .expect("column name came from payload object keys");
-        query = bind_mysql_json_value(query, value)?;
+        query = bind_mysql_import_column(query, &object, target_columns, table_name, column)?;
     }
-    query.execute(pool).await.map_sql_err()?;
+    query.execute(&mut **tx).await.map_sql_err()?;
     Ok(())
 }
 
+fn bind_mysql_import_column<'q>(
+    query: sqlx::query::Query<'q, sqlx::MySql, sqlx::mysql::MySqlArguments>,
+    object: &'q serde_json::Map<String, Value>,
+    target_columns: &MysqlImportColumns,
+    table_name: &str,
+    column: &str,
+) -> Result<sqlx::query::Query<'q, sqlx::MySql, sqlx::mysql::MySqlArguments>, DataLayerError> {
+    let value = object
+        .get(column)
+        .expect("column name came from payload object keys");
+    let data_type = target_columns
+        .data_types
+        .get(column)
+        .map(String::as_str)
+        .unwrap_or_default();
+    bind_mysql_import_value(query, value, table_name, column, data_type)
+}
+
 async fn import_mysql_billing_row(
-    pool: &crate::driver::mysql::MysqlPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
     row: &ExportRow,
-    column_cache: &mut BTreeMap<String, ImportColumnNames>,
+    column_cache: &mut BTreeMap<String, MysqlImportColumns>,
 ) -> Result<(), DataLayerError> {
     let (table_name, payload) = billing_payload_table(row)?;
     let table_name = mysql_billing_table_name(&table_name)?;
-    let target_columns = mysql_import_columns_cached(pool, column_cache, table_name).await?;
+    let target_columns = mysql_import_columns_cached(tx, column_cache, table_name).await?;
     import_mysql_row(
-        pool,
+        tx,
         table_name,
         ExportDomain::Billing,
+        &ExportRow {
+            id: row.id.clone(),
+            payload,
+        },
+        &target_columns,
+    )
+    .await
+}
+
+async fn import_mysql_auxiliary_row(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    row: &ExportRow,
+    column_cache: &mut BTreeMap<String, MysqlImportColumns>,
+) -> Result<(), DataLayerError> {
+    let (table_name, payload) = domain_payload_table(row, "auxiliary", None)?;
+    let table = auxiliary_table(&table_name)?;
+    let target_columns = mysql_import_columns_cached(tx, column_cache, table.name).await?;
+    import_mysql_row(
+        tx,
+        table.name,
+        ExportDomain::Auxiliary,
         &ExportRow {
             id: row.id.clone(),
             payload,
@@ -265,15 +409,15 @@ fn mysql_billing_table_name(table_name: &str) -> Result<&'static str, DataLayerE
 }
 
 async fn import_mysql_wallet_row(
-    pool: &crate::driver::mysql::MysqlPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
     row: &ExportRow,
-    column_cache: &mut BTreeMap<String, ImportColumnNames>,
+    column_cache: &mut BTreeMap<String, MysqlImportColumns>,
 ) -> Result<(), DataLayerError> {
     let (table_name, payload) = domain_payload_table(row, "wallet", Some("wallets"))?;
     let table_name = mysql_wallet_table_name(&table_name)?;
-    let target_columns = mysql_import_columns_cached(pool, column_cache, table_name).await?;
+    let target_columns = mysql_import_columns_cached(tx, column_cache, table_name).await?;
     import_mysql_row(
-        pool,
+        tx,
         table_name,
         ExportDomain::Wallets,
         &ExportRow {
@@ -311,49 +455,128 @@ fn mysql_wallet_table_name(table_name: &str) -> Result<&'static str, DataLayerEr
 }
 
 async fn mysql_import_columns_cached(
-    pool: &crate::driver::mysql::MysqlPool,
-    cache: &mut BTreeMap<String, ImportColumnNames>,
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    cache: &mut BTreeMap<String, MysqlImportColumns>,
     table_name: &str,
-) -> Result<ImportColumnNames, DataLayerError> {
+) -> Result<MysqlImportColumns, DataLayerError> {
     if let Some(columns) = cache.get(table_name) {
         return Ok(columns.clone());
     }
 
-    let columns = load_mysql_import_columns(pool, table_name).await?;
+    let columns = load_mysql_import_columns(tx, table_name).await?;
     cache.insert(table_name.to_string(), columns.clone());
     Ok(columns)
 }
 
 async fn load_mysql_import_columns(
-    pool: &crate::driver::mysql::MysqlPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
     table_name: &str,
-) -> Result<ImportColumnNames, DataLayerError> {
+) -> Result<MysqlImportColumns, DataLayerError> {
     let relation_name = table_name.trim_matches('`');
     let rows = sqlx::query(
         r#"
-SELECT COLUMN_NAME AS column_name
+SELECT
+  COLUMN_NAME AS column_name,
+  DATA_TYPE AS data_type,
+  COLUMN_KEY AS column_key,
+  ORDINAL_POSITION AS ordinal_position
 FROM information_schema.columns
 WHERE table_schema = DATABASE()
   AND table_name = ?
 "#,
     )
     .bind(relation_name)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .map_sql_err()?;
 
-    let mut columns = ImportColumnNames::new();
+    let mut columns = MysqlImportColumns::default();
+    let mut primary_key = BTreeMap::new();
     for row in rows {
-        columns.insert(row.try_get::<String, _>("column_name").map_sql_err()?);
+        let name = row.try_get::<String, _>("column_name").map_sql_err()?;
+        let data_type = row
+            .try_get::<String, _>("data_type")
+            .map_sql_err()?
+            .to_ascii_lowercase();
+        columns.names.insert(name.clone());
+        columns.data_types.insert(name.clone(), data_type);
+        if row
+            .try_get::<String, _>("column_key")
+            .map_sql_err()?
+            .eq_ignore_ascii_case("PRI")
+        {
+            primary_key.insert(
+                row.try_get::<i64, _>("ordinal_position").map_sql_err()?,
+                name,
+            );
+        }
     }
 
-    if columns.is_empty() {
+    if columns.names.is_empty() {
         return Err(DataLayerError::UnexpectedValue(format!(
             "mysql import target table '{table_name}' has no visible columns"
         )));
     }
+    if primary_key.is_empty() {
+        return Err(DataLayerError::UnexpectedValue(format!(
+            "mysql import target table '{table_name}' has no primary key"
+        )));
+    }
+    columns.primary_key = primary_key.into_values().collect();
 
     Ok(columns)
+}
+
+fn bind_mysql_import_value<'q>(
+    query: sqlx::query::Query<'q, sqlx::MySql, sqlx::mysql::MySqlArguments>,
+    json_value: &'q Value,
+    table_name: &str,
+    column_name: &str,
+    data_type: &str,
+) -> Result<sqlx::query::Query<'q, sqlx::MySql, sqlx::mysql::MySqlArguments>, DataLayerError> {
+    if matches!(
+        data_type,
+        "binary" | "varbinary" | "blob" | "tinyblob" | "mediumblob" | "longblob"
+    ) {
+        return match normalize_imported_binary("mysql", column_name, json_value)? {
+            Some(bytes) => Ok(query.bind(bytes)),
+            None => Ok(query.bind(Option::<Vec<u8>>::None)),
+        };
+    }
+    if matches!(data_type, "decimal" | "numeric") {
+        return match normalize_mysql_decimal_value(column_name, json_value)? {
+            Some(value) => Ok(query.bind(value)),
+            None => Ok(query.bind(Option::<String>::None)),
+        };
+    }
+    let has_integer_type = matches!(
+        data_type,
+        "tinyint" | "smallint" | "mediumint" | "int" | "integer" | "bigint"
+    );
+    if !has_integer_type || !import_column_stores_timestamp(column_name) {
+        return bind_mysql_json_value(query, json_value);
+    }
+
+    match normalize_imported_integer_timestamp("mysql", table_name, column_name, json_value)? {
+        Some(timestamp) => Ok(query.bind(timestamp)),
+        None => Ok(query.bind(Option::<i64>::None)),
+    }
+}
+
+fn normalize_mysql_decimal_value(
+    column_name: &str,
+    value: &Value,
+) -> Result<Option<String>, DataLayerError> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Number(value) => Ok(Some(value.to_string())),
+        Value::String(value) => Ok(Some(value.clone())),
+        Value::Bool(_) | Value::Array(_) | Value::Object(_) => {
+            Err(DataLayerError::InvalidInput(format!(
+                "mysql decimal import column '{column_name}' must contain a number or numeric string"
+            )))
+        }
+    }
 }
 
 fn mysql_quote_identifier(identifier: &str) -> Result<String, DataLayerError> {
@@ -452,5 +675,32 @@ fn mysql_value_to_json(row: &sqlx::mysql::MySqlRow, index: usize) -> Result<Valu
         other => Err(DataLayerError::UnexpectedValue(format!(
             "unsupported mysql export column type '{other}' at index {index}"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_mysql_decimal_value;
+    use serde_json::json;
+
+    #[test]
+    fn decimal_import_binds_numbers_and_strings_as_decimal_text() {
+        let value = json!(12345.12345678);
+        assert_eq!(
+            normalize_mysql_decimal_value("billing_total_cost_usd", &value)
+                .expect("decimal value should normalize")
+                .as_deref(),
+            Some("12345.12345678")
+        );
+        assert_eq!(
+            normalize_mysql_decimal_value(
+                "billing_total_cost_usd",
+                &json!("123456789012.12345678")
+            )
+            .expect("decimal string should normalize")
+            .as_deref(),
+            Some("123456789012.12345678")
+        );
+        assert!(normalize_mysql_decimal_value("billing_total_cost_usd", &json!(true)).is_err());
     }
 }

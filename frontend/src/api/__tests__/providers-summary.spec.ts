@@ -33,6 +33,8 @@ describe('getProvidersSummary', () => {
     expect(result.total).toBe(1)
     expect(result.items).toHaveLength(1)
     expect(result.items[0]?.kiro_simulated_cache_enabled).toBe(false)
+    expect(result.items[0]?.max_transfer_count).toBe(0)
+    expect(result.items[0]?.max_transfer_timeout_seconds).toBe(0)
   })
 
   it('supports the legacy array response without reading an undefined items field', async () => {

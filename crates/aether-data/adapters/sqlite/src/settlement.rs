@@ -109,6 +109,13 @@ DO UPDATE SET
   updated_at = excluded.updated_at
 "#;
 
+const ENQUEUE_PROVIDER_MONTHLY_USAGE_DELTA_SQL: &str = r#"
+INSERT INTO usage_counter_deltas (
+  id, request_id, kind, target_id, total_cost_usd_delta, created_at
+)
+VALUES (?, ?, 'provider_monthly', ?, ?, ?)
+"#;
+
 #[derive(Debug, Clone)]
 pub struct SqliteSettlementRepository {
     pool: SqlitePool,
@@ -150,6 +157,36 @@ fn now_unix_secs() -> Result<i64, DataLayerError> {
             .as_secs(),
     )
     .map_err(|_| DataLayerError::InvalidInput("timestamp overflow".to_string()))
+}
+
+async fn enqueue_provider_monthly_usage_delta_sqlite(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    request_id: &str,
+    provider_id: &str,
+    total_cost_usd_delta: f64,
+    created_at: i64,
+) -> Result<(), DataLayerError> {
+    let request_id = request_id.trim();
+    let provider_id = provider_id.trim();
+    if request_id.is_empty() || provider_id.is_empty() || total_cost_usd_delta == 0.0 {
+        return Ok(());
+    }
+    if !total_cost_usd_delta.is_finite() {
+        return Err(DataLayerError::UnexpectedValue(format!(
+            "provider monthly usage delta is not finite for {provider_id}"
+        )));
+    }
+
+    sqlx::query(ENQUEUE_PROVIDER_MONTHLY_USAGE_DELTA_SQL)
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(request_id)
+        .bind(provider_id)
+        .bind(total_cost_usd_delta)
+        .bind(created_at)
+        .execute(&mut **tx)
+        .await
+        .map_sql_err()?;
+    Ok(())
 }
 
 #[derive(Debug, Default)]
@@ -360,6 +397,12 @@ impl SettlementWriteRepository for SqliteSettlementRepository {
         let updated_at = now_unix_secs()?;
 
         let mut tx = self.pool.begin().await.map_sql_err()?;
+        // SQLite transactions are deferred. Acquire the single writer slot before reading the
+        // billing status so concurrent settlement attempts cannot both observe `pending`.
+        sqlx::query("UPDATE \"usage\" SET billing_status = billing_status WHERE 0")
+            .execute(&mut *tx)
+            .await
+            .map_sql_err()?;
         let row = sqlx::query(FIND_USAGE_FOR_SETTLEMENT_SQL)
             .bind(&input.request_id)
             .fetch_optional(&mut *tx)
@@ -633,31 +676,14 @@ WHERE id = ?
                 .as_deref()
                 .filter(|value| !value.is_empty())
             {
-                sqlx::query(
-                    r#"
-UPDATE providers
-SET
-  monthly_used_usd = CAST(COALESCE(monthly_used_usd, 0) AS REAL) + ?,
-  updated_at = ?
-WHERE id = ?
-"#,
+                enqueue_provider_monthly_usage_delta_sqlite(
+                    &mut tx,
+                    &input.request_id,
+                    provider_id,
+                    input.actual_total_cost_usd,
+                    updated_at,
                 )
-                .bind(input.actual_total_cost_usd)
-                .bind(updated_at)
-                .bind(provider_id)
-                .execute(&mut *tx)
-                .await
-                .map_sql_err()?;
-
-                settlement.provider_monthly_used_usd = sqlx::query(
-                    "SELECT CAST(monthly_used_usd AS REAL) AS monthly_used_usd FROM providers WHERE id = ? LIMIT 1",
-                )
-                .bind(provider_id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_sql_err()?
-                .map(|row| sqlite_real(&row, "monthly_used_usd"))
-                .transpose()?;
+                .await?;
             }
         }
 
@@ -700,6 +726,7 @@ mod tests {
         SettlementWriteRepository, UsageSettlementInput,
     };
     use sqlx::Row;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn sqlite_repository_settles_usage_once() {
@@ -737,7 +764,7 @@ mod tests {
         assert_eq!(settlement.wallet_balance_after, Some(6.0));
         assert_eq!(settlement.wallet_recharge_balance_after, Some(4.0));
         assert_eq!(settlement.wallet_gift_balance_after, Some(2.0));
-        assert_eq!(settlement.provider_monthly_used_usd, Some(11.0));
+        assert_eq!(settlement.provider_monthly_used_usd, None);
 
         let wallet = sqlx::query(
             "SELECT balance, gift_balance, total_consumed FROM wallets WHERE id = 'wallet-1'",
@@ -772,7 +799,40 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .expect("provider should load");
-        assert_eq!(provider_used, 11.0);
+        assert_eq!(provider_used, 5.0);
+        let provider_delta: (i64, f64) = sqlx::query_as(
+            r#"
+SELECT COUNT(*), CAST(COALESCE(SUM(total_cost_usd_delta), 0) AS REAL)
+FROM usage_counter_deltas
+WHERE request_id = 'request-1'
+  AND kind = 'provider_monthly'
+  AND target_id = 'provider-1'
+"#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("provider delta should load");
+        assert_eq!(provider_delta, (1, 6.0));
+
+        let snapshot: (String, Option<String>, Option<f64>, Option<i64>) = sqlx::query_as(
+            r#"
+SELECT billing_status, wallet_id, wallet_balance_after, finalized_at
+FROM usage_settlement_snapshots
+WHERE request_id = 'request-1'
+"#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("canonical settlement snapshot should load");
+        assert_eq!(
+            snapshot,
+            (
+                "settled".to_string(),
+                Some("wallet-1".to_string()),
+                Some(6.0),
+                Some(1_234),
+            )
+        );
     }
 
     #[tokio::test]
@@ -851,7 +911,7 @@ mod tests {
         assert_eq!(settlement.wallet_balance_after, Some(-3.0));
         assert_eq!(settlement.wallet_recharge_balance_after, Some(-3.0));
         assert_eq!(settlement.wallet_gift_balance_after, Some(0.0));
-        assert_eq!(settlement.provider_monthly_used_usd, Some(20.0));
+        assert_eq!(settlement.provider_monthly_used_usd, None);
 
         let wallet = sqlx::query(
             "SELECT balance, gift_balance, total_consumed FROM wallets WHERE id = 'wallet-1'",
@@ -862,6 +922,13 @@ mod tests {
         assert_eq!(wallet.try_get::<f64, _>("balance").unwrap(), -3.0);
         assert_eq!(wallet.try_get::<f64, _>("gift_balance").unwrap(), 0.0);
         assert_eq!(wallet.try_get::<f64, _>("total_consumed").unwrap(), 15.0);
+        let provider_delta: f64 = sqlx::query_scalar(
+            "SELECT total_cost_usd_delta FROM usage_counter_deltas WHERE request_id = 'request-overdraw' AND kind = 'provider_monthly'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("provider delta should load");
+        assert_eq!(provider_delta, 15.0);
     }
 
     #[tokio::test]
@@ -914,6 +981,74 @@ mod tests {
         .await
         .expect("quota ledger should load");
         assert_eq!(quota_used, 6.0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sqlite_repository_serializes_concurrent_settlement_attempts() {
+        let database_path = std::env::temp_dir().join(format!(
+            "aether-settlement-parity-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&database_path)
+            .create_if_missing(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(2)
+            .connect_with(options)
+            .await
+            .expect("sqlite pool should connect");
+        run_migrations(&pool)
+            .await
+            .expect("sqlite migrations should run");
+        seed_settlement_rows(&pool).await;
+
+        let repository = SqliteSettlementRepository::new(pool.clone());
+        let input = UsageSettlementInput {
+            request_id: "request-1".to_string(),
+            user_id: Some("user-1".to_string()),
+            api_key_id: None,
+            api_key_is_standalone: false,
+            provider_id: Some("provider-1".to_string()),
+            status: "completed".to_string(),
+            billing_status: "pending".to_string(),
+            total_cost_usd: 3.0,
+            actual_total_cost_usd: 6.0,
+            finalized_at_unix_secs: Some(1_234),
+        };
+        let (first, second) = tokio::join!(
+            repository.settle_usage(input.clone()),
+            repository.settle_usage(input)
+        );
+        let first = first
+            .expect("first settlement should succeed")
+            .expect("usage should exist");
+        let second = second
+            .expect("second settlement should succeed")
+            .expect("usage should exist");
+        assert_eq!(first.billing_status, "settled");
+        assert_eq!(second.billing_status, "settled");
+
+        let wallet: (f64, f64, f64) = sqlx::query_as(
+            "SELECT balance, gift_balance, total_consumed FROM wallets WHERE id = 'wallet-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("wallet should load");
+        assert_eq!(wallet, (4.0, 2.0, 6.0));
+        let delta_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM usage_counter_deltas WHERE request_id = 'request-1' AND kind = 'provider_monthly'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("provider deltas should count");
+        assert_eq!(delta_count, 1);
+
+        pool.close().await;
+        let _ = std::fs::remove_file(&database_path);
+        let _ = std::fs::remove_file(format!("{}-wal", database_path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", database_path.display()));
     }
 
     async fn seed_settlement_rows(pool: &sqlx::SqlitePool) {

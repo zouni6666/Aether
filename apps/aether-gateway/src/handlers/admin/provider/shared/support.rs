@@ -12,6 +12,35 @@ pub(crate) const ADMIN_PROVIDER_POOL_QUOTA_PROBE_ACTIVE_SET_PREFIX: &str =
     "ap:quota_probe:active_members";
 pub(crate) const ADMIN_PROVIDER_OAUTH_DATA_UNAVAILABLE_DETAIL: &str =
     "Admin provider OAuth data unavailable";
+pub(crate) const PROVIDER_MAX_TRANSFER_COUNT_CONFIG_KEY: &str = "max_transfer_count";
+pub(crate) const PROVIDER_MAX_TRANSFER_TIMEOUT_SECONDS_CONFIG_KEY: &str =
+    "max_transfer_timeout_seconds";
+
+pub(crate) fn normalize_provider_transfer_limit(
+    value: i64,
+    field_name: &str,
+) -> Result<u64, String> {
+    u64::try_from(value).map_err(|_| format!("{field_name} 必须是非负整数"))
+}
+
+pub(crate) fn normalize_provider_transfer_limit_json(
+    value: &serde_json::Value,
+    field_name: &str,
+) -> Result<u64, String> {
+    value
+        .as_u64()
+        .ok_or_else(|| format!("{field_name} 必须是非负整数"))
+}
+
+pub(crate) fn provider_transfer_limit_from_config(
+    config: Option<&serde_json::Map<String, serde_json::Value>>,
+    field_name: &str,
+) -> u64 {
+    config
+        .and_then(|config| config.get(field_name))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
+}
 
 pub(crate) fn admin_provider_pool_quota_probe_active_members_key(provider_id: &str) -> String {
     format!("{ADMIN_PROVIDER_POOL_QUOTA_PROBE_ACTIVE_SET_PREFIX}:{provider_id}")

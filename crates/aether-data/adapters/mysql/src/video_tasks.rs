@@ -99,32 +99,6 @@ impl MysqlVideoTaskRepository {
         .map_sql_err()?;
         row.as_ref().map(map_video_task_row).transpose()
     }
-
-    async fn reload_ids(&self, ids: &[String]) -> Result<Vec<StoredVideoTask>, DataLayerError> {
-        if ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut builder = QueryBuilder::<MySql>::new(VIDEO_TASK_COLUMNS);
-        builder.push(" WHERE id IN (");
-        {
-            let mut separated = builder.separated(", ");
-            for id in ids {
-                separated.push_bind(id);
-            }
-        }
-        builder.push(")");
-        let rows = builder.build().fetch_all(&self.pool).await.map_sql_err()?;
-        let mut tasks = rows
-            .iter()
-            .map(map_video_task_row)
-            .collect::<Result<Vec<_>, _>>()?;
-        tasks.sort_by(|left, right| {
-            left.next_poll_at_unix_secs
-                .cmp(&right.next_poll_at_unix_secs)
-                .then_with(|| left.updated_at_unix_secs.cmp(&right.updated_at_unix_secs))
-        });
-        Ok(tasks)
-    }
 }
 
 #[async_trait]
@@ -320,20 +294,77 @@ impl VideoTaskWriteRepository for MysqlVideoTaskRepository {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let due = self.list_due(now_unix_secs, limit).await?;
-        let ids = due.iter().map(|task| task.id.clone()).collect::<Vec<_>>();
-        for id in &ids {
-            sqlx::query(
-                "UPDATE video_tasks SET next_poll_at = ?, updated_at = GREATEST(updated_at, ?) WHERE id = ?",
-            )
-            .bind(u64_to_i64(claim_until_unix_secs, "video task claim_until")?)
-            .bind(u64_to_i64(now_unix_secs, "video task now")?)
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_sql_err()?;
+        let now = u64_to_i64(now_unix_secs, "video task now")?;
+        let claim_until = u64_to_i64(claim_until_unix_secs, "video task claim_until")?;
+        let limit = limit_i64(limit, "due video task claim limit")?;
+        let mut tx = self.pool.begin().await.map_sql_err()?;
+        let due_rows = sqlx::query(
+            r#"
+SELECT id
+FROM video_tasks
+WHERE status IN ('submitted', 'queued', 'processing')
+  AND next_poll_at IS NOT NULL
+  AND next_poll_at <= ?
+  AND poll_count < max_poll_count
+ORDER BY next_poll_at ASC, updated_at ASC
+LIMIT ?
+FOR UPDATE SKIP LOCKED
+"#,
+        )
+        .bind(now)
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await
+        .map_sql_err()?;
+        let ids = due_rows
+            .iter()
+            .map(|row| row.try_get::<String, _>("id").map_sql_err())
+            .collect::<Result<Vec<_>, _>>()?;
+        if ids.is_empty() {
+            tx.commit().await.map_sql_err()?;
+            return Ok(Vec::new());
         }
-        self.reload_ids(&ids).await
+
+        let mut update = QueryBuilder::<MySql>::new("UPDATE video_tasks SET next_poll_at = ");
+        update
+            .push_bind(claim_until)
+            .push(", updated_at = GREATEST(updated_at, ")
+            .push_bind(now)
+            .push(") WHERE id IN (");
+        {
+            let mut separated = update.separated(", ");
+            for id in &ids {
+                separated.push_bind(id);
+            }
+        }
+        update
+            .push(") AND status IN ('submitted', 'queued', 'processing')")
+            .push(" AND next_poll_at IS NOT NULL AND next_poll_at <= ")
+            .push_bind(now)
+            .push(" AND poll_count < max_poll_count");
+        update.build().execute(&mut *tx).await.map_sql_err()?;
+
+        let mut reload = QueryBuilder::<MySql>::new(VIDEO_TASK_COLUMNS);
+        reload.push(" WHERE id IN (");
+        {
+            let mut separated = reload.separated(", ");
+            for id in &ids {
+                separated.push_bind(id);
+            }
+        }
+        reload.push(")");
+        let rows = reload.build().fetch_all(&mut *tx).await.map_sql_err()?;
+        let mut tasks = rows
+            .iter()
+            .map(map_video_task_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        tasks.sort_by(|left, right| {
+            left.next_poll_at_unix_secs
+                .cmp(&right.next_poll_at_unix_secs)
+                .then_with(|| left.updated_at_unix_secs.cmp(&right.updated_at_unix_secs))
+        });
+        tx.commit().await.map_sql_err()?;
+        Ok(tasks)
     }
 }
 
@@ -676,6 +707,11 @@ fn optional_u32_to_i32(value: Option<u32>, name: &str) -> Result<Option<i32>, Da
 #[cfg(test)]
 mod tests {
     use super::MysqlVideoTaskRepository;
+    use crate::run_migrations;
+    use aether_data_contracts::repository::video_tasks::{
+        UpsertVideoTask, VideoTaskStatus, VideoTaskWriteRepository,
+    };
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn repository_builds_from_lazy_pool() {
@@ -686,5 +722,117 @@ mod tests {
         );
 
         let _repository = MysqlVideoTaskRepository::new(pool);
+    }
+
+    #[tokio::test]
+    async fn mysql_claim_due_does_not_return_one_task_to_multiple_workers_when_url_is_set() {
+        let Some(database_url) = std::env::var("AETHER_TEST_MYSQL_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        else {
+            eprintln!(
+                "skipping mysql claim_due concurrency test because AETHER_TEST_MYSQL_URL is unset"
+            );
+            return;
+        };
+
+        let pool = sqlx::mysql::MySqlPoolOptions::new()
+            .max_connections(4)
+            .connect(&database_url)
+            .await
+            .expect("mysql test pool should connect");
+        run_migrations(&pool)
+            .await
+            .expect("mysql migrations should run");
+
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let task_id = format!("claim-{}", &suffix[..20]);
+        let repository = MysqlVideoTaskRepository::new(pool.clone());
+        repository
+            .upsert(claimable_task(&task_id))
+            .await
+            .expect("claimable mysql task should insert");
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let first_repository = repository.clone();
+        let first_barrier = barrier.clone();
+        let first = tokio::spawn(async move {
+            first_barrier.wait().await;
+            first_repository.claim_due(100, 130, 1).await
+        });
+        let second_repository = repository.clone();
+        let second_barrier = barrier.clone();
+        let second = tokio::spawn(async move {
+            second_barrier.wait().await;
+            second_repository.claim_due(100, 130, 1).await
+        });
+        barrier.wait().await;
+
+        let first_result = first.await;
+        let second_result = second.await;
+        let followup_result = repository.claim_due(100, 130, 1).await;
+        let cleanup_result = sqlx::query("DELETE FROM video_tasks WHERE id = ?")
+            .bind(&task_id)
+            .execute(&pool)
+            .await;
+
+        let first_claimed = first_result
+            .expect("first mysql claim worker should join")
+            .expect("first mysql claim should execute");
+        let second_claimed = second_result
+            .expect("second mysql claim worker should join")
+            .expect("second mysql claim should execute");
+        let followup_claimed = followup_result.expect("follow-up mysql claim should execute");
+        cleanup_result.expect("mysql claim fixture should clean up");
+
+        let claimed_ids = first_claimed
+            .iter()
+            .chain(&second_claimed)
+            .map(|task| task.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(claimed_ids, vec![task_id.as_str()]);
+        assert!(followup_claimed.is_empty());
+    }
+
+    fn claimable_task(id: &str) -> UpsertVideoTask {
+        UpsertVideoTask {
+            id: id.to_string(),
+            short_id: None,
+            request_id: format!("request-{id}"),
+            user_id: None,
+            api_key_id: None,
+            username: None,
+            api_key_name: None,
+            external_task_id: Some(format!("external-{id}")),
+            provider_id: None,
+            endpoint_id: None,
+            key_id: None,
+            client_api_format: Some("openai:video".to_string()),
+            provider_api_format: Some("openai:video".to_string()),
+            format_converted: false,
+            model: Some("sora-2".to_string()),
+            prompt: Some("claim test".to_string()),
+            original_request_body: None,
+            duration_seconds: None,
+            resolution: None,
+            aspect_ratio: None,
+            size: None,
+            status: VideoTaskStatus::Submitted,
+            progress_percent: 0,
+            progress_message: None,
+            retry_count: 0,
+            poll_interval_seconds: 10,
+            next_poll_at_unix_secs: Some(100),
+            poll_count: 0,
+            max_poll_count: 360,
+            created_at_unix_ms: 90,
+            submitted_at_unix_secs: Some(90),
+            completed_at_unix_secs: None,
+            updated_at_unix_secs: 100,
+            error_code: None,
+            error_message: None,
+            video_url: None,
+            request_metadata: None,
+        }
     }
 }

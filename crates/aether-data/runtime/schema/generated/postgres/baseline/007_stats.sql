@@ -17,7 +17,27 @@ CREATE TABLE IF NOT EXISTS public.stats_hourly (
     is_complete boolean DEFAULT false NOT NULL,
     aggregated_at bigint,
     created_at bigint NOT NULL,
-    updated_at bigint NOT NULL
+    updated_at bigint NOT NULL,
+    response_time_sum_ms double precision DEFAULT 0 NOT NULL,
+    response_time_samples bigint DEFAULT 0 NOT NULL,
+    cache_hit_total_requests bigint DEFAULT 0 NOT NULL,
+    cache_hit_requests bigint DEFAULT 0 NOT NULL,
+    completed_total_requests bigint DEFAULT 0 NOT NULL,
+    completed_cache_hit_requests bigint DEFAULT 0 NOT NULL,
+    completed_input_tokens bigint DEFAULT 0 NOT NULL,
+    completed_cache_creation_tokens bigint DEFAULT 0 NOT NULL,
+    completed_cache_read_tokens bigint DEFAULT 0 NOT NULL,
+    completed_total_input_context bigint DEFAULT 0 NOT NULL,
+    completed_cache_creation_cost double precision DEFAULT 0 NOT NULL,
+    completed_cache_read_cost double precision DEFAULT 0 NOT NULL,
+    settled_total_cost double precision DEFAULT 0 NOT NULL,
+    settled_total_requests bigint DEFAULT 0 NOT NULL,
+    settled_input_tokens bigint DEFAULT 0 NOT NULL,
+    settled_output_tokens bigint DEFAULT 0 NOT NULL,
+    settled_cache_creation_tokens bigint DEFAULT 0 NOT NULL,
+    settled_cache_read_tokens bigint DEFAULT 0 NOT NULL,
+    settled_first_finalized_at_unix_secs bigint,
+    settled_last_finalized_at_unix_secs bigint
 );
 
 ALTER TABLE ONLY public.stats_hourly ADD CONSTRAINT stats_hourly_pkey PRIMARY KEY (id);
@@ -56,7 +76,20 @@ CREATE TABLE IF NOT EXISTS public.stats_hourly_user (
     output_tokens bigint DEFAULT 0 NOT NULL,
     total_cost double precision DEFAULT 0 NOT NULL,
     created_at bigint NOT NULL,
-    updated_at bigint NOT NULL
+    updated_at bigint NOT NULL,
+    cache_creation_tokens bigint DEFAULT 0 NOT NULL,
+    cache_read_tokens bigint DEFAULT 0 NOT NULL,
+    actual_total_cost double precision DEFAULT 0 NOT NULL,
+    response_time_sum_ms double precision DEFAULT 0 NOT NULL,
+    response_time_samples bigint DEFAULT 0 NOT NULL,
+    settled_total_cost double precision DEFAULT 0 NOT NULL,
+    settled_total_requests bigint DEFAULT 0 NOT NULL,
+    settled_input_tokens bigint DEFAULT 0 NOT NULL,
+    settled_output_tokens bigint DEFAULT 0 NOT NULL,
+    settled_cache_creation_tokens bigint DEFAULT 0 NOT NULL,
+    settled_cache_read_tokens bigint DEFAULT 0 NOT NULL,
+    settled_first_finalized_at_unix_secs bigint,
+    settled_last_finalized_at_unix_secs bigint
 );
 
 ALTER TABLE ONLY public.stats_hourly_user ADD CONSTRAINT stats_hourly_user_pkey PRIMARY KEY (id);
@@ -72,7 +105,9 @@ CREATE TABLE IF NOT EXISTS public.stats_hourly_user_model (
     output_tokens bigint DEFAULT 0 NOT NULL,
     total_cost double precision DEFAULT 0 NOT NULL,
     created_at bigint NOT NULL,
-    updated_at bigint NOT NULL
+    updated_at bigint NOT NULL,
+    response_time_sum_ms double precision DEFAULT 0 NOT NULL,
+    response_time_samples bigint DEFAULT 0 NOT NULL
 );
 
 ALTER TABLE ONLY public.stats_hourly_user_model ADD CONSTRAINT stats_hourly_user_model_pkey PRIMARY KEY (id);
@@ -102,7 +137,9 @@ CREATE TABLE IF NOT EXISTS public.stats_hourly_model (
     total_cost double precision DEFAULT 0 NOT NULL,
     avg_response_time_ms double precision DEFAULT 0 NOT NULL,
     created_at bigint NOT NULL,
-    updated_at bigint NOT NULL
+    updated_at bigint NOT NULL,
+    response_time_sum_ms double precision DEFAULT 0 NOT NULL,
+    response_time_samples bigint DEFAULT 0 NOT NULL
 );
 
 ALTER TABLE ONLY public.stats_hourly_model ADD CONSTRAINT stats_hourly_model_pkey PRIMARY KEY (id);
@@ -152,7 +189,31 @@ CREATE TABLE IF NOT EXISTS public.stats_daily (
     p99_response_time_ms bigint,
     p50_first_byte_time_ms bigint,
     p90_first_byte_time_ms bigint,
-    p99_first_byte_time_ms bigint
+    p99_first_byte_time_ms bigint,
+    effective_input_tokens bigint DEFAULT 0 NOT NULL,
+    total_input_context bigint DEFAULT 0 NOT NULL,
+    response_time_sum_ms double precision DEFAULT 0 NOT NULL,
+    response_time_samples bigint DEFAULT 0 NOT NULL,
+    cache_creation_ephemeral_5m_tokens bigint DEFAULT 0 NOT NULL,
+    cache_creation_ephemeral_1h_tokens bigint DEFAULT 0 NOT NULL,
+    cache_hit_total_requests bigint DEFAULT 0 NOT NULL,
+    cache_hit_requests bigint DEFAULT 0 NOT NULL,
+    completed_total_requests bigint DEFAULT 0 NOT NULL,
+    completed_cache_hit_requests bigint DEFAULT 0 NOT NULL,
+    completed_input_tokens bigint DEFAULT 0 NOT NULL,
+    completed_cache_creation_tokens bigint DEFAULT 0 NOT NULL,
+    completed_cache_read_tokens bigint DEFAULT 0 NOT NULL,
+    completed_total_input_context bigint DEFAULT 0 NOT NULL,
+    completed_cache_creation_cost double precision DEFAULT 0 NOT NULL,
+    completed_cache_read_cost double precision DEFAULT 0 NOT NULL,
+    settled_total_cost double precision DEFAULT 0 NOT NULL,
+    settled_total_requests bigint DEFAULT 0 NOT NULL,
+    settled_input_tokens bigint DEFAULT 0 NOT NULL,
+    settled_output_tokens bigint DEFAULT 0 NOT NULL,
+    settled_cache_creation_tokens bigint DEFAULT 0 NOT NULL,
+    settled_cache_read_tokens bigint DEFAULT 0 NOT NULL,
+    settled_first_finalized_at_unix_secs bigint,
+    settled_last_finalized_at_unix_secs bigint
 );
 
 ALTER TABLE ONLY public.stats_daily ADD CONSTRAINT stats_daily_pkey PRIMARY KEY (id);
@@ -170,7 +231,11 @@ CREATE TABLE IF NOT EXISTS public.stats_daily_model (
     total_cost double precision DEFAULT 0 NOT NULL,
     avg_response_time_ms double precision DEFAULT 0 NOT NULL,
     created_at bigint NOT NULL,
-    updated_at bigint NOT NULL
+    updated_at bigint NOT NULL,
+    response_time_sum_ms double precision DEFAULT 0 NOT NULL,
+    response_time_samples bigint DEFAULT 0 NOT NULL,
+    cache_creation_ephemeral_5m_tokens bigint DEFAULT 0 NOT NULL,
+    cache_creation_ephemeral_1h_tokens bigint DEFAULT 0 NOT NULL
 );
 
 ALTER TABLE ONLY public.stats_daily_model ADD CONSTRAINT stats_daily_model_pkey PRIMARY KEY (id);
@@ -241,9 +306,321 @@ CREATE TABLE IF NOT EXISTS public.stats_user_daily (
     total_cost double precision DEFAULT 0 NOT NULL,
     username character varying(255),
     created_at bigint NOT NULL,
-    updated_at bigint NOT NULL
+    updated_at bigint NOT NULL,
+    actual_total_cost double precision DEFAULT 0 NOT NULL,
+    response_time_sum_ms double precision DEFAULT 0 NOT NULL,
+    response_time_samples bigint DEFAULT 0 NOT NULL,
+    effective_input_tokens bigint DEFAULT 0 NOT NULL,
+    total_input_context bigint DEFAULT 0 NOT NULL,
+    cache_creation_cost double precision DEFAULT 0 NOT NULL,
+    cache_read_cost double precision DEFAULT 0 NOT NULL,
+    cache_creation_ephemeral_5m_tokens bigint DEFAULT 0 NOT NULL,
+    cache_creation_ephemeral_1h_tokens bigint DEFAULT 0 NOT NULL,
+    settled_total_cost double precision DEFAULT 0 NOT NULL,
+    settled_total_requests bigint DEFAULT 0 NOT NULL,
+    settled_input_tokens bigint DEFAULT 0 NOT NULL,
+    settled_output_tokens bigint DEFAULT 0 NOT NULL,
+    settled_cache_creation_tokens bigint DEFAULT 0 NOT NULL,
+    settled_cache_read_tokens bigint DEFAULT 0 NOT NULL,
+    settled_first_finalized_at_unix_secs bigint,
+    settled_last_finalized_at_unix_secs bigint
 );
 
 ALTER TABLE ONLY public.stats_user_daily ADD CONSTRAINT stats_user_daily_pkey PRIMARY KEY (id);
 ALTER TABLE ONLY public.stats_user_daily ADD CONSTRAINT uq_stats_user_daily UNIQUE (date, user_id);
+
+CREATE TABLE IF NOT EXISTS public.stats_user_summary (
+    id character varying(64) NOT NULL,
+    user_id character varying(64) NOT NULL,
+    username character varying(255),
+    cutoff_date bigint NOT NULL,
+    all_time_requests bigint DEFAULT 0 NOT NULL,
+    all_time_success_requests bigint DEFAULT 0 NOT NULL,
+    all_time_error_requests bigint DEFAULT 0 NOT NULL,
+    all_time_input_tokens bigint DEFAULT 0 NOT NULL,
+    all_time_output_tokens bigint DEFAULT 0 NOT NULL,
+    all_time_cache_creation_tokens bigint DEFAULT 0 NOT NULL,
+    all_time_cache_read_tokens bigint DEFAULT 0 NOT NULL,
+    all_time_cost double precision DEFAULT 0 NOT NULL,
+    all_time_actual_cost double precision DEFAULT 0 NOT NULL,
+    active_days bigint DEFAULT 0 NOT NULL,
+    first_active_date bigint,
+    last_active_date bigint,
+    created_at bigint NOT NULL,
+    updated_at bigint NOT NULL
+);
+
+ALTER TABLE ONLY public.stats_user_summary ADD CONSTRAINT stats_user_summary_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.stats_user_summary ADD CONSTRAINT uq_stats_user_summary_user_id UNIQUE (user_id);
+CREATE INDEX IF NOT EXISTS idx_stats_user_summary_cutoff_date ON public.stats_user_summary USING btree (cutoff_date);
+
+CREATE TABLE IF NOT EXISTS public.stats_user_daily_model (
+    id character varying(64) NOT NULL,
+    user_id character varying(64) NOT NULL,
+    username character varying(255),
+    date bigint NOT NULL,
+    model character varying(255) NOT NULL,
+    total_requests bigint DEFAULT 0 NOT NULL,
+    success_requests bigint DEFAULT 0 NOT NULL,
+    input_tokens bigint DEFAULT 0 NOT NULL,
+    effective_input_tokens bigint DEFAULT 0 NOT NULL,
+    output_tokens bigint DEFAULT 0 NOT NULL,
+    total_tokens bigint DEFAULT 0 NOT NULL,
+    total_input_context bigint DEFAULT 0 NOT NULL,
+    cache_creation_tokens bigint DEFAULT 0 NOT NULL,
+    cache_creation_ephemeral_5m_tokens bigint DEFAULT 0 NOT NULL,
+    cache_creation_ephemeral_1h_tokens bigint DEFAULT 0 NOT NULL,
+    cache_read_tokens bigint DEFAULT 0 NOT NULL,
+    total_cost double precision DEFAULT 0 NOT NULL,
+    actual_total_cost double precision DEFAULT 0 NOT NULL,
+    response_time_sum_ms double precision DEFAULT 0 NOT NULL,
+    response_time_samples bigint DEFAULT 0 NOT NULL,
+    successful_response_time_sum_ms double precision DEFAULT 0 NOT NULL,
+    successful_response_time_samples bigint DEFAULT 0 NOT NULL,
+    created_at bigint NOT NULL,
+    updated_at bigint NOT NULL
+);
+
+ALTER TABLE ONLY public.stats_user_daily_model ADD CONSTRAINT stats_user_daily_model_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.stats_user_daily_model ADD CONSTRAINT uq_stats_user_daily_model UNIQUE (user_id, date, model);
+CREATE INDEX IF NOT EXISTS idx_stats_user_daily_model_date ON public.stats_user_daily_model USING btree (date);
+CREATE INDEX IF NOT EXISTS idx_stats_user_daily_model_user_id ON public.stats_user_daily_model USING btree (user_id);
+
+CREATE TABLE IF NOT EXISTS public.stats_user_daily_provider (
+    id character varying(64) NOT NULL,
+    user_id character varying(64) NOT NULL,
+    username character varying(255),
+    date bigint NOT NULL,
+    provider_name character varying(255) NOT NULL,
+    total_requests bigint DEFAULT 0 NOT NULL,
+    success_requests bigint DEFAULT 0 NOT NULL,
+    input_tokens bigint DEFAULT 0 NOT NULL,
+    effective_input_tokens bigint DEFAULT 0 NOT NULL,
+    output_tokens bigint DEFAULT 0 NOT NULL,
+    total_tokens bigint DEFAULT 0 NOT NULL,
+    total_input_context bigint DEFAULT 0 NOT NULL,
+    cache_creation_tokens bigint DEFAULT 0 NOT NULL,
+    cache_creation_ephemeral_5m_tokens bigint DEFAULT 0 NOT NULL,
+    cache_creation_ephemeral_1h_tokens bigint DEFAULT 0 NOT NULL,
+    cache_read_tokens bigint DEFAULT 0 NOT NULL,
+    total_cost double precision DEFAULT 0 NOT NULL,
+    actual_total_cost double precision DEFAULT 0 NOT NULL,
+    response_time_sum_ms double precision DEFAULT 0 NOT NULL,
+    response_time_samples bigint DEFAULT 0 NOT NULL,
+    successful_response_time_sum_ms double precision DEFAULT 0 NOT NULL,
+    successful_response_time_samples bigint DEFAULT 0 NOT NULL,
+    created_at bigint NOT NULL,
+    updated_at bigint NOT NULL
+);
+
+ALTER TABLE ONLY public.stats_user_daily_provider ADD CONSTRAINT stats_user_daily_provider_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.stats_user_daily_provider ADD CONSTRAINT uq_stats_user_daily_provider UNIQUE (user_id, date, provider_name);
+CREATE INDEX IF NOT EXISTS idx_stats_user_daily_provider_date ON public.stats_user_daily_provider USING btree (date);
+CREATE INDEX IF NOT EXISTS idx_stats_user_daily_provider_user_id ON public.stats_user_daily_provider USING btree (user_id);
+
+CREATE TABLE IF NOT EXISTS public.stats_user_daily_api_format (
+    id character varying(64) NOT NULL,
+    user_id character varying(64) NOT NULL,
+    username character varying(255),
+    date bigint NOT NULL,
+    api_format character varying(128) NOT NULL,
+    total_requests bigint DEFAULT 0 NOT NULL,
+    success_requests bigint DEFAULT 0 NOT NULL,
+    input_tokens bigint DEFAULT 0 NOT NULL,
+    effective_input_tokens bigint DEFAULT 0 NOT NULL,
+    output_tokens bigint DEFAULT 0 NOT NULL,
+    total_tokens bigint DEFAULT 0 NOT NULL,
+    total_input_context bigint DEFAULT 0 NOT NULL,
+    cache_creation_tokens bigint DEFAULT 0 NOT NULL,
+    cache_creation_ephemeral_5m_tokens bigint DEFAULT 0 NOT NULL,
+    cache_creation_ephemeral_1h_tokens bigint DEFAULT 0 NOT NULL,
+    cache_read_tokens bigint DEFAULT 0 NOT NULL,
+    total_cost double precision DEFAULT 0 NOT NULL,
+    actual_total_cost double precision DEFAULT 0 NOT NULL,
+    response_time_sum_ms double precision DEFAULT 0 NOT NULL,
+    response_time_samples bigint DEFAULT 0 NOT NULL,
+    successful_response_time_sum_ms double precision DEFAULT 0 NOT NULL,
+    successful_response_time_samples bigint DEFAULT 0 NOT NULL,
+    created_at bigint NOT NULL,
+    updated_at bigint NOT NULL
+);
+
+ALTER TABLE ONLY public.stats_user_daily_api_format ADD CONSTRAINT stats_user_daily_api_format_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.stats_user_daily_api_format ADD CONSTRAINT uq_stats_user_daily_api_format UNIQUE (user_id, date, api_format);
+CREATE INDEX IF NOT EXISTS idx_stats_user_daily_api_format_date ON public.stats_user_daily_api_format USING btree (date);
+CREATE INDEX IF NOT EXISTS idx_stats_user_daily_api_format_user_id ON public.stats_user_daily_api_format USING btree (user_id);
+
+CREATE TABLE IF NOT EXISTS public.stats_daily_model_provider (
+    id character varying(64) NOT NULL,
+    date bigint NOT NULL,
+    model character varying(255) NOT NULL,
+    provider_name character varying(255) NOT NULL,
+    total_requests bigint DEFAULT 0 NOT NULL,
+    total_tokens bigint DEFAULT 0 NOT NULL,
+    total_cost double precision DEFAULT 0 NOT NULL,
+    response_time_sum_ms double precision DEFAULT 0 NOT NULL,
+    response_time_samples bigint DEFAULT 0 NOT NULL,
+    created_at bigint NOT NULL,
+    updated_at bigint NOT NULL
+);
+
+ALTER TABLE ONLY public.stats_daily_model_provider ADD CONSTRAINT stats_daily_model_provider_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.stats_daily_model_provider ADD CONSTRAINT uq_stats_daily_model_provider UNIQUE (date, model, provider_name);
+CREATE INDEX IF NOT EXISTS idx_stats_daily_model_provider_date ON public.stats_daily_model_provider USING btree (date);
+
+CREATE TABLE IF NOT EXISTS public.stats_user_daily_model_provider (
+    id character varying(64) NOT NULL,
+    user_id character varying(64) NOT NULL,
+    username character varying(255),
+    date bigint NOT NULL,
+    model character varying(255) NOT NULL,
+    provider_name character varying(255) NOT NULL,
+    total_requests bigint DEFAULT 0 NOT NULL,
+    total_tokens bigint DEFAULT 0 NOT NULL,
+    total_cost double precision DEFAULT 0 NOT NULL,
+    response_time_sum_ms double precision DEFAULT 0 NOT NULL,
+    response_time_samples bigint DEFAULT 0 NOT NULL,
+    created_at bigint NOT NULL,
+    updated_at bigint NOT NULL
+);
+
+ALTER TABLE ONLY public.stats_user_daily_model_provider ADD CONSTRAINT stats_user_daily_model_provider_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.stats_user_daily_model_provider ADD CONSTRAINT uq_stats_user_daily_model_provider UNIQUE (user_id, date, model, provider_name);
+CREATE INDEX IF NOT EXISTS idx_stats_user_daily_model_provider_date ON public.stats_user_daily_model_provider USING btree (date);
+CREATE INDEX IF NOT EXISTS idx_stats_user_daily_model_provider_user_date ON public.stats_user_daily_model_provider USING btree (user_id, date);
+
+CREATE TABLE IF NOT EXISTS public.stats_daily_cost_savings (
+    id character varying(64) NOT NULL,
+    date bigint NOT NULL,
+    cache_read_tokens bigint DEFAULT 0 NOT NULL,
+    cache_read_cost double precision DEFAULT 0 NOT NULL,
+    cache_creation_cost double precision DEFAULT 0 NOT NULL,
+    estimated_full_cost double precision DEFAULT 0 NOT NULL,
+    created_at bigint NOT NULL,
+    updated_at bigint NOT NULL
+);
+
+ALTER TABLE ONLY public.stats_daily_cost_savings ADD CONSTRAINT stats_daily_cost_savings_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.stats_daily_cost_savings ADD CONSTRAINT uq_stats_daily_cost_savings_date UNIQUE (date);
+
+CREATE TABLE IF NOT EXISTS public.stats_daily_cost_savings_provider (
+    id character varying(64) NOT NULL,
+    date bigint NOT NULL,
+    provider_name character varying(255) NOT NULL,
+    cache_read_tokens bigint DEFAULT 0 NOT NULL,
+    cache_read_cost double precision DEFAULT 0 NOT NULL,
+    cache_creation_cost double precision DEFAULT 0 NOT NULL,
+    estimated_full_cost double precision DEFAULT 0 NOT NULL,
+    created_at bigint NOT NULL,
+    updated_at bigint NOT NULL
+);
+
+ALTER TABLE ONLY public.stats_daily_cost_savings_provider ADD CONSTRAINT stats_daily_cost_savings_provider_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.stats_daily_cost_savings_provider ADD CONSTRAINT uq_stats_daily_cost_savings_provider UNIQUE (date, provider_name);
+CREATE INDEX IF NOT EXISTS idx_stats_daily_cost_savings_provider_date ON public.stats_daily_cost_savings_provider USING btree (date);
+
+CREATE TABLE IF NOT EXISTS public.stats_daily_cost_savings_model (
+    id character varying(64) NOT NULL,
+    date bigint NOT NULL,
+    model character varying(255) NOT NULL,
+    cache_read_tokens bigint DEFAULT 0 NOT NULL,
+    cache_read_cost double precision DEFAULT 0 NOT NULL,
+    cache_creation_cost double precision DEFAULT 0 NOT NULL,
+    estimated_full_cost double precision DEFAULT 0 NOT NULL,
+    created_at bigint NOT NULL,
+    updated_at bigint NOT NULL
+);
+
+ALTER TABLE ONLY public.stats_daily_cost_savings_model ADD CONSTRAINT stats_daily_cost_savings_model_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.stats_daily_cost_savings_model ADD CONSTRAINT uq_stats_daily_cost_savings_model UNIQUE (date, model);
+CREATE INDEX IF NOT EXISTS idx_stats_daily_cost_savings_model_date ON public.stats_daily_cost_savings_model USING btree (date);
+
+CREATE TABLE IF NOT EXISTS public.stats_daily_cost_savings_model_provider (
+    id character varying(64) NOT NULL,
+    date bigint NOT NULL,
+    model character varying(255) NOT NULL,
+    provider_name character varying(255) NOT NULL,
+    cache_read_tokens bigint DEFAULT 0 NOT NULL,
+    cache_read_cost double precision DEFAULT 0 NOT NULL,
+    cache_creation_cost double precision DEFAULT 0 NOT NULL,
+    estimated_full_cost double precision DEFAULT 0 NOT NULL,
+    created_at bigint NOT NULL,
+    updated_at bigint NOT NULL
+);
+
+ALTER TABLE ONLY public.stats_daily_cost_savings_model_provider ADD CONSTRAINT stats_daily_cost_savings_model_provider_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.stats_daily_cost_savings_model_provider ADD CONSTRAINT uq_stats_daily_cost_savings_model_provider UNIQUE (date, model, provider_name);
+CREATE INDEX IF NOT EXISTS idx_stats_daily_cost_savings_model_provider_date ON public.stats_daily_cost_savings_model_provider USING btree (date);
+
+CREATE TABLE IF NOT EXISTS public.stats_user_daily_cost_savings (
+    id character varying(64) NOT NULL,
+    user_id character varying(64) NOT NULL,
+    username character varying(255),
+    date bigint NOT NULL,
+    cache_read_tokens bigint DEFAULT 0 NOT NULL,
+    cache_read_cost double precision DEFAULT 0 NOT NULL,
+    cache_creation_cost double precision DEFAULT 0 NOT NULL,
+    estimated_full_cost double precision DEFAULT 0 NOT NULL,
+    created_at bigint NOT NULL,
+    updated_at bigint NOT NULL
+);
+
+ALTER TABLE ONLY public.stats_user_daily_cost_savings ADD CONSTRAINT stats_user_daily_cost_savings_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.stats_user_daily_cost_savings ADD CONSTRAINT uq_stats_user_daily_cost_savings UNIQUE (user_id, date);
+CREATE INDEX IF NOT EXISTS idx_stats_user_daily_cost_savings_date ON public.stats_user_daily_cost_savings USING btree (date);
+
+CREATE TABLE IF NOT EXISTS public.stats_user_daily_cost_savings_provider (
+    id character varying(64) NOT NULL,
+    user_id character varying(64) NOT NULL,
+    username character varying(255),
+    date bigint NOT NULL,
+    provider_name character varying(255) NOT NULL,
+    cache_read_tokens bigint DEFAULT 0 NOT NULL,
+    cache_read_cost double precision DEFAULT 0 NOT NULL,
+    cache_creation_cost double precision DEFAULT 0 NOT NULL,
+    estimated_full_cost double precision DEFAULT 0 NOT NULL,
+    created_at bigint NOT NULL,
+    updated_at bigint NOT NULL
+);
+
+ALTER TABLE ONLY public.stats_user_daily_cost_savings_provider ADD CONSTRAINT stats_user_daily_cost_savings_provider_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.stats_user_daily_cost_savings_provider ADD CONSTRAINT uq_stats_user_daily_cost_savings_provider UNIQUE (user_id, date, provider_name);
+CREATE INDEX IF NOT EXISTS idx_stats_user_daily_cost_savings_provider_date ON public.stats_user_daily_cost_savings_provider USING btree (date);
+
+CREATE TABLE IF NOT EXISTS public.stats_user_daily_cost_savings_model (
+    id character varying(64) NOT NULL,
+    user_id character varying(64) NOT NULL,
+    username character varying(255),
+    date bigint NOT NULL,
+    model character varying(255) NOT NULL,
+    cache_read_tokens bigint DEFAULT 0 NOT NULL,
+    cache_read_cost double precision DEFAULT 0 NOT NULL,
+    cache_creation_cost double precision DEFAULT 0 NOT NULL,
+    estimated_full_cost double precision DEFAULT 0 NOT NULL,
+    created_at bigint NOT NULL,
+    updated_at bigint NOT NULL
+);
+
+ALTER TABLE ONLY public.stats_user_daily_cost_savings_model ADD CONSTRAINT stats_user_daily_cost_savings_model_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.stats_user_daily_cost_savings_model ADD CONSTRAINT uq_stats_user_daily_cost_savings_model UNIQUE (user_id, date, model);
+CREATE INDEX IF NOT EXISTS idx_stats_user_daily_cost_savings_model_date ON public.stats_user_daily_cost_savings_model USING btree (date);
+
+CREATE TABLE IF NOT EXISTS public.stats_user_daily_cost_savings_model_provider (
+    id character varying(64) NOT NULL,
+    user_id character varying(64) NOT NULL,
+    username character varying(255),
+    date bigint NOT NULL,
+    model character varying(255) NOT NULL,
+    provider_name character varying(255) NOT NULL,
+    cache_read_tokens bigint DEFAULT 0 NOT NULL,
+    cache_read_cost double precision DEFAULT 0 NOT NULL,
+    cache_creation_cost double precision DEFAULT 0 NOT NULL,
+    estimated_full_cost double precision DEFAULT 0 NOT NULL,
+    created_at bigint NOT NULL,
+    updated_at bigint NOT NULL
+);
+
+ALTER TABLE ONLY public.stats_user_daily_cost_savings_model_provider ADD CONSTRAINT stats_user_daily_cost_savings_model_provider_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.stats_user_daily_cost_savings_model_provider ADD CONSTRAINT uq_stats_user_daily_cost_savings_model_provider UNIQUE (user_id, date, model, provider_name);
+CREATE INDEX IF NOT EXISTS idx_stats_user_daily_cost_savings_model_provider_date ON public.stats_user_daily_cost_savings_model_provider USING btree (date);
 

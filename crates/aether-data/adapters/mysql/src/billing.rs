@@ -642,23 +642,8 @@ LIMIT 1
         input: &PaymentGatewayConfigWriteInput,
     ) -> Result<AdminBillingMutationOutcome<PaymentGatewayConfigRecord>, DataLayerError> {
         let provider = input.provider.trim().to_ascii_lowercase();
-        let existing_secret = if input.preserve_existing_secret {
-            sqlx::query_scalar::<_, String>(
-                "SELECT merchant_key_encrypted FROM payment_gateway_configs WHERE provider = ?",
-            )
-            .bind(&provider)
-            .fetch_optional(&self.pool)
-            .await
-            .map_sql_err()?
-        } else {
-            None
-        };
-        let secret = if input.preserve_existing_secret {
-            existing_secret
-        } else {
-            input.merchant_key_encrypted.clone()
-        };
         let now = current_unix_secs_i64();
+        let mut tx = self.pool.begin().await.map_sql_err()?;
         sqlx::query(
             r#"
 INSERT INTO payment_gateway_configs (
@@ -672,7 +657,10 @@ ON DUPLICATE KEY UPDATE
   endpoint_url = VALUES(endpoint_url),
   callback_base_url = VALUES(callback_base_url),
   merchant_id = VALUES(merchant_id),
-  merchant_key_encrypted = VALUES(merchant_key_encrypted),
+  merchant_key_encrypted = CASE
+    WHEN ? THEN merchant_key_encrypted
+    ELSE VALUES(merchant_key_encrypted)
+  END,
   pay_currency = VALUES(pay_currency),
   usd_exchange_rate = VALUES(usd_exchange_rate),
   min_recharge_usd = VALUES(min_recharge_usd),
@@ -685,22 +673,35 @@ ON DUPLICATE KEY UPDATE
         .bind(&input.endpoint_url)
         .bind(input.callback_base_url.as_deref())
         .bind(&input.merchant_id)
-        .bind(secret.as_deref())
+        .bind(input.merchant_key_encrypted.as_deref())
         .bind(&input.pay_currency)
         .bind(input.usd_exchange_rate)
         .bind(input.min_recharge_usd)
         .bind(json_to_string(&input.channels_json)?)
         .bind(now)
         .bind(now)
-        .execute(&self.pool)
+        .bind(input.preserve_existing_secret)
+        .execute(&mut *tx)
         .await
         .map_sql_err()?;
-        match self.find_payment_gateway_config(&provider).await? {
-            Some(record) => Ok(AdminBillingMutationOutcome::Applied(record)),
-            None => Err(DataLayerError::UnexpectedValue(
-                "upserted payment gateway config missing".to_string(),
-            )),
-        }
+        let row = sqlx::query(
+            r#"
+SELECT
+  provider, enabled, endpoint_url, callback_base_url, merchant_id,
+  merchant_key_encrypted, pay_currency, usd_exchange_rate, min_recharge_usd,
+  channels_json, created_at AS created_at_unix_secs, updated_at AS updated_at_unix_secs
+FROM payment_gateway_configs
+WHERE provider = ?
+LIMIT 1
+"#,
+        )
+        .bind(&provider)
+        .fetch_one(&mut *tx)
+        .await
+        .map_sql_err()?;
+        let record = map_payment_gateway_config_mysql(&row)?;
+        tx.commit().await.map_sql_err()?;
+        Ok(AdminBillingMutationOutcome::Applied(record))
     }
 
     async fn list_billing_plans(
@@ -1402,7 +1403,13 @@ fn parse_required_json(raw: String) -> Result<serde_json::Value, DataLayerError>
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::MysqlBillingReadRepository;
+    use crate::run_migrations;
+    use aether_data_contracts::repository::billing::{
+        AdminBillingMutationOutcome, BillingReadRepository, PaymentGatewayConfigWriteInput,
+    };
 
     #[tokio::test]
     async fn repository_builds_from_lazy_pool() {
@@ -1413,5 +1420,89 @@ mod tests {
         );
 
         let _repository = MysqlBillingReadRepository::new(pool);
+    }
+
+    #[tokio::test]
+    async fn mysql_gateway_upsert_preserves_secret_when_url_is_set() {
+        let Some(database_url) = std::env::var("AETHER_TEST_MYSQL_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        else {
+            eprintln!("skipping mysql billing parity test because AETHER_TEST_MYSQL_URL is unset");
+            return;
+        };
+        let pool = sqlx::mysql::MySqlPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .expect("mysql pool should connect");
+        run_migrations(&pool)
+            .await
+            .expect("mysql migrations should run");
+        sqlx::query("DELETE FROM payment_gateway_configs WHERE provider = 'paritypay'")
+            .execute(&pool)
+            .await
+            .expect("gateway cleanup should succeed");
+        let repository = MysqlBillingReadRepository::new(pool.clone());
+
+        let mut input = PaymentGatewayConfigWriteInput {
+            provider: " ParityPay ".to_string(),
+            enabled: true,
+            endpoint_url: "https://pay.example/first".to_string(),
+            callback_base_url: Some("https://api.example/callback".to_string()),
+            merchant_id: "merchant-1".to_string(),
+            merchant_key_encrypted: Some("secret-first".to_string()),
+            preserve_existing_secret: true,
+            pay_currency: "USD".to_string(),
+            usd_exchange_rate: 1.0,
+            min_recharge_usd: 2.0,
+            channels_json: json!([{"id": "card"}]),
+        };
+        let inserted = match repository
+            .upsert_payment_gateway_config(&input)
+            .await
+            .expect("gateway insert should run")
+        {
+            AdminBillingMutationOutcome::Applied(record) => record,
+            other => panic!("unexpected gateway insert outcome: {other:?}"),
+        };
+        assert_eq!(
+            inserted.merchant_key_encrypted.as_deref(),
+            Some("secret-first")
+        );
+
+        input.merchant_key_encrypted = Some("secret-ignored".to_string());
+        let preserved = match repository
+            .upsert_payment_gateway_config(&input)
+            .await
+            .expect("gateway preserve update should run")
+        {
+            AdminBillingMutationOutcome::Applied(record) => record,
+            other => panic!("unexpected gateway preserve outcome: {other:?}"),
+        };
+        assert_eq!(
+            preserved.merchant_key_encrypted.as_deref(),
+            Some("secret-first")
+        );
+
+        input.preserve_existing_secret = false;
+        input.merchant_key_encrypted = Some("secret-replaced".to_string());
+        let replaced = match repository
+            .upsert_payment_gateway_config(&input)
+            .await
+            .expect("gateway replacement update should run")
+        {
+            AdminBillingMutationOutcome::Applied(record) => record,
+            other => panic!("unexpected gateway replace outcome: {other:?}"),
+        };
+        assert_eq!(
+            replaced.merchant_key_encrypted.as_deref(),
+            Some("secret-replaced")
+        );
+
+        sqlx::query("DELETE FROM payment_gateway_configs WHERE provider = 'paritypay'")
+            .execute(&pool)
+            .await
+            .expect("gateway cleanup should succeed");
     }
 }

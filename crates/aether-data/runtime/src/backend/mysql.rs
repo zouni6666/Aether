@@ -538,6 +538,20 @@ WHERE wallet_id = ?
         for sql in [
             "DELETE FROM stats_daily WHERE `date` = 0",
             "DELETE FROM stats_hourly WHERE hour_utc = 3600",
+            "DELETE FROM stats_user_summary WHERE user_id LIKE 'user-%'",
+            "DELETE FROM stats_user_daily_model WHERE `date` = 0",
+            "DELETE FROM stats_user_daily_provider WHERE `date` = 0",
+            "DELETE FROM stats_user_daily_api_format WHERE `date` = 0",
+            "DELETE FROM stats_daily_model_provider WHERE `date` = 0",
+            "DELETE FROM stats_user_daily_model_provider WHERE `date` = 0",
+            "DELETE FROM stats_daily_cost_savings WHERE `date` = 0",
+            "DELETE FROM stats_daily_cost_savings_provider WHERE `date` = 0",
+            "DELETE FROM stats_daily_cost_savings_model WHERE `date` = 0",
+            "DELETE FROM stats_daily_cost_savings_model_provider WHERE `date` = 0",
+            "DELETE FROM stats_user_daily_cost_savings WHERE `date` = 0",
+            "DELETE FROM stats_user_daily_cost_savings_provider WHERE `date` = 0",
+            "DELETE FROM stats_user_daily_cost_savings_model WHERE `date` = 0",
+            "DELETE FROM stats_user_daily_cost_savings_model_provider WHERE `date` = 0",
             "DELETE FROM usage_settlement_snapshots WHERE request_id LIKE 'request-daily-%' OR request_id LIKE 'stats-%'",
             "DELETE FROM `usage` WHERE request_id LIKE 'request-%' OR request_id LIKE 'export-request-%' OR request_id LIKE 'stats-%'",
         ] {
@@ -550,19 +564,21 @@ WHERE wallet_id = ?
         sqlx::query(
             r#"
 INSERT INTO `usage` (
-  request_id, user_id, api_key_id, provider_name, model, status, billing_status,
+  request_id, user_id, api_key_id, provider_name, model, api_format, status, billing_status,
   status_code, error_category, input_tokens, output_tokens,
   cache_creation_input_tokens, cache_read_input_tokens, total_cost_usd,
-  actual_total_cost_usd, response_time_ms, created_at_unix_ms, updated_at_unix_secs
+  actual_total_cost_usd, cache_creation_cost_usd, cache_read_cost_usd,
+  input_price_per_1m, response_time_ms, first_byte_time_ms,
+  created_at_unix_ms, updated_at_unix_secs
 ) VALUES
-  ('stats-1', 'user-1', 'key-1', 'provider-a', 'model-a', 'completed', 'settled',
-   200, NULL, 10, 20, 1, 2, 0.30, 0.25, 100, 3600000, 3600),
-  ('stats-2', 'user-2', 'key-2', 'provider-b', 'model-b', 'failed', 'void',
-   500, 'upstream_error', 5, 7, 0, 1, 0.20, 0.20, 300, 3610000, 3610),
-  ('stats-pending', 'user-3', 'key-3', 'provider-a', 'model-a', 'pending', 'pending',
-   NULL, NULL, 100, 100, 0, 0, 9.99, 9.99, 50, 3620000, 3620),
-  ('stats-unknown-provider', 'user-4', 'key-4', 'unknown', 'model-a', 'completed', 'settled',
-   200, NULL, 100, 100, 0, 0, 9.99, 9.99, 50, 3630000, 3630)
+  ('stats-1', 'user-1', 'key-1', 'provider-a', 'model-a', 'openai', 'completed', 'settled',
+   200, NULL, 10, 20, 1, 2, 0.30, 0.25, 0.01, 0.02, 10.0, 100, 50, 3600, 3600),
+  ('stats-2', 'user-2', 'key-2', 'provider-b', 'model-b', 'claude', 'failed', 'void',
+   500, 'upstream_error', 5, 7, 0, 1, 0.20, 0.20, 0.00, 0.01, 20.0, 300, 200, 3610, 3610),
+  ('stats-pending', 'user-3', 'key-3', 'provider-a', 'model-a', 'openai', 'pending', 'pending',
+   NULL, NULL, 100, 100, 0, 0, 9.99, 9.99, 0.00, 0.00, 0.0, 50, 25, 3620, 3620),
+  ('stats-unknown-provider', 'user-4', 'key-4', 'unknown', 'model-a', 'openai', 'completed', 'settled',
+   200, NULL, 100, 100, 0, 0, 9.99, 9.99, 0.00, 0.00, 0.0, 50, 25, 3630, 3630)
 "#,
         )
         .execute(backend.pool())
@@ -627,7 +643,7 @@ WHERE hour_utc = 3600
         assert_eq!(daily.total_requests, 2);
         assert_eq!(daily.model_rows, 2);
         assert_eq!(daily.provider_rows, 2);
-        assert_eq!(daily.api_key_rows, 2);
+        assert_eq!(daily.api_key_rows, 4);
         assert_eq!(daily.error_rows, 1);
         assert_eq!(daily.user_rows, 2);
 
@@ -642,5 +658,46 @@ WHERE `date` = 0
         .await
         .expect("daily stats row should load");
         assert_eq!(daily_row, (2, 1, 1, 2));
+
+        let enriched_daily = sqlx::query_as::<_, (i64, i64, i64, i64, i64, Option<i64>)>(
+            r#"
+SELECT effective_input_tokens, total_input_context, cache_hit_total_requests,
+       completed_total_requests, settled_total_requests, p50_response_time_ms
+FROM stats_daily
+WHERE `date` = 0
+"#,
+        )
+        .fetch_one(backend.pool())
+        .await
+        .expect("mysql enriched daily stats row should load");
+        assert_eq!(enriched_daily, (13, 17, 4, 2, 2, None));
+
+        for table in [
+            "stats_user_summary",
+            "stats_user_daily_model",
+            "stats_user_daily_provider",
+            "stats_user_daily_api_format",
+            "stats_daily_model_provider",
+            "stats_user_daily_model_provider",
+            "stats_daily_cost_savings",
+            "stats_daily_cost_savings_provider",
+            "stats_daily_cost_savings_model",
+            "stats_daily_cost_savings_model_provider",
+            "stats_user_daily_cost_savings",
+            "stats_user_daily_cost_savings_provider",
+            "stats_user_daily_cost_savings_model",
+            "stats_user_daily_cost_savings_model_provider",
+        ] {
+            let sql = if table == "stats_user_summary" {
+                format!("SELECT COUNT(*) FROM {table} WHERE user_id IN ('user-1', 'user-2')")
+            } else {
+                format!("SELECT COUNT(*) FROM {table} WHERE `date` = 0")
+            };
+            let count: i64 = sqlx::query_scalar(&sql)
+                .fetch_one(backend.pool())
+                .await
+                .expect("mysql advanced stats count should load");
+            assert!(count > 0, "{table} should be populated");
+        }
     }
 }

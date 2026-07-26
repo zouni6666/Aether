@@ -112,6 +112,8 @@ describe('i18n infrastructure', () => {
 
   it('translates common legacy phrases without adding new message entry points', () => {
     expect(translateLegacyText('请求记录清理策略', 'en-US')).toBe('Request log cleanup policy')
+    expect(translateLegacyText('最大转移次数', 'en-US')).toBe('Max transfers')
+    expect(translateLegacyText('最大转移超时', 'en-US')).toBe('Max transfer timeout')
     expect(translateLegacyText('  发布于 2026-01-01  ', 'en-US')).toBe('  Published at 2026-01-01  ')
     expect(translateLegacyText('git clone https://github.com/fawney19/Aether.git', 'en-US')).toBe('git clone https://github.com/fawney19/Aether.git')
   })

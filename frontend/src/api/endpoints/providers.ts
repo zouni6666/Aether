@@ -52,6 +52,8 @@ function normalizeProviderSummary(
     chat_pii_redaction: normalizeChatPiiRedactionProvider(provider.chat_pii_redaction),
     pool_advanced: normalizePoolAdvanced(provider.pool_advanced),
     kiro_simulated_cache_enabled: provider.kiro_simulated_cache_enabled ?? false,
+    max_transfer_count: provider.max_transfer_count ?? 0,
+    max_transfer_timeout_seconds: provider.max_transfer_timeout_seconds ?? 0,
   }
 }
 
@@ -120,6 +122,8 @@ export async function updateProvider(
     rpm_limit: number | null
     // 请求配置（从 Endpoint 迁移）
     max_retries: number
+    max_transfer_count: number
+    max_transfer_timeout_seconds: number
     proxy: ProxyConfig | null
     cache_ttl_minutes: number  // 0表示不支持缓存，>0表示支持缓存并设置TTL(分钟)
     max_probe_interval_minutes: number
@@ -154,6 +158,8 @@ export async function createProvider(
     keep_priority_on_conversion?: boolean
     is_active?: boolean
     max_retries?: number
+    max_transfer_count?: number
+    max_transfer_timeout_seconds?: number
     stream_first_byte_timeout?: number | null
     request_timeout?: number | null
     proxy?: ProxyConfig | null

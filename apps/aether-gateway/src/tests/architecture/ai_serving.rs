@@ -1,6 +1,21 @@
 use super::*;
 
 #[test]
+fn specialized_decisions_embed_provider_failover_policy_in_report_context() {
+    for path in [
+        "apps/aether-gateway/src/ai_serving/planner/specialized/files/decision.rs",
+        "apps/aether-gateway/src/ai_serving/planner/specialized/image/decision.rs",
+        "apps/aether-gateway/src/ai_serving/planner/specialized/video/decision.rs",
+    ] {
+        let source = read_workspace_file(path);
+        assert!(
+            source.contains("append_local_failover_policy_to_value(report_context, &transport)"),
+            "{path} should embed provider failover policy in every generated report context"
+        );
+    }
+}
+
+#[test]
 fn ai_serving_target_structure_removes_legacy_pipeline_boundary() {
     assert!(
         !workspace_file_exists("crates/aether-ai-pipeline"),

@@ -243,8 +243,7 @@ impl AppState {
     ) -> Result<(), GatewayError> {
         if !self.has_auth_user_write_capability() || !self.has_auth_wallet_write_capability() {
             return Err(GatewayError::Internal(
-                "bootstrap admin requires Postgres-backed user and wallet write capability"
-                    .to_string(),
+                "bootstrap admin requires SQL-backed user and wallet write capability".to_string(),
             ));
         }
 

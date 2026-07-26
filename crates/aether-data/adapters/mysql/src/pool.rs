@@ -62,6 +62,14 @@ impl MysqlPoolFactory {
             .acquire_timeout(Duration::from_millis(acquire_timeout_ms))
             .idle_timeout(Duration::from_millis(idle_timeout_ms))
             .max_lifetime(Duration::from_millis(max_lifetime_ms))
+            .after_connect(|connection, _metadata| {
+                Box::pin(async move {
+                    sqlx::query("SET time_zone = '+00:00'")
+                        .execute(connection)
+                        .await?;
+                    Ok(())
+                })
+            })
             .connect_lazy_with(self.connect_options()?))
     }
 }
@@ -89,5 +97,35 @@ mod tests {
 
         let factory = MysqlPoolFactory::new(config).expect("factory should build");
         let _pool = factory.connect_lazy().expect("lazy pool should build");
+    }
+
+    #[tokio::test]
+    async fn factory_configures_utc_session_timezone_when_url_is_set() {
+        let Some(database_url) = std::env::var("AETHER_TEST_MYSQL_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        else {
+            eprintln!("skipping mysql timezone test because AETHER_TEST_MYSQL_URL is unset");
+            return;
+        };
+        let config = SqlDatabaseConfig {
+            driver: DatabaseDriver::Mysql,
+            url: database_url,
+            pool: SqlPoolConfig {
+                max_connections: 1,
+                ..SqlPoolConfig::default()
+            },
+        };
+
+        let pool = MysqlPoolFactory::new(config)
+            .expect("factory should build")
+            .connect_lazy()
+            .expect("lazy pool should build");
+        let timezone: String = sqlx::query_scalar("SELECT @@session.time_zone")
+            .fetch_one(&pool)
+            .await
+            .expect("mysql session timezone should load");
+
+        assert_eq!(timezone, "+00:00");
     }
 }

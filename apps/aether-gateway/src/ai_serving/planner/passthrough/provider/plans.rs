@@ -213,6 +213,11 @@ impl LocalExecutionAttemptSource<AiSyncAttempt> for LocalSameFormatProviderSyncA
         }
         Ok(drained)
     }
+
+    async fn skip_provider(&mut self, provider_id: &str) -> Result<(), GatewayError> {
+        self.candidates.skip_provider(provider_id);
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -242,6 +247,11 @@ impl LocalExecutionAttemptSource<AiStreamAttempt>
             }
         }
         Ok(drained)
+    }
+
+    async fn skip_provider(&mut self, provider_id: &str) -> Result<(), GatewayError> {
+        self.candidates.skip_provider(provider_id);
+        Ok(())
     }
 }
 

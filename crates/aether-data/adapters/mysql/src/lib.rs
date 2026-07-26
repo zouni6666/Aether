@@ -47,7 +47,7 @@ pub use proxy_nodes::MysqlProxyNodeReadRepository;
 pub use quota::MysqlProviderQuotaRepository;
 pub use routing_profiles::MysqlRoutingGroupRepository;
 pub use settlement::MysqlSettlementRepository;
-pub use usage::{MysqlUsageStorage, MysqlUsageWriteRepository};
+pub use usage::{MysqlUsageReadFilter, MysqlUsageStorage, MysqlUsageWriteRepository};
 pub use users::MysqlUserReadRepository;
 pub use video_tasks::MysqlVideoTaskRepository;
 pub use wallet::MysqlWalletReadRepository;

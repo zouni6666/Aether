@@ -1094,8 +1094,8 @@ fn map_public_catalog_model_row(
             .and_then(|value| value.get("icon_url"))
             .and_then(serde_json::Value::as_str)
             .map(ToString::to_string),
-        first_tier_price(pricing, "input_price_per_1m"),
-        first_tier_price(pricing, "output_price_per_1m"),
+        Some(first_tier_price(pricing, "input_price_per_1m").unwrap_or(0.0)),
+        Some(first_tier_price(pricing, "output_price_per_1m").unwrap_or(0.0)),
         first_tier_price(pricing, "cache_creation_price_per_1m"),
         first_tier_price(pricing, "cache_read_price_per_1m"),
         row.try_get("supports_vision").map_sql_err()?,
@@ -1373,6 +1373,44 @@ mod tests {
             .await
             .expect("deleted provider model lookup should succeed")
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn sqlite_public_catalog_defaults_missing_input_and_output_prices_to_zero() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool should connect");
+        run_migrations(&pool)
+            .await
+            .expect("sqlite migrations should run");
+        seed_provider(&pool).await;
+        sqlx::query(
+            r#"
+INSERT INTO models (
+  id, provider_id, provider_model_name, is_active, is_available, created_at, updated_at
+) VALUES ('model-no-price', 'provider-1', 'provider-no-price', 1, 1, 1, 1)
+"#,
+        )
+        .execute(&pool)
+        .await
+        .expect("unpriced provider model should seed");
+
+        let items = SqliteGlobalModelReadRepository::new(pool)
+            .list_public_catalog_models(&PublicCatalogModelListQuery {
+                provider_id: Some("provider-1".to_string()),
+                offset: 0,
+                limit: 10,
+            })
+            .await
+            .expect("public catalog should load");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].input_price_per_1m, Some(0.0));
+        assert_eq!(items[0].output_price_per_1m, Some(0.0));
+        assert_eq!(items[0].cache_creation_price_per_1m, None);
+        assert_eq!(items[0].cache_read_price_per_1m, None);
     }
 
     async fn seed_rows(pool: &sqlx::SqlitePool) {

@@ -43,15 +43,16 @@ use crate::constants::{CONTROL_CANDIDATE_ID_HEADER, EXECUTION_PATH_LOCAL_EXECUTI
 use crate::control::GatewayControlDecision;
 use crate::execution_runtime::sync::{
     build_openai_image_sync_json_whitespace_heartbeat_stream,
-    build_sync_json_whitespace_heartbeat_stream, execute_execution_runtime_sync,
+    build_sync_json_whitespace_heartbeat_stream,
 };
 use crate::executor::candidate_loop::{
-    execute_stream_attempt_source, execute_sync_attempt_source, execute_sync_plan_and_reports,
-    mark_unused_local_candidates,
+    execute_stream_attempt_source_with_transfer_tracker, execute_sync_attempt_source,
+    execute_sync_attempt_source_with_transfer_tracker,
+    execute_sync_plan_and_reports_with_transfer_tracker, ProviderTransferTracker,
 };
 use crate::executor::{
-    build_local_execution_exhaustion, record_failed_usage_for_exhausted_request,
-    LocalExecutionExhaustion, LocalExecutionRequestOutcome,
+    record_failed_usage_for_exhausted_request, LocalExecutionExhaustion,
+    LocalExecutionRequestOutcome,
 };
 use crate::handlers::shared::system_config_bool;
 use crate::stage_metrics::observe_gateway_stage_ms;
@@ -94,6 +95,7 @@ pub(crate) async fn maybe_execute_sync_via_local_decision(
     decision: &GatewayControlDecision,
     body_json: &serde_json::Value,
     plan_kind: &str,
+    transfer_tracker: &ProviderTransferTracker,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
     let Some((attempt_source, candidate_count)) =
         build_local_openai_chat_sync_attempt_source_for_kind(
@@ -107,6 +109,7 @@ pub(crate) async fn maybe_execute_sync_via_local_decision(
     if standard_text_sync_heartbeat_should_wrap(state, plan_kind).await {
         let parts_for_task = parts.clone();
         let body_json_for_task = body_json.clone();
+        let transfer_tracker_for_task = transfer_tracker.clone();
         return Ok(LocalExecutionRequestOutcome::responded(
             build_standard_text_sync_heartbeat_shell_response(
                 state.clone(),
@@ -129,15 +132,17 @@ pub(crate) async fn maybe_execute_sync_via_local_decision(
                         return Ok(LocalExecutionRequestOutcome::NoPath);
                     };
 
-                    let outcome = execute_sync_attempt_source::<AiSyncAttempt, _>(
-                        &state,
-                        &parts,
-                        trace_id.as_str(),
-                        &decision,
-                        plan_kind.as_str(),
-                        attempt_source,
-                    )
-                    .await?;
+                    let outcome =
+                        execute_sync_attempt_source_with_transfer_tracker::<AiSyncAttempt, _>(
+                            &state,
+                            &parts,
+                            trace_id.as_str(),
+                            &decision,
+                            plan_kind.as_str(),
+                            attempt_source,
+                            &transfer_tracker_for_task,
+                        )
+                        .await?;
                     match outcome {
                         LocalExecutionRequestOutcome::Exhausted(exhaustion) => {
                             set_local_openai_chat_execution_exhausted_diagnostic(
@@ -163,13 +168,14 @@ pub(crate) async fn maybe_execute_sync_via_local_decision(
         ));
     }
 
-    let outcome = execute_sync_attempt_source::<AiSyncAttempt, _>(
+    let outcome = execute_sync_attempt_source_with_transfer_tracker::<AiSyncAttempt, _>(
         state,
         parts,
         trace_id,
         decision,
         plan_kind,
         attempt_source,
+        transfer_tracker,
     )
     .await?;
 
@@ -194,6 +200,7 @@ pub(crate) async fn maybe_execute_stream_via_local_decision(
     decision: &GatewayControlDecision,
     body_json: &serde_json::Value,
     plan_kind: &str,
+    transfer_tracker: &ProviderTransferTracker,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
     let attempt_source_started_at = std::time::Instant::now();
     let attempt_source = build_local_openai_chat_stream_attempt_source_for_kind(
@@ -209,12 +216,13 @@ pub(crate) async fn maybe_execute_stream_via_local_decision(
     };
 
     let attempt_source_execute_started_at = std::time::Instant::now();
-    let outcome = execute_stream_attempt_source::<AiStreamAttempt, _>(
+    let outcome = execute_stream_attempt_source_with_transfer_tracker::<AiStreamAttempt, _>(
         state,
         trace_id,
         decision,
         plan_kind,
         attempt_source,
+        transfer_tracker,
     )
     .await;
     observe_gateway_stage_ms(
@@ -244,6 +252,7 @@ pub(crate) async fn maybe_execute_sync_via_local_openai_responses_decision(
     decision: &GatewayControlDecision,
     body_json: &serde_json::Value,
     plan_kind: &str,
+    transfer_tracker: &ProviderTransferTracker,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
     let Some((attempt_source, _candidate_count)) =
         build_local_openai_responses_sync_attempt_source_for_kind(
@@ -257,6 +266,7 @@ pub(crate) async fn maybe_execute_sync_via_local_openai_responses_decision(
     if standard_text_sync_heartbeat_should_wrap(state, plan_kind).await {
         let parts_for_task = parts.clone();
         let body_json_for_task = body_json.clone();
+        let transfer_tracker_for_task = transfer_tracker.clone();
         return Ok(LocalExecutionRequestOutcome::responded(
             build_standard_text_sync_heartbeat_shell_response(
                 state.clone(),
@@ -279,15 +289,17 @@ pub(crate) async fn maybe_execute_sync_via_local_openai_responses_decision(
                         return Ok(LocalExecutionRequestOutcome::NoPath);
                     };
 
-                    let outcome = execute_sync_attempt_source::<AiSyncAttempt, _>(
-                        &state,
-                        &parts,
-                        trace_id.as_str(),
-                        &decision,
-                        plan_kind.as_str(),
-                        attempt_source,
-                    )
-                    .await?;
+                    let outcome =
+                        execute_sync_attempt_source_with_transfer_tracker::<AiSyncAttempt, _>(
+                            &state,
+                            &parts,
+                            trace_id.as_str(),
+                            &decision,
+                            plan_kind.as_str(),
+                            attempt_source,
+                            &transfer_tracker_for_task,
+                        )
+                        .await?;
                     match outcome {
                         LocalExecutionRequestOutcome::Exhausted(exhaustion) => {
                             record_standard_text_sync_heartbeat_exhaustion(
@@ -305,13 +317,14 @@ pub(crate) async fn maybe_execute_sync_via_local_openai_responses_decision(
         ));
     }
 
-    execute_sync_attempt_source::<AiSyncAttempt, _>(
+    execute_sync_attempt_source_with_transfer_tracker::<AiSyncAttempt, _>(
         state,
         parts,
         trace_id,
         decision,
         plan_kind,
         attempt_source,
+        transfer_tracker,
     )
     .await
 }
@@ -323,6 +336,7 @@ pub(crate) async fn maybe_execute_stream_via_local_openai_responses_decision(
     decision: &GatewayControlDecision,
     body_json: &serde_json::Value,
     plan_kind: &str,
+    transfer_tracker: &ProviderTransferTracker,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
     let Some((attempt_source, _candidate_count)) =
         build_local_openai_responses_stream_attempt_source_for_kind(
@@ -333,12 +347,13 @@ pub(crate) async fn maybe_execute_stream_via_local_openai_responses_decision(
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
 
-    execute_stream_attempt_source::<AiStreamAttempt, _>(
+    execute_stream_attempt_source_with_transfer_tracker::<AiStreamAttempt, _>(
         state,
         trace_id,
         decision,
         plan_kind,
         attempt_source,
+        transfer_tracker,
     )
     .await
 }
@@ -351,6 +366,7 @@ pub(crate) async fn maybe_execute_sync_via_standard_family_decision(
     body_json: &serde_json::Value,
     plan_kind: &str,
     resolve_sync_spec: fn(&str) -> Option<LocalStandardSpec>,
+    transfer_tracker: &ProviderTransferTracker,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
     let Some(spec) = resolve_sync_spec(plan_kind) else {
         return Ok(LocalExecutionRequestOutcome::NoPath);
@@ -367,6 +383,7 @@ pub(crate) async fn maybe_execute_sync_via_standard_family_decision(
     if standard_text_sync_heartbeat_should_wrap(state, plan_kind).await {
         let parts_for_task = parts.clone();
         let body_json_for_task = body_json.clone();
+        let transfer_tracker_for_task = transfer_tracker.clone();
         return Ok(LocalExecutionRequestOutcome::responded(
             build_standard_text_sync_heartbeat_shell_response(
                 state.clone(),
@@ -389,15 +406,17 @@ pub(crate) async fn maybe_execute_sync_via_standard_family_decision(
                         return Ok(LocalExecutionRequestOutcome::NoPath);
                     };
 
-                    let outcome = execute_sync_attempt_source::<AiSyncAttempt, _>(
-                        &state,
-                        &parts,
-                        trace_id.as_str(),
-                        &decision,
-                        plan_kind.as_str(),
-                        attempt_source,
-                    )
-                    .await?;
+                    let outcome =
+                        execute_sync_attempt_source_with_transfer_tracker::<AiSyncAttempt, _>(
+                            &state,
+                            &parts,
+                            trace_id.as_str(),
+                            &decision,
+                            plan_kind.as_str(),
+                            attempt_source,
+                            &transfer_tracker_for_task,
+                        )
+                        .await?;
                     match outcome {
                         LocalExecutionRequestOutcome::Exhausted(exhaustion) => {
                             record_standard_text_sync_heartbeat_exhaustion(
@@ -415,13 +434,14 @@ pub(crate) async fn maybe_execute_sync_via_standard_family_decision(
         ));
     }
 
-    execute_sync_attempt_source::<AiSyncAttempt, _>(
+    execute_sync_attempt_source_with_transfer_tracker::<AiSyncAttempt, _>(
         state,
         parts,
         trace_id,
         decision,
         plan_kind,
         attempt_source,
+        transfer_tracker,
     )
     .await
 }
@@ -434,6 +454,7 @@ pub(crate) async fn maybe_execute_stream_via_standard_family_decision(
     body_json: &serde_json::Value,
     plan_kind: &str,
     resolve_stream_spec: fn(&str) -> Option<LocalStandardSpec>,
+    transfer_tracker: &ProviderTransferTracker,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
     let Some(spec) = resolve_stream_spec(plan_kind) else {
         return Ok(LocalExecutionRequestOutcome::NoPath);
@@ -447,12 +468,13 @@ pub(crate) async fn maybe_execute_stream_via_standard_family_decision(
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
 
-    execute_stream_attempt_source::<AiStreamAttempt, _>(
+    execute_stream_attempt_source_with_transfer_tracker::<AiStreamAttempt, _>(
         state,
         trace_id,
         decision,
         plan_kind,
         attempt_source,
+        transfer_tracker,
     )
     .await
 }
@@ -464,6 +486,7 @@ pub(crate) async fn maybe_execute_sync_via_local_standard_decision(
     decision: &GatewayControlDecision,
     body_json: &serde_json::Value,
     plan_kind: &str,
+    transfer_tracker: &ProviderTransferTracker,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
     let mut exhausted = None;
 
@@ -475,6 +498,7 @@ pub(crate) async fn maybe_execute_sync_via_local_standard_decision(
         body_json,
         plan_kind,
         resolve_claude_sync_spec,
+        transfer_tracker,
     )
     .await?
     {
@@ -493,6 +517,7 @@ pub(crate) async fn maybe_execute_sync_via_local_standard_decision(
         body_json,
         plan_kind,
         resolve_gemini_sync_spec,
+        transfer_tracker,
     )
     .await?
     {
@@ -515,6 +540,7 @@ pub(crate) async fn maybe_execute_stream_via_local_standard_decision(
     decision: &GatewayControlDecision,
     body_json: &serde_json::Value,
     plan_kind: &str,
+    transfer_tracker: &ProviderTransferTracker,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
     let mut exhausted = None;
 
@@ -526,6 +552,7 @@ pub(crate) async fn maybe_execute_stream_via_local_standard_decision(
         body_json,
         plan_kind,
         resolve_claude_stream_spec,
+        transfer_tracker,
     )
     .await?
     {
@@ -544,6 +571,7 @@ pub(crate) async fn maybe_execute_stream_via_local_standard_decision(
         body_json,
         plan_kind,
         resolve_gemini_stream_spec,
+        transfer_tracker,
     )
     .await?
     {
@@ -566,6 +594,7 @@ pub(crate) async fn maybe_execute_sync_via_local_same_format_provider_decision(
     decision: &GatewayControlDecision,
     body_json: &serde_json::Value,
     plan_kind: &str,
+    transfer_tracker: &ProviderTransferTracker,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
     let Some(spec) = resolve_local_same_format_sync_spec(plan_kind) else {
         return Ok(LocalExecutionRequestOutcome::NoPath);
@@ -582,6 +611,7 @@ pub(crate) async fn maybe_execute_sync_via_local_same_format_provider_decision(
     if standard_text_sync_heartbeat_should_wrap(state, plan_kind).await {
         let parts_for_task = parts.clone();
         let body_json_for_task = body_json.clone();
+        let transfer_tracker_for_task = transfer_tracker.clone();
         return Ok(LocalExecutionRequestOutcome::responded(
             build_standard_text_sync_heartbeat_shell_response(
                 state.clone(),
@@ -604,15 +634,17 @@ pub(crate) async fn maybe_execute_sync_via_local_same_format_provider_decision(
                         return Ok(LocalExecutionRequestOutcome::NoPath);
                     };
 
-                    let outcome = execute_sync_attempt_source::<AiSyncAttempt, _>(
-                        &state,
-                        &parts,
-                        trace_id.as_str(),
-                        &decision,
-                        plan_kind.as_str(),
-                        attempt_source,
-                    )
-                    .await?;
+                    let outcome =
+                        execute_sync_attempt_source_with_transfer_tracker::<AiSyncAttempt, _>(
+                            &state,
+                            &parts,
+                            trace_id.as_str(),
+                            &decision,
+                            plan_kind.as_str(),
+                            attempt_source,
+                            &transfer_tracker_for_task,
+                        )
+                        .await?;
                     match outcome {
                         LocalExecutionRequestOutcome::Exhausted(exhaustion) => {
                             record_standard_text_sync_heartbeat_exhaustion(
@@ -630,13 +662,14 @@ pub(crate) async fn maybe_execute_sync_via_local_same_format_provider_decision(
         ));
     }
 
-    execute_sync_attempt_source::<AiSyncAttempt, _>(
+    execute_sync_attempt_source_with_transfer_tracker::<AiSyncAttempt, _>(
         state,
         parts,
         trace_id,
         decision,
         plan_kind,
         attempt_source,
+        transfer_tracker,
     )
     .await
 }
@@ -648,6 +681,7 @@ pub(crate) async fn maybe_execute_stream_via_local_same_format_provider_decision
     decision: &GatewayControlDecision,
     body_json: &serde_json::Value,
     plan_kind: &str,
+    transfer_tracker: &ProviderTransferTracker,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
     let Some(spec) = resolve_local_same_format_stream_spec(plan_kind) else {
         return Ok(LocalExecutionRequestOutcome::NoPath);
@@ -661,12 +695,13 @@ pub(crate) async fn maybe_execute_stream_via_local_same_format_provider_decision
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
 
-    execute_stream_attempt_source::<AiStreamAttempt, _>(
+    execute_stream_attempt_source_with_transfer_tracker::<AiStreamAttempt, _>(
         state,
         trace_id,
         decision,
         plan_kind,
         attempt_source,
+        transfer_tracker,
     )
     .await
 }
@@ -680,6 +715,7 @@ pub(crate) async fn maybe_execute_sync_via_local_gemini_files_decision(
     trace_id: &str,
     decision: &GatewayControlDecision,
     plan_kind: &str,
+    transfer_tracker: &ProviderTransferTracker,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
     let Some((attempt_source, _candidate_count)) =
         build_local_gemini_files_sync_attempt_source_for_kind(
@@ -697,13 +733,14 @@ pub(crate) async fn maybe_execute_sync_via_local_gemini_files_decision(
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
 
-    execute_sync_attempt_source::<AiSyncAttempt, _>(
+    execute_sync_attempt_source_with_transfer_tracker::<AiSyncAttempt, _>(
         state,
         parts,
         trace_id,
         decision,
         plan_kind,
         attempt_source,
+        transfer_tracker,
     )
     .await
 }
@@ -1068,6 +1105,7 @@ fn build_openai_image_sync_heartbeat_shell_response(
     decision: GatewayControlDecision,
     plan_kind: String,
     attempts: Vec<AiSyncAttempt>,
+    transfer_tracker: ProviderTransferTracker,
 ) -> Result<Response<Body>, GatewayError> {
     let request_id = attempts
         .first()
@@ -1087,6 +1125,7 @@ fn build_openai_image_sync_heartbeat_shell_response(
                 decision,
                 plan_kind,
                 attempts,
+                transfer_tracker,
                 started_at,
             )
             .await,
@@ -1129,51 +1168,39 @@ async fn execute_openai_image_sync_heartbeat_attempts(
     decision: GatewayControlDecision,
     plan_kind: String,
     attempts: Vec<AiSyncAttempt>,
+    transfer_tracker: ProviderTransferTracker,
     started_at: Instant,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
-    let mut attempts = VecDeque::from(attempts);
-    let mut last_attempted = None;
-
-    while let Some(attempt) = attempts.pop_front() {
-        let plan = attempt.plan;
-        let report_kind = attempt.report_kind;
-        let report_context = attempt.report_context;
-        last_attempted = Some((plan.clone(), report_context.clone()));
-        match execute_execution_runtime_sync(
-            &state,
-            request_path.as_str(),
-            plan,
-            trace_id.as_str(),
-            &decision,
-            plan_kind.as_str(),
-            report_kind,
-            report_context,
-        )
-        .await?
-        {
-            Some(response) => {
-                mark_unused_local_candidates(&state, attempts.into_iter().collect()).await;
-                return Ok(LocalExecutionRequestOutcome::responded(response));
-            }
-            None => continue,
-        }
-    }
-
-    let Some((last_plan, last_report_context)) = last_attempted else {
-        return Ok(LocalExecutionRequestOutcome::NoPath);
-    };
-    let exhaustion =
-        build_local_execution_exhaustion(&state, &last_plan, last_report_context.as_ref()).await;
-    record_failed_usage_for_exhausted_request(
+    let (parts, _) = http::Request::builder()
+        .uri(request_path.as_str())
+        .body(())
+        .map_err(|err| GatewayError::Internal(err.to_string()))?
+        .into_parts();
+    match execute_sync_plan_and_reports_with_transfer_tracker(
         &state,
-        exhaustion,
-        &started_at,
-        "OpenAI image sync heartbeat exhausted all local candidates",
-        EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS,
-        None,
+        &parts,
+        trace_id.as_str(),
+        &decision,
+        plan_kind.as_str(),
+        attempts,
+        &transfer_tracker,
     )
-    .await;
-    Ok(LocalExecutionRequestOutcome::NoPath)
+    .await?
+    {
+        LocalExecutionRequestOutcome::Exhausted(exhaustion) => {
+            record_failed_usage_for_exhausted_request(
+                &state,
+                exhaustion,
+                &started_at,
+                "OpenAI image sync heartbeat exhausted all local candidates",
+                EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS,
+                None,
+            )
+            .await;
+            Ok(LocalExecutionRequestOutcome::NoPath)
+        }
+        outcome => Ok(outcome),
+    }
 }
 
 async fn openai_image_sync_heartbeat_final_bytes(
@@ -1276,6 +1303,7 @@ pub(crate) async fn maybe_execute_sync_via_local_image_decision(
     trace_id: &str,
     decision: &GatewayControlDecision,
     plan_kind: &str,
+    transfer_tracker: &ProviderTransferTracker,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
     let Some((mut attempt_source, candidate_count)) =
         build_local_image_sync_attempt_source_for_kind(
@@ -1305,17 +1333,19 @@ pub(crate) async fn maybe_execute_sync_via_local_image_decision(
                 decision.clone(),
                 plan_kind.to_string(),
                 attempts,
+                transfer_tracker.clone(),
             )?,
         ));
     }
 
-    let outcome = execute_sync_attempt_source::<AiSyncAttempt, _>(
+    let outcome = execute_sync_attempt_source_with_transfer_tracker::<AiSyncAttempt, _>(
         state,
         parts,
         trace_id,
         decision,
         plan_kind,
         attempt_source,
+        transfer_tracker,
     )
     .await?;
 
@@ -1339,6 +1369,7 @@ pub(crate) async fn maybe_execute_stream_via_local_gemini_files_decision(
     trace_id: &str,
     decision: &GatewayControlDecision,
     plan_kind: &str,
+    transfer_tracker: &ProviderTransferTracker,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
     let Some((attempt_source, _candidate_count)) =
         build_local_gemini_files_stream_attempt_source_for_kind(
@@ -1349,12 +1380,13 @@ pub(crate) async fn maybe_execute_stream_via_local_gemini_files_decision(
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
 
-    execute_stream_attempt_source::<AiStreamAttempt, _>(
+    execute_stream_attempt_source_with_transfer_tracker::<AiStreamAttempt, _>(
         state,
         trace_id,
         decision,
         plan_kind,
         attempt_source,
+        transfer_tracker,
     )
     .await
 }
@@ -1367,6 +1399,7 @@ pub(crate) async fn maybe_execute_stream_via_local_image_decision(
     trace_id: &str,
     decision: &GatewayControlDecision,
     plan_kind: &str,
+    transfer_tracker: &ProviderTransferTracker,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
     let Some((attempt_source, candidate_count)) = build_local_image_stream_attempt_source_for_kind(
         state,
@@ -1382,12 +1415,13 @@ pub(crate) async fn maybe_execute_stream_via_local_image_decision(
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
 
-    let outcome = execute_stream_attempt_source::<AiStreamAttempt, _>(
+    let outcome = execute_stream_attempt_source_with_transfer_tracker::<AiStreamAttempt, _>(
         state,
         trace_id,
         decision,
         plan_kind,
         attempt_source,
+        transfer_tracker,
     )
     .await?;
 
@@ -1412,6 +1446,7 @@ pub(crate) async fn maybe_execute_sync_via_local_video_decision(
     trace_id: &str,
     decision: &GatewayControlDecision,
     plan_kind: &str,
+    transfer_tracker: &ProviderTransferTracker,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
     let Some((attempt_source, _candidate_count)) = build_local_video_sync_attempt_source_for_kind(
         state, parts, body_json, trace_id, decision, plan_kind,
@@ -1421,13 +1456,14 @@ pub(crate) async fn maybe_execute_sync_via_local_video_decision(
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
 
-    execute_sync_attempt_source::<AiSyncAttempt, _>(
+    execute_sync_attempt_source_with_transfer_tracker::<AiSyncAttempt, _>(
         state,
         parts,
         trace_id,
         decision,
         plan_kind,
         attempt_source,
+        transfer_tracker,
     )
     .await
 }
@@ -1548,6 +1584,12 @@ mod tests {
 
         async fn drain_execution_attempts(&mut self) -> Result<Vec<AiSyncAttempt>, GatewayError> {
             Ok(self.attempts.drain(..).collect())
+        }
+
+        async fn skip_provider(&mut self, provider_id: &str) -> Result<(), GatewayError> {
+            self.attempts
+                .retain(|attempt| attempt.plan.provider_id != provider_id);
+            Ok(())
         }
     }
 
@@ -1779,6 +1821,7 @@ mod tests {
             test_openai_image_heartbeat_decision(),
             TEST_OPENAI_IMAGE_SYNC_PLAN_KIND.to_string(),
             attempts,
+            ProviderTransferTracker::default(),
             Instant::now(),
         )
         .await
@@ -1791,6 +1834,70 @@ mod tests {
 
         assert_eq!(call_count.load(Ordering::SeqCst), 2);
         assert_eq!(body, json!({"data": [{"b64_json": "second-candidate"}]}));
+    }
+
+    #[tokio::test]
+    async fn openai_image_sync_heartbeat_honors_provider_transfer_limit() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_for_override = Arc::clone(&call_count);
+        let state = AppState::new()
+            .expect("state should build")
+            .with_execution_runtime_sync_override_for_tests(move |plan| {
+                call_count_for_override.fetch_add(1, Ordering::SeqCst);
+                if plan.provider_id == "provider-fallback" {
+                    Ok(test_openai_image_execution_result(
+                        plan,
+                        StatusCode::OK.as_u16(),
+                        json!({"data": [{"b64_json": "fallback-provider"}]}),
+                    ))
+                } else {
+                    Ok(test_openai_image_execution_result(
+                        plan,
+                        StatusCode::TOO_MANY_REQUESTS.as_u16(),
+                        json!({"error": {"message": "retry another key"}}),
+                    ))
+                }
+            });
+        let mut attempts = vec![
+            test_openai_image_heartbeat_attempt(0, "endpoint-key-1", "candidate-key-1"),
+            test_openai_image_heartbeat_attempt(1, "endpoint-key-2", "candidate-key-2"),
+            test_openai_image_heartbeat_attempt(2, "endpoint-key-3", "candidate-key-3"),
+            test_openai_image_heartbeat_attempt(3, "endpoint-fallback", "candidate-fallback"),
+        ];
+        for (index, attempt) in attempts.iter_mut().take(3).enumerate() {
+            attempt.plan.key_id = format!("key-{}", index + 1);
+            attempt.report_context = Some(json!({
+                "candidate_index": index,
+                "retry_index": 0,
+                "local_failover_policy": {
+                    "max_transfer_count": 1,
+                    "max_transfer_timeout_seconds": 0
+                }
+            }));
+        }
+        attempts[3].plan.provider_id = "provider-fallback".to_string();
+        attempts[3].plan.key_id = "key-fallback".to_string();
+
+        let outcome = execute_openai_image_sync_heartbeat_attempts(
+            state,
+            "/v1/images/generations".to_string(),
+            "trace-image-heartbeat-transfer-limit".to_string(),
+            test_openai_image_heartbeat_decision(),
+            TEST_OPENAI_IMAGE_SYNC_PLAN_KIND.to_string(),
+            attempts,
+            ProviderTransferTracker::default(),
+            Instant::now(),
+        )
+        .await
+        .expect("heartbeat attempts should execute");
+        let LocalExecutionRequestOutcome::Responded(response) = outcome else {
+            panic!("fallback provider should return a response");
+        };
+        let bytes = openai_image_sync_heartbeat_response_body_bytes(response).await;
+        let body: Value = serde_json::from_slice(&bytes).expect("body should decode");
+
+        assert_eq!(call_count.load(Ordering::SeqCst), 3);
+        assert_eq!(body, json!({"data": [{"b64_json": "fallback-provider"}]}));
     }
 
     #[tokio::test]
@@ -1824,6 +1931,7 @@ mod tests {
             &test_standard_text_heartbeat_decision(),
             &json!({"model": "missing-local-candidate"}),
             TEST_STANDARD_TEXT_SYNC_PLAN_KIND,
+            &ProviderTransferTracker::default(),
         )
         .await
         .expect("heartbeat no-path check should execute");

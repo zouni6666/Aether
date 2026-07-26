@@ -919,3 +919,1545 @@ type = "unix_seconds"
 [[table.stats_user_daily.uniques]]
 name = "uq_stats_user_daily"
 columns = ["date", "user_id"]
+
+# Advanced rollup columns are deployed incrementally by the portable drivers.
+[[table.stats_user_daily.columns]]
+name = "actual_total_cost"
+type = "float64"
+default = 0
+
+[[table.stats_user_daily.columns]]
+name = "response_time_sum_ms"
+type = "float64"
+default = 0
+
+[[table.stats_user_daily.columns]]
+name = "response_time_samples"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily.columns]]
+name = "effective_input_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily.columns]]
+name = "total_input_context"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily.columns]]
+name = "cache_creation_cost"
+type = "float64"
+default = 0
+
+[[table.stats_user_daily.columns]]
+name = "cache_read_cost"
+type = "float64"
+default = 0
+
+[[table.stats_user_daily.columns]]
+name = "cache_creation_ephemeral_5m_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily.columns]]
+name = "cache_creation_ephemeral_1h_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily.columns]]
+name = "settled_total_cost"
+type = "float64"
+default = 0
+
+[[table.stats_user_daily.columns]]
+name = "settled_total_requests"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily.columns]]
+name = "settled_input_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily.columns]]
+name = "settled_output_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily.columns]]
+name = "settled_cache_creation_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily.columns]]
+name = "settled_cache_read_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily.columns]]
+name = "settled_first_finalized_at_unix_secs"
+type = "unix_seconds"
+nullable = true
+
+[[table.stats_user_daily.columns]]
+name = "settled_last_finalized_at_unix_secs"
+type = "unix_seconds"
+nullable = true
+
+[[table.stats_hourly_user.columns]]
+name = "cache_creation_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_hourly_user.columns]]
+name = "cache_read_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_hourly_user.columns]]
+name = "actual_total_cost"
+type = "float64"
+default = 0
+
+[[table.stats_hourly_user.columns]]
+name = "response_time_sum_ms"
+type = "float64"
+default = 0
+
+[[table.stats_hourly_user.columns]]
+name = "response_time_samples"
+type = "int64"
+default = 0
+
+[[table.stats_hourly_user.columns]]
+name = "settled_total_cost"
+type = "float64"
+default = 0
+
+[[table.stats_hourly_user.columns]]
+name = "settled_total_requests"
+type = "int64"
+default = 0
+
+[[table.stats_hourly_user.columns]]
+name = "settled_input_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_hourly_user.columns]]
+name = "settled_output_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_hourly_user.columns]]
+name = "settled_cache_creation_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_hourly_user.columns]]
+name = "settled_cache_read_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_hourly_user.columns]]
+name = "settled_first_finalized_at_unix_secs"
+type = "unix_seconds"
+nullable = true
+
+[[table.stats_hourly_user.columns]]
+name = "settled_last_finalized_at_unix_secs"
+type = "unix_seconds"
+nullable = true
+
+[[table.stats_daily.columns]]
+name = "effective_input_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_daily.columns]]
+name = "total_input_context"
+type = "int64"
+default = 0
+
+[[table.stats_daily.columns]]
+name = "response_time_sum_ms"
+type = "float64"
+default = 0
+
+[[table.stats_daily.columns]]
+name = "response_time_samples"
+type = "int64"
+default = 0
+
+[[table.stats_daily.columns]]
+name = "cache_creation_ephemeral_5m_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_daily.columns]]
+name = "cache_creation_ephemeral_1h_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_daily.columns]]
+name = "cache_hit_total_requests"
+type = "int64"
+default = 0
+
+[[table.stats_daily.columns]]
+name = "cache_hit_requests"
+type = "int64"
+default = 0
+
+[[table.stats_daily.columns]]
+name = "completed_total_requests"
+type = "int64"
+default = 0
+
+[[table.stats_daily.columns]]
+name = "completed_cache_hit_requests"
+type = "int64"
+default = 0
+
+[[table.stats_daily.columns]]
+name = "completed_input_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_daily.columns]]
+name = "completed_cache_creation_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_daily.columns]]
+name = "completed_cache_read_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_daily.columns]]
+name = "completed_total_input_context"
+type = "int64"
+default = 0
+
+[[table.stats_daily.columns]]
+name = "completed_cache_creation_cost"
+type = "float64"
+default = 0
+
+[[table.stats_daily.columns]]
+name = "completed_cache_read_cost"
+type = "float64"
+default = 0
+
+[[table.stats_daily.columns]]
+name = "settled_total_cost"
+type = "float64"
+default = 0
+
+[[table.stats_daily.columns]]
+name = "settled_total_requests"
+type = "int64"
+default = 0
+
+[[table.stats_daily.columns]]
+name = "settled_input_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_daily.columns]]
+name = "settled_output_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_daily.columns]]
+name = "settled_cache_creation_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_daily.columns]]
+name = "settled_cache_read_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_daily.columns]]
+name = "settled_first_finalized_at_unix_secs"
+type = "unix_seconds"
+nullable = true
+
+[[table.stats_daily.columns]]
+name = "settled_last_finalized_at_unix_secs"
+type = "unix_seconds"
+nullable = true
+
+[[table.stats_hourly.columns]]
+name = "response_time_sum_ms"
+type = "float64"
+default = 0
+
+[[table.stats_hourly.columns]]
+name = "response_time_samples"
+type = "int64"
+default = 0
+
+[[table.stats_hourly.columns]]
+name = "cache_hit_total_requests"
+type = "int64"
+default = 0
+
+[[table.stats_hourly.columns]]
+name = "cache_hit_requests"
+type = "int64"
+default = 0
+
+[[table.stats_hourly.columns]]
+name = "completed_total_requests"
+type = "int64"
+default = 0
+
+[[table.stats_hourly.columns]]
+name = "completed_cache_hit_requests"
+type = "int64"
+default = 0
+
+[[table.stats_hourly.columns]]
+name = "completed_input_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_hourly.columns]]
+name = "completed_cache_creation_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_hourly.columns]]
+name = "completed_cache_read_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_hourly.columns]]
+name = "completed_total_input_context"
+type = "int64"
+default = 0
+
+[[table.stats_hourly.columns]]
+name = "completed_cache_creation_cost"
+type = "float64"
+default = 0
+
+[[table.stats_hourly.columns]]
+name = "completed_cache_read_cost"
+type = "float64"
+default = 0
+
+[[table.stats_hourly.columns]]
+name = "settled_total_cost"
+type = "float64"
+default = 0
+
+[[table.stats_hourly.columns]]
+name = "settled_total_requests"
+type = "int64"
+default = 0
+
+[[table.stats_hourly.columns]]
+name = "settled_input_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_hourly.columns]]
+name = "settled_output_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_hourly.columns]]
+name = "settled_cache_creation_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_hourly.columns]]
+name = "settled_cache_read_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_hourly.columns]]
+name = "settled_first_finalized_at_unix_secs"
+type = "unix_seconds"
+nullable = true
+
+[[table.stats_hourly.columns]]
+name = "settled_last_finalized_at_unix_secs"
+type = "unix_seconds"
+nullable = true
+
+[[table.stats_daily_model.columns]]
+name = "response_time_sum_ms"
+type = "float64"
+default = 0
+
+[[table.stats_daily_model.columns]]
+name = "response_time_samples"
+type = "int64"
+default = 0
+
+[[table.stats_daily_model.columns]]
+name = "cache_creation_ephemeral_5m_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_daily_model.columns]]
+name = "cache_creation_ephemeral_1h_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_hourly_model.columns]]
+name = "response_time_sum_ms"
+type = "float64"
+default = 0
+
+[[table.stats_hourly_model.columns]]
+name = "response_time_samples"
+type = "int64"
+default = 0
+
+[[table.stats_hourly_user_model.columns]]
+name = "response_time_sum_ms"
+type = "float64"
+default = 0
+
+[[table.stats_hourly_user_model.columns]]
+name = "response_time_samples"
+type = "int64"
+default = 0
+
+[table.stats_user_summary]
+domain = "stats"
+order = 120
+primary_key = ["id"]
+
+[[table.stats_user_summary.columns]]
+name = "id"
+type = "text_id"
+length = 64
+
+[[table.stats_user_summary.columns]]
+name = "user_id"
+type = "text_id"
+length = 64
+
+[[table.stats_user_summary.columns]]
+name = "username"
+type = "text"
+length = 255
+nullable = true
+
+[[table.stats_user_summary.columns]]
+name = "cutoff_date"
+type = "unix_seconds"
+
+[[table.stats_user_summary.columns]]
+name = "all_time_requests"
+type = "int64"
+default = 0
+
+[[table.stats_user_summary.columns]]
+name = "all_time_success_requests"
+type = "int64"
+default = 0
+
+[[table.stats_user_summary.columns]]
+name = "all_time_error_requests"
+type = "int64"
+default = 0
+
+[[table.stats_user_summary.columns]]
+name = "all_time_input_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_summary.columns]]
+name = "all_time_output_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_summary.columns]]
+name = "all_time_cache_creation_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_summary.columns]]
+name = "all_time_cache_read_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_summary.columns]]
+name = "all_time_cost"
+type = "float64"
+default = 0
+
+[[table.stats_user_summary.columns]]
+name = "all_time_actual_cost"
+type = "float64"
+default = 0
+
+[[table.stats_user_summary.columns]]
+name = "active_days"
+type = "int64"
+default = 0
+
+[[table.stats_user_summary.columns]]
+name = "first_active_date"
+type = "unix_seconds"
+nullable = true
+
+[[table.stats_user_summary.columns]]
+name = "last_active_date"
+type = "unix_seconds"
+nullable = true
+
+[[table.stats_user_summary.columns]]
+name = "created_at"
+type = "unix_seconds"
+
+[[table.stats_user_summary.columns]]
+name = "updated_at"
+type = "unix_seconds"
+
+[[table.stats_user_summary.uniques]]
+name = "uq_stats_user_summary_user_id"
+columns = ["user_id"]
+
+[[table.stats_user_summary.indexes]]
+name = "idx_stats_user_summary_cutoff_date"
+columns = ["cutoff_date"]
+
+[table.stats_user_daily_model]
+domain = "stats"
+order = 130
+primary_key = ["id"]
+
+[[table.stats_user_daily_model.columns]]
+name = "id"
+type = "text_id"
+length = 64
+
+[[table.stats_user_daily_model.columns]]
+name = "user_id"
+type = "text_id"
+length = 64
+
+[[table.stats_user_daily_model.columns]]
+name = "username"
+type = "text"
+length = 255
+nullable = true
+
+[[table.stats_user_daily_model.columns]]
+name = "date"
+type = "unix_seconds"
+
+[[table.stats_user_daily_model.columns]]
+name = "model"
+type = "text"
+length = 255
+
+[[table.stats_user_daily_model.columns]]
+name = "total_requests"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_model.columns]]
+name = "success_requests"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_model.columns]]
+name = "input_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_model.columns]]
+name = "effective_input_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_model.columns]]
+name = "output_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_model.columns]]
+name = "total_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_model.columns]]
+name = "total_input_context"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_model.columns]]
+name = "cache_creation_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_model.columns]]
+name = "cache_creation_ephemeral_5m_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_model.columns]]
+name = "cache_creation_ephemeral_1h_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_model.columns]]
+name = "cache_read_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_model.columns]]
+name = "total_cost"
+type = "float64"
+default = 0
+
+[[table.stats_user_daily_model.columns]]
+name = "actual_total_cost"
+type = "float64"
+default = 0
+
+[[table.stats_user_daily_model.columns]]
+name = "response_time_sum_ms"
+type = "float64"
+default = 0
+
+[[table.stats_user_daily_model.columns]]
+name = "response_time_samples"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_model.columns]]
+name = "successful_response_time_sum_ms"
+type = "float64"
+default = 0
+
+[[table.stats_user_daily_model.columns]]
+name = "successful_response_time_samples"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_model.columns]]
+name = "created_at"
+type = "unix_seconds"
+
+[[table.stats_user_daily_model.columns]]
+name = "updated_at"
+type = "unix_seconds"
+
+[[table.stats_user_daily_model.uniques]]
+name = "uq_stats_user_daily_model"
+columns = ["user_id", "date", "model"]
+
+[[table.stats_user_daily_model.indexes]]
+name = "idx_stats_user_daily_model_date"
+columns = ["date"]
+
+[[table.stats_user_daily_model.indexes]]
+name = "idx_stats_user_daily_model_user_id"
+columns = ["user_id"]
+
+[table.stats_user_daily_provider]
+domain = "stats"
+order = 140
+primary_key = ["id"]
+
+[[table.stats_user_daily_provider.columns]]
+name = "id"
+type = "text_id"
+length = 64
+
+[[table.stats_user_daily_provider.columns]]
+name = "user_id"
+type = "text_id"
+length = 64
+
+[[table.stats_user_daily_provider.columns]]
+name = "username"
+type = "text"
+length = 255
+nullable = true
+
+[[table.stats_user_daily_provider.columns]]
+name = "date"
+type = "unix_seconds"
+
+[[table.stats_user_daily_provider.columns]]
+name = "provider_name"
+type = "text"
+length = 255
+
+[[table.stats_user_daily_provider.columns]]
+name = "total_requests"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_provider.columns]]
+name = "success_requests"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_provider.columns]]
+name = "input_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_provider.columns]]
+name = "effective_input_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_provider.columns]]
+name = "output_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_provider.columns]]
+name = "total_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_provider.columns]]
+name = "total_input_context"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_provider.columns]]
+name = "cache_creation_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_provider.columns]]
+name = "cache_creation_ephemeral_5m_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_provider.columns]]
+name = "cache_creation_ephemeral_1h_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_provider.columns]]
+name = "cache_read_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_provider.columns]]
+name = "total_cost"
+type = "float64"
+default = 0
+
+[[table.stats_user_daily_provider.columns]]
+name = "actual_total_cost"
+type = "float64"
+default = 0
+
+[[table.stats_user_daily_provider.columns]]
+name = "response_time_sum_ms"
+type = "float64"
+default = 0
+
+[[table.stats_user_daily_provider.columns]]
+name = "response_time_samples"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_provider.columns]]
+name = "successful_response_time_sum_ms"
+type = "float64"
+default = 0
+
+[[table.stats_user_daily_provider.columns]]
+name = "successful_response_time_samples"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_provider.columns]]
+name = "created_at"
+type = "unix_seconds"
+
+[[table.stats_user_daily_provider.columns]]
+name = "updated_at"
+type = "unix_seconds"
+
+[[table.stats_user_daily_provider.uniques]]
+name = "uq_stats_user_daily_provider"
+columns = ["user_id", "date", "provider_name"]
+
+[[table.stats_user_daily_provider.indexes]]
+name = "idx_stats_user_daily_provider_date"
+columns = ["date"]
+
+[[table.stats_user_daily_provider.indexes]]
+name = "idx_stats_user_daily_provider_user_id"
+columns = ["user_id"]
+
+[table.stats_user_daily_api_format]
+domain = "stats"
+order = 150
+primary_key = ["id"]
+
+[[table.stats_user_daily_api_format.columns]]
+name = "id"
+type = "text_id"
+length = 64
+
+[[table.stats_user_daily_api_format.columns]]
+name = "user_id"
+type = "text_id"
+length = 64
+
+[[table.stats_user_daily_api_format.columns]]
+name = "username"
+type = "text"
+length = 255
+nullable = true
+
+[[table.stats_user_daily_api_format.columns]]
+name = "date"
+type = "unix_seconds"
+
+[[table.stats_user_daily_api_format.columns]]
+name = "api_format"
+type = "text"
+length = 128
+
+[[table.stats_user_daily_api_format.columns]]
+name = "total_requests"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_api_format.columns]]
+name = "success_requests"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_api_format.columns]]
+name = "input_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_api_format.columns]]
+name = "effective_input_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_api_format.columns]]
+name = "output_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_api_format.columns]]
+name = "total_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_api_format.columns]]
+name = "total_input_context"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_api_format.columns]]
+name = "cache_creation_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_api_format.columns]]
+name = "cache_creation_ephemeral_5m_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_api_format.columns]]
+name = "cache_creation_ephemeral_1h_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_api_format.columns]]
+name = "cache_read_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_api_format.columns]]
+name = "total_cost"
+type = "float64"
+default = 0
+
+[[table.stats_user_daily_api_format.columns]]
+name = "actual_total_cost"
+type = "float64"
+default = 0
+
+[[table.stats_user_daily_api_format.columns]]
+name = "response_time_sum_ms"
+type = "float64"
+default = 0
+
+[[table.stats_user_daily_api_format.columns]]
+name = "response_time_samples"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_api_format.columns]]
+name = "successful_response_time_sum_ms"
+type = "float64"
+default = 0
+
+[[table.stats_user_daily_api_format.columns]]
+name = "successful_response_time_samples"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_api_format.columns]]
+name = "created_at"
+type = "unix_seconds"
+
+[[table.stats_user_daily_api_format.columns]]
+name = "updated_at"
+type = "unix_seconds"
+
+[[table.stats_user_daily_api_format.uniques]]
+name = "uq_stats_user_daily_api_format"
+columns = ["user_id", "date", "api_format"]
+
+[[table.stats_user_daily_api_format.indexes]]
+name = "idx_stats_user_daily_api_format_date"
+columns = ["date"]
+
+[[table.stats_user_daily_api_format.indexes]]
+name = "idx_stats_user_daily_api_format_user_id"
+columns = ["user_id"]
+
+[table.stats_daily_model_provider]
+domain = "stats"
+order = 160
+primary_key = ["id"]
+
+[[table.stats_daily_model_provider.columns]]
+name = "id"
+type = "text_id"
+length = 64
+
+[[table.stats_daily_model_provider.columns]]
+name = "date"
+type = "unix_seconds"
+
+[[table.stats_daily_model_provider.columns]]
+name = "model"
+type = "text"
+length = 255
+
+[[table.stats_daily_model_provider.columns]]
+name = "provider_name"
+type = "text"
+length = 255
+
+[[table.stats_daily_model_provider.columns]]
+name = "total_requests"
+type = "int64"
+default = 0
+
+[[table.stats_daily_model_provider.columns]]
+name = "total_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_daily_model_provider.columns]]
+name = "total_cost"
+type = "float64"
+default = 0
+
+[[table.stats_daily_model_provider.columns]]
+name = "response_time_sum_ms"
+type = "float64"
+default = 0
+
+[[table.stats_daily_model_provider.columns]]
+name = "response_time_samples"
+type = "int64"
+default = 0
+
+[[table.stats_daily_model_provider.columns]]
+name = "created_at"
+type = "unix_seconds"
+
+[[table.stats_daily_model_provider.columns]]
+name = "updated_at"
+type = "unix_seconds"
+
+[[table.stats_daily_model_provider.uniques]]
+name = "uq_stats_daily_model_provider"
+columns = ["date", "model", "provider_name"]
+
+[[table.stats_daily_model_provider.indexes]]
+name = "idx_stats_daily_model_provider_date"
+columns = ["date"]
+
+[table.stats_user_daily_model_provider]
+domain = "stats"
+order = 170
+primary_key = ["id"]
+
+[[table.stats_user_daily_model_provider.columns]]
+name = "id"
+type = "text_id"
+length = 64
+
+[[table.stats_user_daily_model_provider.columns]]
+name = "user_id"
+type = "text_id"
+length = 64
+
+[[table.stats_user_daily_model_provider.columns]]
+name = "username"
+type = "text"
+length = 255
+nullable = true
+
+[[table.stats_user_daily_model_provider.columns]]
+name = "date"
+type = "unix_seconds"
+
+[[table.stats_user_daily_model_provider.columns]]
+name = "model"
+type = "text"
+length = 255
+
+[[table.stats_user_daily_model_provider.columns]]
+name = "provider_name"
+type = "text"
+length = 255
+
+[[table.stats_user_daily_model_provider.columns]]
+name = "total_requests"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_model_provider.columns]]
+name = "total_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_model_provider.columns]]
+name = "total_cost"
+type = "float64"
+default = 0
+
+[[table.stats_user_daily_model_provider.columns]]
+name = "response_time_sum_ms"
+type = "float64"
+default = 0
+
+[[table.stats_user_daily_model_provider.columns]]
+name = "response_time_samples"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_model_provider.columns]]
+name = "created_at"
+type = "unix_seconds"
+
+[[table.stats_user_daily_model_provider.columns]]
+name = "updated_at"
+type = "unix_seconds"
+
+[[table.stats_user_daily_model_provider.uniques]]
+name = "uq_stats_user_daily_model_provider"
+columns = ["user_id", "date", "model", "provider_name"]
+
+[[table.stats_user_daily_model_provider.indexes]]
+name = "idx_stats_user_daily_model_provider_date"
+columns = ["date"]
+
+[[table.stats_user_daily_model_provider.indexes]]
+name = "idx_stats_user_daily_model_provider_user_date"
+columns = ["user_id", "date"]
+
+[table.stats_daily_cost_savings]
+domain = "stats"
+order = 180
+primary_key = ["id"]
+
+[[table.stats_daily_cost_savings.columns]]
+name = "id"
+type = "text_id"
+length = 64
+
+[[table.stats_daily_cost_savings.columns]]
+name = "date"
+type = "unix_seconds"
+
+[[table.stats_daily_cost_savings.columns]]
+name = "cache_read_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_daily_cost_savings.columns]]
+name = "cache_read_cost"
+type = "float64"
+default = 0
+
+[[table.stats_daily_cost_savings.columns]]
+name = "cache_creation_cost"
+type = "float64"
+default = 0
+
+[[table.stats_daily_cost_savings.columns]]
+name = "estimated_full_cost"
+type = "float64"
+default = 0
+
+[[table.stats_daily_cost_savings.columns]]
+name = "created_at"
+type = "unix_seconds"
+
+[[table.stats_daily_cost_savings.columns]]
+name = "updated_at"
+type = "unix_seconds"
+
+[[table.stats_daily_cost_savings.uniques]]
+name = "uq_stats_daily_cost_savings_date"
+columns = ["date"]
+
+[table.stats_daily_cost_savings_provider]
+domain = "stats"
+order = 190
+primary_key = ["id"]
+
+[[table.stats_daily_cost_savings_provider.columns]]
+name = "id"
+type = "text_id"
+length = 64
+
+[[table.stats_daily_cost_savings_provider.columns]]
+name = "date"
+type = "unix_seconds"
+
+[[table.stats_daily_cost_savings_provider.columns]]
+name = "provider_name"
+type = "text"
+length = 255
+
+[[table.stats_daily_cost_savings_provider.columns]]
+name = "cache_read_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_daily_cost_savings_provider.columns]]
+name = "cache_read_cost"
+type = "float64"
+default = 0
+
+[[table.stats_daily_cost_savings_provider.columns]]
+name = "cache_creation_cost"
+type = "float64"
+default = 0
+
+[[table.stats_daily_cost_savings_provider.columns]]
+name = "estimated_full_cost"
+type = "float64"
+default = 0
+
+[[table.stats_daily_cost_savings_provider.columns]]
+name = "created_at"
+type = "unix_seconds"
+
+[[table.stats_daily_cost_savings_provider.columns]]
+name = "updated_at"
+type = "unix_seconds"
+
+[[table.stats_daily_cost_savings_provider.uniques]]
+name = "uq_stats_daily_cost_savings_provider"
+columns = ["date", "provider_name"]
+
+[[table.stats_daily_cost_savings_provider.indexes]]
+name = "idx_stats_daily_cost_savings_provider_date"
+columns = ["date"]
+
+[table.stats_daily_cost_savings_model]
+domain = "stats"
+order = 200
+primary_key = ["id"]
+
+[[table.stats_daily_cost_savings_model.columns]]
+name = "id"
+type = "text_id"
+length = 64
+
+[[table.stats_daily_cost_savings_model.columns]]
+name = "date"
+type = "unix_seconds"
+
+[[table.stats_daily_cost_savings_model.columns]]
+name = "model"
+type = "text"
+length = 255
+
+[[table.stats_daily_cost_savings_model.columns]]
+name = "cache_read_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_daily_cost_savings_model.columns]]
+name = "cache_read_cost"
+type = "float64"
+default = 0
+
+[[table.stats_daily_cost_savings_model.columns]]
+name = "cache_creation_cost"
+type = "float64"
+default = 0
+
+[[table.stats_daily_cost_savings_model.columns]]
+name = "estimated_full_cost"
+type = "float64"
+default = 0
+
+[[table.stats_daily_cost_savings_model.columns]]
+name = "created_at"
+type = "unix_seconds"
+
+[[table.stats_daily_cost_savings_model.columns]]
+name = "updated_at"
+type = "unix_seconds"
+
+[[table.stats_daily_cost_savings_model.uniques]]
+name = "uq_stats_daily_cost_savings_model"
+columns = ["date", "model"]
+
+[[table.stats_daily_cost_savings_model.indexes]]
+name = "idx_stats_daily_cost_savings_model_date"
+columns = ["date"]
+
+[table.stats_daily_cost_savings_model_provider]
+domain = "stats"
+order = 210
+primary_key = ["id"]
+
+[[table.stats_daily_cost_savings_model_provider.columns]]
+name = "id"
+type = "text_id"
+length = 64
+
+[[table.stats_daily_cost_savings_model_provider.columns]]
+name = "date"
+type = "unix_seconds"
+
+[[table.stats_daily_cost_savings_model_provider.columns]]
+name = "model"
+type = "text"
+length = 255
+
+[[table.stats_daily_cost_savings_model_provider.columns]]
+name = "provider_name"
+type = "text"
+length = 255
+
+[[table.stats_daily_cost_savings_model_provider.columns]]
+name = "cache_read_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_daily_cost_savings_model_provider.columns]]
+name = "cache_read_cost"
+type = "float64"
+default = 0
+
+[[table.stats_daily_cost_savings_model_provider.columns]]
+name = "cache_creation_cost"
+type = "float64"
+default = 0
+
+[[table.stats_daily_cost_savings_model_provider.columns]]
+name = "estimated_full_cost"
+type = "float64"
+default = 0
+
+[[table.stats_daily_cost_savings_model_provider.columns]]
+name = "created_at"
+type = "unix_seconds"
+
+[[table.stats_daily_cost_savings_model_provider.columns]]
+name = "updated_at"
+type = "unix_seconds"
+
+[[table.stats_daily_cost_savings_model_provider.uniques]]
+name = "uq_stats_daily_cost_savings_model_provider"
+columns = ["date", "model", "provider_name"]
+
+[[table.stats_daily_cost_savings_model_provider.indexes]]
+name = "idx_stats_daily_cost_savings_model_provider_date"
+columns = ["date"]
+
+[table.stats_user_daily_cost_savings]
+domain = "stats"
+order = 220
+primary_key = ["id"]
+
+[[table.stats_user_daily_cost_savings.columns]]
+name = "id"
+type = "text_id"
+length = 64
+
+[[table.stats_user_daily_cost_savings.columns]]
+name = "user_id"
+type = "text_id"
+length = 64
+
+[[table.stats_user_daily_cost_savings.columns]]
+name = "username"
+type = "text"
+length = 255
+nullable = true
+
+[[table.stats_user_daily_cost_savings.columns]]
+name = "date"
+type = "unix_seconds"
+
+[[table.stats_user_daily_cost_savings.columns]]
+name = "cache_read_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_cost_savings.columns]]
+name = "cache_read_cost"
+type = "float64"
+default = 0
+
+[[table.stats_user_daily_cost_savings.columns]]
+name = "cache_creation_cost"
+type = "float64"
+default = 0
+
+[[table.stats_user_daily_cost_savings.columns]]
+name = "estimated_full_cost"
+type = "float64"
+default = 0
+
+[[table.stats_user_daily_cost_savings.columns]]
+name = "created_at"
+type = "unix_seconds"
+
+[[table.stats_user_daily_cost_savings.columns]]
+name = "updated_at"
+type = "unix_seconds"
+
+[[table.stats_user_daily_cost_savings.uniques]]
+name = "uq_stats_user_daily_cost_savings"
+columns = ["user_id", "date"]
+
+[[table.stats_user_daily_cost_savings.indexes]]
+name = "idx_stats_user_daily_cost_savings_date"
+columns = ["date"]
+
+[table.stats_user_daily_cost_savings_provider]
+domain = "stats"
+order = 230
+primary_key = ["id"]
+
+[[table.stats_user_daily_cost_savings_provider.columns]]
+name = "id"
+type = "text_id"
+length = 64
+
+[[table.stats_user_daily_cost_savings_provider.columns]]
+name = "user_id"
+type = "text_id"
+length = 64
+
+[[table.stats_user_daily_cost_savings_provider.columns]]
+name = "username"
+type = "text"
+length = 255
+nullable = true
+
+[[table.stats_user_daily_cost_savings_provider.columns]]
+name = "date"
+type = "unix_seconds"
+
+[[table.stats_user_daily_cost_savings_provider.columns]]
+name = "provider_name"
+type = "text"
+length = 255
+
+[[table.stats_user_daily_cost_savings_provider.columns]]
+name = "cache_read_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_cost_savings_provider.columns]]
+name = "cache_read_cost"
+type = "float64"
+default = 0
+
+[[table.stats_user_daily_cost_savings_provider.columns]]
+name = "cache_creation_cost"
+type = "float64"
+default = 0
+
+[[table.stats_user_daily_cost_savings_provider.columns]]
+name = "estimated_full_cost"
+type = "float64"
+default = 0
+
+[[table.stats_user_daily_cost_savings_provider.columns]]
+name = "created_at"
+type = "unix_seconds"
+
+[[table.stats_user_daily_cost_savings_provider.columns]]
+name = "updated_at"
+type = "unix_seconds"
+
+[[table.stats_user_daily_cost_savings_provider.uniques]]
+name = "uq_stats_user_daily_cost_savings_provider"
+columns = ["user_id", "date", "provider_name"]
+
+[[table.stats_user_daily_cost_savings_provider.indexes]]
+name = "idx_stats_user_daily_cost_savings_provider_date"
+columns = ["date"]
+
+[table.stats_user_daily_cost_savings_model]
+domain = "stats"
+order = 240
+primary_key = ["id"]
+
+[[table.stats_user_daily_cost_savings_model.columns]]
+name = "id"
+type = "text_id"
+length = 64
+
+[[table.stats_user_daily_cost_savings_model.columns]]
+name = "user_id"
+type = "text_id"
+length = 64
+
+[[table.stats_user_daily_cost_savings_model.columns]]
+name = "username"
+type = "text"
+length = 255
+nullable = true
+
+[[table.stats_user_daily_cost_savings_model.columns]]
+name = "date"
+type = "unix_seconds"
+
+[[table.stats_user_daily_cost_savings_model.columns]]
+name = "model"
+type = "text"
+length = 255
+
+[[table.stats_user_daily_cost_savings_model.columns]]
+name = "cache_read_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_cost_savings_model.columns]]
+name = "cache_read_cost"
+type = "float64"
+default = 0
+
+[[table.stats_user_daily_cost_savings_model.columns]]
+name = "cache_creation_cost"
+type = "float64"
+default = 0
+
+[[table.stats_user_daily_cost_savings_model.columns]]
+name = "estimated_full_cost"
+type = "float64"
+default = 0
+
+[[table.stats_user_daily_cost_savings_model.columns]]
+name = "created_at"
+type = "unix_seconds"
+
+[[table.stats_user_daily_cost_savings_model.columns]]
+name = "updated_at"
+type = "unix_seconds"
+
+[[table.stats_user_daily_cost_savings_model.uniques]]
+name = "uq_stats_user_daily_cost_savings_model"
+columns = ["user_id", "date", "model"]
+
+[[table.stats_user_daily_cost_savings_model.indexes]]
+name = "idx_stats_user_daily_cost_savings_model_date"
+columns = ["date"]
+
+[table.stats_user_daily_cost_savings_model_provider]
+domain = "stats"
+order = 250
+primary_key = ["id"]
+
+[[table.stats_user_daily_cost_savings_model_provider.columns]]
+name = "id"
+type = "text_id"
+length = 64
+
+[[table.stats_user_daily_cost_savings_model_provider.columns]]
+name = "user_id"
+type = "text_id"
+length = 64
+
+[[table.stats_user_daily_cost_savings_model_provider.columns]]
+name = "username"
+type = "text"
+length = 255
+nullable = true
+
+[[table.stats_user_daily_cost_savings_model_provider.columns]]
+name = "date"
+type = "unix_seconds"
+
+[[table.stats_user_daily_cost_savings_model_provider.columns]]
+name = "model"
+type = "text"
+length = 255
+
+[[table.stats_user_daily_cost_savings_model_provider.columns]]
+name = "provider_name"
+type = "text"
+length = 255
+
+[[table.stats_user_daily_cost_savings_model_provider.columns]]
+name = "cache_read_tokens"
+type = "int64"
+default = 0
+
+[[table.stats_user_daily_cost_savings_model_provider.columns]]
+name = "cache_read_cost"
+type = "float64"
+default = 0
+
+[[table.stats_user_daily_cost_savings_model_provider.columns]]
+name = "cache_creation_cost"
+type = "float64"
+default = 0
+
+[[table.stats_user_daily_cost_savings_model_provider.columns]]
+name = "estimated_full_cost"
+type = "float64"
+default = 0
+
+[[table.stats_user_daily_cost_savings_model_provider.columns]]
+name = "created_at"
+type = "unix_seconds"
+
+[[table.stats_user_daily_cost_savings_model_provider.columns]]
+name = "updated_at"
+type = "unix_seconds"
+
+[[table.stats_user_daily_cost_savings_model_provider.uniques]]
+name = "uq_stats_user_daily_cost_savings_model_provider"
+columns = ["user_id", "date", "model", "provider_name"]
+
+[[table.stats_user_daily_cost_savings_model_provider.indexes]]
+name = "idx_stats_user_daily_cost_savings_model_provider_date"
+columns = ["date"]

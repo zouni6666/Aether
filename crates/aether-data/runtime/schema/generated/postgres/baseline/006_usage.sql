@@ -112,6 +112,66 @@ CREATE INDEX IF NOT EXISTS usage_request_id_idx ON public.usage USING btree (req
 CREATE INDEX IF NOT EXISTS usage_user_id_idx ON public.usage USING btree (user_id);
 CREATE INDEX IF NOT EXISTS usage_wallet_id_idx ON public.usage USING btree (wallet_id);
 
+CREATE TABLE IF NOT EXISTS public.usage_body_blobs (
+    body_ref character varying(160) NOT NULL,
+    request_id character varying(128) NOT NULL,
+    body_field character varying(50) NOT NULL,
+    payload_gzip bytea NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    updated_at timestamp with time zone NOT NULL
+);
+
+ALTER TABLE ONLY public.usage_body_blobs ADD CONSTRAINT usage_body_blobs_pkey PRIMARY KEY (body_ref);
+ALTER TABLE ONLY public.usage_body_blobs ADD CONSTRAINT usage_body_blobs_request_id_field_key UNIQUE (request_id, body_field);
+CREATE INDEX IF NOT EXISTS ix_usage_body_blobs_request_id ON public.usage_body_blobs USING btree (request_id);
+ALTER TABLE ONLY public.usage_body_blobs ADD CONSTRAINT usage_body_blobs_request_id_fkey FOREIGN KEY (request_id) REFERENCES public.usage(request_id) ON DELETE CASCADE;
+
+CREATE TABLE IF NOT EXISTS public.usage_http_audits (
+    request_id character varying(128) NOT NULL,
+    request_headers jsonb,
+    provider_request_headers jsonb,
+    response_headers jsonb,
+    client_response_headers jsonb,
+    request_body_ref character varying(160),
+    provider_request_body_ref character varying(160),
+    response_body_ref character varying(160),
+    client_response_body_ref character varying(160),
+    request_body_state character varying(32),
+    provider_request_body_state character varying(32),
+    response_body_state character varying(32),
+    client_response_body_state character varying(32),
+    body_capture_mode character varying(32) DEFAULT 'none' NOT NULL,
+    created_at timestamp with time zone NOT NULL,
+    updated_at timestamp with time zone NOT NULL
+);
+
+ALTER TABLE ONLY public.usage_http_audits ADD CONSTRAINT usage_http_audits_pkey PRIMARY KEY (request_id);
+CREATE INDEX IF NOT EXISTS ix_usage_http_audits_updated_at ON public.usage_http_audits USING btree (updated_at);
+ALTER TABLE ONLY public.usage_http_audits ADD CONSTRAINT usage_http_audits_request_id_fkey FOREIGN KEY (request_id) REFERENCES public.usage(request_id) ON DELETE CASCADE;
+
+CREATE TABLE IF NOT EXISTS public.usage_routing_snapshots (
+    request_id character varying(128) NOT NULL,
+    candidate_id character varying(160),
+    candidate_index bigint,
+    key_name character varying(255),
+    planner_kind character varying(120),
+    route_family character varying(80),
+    route_kind character varying(80),
+    execution_path character varying(80),
+    local_execution_runtime_miss_reason character varying(255),
+    selected_provider_id character varying(100),
+    selected_endpoint_id character varying(100),
+    selected_provider_api_key_id character varying(100),
+    has_format_conversion boolean,
+    created_at timestamp with time zone NOT NULL,
+    updated_at timestamp with time zone NOT NULL
+);
+
+ALTER TABLE ONLY public.usage_routing_snapshots ADD CONSTRAINT usage_routing_snapshots_pkey PRIMARY KEY (request_id);
+CREATE INDEX IF NOT EXISTS ix_usage_routing_snapshots_route_family_kind ON public.usage_routing_snapshots USING btree (route_family, route_kind);
+CREATE INDEX IF NOT EXISTS ix_usage_routing_snapshots_candidate_id ON public.usage_routing_snapshots USING btree (candidate_id);
+ALTER TABLE ONLY public.usage_routing_snapshots ADD CONSTRAINT usage_routing_snapshots_request_id_fkey FOREIGN KEY (request_id) REFERENCES public.usage(request_id) ON DELETE CASCADE;
+
 CREATE TABLE IF NOT EXISTS public.usage_counter_deltas (
     id character varying(36) NOT NULL,
     request_id character varying(128) NOT NULL,
@@ -151,6 +211,33 @@ CREATE TABLE IF NOT EXISTS public.usage_settlement_snapshots (
     wallet_gift_balance_before double precision,
     wallet_gift_balance_after double precision,
     provider_monthly_used_usd double precision,
+    billing_snapshot_schema_version character varying(20),
+    billing_snapshot_status character varying(20),
+    rate_multiplier double precision,
+    is_free_tier boolean,
+    input_price_per_1m double precision,
+    output_price_per_1m double precision,
+    cache_creation_price_per_1m double precision,
+    cache_read_price_per_1m double precision,
+    price_per_request double precision,
+    settlement_snapshot_schema_version character varying(20),
+    settlement_snapshot jsonb,
+    billing_dimensions jsonb,
+    billing_input_tokens bigint,
+    billing_effective_input_tokens bigint,
+    billing_output_tokens bigint,
+    billing_cache_creation_tokens bigint,
+    billing_cache_creation_5m_tokens bigint,
+    billing_cache_creation_1h_tokens bigint,
+    billing_cache_read_tokens bigint,
+    billing_total_input_context bigint,
+    billing_cache_creation_cost_usd double precision,
+    billing_cache_read_cost_usd double precision,
+    billing_total_cost_usd double precision,
+    billing_actual_total_cost_usd double precision,
+    billing_pricing_source character varying(50),
+    billing_rule_id character varying(100),
+    billing_rule_version character varying(50),
     finalized_at bigint,
     created_at bigint NOT NULL,
     updated_at bigint NOT NULL
@@ -159,4 +246,6 @@ CREATE TABLE IF NOT EXISTS public.usage_settlement_snapshots (
 ALTER TABLE ONLY public.usage_settlement_snapshots ADD CONSTRAINT usage_settlement_snapshots_pkey PRIMARY KEY (request_id);
 CREATE INDEX IF NOT EXISTS usage_settlement_snapshots_billing_status_idx ON public.usage_settlement_snapshots USING btree (billing_status);
 CREATE INDEX IF NOT EXISTS usage_settlement_snapshots_wallet_id_idx ON public.usage_settlement_snapshots USING btree (wallet_id);
+CREATE INDEX IF NOT EXISTS ix_usage_settlement_snapshots_schema_version ON public.usage_settlement_snapshots USING btree (settlement_snapshot_schema_version);
+CREATE INDEX IF NOT EXISTS ix_usage_settlement_snapshots_pricing_source ON public.usage_settlement_snapshots USING btree (billing_pricing_source);
 
