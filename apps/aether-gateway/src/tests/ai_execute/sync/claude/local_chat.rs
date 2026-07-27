@@ -49,7 +49,9 @@ async fn gateway_executes_claude_chat_sync_via_local_decision_gate_with_local_sy
         trace_id: String,
         url: String,
         model: String,
+        stream: Option<bool>,
         auth_header_value: String,
+        accept: String,
         anthropic_version: String,
         anthropic_beta: String,
         endpoint_tag: String,
@@ -270,6 +272,12 @@ async fn gateway_executes_claude_chat_sync_via_local_decision_gate_with_local_sy
                 let raw_body = to_bytes(body, usize::MAX).await.expect("body should read");
                 let payload: serde_json::Value = serde_json::from_slice(&raw_body)
                     .expect("execution runtime payload should parse");
+                let upstream_url = payload
+                    .get("url")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let is_count_tokens = upstream_url.ends_with("/v1/messages/count_tokens");
                 *seen_execution_runtime_inner
                     .lock()
                     .expect("mutex should lock") = Some(SeenExecutionRuntimeSyncRequest {
@@ -279,11 +287,7 @@ async fn gateway_executes_claude_chat_sync_via_local_decision_gate_with_local_sy
                         .and_then(|value| value.to_str().ok())
                         .unwrap_or_default()
                         .to_string(),
-                    url: payload
-                        .get("url")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
+                    url: upstream_url,
                     model: payload
                         .get("body")
                         .and_then(|value| value.get("json_body"))
@@ -291,9 +295,20 @@ async fn gateway_executes_claude_chat_sync_via_local_decision_gate_with_local_sy
                         .and_then(|value| value.as_str())
                         .unwrap_or_default()
                         .to_string(),
+                    stream: payload
+                        .get("body")
+                        .and_then(|value| value.get("json_body"))
+                        .and_then(|value| value.get("stream"))
+                        .and_then(|value| value.as_bool()),
                     auth_header_value: payload
                         .get("headers")
                         .and_then(|value| value.get("x-api-key"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    accept: payload
+                        .get("headers")
+                        .and_then(|value| value.get("accept"))
                         .and_then(|value| value.as_str())
                         .unwrap_or_default()
                         .to_string(),
@@ -344,29 +359,39 @@ async fn gateway_executes_claude_chat_sync_via_local_decision_gate_with_local_sy
                         .unwrap_or_default()
                         .to_string(),
                 });
-                Json(json!({
-                    "request_id": "trace-claude-chat-local-123",
-                    "status_code": 200,
-                    "headers": {
-                        "content-type": "application/json"
-                    },
-                    "body": {
-                        "json_body": {
-                            "id": "msg-local-claude-123",
-                            "type": "message",
-                            "model": "claude-sonnet-4-5-upstream",
-                            "role": "assistant",
-                            "content": [],
-                            "usage": {
-                                "input_tokens": 2,
-                                "output_tokens": 3
+                if is_count_tokens {
+                    Json(json!({
+                        "request_id": "trace-claude-count-tokens-local-123",
+                        "status_code": 200,
+                        "headers": {"content-type": "application/json"},
+                        "body": {"json_body": {"input_tokens": 17}},
+                        "telemetry": {"elapsed_ms": 11}
+                    }))
+                } else {
+                    Json(json!({
+                        "request_id": "trace-claude-chat-local-123",
+                        "status_code": 200,
+                        "headers": {
+                            "content-type": "application/json"
+                        },
+                        "body": {
+                            "json_body": {
+                                "id": "msg-local-claude-123",
+                                "type": "message",
+                                "model": "claude-sonnet-4-5-upstream",
+                                "role": "assistant",
+                                "content": [],
+                                "usage": {
+                                    "input_tokens": 2,
+                                    "output_tokens": 3
+                                }
                             }
+                        },
+                        "telemetry": {
+                            "elapsed_ms": 29
                         }
-                    },
-                    "telemetry": {
-                        "elapsed_ms": 29
-                    }
-                }))
+                    }))
+                }
             }
         }),
     );
@@ -483,6 +508,125 @@ async fn gateway_executes_claude_chat_sync_via_local_decision_gate_with_local_sy
     assert_eq!(*decision_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*plan_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
+
+    for (case, body, expected_message) in [
+        ("missing-body", None, "Request body is required"),
+        ("invalid-json", Some("{"), "Invalid JSON body"),
+        (
+            "missing-model",
+            Some(r#"{"messages":[]}"#),
+            "model: Field required",
+        ),
+        (
+            "missing-messages",
+            Some(r#"{"model":"claude-sonnet-4-5"}"#),
+            "messages: Field required",
+        ),
+    ] {
+        let mut request = reqwest::Client::new()
+            .post(format!("{gateway_url}/v1/messages/count_tokens"))
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .header("x-api-key", "sk-client-claude-chat-local")
+            .header("anthropic-version", "2023-06-01")
+            .header(TRACE_ID_HEADER, format!("trace-claude-count-tokens-{case}"));
+        if let Some(body) = body {
+            request = request.body(body);
+        }
+        let invalid_response = request
+            .send()
+            .await
+            .expect("invalid count_tokens request should complete locally");
+        assert_eq!(invalid_response.status(), StatusCode::BAD_REQUEST);
+        let invalid_json: serde_json::Value = invalid_response
+            .json()
+            .await
+            .expect("Anthropic error body should parse");
+        assert_eq!(invalid_json["type"], "error");
+        assert_eq!(invalid_json["error"]["type"], "invalid_request_error");
+        assert_eq!(invalid_json["error"]["message"], expected_message);
+        assert_eq!(
+            seen_execution_runtime
+                .lock()
+                .expect("mutex should lock")
+                .as_ref()
+                .map(|request| request.url.as_str()),
+            Some("https://api.anthropic.example/custom/v1/messages"),
+            "invalid count_tokens request must not reach the execution runtime"
+        );
+    }
+
+    let count_tokens_response = reqwest::Client::new()
+        .post(format!("{gateway_url}/v1/messages/count_tokens"))
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .header("x-api-key", "sk-client-claude-chat-local")
+        .header("anthropic-version", "2023-06-01")
+        .header(TRACE_ID_HEADER, "trace-claude-count-tokens-local-123")
+        .body(
+            "{\"model\":\"claude-sonnet-4-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"stream\":true}",
+        )
+        .send()
+        .await
+        .expect("count_tokens request should succeed");
+
+    assert_eq!(count_tokens_response.status(), StatusCode::OK);
+    assert_eq!(
+        count_tokens_response
+            .headers()
+            .get(EXECUTION_PATH_HEADER)
+            .and_then(|value| value.to_str().ok()),
+        Some(EXECUTION_PATH_EXECUTION_RUNTIME_SYNC)
+    );
+    let seen_count_tokens = seen_execution_runtime
+        .lock()
+        .expect("mutex should lock")
+        .clone()
+        .expect("count_tokens execution request should be captured");
+    assert_eq!(
+        seen_count_tokens.url,
+        "https://api.anthropic.example/custom/v1/messages/count_tokens"
+    );
+    assert_eq!(seen_count_tokens.model, "claude-sonnet-4-5-upstream");
+    assert_eq!(seen_count_tokens.stream, None);
+    assert_eq!(seen_count_tokens.accept, "application/json");
+    assert_eq!(
+        seen_count_tokens.auth_header_value,
+        "sk-upstream-claude-chat"
+    );
+
+    let count_tokens_json: serde_json::Value = count_tokens_response
+        .json()
+        .await
+        .expect("count_tokens response should parse");
+    assert_eq!(
+        count_tokens_json["input_tokens"], 17,
+        "unexpected count_tokens response: {count_tokens_json}"
+    );
+
+    use std::io::Write as _;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder
+        .write_all(
+            br#"{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hello"}]}"#,
+        )
+        .expect("gzip request body should encode");
+    let gzip_body = encoder.finish().expect("gzip request body should finish");
+    let gzip_count_tokens_response = reqwest::Client::new()
+        .post(format!("{gateway_url}/v1/messages/count_tokens"))
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .header(http::header::CONTENT_ENCODING, "gzip")
+        .header("x-api-key", "sk-client-claude-chat-local")
+        .header("anthropic-version", "2023-06-01")
+        .header(TRACE_ID_HEADER, "trace-claude-count-tokens-gzip-123")
+        .body(gzip_body)
+        .send()
+        .await
+        .expect("gzip count_tokens request should succeed");
+    assert_eq!(gzip_count_tokens_response.status(), StatusCode::OK);
+    let gzip_count_tokens_json: serde_json::Value = gzip_count_tokens_response
+        .json()
+        .await
+        .expect("gzip count_tokens response should parse");
+    assert_eq!(gzip_count_tokens_json["input_tokens"], 17);
 
     gateway_handle.abort();
     execution_runtime_handle.abort();
@@ -603,7 +747,8 @@ async fn gateway_surfaces_candidate_list_empty_reason_for_claude_chat_runtime_mi
         Some("candidate_list_empty")
     );
     let payload: serde_json::Value = response.json().await.expect("body should parse");
-    assert_eq!(payload["error"]["type"], "http_error");
+    assert_eq!(payload["type"], "error");
+    assert_eq!(payload["error"]["type"], "overloaded_error");
     assert_eq!(
         payload["error"]["message"],
         "没有可用提供商支持模型 claude-sonnet-4-5 的同步请求"

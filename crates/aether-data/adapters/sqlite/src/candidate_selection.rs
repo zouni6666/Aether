@@ -562,24 +562,12 @@ fn push_key_auth_channel_sql_filter(
     )
     OR (
       LOWER(TRIM(p.provider_type)) = 'vertex_ai'
-      AND (
-        (
-          LOWER(TRIM(pak.auth_type)) = 'api_key'
-          AND "#,
+      AND LOWER(TRIM(pak.auth_type)) IN ('api_key', 'service_account', 'vertex_ai')
+      AND "#,
     );
     builder.push_bind(api_format.clone());
     builder.push(
-        r#" = 'gemini:generate_content'
-        )
-        OR (
-          LOWER(TRIM(pak.auth_type)) IN ('service_account', 'vertex_ai')
-          AND "#,
-    );
-    builder.push_bind(api_format.clone());
-    builder.push(
-        r#" IN ('claude:messages', 'gemini:generate_content')
-        )
-      )
+        r#" IN ('gemini:generate_content', 'gemini:embedding')
     )
     OR (
       LOWER(TRIM(p.provider_type)) NOT IN (
@@ -862,20 +850,14 @@ fn key_auth_channel_matches(row: &CandidateSelectionRow, api_format: &str) -> bo
             matches!(auth_type.as_str(), "oauth" | "api_key" | "bearer")
                 && api_format == "openai:chat"
         }
-        "vertex_ai" => {
-            (auth_type == "api_key"
-                && matches!(
-                    api_format.as_str(),
-                    "gemini:generate_content" | "gemini:embedding"
-                ))
-                || (matches!(auth_type.as_str(), "service_account" | "vertex_ai")
-                    && matches!(
-                        api_format.as_str(),
-                        "claude:messages" | "gemini:generate_content" | "gemini:embedding"
-                    ))
-        }
+        "vertex_ai" => vertex_key_auth_channel_matches(&auth_type, &api_format),
         _ => auth_type != "oauth",
     }
+}
+
+fn vertex_key_auth_channel_matches(auth_type: &str, api_format: &str) -> bool {
+    matches!(auth_type, "api_key" | "service_account" | "vertex_ai")
+        && matches!(api_format, "gemini:generate_content" | "gemini:embedding")
 }
 
 fn dedupe_candidate_selection_rows(
@@ -1194,12 +1176,45 @@ fn sql_match_aliases(api_formats: &[String]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::SqliteMinimalCandidateSelectionReadRepository;
+    use super::{
+        push_key_auth_channel_sql_filter, vertex_key_auth_channel_matches,
+        SqliteMinimalCandidateSelectionReadRepository,
+    };
     use crate::run_migrations;
     use aether_data_contracts::repository::candidate_selection::{
         MinimalCandidateSelectionReadRepository, StoredPoolKeyCandidateOrder,
         StoredPoolKeyCandidateRowsQuery, StoredRequestedModelCandidateRowsQuery,
     };
+
+    #[test]
+    fn vertex_auth_matrix_rejects_retired_claude_format() {
+        for auth_type in ["api_key", "service_account", "vertex_ai"] {
+            assert!(!vertex_key_auth_channel_matches(
+                auth_type,
+                "claude:messages"
+            ));
+            assert!(vertex_key_auth_channel_matches(
+                auth_type,
+                "gemini:generate_content"
+            ));
+            assert!(vertex_key_auth_channel_matches(
+                auth_type,
+                "gemini:embedding"
+            ));
+        }
+
+        let mut builder = sqlx::QueryBuilder::<sqlx::Sqlite>::new("SELECT 1 WHERE 1 = 1");
+        push_key_auth_channel_sql_filter(&mut builder, "claude:messages");
+        let sql = builder.sql();
+        let vertex_clause = sql
+            .split_once("LOWER(TRIM(p.provider_type)) = 'vertex_ai'")
+            .and_then(|(_, suffix)| suffix.split_once("LOWER(TRIM(p.provider_type)) NOT IN"))
+            .map(|(clause, _)| clause)
+            .expect("Vertex auth clause should exist");
+        assert!(!vertex_clause.contains("claude:messages"));
+        assert!(vertex_clause.contains("gemini:generate_content"));
+        assert!(vertex_clause.contains("gemini:embedding"));
+    }
 
     #[tokio::test]
     async fn sqlite_repository_reads_candidate_selection_rows() {

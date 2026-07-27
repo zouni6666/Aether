@@ -1,6 +1,10 @@
 use aether_contracts::ExecutionPlan;
 use tracing::warn;
 
+use crate::orchestration::{
+    oauth_status_may_be_invalid as status_may_be_oauth_invalid,
+    oauth_status_proves_access_token_invalid as status_proves_access_token_invalid,
+};
 use crate::state::AgentIdentityAuthConfigFence;
 use crate::{provider_transport::LocalOAuthRefreshError, AppState};
 
@@ -70,17 +74,17 @@ pub(crate) async fn refresh_oauth_plan_auth_for_retry(
         // A bearer-token response cannot authorize refreshing an Agent Identity
         // installed under the same key id while the request was in flight.
         return false;
-    } else if transport
-        .provider
-        .provider_type
-        .trim()
-        .eq_ignore_ascii_case("codex")
-        && transport.key.auth_type.trim().eq_ignore_ascii_case("oauth")
-        && !request_authorization.is_some_and(|authorization| {
-            bearer_authorization_matches_transport(authorization, &transport)
-        })
-    {
-        return false;
+    } else if aether_provider_transport::supports_local_generic_oauth_request_auth_resolution(
+        &transport,
+    ) {
+        if let Some(current_authorization) = generic_oauth_transport_authorization(&transport) {
+            if !request_authorization.is_some_and(|authorization| {
+                authorizations_use_same_access_token(authorization, &current_authorization)
+            }) {
+                replace_execution_plan_authorization(plan, current_authorization);
+                return true;
+            }
+        }
     }
 
     if transport.key.decrypted_auth_config.is_none()
@@ -164,63 +168,31 @@ fn execution_plan_authorization(plan: &ExecutionPlan) -> Option<&str> {
         .map(|(_, value)| value.as_str())
 }
 
-fn bearer_authorization_matches_transport(
-    authorization: &str,
+fn generic_oauth_transport_authorization(
     transport: &aether_provider_transport::GatewayProviderTransportSnapshot,
-) -> bool {
-    let current_token = transport.key.decrypted_api_key.trim();
-    !current_token.is_empty()
-        && authorization
-            .trim()
-            .strip_prefix("Bearer ")
-            .map(str::trim)
-            .is_some_and(|token| token == current_token)
+) -> Option<String> {
+    aether_provider_transport::resolve_local_generic_oauth_transport_authorization(transport)
 }
 
-fn status_may_be_oauth_invalid(status_code: u16, response_text: Option<&str>) -> bool {
-    if status_code == 401 {
-        return true;
+fn authorizations_use_same_access_token(left: &str, right: &str) -> bool {
+    match (bearer_access_token(left), bearer_access_token(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => left.trim() == right.trim(),
     }
-    if status_code != 403 {
-        return false;
-    }
-
-    let Some(response_text) = response_text else {
-        return true;
-    };
-    let response_text = response_text.to_ascii_lowercase();
-    ["oauth", "token", "auth", "credential", "expired"]
-        .iter()
-        .any(|needle| response_text.contains(needle))
 }
 
-fn status_proves_access_token_invalid(status_code: u16, response_text: Option<&str>) -> bool {
-    if status_code == 401 {
-        return true;
-    }
-    if status_code != 403 {
-        return false;
-    }
+fn bearer_access_token(authorization: &str) -> Option<&str> {
+    let mut parts = authorization.split_ascii_whitespace();
+    let scheme = parts.next()?;
+    let token = parts.next()?;
+    (scheme.eq_ignore_ascii_case("bearer") && parts.next().is_none()).then_some(token)
+}
 
-    let Some(response_text) = response_text else {
-        return false;
-    };
-    let response_text = response_text.to_ascii_lowercase();
-    [
-        "oauth_token_invalid",
-        "invalid_token",
-        "invalid access token",
-        "access token invalid",
-        "access token expired",
-        "expired access token",
-        "authentication token has been invalidated",
-        "token has been invalidated",
-        "personal access token owner is inactive",
-        "biscuit_baker_service_auth_credential_error_status",
-        "security token included in the request is expired",
-    ]
-    .iter()
-    .any(|needle| response_text.contains(needle))
+fn replace_execution_plan_authorization(plan: &mut ExecutionPlan, authorization: String) {
+    plan.headers
+        .retain(|name, _| !name.eq_ignore_ascii_case("authorization"));
+    plan.headers
+        .insert("authorization".to_string(), authorization);
 }
 
 #[cfg(test)]
@@ -230,14 +202,15 @@ mod tests {
         status_proves_access_token_invalid,
     };
     use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use aether_contracts::{ExecutionPlan, RequestBody};
     use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
     use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
     use aether_data_contracts::repository::provider_catalog::{
-        ProviderCatalogReadRepository, StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
-        StoredProviderCatalogProvider,
+        ProviderCatalogReadRepository, ProviderCatalogWriteRepository,
+        StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
     };
     use axum::routing::post;
     use axum::{extract::Request, Json, Router};
@@ -252,8 +225,65 @@ mod tests {
             403,
             Some("The security token included in the request is expired")
         ));
-        assert!(status_may_be_oauth_invalid(403, None));
+        assert!(status_may_be_oauth_invalid(
+            403,
+            Some("oauth_token_invalid")
+        ));
+        assert!(!status_may_be_oauth_invalid(403, None));
+        assert!(!status_may_be_oauth_invalid(
+            403,
+            Some(
+                r#"{"type":"error","error":{"type":"permission_error","message":"this token is not authorized for the workspace"}}"#
+            )
+        ));
+        assert!(!status_may_be_oauth_invalid(
+            403,
+            Some(
+                r#"{"error":{"type":"permission_error","message":"the authentication token has been invalidated for this workspace"}}"#
+            )
+        ));
+        assert!(status_may_be_oauth_invalid(
+            403,
+            Some(
+                r#"{"type":"error","error":{"type":"authentication_error","message":"credential expired"}}"#
+            )
+        ));
+        assert!(status_may_be_oauth_invalid(
+            403,
+            Some(r#"{"error":{"type":"oauth_token_invalid","message":"sign in again"}}"#)
+        ));
+        assert!(status_may_be_oauth_invalid(
+            403,
+            Some(
+                r#"{"error":{"code":"biscuit_baker_service_auth_credential_error_status","message":"Personal access token owner is inactive."}}"#
+            )
+        ));
+        assert!(!status_may_be_oauth_invalid(
+            403,
+            Some(
+                r#"{"error":{"type":"invalid_request_error","message":"Your authentication token has been invalidated. Please try signing in again."}}"#
+            )
+        ));
+        assert!(!status_may_be_oauth_invalid(
+            403,
+            Some(
+                r#"{"error":{"type":"invalid_request_error","message":"invalid request: token budget is invalid"}}"#
+            )
+        ));
         assert!(!status_may_be_oauth_invalid(403, Some("quota exceeded")));
+        assert!(!status_may_be_oauth_invalid(
+            403,
+            Some("invalid request: max token budget is invalid")
+        ));
+        assert!(!status_may_be_oauth_invalid(
+            403,
+            Some("invalid_token_budget")
+        ));
+        assert!(!status_may_be_oauth_invalid(403, Some("not authorized")));
+        assert!(!status_may_be_oauth_invalid(
+            403,
+            Some("authorization denied")
+        ));
         assert!(!status_may_be_oauth_invalid(429, Some("token bucket")));
     }
 
@@ -282,7 +312,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_removes_request_proven_oauth_failure_after_terminal_refresh_failure() {
+    async fn retains_codex_key_after_request_proven_terminal_refresh_failure() {
         let token_hits = Arc::new(Mutex::new(0usize));
         let token_hits_clone = Arc::clone(&token_hits);
         let token_server = Router::new().route(
@@ -437,7 +467,233 @@ mod tests {
             .list_keys_by_ids(&["key-codex-oauth-retry".to_string()])
             .await
             .expect("keys should read");
-        assert!(keys.is_empty());
+        assert_eq!(keys.len(), 1);
+        assert!(keys[0].oauth_invalid_at_unix_secs.is_some());
+        assert!(keys[0]
+            .oauth_invalid_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("[REFRESH_FAILED]")
+                && reason.contains("Token 续期失败 (401)")));
+
+        token_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn stale_claude_code_request_reuses_rotated_access_token_without_second_refresh() {
+        let refresh_hits = Arc::new(AtomicUsize::new(0));
+        let refresh_hits_for_server = Arc::clone(&refresh_hits);
+        let token_server = Router::new().route(
+            "/oauth/token",
+            post(move |_request: Request| {
+                let hits = Arc::clone(&refresh_hits_for_server);
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    Json(json!({
+                        "access_token": "fresh-claude-access-token",
+                        "refresh_token": "fresh-claude-refresh-token",
+                        "expires_in": 3600,
+                        "token_type": "Bearer"
+                    }))
+                }
+            }),
+        );
+
+        let provider = StoredProviderCatalogProvider::new(
+            "provider-claude-code".to_string(),
+            "Claude Code".to_string(),
+            Some("https://api.anthropic.com".to_string()),
+            "claude_code".to_string(),
+        )
+        .expect("provider should build");
+        let endpoint = StoredProviderCatalogEndpoint::new(
+            "endpoint-claude-code".to_string(),
+            "provider-claude-code".to_string(),
+            "claude:messages".to_string(),
+            None,
+            None,
+            true,
+        )
+        .expect("endpoint should build")
+        .with_transport_fields(
+            "https://api.anthropic.com".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("endpoint transport should build");
+        let encrypted_api_key = encrypt_python_fernet_plaintext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            "stale-claude-access-token",
+        )
+        .expect("api key ciphertext should build");
+        let encrypted_auth_config = encrypt_python_fernet_plaintext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            r#"{"provider_type":"claude_code","access_token":"stale-claude-access-token","refresh_token":"stale-claude-refresh-token","expires_at":4102444800}"#,
+        )
+        .expect("auth config ciphertext should build");
+        let mut key = StoredProviderCatalogKey::new(
+            "key-claude-code".to_string(),
+            "provider-claude-code".to_string(),
+            "Claude OAuth".to_string(),
+            "oauth".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build")
+        .with_transport_fields(
+            Some(json!(["claude:messages"])),
+            encrypted_api_key,
+            Some(encrypted_auth_config),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("key transport should build");
+        key.expires_at_unix_secs = Some(4_102_444_800);
+
+        let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![provider],
+            vec![endpoint],
+            vec![key],
+        ));
+        let (token_url, token_handle) = start_test_server(token_server).await;
+        let oauth_refresh =
+            crate::provider_transport::LocalOAuthRefreshCoordinator::with_adapters_for_tests(vec![
+                Arc::new(
+                    crate::provider_transport::oauth_refresh::GenericOAuthRefreshAdapter::default()
+                        .with_token_url_for_tests(
+                            "claude_code",
+                            format!("{token_url}/oauth/token"),
+                        ),
+                ),
+            ]);
+        let state = crate::AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_provider_catalog_repository_for_tests(
+                    provider_catalog_repository.clone(),
+                )
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            )
+            .with_oauth_refresh_coordinator_for_tests(oauth_refresh);
+        let stale_transport = state
+            .read_provider_transport_snapshot(
+                "provider-claude-code",
+                "endpoint-claude-code",
+                "key-claude-code",
+            )
+            .await
+            .expect("stale transport should load")
+            .expect("stale transport should exist");
+        let stale_plan = ExecutionPlan {
+            request_id: "req-claude-oauth-fence".to_string(),
+            candidate_id: None,
+            provider_name: Some("claude_code".to_string()),
+            provider_id: "provider-claude-code".to_string(),
+            endpoint_id: "endpoint-claude-code".to_string(),
+            key_id: "key-claude-code".to_string(),
+            method: "POST".to_string(),
+            url: "https://api.anthropic.com/v1/messages".to_string(),
+            headers: BTreeMap::from([(
+                "authorization".to_string(),
+                "Bearer stale-claude-access-token".to_string(),
+            )]),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({"model": "claude-sonnet-4-5"})),
+            stream: false,
+            client_api_format: "claude:messages".to_string(),
+            provider_api_format: "claude:messages".to_string(),
+            model_name: Some("claude-sonnet-4-5".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+
+        let mut first_plan = stale_plan.clone();
+        assert!(
+            refresh_oauth_plan_auth_for_retry(
+                &state,
+                &mut first_plan,
+                401,
+                Some(r#"{"error":"invalid_token"}"#),
+                "trace-claude-oauth-fence-first",
+            )
+            .await
+        );
+        assert_eq!(
+            first_plan.headers.get("authorization").map(String::as_str),
+            Some("Bearer fresh-claude-access-token")
+        );
+        assert_eq!(refresh_hits.load(Ordering::SeqCst), 1);
+
+        let stale_force_result = state
+            .force_local_oauth_refresh_entry(&stale_transport)
+            .await
+            .expect("stale force should reuse the persisted winner")
+            .expect("stale force should return the winner entry");
+        assert_eq!(
+            stale_force_result.auth_header_value,
+            "Bearer fresh-claude-access-token"
+        );
+        assert_eq!(refresh_hits.load(Ordering::SeqCst), 1);
+
+        let mut stale_in_flight_plan = stale_plan;
+        assert!(
+            refresh_oauth_plan_auth_for_retry(
+                &state,
+                &mut stale_in_flight_plan,
+                401,
+                Some(r#"{"error":"invalid_token"}"#),
+                "trace-claude-oauth-fence-stale",
+            )
+            .await
+        );
+        assert_eq!(
+            stale_in_flight_plan
+                .headers
+                .get("authorization")
+                .map(String::as_str),
+            Some("Bearer fresh-claude-access-token")
+        );
+        assert_eq!(refresh_hits.load(Ordering::SeqCst), 1);
+
+        let mut admin_replacement = provider_catalog_repository
+            .list_keys_by_ids(&["key-claude-code".to_string()])
+            .await
+            .expect("Claude key should load")
+            .pop()
+            .expect("Claude key should exist");
+        admin_replacement.encrypted_api_key = Some(
+            encrypt_python_fernet_plaintext(
+                DEVELOPMENT_ENCRYPTION_KEY,
+                "admin-claude-access-token",
+            )
+            .expect("admin access token should encrypt"),
+        );
+        admin_replacement.expires_at_unix_secs = Some(4_102_444_800);
+        provider_catalog_repository
+            .update_key(&admin_replacement)
+            .await
+            .expect("admin replacement should persist");
+
+        let admin_result = state
+            .force_local_oauth_refresh_entry(&stale_transport)
+            .await
+            .expect("stale force should reuse the admin replacement")
+            .expect("admin replacement should resolve");
+        assert_eq!(
+            admin_result.auth_header_value,
+            "Bearer admin-claude-access-token"
+        );
+        assert_eq!(refresh_hits.load(Ordering::SeqCst), 1);
 
         token_handle.abort();
     }

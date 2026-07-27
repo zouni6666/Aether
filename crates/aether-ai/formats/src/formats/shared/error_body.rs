@@ -8,6 +8,7 @@ pub enum LocalCoreSyncErrorKind {
     NotFound,
     RateLimit,
     ContextLengthExceeded,
+    RequestTooLarge,
     Overloaded,
     ServerError,
 }
@@ -93,7 +94,9 @@ fn map_local_sync_error_kind_to_openai_type(kind: LocalCoreSyncErrorKind) -> &'s
         LocalCoreSyncErrorKind::PermissionDenied => "permission_error",
         LocalCoreSyncErrorKind::NotFound => "not_found_error",
         LocalCoreSyncErrorKind::RateLimit => "rate_limit_error",
-        LocalCoreSyncErrorKind::ContextLengthExceeded => "context_length_exceeded",
+        LocalCoreSyncErrorKind::ContextLengthExceeded | LocalCoreSyncErrorKind::RequestTooLarge => {
+            "context_length_exceeded"
+        }
         LocalCoreSyncErrorKind::Overloaded | LocalCoreSyncErrorKind::ServerError => "server_error",
     }
 }
@@ -103,19 +106,21 @@ fn map_local_sync_error_kind_to_claude_type(kind: LocalCoreSyncErrorKind) -> &'s
         LocalCoreSyncErrorKind::InvalidRequest | LocalCoreSyncErrorKind::ContextLengthExceeded => {
             "invalid_request_error"
         }
+        LocalCoreSyncErrorKind::RequestTooLarge => "request_too_large",
         LocalCoreSyncErrorKind::Authentication => "authentication_error",
         LocalCoreSyncErrorKind::PermissionDenied => "permission_error",
         LocalCoreSyncErrorKind::NotFound => "not_found_error",
         LocalCoreSyncErrorKind::RateLimit => "rate_limit_error",
-        LocalCoreSyncErrorKind::Overloaded | LocalCoreSyncErrorKind::ServerError => "api_error",
+        LocalCoreSyncErrorKind::Overloaded => "overloaded_error",
+        LocalCoreSyncErrorKind::ServerError => "api_error",
     }
 }
 
 fn map_local_sync_error_kind_to_gemini_code(kind: LocalCoreSyncErrorKind) -> u16 {
     match kind {
-        LocalCoreSyncErrorKind::InvalidRequest | LocalCoreSyncErrorKind::ContextLengthExceeded => {
-            400
-        }
+        LocalCoreSyncErrorKind::InvalidRequest
+        | LocalCoreSyncErrorKind::ContextLengthExceeded
+        | LocalCoreSyncErrorKind::RequestTooLarge => 400,
         LocalCoreSyncErrorKind::Authentication => 401,
         LocalCoreSyncErrorKind::PermissionDenied => 403,
         LocalCoreSyncErrorKind::NotFound => 404,
@@ -127,9 +132,9 @@ fn map_local_sync_error_kind_to_gemini_code(kind: LocalCoreSyncErrorKind) -> u16
 
 fn map_local_sync_error_kind_to_gemini_status(kind: LocalCoreSyncErrorKind) -> &'static str {
     match kind {
-        LocalCoreSyncErrorKind::InvalidRequest | LocalCoreSyncErrorKind::ContextLengthExceeded => {
-            "INVALID_ARGUMENT"
-        }
+        LocalCoreSyncErrorKind::InvalidRequest
+        | LocalCoreSyncErrorKind::ContextLengthExceeded
+        | LocalCoreSyncErrorKind::RequestTooLarge => "INVALID_ARGUMENT",
         LocalCoreSyncErrorKind::Authentication => "UNAUTHENTICATED",
         LocalCoreSyncErrorKind::PermissionDenied => "PERMISSION_DENIED",
         LocalCoreSyncErrorKind::NotFound => "NOT_FOUND",
@@ -174,6 +179,51 @@ mod tests {
         assert_eq!(body["error"]["message"], "search unavailable");
         assert_eq!(body["error"]["type"], "server_error");
         assert_eq!(body["error"]["code"], "upstream_unavailable");
+    }
+
+    #[test]
+    fn builds_claude_overloaded_error_body() {
+        let body = build_core_error_body_for_client_format(
+            "claude:messages",
+            "busy",
+            None,
+            LocalCoreSyncErrorKind::Overloaded,
+        )
+        .expect("body should build");
+
+        assert_eq!(body["type"], "error");
+        assert_eq!(body["error"]["type"], "overloaded_error");
+    }
+
+    #[test]
+    fn maps_request_too_large_for_each_client_format() {
+        let claude = build_core_error_body_for_client_format(
+            "claude:messages",
+            "too large",
+            None,
+            LocalCoreSyncErrorKind::RequestTooLarge,
+        )
+        .expect("Claude body should build");
+        assert_eq!(claude["error"]["type"], "request_too_large");
+
+        let openai = build_core_error_body_for_client_format(
+            "openai:chat",
+            "too large",
+            None,
+            LocalCoreSyncErrorKind::RequestTooLarge,
+        )
+        .expect("OpenAI body should build");
+        assert_eq!(openai["error"]["type"], "context_length_exceeded");
+
+        let gemini = build_core_error_body_for_client_format(
+            "gemini:generate_content",
+            "too large",
+            None,
+            LocalCoreSyncErrorKind::RequestTooLarge,
+        )
+        .expect("Gemini body should build");
+        assert_eq!(gemini["error"]["code"], 400);
+        assert_eq!(gemini["error"]["status"], "INVALID_ARGUMENT");
     }
 
     #[test]

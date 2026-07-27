@@ -1,6 +1,6 @@
 use aether_ai_serving::{
     run_ai_sync_execution_path, AiPlanFallbackReason, AiServingExecutionOutcome,
-    AiSyncExecutionPathPort, AiSyncExecutionStep,
+    AiSyncExecutionPathPort, AiSyncExecutionStep, OriginalRequestPayload,
 };
 use async_trait::async_trait;
 use axum::body::{Body, Bytes};
@@ -50,6 +50,22 @@ pub(crate) async fn maybe_execute_via_sync_decision_path(
     let Some((body_json, body_base64)) = parse_local_request_body(parts, body_bytes) else {
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
+
+    let mut planning_parts = parts.clone();
+    if crate::ai_serving::is_json_request(&planning_parts.headers) {
+        if let Ok(decoded_body) = crate::ai_serving::decoded_request_body_bytes(
+            &planning_parts.headers,
+            body_bytes.as_ref(),
+        ) {
+            planning_parts
+                .extensions
+                .insert(OriginalRequestPayload::from_parsed_json(
+                    body_json.clone(),
+                    decoded_body.as_ref(),
+                ));
+        }
+    }
+    let parts = &planning_parts;
 
     if let Some(stream_plan_kind) = resolve_execution_runtime_stream_plan_kind(parts, decision) {
         if is_matching_stream_request(stream_plan_kind, parts, &body_json, body_base64.as_deref()) {
@@ -256,7 +272,11 @@ fn to_ai_serving_outcome(
 ) -> AiServingExecutionOutcome<Response<Body>, super::LocalExecutionExhaustion> {
     match outcome {
         LocalExecutionRequestOutcome::Responded(response) => {
-            AiServingExecutionOutcome::Responded(response)
+            if super::is_deferred_upstream_response(&response) {
+                AiServingExecutionOutcome::Deferred(response)
+            } else {
+                AiServingExecutionOutcome::Responded(response)
+            }
         }
         LocalExecutionRequestOutcome::Exhausted(outcome) => {
             AiServingExecutionOutcome::Exhausted(outcome)
@@ -270,6 +290,9 @@ fn from_ai_serving_outcome(
 ) -> LocalExecutionRequestOutcome {
     match outcome {
         AiServingExecutionOutcome::Responded(response) => {
+            LocalExecutionRequestOutcome::Responded(response)
+        }
+        AiServingExecutionOutcome::Deferred(response) => {
             LocalExecutionRequestOutcome::Responded(response)
         }
         AiServingExecutionOutcome::Exhausted(outcome) => {

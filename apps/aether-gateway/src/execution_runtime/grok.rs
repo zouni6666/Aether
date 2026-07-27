@@ -223,8 +223,8 @@ async fn execute_grok_app_chat(
 
     let elapsed_ms = started_at.elapsed().as_millis() as u64;
     if !(200..300).contains(&status_code) {
-        let decoded = decode_response_body_bytes(&headers, &raw_body).unwrap_or(raw_body);
-        let text = String::from_utf8_lossy(&decoded).to_string();
+        let decoded = decode_response_body_bytes(&headers, &raw_body)?;
+        let text = String::from_utf8_lossy(decoded.as_ref()).to_string();
         return Ok(GrokCollected {
             status_code,
             headers,
@@ -274,8 +274,8 @@ async fn execute_grok_app_chat_stream(
             &mut adapter,
         )
         .await?;
-        let decoded = decode_response_body_bytes(&headers, &raw_body).unwrap_or(raw_body);
-        let text = String::from_utf8_lossy(&decoded).to_string();
+        let decoded = decode_response_body_bytes(&headers, &raw_body)?;
+        let text = String::from_utf8_lossy(decoded.as_ref()).to_string();
         let elapsed_ms = started_at.elapsed().as_millis() as u64;
         let collected = GrokCollected {
             status_code,

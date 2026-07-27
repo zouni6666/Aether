@@ -460,20 +460,14 @@ fn key_auth_channel_matches(row: &CandidateSelectionRow, api_format: &str) -> bo
             matches!(auth_type.as_str(), "oauth" | "api_key" | "bearer")
                 && api_format == "openai:chat"
         }
-        "vertex_ai" => {
-            (auth_type == "api_key"
-                && matches!(
-                    api_format.as_str(),
-                    "gemini:generate_content" | "gemini:embedding"
-                ))
-                || (matches!(auth_type.as_str(), "service_account" | "vertex_ai")
-                    && matches!(
-                        api_format.as_str(),
-                        "claude:messages" | "gemini:generate_content" | "gemini:embedding"
-                    ))
-        }
+        "vertex_ai" => vertex_key_auth_channel_matches(&auth_type, &api_format),
         _ => auth_type != "oauth",
     }
+}
+
+fn vertex_key_auth_channel_matches(auth_type: &str, api_format: &str) -> bool {
+    matches!(auth_type, "api_key" | "service_account" | "vertex_ai")
+        && matches!(api_format, "gemini:generate_content" | "gemini:embedding")
 }
 
 fn dedupe_candidate_selection_rows(
@@ -797,7 +791,7 @@ fn sql_match_aliases(api_formats: &[String]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::MysqlMinimalCandidateSelectionReadRepository;
+    use super::{vertex_key_auth_channel_matches, MysqlMinimalCandidateSelectionReadRepository};
 
     #[tokio::test]
     async fn repository_builds_from_lazy_pool() {
@@ -808,5 +802,23 @@ mod tests {
         );
 
         let _repository = MysqlMinimalCandidateSelectionReadRepository::new(pool);
+    }
+
+    #[test]
+    fn vertex_auth_matrix_rejects_retired_claude_format() {
+        for auth_type in ["api_key", "service_account", "vertex_ai"] {
+            assert!(!vertex_key_auth_channel_matches(
+                auth_type,
+                "claude:messages"
+            ));
+            assert!(vertex_key_auth_channel_matches(
+                auth_type,
+                "gemini:generate_content"
+            ));
+            assert!(vertex_key_auth_channel_matches(
+                auth_type,
+                "gemini:embedding"
+            ));
+        }
     }
 }

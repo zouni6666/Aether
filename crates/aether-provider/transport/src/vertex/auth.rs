@@ -9,7 +9,7 @@ use rsa::pkcs8::DecodePrivateKey;
 use rsa::signature::{SignatureEncoding, Signer};
 use rsa::RsaPrivateKey;
 use serde_json::{json, Value};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use url::form_urlencoded;
 
 use super::super::oauth_refresh::{
@@ -153,13 +153,16 @@ impl LocalOAuthRefreshAdapter for VertexServiceAccountRefreshAdapter {
 
     fn resolve_cached(
         &self,
-        _transport: &GatewayProviderTransportSnapshot,
+        transport: &GatewayProviderTransportSnapshot,
         entry: &CachedOAuthEntry,
     ) -> Option<LocalResolvedOAuthRequestAuth> {
         if !entry
             .provider_type
             .eq_ignore_ascii_case(VERTEX_SERVICE_ACCOUNT_PROVIDER_TYPE)
         {
+            return None;
+        }
+        if !vertex_service_account_cached_entry_matches_transport(transport, entry) {
             return None;
         }
         if service_account_token_expires_soon(entry.expires_at_unix_secs) {
@@ -192,6 +195,34 @@ impl LocalOAuthRefreshAdapter for VertexServiceAccountRefreshAdapter {
             && entry
                 .and_then(|cached| self.resolve_cached(transport, cached))
                 .is_none()
+    }
+
+    fn refresh_fingerprint(
+        &self,
+        transport: &GatewayProviderTransportSnapshot,
+        entry: Option<&CachedOAuthEntry>,
+    ) -> Option<String> {
+        let source_fingerprint = vertex_service_account_credential_fingerprint(transport)?;
+        Some(
+            entry
+                .filter(|entry| {
+                    vertex_service_account_cached_entry_matches_transport(transport, entry)
+                })
+                .map(|entry| {
+                    let mut digest = Sha256::new();
+                    digest.update(source_fingerprint.as_bytes());
+                    digest.update([0]);
+                    digest.update(entry.auth_header_value.as_bytes());
+                    digest.update([0]);
+                    digest.update(entry.expires_at_unix_secs.unwrap_or_default().to_be_bytes());
+                    format!("{:x}", digest.finalize())
+                })
+                .unwrap_or(source_fingerprint),
+        )
+    }
+
+    fn shares_refresh_through_transport_persistence(&self) -> bool {
+        false
     }
 
     async fn refresh(
@@ -259,9 +290,46 @@ impl LocalOAuthRefreshAdapter for VertexServiceAccountRefreshAdapter {
                 "project_id": auth_config.project_id,
                 "client_email": auth_config.client_email,
             })),
-            source_fingerprint: None,
+            source_fingerprint: vertex_service_account_credential_fingerprint(transport),
         }))
     }
+}
+
+fn vertex_service_account_credential_fingerprint(
+    transport: &GatewayProviderTransportSnapshot,
+) -> Option<String> {
+    supports_local_vertex_service_account_auth_resolution(transport).then(|| {
+        let provider_type = transport.provider.provider_type.trim().to_ascii_lowercase();
+        let auth_type = transport.key.auth_type.trim().to_ascii_lowercase();
+        let auth_config = transport
+            .key
+            .decrypted_auth_config
+            .as_deref()
+            .unwrap_or_default();
+        let mut digest = Sha256::new();
+        for field in [
+            provider_type.as_bytes(),
+            auth_type.as_bytes(),
+            auth_config.as_bytes(),
+            transport.key.decrypted_api_key.as_bytes(),
+        ] {
+            digest.update((field.len() as u64).to_be_bytes());
+            digest.update(field);
+        }
+        format!("{:x}", digest.finalize())
+    })
+}
+
+fn vertex_service_account_cached_entry_matches_transport(
+    transport: &GatewayProviderTransportSnapshot,
+    entry: &CachedOAuthEntry,
+) -> bool {
+    entry
+        .provider_type
+        .eq_ignore_ascii_case(VERTEX_SERVICE_ACCOUNT_PROVIDER_TYPE)
+        && vertex_service_account_credential_fingerprint(transport)
+            .as_deref()
+            .is_some_and(|fingerprint| entry.source_fingerprint.as_deref() == Some(fingerprint))
 }
 
 pub fn build_vertex_service_account_assertion(
@@ -324,6 +392,9 @@ fn body_excerpt(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::oauth_refresh::{
+        CachedOAuthEntry, LocalOAuthRefreshAdapter, LocalResolvedOAuthRequestAuth,
+    };
     use super::super::super::snapshot::{
         GatewayProviderTransportEndpoint, GatewayProviderTransportKey,
         GatewayProviderTransportProvider, GatewayProviderTransportSnapshot,
@@ -335,7 +406,10 @@ mod tests {
     use super::{
         decode_vertex_service_account_private_key, parse_vertex_service_account_auth_config,
         resolve_local_vertex_api_key_query_auth,
-        supports_local_vertex_service_account_auth_resolution, VERTEX_API_KEY_QUERY_PARAM,
+        supports_local_vertex_service_account_auth_resolution,
+        vertex_service_account_credential_fingerprint, VertexServiceAccountRefreshAdapter,
+        VERTEX_API_KEY_QUERY_PARAM, VERTEX_SERVICE_ACCOUNT_AUTH_HEADER,
+        VERTEX_SERVICE_ACCOUNT_PROVIDER_TYPE,
     };
 
     fn sample_transport() -> GatewayProviderTransportSnapshot {
@@ -393,6 +467,59 @@ mod tests {
                 decrypted_auth_config: None,
             },
         }
+    }
+
+    fn sample_service_account_transport(private_key: &str) -> GatewayProviderTransportSnapshot {
+        let mut transport = sample_transport();
+        transport.key.auth_type = "service_account".to_string();
+        transport.key.decrypted_api_key = "__placeholder__".to_string();
+        transport.key.decrypted_auth_config = Some(
+            serde_json::json!({
+                "client_email": "svc@example.iam.gserviceaccount.com",
+                "private_key": private_key,
+                "project_id": "demo-project"
+            })
+            .to_string(),
+        );
+        transport
+    }
+
+    #[test]
+    fn cached_token_is_bound_to_vertex_service_account_generation() {
+        let source_transport = sample_service_account_transport("SOURCE-PRIVATE-KEY");
+        let source_fingerprint = vertex_service_account_credential_fingerprint(&source_transport)
+            .expect("source service account should have a fingerprint");
+        let entry = CachedOAuthEntry {
+            provider_type: VERTEX_SERVICE_ACCOUNT_PROVIDER_TYPE.to_string(),
+            auth_header_name: VERTEX_SERVICE_ACCOUNT_AUTH_HEADER.to_string(),
+            auth_header_value: "Bearer source-access-token".to_string(),
+            expires_at_unix_secs: Some(u64::MAX),
+            metadata: None,
+            source_fingerprint: Some(source_fingerprint),
+        };
+        let adapter = VertexServiceAccountRefreshAdapter;
+
+        assert!(!adapter.shares_refresh_through_transport_persistence());
+        assert_eq!(
+            adapter.resolve_cached(&source_transport, &entry),
+            Some(LocalResolvedOAuthRequestAuth::Header {
+                name: VERTEX_SERVICE_ACCOUNT_AUTH_HEADER.to_string(),
+                value: "Bearer source-access-token".to_string(),
+            })
+        );
+        assert_ne!(
+            adapter.refresh_fingerprint(&source_transport, None),
+            adapter.refresh_fingerprint(&source_transport, Some(&entry))
+        );
+
+        let replacement_transport = sample_service_account_transport("ADMIN-PRIVATE-KEY");
+        assert!(adapter
+            .resolve_cached(&replacement_transport, &entry)
+            .is_none());
+        assert_eq!(
+            adapter.refresh_fingerprint(&replacement_transport, Some(&entry)),
+            vertex_service_account_credential_fingerprint(&replacement_transport)
+        );
     }
 
     #[test]

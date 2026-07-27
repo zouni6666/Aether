@@ -708,14 +708,18 @@ async function fetchUpstreamModels() {
 }
 
 // 监听打开状态
-watch(() => props.open, async (isOpen) => {
-  if (isOpen) {
-    initForm()
-    if (props.hasAutoFetchKey) {
-      await fetchUpstreamModels()
+watch(
+  () => props.open,
+  async (isOpen) => {
+    if (isOpen) {
+      initForm()
+      if (props.hasAutoFetchKey) {
+        await fetchUpstreamModels()
+      }
     }
-  }
-})
+  },
+  { immediate: true },
+)
 
 // 初始化表单
 function initForm() {

@@ -545,6 +545,7 @@ async fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candid
         let response = reqwest::Client::new()
             .post(format!("{gateway_url}/v1/messages"))
             .header(http::header::CONTENT_TYPE, "application/json")
+            .header(http::header::USER_AGENT, "Claude-Code/2.1.0")
             .header(
                 http::header::AUTHORIZATION,
                 "Bearer sk-client-kiro-cli-local-sync",
@@ -1153,6 +1154,7 @@ async fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candid
     let response = reqwest::Client::new()
         .post(format!("{gateway_url}/v1/messages"))
         .header(http::header::CONTENT_TYPE, "application/json")
+        .header(http::header::USER_AGENT, "Claude-Code/2.1.0")
         .header(
             http::header::AUTHORIZATION,
             "Bearer sk-client-kiro-cli-local-refresh",

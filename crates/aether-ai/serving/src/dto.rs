@@ -44,6 +44,28 @@ impl ConversionMode {
     }
 }
 
+/// Request/response adaptation applied after candidate selection.
+///
+/// This is independent from format conversion: a same-format request may be
+/// byte-transparent or may intentionally apply provider compatibility edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdaptationMode {
+    NativeTransparent,
+    SameFormatCompat,
+    CrossFormat,
+}
+
+impl AdaptationMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NativeTransparent => "native_transparent",
+            Self::SameFormatCompat => "same_format_compat",
+            Self::CrossFormat => "cross_format",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct AiRequestGzipPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]

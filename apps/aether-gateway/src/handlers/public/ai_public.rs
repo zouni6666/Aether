@@ -1,4 +1,6 @@
-use crate::ai_serving::normalize_openai_image_quality;
+use crate::ai_serving::{
+    build_core_error_body_for_client_format, normalize_openai_image_quality, LocalCoreSyncErrorKind,
+};
 use crate::async_task::CancelVideoTaskError;
 use crate::control::GatewayControlDecision;
 use crate::control::GatewayPublicRequestContext;
@@ -13,8 +15,6 @@ use axum::response::IntoResponse;
 use axum::Json;
 use serde_json::{json, Value};
 
-const CLAUDE_COUNT_TOKENS_INVALID_PAYLOAD_DETAIL: &str = "Invalid token count payload";
-const CLAUDE_COUNT_TOKENS_MISSING_BODY_DETAIL: &str = "请求体不能为空";
 const GEMINI_VIDEO_TASK_NOT_FOUND_DETAIL: &str = "Video task not found";
 const AI_PUBLIC_METHOD_NOT_ALLOWED_DETAIL: &str = "Method not allowed";
 const AI_PUBLIC_UNAUTHORIZED_DETAIL: &str = "Unauthorized";
@@ -51,6 +51,10 @@ const OPENAI_RERANK_TOP_N_DETAIL: &str = "Rerank request top_n must be a positiv
 const OPENAI_RERANK_CHAT_PAYLOAD_DETAIL: &str =
     "Rerank request must use query/documents, not chat messages";
 const OPENAI_RERANK_STREAM_UNSUPPORTED_DETAIL: &str = "Rerank requests do not support streaming";
+const CLAUDE_COUNT_TOKENS_BODY_REQUIRED_DETAIL: &str = "Request body is required";
+const CLAUDE_COUNT_TOKENS_INVALID_JSON_DETAIL: &str = "Invalid JSON body";
+const CLAUDE_COUNT_TOKENS_MODEL_REQUIRED_DETAIL: &str = "model: Field required";
+const CLAUDE_COUNT_TOKENS_MESSAGES_REQUIRED_DETAIL: &str = "messages: Field required";
 const ANTIGRAVITY_USER_SETTINGS_MISSING_BODY_DETAIL: &str =
     "Antigravity setUserSettings request body is required";
 const ANTIGRAVITY_USER_SETTINGS_INVALID_JSON_DETAIL: &str =
@@ -135,7 +139,7 @@ pub(crate) async fn maybe_build_local_ai_public_response(
     }
 
     if let Some(response) =
-        maybe_build_local_claude_count_tokens_response(request_context, request_body)
+        maybe_build_local_claude_count_tokens_validation_response(request_context, request_body)
     {
         return Some(response);
     }
@@ -863,7 +867,7 @@ fn maybe_build_local_ai_public_route_guard_response(
     None
 }
 
-fn maybe_build_local_claude_count_tokens_response(
+fn maybe_build_local_claude_count_tokens_validation_response(
     request_context: &GatewayPublicRequestContext,
     request_body: Option<&Bytes>,
 ) -> Option<Response<Body>> {
@@ -876,34 +880,45 @@ fn maybe_build_local_claude_count_tokens_response(
         return None;
     }
 
-    let Some(request_body) = request_body else {
-        return Some(build_ai_public_error_response(
-            http::StatusCode::BAD_REQUEST,
-            CLAUDE_COUNT_TOKENS_MISSING_BODY_DETAIL,
-        ));
-    };
+    let validation = validate_claude_count_tokens_request(request_body);
+    validation.err().map(build_claude_invalid_request_response)
+}
 
-    let payload = match serde_json::from_slice::<serde_json::Value>(request_body) {
-        Ok(payload) => payload,
-        Err(_) => {
-            return Some(build_ai_public_error_response(
-                http::StatusCode::BAD_REQUEST,
-                CLAUDE_COUNT_TOKENS_INVALID_PAYLOAD_DETAIL,
-            ));
-        }
-    };
+fn validate_claude_count_tokens_request(request_body: Option<&Bytes>) -> Result<(), &'static str> {
+    let request_body = request_body
+        .filter(|body| !body.is_empty())
+        .ok_or(CLAUDE_COUNT_TOKENS_BODY_REQUIRED_DETAIL)?;
+    let payload = serde_json::from_slice::<Value>(request_body)
+        .map_err(|_| CLAUDE_COUNT_TOKENS_INVALID_JSON_DETAIL)?;
+    let object = payload
+        .as_object()
+        .ok_or(CLAUDE_COUNT_TOKENS_INVALID_JSON_DETAIL)?;
 
-    let input_tokens = match estimate_claude_count_tokens(&payload) {
-        Ok(tokens) => tokens,
-        Err(_) => {
-            return Some(build_ai_public_error_response(
-                http::StatusCode::BAD_REQUEST,
-                CLAUDE_COUNT_TOKENS_INVALID_PAYLOAD_DETAIL,
-            ));
-        }
-    };
+    if object
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .is_none()
+    {
+        return Err(CLAUDE_COUNT_TOKENS_MODEL_REQUIRED_DETAIL);
+    }
+    if object.get("messages").and_then(Value::as_array).is_none() {
+        return Err(CLAUDE_COUNT_TOKENS_MESSAGES_REQUIRED_DETAIL);
+    }
 
-    Some(Json(json!({ "input_tokens": input_tokens })).into_response())
+    Ok(())
+}
+
+fn build_claude_invalid_request_response(detail: &'static str) -> Response<Body> {
+    let body = build_core_error_body_for_client_format(
+        "claude:messages",
+        detail,
+        None,
+        LocalCoreSyncErrorKind::InvalidRequest,
+    )
+    .expect("Claude core error format should be available");
+    (http::StatusCode::BAD_REQUEST, Json(body)).into_response()
 }
 
 fn maybe_build_local_antigravity_v1internal_response(
@@ -1583,132 +1598,43 @@ fn build_ai_public_error_response(
     (status, Json(json!({ "detail": detail.into() }))).into_response()
 }
 
-fn estimate_claude_count_tokens(payload: &serde_json::Value) -> Result<u64, ()> {
-    let object = payload.as_object().ok_or(())?;
-    let model = object
-        .get("model")
-        .and_then(serde_json::Value::as_str)
-        .ok_or(())?;
-    if model.trim().is_empty() {
-        return Err(());
-    }
-
-    let messages = object
-        .get("messages")
-        .and_then(serde_json::Value::as_array)
-        .ok_or(())?;
-
-    let system_tokens = estimate_claude_system_tokens(object.get("system"))?;
-    let message_tokens = estimate_claude_message_tokens(messages)?;
-    Ok(system_tokens.saturating_add(message_tokens))
-}
-
-fn estimate_claude_system_tokens(system: Option<&serde_json::Value>) -> Result<u64, ()> {
-    let Some(system) = system else {
-        return Ok(0);
-    };
-
-    match system {
-        serde_json::Value::Null => Ok(0),
-        serde_json::Value::String(text) => Ok(estimate_text_tokens(text)),
-        serde_json::Value::Array(blocks) => {
-            let mut total = 0_u64;
-            for block in blocks {
-                let block = block.as_object().ok_or(())?;
-                if let Some(text) = block.get("text").and_then(serde_json::Value::as_str) {
-                    total = total.saturating_add(estimate_text_tokens(text));
-                }
-            }
-            Ok(total)
-        }
-        serde_json::Value::Object(_) => Ok(0),
-        _ => Err(()),
-    }
-}
-
-fn estimate_claude_message_tokens(messages: &[serde_json::Value]) -> Result<u64, ()> {
-    let mut total = 0_u64;
-
-    for message in messages {
-        let message = message.as_object().ok_or(())?;
-        let role = message
-            .get("role")
-            .and_then(serde_json::Value::as_str)
-            .ok_or(())?;
-        if !matches!(role, "user" | "assistant") {
-            return Err(());
-        }
-
-        total = total.saturating_add(4);
-        let content = message.get("content").ok_or(())?;
-        match content {
-            serde_json::Value::String(text) => {
-                total = total.saturating_add(estimate_text_tokens(text));
-            }
-            serde_json::Value::Array(items) => {
-                for item in items {
-                    let item = item.as_object().ok_or(())?;
-                    if let Some(text) = item.get("text").and_then(serde_json::Value::as_str) {
-                        total = total.saturating_add(estimate_text_tokens(text));
-                    }
-                }
-            }
-            _ => return Err(()),
-        }
-    }
-
-    Ok(total)
-}
-
-fn estimate_text_tokens(text: &str) -> u64 {
-    if text.is_empty() {
-        return 0;
-    }
-
-    let char_count = text.chars().count() as u64;
-    std::cmp::max(1, char_count / 4)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        estimate_claude_count_tokens, parse_openai_image_validation_input, validate_openai_image_n,
-        OpenAiImageOperation,
+        parse_openai_image_validation_input, validate_claude_count_tokens_request,
+        validate_openai_image_n, OpenAiImageOperation, CLAUDE_COUNT_TOKENS_BODY_REQUIRED_DETAIL,
+        CLAUDE_COUNT_TOKENS_INVALID_JSON_DETAIL, CLAUDE_COUNT_TOKENS_MESSAGES_REQUIRED_DETAIL,
+        CLAUDE_COUNT_TOKENS_MODEL_REQUIRED_DETAIL,
     };
     use axum::body::Bytes;
     use serde_json::json;
 
     #[test]
-    fn estimates_claude_count_tokens_from_system_and_messages() {
-        let payload = json!({
-            "model": "claude-sonnet-4-5",
-            "system": [{"type": "text", "text": "abcdefghijklmnop"}],
-            "messages": [
-                {
-                    "role": "user",
-                    "content": "abcdefghijkl"
-                },
-                {
-                    "role": "assistant",
-                    "content": [
-                        {"type": "text", "text": "abcdefgh"},
-                        {"type": "tool_use", "name": "ignored", "input": {"city": "SF"}}
-                    ]
-                }
-            ]
-        });
-
-        assert_eq!(estimate_claude_count_tokens(&payload), Ok(17));
-    }
-
-    #[test]
-    fn rejects_invalid_claude_count_tokens_payload() {
-        let payload = json!({
-            "model": "claude-sonnet-4-5",
-            "messages": [{"role": "system", "content": "bad"}]
-        });
-
-        assert_eq!(estimate_claude_count_tokens(&payload), Err(()));
+    fn count_tokens_validation_rejects_only_structurally_invalid_requests() {
+        assert_eq!(
+            validate_claude_count_tokens_request(None),
+            Err(CLAUDE_COUNT_TOKENS_BODY_REQUIRED_DETAIL)
+        );
+        assert_eq!(
+            validate_claude_count_tokens_request(Some(&Bytes::from_static(b"{"))),
+            Err(CLAUDE_COUNT_TOKENS_INVALID_JSON_DETAIL)
+        );
+        assert_eq!(
+            validate_claude_count_tokens_request(Some(&Bytes::from_static(br#"{"messages":[]}"#,))),
+            Err(CLAUDE_COUNT_TOKENS_MODEL_REQUIRED_DETAIL)
+        );
+        assert_eq!(
+            validate_claude_count_tokens_request(Some(&Bytes::from_static(
+                br#"{"model":"claude-sonnet-4-5"}"#,
+            ))),
+            Err(CLAUDE_COUNT_TOKENS_MESSAGES_REQUIRED_DETAIL)
+        );
+        assert_eq!(
+            validate_claude_count_tokens_request(Some(&Bytes::from_static(
+                br#"{"model":"claude-sonnet-4-5","messages":[],"tools":[{"name":"x"}]}"#,
+            ))),
+            Ok(())
+        );
     }
 
     #[test]

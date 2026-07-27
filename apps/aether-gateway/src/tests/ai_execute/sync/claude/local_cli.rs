@@ -404,6 +404,7 @@ async fn gateway_executes_claude_cli_sync_via_local_decision_gate_with_local_syn
     let response = reqwest::Client::new()
         .post(format!("{gateway_url}/v1/messages"))
         .header(http::header::CONTENT_TYPE, "application/json")
+        .header(http::header::USER_AGENT, "Claude-Code/2.1.0")
         .header(
             http::header::AUTHORIZATION,
             "Bearer sk-client-claude-cli-local",
@@ -730,6 +731,7 @@ async fn gateway_returns_claude_cli_error_for_local_sync_failure_impl() {
     let response = reqwest::Client::new()
         .post(format!("{gateway_url}/v1/messages"))
         .header(http::header::CONTENT_TYPE, "application/json")
+        .header(http::header::USER_AGENT, "Claude-Code/2.1.0")
         .header(
             http::header::AUTHORIZATION,
             "Bearer sk-client-claude-cli-local-error",
@@ -985,6 +987,7 @@ async fn gateway_marks_claude_cli_cross_format_runtime_miss_when_format_conversi
     let response = reqwest::Client::new()
         .post(format!("{gateway_url}/v1/messages?beta=true"))
         .header(http::header::CONTENT_TYPE, "application/json")
+        .header(http::header::USER_AGENT, "Claude-Code/2.1.0")
         .header(
             http::header::AUTHORIZATION,
             "Bearer sk-client-claude-cli-openai-local-miss",
@@ -1011,7 +1014,8 @@ async fn gateway_marks_claude_cli_cross_format_runtime_miss_when_format_conversi
         Some("all_candidates_skipped")
     );
     let response_json: serde_json::Value = response.json().await.expect("body should parse");
-    assert_eq!(response_json["error"]["type"], "http_error");
+    assert_eq!(response_json["type"], "error");
+    assert_eq!(response_json["error"]["type"], "overloaded_error");
     assert_eq!(
         response_json["error"]["message"],
         "没有可用提供商支持模型 gpt-5.4 的同步请求"

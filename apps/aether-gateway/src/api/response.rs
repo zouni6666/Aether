@@ -6,6 +6,7 @@ use axum::http::Response;
 use axum::http::StatusCode;
 use serde_json::json;
 
+use crate::ai_serving::{build_core_error_body_for_client_format, LocalCoreSyncErrorKind};
 use crate::constants::*;
 use crate::control::GatewayControlDecision;
 use crate::control::GatewayLocalAuthRejection;
@@ -191,7 +192,7 @@ pub(crate) fn build_local_balance_denied_response(
         Some(remaining) => format!("余额不足（剩余: ${remaining:.2}）"),
         None => "余额不足".to_string(),
     };
-    let payload = json!({
+    let fallback_payload = json!({
         "error": {
             "type": "balance_exceeded",
             "message": message,
@@ -201,6 +202,13 @@ pub(crate) fn build_local_balance_denied_response(
             }
         }
     });
+    let payload = build_local_error_payload(
+        control_decision,
+        None,
+        &message,
+        LocalCoreSyncErrorKind::RateLimit,
+        fallback_payload,
+    );
     let body =
         serde_json::to_vec(&payload).map_err(|err| GatewayError::Internal(err.to_string()))?;
     let headers = BTreeMap::from([("content-type".to_string(), "application/json".to_string())]);
@@ -218,12 +226,20 @@ pub(crate) fn build_local_user_rpm_limited_response(
     control_decision: Option<&GatewayControlDecision>,
     rejection: &FrontdoorUserRpmRejection,
 ) -> Result<Response<Body>, GatewayError> {
-    let payload = json!({
+    let message = "请求过于频繁，请稍后重试";
+    let fallback_payload = json!({
         "error": {
             "type": "rate_limit_exceeded",
-            "message": "请求过于频繁，请稍后重试",
+            "message": message,
         }
     });
+    let payload = build_local_error_payload(
+        control_decision,
+        None,
+        message,
+        LocalCoreSyncErrorKind::RateLimit,
+        fallback_payload,
+    );
     let body =
         serde_json::to_vec(&payload).map_err(|err| GatewayError::Internal(err.to_string()))?;
     let headers = BTreeMap::from([
@@ -248,12 +264,35 @@ pub(crate) fn build_local_http_error_response(
     status_code: StatusCode,
     message: &str,
 ) -> Result<Response<Body>, GatewayError> {
-    let payload = json!({
+    build_local_http_error_response_with_request_path(
+        trace_id,
+        control_decision,
+        None,
+        status_code,
+        message,
+    )
+}
+
+pub(crate) fn build_local_http_error_response_with_request_path(
+    trace_id: &str,
+    control_decision: Option<&GatewayControlDecision>,
+    request_path: Option<&str>,
+    status_code: StatusCode,
+    message: &str,
+) -> Result<Response<Body>, GatewayError> {
+    let fallback_payload = json!({
         "error": {
             "type": "http_error",
             "message": message,
         }
     });
+    let payload = build_local_error_payload(
+        control_decision,
+        request_path,
+        message,
+        local_error_kind_for_status(status_code),
+        fallback_payload,
+    );
     let body =
         serde_json::to_vec(&payload).map_err(|err| GatewayError::Internal(err.to_string()))?;
     let headers = BTreeMap::from([("content-type".to_string(), "application/json".to_string())]);
@@ -329,19 +368,28 @@ pub(crate) fn build_local_auth_rejection_response(
 pub(crate) fn build_local_overloaded_response(
     trace_id: &str,
     control_decision: Option<&GatewayControlDecision>,
+    request_path: Option<&str>,
     gate: &str,
     limit: usize,
 ) -> Result<Response<Body>, GatewayError> {
-    let payload = json!({
+    let message = "服务繁忙，请稍后重试";
+    let fallback_payload = json!({
         "error": {
             "type": "overloaded",
-            "message": "服务繁忙，请稍后重试",
+            "message": message,
             "details": {
                 "gate": gate,
                 "limit": limit,
             }
         }
     });
+    let payload = build_local_error_payload(
+        control_decision,
+        request_path,
+        message,
+        LocalCoreSyncErrorKind::Overloaded,
+        fallback_payload,
+    );
     let body =
         serde_json::to_vec(&payload).map_err(|err| GatewayError::Internal(err.to_string()))?;
     let headers = BTreeMap::from([("content-type".to_string(), "application/json".to_string())]);
@@ -354,10 +402,65 @@ pub(crate) fn build_local_overloaded_response(
     )
 }
 
+fn build_local_error_payload(
+    control_decision: Option<&GatewayControlDecision>,
+    request_path: Option<&str>,
+    message: &str,
+    kind: LocalCoreSyncErrorKind,
+    fallback_payload: serde_json::Value,
+) -> serde_json::Value {
+    if !local_error_uses_claude_format(control_decision, request_path) {
+        return fallback_payload;
+    }
+
+    build_core_error_body_for_client_format("claude:messages", message, None, kind)
+        .unwrap_or(fallback_payload)
+}
+
+fn local_error_uses_claude_format(
+    control_decision: Option<&GatewayControlDecision>,
+    request_path: Option<&str>,
+) -> bool {
+    control_decision.is_some_and(|decision| {
+        decision.route_family.as_deref() == Some("claude")
+            || decision
+                .auth_endpoint_signature
+                .as_deref()
+                .is_some_and(|format| {
+                    crate::ai_serving::normalize_api_format_alias(format)
+                        .eq_ignore_ascii_case("claude:messages")
+                })
+    }) || request_path.is_some_and(|path| {
+        matches!(
+            path.trim_end_matches('/'),
+            "/v1/messages" | "/v1/messages/count_tokens"
+        )
+    })
+}
+
+fn local_error_kind_for_status(status: StatusCode) -> LocalCoreSyncErrorKind {
+    match status.as_u16() {
+        400 | 405 | 422 => LocalCoreSyncErrorKind::InvalidRequest,
+        401 => LocalCoreSyncErrorKind::Authentication,
+        403 => LocalCoreSyncErrorKind::PermissionDenied,
+        404 => LocalCoreSyncErrorKind::NotFound,
+        413 => LocalCoreSyncErrorKind::RequestTooLarge,
+        429 => LocalCoreSyncErrorKind::RateLimit,
+        503 | 529 => LocalCoreSyncErrorKind::Overloaded,
+        _ => LocalCoreSyncErrorKind::ServerError,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::build_client_response_from_parts;
-    use axum::body::Body;
+    use super::{
+        build_client_response_from_parts, build_local_auth_rejection_response,
+        build_local_http_error_response_with_request_path, build_local_overloaded_response,
+        build_local_user_rpm_limited_response,
+    };
+    use crate::control::{GatewayControlDecision, GatewayLocalAuthRejection};
+    use crate::rate_limit::FrontdoorUserRpmRejection;
+    use axum::body::{to_bytes, Body};
     use std::collections::BTreeMap;
 
     #[test]
@@ -385,5 +488,97 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("no")
         );
+    }
+
+    fn claude_decision() -> GatewayControlDecision {
+        GatewayControlDecision::synthetic(
+            "/v1/messages",
+            Some("ai_public".to_string()),
+            Some("claude".to_string()),
+            Some("messages".to_string()),
+            Some("claude:messages".to_string()),
+        )
+    }
+
+    async fn response_json(response: http::Response<Body>) -> serde_json::Value {
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        serde_json::from_slice(&body).expect("response body should be JSON")
+    }
+
+    #[tokio::test]
+    async fn claude_local_errors_use_anthropic_envelopes() {
+        let decision = claude_decision();
+        let invalid_key = build_local_auth_rejection_response(
+            "trace-auth",
+            Some(&decision),
+            &GatewayLocalAuthRejection::InvalidApiKey,
+        )
+        .expect("invalid-key response should build");
+        let invalid_key = response_json(invalid_key).await;
+        assert_eq!(invalid_key["type"], "error");
+        assert_eq!(invalid_key["error"]["type"], "authentication_error");
+
+        let rpm = build_local_user_rpm_limited_response(
+            "trace-rpm",
+            Some(&decision),
+            &FrontdoorUserRpmRejection {
+                scope: "api_key",
+                limit: 1,
+                retry_after: 60,
+            },
+        )
+        .expect("RPM response should build");
+        let rpm = response_json(rpm).await;
+        assert_eq!(rpm["type"], "error");
+        assert_eq!(rpm["error"]["type"], "rate_limit_error");
+
+        let overloaded = build_local_overloaded_response(
+            "trace-overload",
+            None,
+            Some("/v1/messages/count_tokens"),
+            "requests",
+            10,
+        )
+        .expect("overload response should build");
+        let overloaded = response_json(overloaded).await;
+        assert_eq!(overloaded["type"], "error");
+        assert_eq!(overloaded["error"]["type"], "overloaded_error");
+    }
+
+    #[tokio::test]
+    async fn claude_path_shapes_pre_control_http_errors_and_413() {
+        for path in ["/v1/messages", "/v1/messages/count_tokens"] {
+            let forbidden = build_local_http_error_response_with_request_path(
+                "trace-pre-control",
+                None,
+                Some(path),
+                http::StatusCode::FORBIDDEN,
+                "blocked",
+            )
+            .expect("forbidden response should build");
+            let forbidden = response_json(forbidden).await;
+            assert_eq!(forbidden["type"], "error", "path: {path}");
+            assert_eq!(
+                forbidden["error"]["type"], "permission_error",
+                "path: {path}"
+            );
+
+            let too_large = build_local_http_error_response_with_request_path(
+                "trace-too-large",
+                None,
+                Some(path),
+                http::StatusCode::PAYLOAD_TOO_LARGE,
+                "too large",
+            )
+            .expect("payload-too-large response should build");
+            let too_large = response_json(too_large).await;
+            assert_eq!(too_large["type"], "error", "path: {path}");
+            assert_eq!(
+                too_large["error"]["type"], "request_too_large",
+                "path: {path}"
+            );
+        }
     }
 }

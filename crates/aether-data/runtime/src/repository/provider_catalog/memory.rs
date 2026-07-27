@@ -779,6 +779,15 @@ impl ProviderCatalogWriteRepository for InMemoryProviderCatalogReadRepository {
                 .encrypted_api_key_update
                 .as_deref()
                 .is_some_and(|value| value.trim().is_empty())
+            || update.expected_credential.as_ref().is_some_and(|expected| {
+                expected
+                    .encrypted_api_key
+                    .as_deref()
+                    .is_some_and(|value| value.trim().is_empty())
+                    || expected.auth_type.trim().is_empty()
+                    || expected.provider_id.trim().is_empty()
+                    || expected.provider_type.trim().is_empty()
+            })
             || !update.status_snapshot_patch.is_object()
             || update
                 .upstream_metadata_patch
@@ -799,13 +808,30 @@ impl ProviderCatalogWriteRepository for InMemoryProviderCatalogReadRepository {
             .index
             .write()
             .expect("provider catalog repository lock");
-        let Some(key) = index.keys.get_mut(&update.key_id) else {
+        let Some(key) = index.keys.get(&update.key_id) else {
             return Ok(false);
         };
         if key.encrypted_auth_config.as_deref() != update.expected_encrypted_auth_config.as_deref()
         {
             return Ok(false);
         }
+        if let Some(expected) = update.expected_credential.as_ref() {
+            let provider_type_matches = index
+                .providers
+                .get(&key.provider_id)
+                .is_some_and(|provider| provider.provider_type == expected.provider_type);
+            if key.encrypted_api_key != expected.encrypted_api_key
+                || key.auth_type != expected.auth_type
+                || key.provider_id != expected.provider_id
+                || !provider_type_matches
+            {
+                return Ok(false);
+            }
+        }
+        let key = index
+            .keys
+            .get_mut(&update.key_id)
+            .expect("provider catalog key was checked under the same write lock");
         if let Some(encrypted_api_key) = update.encrypted_api_key_update.as_ref() {
             key.encrypted_api_key = Some(encrypted_api_key.clone());
         }
@@ -1170,10 +1196,10 @@ mod tests {
     use crate::repository::provider_catalog::{
         ProviderCatalogKeyAdaptiveState, ProviderCatalogKeyAdaptiveStateUpdate,
         ProviderCatalogKeyHealthStateUpdate, ProviderCatalogKeyListOrder,
-        ProviderCatalogKeyListQuery, ProviderCatalogKeyOAuthRuntimeStateCasUpdate,
-        ProviderCatalogKeyRuntimeMetadataUpdate, ProviderCatalogReadRepository,
-        ProviderCatalogWriteRepository, StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
-        StoredProviderCatalogProvider,
+        ProviderCatalogKeyListQuery, ProviderCatalogKeyOAuthCredentialFence,
+        ProviderCatalogKeyOAuthRuntimeStateCasUpdate, ProviderCatalogKeyRuntimeMetadataUpdate,
+        ProviderCatalogReadRepository, ProviderCatalogWriteRepository,
+        StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
     };
     use crate::repository::usage::ProviderApiKeyUsageDelta;
     use serde_json::{json, Value};
@@ -1347,6 +1373,12 @@ mod tests {
         let update = ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
             key_id: "key-1".to_string(),
             expected_encrypted_auth_config: Some("ciphertext-auth-1".to_string()),
+            expected_credential: Some(ProviderCatalogKeyOAuthCredentialFence {
+                encrypted_api_key: Some("ciphertext-placeholder".to_string()),
+                auth_type: "api_key".to_string(),
+                provider_id: "provider-1".to_string(),
+                provider_type: "custom".to_string(),
+            }),
             encrypted_auth_config: "ciphertext-auth-2".to_string(),
             encrypted_api_key_update: Some("ciphertext-api-2".to_string()),
             expires_at_unix_secs_update: Some(Some(456)),
@@ -1389,6 +1421,99 @@ mod tests {
             stored.upstream_metadata.as_ref().unwrap()["codex"]["remaining"],
             3
         );
+    }
+
+    #[tokio::test]
+    async fn oauth_runtime_cas_rejects_changed_credential_context() {
+        let repository = || {
+            InMemoryProviderCatalogReadRepository::seed(
+                vec![sample_provider("provider-1")],
+                vec![],
+                vec![sample_key("key-1", "provider-1")
+                    .with_transport_fields(
+                        None,
+                        "ciphertext-api-1".to_string(),
+                        Some("ciphertext-auth-1".to_string()),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .expect("key transport should build")],
+            )
+        };
+        let update = || ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
+            key_id: "key-1".to_string(),
+            expected_encrypted_auth_config: Some("ciphertext-auth-1".to_string()),
+            expected_credential: Some(ProviderCatalogKeyOAuthCredentialFence {
+                encrypted_api_key: Some("ciphertext-api-1".to_string()),
+                auth_type: "api_key".to_string(),
+                provider_id: "provider-1".to_string(),
+                provider_type: "custom".to_string(),
+            }),
+            encrypted_auth_config: "ciphertext-auth-2".to_string(),
+            encrypted_api_key_update: Some("ciphertext-api-2".to_string()),
+            expires_at_unix_secs_update: None,
+            oauth_invalid_at_unix_secs: None,
+            oauth_invalid_reason: None,
+            upstream_metadata_patch: None,
+            status_snapshot_patch: json!({}),
+            reset_error_count: false,
+            updated_at_unix_secs: Some(123),
+        };
+
+        let api_key_repository = repository();
+        let mut key = api_key_repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key should load")
+            .pop()
+            .expect("key should exist");
+        key.encrypted_api_key = Some("ciphertext-admin".to_string());
+        api_key_repository
+            .update_key(&key)
+            .await
+            .expect("api key replacement should persist");
+        assert!(!api_key_repository
+            .compare_and_update_key_oauth_runtime_state(&update())
+            .await
+            .expect("API key mismatch should be a CAS miss"));
+
+        let auth_type_repository = repository();
+        let mut key = auth_type_repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key should load")
+            .pop()
+            .expect("key should exist");
+        key.auth_type = "oauth".to_string();
+        auth_type_repository
+            .update_key(&key)
+            .await
+            .expect("auth type replacement should persist");
+        assert!(!auth_type_repository
+            .compare_and_update_key_oauth_runtime_state(&update())
+            .await
+            .expect("auth type mismatch should be a CAS miss"));
+
+        let provider_repository = repository();
+        let mut provider = provider_repository
+            .list_providers_by_ids(&["provider-1".to_string()])
+            .await
+            .expect("provider should load")
+            .pop()
+            .expect("provider should exist");
+        provider.provider_type = "codex".to_string();
+        provider_repository
+            .update_provider(&provider)
+            .await
+            .expect("provider type replacement should persist");
+        assert!(!provider_repository
+            .compare_and_update_key_oauth_runtime_state(&update())
+            .await
+            .expect("provider type mismatch should be a CAS miss"));
     }
 
     #[tokio::test]

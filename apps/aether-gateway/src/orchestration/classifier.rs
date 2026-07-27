@@ -54,6 +54,223 @@ impl LocalFailoverClassification {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FailureRetryAction {
+    Stop,
+    SameCredential,
+    NextCandidate,
+    NextCredential,
+    NextEndpoint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FailureScope {
+    None,
+    Credential,
+    CredentialModel,
+    Endpoint,
+    Provider,
+}
+
+impl FailureScope {
+    pub(crate) const fn affects_credential(self) -> bool {
+        matches!(self, Self::Credential | Self::CredentialModel)
+    }
+
+    pub(crate) const fn allows_key_wide_effects(self) -> bool {
+        matches!(self, Self::None | Self::Credential)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FailureTokenAction {
+    None,
+    ForceRefresh,
+    #[allow(dead_code)]
+    Quarantine,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FailureDisposition {
+    pub(crate) retry_action: FailureRetryAction,
+    pub(crate) failure_scope: FailureScope,
+    pub(crate) token_action: FailureTokenAction,
+    pub(crate) preserve_upstream_error: bool,
+}
+
+impl FailureDisposition {
+    const fn new(
+        retry_action: FailureRetryAction,
+        failure_scope: FailureScope,
+        token_action: FailureTokenAction,
+        preserve_upstream_error: bool,
+    ) -> Self {
+        Self {
+            retry_action,
+            failure_scope,
+            token_action,
+            preserve_upstream_error,
+        }
+    }
+}
+
+pub(crate) const fn failure_disposition_from_local_classification(
+    classification: LocalFailoverClassification,
+    status_code: u16,
+) -> FailureDisposition {
+    match classification {
+        LocalFailoverClassification::StopStatusCode
+        | LocalFailoverClassification::StopErrorPattern
+        | LocalFailoverClassification::StopExecutionError
+        | LocalFailoverClassification::StopCyberPolicy => FailureDisposition::new(
+            FailureRetryAction::Stop,
+            FailureScope::None,
+            FailureTokenAction::None,
+            true,
+        ),
+        LocalFailoverClassification::UseDefault => FailureDisposition::new(
+            FailureRetryAction::Stop,
+            FailureScope::None,
+            FailureTokenAction::None,
+            status_code >= 400,
+        ),
+        LocalFailoverClassification::RetrySuccessPattern => FailureDisposition::new(
+            FailureRetryAction::NextCandidate,
+            FailureScope::None,
+            FailureTokenAction::None,
+            false,
+        ),
+        LocalFailoverClassification::RetryStatusCode
+        | LocalFailoverClassification::RetryUpstreamFailure => FailureDisposition::new(
+            FailureRetryAction::NextCandidate,
+            FailureScope::None,
+            FailureTokenAction::None,
+            false,
+        ),
+    }
+}
+
+pub(crate) const fn classify_anthropic_failure_disposition(
+    classification: LocalFailoverClassification,
+    status_code: u16,
+) -> FailureDisposition {
+    if matches!(
+        classification,
+        LocalFailoverClassification::StopStatusCode
+            | LocalFailoverClassification::StopErrorPattern
+            | LocalFailoverClassification::StopExecutionError
+            | LocalFailoverClassification::StopCyberPolicy
+    ) {
+        let generic = failure_disposition_from_local_classification(classification, status_code);
+        return match status_code {
+            401 => FailureDisposition::new(
+                generic.retry_action,
+                FailureScope::Credential,
+                FailureTokenAction::ForceRefresh,
+                generic.preserve_upstream_error,
+            ),
+            403 => FailureDisposition::new(
+                generic.retry_action,
+                FailureScope::Credential,
+                FailureTokenAction::None,
+                generic.preserve_upstream_error,
+            ),
+            404 => FailureDisposition::new(
+                generic.retry_action,
+                FailureScope::Endpoint,
+                FailureTokenAction::None,
+                generic.preserve_upstream_error,
+            ),
+            429 => FailureDisposition::new(
+                generic.retry_action,
+                FailureScope::CredentialModel,
+                FailureTokenAction::None,
+                generic.preserve_upstream_error,
+            ),
+            529 => FailureDisposition::new(
+                generic.retry_action,
+                FailureScope::Provider,
+                FailureTokenAction::None,
+                generic.preserve_upstream_error,
+            ),
+            500..=599 => FailureDisposition::new(
+                generic.retry_action,
+                FailureScope::Endpoint,
+                FailureTokenAction::None,
+                generic.preserve_upstream_error,
+            ),
+            _ => generic,
+        };
+    }
+
+    match status_code {
+        400 => FailureDisposition::new(
+            FailureRetryAction::Stop,
+            FailureScope::None,
+            FailureTokenAction::None,
+            true,
+        ),
+        401 => FailureDisposition::new(
+            FailureRetryAction::NextCredential,
+            FailureScope::Credential,
+            FailureTokenAction::ForceRefresh,
+            true,
+        ),
+        403 => FailureDisposition::new(
+            FailureRetryAction::NextCredential,
+            FailureScope::Credential,
+            FailureTokenAction::None,
+            true,
+        ),
+        404 => FailureDisposition::new(
+            FailureRetryAction::NextEndpoint,
+            FailureScope::Endpoint,
+            FailureTokenAction::None,
+            true,
+        ),
+        413 => FailureDisposition::new(
+            FailureRetryAction::Stop,
+            FailureScope::None,
+            FailureTokenAction::None,
+            true,
+        ),
+        429 => FailureDisposition::new(
+            FailureRetryAction::NextCredential,
+            FailureScope::CredentialModel,
+            FailureTokenAction::None,
+            true,
+        ),
+        529 => FailureDisposition::new(
+            FailureRetryAction::NextEndpoint,
+            FailureScope::Provider,
+            FailureTokenAction::None,
+            true,
+        ),
+        500..=599 => FailureDisposition::new(
+            FailureRetryAction::NextEndpoint,
+            FailureScope::Endpoint,
+            FailureTokenAction::None,
+            true,
+        ),
+        _ => failure_disposition_from_local_classification(classification, status_code),
+    }
+}
+
+pub(crate) fn classify_failure_disposition(
+    provider_api_format: &str,
+    classification: LocalFailoverClassification,
+    status_code: u16,
+) -> FailureDisposition {
+    if provider_api_format
+        .trim()
+        .eq_ignore_ascii_case("claude:messages")
+    {
+        classify_anthropic_failure_disposition(classification, status_code)
+    } else {
+        failure_disposition_from_local_classification(classification, status_code)
+    }
+}
+
 pub(crate) fn classify_local_failover(
     policy: &LocalFailoverPolicy,
     input: LocalFailoverInput<'_>,
@@ -267,7 +484,11 @@ fn local_failover_regex_rule_matches(
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::{classify_local_failover, LocalFailoverClassification, LocalFailoverInput};
+    use super::{
+        classify_anthropic_failure_disposition, classify_local_failover,
+        failure_disposition_from_local_classification, FailureDisposition, FailureRetryAction,
+        FailureScope, FailureTokenAction, LocalFailoverClassification, LocalFailoverInput,
+    };
     use crate::orchestration::{LocalFailoverPolicy, LocalFailoverRegexRule};
 
     #[test]
@@ -543,5 +764,139 @@ mod tests {
             ),
             LocalFailoverClassification::UseDefault
         );
+    }
+
+    #[test]
+    fn legacy_classification_preserves_candidate_by_candidate_retry() {
+        assert_eq!(
+            failure_disposition_from_local_classification(
+                LocalFailoverClassification::RetryUpstreamFailure,
+                429,
+            ),
+            FailureDisposition {
+                retry_action: FailureRetryAction::NextCandidate,
+                failure_scope: FailureScope::None,
+                token_action: FailureTokenAction::None,
+                preserve_upstream_error: false,
+            }
+        );
+        assert_eq!(
+            failure_disposition_from_local_classification(
+                LocalFailoverClassification::StopErrorPattern,
+                400,
+            )
+            .retry_action,
+            FailureRetryAction::Stop
+        );
+    }
+
+    #[test]
+    fn anthropic_bad_request_stops_and_preserves_upstream_error() {
+        let disposition = classify_anthropic_failure_disposition(
+            LocalFailoverClassification::RetryUpstreamFailure,
+            400,
+        );
+
+        assert_eq!(disposition.retry_action, FailureRetryAction::Stop);
+        assert_eq!(disposition.failure_scope, FailureScope::None);
+        assert_eq!(disposition.token_action, FailureTokenAction::None);
+        assert!(disposition.preserve_upstream_error);
+    }
+
+    #[test]
+    fn anthropic_auth_failures_refresh_then_rotate_only_when_needed() {
+        let unauthorized = classify_anthropic_failure_disposition(
+            LocalFailoverClassification::RetryUpstreamFailure,
+            401,
+        );
+        assert_eq!(
+            unauthorized.retry_action,
+            FailureRetryAction::NextCredential
+        );
+        assert_eq!(unauthorized.failure_scope, FailureScope::Credential);
+        assert_eq!(unauthorized.token_action, FailureTokenAction::ForceRefresh);
+
+        let forbidden = classify_anthropic_failure_disposition(
+            LocalFailoverClassification::RetryUpstreamFailure,
+            403,
+        );
+        assert_eq!(forbidden.retry_action, FailureRetryAction::NextCredential);
+        assert_eq!(forbidden.failure_scope, FailureScope::Credential);
+        assert_eq!(forbidden.token_action, FailureTokenAction::None);
+    }
+
+    #[test]
+    fn anthropic_rate_limit_rotates_with_credential_model_scope() {
+        let disposition = classify_anthropic_failure_disposition(
+            LocalFailoverClassification::RetryUpstreamFailure,
+            429,
+        );
+
+        assert_eq!(disposition.retry_action, FailureRetryAction::NextCredential);
+        assert_eq!(disposition.failure_scope, FailureScope::CredentialModel);
+        assert!(disposition.failure_scope.affects_credential());
+        assert!(!disposition.failure_scope.allows_key_wide_effects());
+        assert!(disposition.preserve_upstream_error);
+    }
+
+    #[test]
+    fn anthropic_overload_moves_endpoint_without_credential_penalty() {
+        let disposition = classify_anthropic_failure_disposition(
+            LocalFailoverClassification::RetryUpstreamFailure,
+            529,
+        );
+
+        assert_eq!(disposition.retry_action, FailureRetryAction::NextEndpoint);
+        assert_eq!(disposition.failure_scope, FailureScope::Provider);
+        assert!(!disposition.failure_scope.affects_credential());
+        assert!(!disposition.failure_scope.allows_key_wide_effects());
+        assert_eq!(disposition.token_action, FailureTokenAction::None);
+        assert!(disposition.preserve_upstream_error);
+    }
+
+    #[test]
+    fn anthropic_not_found_moves_endpoint_and_oversize_stops() {
+        let not_found = classify_anthropic_failure_disposition(
+            LocalFailoverClassification::RetryUpstreamFailure,
+            404,
+        );
+        assert_eq!(not_found.retry_action, FailureRetryAction::NextEndpoint);
+        assert_eq!(not_found.failure_scope, FailureScope::Endpoint);
+        assert!(not_found.preserve_upstream_error);
+
+        let oversized = classify_anthropic_failure_disposition(
+            LocalFailoverClassification::RetryUpstreamFailure,
+            413,
+        );
+        assert_eq!(oversized.retry_action, FailureRetryAction::Stop);
+        assert_eq!(oversized.failure_scope, FailureScope::None);
+        assert!(oversized.preserve_upstream_error);
+    }
+
+    #[test]
+    fn only_unscoped_and_credential_failures_allow_key_wide_effects() {
+        assert!(FailureScope::None.allows_key_wide_effects());
+        assert!(FailureScope::Credential.allows_key_wide_effects());
+        assert!(!FailureScope::CredentialModel.allows_key_wide_effects());
+        assert!(!FailureScope::Endpoint.allows_key_wide_effects());
+        assert!(!FailureScope::Provider.allows_key_wide_effects());
+    }
+
+    #[test]
+    fn anthropic_explicit_stop_keeps_failure_resource_scope() {
+        let auth = classify_anthropic_failure_disposition(
+            LocalFailoverClassification::StopStatusCode,
+            401,
+        );
+        assert_eq!(auth.retry_action, FailureRetryAction::Stop);
+        assert_eq!(auth.failure_scope, FailureScope::Credential);
+        assert_eq!(auth.token_action, FailureTokenAction::ForceRefresh);
+
+        let overloaded = classify_anthropic_failure_disposition(
+            LocalFailoverClassification::StopStatusCode,
+            529,
+        );
+        assert_eq!(overloaded.retry_action, FailureRetryAction::Stop);
+        assert_eq!(overloaded.failure_scope, FailureScope::Provider);
     }
 }

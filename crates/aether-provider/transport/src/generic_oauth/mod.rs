@@ -26,6 +26,42 @@ pub fn supports_local_generic_oauth_request_auth_resolution(
         && generic_provider_type(transport.provider.provider_type.as_str()).is_some()
 }
 
+pub fn resolve_local_generic_oauth_transport_authorization(
+    transport: &GatewayProviderTransportSnapshot,
+) -> Option<String> {
+    if !supports_local_generic_oauth_request_auth_resolution(transport) {
+        return None;
+    }
+    if let Some(value) =
+        auth_config_authorization_header(transport.key.decrypted_auth_config.as_deref())
+    {
+        return if bearer_access_token(&value).is_some() {
+            Some(value)
+        } else {
+            None
+        };
+    }
+
+    let auth_config = GenericOAuthRefreshAdapter::auth_config_from_transport(transport);
+    let refreshable = auth_config
+        .as_ref()
+        .and_then(refresh_token_from_auth_config)
+        .is_some();
+    if refreshable && auth_config_expires_soon(auth_config.as_ref()) {
+        return None;
+    }
+
+    let secret = transport.key.decrypted_api_key.trim();
+    if !secret.is_empty() && secret != PLACEHOLDER_API_KEY {
+        return Some(format!("Bearer {secret}"));
+    }
+
+    auth_config
+        .as_ref()
+        .and_then(access_token_from_auth_config)
+        .map(|token| format!("Bearer {token}"))
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct GenericOAuthRefreshAdapter {
     token_url_overrides: BTreeMap<String, String>,
@@ -114,48 +150,23 @@ impl GenericOAuthRefreshAdapter {
         &self,
         transport: &GatewayProviderTransportSnapshot,
     ) -> Option<LocalResolvedOAuthRequestAuth> {
-        if !supports_local_generic_oauth_request_auth_resolution(transport) {
-            return None;
-        }
-
-        if let Some(value) =
-            auth_config_authorization_header(transport.key.decrypted_auth_config.as_deref())
-        {
-            return Some(LocalResolvedOAuthRequestAuth::Header {
-                name: AUTH_HEADER_NAME.to_string(),
-                value,
-            });
-        }
-
-        let secret = transport.key.decrypted_api_key.trim();
-        if secret.is_empty() || secret == PLACEHOLDER_API_KEY {
-            return None;
-        }
-
-        let auth_config = Self::auth_config_from_transport(transport);
-        let refreshable = auth_config
-            .as_ref()
-            .and_then(refresh_token_from_auth_config)
-            .is_some();
-        if refreshable && auth_config_expires_soon(auth_config.as_ref()) {
-            return None;
-        }
-
         Some(LocalResolvedOAuthRequestAuth::Header {
             name: AUTH_HEADER_NAME.to_string(),
-            value: format!("Bearer {secret}"),
+            value: resolve_local_generic_oauth_transport_authorization(transport)?,
         })
     }
 
     fn build_cached_entry(
         provider_type: &'static str,
         transport: &GatewayProviderTransportSnapshot,
-        refreshed: ProviderOAuthTokenSet,
+        mut refreshed: ProviderOAuthTokenSet,
     ) -> CachedOAuthEntry {
+        let auth_header_value = refreshed.token_set.bearer_header_value();
+        synchronize_authorization_overrides(&mut refreshed.auth_config, &auth_header_value);
         CachedOAuthEntry {
             provider_type: provider_type.to_string(),
             auth_header_name: AUTH_HEADER_NAME.to_string(),
-            auth_header_value: refreshed.token_set.bearer_header_value(),
+            auth_header_value,
             expires_at_unix_secs: refreshed.token_set.expires_at_unix_secs,
             metadata: Some(refreshed.auth_config),
             source_fingerprint: Some(generic_oauth_transport_source_fingerprint(transport)),
@@ -184,12 +195,14 @@ impl LocalOAuthRefreshAdapter for GenericOAuthRefreshAdapter {
         {
             return None;
         }
-        if let Some(value) =
-            auth_config_authorization_header(transport.key.decrypted_auth_config.as_deref())
+        if auth_config_authorization_header(transport.key.decrypted_auth_config.as_deref())
+            .is_some()
         {
-            return Some(LocalResolvedOAuthRequestAuth::Header {
-                name: AUTH_HEADER_NAME.to_string(),
-                value,
+            return resolve_local_generic_oauth_transport_authorization(transport).map(|value| {
+                LocalResolvedOAuthRequestAuth::Header {
+                    name: AUTH_HEADER_NAME.to_string(),
+                    value,
+                }
             });
         }
         if !generic_oauth_cached_entry_matches_transport(transport, entry) {
@@ -209,6 +222,26 @@ impl LocalOAuthRefreshAdapter for GenericOAuthRefreshAdapter {
             name: name.to_ascii_lowercase(),
             value: value.to_string(),
         })
+    }
+
+    fn resolve_fenced_cached(
+        &self,
+        transport: &GatewayProviderTransportSnapshot,
+        entry: &CachedOAuthEntry,
+    ) -> Option<LocalResolvedOAuthRequestAuth> {
+        generic_oauth_successor_entry_matches_transport(transport, entry)
+            .then(|| resolved_entry_header(entry))
+            .flatten()
+    }
+
+    fn resolve_refreshed(
+        &self,
+        transport: &GatewayProviderTransportSnapshot,
+        entry: &CachedOAuthEntry,
+    ) -> Option<LocalResolvedOAuthRequestAuth> {
+        generic_oauth_entry_belongs_to_transport(transport, entry)
+            .then(|| resolved_entry_header(entry))
+            .flatten()
     }
 
     fn resolve_without_refresh(
@@ -238,6 +271,39 @@ impl LocalOAuthRefreshAdapter for GenericOAuthRefreshAdapter {
             .as_ref()
             .and_then(refresh_token_from_auth_config)
             .is_some()
+    }
+
+    fn refresh_fingerprint(
+        &self,
+        transport: &GatewayProviderTransportSnapshot,
+        entry: Option<&CachedOAuthEntry>,
+    ) -> Option<String> {
+        generic_oauth_refresh_fingerprint(transport, entry)
+    }
+
+    fn cached_entry_from_transport(
+        &self,
+        transport: &GatewayProviderTransportSnapshot,
+    ) -> Option<CachedOAuthEntry> {
+        let provider_type = generic_provider_type(transport.provider.provider_type.as_str())?;
+        let LocalResolvedOAuthRequestAuth::Header { name, value } =
+            self.resolve_direct_header(transport)?
+        else {
+            return None;
+        };
+        let metadata = Self::auth_config_from_transport(transport);
+        let expires_at_unix_secs = transport
+            .key
+            .expires_at_unix_secs
+            .or_else(|| metadata.as_ref().and_then(auth_config_expires_at));
+        Some(CachedOAuthEntry {
+            provider_type: provider_type.to_string(),
+            auth_header_name: name,
+            auth_header_value: value,
+            expires_at_unix_secs,
+            metadata,
+            source_fingerprint: Some(generic_oauth_transport_source_fingerprint(transport)),
+        })
     }
 
     async fn refresh(
@@ -311,20 +377,33 @@ impl LocalOAuthRefreshAdapter for GenericOAuthRefreshAdapter {
 fn generic_oauth_transport_source_fingerprint(
     transport: &GatewayProviderTransportSnapshot,
 ) -> String {
-    let provider_type = transport.provider.provider_type.trim().to_ascii_lowercase();
-    let auth_type = transport.key.auth_type.trim().to_ascii_lowercase();
     let auth_config = transport
         .key
         .decrypted_auth_config
         .as_deref()
         .unwrap_or_default();
-    let api_key = transport.key.decrypted_api_key.as_str();
+    generic_oauth_credential_fingerprint(
+        transport.provider.provider_type.as_str(),
+        transport.key.auth_type.as_str(),
+        auth_config,
+        transport.key.decrypted_api_key.as_str(),
+    )
+}
+
+fn generic_oauth_credential_fingerprint(
+    provider_type: &str,
+    auth_type: &str,
+    auth_config: &str,
+    access_token: &str,
+) -> String {
+    let provider_type = provider_type.trim().to_ascii_lowercase();
+    let auth_type = auth_type.trim().to_ascii_lowercase();
     let mut digest = Sha256::new();
     for field in [
         provider_type.as_bytes(),
         auth_type.as_bytes(),
         auth_config.as_bytes(),
-        api_key.as_bytes(),
+        access_token.as_bytes(),
     ] {
         digest.update((field.len() as u64).to_be_bytes());
         digest.update(field);
@@ -340,6 +419,91 @@ fn generic_oauth_cached_entry_matches_transport(
     entry.source_fingerprint.as_deref() == Some(transport_fingerprint.as_str())
 }
 
+fn generic_oauth_entry_belongs_to_transport(
+    transport: &GatewayProviderTransportSnapshot,
+    entry: &CachedOAuthEntry,
+) -> bool {
+    entry
+        .provider_type
+        .eq_ignore_ascii_case(transport.provider.provider_type.as_str())
+        && generic_oauth_cached_entry_matches_transport(transport, entry)
+}
+
+fn generic_oauth_successor_entry_matches_transport(
+    transport: &GatewayProviderTransportSnapshot,
+    entry: &CachedOAuthEntry,
+) -> bool {
+    generic_oauth_entry_belongs_to_transport(transport, entry)
+        && !expires_at_requires_refresh(entry.expires_at_unix_secs)
+        && resolved_entry_header(entry).is_some()
+        && entry.metadata.is_some()
+}
+
+fn generic_oauth_refresh_fingerprint(
+    transport: &GatewayProviderTransportSnapshot,
+    entry: Option<&CachedOAuthEntry>,
+) -> Option<String> {
+    if !supports_local_generic_oauth_request_auth_resolution(transport) {
+        return None;
+    }
+    entry
+        .filter(|entry| generic_oauth_successor_entry_matches_transport(transport, entry))
+        .and_then(|entry| {
+            let metadata = serde_json::to_string(entry.metadata.as_ref()?).ok()?;
+            let access_token = bearer_access_token(entry.auth_header_value.as_str())?;
+            Some(generic_oauth_credential_fingerprint(
+                transport.provider.provider_type.as_str(),
+                transport.key.auth_type.as_str(),
+                metadata.as_str(),
+                access_token,
+            ))
+        })
+        .or_else(|| Some(generic_oauth_transport_source_fingerprint(transport)))
+}
+
+fn resolved_entry_header(entry: &CachedOAuthEntry) -> Option<LocalResolvedOAuthRequestAuth> {
+    let name = entry.auth_header_name.trim();
+    let value = entry.auth_header_value.trim();
+    if name.is_empty() || value.is_empty() {
+        return None;
+    }
+    Some(LocalResolvedOAuthRequestAuth::Header {
+        name: name.to_ascii_lowercase(),
+        value: value.to_string(),
+    })
+}
+
+fn bearer_access_token(authorization: &str) -> Option<&str> {
+    let mut parts = authorization.split_ascii_whitespace();
+    let scheme = parts.next()?;
+    let token = parts.next()?;
+    (scheme.eq_ignore_ascii_case("bearer") && parts.next().is_none()).then_some(token)
+}
+
+fn synchronize_authorization_overrides(auth_config: &mut Value, authorization: &str) {
+    let Some(object) = auth_config.as_object_mut() else {
+        return;
+    };
+    for (key, value) in object.iter_mut() {
+        match key.trim().to_ascii_lowercase().as_str() {
+            "headers" | "extra_headers" | "extraheaders" => {
+                let Some(headers) = value.as_object_mut() else {
+                    continue;
+                };
+                for (header_name, header_value) in headers.iter_mut() {
+                    if header_name.trim().eq_ignore_ascii_case(AUTH_HEADER_NAME) {
+                        *header_value = Value::String(authorization.to_string());
+                    }
+                }
+            }
+            "transport" | "request" => {
+                synchronize_authorization_overrides(value, authorization);
+            }
+            _ => {}
+        }
+    }
+}
+
 fn generic_provider_type(provider_type: &str) -> Option<&'static str> {
     let normalized = provider_type.trim();
     GENERIC_PROVIDER_OAUTH_TEMPLATES
@@ -353,6 +517,13 @@ fn refresh_token_from_auth_config(auth_config: &Value) -> Option<String> {
         .as_object()
         .and_then(|object| object.get("refresh_token"))
         .and_then(non_empty_string)
+}
+
+fn access_token_from_auth_config(auth_config: &Value) -> Option<String> {
+    let object = auth_config.as_object()?;
+    ["access_token", "accessToken"]
+        .iter()
+        .find_map(|field| object.get(*field).and_then(non_empty_string))
 }
 
 fn auth_config_expires_at(auth_config: &Value) -> Option<u64> {
@@ -423,10 +594,16 @@ fn current_access_token(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
     use serde_json::json;
 
     use super::super::oauth_refresh::{
-        CachedOAuthEntry, LocalOAuthRefreshAdapter, LocalResolvedOAuthRequestAuth,
+        CachedOAuthEntry, LocalOAuthHttpExecutor, LocalOAuthHttpRequest, LocalOAuthHttpResponse,
+        LocalOAuthRefreshAdapter, LocalOAuthRefreshCoordinator, LocalOAuthRefreshError,
+        LocalResolvedOAuthRequestAuth,
     };
     use super::super::snapshot::{
         GatewayProviderTransportEndpoint, GatewayProviderTransportKey,
@@ -434,8 +611,34 @@ mod tests {
     };
     use super::{
         current_access_token, generic_oauth_transport_source_fingerprint,
-        GenericOAuthRefreshAdapter,
+        resolve_local_generic_oauth_transport_authorization, GenericOAuthRefreshAdapter,
     };
+
+    #[derive(Debug)]
+    struct StaticTokenExecutor {
+        hits: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl LocalOAuthHttpExecutor for StaticTokenExecutor {
+        async fn execute(
+            &self,
+            _provider_type: &'static str,
+            _transport: &GatewayProviderTransportSnapshot,
+            _request: &LocalOAuthHttpRequest,
+        ) -> Result<LocalOAuthHttpResponse, LocalOAuthRefreshError> {
+            self.hits.fetch_add(1, Ordering::SeqCst);
+            Ok(LocalOAuthHttpResponse {
+                status_code: 200,
+                body_text: json!({
+                    "access_token": "fresh-access-token",
+                    "expires_in": 3600,
+                    "token_type": "Bearer"
+                })
+                .to_string(),
+            })
+        }
+    }
 
     fn sample_transport() -> GatewayProviderTransportSnapshot {
         GatewayProviderTransportSnapshot {
@@ -517,6 +720,58 @@ mod tests {
                 value: "Bearer imported-session".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn transport_authorization_uses_one_effective_bearer_generation() {
+        let mut transport = sample_transport();
+        transport.key.decrypted_api_key = "api-access-token".to_string();
+        transport.key.decrypted_auth_config = Some(
+            json!({
+                "accessToken": "legacy-access-token",
+                "request": {
+                    "extraHeaders": {
+                        "Authorization": "Bearer nested-override-token"
+                    }
+                }
+            })
+            .to_string(),
+        );
+        assert_eq!(
+            resolve_local_generic_oauth_transport_authorization(&transport).as_deref(),
+            Some("Bearer nested-override-token")
+        );
+
+        transport.key.decrypted_auth_config =
+            Some(json!({"accessToken": "legacy-access-token"}).to_string());
+        assert_eq!(
+            resolve_local_generic_oauth_transport_authorization(&transport).as_deref(),
+            Some("Bearer api-access-token")
+        );
+
+        transport.key.decrypted_api_key = "__placeholder__".to_string();
+        assert_eq!(
+            resolve_local_generic_oauth_transport_authorization(&transport).as_deref(),
+            Some("Bearer legacy-access-token")
+        );
+    }
+
+    #[test]
+    fn non_bearer_authorization_override_does_not_fall_back_to_stale_token() {
+        let mut transport = sample_transport();
+        transport.key.decrypted_api_key = "api-access-token".to_string();
+        transport.key.decrypted_auth_config = Some(
+            json!({
+                "access_token": "legacy-access-token",
+                "headers": {"Authorization": "Basic imported-session"}
+            })
+            .to_string(),
+        );
+
+        assert!(resolve_local_generic_oauth_transport_authorization(&transport).is_none());
+        assert!(GenericOAuthRefreshAdapter::default()
+            .resolve_without_refresh(&transport)
+            .is_none());
     }
 
     #[test]
@@ -635,5 +890,96 @@ mod tests {
             current_access_token(&transport, Some(&entry)).as_deref(),
             Some("refreshed-access-a")
         );
+    }
+
+    #[tokio::test]
+    async fn fenced_force_reuses_successor_when_refresh_token_does_not_rotate() {
+        let mut transport = sample_transport();
+        transport.key.decrypted_api_key = "stale-access-token".to_string();
+        transport.key.expires_at_unix_secs = Some(u64::MAX);
+        transport.key.decrypted_auth_config = Some(
+            json!({
+                "provider_type": "codex",
+                "refresh_token": "stable-refresh-token",
+                "expires_at": u64::MAX,
+                "headers": {"Authorization": "Bearer stale-top-level"},
+                "request": {
+                    "extraHeaders": {"authorization": "Bearer stale-request"}
+                },
+                "transport": {
+                    "extra_headers": {"AUTHORIZATION": "Bearer stale-transport"}
+                }
+            })
+            .to_string(),
+        );
+        let hits = Arc::new(AtomicUsize::new(0));
+        let coordinator = LocalOAuthRefreshCoordinator::with_adapters_for_tests(vec![Arc::new(
+            GenericOAuthRefreshAdapter::default()
+                .with_token_url_for_tests("codex", "https://oauth.example/token"),
+        )]);
+        let executor = StaticTokenExecutor {
+            hits: Arc::clone(&hits),
+        };
+        let expected = coordinator
+            .refresh_fingerprint_for_transport(&transport)
+            .expect("refreshable transport should have a generation fence");
+
+        let first = coordinator
+            .force_refresh_with_result_fenced(
+                &executor,
+                &transport,
+                None,
+                None,
+                Some(expected.as_str()),
+            )
+            .await
+            .expect("first refresh should succeed")
+            .expect("first refresh should resolve");
+        let first_entry = first
+            .refreshed_entry
+            .as_ref()
+            .expect("first refresh should return a cache entry");
+        assert_eq!(first_entry.auth_header_value, "Bearer fresh-access-token");
+        let metadata = first_entry
+            .metadata
+            .as_ref()
+            .expect("generic refresh should preserve auth metadata");
+        assert_eq!(metadata["refresh_token"], "stable-refresh-token");
+        assert_eq!(
+            metadata["headers"]["Authorization"],
+            "Bearer fresh-access-token"
+        );
+        assert_eq!(
+            metadata["request"]["extraHeaders"]["authorization"],
+            "Bearer fresh-access-token"
+        );
+        assert_eq!(
+            metadata["transport"]["extra_headers"]["AUTHORIZATION"],
+            "Bearer fresh-access-token"
+        );
+        coordinator
+            .store_cached_entry(&transport.key.id, first_entry.clone())
+            .await;
+
+        let follower = coordinator
+            .force_refresh_with_result_fenced(
+                &executor,
+                &transport,
+                None,
+                None,
+                Some(expected.as_str()),
+            )
+            .await
+            .expect("follower should reuse the completed refresh")
+            .expect("follower should resolve");
+        assert!(follower.reused_refresh);
+        assert_eq!(
+            follower
+                .refreshed_entry
+                .as_ref()
+                .map(|entry| entry.auth_header_value.as_str()),
+            Some("Bearer fresh-access-token")
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 }

@@ -18,6 +18,7 @@ use base64::Engine as _;
 use serde_json::{json, Map, Value};
 use tracing::warn;
 
+use crate::ai_serving::{build_core_error_body_for_client_format, LocalCoreSyncErrorKind};
 use crate::constants::{
     EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS, LOCAL_EXECUTION_RUNTIME_MISS_REASON_HEADER,
 };
@@ -31,6 +32,9 @@ pub(crate) enum LocalExecutionRequestOutcome {
     Exhausted(LocalExecutionExhaustion),
     NoPath,
 }
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DeferredUpstreamResponse;
 
 #[derive(Debug, Clone)]
 pub(crate) struct LocalExecutionExhaustion {
@@ -68,6 +72,18 @@ impl LocalExecutionRequestOutcome {
     pub(crate) fn responded(response: Response<Body>) -> Self {
         Self::Responded(response)
     }
+}
+
+pub(crate) fn mark_deferred_upstream_response(mut response: Response<Body>) -> Response<Body> {
+    response.extensions_mut().insert(DeferredUpstreamResponse);
+    response
+}
+
+pub(crate) fn is_deferred_upstream_response(response: &Response<Body>) -> bool {
+    response
+        .extensions()
+        .get::<DeferredUpstreamResponse>()
+        .is_some()
 }
 
 impl LocalExecutionRuntimeMissContext {
@@ -316,12 +332,12 @@ pub(crate) async fn record_failed_usage_for_exhausted_request(
         );
     }
     data.client_response_headers = Some(Value::Object(client_headers));
-    data.client_response_body = Some(json!({
-        "error": {
-            "type": "http_error",
-            "message": beautify_local_execution_client_error_message(local_execution_runtime_miss_detail),
-        }
-    }));
+    let client_message =
+        beautify_local_execution_client_error_message(local_execution_runtime_miss_detail);
+    data.client_response_body = Some(runtime_miss_client_error_body(
+        data.api_format.as_deref(),
+        &client_message,
+    ));
 
     let mut request_metadata = match data.request_metadata.take() {
         Some(Value::Object(object)) => object,
@@ -392,12 +408,7 @@ pub(crate) async fn record_failed_usage_for_runtime_miss_request(
     let status_code = http::StatusCode::SERVICE_UNAVAILABLE.as_u16();
     let client_message =
         beautify_local_execution_client_error_message(local_execution_runtime_miss_detail);
-    let client_body = json!({
-        "error": {
-            "type": "http_error",
-            "message": client_message,
-        }
-    });
+    let client_body = runtime_miss_client_error_body(api_format.as_deref(), &client_message);
     let mut client_headers = Map::from_iter([(
         "content-type".to_string(),
         Value::String("application/json".to_string()),
@@ -652,6 +663,30 @@ fn json_header_map() -> Value {
         "content-type".to_string(),
         Value::String("application/json".to_string()),
     )]))
+}
+
+fn runtime_miss_client_error_body(api_format: Option<&str>, message: &str) -> Value {
+    let fallback = json!({
+        "error": {
+            "type": "http_error",
+            "message": message,
+        }
+    });
+    let is_claude = api_format.is_some_and(|format| {
+        crate::ai_serving::normalize_api_format_alias(format)
+            .eq_ignore_ascii_case("claude:messages")
+    });
+    if !is_claude {
+        return fallback;
+    }
+
+    build_core_error_body_for_client_format(
+        "claude:messages",
+        message,
+        None,
+        LocalCoreSyncErrorKind::Overloaded,
+    )
+    .unwrap_or(fallback)
 }
 
 fn runtime_miss_original_headers_json(headers: &HeaderMap) -> Value {
@@ -1135,7 +1170,7 @@ fn trimmed_non_empty(value: Option<&str>) -> Option<String> {
 mod tests {
     use super::{
         apply_runtime_miss_usage_routing, beautify_local_execution_client_error_message,
-        request_candidate_represents_provider_execution,
+        request_candidate_represents_provider_execution, runtime_miss_client_error_body,
         select_last_runtime_miss_executed_candidate, LocalExecutionRuntimeMissContext,
         RuntimeMissCandidateContext,
     };
@@ -1167,6 +1202,17 @@ mod tests {
             ),
             "没有可用提供商支持模型 gpt-5.4 的流式请求"
         );
+    }
+
+    #[test]
+    fn runtime_miss_usage_body_matches_claude_client_envelope() {
+        let claude = runtime_miss_client_error_body(Some("claude:messages"), "busy");
+        assert_eq!(claude["type"], "error");
+        assert_eq!(claude["error"]["type"], "overloaded_error");
+
+        let openai = runtime_miss_client_error_body(Some("openai:chat"), "busy");
+        assert_eq!(openai["error"]["type"], "http_error");
+        assert!(openai.get("type").is_none());
     }
 
     #[test]

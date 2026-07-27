@@ -511,7 +511,13 @@ async fn assert_ai_route_locally_denied_after_execution_runtime_miss_with_reques
         None
     );
     let payload: serde_json::Value = response.json().await.expect("body should parse");
-    assert_eq!(payload["error"]["type"], "http_error");
+    if request_path.trim_end_matches('/') == "/v1/messages" {
+        assert_eq!(payload["type"], "error");
+        assert_eq!(payload["error"]["type"], "overloaded_error");
+    } else {
+        assert!(payload.get("type").is_none());
+        assert_eq!(payload["error"]["type"], "http_error");
+    }
     assert_eq!(payload["error"]["message"], expected_message);
     assert_eq!(*control_execute_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);

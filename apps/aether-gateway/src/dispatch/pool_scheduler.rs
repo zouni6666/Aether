@@ -375,6 +375,10 @@ impl<'a> PoolKeyCursor<'a> {
         self.group.candidate.provider_id.as_str()
     }
 
+    pub(crate) fn endpoint_id(&self) -> &str {
+        self.group.candidate.endpoint_id.as_str()
+    }
+
     pub(crate) fn new(
         state: PlannerAppState<'a>,
         group: EligibleLocalExecutionCandidate,

@@ -7,11 +7,38 @@ pub const EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER: &str = "x-aether-execution-
 pub const EXECUTION_REQUEST_HTTP1_ONLY_HEADER: &str = "x-aether-execution-http1-only";
 pub const EXECUTION_REQUEST_ACCEPT_INVALID_CERTS_HEADER: &str =
     "x-aether-execution-accept-invalid-certs";
+pub const EXECUTION_RESPONSE_BODY_MODE_HEADER: &str = "x-aether-execution-response-body-mode";
 pub const MAX_EXECUTION_REQUEST_TIMEOUT_SECS: u64 = 1_200;
 pub const MAX_EXECUTION_REQUEST_TIMEOUT_MS: u64 = MAX_EXECUTION_REQUEST_TIMEOUT_SECS * 1_000;
 pub const MAX_EXECUTION_STREAM_FIRST_BYTE_TIMEOUT_SECS: u64 = 300;
 pub const MAX_EXECUTION_STREAM_FIRST_BYTE_TIMEOUT_MS: u64 =
     MAX_EXECUTION_STREAM_FIRST_BYTE_TIMEOUT_SECS * 1_000;
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionResponseBodyMode {
+    #[default]
+    StructuredJson,
+    PreserveBytes,
+}
+
+impl ExecutionResponseBodyMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::StructuredJson => "structured_json",
+            Self::PreserveBytes => "preserve_bytes",
+        }
+    }
+
+    pub fn from_header_value(value: Option<&str>) -> Self {
+        match value.map(str::trim) {
+            Some(value) if value.eq_ignore_ascii_case(Self::PreserveBytes.as_str()) => {
+                Self::PreserveBytes
+            }
+            _ => Self::StructuredJson,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -138,6 +165,22 @@ pub struct ExecutionPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn response_body_mode_is_fail_closed_to_structured_json() {
+        assert_eq!(
+            ExecutionResponseBodyMode::from_header_value(Some(" preserve_bytes ")),
+            ExecutionResponseBodyMode::PreserveBytes
+        );
+        assert_eq!(
+            ExecutionResponseBodyMode::from_header_value(Some("unexpected")),
+            ExecutionResponseBodyMode::StructuredJson
+        );
+        assert_eq!(
+            ExecutionResponseBodyMode::from_header_value(None),
+            ExecutionResponseBodyMode::StructuredJson
+        );
+    }
 
     #[test]
     fn serializes_plan_with_json_body() {

@@ -496,6 +496,15 @@ fn classify_local_sync_error_kind(
     {
         return LocalCoreSyncErrorKind::RateLimit;
     }
+    if status_code == 413
+        || fingerprint.contains("request_too_large")
+        || fingerprint.contains("request too large")
+        || fingerprint.contains("payload_too_large")
+        || fingerprint.contains("payload too large")
+        || fingerprint.contains("request entity too large")
+    {
+        return LocalCoreSyncErrorKind::RequestTooLarge;
+    }
     if fingerprint.contains("contextlength")
         || fingerprint.contains("contentlengthexceeded")
         || fingerprint.contains("context window")
@@ -534,6 +543,7 @@ fn default_status_code_for_local_sync_error_kind(kind: LocalCoreSyncErrorKind) -
         LocalCoreSyncErrorKind::InvalidRequest | LocalCoreSyncErrorKind::ContextLengthExceeded => {
             400
         }
+        LocalCoreSyncErrorKind::RequestTooLarge => 413,
         LocalCoreSyncErrorKind::Authentication => 401,
         LocalCoreSyncErrorKind::PermissionDenied => 403,
         LocalCoreSyncErrorKind::NotFound => 404,
@@ -789,6 +799,76 @@ mod tests {
                     "status": "RESOURCE_EXHAUSTED"
                 }
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn local_core_error_maps_request_too_large_without_changing_openai_shape() {
+        let claude_payload = core_finalize_payload(
+            "claude_chat_sync_finalize",
+            "claude:messages",
+            "openai:chat",
+            413,
+            json!({
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "request body is too large"
+                }
+            }),
+        );
+        let claude_response = maybe_build_local_core_error_response(
+            "trace-sync-claude-too-large",
+            &test_decision(),
+            &claude_payload,
+        )
+        .expect("response build should not error")
+        .expect("response should exist");
+        assert_eq!(
+            claude_response.status(),
+            http::StatusCode::PAYLOAD_TOO_LARGE
+        );
+        let claude_body: serde_json::Value = serde_json::from_slice(
+            &to_bytes(claude_response.into_body(), usize::MAX)
+                .await
+                .expect("body should read"),
+        )
+        .expect("body should decode");
+        assert_eq!(claude_body["type"], "error");
+        assert_eq!(claude_body["error"]["type"], "request_too_large");
+
+        let openai_payload = core_finalize_payload(
+            "openai_chat_sync_finalize",
+            "openai:chat",
+            "claude:messages",
+            200,
+            json!({
+                "type": "error",
+                "error": {
+                    "type": "request_too_large",
+                    "message": "request body is too large"
+                }
+            }),
+        );
+        let openai_response = maybe_build_local_core_error_response(
+            "trace-sync-openai-too-large",
+            &test_decision(),
+            &openai_payload,
+        )
+        .expect("response build should not error")
+        .expect("response should exist");
+        assert_eq!(
+            openai_response.status(),
+            http::StatusCode::PAYLOAD_TOO_LARGE
+        );
+        let openai_body: serde_json::Value = serde_json::from_slice(
+            &to_bytes(openai_response.into_body(), usize::MAX)
+                .await
+                .expect("body should read"),
+        )
+        .expect("body should decode");
+        assert_eq!(
+            openai_body["error"]["type"], "context_length_exceeded",
+            "OpenAI compatibility shape should remain unchanged"
         );
     }
 

@@ -104,6 +104,7 @@ impl WindsurfProviderOAuthAdapter {
                     json_body,
                     body_bytes,
                     network: ctx.network.clone(),
+                    transport_profile: None,
                 })
                 .await;
             match response {
@@ -234,6 +235,7 @@ impl WindsurfProviderOAuthAdapter {
                 json_body: Some(json!({ "email": email, "password": password })),
                 body_bytes: None,
                 network: ctx.network.clone(),
+                transport_profile: None,
             })
             .await?;
         if !(200..300).contains(&login_response.status_code) {
@@ -266,6 +268,7 @@ impl WindsurfProviderOAuthAdapter {
                     json_body: None,
                     body_bytes: Some(Vec::new()),
                     network: ctx.network.clone(),
+                    transport_profile: None,
                 })
                 .await;
             match response {
@@ -388,6 +391,7 @@ impl ProviderOAuthAdapter for WindsurfProviderOAuthAdapter {
     fn capabilities(&self) -> ProviderOAuthCapabilities {
         ProviderOAuthCapabilities {
             supports_authorization_code: false,
+            supports_cookie_authorization: false,
             supports_refresh_token_import: true,
             supports_batch_import: true,
             supports_device_flow: true,

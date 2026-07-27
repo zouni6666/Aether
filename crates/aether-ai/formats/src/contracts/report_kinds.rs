@@ -23,6 +23,7 @@ const LEGACY_OPENAI_COMPACT_SYNC_FINALIZE_REPORT_KIND: &str = "openai_compact_sy
 
 pub const OPENAI_CHAT_SYNC_SUCCESS_REPORT_KIND: &str = "openai_chat_sync_success";
 pub const CLAUDE_CHAT_SYNC_SUCCESS_REPORT_KIND: &str = "claude_chat_sync_success";
+pub const CLAUDE_COUNT_TOKENS_SYNC_SUCCESS_REPORT_KIND: &str = "claude_count_tokens_sync_success";
 pub const GEMINI_CHAT_SYNC_SUCCESS_REPORT_KIND: &str = "gemini_chat_sync_success";
 pub const GEMINI_INTERACTIONS_SYNC_SUCCESS_REPORT_KIND: &str = "gemini_interactions_sync_success";
 pub const OPENAI_RESPONSES_SYNC_SUCCESS_REPORT_KIND: &str = "openai_responses_sync_success";

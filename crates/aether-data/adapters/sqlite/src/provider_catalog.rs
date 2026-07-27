@@ -1462,6 +1462,19 @@ WHERE id = ?
                 "provider catalog OAuth api_key update must not be empty".to_string(),
             ));
         }
+        if update.expected_credential.as_ref().is_some_and(|expected| {
+            expected
+                .encrypted_api_key
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
+                || expected.auth_type.trim().is_empty()
+                || expected.provider_id.trim().is_empty()
+                || expected.provider_type.trim().is_empty()
+        }) {
+            return Err(DataLayerError::InvalidInput(
+                "provider catalog OAuth credential fence must not contain empty fields".to_string(),
+            ));
+        }
         if !update.status_snapshot_patch.is_object() {
             return Err(DataLayerError::InvalidInput(
                 "provider catalog status snapshot patch must be an object".to_string(),
@@ -1518,6 +1531,22 @@ WHERE id = ?
             .push_bind(&update.key_id)
             .push(" AND auth_config IS ")
             .push_bind(update.expected_encrypted_auth_config.as_deref());
+        if let Some(expected) = update.expected_credential.as_ref() {
+            builder
+                .push(" AND api_key IS ")
+                .push_bind(expected.encrypted_api_key.as_deref())
+                .push(" AND auth_type = ")
+                .push_bind(&expected.auth_type)
+                .push(" AND provider_id = ")
+                .push_bind(&expected.provider_id)
+                .push(
+                    " AND EXISTS (SELECT 1 FROM providers WHERE \
+                     providers.id = provider_api_keys.provider_id \
+                     AND providers.provider_type = ",
+                )
+                .push_bind(&expected.provider_type)
+                .push(")");
+        }
         let rows_affected = builder
             .build()
             .execute(&self.pool)
@@ -2938,9 +2967,10 @@ mod tests {
     use aether_data_contracts::repository::provider_catalog::{
         ProviderCatalogKeyAdaptiveState, ProviderCatalogKeyAdaptiveStateUpdate,
         ProviderCatalogKeyHealthStateUpdate, ProviderCatalogKeyListOrder,
-        ProviderCatalogKeyListQuery, ProviderCatalogKeyOAuthRuntimeStateCasUpdate,
-        ProviderCatalogKeyRuntimeMetadataUpdate, ProviderCatalogUpstreamMetadataNamespaceUpdate,
-        StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
+        ProviderCatalogKeyListQuery, ProviderCatalogKeyOAuthCredentialFence,
+        ProviderCatalogKeyOAuthRuntimeStateCasUpdate, ProviderCatalogKeyRuntimeMetadataUpdate,
+        ProviderCatalogUpstreamMetadataNamespaceUpdate, StoredProviderCatalogEndpoint,
+        StoredProviderCatalogKey, StoredProviderCatalogProvider,
     };
     use serde_json::json;
 
@@ -3246,6 +3276,12 @@ mod tests {
         let update = ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
             key_id: key.id.clone(),
             expected_encrypted_auth_config: Some("encrypted-auth-v1".to_string()),
+            expected_credential: Some(ProviderCatalogKeyOAuthCredentialFence {
+                encrypted_api_key: Some("encrypted-api-key".to_string()),
+                auth_type: "oauth".to_string(),
+                provider_id: "oauth-cas-provider".to_string(),
+                provider_type: "codex".to_string(),
+            }),
             encrypted_auth_config: "encrypted-auth-v2".to_string(),
             encrypted_api_key_update: Some("encrypted-api-v2".to_string()),
             expires_at_unix_secs_update: Some(Some(4_102_555_900)),
@@ -3303,6 +3339,24 @@ mod tests {
         assert_eq!(status["quota"], json!({"remaining": 7}));
         assert_eq!(status["admin"], json!({"label": "keep"}));
         assert_eq!(status["runtime"], json!({"generation": 2}));
+
+        let stale_api_key_update = ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
+            expected_encrypted_auth_config: Some("encrypted-auth-v2".to_string()),
+            expected_credential: Some(ProviderCatalogKeyOAuthCredentialFence {
+                encrypted_api_key: Some("encrypted-api-key".to_string()),
+                auth_type: "oauth".to_string(),
+                provider_id: "oauth-cas-provider".to_string(),
+                provider_type: "codex".to_string(),
+            }),
+            encrypted_auth_config: "encrypted-auth-v3".to_string(),
+            status_snapshot_patch: json!({}),
+            updated_at_unix_secs: Some(201),
+            ..update.clone()
+        };
+        assert!(!repository
+            .compare_and_update_key_oauth_runtime_state(&stale_api_key_update)
+            .await
+            .expect("stale API key generation should conflict"));
 
         let stale_update = ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
             expected_encrypted_auth_config: Some("encrypted-auth-v1".to_string()),

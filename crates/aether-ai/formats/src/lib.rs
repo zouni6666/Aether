@@ -6,6 +6,8 @@ pub mod formats;
 pub mod protocol;
 pub mod provider_compat;
 
+pub use contracts::{ApiOperation, ClientSurface};
+
 pub use formats::context::{
     ConversionFieldRecord, ConversionFieldStatus, ConversionReport, Converted, FormatContext,
     FormatError,

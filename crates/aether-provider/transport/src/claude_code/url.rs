@@ -5,14 +5,19 @@ use url::form_urlencoded;
 pub fn build_claude_code_messages_url(upstream_base_url: &str, query: Option<&str>) -> String {
     let (trimmed_base_url, base_query) = split_query(upstream_base_url.trim());
     let trimmed_base_url = trimmed_base_url.trim_end_matches('/');
-    let mut url =
-        if trimmed_base_url.ends_with("/v1/messages") || trimmed_base_url.ends_with("/messages") {
-            trimmed_base_url.to_string()
-        } else if trimmed_base_url.ends_with("/v1") {
-            format!("{trimmed_base_url}/messages")
-        } else {
-            format!("{trimmed_base_url}/v1/messages")
-        };
+    let mut url = if trimmed_base_url.ends_with("/messages/count_tokens") {
+        trimmed_base_url
+            .strip_suffix("/count_tokens")
+            .unwrap_or(trimmed_base_url)
+            .to_string()
+    } else if trimmed_base_url.ends_with("/v1/messages") || trimmed_base_url.ends_with("/messages")
+    {
+        trimmed_base_url.to_string()
+    } else if trimmed_base_url.ends_with("/v1") {
+        format!("{trimmed_base_url}/messages")
+    } else {
+        format!("{trimmed_base_url}/v1/messages")
+    };
     append_merged_query(&mut url, base_query, query);
     url
 }
@@ -65,6 +70,13 @@ mod tests {
         assert_eq!(
             build_claude_code_messages_url("https://api.anthropic.com/v1/messages", None),
             "https://api.anthropic.com/v1/messages"
+        );
+        assert_eq!(
+            build_claude_code_messages_url(
+                "https://api.anthropic.com/v1/messages/count_tokens?tenant=base",
+                Some("trace=1"),
+            ),
+            "https://api.anthropic.com/v1/messages?tenant=base&trace=1"
         );
     }
 

@@ -45,11 +45,8 @@
                   <SelectItem value="vertex_ai">
                     Vertex AI
                   </SelectItem>
-                  <SelectItem
-                    value="claude_code"
-                    disabled
-                  >
-                    {{ legacyT('ClaudeCode（暂不可用）') }}
+                  <SelectItem value="claude_code">
+                    {{ legacyT('Claude Code（实验性功能）') }}
                   </SelectItem>
                   <SelectItem value="codex">
                     Codex
@@ -82,7 +79,7 @@
                     Vertex AI
                   </SelectItem>
                   <SelectItem value="claude_code">
-                    ClaudeCode
+                    {{ legacyT('Claude Code（实验性功能）') }}
                   </SelectItem>
                   <SelectItem value="codex">
                     Codex
@@ -548,11 +545,6 @@ watch(() => form.value.provider_type, () => {
 
 // 提交表单
 const handleSubmit = async () => {
-  if (!isEditMode.value && form.value.provider_type === 'claude_code') {
-    showError(legacyT('ClaudeCode 提供商类型暂时禁用'), legacyT('验证失败'))
-    return
-  }
-
   // 月卡类型必须设置周期开始时间
   if (form.value.billing_type === 'monthly_quota' && !form.value.quota_last_reset_at) {
     showError(legacyT('月卡类型必须设置周期开始时间'), legacyT('验证失败'))

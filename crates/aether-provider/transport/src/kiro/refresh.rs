@@ -1,5 +1,6 @@
 use aether_oauth::provider::providers::KiroProviderOAuthAdapter as CoreKiroProviderOAuthAdapter;
 use async_trait::async_trait;
+use sha2::{Digest, Sha256};
 
 use super::super::oauth_refresh::{
     oauth_error_to_local_refresh_error, provider_oauth_transport_context_from_snapshot,
@@ -51,11 +52,15 @@ impl KiroOAuthRefreshAdapter {
             .map_err(|error| oauth_error_to_local_refresh_error(PROVIDER_TYPE, error))
     }
 
-    fn auth_config_from_entry(entry: &CachedOAuthEntry) -> Option<KiroAuthConfig> {
+    fn auth_config_from_entry(
+        transport: &GatewayProviderTransportSnapshot,
+        entry: &CachedOAuthEntry,
+    ) -> Option<KiroAuthConfig> {
         entry
             .metadata
             .as_ref()
             .filter(|_| entry.provider_type.eq_ignore_ascii_case(PROVIDER_TYPE))
+            .filter(|_| kiro_cached_entry_matches_transport(transport, entry))
             .and_then(KiroAuthConfig::from_json_value)
     }
 
@@ -64,12 +69,17 @@ impl KiroOAuthRefreshAdapter {
         transport: &GatewayProviderTransportSnapshot,
         entry: Option<&CachedOAuthEntry>,
     ) -> Option<KiroAuthConfig> {
-        entry.and_then(Self::auth_config_from_entry).or_else(|| {
-            KiroAuthConfig::from_raw_json(transport.key.decrypted_auth_config.as_deref())
-        })
+        entry
+            .and_then(|entry| Self::auth_config_from_entry(transport, entry))
+            .or_else(|| {
+                KiroAuthConfig::from_raw_json(transport.key.decrypted_auth_config.as_deref())
+            })
     }
 
-    fn build_cached_entry(auth_config: &KiroAuthConfig) -> Option<CachedOAuthEntry> {
+    fn build_cached_entry(
+        transport: &GatewayProviderTransportSnapshot,
+        auth_config: &KiroAuthConfig,
+    ) -> Option<CachedOAuthEntry> {
         let request_auth = build_kiro_request_auth_from_config(auth_config.clone(), None)?;
         Some(CachedOAuthEntry {
             provider_type: PROVIDER_TYPE.to_string(),
@@ -77,7 +87,21 @@ impl KiroOAuthRefreshAdapter {
             auth_header_value: request_auth.value,
             expires_at_unix_secs: auth_config.expires_at,
             metadata: Some(auth_config.to_json_value()),
-            source_fingerprint: None,
+            source_fingerprint: Some(kiro_transport_credential_fingerprint(transport)),
+        })
+    }
+
+    fn build_cached_entry_from_transport(
+        transport: &GatewayProviderTransportSnapshot,
+    ) -> Option<CachedOAuthEntry> {
+        let request_auth = resolve_local_kiro_request_auth(transport)?;
+        Some(CachedOAuthEntry {
+            provider_type: PROVIDER_TYPE.to_string(),
+            auth_header_name: request_auth.name.to_string(),
+            auth_header_value: request_auth.value,
+            expires_at_unix_secs: request_auth.auth_config.expires_at,
+            metadata: Some(request_auth.auth_config.to_json_value()),
+            source_fingerprint: Some(kiro_transport_credential_fingerprint(transport)),
         })
     }
 
@@ -101,10 +125,10 @@ impl LocalOAuthRefreshAdapter for KiroOAuthRefreshAdapter {
 
     fn resolve_cached(
         &self,
-        _transport: &GatewayProviderTransportSnapshot,
+        transport: &GatewayProviderTransportSnapshot,
         entry: &CachedOAuthEntry,
     ) -> Option<LocalResolvedOAuthRequestAuth> {
-        let auth_config = Self::auth_config_from_entry(entry)?;
+        let auth_config = Self::auth_config_from_entry(transport, entry)?;
         let request_auth = build_kiro_request_auth_from_config(auth_config, None)?;
         Some(LocalResolvedOAuthRequestAuth::Kiro(request_auth))
     }
@@ -128,6 +152,24 @@ impl LocalOAuthRefreshAdapter for KiroOAuthRefreshAdapter {
             && self.refreshable_auth_config(transport, entry).is_some()
     }
 
+    fn refresh_fingerprint(
+        &self,
+        transport: &GatewayProviderTransportSnapshot,
+        entry: Option<&CachedOAuthEntry>,
+    ) -> Option<String> {
+        self.supports(transport).then(|| {
+            kiro_successor_refresh_fingerprint(transport, entry)
+                .unwrap_or_else(|| kiro_transport_credential_fingerprint(transport))
+        })
+    }
+
+    fn cached_entry_from_transport(
+        &self,
+        transport: &GatewayProviderTransportSnapshot,
+    ) -> Option<CachedOAuthEntry> {
+        Self::build_cached_entry_from_transport(transport)
+    }
+
     async fn refresh(
         &self,
         executor: &dyn LocalOAuthHttpExecutor,
@@ -140,8 +182,73 @@ impl LocalOAuthRefreshAdapter for KiroOAuthRefreshAdapter {
         let refreshed = self
             .refresh_auth_config(executor, transport, &auth_config)
             .await?;
-        Ok(Self::build_cached_entry(&refreshed))
+        Ok(Self::build_cached_entry(transport, &refreshed))
     }
+}
+
+fn kiro_transport_credential_fingerprint(transport: &GatewayProviderTransportSnapshot) -> String {
+    kiro_credential_fingerprint(
+        transport.provider.provider_type.as_str(),
+        transport.key.auth_type.as_str(),
+        transport
+            .key
+            .decrypted_auth_config
+            .as_deref()
+            .unwrap_or_default(),
+        transport.key.decrypted_api_key.as_str(),
+    )
+}
+
+fn kiro_successor_refresh_fingerprint(
+    transport: &GatewayProviderTransportSnapshot,
+    entry: Option<&CachedOAuthEntry>,
+) -> Option<String> {
+    let entry = entry.filter(|entry| kiro_cached_entry_matches_transport(transport, entry))?;
+    let metadata = serde_json::to_string(entry.metadata.as_ref()?).ok()?;
+    let access_token = bearer_access_token(entry.auth_header_value.as_str())?;
+    Some(kiro_credential_fingerprint(
+        transport.provider.provider_type.as_str(),
+        transport.key.auth_type.as_str(),
+        metadata.as_str(),
+        access_token,
+    ))
+}
+
+fn kiro_cached_entry_matches_transport(
+    transport: &GatewayProviderTransportSnapshot,
+    entry: &CachedOAuthEntry,
+) -> bool {
+    entry.provider_type.eq_ignore_ascii_case(PROVIDER_TYPE)
+        && entry.source_fingerprint.as_deref()
+            == Some(kiro_transport_credential_fingerprint(transport).as_str())
+}
+
+fn kiro_credential_fingerprint(
+    provider_type: &str,
+    auth_type: &str,
+    auth_config: &str,
+    access_token: &str,
+) -> String {
+    let provider_type = provider_type.trim().to_ascii_lowercase();
+    let auth_type = auth_type.trim().to_ascii_lowercase();
+    let mut digest = Sha256::new();
+    for field in [
+        provider_type.as_bytes(),
+        auth_type.as_bytes(),
+        auth_config.as_bytes(),
+        access_token.as_bytes(),
+    ] {
+        digest.update((field.len() as u64).to_be_bytes());
+        digest.update(field);
+    }
+    format!("{:x}", digest.finalize())
+}
+
+fn bearer_access_token(authorization: &str) -> Option<&str> {
+    let mut parts = authorization.split_ascii_whitespace();
+    let scheme = parts.next()?;
+    let token = parts.next()?;
+    (scheme.eq_ignore_ascii_case("bearer") && parts.next().is_none()).then_some(token)
 }
 
 #[cfg(test)]
@@ -155,7 +262,7 @@ mod tests {
         GatewayProviderTransportEndpoint, GatewayProviderTransportKey,
         GatewayProviderTransportProvider, GatewayProviderTransportSnapshot,
     };
-    use super::{KiroOAuthRefreshAdapter, IDC_AMZ_USER_AGENT};
+    use super::{KiroAuthConfig, KiroOAuthRefreshAdapter, IDC_AMZ_USER_AGENT};
     use axum::body::to_bytes;
     use axum::extract::Request;
     use axum::response::IntoResponse;
@@ -242,6 +349,72 @@ mod tests {
             axum::serve(listener, app).await.expect("server should run");
         });
         (format!("http://{addr}"), handle)
+    }
+
+    #[test]
+    fn cached_entry_is_bound_to_kiro_credential_generation() {
+        let stable_refresh_token = "r".repeat(120);
+        let source_transport = sample_transport(
+            &json!({
+                "refresh_token": stable_refresh_token,
+                "machine_id": "123e4567-e89b-12d3-a456-426614174000",
+                "kiro_version": "1.2.3"
+            })
+            .to_string(),
+        );
+        let refreshed_config = KiroAuthConfig::from_raw_json(Some(
+            &json!({
+                "refresh_token": "s".repeat(120),
+                "access_token": "fresh-kiro-access-token",
+                "expires_at": u64::MAX,
+                "machine_id": "123e4567-e89b-12d3-a456-426614174000",
+                "kiro_version": "1.2.3"
+            })
+            .to_string(),
+        ))
+        .expect("refreshed Kiro config should parse");
+        let entry =
+            KiroOAuthRefreshAdapter::build_cached_entry(&source_transport, &refreshed_config)
+                .expect("refreshed Kiro entry should build");
+        let adapter = KiroOAuthRefreshAdapter::default();
+
+        assert!(adapter.resolve_cached(&source_transport, &entry).is_some());
+        assert_ne!(
+            adapter.refresh_fingerprint(&source_transport, None),
+            adapter.refresh_fingerprint(&source_transport, Some(&entry))
+        );
+
+        let replacement_transport = sample_transport(
+            &json!({
+                "refresh_token": "admin-refresh-token",
+                "access_token": "admin-access-token",
+                "expires_at": u64::MAX,
+                "machine_id": "123e4567-e89b-12d3-a456-426614174001",
+                "kiro_version": "1.2.3"
+            })
+            .to_string(),
+        );
+        assert!(adapter
+            .resolve_cached(&replacement_transport, &entry)
+            .is_none());
+        let selected_refresh_config = adapter
+            .base_auth_config(&replacement_transport, Some(&entry))
+            .expect("replacement transport should provide refresh config");
+        assert_eq!(
+            selected_refresh_config.refresh_token.as_deref(),
+            Some("admin-refresh-token")
+        );
+        assert_eq!(
+            selected_refresh_config.access_token.as_deref(),
+            Some("admin-access-token")
+        );
+
+        let replacement_entry =
+            LocalOAuthRefreshAdapter::cached_entry_from_transport(&adapter, &replacement_transport)
+                .expect("persisted replacement should reconstruct a generation-bound entry");
+        assert!(adapter
+            .resolve_cached(&replacement_transport, &replacement_entry)
+            .is_some());
     }
 
     #[tokio::test]

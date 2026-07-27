@@ -3,6 +3,7 @@ use async_trait::async_trait;
 #[derive(Debug)]
 pub enum AiServingExecutionOutcome<Response, Exhaustion> {
     Responded(Response),
+    Deferred(Response),
     Exhausted(Exhaustion),
     NoPath,
 }
@@ -98,9 +99,15 @@ where
     Port: AiSyncExecutionPathPort,
 {
     let mut exhausted = None;
+    let mut deferred = None;
 
-    if let Some(response) =
-        absorb_sync_step(port, AiSyncExecutionStep::VideoTaskFollowUp, &mut exhausted).await?
+    if let Some(response) = absorb_sync_step(
+        port,
+        AiSyncExecutionStep::VideoTaskFollowUp,
+        &mut deferred,
+        &mut exhausted,
+    )
+    .await?
     {
         return Ok(response);
     }
@@ -116,10 +123,16 @@ where
             AiSyncExecutionStep::LocalGeminiFiles,
             AiSyncExecutionStep::RemoteDecision,
         ] {
-            if let Some(response) = absorb_sync_step(port, step, &mut exhausted).await? {
+            if let Some(response) =
+                absorb_sync_step(port, step, &mut deferred, &mut exhausted).await?
+            {
                 return Ok(response);
             }
         }
+    }
+
+    if let Some(response) = deferred {
+        return Ok(AiServingExecutionOutcome::Deferred(response));
     }
 
     if let Some(outcome) = exhausted {
@@ -135,6 +148,9 @@ where
         AiServingExecutionOutcome::Responded(response) => {
             Ok(AiServingExecutionOutcome::Responded(response))
         }
+        AiServingExecutionOutcome::Deferred(response) => {
+            Ok(AiServingExecutionOutcome::Deferred(response))
+        }
         AiServingExecutionOutcome::Exhausted(outcome) => {
             Ok(AiServingExecutionOutcome::Exhausted(outcome))
         }
@@ -149,15 +165,22 @@ where
     Port: AiStreamExecutionPathPort,
 {
     let mut exhausted = None;
+    let mut deferred = None;
 
     for step in port.stream_execution_steps() {
         if *step != AiStreamExecutionStep::LocalVideoContent && !port.scheduler_decision_supported()
         {
             continue;
         }
-        if let Some(response) = absorb_stream_step(port, *step, &mut exhausted).await? {
+        if let Some(response) =
+            absorb_stream_step(port, *step, &mut deferred, &mut exhausted).await?
+        {
             return Ok(response);
         }
+    }
+
+    if let Some(response) = deferred {
+        return Ok(AiServingExecutionOutcome::Deferred(response));
     }
 
     if let Some(outcome) = exhausted {
@@ -173,6 +196,9 @@ where
         AiServingExecutionOutcome::Responded(response) => {
             Ok(AiServingExecutionOutcome::Responded(response))
         }
+        AiServingExecutionOutcome::Deferred(response) => {
+            Ok(AiServingExecutionOutcome::Deferred(response))
+        }
         AiServingExecutionOutcome::Exhausted(outcome) => {
             Ok(AiServingExecutionOutcome::Exhausted(outcome))
         }
@@ -183,6 +209,7 @@ where
 async fn absorb_sync_step<Port>(
     port: &Port,
     step: AiSyncExecutionStep,
+    deferred: &mut Option<Port::Response>,
     exhausted: &mut Option<Port::Exhaustion>,
 ) -> Result<Option<AiServingExecutionOutcome<Port::Response, Port::Exhaustion>>, Port::Error>
 where
@@ -191,6 +218,10 @@ where
     match port.execute_sync_step(step).await? {
         AiServingExecutionOutcome::Responded(response) => {
             Ok(Some(AiServingExecutionOutcome::Responded(response)))
+        }
+        AiServingExecutionOutcome::Deferred(response) => {
+            *deferred = Some(response);
+            Ok(None)
         }
         AiServingExecutionOutcome::Exhausted(outcome) => {
             *exhausted = Some(outcome);
@@ -203,6 +234,7 @@ where
 async fn absorb_stream_step<Port>(
     port: &Port,
     step: AiStreamExecutionStep,
+    deferred: &mut Option<Port::Response>,
     exhausted: &mut Option<Port::Exhaustion>,
 ) -> Result<Option<AiServingExecutionOutcome<Port::Response, Port::Exhaustion>>, Port::Error>
 where
@@ -211,6 +243,10 @@ where
     match port.execute_stream_step(step).await? {
         AiServingExecutionOutcome::Responded(response) => {
             Ok(Some(AiServingExecutionOutcome::Responded(response)))
+        }
+        AiServingExecutionOutcome::Deferred(response) => {
+            *deferred = Some(response);
+            Ok(None)
         }
         AiServingExecutionOutcome::Exhausted(outcome) => {
             *exhausted = Some(outcome);
@@ -391,6 +427,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_path_keeps_deferred_error_until_a_later_step_succeeds() {
+        let port = TestSyncPort {
+            scheduler_supported: true,
+            outcomes: Mutex::new(VecDeque::from([
+                AiServingExecutionOutcome::NoPath,
+                AiServingExecutionOutcome::Deferred("preserved_upstream_error"),
+                AiServingExecutionOutcome::Responded("later_success"),
+            ])),
+            calls: Mutex::default(),
+        };
+
+        let outcome = run_ai_sync_execution_path(&port).await.unwrap();
+
+        assert!(matches!(
+            outcome,
+            AiServingExecutionOutcome::Responded("later_success")
+        ));
+        assert_eq!(
+            port.calls.lock().unwrap().as_slice(),
+            ["VideoTaskFollowUp", "LocalVideo", "LocalImage"]
+        );
+    }
+
+    #[tokio::test]
     async fn stream_path_skips_scheduler_steps_when_unsupported() {
         let port = TestStreamPort {
             scheduler_supported: false,
@@ -449,6 +509,34 @@ mod tests {
             AiServingExecutionOutcome::Responded("chat_response")
         ));
         assert_eq!(port.calls.lock().unwrap().as_slice(), ["LocalOpenAiChat"]);
+    }
+
+    #[tokio::test]
+    async fn stream_path_returns_deferred_error_only_after_steps_exhaust() {
+        const TWO_STEPS: &[AiStreamExecutionStep] = &[
+            AiStreamExecutionStep::LocalOpenAiChat,
+            AiStreamExecutionStep::LocalSameFormatProvider,
+        ];
+        let port = TestStreamPort {
+            scheduler_supported: true,
+            stream_steps: Some(TWO_STEPS),
+            outcomes: Mutex::new(VecDeque::from([
+                AiServingExecutionOutcome::Deferred("preserved_upstream_error"),
+                AiServingExecutionOutcome::NoPath,
+            ])),
+            calls: Mutex::default(),
+        };
+
+        let outcome = run_ai_stream_execution_path(&port).await.unwrap();
+
+        assert!(matches!(
+            outcome,
+            AiServingExecutionOutcome::Deferred("preserved_upstream_error")
+        ));
+        assert_eq!(
+            port.calls.lock().unwrap().as_slice(),
+            ["LocalOpenAiChat", "LocalSameFormatProvider"]
+        );
     }
 
     #[tokio::test]

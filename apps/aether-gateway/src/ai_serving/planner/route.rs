@@ -1,8 +1,8 @@
 use crate::ai_serving::GatewayControlDecision;
 use crate::ai_serving::{
     is_matching_stream_http_request as is_matching_stream_http_request_impl,
-    resolve_execution_runtime_stream_plan_kind as resolve_execution_runtime_stream_plan_kind_impl,
-    resolve_execution_runtime_sync_plan_kind as resolve_execution_runtime_sync_plan_kind_impl,
+    resolve_execution_runtime_stream_plan_kind_with_client_surface as resolve_execution_runtime_stream_plan_kind_impl,
+    resolve_execution_runtime_sync_plan_kind_with_client_surface as resolve_execution_runtime_sync_plan_kind_impl,
     supports_stream_execution_decision_kind as supports_stream_execution_decision_kind_impl,
     supports_sync_execution_decision_kind as supports_sync_execution_decision_kind_impl,
 };
@@ -11,28 +11,34 @@ pub(crate) fn resolve_execution_runtime_stream_plan_kind(
     parts: &http::request::Parts,
     decision: &GatewayControlDecision,
 ) -> Option<&'static str> {
-    resolve_execution_runtime_stream_plan_kind_impl(
+    let plan_kind = resolve_execution_runtime_stream_plan_kind_impl(
         decision.route_class.as_deref(),
         decision.route_family.as_deref(),
         decision.route_kind.as_deref(),
+        decision.client_surface,
         decision.request_auth_channel.as_deref(),
         &parts.method,
         parts.uri.path(),
-    )
+    )?;
+    crate::ai_serving::plan_kind_matches_api_operation(plan_kind, true, decision.api_operation)
+        .then_some(plan_kind)
 }
 
 pub(crate) fn resolve_execution_runtime_sync_plan_kind(
     parts: &http::request::Parts,
     decision: &GatewayControlDecision,
 ) -> Option<&'static str> {
-    resolve_execution_runtime_sync_plan_kind_impl(
+    let plan_kind = resolve_execution_runtime_sync_plan_kind_impl(
         decision.route_class.as_deref(),
         decision.route_family.as_deref(),
         decision.route_kind.as_deref(),
+        decision.client_surface,
         decision.request_auth_channel.as_deref(),
         &parts.method,
         parts.uri.path(),
-    )
+    )?;
+    crate::ai_serving::plan_kind_matches_api_operation(plan_kind, false, decision.api_operation)
+        .then_some(plan_kind)
 }
 
 pub(crate) fn is_matching_stream_request(
@@ -62,7 +68,7 @@ mod tests {
         resolve_execution_runtime_sync_plan_kind, supports_stream_execution_decision_kind,
         supports_sync_execution_decision_kind,
     };
-    use crate::ai_serving::GatewayControlDecision;
+    use crate::ai_serving::{ApiOperation, ClientSurface, GatewayControlDecision};
 
     fn sample_decision(route_family: &str, route_kind: &str) -> GatewayControlDecision {
         GatewayControlDecision {
@@ -71,6 +77,9 @@ mod tests {
             route_class: Some("ai_public".to_string()),
             route_family: Some(route_family.to_string()),
             route_kind: Some(route_kind.to_string()),
+            client_surface: None,
+            api_operation: None,
+            gateway_credential_carrier: None,
             request_auth_channel: None,
             auth_context: None,
             admin_principal: None,
@@ -121,7 +130,9 @@ mod tests {
         let (claude_parts, _) = claude_request.into_parts();
 
         let claude_api_key = sample_decision_with_auth_channel("claude", "messages", "api_key");
-        let claude_bearer = sample_decision_with_auth_channel("claude", "messages", "bearer_like");
+        let mut claude_bearer =
+            sample_decision_with_auth_channel("claude", "messages", "bearer_like");
+        claude_bearer.client_surface = Some(ClientSurface::ClaudeCode);
         assert_eq!(
             resolve_execution_runtime_sync_plan_kind(&claude_parts, &claude_api_key),
             Some("claude_chat_sync")
@@ -129,6 +140,13 @@ mod tests {
         assert_eq!(
             resolve_execution_runtime_stream_plan_kind(&claude_parts, &claude_bearer),
             Some("claude_cli_stream")
+        );
+
+        let claude_sdk_bearer =
+            sample_decision_with_auth_channel("claude", "messages", "bearer_like");
+        assert_eq!(
+            resolve_execution_runtime_sync_plan_kind(&claude_parts, &claude_sdk_bearer),
+            Some("claude_chat_sync")
         );
 
         let gemini_request = Request::builder()
@@ -149,6 +167,36 @@ mod tests {
         assert_eq!(
             resolve_execution_runtime_sync_plan_kind(&gemini_parts, &gemini_bearer),
             Some("gemini_cli_sync")
+        );
+    }
+
+    #[test]
+    fn resolves_claude_count_tokens_as_native_sync_operation() {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/messages/count_tokens")
+            .body(())
+            .expect("request should build");
+        let (parts, _) = request.into_parts();
+        let mut decision = sample_decision("claude", "count_tokens");
+        decision.api_operation = Some(ApiOperation::ClaudeCountTokens);
+
+        assert_eq!(
+            resolve_execution_runtime_sync_plan_kind(&parts, &decision),
+            Some("claude_count_tokens_sync")
+        );
+        assert!(supports_sync_execution_decision_kind(
+            "claude_count_tokens_sync"
+        ));
+
+        decision.api_operation = Some(ApiOperation::ClaudeMessagesCreate);
+        assert_eq!(
+            resolve_execution_runtime_sync_plan_kind(&parts, &decision),
+            None
+        );
+        assert_eq!(
+            resolve_execution_runtime_stream_plan_kind(&parts, &decision),
+            None
         );
     }
 

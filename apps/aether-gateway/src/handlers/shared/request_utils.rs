@@ -244,6 +244,12 @@ pub(crate) fn admin_proxy_local_requires_buffered_body(
                     http::Method::POST,
                     Some("import_refresh_token"),
                 )
+                | (Some("provider_oauth_manage"), http::Method::POST, Some("cookie_authorize"))
+                | (
+                    Some("provider_oauth_manage"),
+                    http::Method::POST,
+                    Some("start_cookie_authorize_task"),
+                )
                 | (Some("provider_oauth_manage"), http::Method::POST, Some("batch_import_oauth"))
                 | (
                     Some("provider_oauth_manage"),

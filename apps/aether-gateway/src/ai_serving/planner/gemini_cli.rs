@@ -59,6 +59,7 @@ pub(crate) async fn build_gemini_cli_v1internal_provider_request(
         input.upstream_is_stream,
         input.parts.uri.query(),
         None,
+        None,
         Some(&payload.body),
     )
     .ok_or(GeminiCliV1InternalRequestError::UpstreamUrlUnavailable)?;

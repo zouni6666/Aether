@@ -1091,7 +1091,7 @@ fn standard_text_sync_heartbeat_error_kind(status_code: u16) -> LocalCoreSyncErr
         401 => LocalCoreSyncErrorKind::Authentication,
         403 => LocalCoreSyncErrorKind::PermissionDenied,
         404 => LocalCoreSyncErrorKind::NotFound,
-        413 => LocalCoreSyncErrorKind::ContextLengthExceeded,
+        413 => LocalCoreSyncErrorKind::RequestTooLarge,
         429 => LocalCoreSyncErrorKind::RateLimit,
         503 => LocalCoreSyncErrorKind::Overloaded,
         _ => LocalCoreSyncErrorKind::ServerError,
@@ -1586,6 +1586,18 @@ mod tests {
             Ok(self.attempts.drain(..).collect())
         }
 
+        async fn skip_credential(&mut self, key_id: &str) -> Result<(), GatewayError> {
+            self.attempts
+                .retain(|attempt| attempt.plan.key_id != key_id);
+            Ok(())
+        }
+
+        async fn skip_endpoint(&mut self, endpoint_id: &str) -> Result<(), GatewayError> {
+            self.attempts
+                .retain(|attempt| attempt.plan.endpoint_id != endpoint_id);
+            Ok(())
+        }
+
         async fn skip_provider(&mut self, provider_id: &str) -> Result<(), GatewayError> {
             self.attempts
                 .retain(|attempt| attempt.plan.provider_id != provider_id);
@@ -1813,7 +1825,6 @@ mod tests {
             test_openai_image_heartbeat_attempt(0, "endpoint-retry", "candidate-retry"),
             test_openai_image_heartbeat_attempt(1, "endpoint-success", "candidate-success"),
         ];
-
         let outcome = execute_openai_image_sync_heartbeat_attempts(
             state,
             "/v1/images/generations".to_string(),
@@ -2104,7 +2115,6 @@ mod tests {
                 "openai:responses:compact",
             ),
         ];
-
         let (parts, _) = http::Request::builder()
             .method(http::Method::POST)
             .uri("/v1/responses")

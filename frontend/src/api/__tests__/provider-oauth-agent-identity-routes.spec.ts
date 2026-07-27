@@ -13,12 +13,17 @@ vi.mock('@/api/client', () => ({
 }))
 
 import {
+  authorizeProviderWithCookie,
+  getProviderCookieAuthorizeTaskStatus,
   getBatchImportOAuthTaskStatus,
   importProviderRefreshToken,
+  startProviderCookieAuthorizeTask,
   startBatchImportOAuthTask,
 } from '@/api/endpoints/provider_oauth'
 
-describe('Agent Identity OAuth management routes', () => {
+const CLAUDE_COOKIE_AUTHORIZE_TIMEOUT_MS = 4 * 60 * 1000
+
+describe('Provider OAuth management routes', () => {
   beforeEach(() => {
     getMock.mockReset()
     postMock.mockReset()
@@ -135,6 +140,39 @@ describe('Agent Identity OAuth management routes', () => {
         access_token: 'access-token',
         create_agent_identity: true,
       },
+    )
+  })
+
+  it('allows the sequential Claude Cookie exchange to outlive the global timeout', async () => {
+    const payload = {
+      cookie: 'sessionKey=claude-session-key',
+      proxy_node_id: 'proxy-1',
+    }
+
+    await authorizeProviderWithCookie('provider-claude', payload)
+
+    expect(postMock).toHaveBeenCalledWith(
+      '/api/admin/provider-oauth/providers/provider-claude/cookie-authorize',
+      payload,
+      { timeout: CLAUDE_COOKIE_AUTHORIZE_TIMEOUT_MS },
+    )
+  })
+
+  it('starts and polls Claude Cookie batches through the dedicated task routes', async () => {
+    const payload = {
+      cookies: ['sessionKey=claude-1', 'sessionKey=claude-2'],
+      proxy_node_id: 'proxy-1',
+    }
+
+    await startProviderCookieAuthorizeTask('provider-claude', payload)
+    await getProviderCookieAuthorizeTaskStatus('provider-claude', 'claude-cookie-task-1')
+
+    expect(postMock).toHaveBeenCalledWith(
+      '/api/admin/provider-oauth/providers/provider-claude/cookie-authorize/tasks',
+      payload,
+    )
+    expect(getMock).toHaveBeenCalledWith(
+      '/api/admin/provider-oauth/providers/provider-claude/cookie-authorize/tasks/claude-cookie-task-1',
     )
   })
 })

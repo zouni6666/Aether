@@ -3100,6 +3100,85 @@ registerDynamicRoute('POST', '/api/admin/provider-oauth/providers/:providerId/co
   })
 })
 
+const mockClaudeCookieAuthorizeTasks = new Map<string, Record<string, unknown>>()
+let mockClaudeCookieAuthorizeTaskSequence = 0
+
+registerDynamicRoute('POST', '/api/admin/provider-oauth/providers/:providerId/cookie-authorize/tasks', async (config, params) => {
+  await delay()
+  requireAdmin()
+  const body = JSON.parse(config.data || '{}')
+  const cookies = Array.isArray(body.cookies)
+    ? body.cookies.filter((cookie: unknown): cookie is string => typeof cookie === 'string' && cookie.trim().length > 0)
+    : []
+  const errorSamples = cookies.flatMap((cookie: string, index: number) => (
+    cookie.includes('mock-fail')
+      ? [{ index, status: 'error', error: '演示模式：Cookie 授权失败', replaced: false }]
+      : []
+  ))
+  const failed = errorSamples.length
+  const success = cookies.length - failed
+  const now = Math.floor(Date.now() / 1000)
+  const taskId = `claude-cookie-${Date.now()}-${++mockClaudeCookieAuthorizeTaskSequence}`
+  mockClaudeCookieAuthorizeTasks.set(taskId, {
+    task_id: taskId,
+    provider_id: params.providerId,
+    provider_type: 'claude_code',
+    import_kind: 'cookie_authorize',
+    status: 'completed',
+    total: cookies.length,
+    processed: cookies.length,
+    success,
+    failed,
+    created_count: success,
+    replaced_count: 0,
+    progress_percent: 100,
+    message: null,
+    error: null,
+    error_samples: errorSamples,
+    created_at: now,
+    started_at: now,
+    finished_at: now,
+    updated_at: now,
+  })
+
+  return createMockResponse({
+    task_id: taskId,
+    import_kind: 'cookie_authorize',
+    status: 'submitted',
+    total: cookies.length,
+    processed: 0,
+    success: 0,
+    failed: 0,
+    created_count: 0,
+    replaced_count: 0,
+    progress_percent: 0,
+    message: '任务已提交',
+  })
+})
+
+registerDynamicRoute('GET', '/api/admin/provider-oauth/providers/:providerId/cookie-authorize/tasks/:taskId', async (_config, params) => {
+  await delay()
+  requireAdmin()
+  const task = mockClaudeCookieAuthorizeTasks.get(params.taskId)
+  if (!task || task.provider_id !== params.providerId) {
+    throw { response: createMockResponse({ detail: 'Cookie 授权任务不存在' }, 404) }
+  }
+  return createMockResponse(task)
+})
+
+registerDynamicRoute('POST', '/api/admin/provider-oauth/providers/:providerId/cookie-authorize', async (config, _params) => {
+  await delay()
+  requireAdmin()
+  const body = JSON.parse(config.data || '{}')
+  return createMockResponse({
+    key_id: `key-claude-cookie-${Date.now()}`,
+    provider_type: 'claude_code',
+    expires_at: Math.floor(Date.now() / 1000) + 24 * 3600,
+    has_refresh_token: true,
+    email: body.name ? `${body.name}@demo.dev` : 'claude-oauth-demo@aether.dev'
+  })
+})
+
 registerDynamicRoute('POST', '/api/admin/provider-oauth/providers/:providerId/import-refresh-token', async (config, _params) => {
   await delay()
   requireAdmin()

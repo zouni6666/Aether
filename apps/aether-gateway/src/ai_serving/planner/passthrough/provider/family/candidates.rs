@@ -81,6 +81,8 @@ pub(crate) async fn resolve_local_same_format_provider_decision_input(
 
     let mut input = build_local_requested_model_decision_input(resolved_input, requested_model);
     input.request_auth_channel = decision.request_auth_channel.clone();
+    input.client_surface = decision.client_surface;
+    input.gateway_credential_carrier = decision.gateway_credential_carrier;
     input.client_session_affinity = client_session_affinity_from_api_request(
         spec_metadata.api_format,
         &parts.headers,
@@ -128,7 +130,7 @@ pub(crate) async fn materialize_local_same_format_provider_candidate_attempts(
         .base_model()
         .unwrap_or(&input.requested_model);
     let (candidates, preselection_skipped) = planner_state
-        .list_selectable_candidates_with_skip_reasons(
+        .list_selectable_candidates_with_skip_reasons_for_request_operation(
             spec_metadata.api_format,
             routing_model,
             spec_metadata.require_streaming,
@@ -137,6 +139,7 @@ pub(crate) async fn materialize_local_same_format_provider_candidate_attempts(
             input.client_session_affinity.as_ref(),
             current_unix_secs(),
             false,
+            spec.operation.map(|operation| operation.as_str()),
         )
         .await?;
     let outcome = materialize_local_execution_candidates_with_serving(
@@ -232,7 +235,7 @@ pub(crate) async fn build_local_same_format_provider_candidate_attempt_source<'a
         .base_model()
         .unwrap_or(&input.requested_model);
     let (candidates, preselection_skipped) = planner_state
-        .list_selectable_candidates_with_skip_reasons(
+        .list_selectable_candidates_with_skip_reasons_for_request_operation(
             spec_metadata.api_format,
             routing_model,
             spec_metadata.require_streaming,
@@ -241,6 +244,7 @@ pub(crate) async fn build_local_same_format_provider_candidate_attempt_source<'a
             input.client_session_affinity.as_ref(),
             current_unix_secs(),
             false,
+            spec.operation.map(|operation| operation.as_str()),
         )
         .await?;
 

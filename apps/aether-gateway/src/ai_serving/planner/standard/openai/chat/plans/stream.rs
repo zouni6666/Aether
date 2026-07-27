@@ -139,6 +139,20 @@ impl LocalExecutionAttemptSource<AiStreamAttempt> for LocalOpenAiChatStreamAttem
         Ok(drained)
     }
 
+    async fn skip_credential(&mut self, key_id: &str) -> Result<(), GatewayError> {
+        self.prefetched_attempts
+            .retain(|attempt| attempt.eligible.candidate.key_id != key_id);
+        self.candidates.skip_credential(key_id);
+        Ok(())
+    }
+
+    async fn skip_endpoint(&mut self, endpoint_id: &str) -> Result<(), GatewayError> {
+        self.prefetched_attempts
+            .retain(|attempt| attempt.eligible.candidate.endpoint_id != endpoint_id);
+        self.candidates.skip_endpoint(endpoint_id);
+        Ok(())
+    }
+
     async fn skip_provider(&mut self, provider_id: &str) -> Result<(), GatewayError> {
         self.prefetched_attempts
             .retain(|attempt| attempt.eligible.candidate.provider_id != provider_id);

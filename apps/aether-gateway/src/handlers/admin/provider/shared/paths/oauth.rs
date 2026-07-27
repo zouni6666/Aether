@@ -34,6 +34,33 @@ pub(crate) fn admin_provider_oauth_import_provider_id(request_path: &str) -> Opt
     provider_oauth_provider_id_for_suffix(request_path, "/import-refresh-token")
 }
 
+pub(crate) fn admin_provider_oauth_cookie_provider_id(request_path: &str) -> Option<String> {
+    provider_oauth_provider_id_for_suffix(request_path, "/cookie-authorize")
+}
+
+pub(crate) fn admin_provider_oauth_cookie_task_provider_id(request_path: &str) -> Option<String> {
+    provider_oauth_provider_id_for_suffix(request_path, "/cookie-authorize/tasks")
+}
+
+pub(crate) fn admin_provider_oauth_cookie_task_path(
+    request_path: &str,
+) -> Option<(String, String)> {
+    let suffix = request_path
+        .strip_prefix("/api/admin/provider-oauth/providers/")?
+        .strip_suffix("/")
+        .unwrap_or(request_path.strip_prefix("/api/admin/provider-oauth/providers/")?);
+    let (provider_id, task_id) = suffix.split_once("/cookie-authorize/tasks/")?;
+    if provider_id.is_empty()
+        || provider_id.contains('/')
+        || task_id.is_empty()
+        || task_id.contains('/')
+        || !task_id.starts_with("claude-cookie-")
+    {
+        return None;
+    }
+    Some((provider_id.to_string(), task_id.to_string()))
+}
+
 pub(crate) fn admin_provider_oauth_batch_import_provider_id(request_path: &str) -> Option<String> {
     provider_oauth_provider_id_for_suffix(request_path, "/batch-import")
 }
@@ -110,6 +137,7 @@ mod tests {
     use super::{
         admin_provider_oauth_agent_identity_import_task_path,
         admin_provider_oauth_agent_identity_import_task_provider_id,
+        admin_provider_oauth_cookie_task_path, admin_provider_oauth_cookie_task_provider_id,
     };
 
     #[test]
@@ -136,6 +164,30 @@ mod tests {
     fn dedicated_status_path_rejects_generic_batch_task_ids() {
         assert!(admin_provider_oauth_agent_identity_import_task_path(
             "/api/admin/provider-oauth/providers/provider-codex/agent-identity-import/tasks/task-1",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn parses_dedicated_claude_cookie_task_paths() {
+        assert_eq!(
+            admin_provider_oauth_cookie_task_provider_id(
+                "/api/admin/provider-oauth/providers/provider-claude/cookie-authorize/tasks",
+            )
+            .as_deref(),
+            Some("provider-claude")
+        );
+        assert_eq!(
+            admin_provider_oauth_cookie_task_path(
+                "/api/admin/provider-oauth/providers/provider-claude/cookie-authorize/tasks/claude-cookie-task-1",
+            ),
+            Some((
+                "provider-claude".to_string(),
+                "claude-cookie-task-1".to_string(),
+            ))
+        );
+        assert!(admin_provider_oauth_cookie_task_path(
+            "/api/admin/provider-oauth/providers/provider-claude/cookie-authorize/tasks/task-1",
         )
         .is_none());
     }

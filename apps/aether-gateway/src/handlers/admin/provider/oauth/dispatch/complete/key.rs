@@ -287,6 +287,7 @@ pub(super) async fn handle_admin_provider_oauth_complete_key(
             &ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
                 key_id: key_id.clone(),
                 expected_encrypted_auth_config: state_data.expected_encrypted_auth_config,
+                expected_credential: None,
                 encrypted_auth_config: persisted_encrypted_auth_config.clone(),
                 encrypted_api_key_update: Some(encrypted_api_key),
                 expires_at_unix_secs_update: Some(expires_at),

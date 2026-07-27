@@ -21,11 +21,13 @@ use crate::ai_serving::api::{
 };
 use crate::execution_runtime::ndjson::encode_stream_frame_ndjson;
 use crate::execution_runtime::transport::{
-    format_hyper_error_chain, format_wreq_upstream_request_error,
-    stream_first_byte_timeout_message, DirectUpstreamResponse,
+    append_upstream_response_body_chunk, decode_response_body_bytes, format_hyper_error_chain,
+    format_wreq_upstream_request_error, stream_first_byte_timeout_message, DirectUpstreamResponse,
 };
 use crate::execution_runtime::DirectUpstreamStreamExecution;
 use crate::GatewayError;
+
+const STREAM_USAGE_OBSERVER_MAX_LINE_BYTES: usize = 1024 * 1024;
 
 pub(crate) fn build_direct_execution_frame_stream(
     execution: DirectUpstreamStreamExecution,
@@ -39,6 +41,7 @@ pub(crate) fn build_direct_execution_frame_stream(
             provider_api_format,
             stream_summary_report_context,
             prefetched_body,
+            stream_precommit_committed: _,
             response,
             started_at,
             stream_first_byte_timeout,
@@ -712,6 +715,23 @@ struct BufferedUpstreamBodyError {
     first_byte_timeout: Option<Duration>,
 }
 
+fn append_buffered_upstream_body_chunk(
+    body_bytes: &mut Vec<u8>,
+    chunk: &[u8],
+    ttfb_ms: Option<u64>,
+    upstream_bytes: &mut u64,
+) -> Result<(), BufferedUpstreamBodyError> {
+    *upstream_bytes = upstream_bytes.saturating_add(chunk.len() as u64);
+    append_upstream_response_body_chunk(body_bytes, chunk).map_err(|error| {
+        BufferedUpstreamBodyError {
+            message: error.to_string(),
+            ttfb_ms,
+            upstream_bytes: *upstream_bytes,
+            first_byte_timeout: None,
+        }
+    })
+}
+
 fn response_headers_indicate_sse(headers: &BTreeMap<String, String>) -> bool {
     headers
         .get("content-type")
@@ -770,8 +790,12 @@ async fn buffer_non_sse_upstream_body(
                 if ttfb_ms.is_none() {
                     ttfb_ms = Some(started_at.elapsed().as_millis() as u64);
                 }
-                upstream_bytes += chunk.len() as u64;
-                body_bytes.extend_from_slice(&chunk);
+                append_buffered_upstream_body_chunk(
+                    &mut body_bytes,
+                    &chunk,
+                    ttfb_ms,
+                    &mut upstream_bytes,
+                )?;
             }
             Err(message) => {
                 return Err(BufferedUpstreamBodyError {
@@ -817,8 +841,12 @@ async fn buffer_non_sse_upstream_body(
                         if ttfb_ms.is_none() {
                             ttfb_ms = Some(started_at.elapsed().as_millis() as u64);
                         }
-                        upstream_bytes += chunk.len() as u64;
-                        body_bytes.extend_from_slice(&chunk);
+                        append_buffered_upstream_body_chunk(
+                            &mut body_bytes,
+                            &chunk,
+                            ttfb_ms,
+                            &mut upstream_bytes,
+                        )?;
                     }
                     Err(err) => {
                         let message = format_error_chain(&err);
@@ -871,8 +899,12 @@ async fn buffer_non_sse_upstream_body(
                         if ttfb_ms.is_none() {
                             ttfb_ms = Some(started_at.elapsed().as_millis() as u64);
                         }
-                        upstream_bytes += chunk.len() as u64;
-                        body_bytes.extend_from_slice(&chunk);
+                        append_buffered_upstream_body_chunk(
+                            &mut body_bytes,
+                            &chunk,
+                            ttfb_ms,
+                            &mut upstream_bytes,
+                        )?;
                     }
                     Err(err) => {
                         let message = format_hyper_error_chain(&err);
@@ -925,8 +957,12 @@ async fn buffer_non_sse_upstream_body(
                         if ttfb_ms.is_none() {
                             ttfb_ms = Some(started_at.elapsed().as_millis() as u64);
                         }
-                        upstream_bytes += chunk.len() as u64;
-                        body_bytes.extend_from_slice(&chunk);
+                        append_buffered_upstream_body_chunk(
+                            &mut body_bytes,
+                            &chunk,
+                            ttfb_ms,
+                            &mut upstream_bytes,
+                        )?;
                     }
                     Err(err) => {
                         let message = format_wreq_upstream_request_error(&err);
@@ -974,8 +1010,12 @@ async fn buffer_non_sse_upstream_body(
                     if ttfb_ms.is_none() {
                         ttfb_ms = Some(started_at.elapsed().as_millis() as u64);
                     }
-                    upstream_bytes += chunk.len() as u64;
-                    body_bytes.extend_from_slice(&chunk);
+                    append_buffered_upstream_body_chunk(
+                        &mut body_bytes,
+                        &chunk,
+                        ttfb_ms,
+                        &mut upstream_bytes,
+                    )?;
                 }
                 Ok(None) => break,
                 Err(message) => {
@@ -1015,13 +1055,13 @@ fn maybe_bridge_non_sse_sync_json_to_stream(
         return Ok(None);
     }
 
-    let decoded_body_bytes = decode_non_sse_response_body_bytes(headers, body_bytes)
-        .unwrap_or_else(|| body_bytes.to_vec());
-    if !response_body_is_json(headers, &decoded_body_bytes) {
+    let decoded_body_bytes = decode_response_body_bytes(headers, body_bytes)
+        .map_err(|error| GatewayError::Internal(error.to_string()))?;
+    if !response_body_is_json(headers, decoded_body_bytes.as_ref()) {
         return Ok(None);
     }
 
-    let body_json: Value = serde_json::from_slice(&decoded_body_bytes)
+    let body_json: Value = serde_json::from_slice(decoded_body_bytes.as_ref())
         .map_err(|err| GatewayError::Internal(err.to_string()))?;
     let client_api_format = report_context
         .get("client_api_format")
@@ -1044,33 +1084,6 @@ fn rewrite_headers_for_bridged_sse_response(
     rewritten.insert("content-type".to_string(), "text/event-stream".to_string());
     rewritten.insert("content-length".to_string(), body_len.to_string());
     rewritten
-}
-
-fn decode_non_sse_response_body_bytes(
-    headers: &BTreeMap<String, String>,
-    body_bytes: &[u8],
-) -> Option<Vec<u8>> {
-    let encoding = headers
-        .get("content-encoding")
-        .map(String::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_ascii_lowercase());
-    match encoding.as_deref() {
-        Some("gzip") => {
-            let mut decoder = flate2::read::GzDecoder::new(body_bytes);
-            let mut out = Vec::new();
-            std::io::Read::read_to_end(&mut decoder, &mut out).ok()?;
-            Some(out)
-        }
-        Some("deflate") => {
-            let mut decoder = flate2::read::DeflateDecoder::new(body_bytes);
-            let mut out = Vec::new();
-            std::io::Read::read_to_end(&mut decoder, &mut out).ok()?;
-            Some(out)
-        }
-        _ => None,
-    }
 }
 
 fn response_body_is_json(headers: &BTreeMap<String, String>, body_bytes: &[u8]) -> bool {
@@ -1159,16 +1172,39 @@ fn observe_normalized_bytes(
     observer_buffered: &mut Vec<u8>,
     normalized: &[u8],
 ) {
-    if normalized.is_empty() {
+    if normalized.is_empty()
+        || observer
+            .latest_summary()
+            .and_then(|summary| summary.parser_error.as_deref())
+            .is_some()
+    {
         return;
     }
-    observer_buffered.extend_from_slice(normalized);
-    while let Some(line_end) = observer_buffered.iter().position(|byte| *byte == b'\n') {
-        let line = observer_buffered.drain(..=line_end).collect::<Vec<_>>();
-        if let Err(err) = observer.push_line(report_context, line) {
-            observer.disable_with_error(err.to_string());
+
+    let mut remaining = normalized;
+    while !remaining.is_empty() {
+        let line_part_len = remaining
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(remaining.len(), |index| index + 1);
+        if observer_buffered.len().saturating_add(line_part_len)
+            > STREAM_USAGE_OBSERVER_MAX_LINE_BYTES
+        {
+            observer.disable_with_error(format!(
+                "stream usage event exceeded {STREAM_USAGE_OBSERVER_MAX_LINE_BYTES} bytes"
+            ));
             observer_buffered.clear();
-            break;
+            return;
+        }
+        observer_buffered.extend_from_slice(&remaining[..line_part_len]);
+        remaining = &remaining[line_part_len..];
+        if observer_buffered.last() == Some(&b'\n') {
+            let line = std::mem::take(observer_buffered);
+            if let Err(err) = observer.push_line(report_context, line) {
+                observer.disable_with_error(err.to_string());
+                observer_buffered.clear();
+                return;
+            }
         }
     }
 }
@@ -1193,9 +1229,11 @@ mod tests {
     use tokio::sync::watch;
 
     use super::{
-        build_direct_execution_frame_stream, should_buffer_non_stream_response,
-        should_treat_upstream_response_as_stream,
+        build_direct_execution_frame_stream, observe_normalized_bytes,
+        should_buffer_non_stream_response, should_treat_upstream_response_as_stream,
+        STREAM_USAGE_OBSERVER_MAX_LINE_BYTES,
     };
+    use crate::ai_serving::api::StreamingStandardTerminalObserver;
     use crate::execution_runtime::transport::{
         execute_stream_plan_via_local_tunnel, DirectSyncExecutionRuntime, DirectUpstreamResponse,
     };
@@ -1258,6 +1296,27 @@ mod tests {
             &BTreeMap::from([("content-type".into(), "text/event-stream".into())]),
             &non_stream_context
         ));
+    }
+
+    #[test]
+    fn oversized_usage_line_disables_observation_without_retaining_the_line() {
+        let mut observer = StreamingStandardTerminalObserver::default();
+        let report_context = serde_json::json!({
+            "provider_api_format": "claude:messages",
+            "client_api_format": "claude:messages",
+        });
+        let mut buffered = Vec::new();
+        let oversized = vec![b'x'; STREAM_USAGE_OBSERVER_MAX_LINE_BYTES + 1];
+
+        observe_normalized_bytes(&mut observer, &report_context, &mut buffered, &oversized);
+
+        assert!(buffered.is_empty());
+        assert!(observer
+            .latest_summary()
+            .and_then(|summary| summary.parser_error.as_deref())
+            .is_some_and(|error| error.contains("stream usage event exceeded")));
+        observe_normalized_bytes(&mut observer, &report_context, &mut buffered, b"ignored");
+        assert!(buffered.is_empty());
     }
 
     #[tokio::test]

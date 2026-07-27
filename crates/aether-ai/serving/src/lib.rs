@@ -14,6 +14,7 @@ pub mod decision_payload;
 pub mod dto;
 pub mod execution_path;
 pub mod failure_diagnostic;
+pub mod payload_fidelity;
 pub mod plan_payload;
 pub mod ports;
 pub mod ranking_metadata;
@@ -52,7 +53,8 @@ pub use aether_pool_core::{
     REQUEST_FAILURE_PENALTY, UNSCHEDULABLE_SCORE_CAP,
 };
 pub use attempt_loop::{
-    run_ai_attempt_loop, AiAttemptLoopOutcome, AiAttemptLoopPort, AiExecutionAttempt,
+    run_ai_attempt_loop, AiAttemptExecutionOutcome, AiAttemptLoopOutcome, AiAttemptLoopPort,
+    AiAttemptRetryScope, AiExecutionAttempt,
 };
 pub use attempt_plan::{
     build_ai_execution_decision_from_plan, build_ai_execution_plan_from_decision,
@@ -106,7 +108,7 @@ pub use decision_payload::{
     AiExecutionDecisionResponseParts,
 };
 pub use dto::{
-    augment_sync_report_context, generic_decision_missing_exact_provider_request,
+    augment_sync_report_context, generic_decision_missing_exact_provider_request, AdaptationMode,
     AiExecutionDecision, AiExecutionPlanPayload, AiRequestGzipPolicy, AiStreamAttempt,
     AiSyncAttempt, ConversionMode, ExecutionStrategy,
 };
@@ -116,6 +118,7 @@ pub use execution_path::{
     AiSyncExecutionPathPort, AiSyncExecutionStep, DEFAULT_STREAM_EXECUTION_STEPS,
 };
 pub use failure_diagnostic::{CandidateFailureDiagnostic, CandidateFailureDiagnosticKind};
+pub use payload_fidelity::OriginalRequestPayload;
 pub use plan_payload::{
     build_ai_stream_execution_plan_payload, build_ai_sync_execution_plan_payload,
 };

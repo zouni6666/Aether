@@ -253,6 +253,7 @@ pub(super) async fn maybe_build_local_test_connection_route_response(
             upstream_is_stream: false,
             request_query: None,
             kiro_api_region: None,
+            api_operation: None,
         },
     );
     let Some(upstream_url) = upstream_url else {

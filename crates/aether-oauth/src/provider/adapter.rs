@@ -1,7 +1,7 @@
 use super::{
     ProviderOAuthAccount, ProviderOAuthAccountState, ProviderOAuthCapabilities,
-    ProviderOAuthImportInput, ProviderOAuthRequestAuth, ProviderOAuthTokenSet,
-    ProviderOAuthTransportContext,
+    ProviderOAuthCookieAuthorizationInput, ProviderOAuthImportInput, ProviderOAuthRequestAuth,
+    ProviderOAuthTokenSet, ProviderOAuthTransportContext,
 };
 use crate::core::{OAuthAuthorizeResponse, OAuthError};
 use crate::network::OAuthHttpExecutor;
@@ -36,6 +36,17 @@ pub trait ProviderOAuthAdapter: Send + Sync {
         _code: &str,
         _state: &str,
         _pkce_verifier: Option<&str>,
+    ) -> Result<ProviderOAuthTokenSet, OAuthError> {
+        Err(OAuthError::UnsupportedProvider(
+            self.provider_type().to_string(),
+        ))
+    }
+
+    async fn authorize_with_cookie(
+        &self,
+        _executor: &dyn OAuthHttpExecutor,
+        _ctx: &ProviderOAuthTransportContext,
+        _input: ProviderOAuthCookieAuthorizationInput,
     ) -> Result<ProviderOAuthTokenSet, OAuthError> {
         Err(OAuthError::UnsupportedProvider(
             self.provider_type().to_string(),

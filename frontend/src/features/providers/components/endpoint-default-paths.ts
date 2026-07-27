@@ -187,9 +187,6 @@ export function getDefaultEndpointPath(params: {
     if (normalizedApiFormat === 'gemini:embedding') {
       return '/v1/projects/{project_id}/locations/{region}/publishers/google/models/{model}:predict'
     }
-    if (normalizedApiFormat === 'claude:messages') {
-      return '/v1/projects/{project_id}/locations/{region}/publishers/anthropic/models/{model}:{action}'
-    }
   }
 
   const format = params.apiFormats.find(f => f.value === normalizedApiFormat)

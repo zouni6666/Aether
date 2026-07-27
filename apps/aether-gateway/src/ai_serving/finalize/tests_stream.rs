@@ -13,6 +13,7 @@ fn same_format_claude_local_stream_rewriter_sanitizes_read_input_json_delta() {
     let report_context = json!({
         "provider_api_format": "claude:messages",
         "client_api_format": "claude:messages",
+        "anthropic_compatibility_profile": "claude_code_legacy",
         "needs_conversion": false,
     });
     let mut rewriter =

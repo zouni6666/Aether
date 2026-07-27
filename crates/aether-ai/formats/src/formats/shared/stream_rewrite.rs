@@ -10,6 +10,7 @@ use crate::formats::shared::response::{
 };
 use crate::formats::shared::sse::encode_json_sse;
 use crate::formats::shared::stream_core::StreamingStandardFormatMatrix;
+use crate::formats::shared::sync_products::anthropic_legacy_compatibility_enabled;
 use crate::formats::shared::AiSurfaceFinalizeError;
 use crate::provider_compat::kiro_stream::KiroToClaudeCliStreamState;
 use crate::provider_compat::private_envelope::transform_provider_private_stream_line;
@@ -117,7 +118,12 @@ pub fn resolve_finalize_stream_rewrite_mode(
             if provider_stream_event_api_format == "claude:messages"
                 && client_api_format == "claude:messages"
             {
-                return Some(FinalizeStreamRewriteMode::ClaudeReadToolSanitize);
+                return if anthropic_legacy_compatibility_enabled(report_context) {
+                    Some(FinalizeStreamRewriteMode::ClaudeReadToolSanitize)
+                } else {
+                    model_directive_display_model_from_report_context(report_context)
+                        .map(|_| FinalizeStreamRewriteMode::ModelDirectiveDisplay)
+                };
             }
             return model_directive_display_model_from_report_context(report_context)
                 .map(|_| FinalizeStreamRewriteMode::ModelDirectiveDisplay);
@@ -144,7 +150,11 @@ pub fn resolve_finalize_stream_rewrite_mode(
         )
     {
         if provider_stream_event_api_format == "claude:messages" {
-            return Some(FinalizeStreamRewriteMode::ClaudeReadToolSanitize);
+            return Some(if anthropic_legacy_compatibility_enabled(report_context) {
+                FinalizeStreamRewriteMode::ClaudeReadToolSanitize
+            } else {
+                FinalizeStreamRewriteMode::ModelDirectiveDisplay
+            });
         }
         return Some(FinalizeStreamRewriteMode::ModelDirectiveDisplay);
     }
@@ -152,7 +162,8 @@ pub fn resolve_finalize_stream_rewrite_mode(
     if provider_stream_event_api_format == "claude:messages"
         && client_api_format == "claude:messages"
     {
-        return Some(FinalizeStreamRewriteMode::ClaudeReadToolSanitize);
+        return anthropic_legacy_compatibility_enabled(report_context)
+            .then_some(FinalizeStreamRewriteMode::ClaudeReadToolSanitize);
     }
 
     if is_same_format_family(
@@ -1160,13 +1171,19 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_123\",\"objec
             "needs_conversion": true,
             "model": "claude-sonnet-4.5-high",
             "mapped_model": "claude-sonnet-4.5",
+            "provider_type": "claude_code",
+            "anthropic_compatibility_profile": "native_transparent",
         });
+        assert_eq!(
+            resolve_finalize_stream_rewrite_mode(&report_context),
+            Some(FinalizeStreamRewriteMode::ModelDirectiveDisplay)
+        );
         let mut rewriter = maybe_build_ai_surface_stream_rewriter(Some(&report_context))
             .expect("rewriter should exist");
         let output = rewriter
             .push_chunk(
                 b"event: content_block_delta\n\
-data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Let me reason...\"}}\n\n",
+data: {\"type\":\"content_block_delta\",\"index\":1,\"future_event_field\":{\"keep\":true},\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Let me reason...\",\"future_delta_field\":42}}\n\n",
             )
             .expect("rewrite should succeed");
         let output = String::from_utf8(output).expect("output should be utf8");
@@ -1175,20 +1192,51 @@ data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"thinki
         assert!(output.contains("event: content_block_delta"));
         assert!(output.contains("\"thinking\":\"Let me reason...\""));
         assert!(output.contains("\"type\":\"thinking_delta\""));
+        assert!(output.contains("\"future_event_field\":{\"keep\":true}"));
+        assert!(output.contains("\"future_delta_field\":42"));
     }
 
     #[test]
-    fn same_format_claude_uses_read_tool_sanitizer_without_display_model() {
-        // Claude→Claude needs a narrow sanitizer for Claude Code Read input.
+    fn native_same_format_claude_without_display_model_is_verbatim() {
         let report_context = json!({
             "provider_api_format": "claude:messages",
             "client_api_format": "claude:messages",
             "needs_conversion": true,
         });
-        assert_eq!(
-            resolve_finalize_stream_rewrite_mode(&report_context),
-            Some(FinalizeStreamRewriteMode::ClaudeReadToolSanitize)
-        );
+        assert_eq!(resolve_finalize_stream_rewrite_mode(&report_context), None);
+        assert!(maybe_build_ai_surface_stream_rewriter(Some(&report_context)).is_none());
+    }
+
+    #[test]
+    fn claude_code_legacy_profile_and_provider_fallback_enable_read_tool_sanitizer() {
+        for report_context in [
+            json!({
+                "provider_api_format": "claude:messages",
+                "client_api_format": "claude:messages",
+                "needs_conversion": false,
+                "anthropic_compatibility_profile": "claude_code_legacy",
+            }),
+            json!({
+                "provider_api_format": "claude:messages",
+                "client_api_format": "claude:messages",
+                "needs_conversion": false,
+                "provider_type": "claude_code",
+            }),
+        ] {
+            assert_eq!(
+                resolve_finalize_stream_rewrite_mode(&report_context),
+                Some(FinalizeStreamRewriteMode::ClaudeReadToolSanitize)
+            );
+        }
+
+        let explicit_native = json!({
+            "provider_api_format": "claude:messages",
+            "client_api_format": "claude:messages",
+            "needs_conversion": false,
+            "provider_type": "claude_code",
+            "anthropic_compatibility_profile": "native_transparent",
+        });
+        assert_eq!(resolve_finalize_stream_rewrite_mode(&explicit_native), None);
     }
 
     #[test]
@@ -1197,6 +1245,7 @@ data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"thinki
             "provider_api_format": "claude:messages",
             "client_api_format": "claude:messages",
             "needs_conversion": false,
+            "anthropic_compatibility_profile": "claude_code_legacy",
         });
         let mut rewriter = maybe_build_ai_surface_stream_rewriter(Some(&report_context))
             .expect("same-format claude sanitizer should exist");
@@ -1219,6 +1268,7 @@ data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":
             "provider_api_format": "claude:messages",
             "client_api_format": "claude:messages",
             "needs_conversion": false,
+            "anthropic_compatibility_profile": "claude_code_legacy",
         });
         let mut rewriter = maybe_build_ai_surface_stream_rewriter(Some(&report_context))
             .expect("same-format claude sanitizer should exist");
@@ -1263,6 +1313,7 @@ data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
             "provider_api_format": "claude:messages",
             "client_api_format": "claude:messages",
             "needs_conversion": false,
+            "anthropic_compatibility_profile": "claude_code_legacy",
         });
         let mut rewriter = maybe_build_ai_surface_stream_rewriter(Some(&report_context))
             .expect("same-format claude sanitizer should exist");

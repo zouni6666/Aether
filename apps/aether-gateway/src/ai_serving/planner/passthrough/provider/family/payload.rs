@@ -1,5 +1,8 @@
 use serde_json::json;
 
+use aether_ai_serving::{AdaptationMode, AiRequestGzipPolicy, OriginalRequestPayload};
+use aether_contracts::{ExecutionResponseBodyMode, EXECUTION_RESPONSE_BODY_MODE_HEADER};
+
 use crate::ai_serving::ai_local_execution_contract_for_formats;
 use crate::ai_serving::build_request_trace_proxy_value;
 use crate::ai_serving::planner::candidate_materialization::{
@@ -61,6 +64,8 @@ pub(crate) async fn maybe_build_local_same_format_provider_decision_payload_for_
     else {
         return Ok(None);
     };
+    let request_redacted = resolved.request_redacted;
+    let compatibility_edits_empty = resolved.compatibility_edits.is_empty();
     let original_request_body_json = if resolved.request_redacted {
         Some(&resolved.provider_request_body)
     } else {
@@ -82,6 +87,51 @@ pub(crate) async fn maybe_build_local_same_format_provider_decision_payload_for_
         .clone()
         .or_else(|| resolve_transport_profile(&resolved.transport));
     let mut extra_fields = serde_json::Map::new();
+    extra_fields.insert(
+        "provider_type".to_string(),
+        json!(resolved.transport.provider.provider_type.as_str()),
+    );
+    if let Some(operation) = spec.operation {
+        extra_fields.insert("api_operation".to_string(), json!(operation.as_str()));
+    }
+    if let Some(client_surface) = input.client_surface {
+        extra_fields.insert("client_surface".to_string(), json!(client_surface.as_str()));
+    }
+    if let Some(carrier) = input.gateway_credential_carrier {
+        extra_fields.insert(
+            "gateway_credential_carrier".to_string(),
+            json!(carrier.as_str()),
+        );
+    }
+    extra_fields.insert(
+        "upstream_credential_mode".to_string(),
+        json!(resolved.transport.key.auth_type.trim().to_ascii_lowercase()),
+    );
+    let mut adaptation_mode = if resolved.compatibility_edits.is_empty() {
+        AdaptationMode::NativeTransparent
+    } else {
+        AdaptationMode::SameFormatCompat
+    };
+    if crate::ai_serving::normalize_api_format_alias(&resolved.provider_api_format)
+        == "claude:messages"
+    {
+        let compatibility_profile =
+            crate::ai_serving::transport::resolve_anthropic_compatibility_profile(
+                &resolved.transport,
+                &resolved.provider_api_format,
+            );
+        extra_fields.insert(
+            "anthropic_compatibility_profile".to_string(),
+            json!(compatibility_profile.as_str()),
+        );
+        if compatibility_profile.uses_claude_code_compatibility() {
+            adaptation_mode = AdaptationMode::SameFormatCompat;
+        }
+    }
+    extra_fields.insert(
+        "adaptation_mode".to_string(),
+        json!(adaptation_mode.as_str()),
+    );
     if let Some(proxy_value) =
         build_request_trace_proxy_value(Some(&resolved.transport), proxy.as_ref())
     {
@@ -227,7 +277,77 @@ pub(crate) async fn maybe_build_local_same_format_provider_decision_payload_for_
         &mut decision,
         Some(transport.as_ref()),
     )?;
+    enforce_provider_api_operation_invariants(
+        spec.operation,
+        decision.provider_request_body.as_mut(),
+        &mut decision.provider_request_headers,
+    );
+    decision.provider_request_body_base64 = original_request_body_base64(
+        parts,
+        decision.provider_request_body.as_ref(),
+        adaptation_mode,
+        request_redacted,
+        compatibility_edits_empty,
+        decision.content_encoding.as_deref(),
+        decision.request_gzip.as_ref(),
+    );
+    decision
+        .provider_request_headers
+        .retain(|name, _| !name.eq_ignore_ascii_case(EXECUTION_RESPONSE_BODY_MODE_HEADER));
+    if !spec_metadata.require_streaming && decision.provider_request_body_base64.is_some() {
+        decision.provider_request_headers.insert(
+            EXECUTION_RESPONSE_BODY_MODE_HEADER.to_string(),
+            ExecutionResponseBodyMode::PreserveBytes
+                .as_str()
+                .to_string(),
+        );
+    }
     Ok(Some(decision))
+}
+
+fn enforce_provider_api_operation_invariants(
+    operation: Option<crate::ai_serving::ApiOperation>,
+    provider_request_body: Option<&mut serde_json::Value>,
+    provider_request_headers: &mut std::collections::BTreeMap<String, String>,
+) {
+    if operation != Some(crate::ai_serving::ApiOperation::ClaudeCountTokens) {
+        return;
+    }
+
+    if let Some(provider_request_body) = provider_request_body {
+        crate::ai_serving::transport::enforce_same_format_provider_api_operation_body_policy(
+            provider_request_body,
+            operation,
+        );
+    }
+    for header_name in ["accept", "content-type"] {
+        provider_request_headers.retain(|name, _| !name.eq_ignore_ascii_case(header_name));
+        provider_request_headers.insert(header_name.to_string(), "application/json".to_string());
+    }
+}
+
+fn original_request_body_base64(
+    parts: &http::request::Parts,
+    provider_request_body: Option<&serde_json::Value>,
+    adaptation_mode: AdaptationMode,
+    request_redacted: bool,
+    compatibility_edits_empty: bool,
+    content_encoding: Option<&str>,
+    request_gzip: Option<&AiRequestGzipPolicy>,
+) -> Option<String> {
+    if adaptation_mode != AdaptationMode::NativeTransparent
+        || request_redacted
+        || !compatibility_edits_empty
+        || content_encoding.is_some_and(|value| !value.trim().is_empty())
+        || request_gzip.is_some_and(|policy| policy.enabled != Some(false))
+    {
+        return None;
+    }
+
+    parts
+        .extensions
+        .get::<OriginalRequestPayload>()?
+        .body_bytes_base64_if_unchanged(provider_request_body?)
 }
 
 pub(super) async fn mark_skipped_local_same_format_provider_candidate(
@@ -312,4 +432,178 @@ pub(super) async fn mark_skipped_local_same_format_provider_candidate_with_failu
         diagnostic,
     )
     .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use base64::Engine as _;
+
+    use super::{
+        enforce_provider_api_operation_invariants, original_request_body_base64, AdaptationMode,
+        AiRequestGzipPolicy, OriginalRequestPayload,
+    };
+    use crate::ai_serving::ApiOperation;
+
+    fn request_parts_with_original_payload(
+        body_json: serde_json::Value,
+        body_bytes: &[u8],
+    ) -> http::request::Parts {
+        let (mut parts, ()) = http::Request::new(()).into_parts();
+        parts
+            .extensions
+            .insert(OriginalRequestPayload::from_parsed_json(
+                body_json, body_bytes,
+            ));
+        parts
+    }
+
+    #[test]
+    fn count_tokens_invariants_win_after_provider_routing_mutations() {
+        let mut body = serde_json::json!({
+            "model": "claude-sonnet-4",
+            "messages": [],
+            "stream": true
+        });
+        let mut headers = BTreeMap::from([
+            ("Accept".to_string(), "text/event-stream".to_string()),
+            ("Content-Type".to_string(), "text/plain".to_string()),
+            ("x-provider-route".to_string(), "kept".to_string()),
+        ]);
+
+        enforce_provider_api_operation_invariants(
+            Some(ApiOperation::ClaudeCountTokens),
+            Some(&mut body),
+            &mut headers,
+        );
+
+        assert!(body.get("stream").is_none());
+        assert_eq!(
+            headers.get("accept").map(String::as_str),
+            Some("application/json")
+        );
+        assert_eq!(
+            headers.get("content-type").map(String::as_str),
+            Some("application/json")
+        );
+        assert_eq!(
+            headers.get("x-provider-route").map(String::as_str),
+            Some("kept")
+        );
+        assert_eq!(
+            headers
+                .keys()
+                .filter(|name| name.eq_ignore_ascii_case("accept"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            headers
+                .keys()
+                .filter(|name| name.eq_ignore_ascii_case("content-type"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn unchanged_same_format_body_preserves_original_json_bytes() {
+        let raw = br#"{ "unknown": {"enabled":true}, "messages": [], "model": "claude-sonnet-4" }"#;
+        let body_json: serde_json::Value = serde_json::from_slice(raw).expect("body should parse");
+        let parts = request_parts_with_original_payload(body_json.clone(), raw);
+
+        let encoded = original_request_body_base64(
+            &parts,
+            Some(&body_json),
+            AdaptationMode::NativeTransparent,
+            false,
+            true,
+            None,
+            None,
+        )
+        .expect("unchanged request should retain exact bytes");
+
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .expect("body should decode"),
+            raw
+        );
+    }
+
+    #[test]
+    fn request_edits_or_encoding_disable_original_json_bytes() {
+        let raw = br#"{"model":"claude-sonnet-4","messages":[]}"#;
+        let body_json: serde_json::Value = serde_json::from_slice(raw).expect("body should parse");
+        let parts = request_parts_with_original_payload(body_json.clone(), raw);
+        let changed_body = serde_json::json!({
+            "model": "claude-sonnet-4-5",
+            "messages": []
+        });
+
+        assert!(original_request_body_base64(
+            &parts,
+            Some(&changed_body),
+            AdaptationMode::NativeTransparent,
+            false,
+            true,
+            None,
+            None,
+        )
+        .is_none());
+        assert!(original_request_body_base64(
+            &parts,
+            Some(&body_json),
+            AdaptationMode::NativeTransparent,
+            true,
+            true,
+            None,
+            None,
+        )
+        .is_none());
+        assert!(original_request_body_base64(
+            &parts,
+            Some(&body_json),
+            AdaptationMode::NativeTransparent,
+            false,
+            false,
+            None,
+            None,
+        )
+        .is_none());
+        assert!(original_request_body_base64(
+            &parts,
+            Some(&body_json),
+            AdaptationMode::SameFormatCompat,
+            false,
+            true,
+            None,
+            None,
+        )
+        .is_none());
+        assert!(original_request_body_base64(
+            &parts,
+            Some(&body_json),
+            AdaptationMode::NativeTransparent,
+            false,
+            true,
+            Some("gzip"),
+            None,
+        )
+        .is_none());
+        assert!(original_request_body_base64(
+            &parts,
+            Some(&body_json),
+            AdaptationMode::NativeTransparent,
+            false,
+            true,
+            None,
+            Some(&AiRequestGzipPolicy {
+                enabled: Some(true),
+                min_bytes: Some(1),
+            }),
+        )
+        .is_none());
+    }
 }

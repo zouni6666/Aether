@@ -111,6 +111,27 @@ fn classifies_admin_provider_oauth_maintenance_routes_as_admin_proxy_route() {
         ),
         (
             http::Method::POST,
+            "/api/admin/provider-oauth/providers/provider-123/cookie-authorize",
+            "cookie_authorize",
+            "admin:provider_oauth",
+            "admin:provider_oauth:write",
+        ),
+        (
+            http::Method::POST,
+            "/api/admin/provider-oauth/providers/provider-123/cookie-authorize/tasks",
+            "start_cookie_authorize_task",
+            "admin:provider_oauth",
+            "admin:provider_oauth:write",
+        ),
+        (
+            http::Method::GET,
+            "/api/admin/provider-oauth/providers/provider-123/cookie-authorize/tasks/claude-cookie-task-123",
+            "get_cookie_authorize_task_status",
+            "admin:provider_oauth",
+            "admin:provider_oauth:read",
+        ),
+        (
+            http::Method::POST,
             "/api/admin/provider-oauth/providers/provider-123/agent-identity-import/tasks",
             "start_agent_identity_import_task",
             "admin:provider_oauth",

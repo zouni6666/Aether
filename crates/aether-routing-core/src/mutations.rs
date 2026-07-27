@@ -8,14 +8,16 @@ use crate::actions::{RoutingHeaderPatch, RoutingJsonPatchOperation};
 
 const RESERVED_HEADERS: &[&str] = &[
     "authorization",
+    "proxy-authorization",
     "x-api-key",
     "api-key",
+    "x-goog-api-key",
     "cookie",
+    "cookie2",
     "set-cookie",
-    "x-aether-trace-id",
-    "x-aether-internal",
-    "x-aether-scheduler-group",
 ];
+
+const AETHER_INTERNAL_HEADER_PREFIX: &str = "x-aether-";
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum MutationError {
@@ -96,7 +98,7 @@ pub fn validate_header_patch(patch: &[RoutingHeaderPatch]) -> Result<(), Mutatio
         {
             return Err(MutationError::InvalidHeaderName(item.name().to_string()));
         }
-        if reserved.contains(name.as_str()) {
+        if reserved.contains(name.as_str()) || name.starts_with(AETHER_INTERNAL_HEADER_PREFIX) {
             return Err(MutationError::ReservedHeader(item.name().to_string()));
         }
     }
@@ -224,13 +226,27 @@ mod tests {
     }
 
     #[test]
-    fn rejects_reserved_headers() {
-        assert_eq!(
-            validate_header_patch(&[RoutingHeaderPatch::Set {
-                name: "authorization".to_string(),
-                value: "secret".to_string()
-            }]),
-            Err(MutationError::ReservedHeader("authorization".to_string()))
-        );
+    fn rejects_upstream_credentials_and_aether_internal_headers() {
+        for name in [
+            "authorization",
+            "proxy-authorization",
+            "api-key",
+            "x-api-key",
+            "x-goog-api-key",
+            "cookie",
+            "cookie2",
+            "set-cookie",
+            "x-aether-auth-user-id",
+            "X-Aether-Future-Control",
+        ] {
+            assert_eq!(
+                validate_header_patch(&[RoutingHeaderPatch::Set {
+                    name: name.to_string(),
+                    value: "secret".to_string()
+                }]),
+                Err(MutationError::ReservedHeader(name.to_string())),
+                "header should be reserved: {name}"
+            );
+        }
     }
 }

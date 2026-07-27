@@ -158,6 +158,8 @@ pub(crate) async fn build_admin_create_provider_record(
         }
     }
     let config = (!config_map.is_empty()).then_some(serde_json::Value::Object(config_map));
+    crate::provider_transport::validate_anthropic_compatibility_profile_config(config.as_ref())
+        .map_err(|_| "无效的 Anthropic compatibility profile".to_string())?;
 
     let now_unix_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)

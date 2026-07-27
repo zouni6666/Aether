@@ -1,6 +1,7 @@
 use super::{
-    ProviderOAuthAdapter, ProviderOAuthImportInput, ProviderOAuthProbeResult,
-    ProviderOAuthRequestAuth, ProviderOAuthTokenSet, ProviderOAuthTransportContext,
+    ProviderOAuthAdapter, ProviderOAuthCookieAuthorizationInput, ProviderOAuthImportInput,
+    ProviderOAuthProbeResult, ProviderOAuthRequestAuth, ProviderOAuthTokenSet,
+    ProviderOAuthTransportContext,
 };
 use crate::core::{OAuthAdapterRegistry, OAuthAuthorizeResponse, OAuthError};
 use crate::network::OAuthHttpExecutor;
@@ -18,16 +19,18 @@ impl ProviderOAuthService {
 
     pub fn with_builtin_adapters() -> Self {
         use super::providers::{
-            AntigravityProviderOAuthAdapter, CodexProviderOAuthAdapter,
-            GenericProviderOAuthAdapter, KiroProviderOAuthAdapter, WindsurfProviderOAuthAdapter,
+            AntigravityProviderOAuthAdapter, ClaudeCodeProviderOAuthAdapter,
+            CodexProviderOAuthAdapter, GenericProviderOAuthAdapter, KiroProviderOAuthAdapter,
+            WindsurfProviderOAuthAdapter,
         };
 
         let mut service = Self::new()
             .with_adapter(Arc::new(KiroProviderOAuthAdapter::default()))
+            .with_adapter(Arc::new(ClaudeCodeProviderOAuthAdapter::default()))
             .with_adapter(Arc::new(CodexProviderOAuthAdapter::default()))
             .with_adapter(Arc::new(AntigravityProviderOAuthAdapter::default()))
             .with_adapter(Arc::new(WindsurfProviderOAuthAdapter));
-        for provider_type in ["claude_code", "chatgpt_web", "gemini_cli"] {
+        for provider_type in ["chatgpt_web", "gemini_cli"] {
             if let Some(adapter) = GenericProviderOAuthAdapter::for_provider_type(provider_type) {
                 service = service.with_adapter(Arc::new(adapter));
             }
@@ -80,6 +83,17 @@ impl ProviderOAuthService {
     ) -> Result<ProviderOAuthTokenSet, OAuthError> {
         self.adapter(&ctx.provider_type)?
             .import_credentials(executor, ctx, input)
+            .await
+    }
+
+    pub async fn authorize_with_cookie(
+        &self,
+        executor: &dyn OAuthHttpExecutor,
+        ctx: &ProviderOAuthTransportContext,
+        input: ProviderOAuthCookieAuthorizationInput,
+    ) -> Result<ProviderOAuthTokenSet, OAuthError> {
+        self.adapter(&ctx.provider_type)?
+            .authorize_with_cookie(executor, ctx, input)
             .await
     }
 

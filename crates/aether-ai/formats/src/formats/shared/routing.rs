@@ -2,20 +2,21 @@ use http::Method;
 use url::form_urlencoded;
 
 use crate::contracts::{
-    CLAUDE_CHAT_STREAM_PLAN_KIND, CLAUDE_CHAT_SYNC_PLAN_KIND, CLAUDE_CLI_STREAM_PLAN_KIND,
-    CLAUDE_CLI_SYNC_PLAN_KIND, GEMINI_CHAT_STREAM_PLAN_KIND, GEMINI_CHAT_SYNC_PLAN_KIND,
-    GEMINI_CLI_STREAM_PLAN_KIND, GEMINI_CLI_SYNC_PLAN_KIND, GEMINI_EMBEDDING_SYNC_PLAN_KIND,
-    GEMINI_FILES_DELETE_PLAN_KIND, GEMINI_FILES_DOWNLOAD_PLAN_KIND, GEMINI_FILES_GET_PLAN_KIND,
-    GEMINI_FILES_LIST_PLAN_KIND, GEMINI_FILES_UPLOAD_PLAN_KIND,
-    GEMINI_INTERACTIONS_STREAM_PLAN_KIND, GEMINI_INTERACTIONS_SYNC_PLAN_KIND,
-    GEMINI_VIDEO_CANCEL_SYNC_PLAN_KIND, GEMINI_VIDEO_CREATE_SYNC_PLAN_KIND,
-    OPENAI_CHAT_STREAM_PLAN_KIND, OPENAI_CHAT_SYNC_PLAN_KIND, OPENAI_EMBEDDING_SYNC_PLAN_KIND,
-    OPENAI_IMAGE_STREAM_PLAN_KIND, OPENAI_IMAGE_SYNC_PLAN_KIND, OPENAI_RERANK_SYNC_PLAN_KIND,
-    OPENAI_RESPONSES_COMPACT_STREAM_PLAN_KIND, OPENAI_RESPONSES_COMPACT_SYNC_PLAN_KIND,
-    OPENAI_RESPONSES_STREAM_PLAN_KIND, OPENAI_RESPONSES_SYNC_PLAN_KIND,
-    OPENAI_SEARCH_SYNC_PLAN_KIND, OPENAI_VIDEO_CANCEL_SYNC_PLAN_KIND,
-    OPENAI_VIDEO_CONTENT_PLAN_KIND, OPENAI_VIDEO_CREATE_SYNC_PLAN_KIND,
-    OPENAI_VIDEO_DELETE_SYNC_PLAN_KIND, OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND,
+    ClientSurface, CLAUDE_CHAT_STREAM_PLAN_KIND, CLAUDE_CHAT_SYNC_PLAN_KIND,
+    CLAUDE_CLI_STREAM_PLAN_KIND, CLAUDE_CLI_SYNC_PLAN_KIND, CLAUDE_COUNT_TOKENS_SYNC_PLAN_KIND,
+    GEMINI_CHAT_STREAM_PLAN_KIND, GEMINI_CHAT_SYNC_PLAN_KIND, GEMINI_CLI_STREAM_PLAN_KIND,
+    GEMINI_CLI_SYNC_PLAN_KIND, GEMINI_EMBEDDING_SYNC_PLAN_KIND, GEMINI_FILES_DELETE_PLAN_KIND,
+    GEMINI_FILES_DOWNLOAD_PLAN_KIND, GEMINI_FILES_GET_PLAN_KIND, GEMINI_FILES_LIST_PLAN_KIND,
+    GEMINI_FILES_UPLOAD_PLAN_KIND, GEMINI_INTERACTIONS_STREAM_PLAN_KIND,
+    GEMINI_INTERACTIONS_SYNC_PLAN_KIND, GEMINI_VIDEO_CANCEL_SYNC_PLAN_KIND,
+    GEMINI_VIDEO_CREATE_SYNC_PLAN_KIND, OPENAI_CHAT_STREAM_PLAN_KIND, OPENAI_CHAT_SYNC_PLAN_KIND,
+    OPENAI_EMBEDDING_SYNC_PLAN_KIND, OPENAI_IMAGE_STREAM_PLAN_KIND, OPENAI_IMAGE_SYNC_PLAN_KIND,
+    OPENAI_RERANK_SYNC_PLAN_KIND, OPENAI_RESPONSES_COMPACT_STREAM_PLAN_KIND,
+    OPENAI_RESPONSES_COMPACT_SYNC_PLAN_KIND, OPENAI_RESPONSES_STREAM_PLAN_KIND,
+    OPENAI_RESPONSES_SYNC_PLAN_KIND, OPENAI_SEARCH_SYNC_PLAN_KIND,
+    OPENAI_VIDEO_CANCEL_SYNC_PLAN_KIND, OPENAI_VIDEO_CONTENT_PLAN_KIND,
+    OPENAI_VIDEO_CREATE_SYNC_PLAN_KIND, OPENAI_VIDEO_DELETE_SYNC_PLAN_KIND,
+    OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND,
 };
 use crate::formats::openai::image::request::is_openai_image_stream_request;
 
@@ -23,6 +24,26 @@ pub fn resolve_execution_runtime_stream_plan_kind(
     route_class: Option<&str>,
     route_family: Option<&str>,
     route_kind: Option<&str>,
+    request_auth_channel: Option<&str>,
+    method: &Method,
+    path: &str,
+) -> Option<&'static str> {
+    resolve_execution_runtime_stream_plan_kind_with_client_surface(
+        route_class,
+        route_family,
+        route_kind,
+        legacy_client_surface_from_auth_channel(request_auth_channel),
+        request_auth_channel,
+        method,
+        path,
+    )
+}
+
+pub fn resolve_execution_runtime_stream_plan_kind_with_client_surface(
+    route_class: Option<&str>,
+    route_family: Option<&str>,
+    route_kind: Option<&str>,
+    client_surface: Option<ClientSurface>,
     request_auth_channel: Option<&str>,
     method: &Method,
     path: &str,
@@ -53,7 +74,7 @@ pub fn resolve_execution_runtime_stream_plan_kind(
         && path == "/v1/messages"
     {
         return Some(resolve_claude_messages_plan_kind(
-            request_auth_channel,
+            client_surface,
             CLAUDE_CHAT_STREAM_PLAN_KIND,
             CLAUDE_CLI_STREAM_PLAN_KIND,
         ));
@@ -118,6 +139,26 @@ pub fn resolve_execution_runtime_sync_plan_kind(
     route_class: Option<&str>,
     route_family: Option<&str>,
     route_kind: Option<&str>,
+    request_auth_channel: Option<&str>,
+    method: &Method,
+    path: &str,
+) -> Option<&'static str> {
+    resolve_execution_runtime_sync_plan_kind_with_client_surface(
+        route_class,
+        route_family,
+        route_kind,
+        legacy_client_surface_from_auth_channel(request_auth_channel),
+        request_auth_channel,
+        method,
+        path,
+    )
+}
+
+pub fn resolve_execution_runtime_sync_plan_kind_with_client_surface(
+    route_class: Option<&str>,
+    route_family: Option<&str>,
+    route_kind: Option<&str>,
+    client_surface: Option<ClientSurface>,
     request_auth_channel: Option<&str>,
     method: &Method,
     path: &str,
@@ -249,12 +290,20 @@ pub fn resolve_execution_runtime_sync_plan_kind(
     }
 
     if route_family == Some("claude")
+        && route_kind == Some("count_tokens")
+        && *method == Method::POST
+        && path == "/v1/messages/count_tokens"
+    {
+        return Some(CLAUDE_COUNT_TOKENS_SYNC_PLAN_KIND);
+    }
+
+    if route_family == Some("claude")
         && is_claude_messages_route_kind(route_kind)
         && *method == Method::POST
         && path == "/v1/messages"
     {
         return Some(resolve_claude_messages_plan_kind(
-            request_auth_channel,
+            client_surface,
             CLAUDE_CHAT_SYNC_PLAN_KIND,
             CLAUDE_CLI_SYNC_PLAN_KIND,
         ));
@@ -313,15 +362,25 @@ fn is_gemini_generate_content_route_kind(route_kind: Option<&str>) -> bool {
 }
 
 fn resolve_claude_messages_plan_kind(
-    request_auth_channel: Option<&str>,
+    client_surface: Option<ClientSurface>,
     chat_plan_kind: &'static str,
     cli_plan_kind: &'static str,
 ) -> &'static str {
-    if request_auth_channel == Some("bearer_like") {
+    if client_surface == Some(ClientSurface::ClaudeCode) {
         cli_plan_kind
     } else {
         chat_plan_kind
     }
+}
+
+fn legacy_client_surface_from_auth_channel(
+    request_auth_channel: Option<&str>,
+) -> Option<ClientSurface> {
+    Some(if request_auth_channel == Some("bearer_like") {
+        ClientSurface::ClaudeCode
+    } else {
+        ClientSurface::GenericCompatible
+    })
 }
 
 fn resolve_gemini_generate_content_plan_kind(
@@ -447,6 +506,7 @@ pub fn supports_sync_execution_decision_kind(plan_kind: &str) -> bool {
             | OPENAI_RESPONSES_COMPACT_SYNC_PLAN_KIND
             | CLAUDE_CHAT_SYNC_PLAN_KIND
             | CLAUDE_CLI_SYNC_PLAN_KIND
+            | CLAUDE_COUNT_TOKENS_SYNC_PLAN_KIND
             | GEMINI_CHAT_SYNC_PLAN_KIND
             | GEMINI_CLI_SYNC_PLAN_KIND
             | GEMINI_EMBEDDING_SYNC_PLAN_KIND

@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use serde_json::{json, Map, Value};
 use tracing::warn;
 
+use crate::claude_code::current_claude_code_transport_identity_profile;
 use crate::grok::grok_browser_resolved_transport_profile_from_auth_config;
 
 use super::snapshot::GatewayProviderTransportSnapshot;
@@ -152,9 +153,38 @@ pub fn resolve_transport_profile_id(
 pub fn resolve_transport_profile(
     transport: &GatewayProviderTransportSnapshot,
 ) -> Option<ResolvedTransportProfile> {
-    resolve_transport_profile_from_fingerprint(transport.key.fingerprint.as_ref()).or_else(|| {
-        resolve_transport_profile_from_provider_config(transport.provider.config.as_ref())
-            .or_else(|| resolve_grok_browser_transport_profile(transport))
+    let configured = resolve_transport_profile_from_fingerprint(transport.key.fingerprint.as_ref())
+        .or_else(|| {
+            resolve_transport_profile_from_provider_config(transport.provider.config.as_ref())
+        });
+    if configured.is_some() || transport_profile_is_configured(transport) {
+        return configured;
+    }
+
+    resolve_claude_code_transport_profile(transport)
+        .or_else(|| resolve_grok_browser_transport_profile(transport))
+}
+
+fn resolve_claude_code_transport_profile(
+    transport: &GatewayProviderTransportSnapshot,
+) -> Option<ResolvedTransportProfile> {
+    if !transport
+        .provider
+        .provider_type
+        .trim()
+        .eq_ignore_ascii_case("claude_code")
+    {
+        return None;
+    }
+
+    let identity_profile = *current_claude_code_transport_identity_profile();
+    Some(ResolvedTransportProfile {
+        profile_id: identity_profile.transport_profile_id().to_string(),
+        backend: TRANSPORT_BACKEND_REQWEST_RUSTLS.to_string(),
+        http_mode: TRANSPORT_HTTP_MODE_AUTO.to_string(),
+        pool_scope: TRANSPORT_POOL_SCOPE_KEY.to_string(),
+        header_fingerprint: None,
+        extra: None,
     })
 }
 
@@ -593,6 +623,64 @@ mod tests {
 
         assert_eq!(profile.profile_id, "provider_profile");
         assert_eq!(profile.backend, "reqwest_rustls");
+    }
+
+    #[test]
+    fn resolves_typed_claude_code_transport_profile_when_unconfigured() {
+        let mut transport = sample_transport();
+        transport.provider.provider_type = "claude_code".to_string();
+        transport.key.fingerprint = None;
+        transport.provider.config = None;
+
+        let profile = resolve_transport_profile(&transport).expect("typed Claude Code profile");
+
+        assert_eq!(profile.profile_id, "claude_code_nodejs");
+        assert_eq!(profile.backend, "reqwest_rustls");
+        assert_eq!(profile.http_mode, "auto");
+        assert_eq!(profile.pool_scope, "key");
+        assert!(profile.header_fingerprint.is_none());
+        assert!(profile.extra.is_none());
+        assert!(!transport_profile_is_configured(&transport));
+    }
+
+    #[test]
+    fn explicit_claude_code_transport_profiles_precede_typed_default() {
+        let mut transport = sample_transport();
+        transport.provider.provider_type = "claude_code".to_string();
+        transport.provider.config = Some(json!({
+            "fingerprint": {"transport_profile": "provider_claude_profile"}
+        }));
+        transport.key.fingerprint = Some(json!({
+            "transport_profile": "key_claude_profile"
+        }));
+
+        assert_eq!(
+            resolve_transport_profile(&transport)
+                .expect("key profile")
+                .profile_id,
+            "key_claude_profile"
+        );
+
+        transport.key.fingerprint = None;
+        assert_eq!(
+            resolve_transport_profile(&transport)
+                .expect("provider profile")
+                .profile_id,
+            "provider_claude_profile"
+        );
+    }
+
+    #[test]
+    fn invalid_explicit_claude_code_transport_profile_blocks_typed_default() {
+        let mut transport = sample_transport();
+        transport.provider.provider_type = "claude_code".to_string();
+        transport.provider.config = None;
+        transport.key.fingerprint = Some(json!({
+            "transport_profile": {"backend": "reqwest_rustls"}
+        }));
+
+        assert!(transport_profile_is_configured(&transport));
+        assert!(resolve_transport_profile(&transport).is_none());
     }
 
     #[test]

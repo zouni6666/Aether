@@ -20,9 +20,14 @@ pub(crate) fn admin_provider_oauth_template(
 }
 
 pub(crate) fn build_admin_provider_oauth_supported_types_payload() -> Vec<serde_json::Value> {
+    let service = aether_oauth::provider::ProviderOAuthService::with_builtin_adapters();
     admin_provider_oauth_template_types()
         .filter_map(|provider_type| admin_provider_oauth_template(provider_type))
         .map(|template| {
+            let capabilities = service
+                .adapter(template.provider_type)
+                .ok()
+                .map(|adapter| adapter.capabilities());
             json!({
                 "provider_type": template.provider_type,
                 "display_name": template.display_name,
@@ -31,6 +36,10 @@ pub(crate) fn build_admin_provider_oauth_supported_types_payload() -> Vec<serde_
                 "authorize_url": template.authorize_url,
                 "token_url": template.token_url,
                 "use_pkce": template.use_pkce,
+                "supports_authorization_code": capabilities.as_ref().is_some_and(|value| value.supports_authorization_code),
+                "supports_cookie_authorization": capabilities.as_ref().is_some_and(|value| value.supports_cookie_authorization),
+                "supports_refresh_token_import": capabilities.as_ref().is_some_and(|value| value.supports_refresh_token_import),
+                "supports_batch_import": capabilities.as_ref().is_some_and(|value| value.supports_batch_import),
             })
         })
         .collect()

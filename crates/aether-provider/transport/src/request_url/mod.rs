@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
+use aether_ai_formats::ApiOperation;
 use regex::Regex;
 use serde_json::Value;
 use url::form_urlencoded;
@@ -15,9 +16,11 @@ use crate::gemini_cli::{
 };
 use crate::snapshot::GatewayProviderTransportSnapshot;
 use crate::url::{
+    build_claude_count_tokens_url as build_default_claude_count_tokens_url,
     build_claude_messages_url, build_gemini_content_url, build_openai_chat_url,
     build_openai_responses_url, build_openai_search_url, build_passthrough_path_url,
-    normalize_gemini_content_action_path,
+    normalize_gemini_content_action_path, strip_gateway_credential_query_parameters,
+    GATEWAY_CREDENTIAL_QUERY_KEYS,
 };
 use crate::vertex::{
     build_vertex_api_key_gemini_content_url, build_vertex_api_key_gemini_embedding_url,
@@ -32,6 +35,7 @@ pub struct TransportRequestUrlParams<'a> {
     pub upstream_is_stream: bool,
     pub request_query: Option<&'a str>,
     pub kiro_api_region: Option<&'a str>,
+    pub api_operation: Option<aether_ai_formats::ApiOperation>,
 }
 
 pub fn build_transport_request_url(
@@ -70,23 +74,62 @@ fn build_transport_request_url_inner(
     let provider_api_format = params.provider_api_format.trim().to_ascii_lowercase();
     let normalized_provider_api_format =
         aether_ai_formats::normalize_api_format_alias(&provider_api_format);
+    let sanitized_claude_request_query = (normalized_provider_api_format == "claude:messages")
+        .then(|| strip_gateway_credential_query_parameters(params.request_query))
+        .flatten();
+    let params = if normalized_provider_api_format == "claude:messages" {
+        TransportRequestUrlParams {
+            request_query: sanitized_claude_request_query.as_deref(),
+            ..params
+        }
+    } else {
+        params
+    };
+    let is_claude_count_tokens = normalized_provider_api_format == "claude:messages"
+        && params.api_operation == Some(ApiOperation::ClaudeCountTokens);
+    if !transport_supports_api_operation(
+        transport,
+        normalized_provider_api_format.as_str(),
+        params.api_operation,
+    ) {
+        return None;
+    }
+    if is_claude_count_tokens {
+        if let Some(url) = build_configured_claude_count_tokens_url(transport, params.request_query)
+        {
+            return Some(url);
+        }
+    }
     if let Some(url) = build_transport_hook_url(transport, params) {
         return Some(url);
     }
 
-    let custom_path = transport
+    let custom_path_template = transport
         .endpoint
         .custom_path
         .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|path| {
-            expand_custom_path_template(path, build_path_params(params, gemini_embedding_batch))
-        });
+        .filter(|value| !value.is_empty());
+    let custom_path_handles_operation =
+        custom_path_template.is_some_and(|path| path.contains("{operation}"));
+    let custom_path = custom_path_template.map(|path| {
+        expand_custom_path_template(path, build_path_params(params, gemini_embedding_batch))
+    });
 
     if let Some(path) = custom_path.as_deref() {
-        let blocked_keys = if normalized_provider_api_format.starts_with("gemini:") {
-            &["key"][..]
+        let custom_path_is_complete_claude_count_tokens = normalized_provider_api_format
+            == "claude:messages"
+            && !custom_path_handles_operation
+            && path
+                .split_once('?')
+                .map(|(path, _)| path)
+                .unwrap_or(path)
+                .trim_end_matches('/')
+                .ends_with("/messages/count_tokens");
+        let blocked_keys = if normalized_provider_api_format.starts_with("gemini:")
+            || normalized_provider_api_format == "claude:messages"
+        {
+            GATEWAY_CREDENTIAL_QUERY_KEYS
         } else {
             &[][..]
         };
@@ -97,12 +140,19 @@ fn build_transport_request_url_inner(
         } else {
             path.to_string()
         };
-        let url = build_passthrough_path_url(
+        let mut url = build_passthrough_path_url(
             &transport.endpoint.base_url,
             normalized_path.as_str(),
             params.request_query,
             blocked_keys,
         )?;
+        if is_claude_count_tokens && !custom_path_handles_operation {
+            url = build_default_claude_count_tokens_url(&url, None);
+        } else if params.api_operation == Some(ApiOperation::ClaudeMessagesCreate)
+            && custom_path_is_complete_claude_count_tokens
+        {
+            url = build_claude_messages_url(&url, None);
+        }
         return Some(maybe_add_gemini_stream_alt_sse(
             url,
             &provider_api_format,
@@ -139,10 +189,14 @@ fn build_transport_request_url_inner(
         "openai:rerank" | "jina:rerank" => {
             build_provider_rerank_v1_url(&transport.endpoint.base_url, params.request_query)
         }
-        "claude:messages" => Some(build_claude_messages_url(
-            &transport.endpoint.base_url,
-            params.request_query,
-        )),
+        "claude:messages" => Some(if is_claude_count_tokens {
+            build_default_claude_count_tokens_url(
+                &transport.endpoint.base_url,
+                params.request_query,
+            )
+        } else {
+            build_claude_messages_url(&transport.endpoint.base_url, params.request_query)
+        }),
         "gemini:generate_content" => build_gemini_content_url(
             &transport.endpoint.base_url,
             params.mapped_model?,
@@ -186,6 +240,7 @@ pub fn build_local_openai_chat_upstream_url(
             upstream_is_stream: false,
             request_query,
             kiro_api_region: None,
+            api_operation: None,
         },
     )
 }
@@ -206,6 +261,7 @@ pub fn build_cross_format_openai_chat_upstream_url(
             upstream_is_stream,
             request_query,
             kiro_api_region: None,
+            api_operation: None,
         },
     )
 }
@@ -228,6 +284,7 @@ pub fn build_local_openai_responses_upstream_url(
             upstream_is_stream: false,
             request_query,
             kiro_api_region: None,
+            api_operation: None,
         },
     )
 }
@@ -249,6 +306,7 @@ pub fn build_cross_format_openai_responses_upstream_url(
             upstream_is_stream,
             request_query,
             kiro_api_region: None,
+            api_operation: None,
         },
     )
 }
@@ -269,6 +327,7 @@ pub fn build_kiro_cross_format_upstream_url(
             upstream_is_stream,
             request_query,
             kiro_api_region: Some(api_region),
+            api_operation: None,
         },
     )
 }
@@ -291,10 +350,15 @@ fn build_transport_hook_url(
         .trim()
         .eq_ignore_ascii_case("claude_code")
     {
-        return Some(build_claude_code_messages_url(
-            &transport.endpoint.base_url,
-            params.request_query,
-        ));
+        let messages_url =
+            build_claude_code_messages_url(&transport.endpoint.base_url, params.request_query);
+        return Some(
+            if params.api_operation == Some(aether_ai_formats::ApiOperation::ClaudeCountTokens) {
+                build_default_claude_count_tokens_url(&messages_url, None)
+            } else {
+                messages_url
+            },
+        );
     }
 
     let normalized_provider_api_format =
@@ -408,6 +472,9 @@ fn build_path_params(
     }
     let provider_api_format =
         aether_ai_formats::normalize_api_format_alias(params.provider_api_format);
+    if let Some(operation) = params.api_operation {
+        path_params.insert("operation", operation.as_str());
+    }
     if provider_api_format == "gemini:generate_content" || provider_api_format == "gemini:embedding"
     {
         path_params.insert(
@@ -426,6 +493,79 @@ fn build_path_params(
         );
     }
     path_params
+}
+
+pub fn transport_supports_api_operation(
+    transport: &GatewayProviderTransportSnapshot,
+    provider_api_format: &str,
+    operation: Option<ApiOperation>,
+) -> bool {
+    if operation != Some(ApiOperation::ClaudeCountTokens) {
+        return true;
+    }
+    if aether_ai_formats::normalize_api_format_alias(provider_api_format) != "claude:messages" {
+        return false;
+    }
+
+    anthropic_count_tokens_supported(transport)
+}
+
+fn anthropic_count_tokens_supported(transport: &GatewayProviderTransportSnapshot) -> bool {
+    // Private message adapters do not implement Anthropic's token-counting
+    // operation. A config flag cannot make their request envelopes compatible.
+    if crate::kiro::is_kiro_provider_transport(transport)
+        || crate::grok::is_grok_provider_transport(transport)
+    {
+        return false;
+    }
+
+    let Some(operations) = anthropic_transport_config_field(transport, "supported_operations")
+    else {
+        return true;
+    };
+    operations.as_array().is_some_and(|operations| {
+        operations.iter().any(|operation| {
+            operation
+                .as_str()
+                .is_some_and(|value| value.eq_ignore_ascii_case("count_tokens"))
+        })
+    })
+}
+
+fn build_configured_claude_count_tokens_url(
+    transport: &GatewayProviderTransportSnapshot,
+    request_query: Option<&str>,
+) -> Option<String> {
+    let path = anthropic_transport_config_field(transport, "count_tokens_path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let path = path?;
+    let path = path
+        .starts_with('/')
+        .then(|| path.to_string())
+        .unwrap_or_else(|| format!("/{path}"));
+    build_passthrough_path_url(
+        &transport.endpoint.base_url,
+        path.as_str(),
+        request_query,
+        GATEWAY_CREDENTIAL_QUERY_KEYS,
+    )
+}
+
+fn anthropic_transport_config_field<'a>(
+    transport: &'a GatewayProviderTransportSnapshot,
+    field: &str,
+) -> Option<&'a Value> {
+    let from_config = |config: Option<&'a Value>| {
+        config
+            .and_then(Value::as_object)
+            .and_then(|config| config.get("anthropic"))
+            .and_then(Value::as_object)
+            .and_then(|anthropic| anthropic.get(field))
+    };
+    from_config(transport.endpoint.config.as_ref())
+        .or_else(|| from_config(transport.provider.config.as_ref()))
 }
 
 fn normalize_gemini_embedding_action_path(path: &str, batch: bool) -> String {
@@ -571,6 +711,8 @@ fn custom_path_template_regex() -> &'static Regex {
 
 #[cfg(test)]
 mod tests {
+    use aether_ai_formats::ApiOperation;
+
     use super::{
         build_kiro_cross_format_upstream_url, build_transport_request_url,
         build_transport_request_url_for_request_body, TransportRequestUrlParams,
@@ -660,6 +802,7 @@ mod tests {
                 upstream_is_stream: true,
                 request_query: Some("foo=bar"),
                 kiro_api_region: None,
+                api_operation: None,
             },
         )
         .expect("vertex hook url");
@@ -697,6 +840,7 @@ mod tests {
                 upstream_is_stream: false,
                 request_query: Some("foo=bar&beta=1"),
                 kiro_api_region: None,
+                api_operation: None,
             },
         )
         .expect("vertex service account hook url");
@@ -738,6 +882,7 @@ mod tests {
                 upstream_is_stream: false,
                 request_query: Some("foo=bar&beta=1"),
                 kiro_api_region: None,
+                api_operation: None,
             },
             Some(&provider_request_body),
         )
@@ -767,6 +912,7 @@ mod tests {
                     upstream_is_stream: false,
                     request_query: Some("key=blocked&beta=true&foo=bar"),
                     kiro_api_region: None,
+                    api_operation: None,
                 },
             )
             .as_deref(),
@@ -792,6 +938,7 @@ mod tests {
                     upstream_is_stream: true,
                     request_query: Some("foo=bar"),
                     kiro_api_region: None,
+                    api_operation: None,
                 },
             )
             .as_deref(),
@@ -839,6 +986,7 @@ mod tests {
                     upstream_is_stream: false,
                     request_query: None,
                     kiro_api_region: None,
+                    api_operation: None,
                 },
                 Some(&batch_body),
             )
@@ -866,6 +1014,7 @@ mod tests {
                 upstream_is_stream: false,
                 request_query: Some("tenant=demo"),
                 kiro_api_region: None,
+                api_operation: None,
             },
         )
         .expect("openai responses url");
@@ -890,6 +1039,7 @@ mod tests {
                 upstream_is_stream: false,
                 request_query: Some("tenant=demo"),
                 kiro_api_region: None,
+                api_operation: None,
             },
         )
         .expect("openai search url");
@@ -917,6 +1067,7 @@ mod tests {
                 upstream_is_stream: false,
                 request_query: Some("key=client-key&foo=bar"),
                 kiro_api_region: None,
+                api_operation: None,
             },
         )
         .expect("expanded custom path url");
@@ -944,6 +1095,7 @@ mod tests {
                 upstream_is_stream: true,
                 request_query: Some("key=client-key&foo=bar"),
                 kiro_api_region: None,
+                api_operation: None,
             },
         )
         .expect("stream custom path url");
@@ -968,6 +1120,7 @@ mod tests {
                 upstream_is_stream: false,
                 request_query: Some("foo=bar"),
                 kiro_api_region: None,
+                api_operation: None,
             },
         )
         .expect("sync custom path url");
@@ -992,6 +1145,7 @@ mod tests {
                 upstream_is_stream: true,
                 request_query: None,
                 kiro_api_region: None,
+                api_operation: None,
             },
         )
         .expect("v1 stream custom path url");
@@ -1019,11 +1173,380 @@ mod tests {
                 upstream_is_stream: false,
                 request_query: None,
                 kiro_api_region: None,
+                api_operation: None,
             },
         )
         .expect("fallback custom path url");
 
         assert_eq!(url, "https://api.example.com/v1/messages/{model}");
+    }
+
+    #[test]
+    fn strips_gateway_query_key_from_claude_messages_url() {
+        let transport = sample_transport(
+            "custom",
+            "claude:messages",
+            "https://api.anthropic.example/v1?region=us",
+            None,
+        );
+
+        let url = build_transport_request_url(
+            &transport,
+            TransportRequestUrlParams {
+                provider_api_format: "claude:messages",
+                mapped_model: Some("claude-sonnet-4"),
+                upstream_is_stream: false,
+                request_query: Some("key=gateway-secret&trace=1"),
+                kiro_api_region: None,
+                api_operation: Some(aether_ai_formats::ApiOperation::ClaudeMessagesCreate),
+            },
+        )
+        .expect("messages url");
+
+        assert_eq!(
+            url,
+            "https://api.anthropic.example/v1/messages?region=us&trace=1"
+        );
+        assert!(!url.contains("gateway-secret"));
+    }
+
+    #[test]
+    fn routes_claude_count_tokens_as_an_operation_on_messages_format() {
+        let mut transport = sample_transport(
+            "custom",
+            "claude:messages",
+            "https://api.anthropic.example/v1",
+            None,
+        );
+        transport.endpoint.config = Some(json!({
+            "anthropic": {
+                "supported_operations": ["messages", "count_tokens"]
+            }
+        }));
+
+        let url = build_transport_request_url(
+            &transport,
+            TransportRequestUrlParams {
+                provider_api_format: "claude:messages",
+                mapped_model: Some("claude-sonnet-4"),
+                upstream_is_stream: false,
+                request_query: Some("key=gateway-secret&trace=1"),
+                kiro_api_region: None,
+                api_operation: Some(aether_ai_formats::ApiOperation::ClaudeCountTokens),
+            },
+        )
+        .expect("count_tokens url");
+
+        assert_eq!(
+            url,
+            "https://api.anthropic.example/v1/messages/count_tokens?trace=1"
+        );
+    }
+
+    #[test]
+    fn count_tokens_default_preserves_custom_anthropic_prefix() {
+        let transport = sample_transport(
+            "custom",
+            "claude:messages",
+            "https://proxy.example/anthropic?key=base-secret&tenant=base",
+            None,
+        );
+
+        assert_eq!(
+            build_transport_request_url(
+                &transport,
+                TransportRequestUrlParams {
+                    provider_api_format: "claude:messages",
+                    mapped_model: Some("claude-sonnet-4"),
+                    upstream_is_stream: false,
+                    request_query: Some("KEY=client-secret&trace=1"),
+                    kiro_api_region: None,
+                    api_operation: Some(aether_ai_formats::ApiOperation::ClaudeCountTokens),
+                },
+            )
+            .as_deref(),
+            Some(
+                "https://proxy.example/anthropic/messages/count_tokens?key=base-secret&tenant=base&trace=1"
+            )
+        );
+    }
+
+    #[test]
+    fn count_tokens_uses_operation_aware_custom_path() {
+        let mut transport = sample_transport(
+            "custom",
+            "claude:messages",
+            "https://proxy.example/anthropic",
+            Some("/operations/{operation}"),
+        );
+        transport.endpoint.config = Some(json!({
+            "anthropic": {"supported_operations": ["messages", "count_tokens"]}
+        }));
+
+        assert_eq!(
+            build_transport_request_url(
+                &transport,
+                TransportRequestUrlParams {
+                    provider_api_format: "claude:messages",
+                    mapped_model: Some("claude-sonnet-4"),
+                    upstream_is_stream: false,
+                    request_query: Some("key=client-secret&trace=1"),
+                    kiro_api_region: None,
+                    api_operation: Some(aether_ai_formats::ApiOperation::ClaudeCountTokens),
+                },
+            )
+            .as_deref(),
+            Some("https://proxy.example/anthropic/operations/count_tokens?trace=1")
+        );
+    }
+
+    #[test]
+    fn count_tokens_derives_from_messages_only_custom_path() {
+        let transport = sample_transport(
+            "custom",
+            "claude:messages",
+            "https://api.anthropic.example",
+            Some("/custom/v1/messages"),
+        );
+
+        assert_eq!(
+            build_transport_request_url(
+                &transport,
+                TransportRequestUrlParams {
+                    provider_api_format: "claude:messages",
+                    mapped_model: Some("claude-sonnet-4"),
+                    upstream_is_stream: false,
+                    request_query: None,
+                    kiro_api_region: None,
+                    api_operation: Some(aether_ai_formats::ApiOperation::ClaudeCountTokens),
+                },
+            )
+            .as_deref(),
+            Some("https://api.anthropic.example/custom/v1/messages/count_tokens")
+        );
+    }
+
+    #[test]
+    fn count_tokens_keeps_complete_custom_count_tokens_path() {
+        let transport = sample_transport(
+            "custom",
+            "claude:messages",
+            "https://api.anthropic.example",
+            Some("/custom/v1/messages/count_tokens?key=path-secret"),
+        );
+
+        assert_eq!(
+            build_transport_request_url(
+                &transport,
+                TransportRequestUrlParams {
+                    provider_api_format: "claude:messages",
+                    mapped_model: Some("claude-sonnet-4"),
+                    upstream_is_stream: false,
+                    request_query: Some("key=client-secret&trace=1"),
+                    kiro_api_region: None,
+                    api_operation: Some(aether_ai_formats::ApiOperation::ClaudeCountTokens),
+                },
+            )
+            .as_deref(),
+            Some(
+                "https://api.anthropic.example/custom/v1/messages/count_tokens?key=path-secret&trace=1"
+            )
+        );
+    }
+
+    #[test]
+    fn messages_create_normalizes_complete_custom_count_tokens_path() {
+        let transport = sample_transport(
+            "custom",
+            "claude:messages",
+            "https://api.anthropic.example",
+            Some("/custom/v1/messages/count_tokens?key=path-secret"),
+        );
+
+        assert_eq!(
+            build_transport_request_url(
+                &transport,
+                TransportRequestUrlParams {
+                    provider_api_format: "claude:messages",
+                    mapped_model: Some("claude-sonnet-4"),
+                    upstream_is_stream: false,
+                    request_query: Some("key=client-secret&trace=1"),
+                    kiro_api_region: None,
+                    api_operation: Some(aether_ai_formats::ApiOperation::ClaudeMessagesCreate),
+                },
+            )
+            .as_deref(),
+            Some("https://api.anthropic.example/custom/v1/messages?key=path-secret&trace=1")
+        );
+    }
+
+    #[test]
+    fn private_anthropic_adapters_reject_count_tokens_even_when_config_claims_support() {
+        for provider_type in ["kiro", "grok"] {
+            let mut transport = sample_transport(
+                provider_type,
+                "claude:messages",
+                "https://private.example",
+                None,
+            );
+            transport.endpoint.config = Some(json!({
+                "anthropic": {
+                    "supported_operations": ["messages", "count_tokens"],
+                    "count_tokens_path": "/v1/messages/count_tokens"
+                }
+            }));
+
+            assert!(build_transport_request_url(
+                &transport,
+                TransportRequestUrlParams {
+                    provider_api_format: "claude:messages",
+                    mapped_model: Some("claude-sonnet-4"),
+                    upstream_is_stream: false,
+                    request_query: None,
+                    kiro_api_region: Some("us-east-1"),
+                    api_operation: Some(ApiOperation::ClaudeCountTokens),
+                },
+            )
+            .is_none());
+        }
+    }
+
+    #[test]
+    fn claude_code_custom_root_keeps_messages_and_count_tokens_on_v1_surface() {
+        let mut transport = sample_transport(
+            "claude_code",
+            "claude:messages",
+            "https://proxy.example?key=base-secret",
+            None,
+        );
+        transport.endpoint.config = Some(json!({
+            "anthropic": {"supported_operations": ["messages", "count_tokens"]}
+        }));
+
+        assert_eq!(
+            build_transport_request_url(
+                &transport,
+                TransportRequestUrlParams {
+                    provider_api_format: "claude:messages",
+                    mapped_model: Some("claude-sonnet-4"),
+                    upstream_is_stream: false,
+                    request_query: Some("key=client-secret&trace=messages"),
+                    kiro_api_region: None,
+                    api_operation: Some(aether_ai_formats::ApiOperation::ClaudeMessagesCreate),
+                },
+            )
+            .as_deref(),
+            Some("https://proxy.example/v1/messages?key=base-secret&trace=messages")
+        );
+        assert_eq!(
+            build_transport_request_url(
+                &transport,
+                TransportRequestUrlParams {
+                    provider_api_format: "claude:messages",
+                    mapped_model: Some("claude-sonnet-4"),
+                    upstream_is_stream: false,
+                    request_query: Some("key=client-secret&trace=count"),
+                    kiro_api_region: None,
+                    api_operation: Some(aether_ai_formats::ApiOperation::ClaudeCountTokens),
+                },
+            )
+            .as_deref(),
+            Some("https://proxy.example/v1/messages/count_tokens?key=base-secret&trace=count")
+        );
+    }
+
+    #[test]
+    fn count_tokens_config_fields_fall_back_from_endpoint_to_provider() {
+        let mut transport = sample_transport(
+            "custom",
+            "claude:messages",
+            "https://api.anthropic.example/v1?key=base-secret",
+            None,
+        );
+        transport.endpoint.config = Some(json!({
+            "anthropic": {"profile": "native_transparent"}
+        }));
+        transport.provider.config = Some(json!({
+            "anthropic": {
+                "supported_operations": ["messages", "count_tokens"],
+                "count_tokens_path": "/v1/messages/provider_count_tokens?key=path-secret"
+            }
+        }));
+
+        assert_eq!(
+            build_transport_request_url(
+                &transport,
+                TransportRequestUrlParams {
+                    provider_api_format: "claude:messages",
+                    mapped_model: Some("claude-sonnet-4"),
+                    upstream_is_stream: false,
+                    request_query: Some("key=client-secret&trace=1"),
+                    kiro_api_region: None,
+                    api_operation: Some(aether_ai_formats::ApiOperation::ClaudeCountTokens),
+                },
+            )
+            .as_deref(),
+            Some(
+                "https://api.anthropic.example/v1/messages/provider_count_tokens?key=path-secret&trace=1"
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_count_tokens_when_provider_capability_excludes_it() {
+        let mut transport = sample_transport(
+            "custom",
+            "claude:messages",
+            "https://api.anthropic.example/v1",
+            None,
+        );
+        transport.endpoint.config = Some(json!({
+            "anthropic": {"profile": "native_transparent"}
+        }));
+        transport.provider.config = Some(json!({
+            "anthropic": {"supported_operations": ["messages"]}
+        }));
+
+        assert!(build_transport_request_url(
+            &transport,
+            TransportRequestUrlParams {
+                provider_api_format: "claude:messages",
+                mapped_model: Some("claude-sonnet-4"),
+                upstream_is_stream: false,
+                request_query: None,
+                kiro_api_region: None,
+                api_operation: Some(aether_ai_formats::ApiOperation::ClaudeCountTokens),
+            },
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn preserves_configured_query_credentials_and_strips_client_credentials() {
+        let transport = sample_transport(
+            "custom",
+            "claude:messages",
+            "https://proxy.example/anthropic?key=base-secret&tenant=base",
+            Some("/messages?key=path-secret&variant=custom"),
+        );
+
+        assert_eq!(
+            build_transport_request_url(
+                &transport,
+                TransportRequestUrlParams {
+                    provider_api_format: "claude:messages",
+                    mapped_model: Some("claude-sonnet-4"),
+                    upstream_is_stream: false,
+                    request_query: Some("KEY=client-secret&trace=1"),
+                    kiro_api_region: None,
+                    api_operation: None,
+                },
+            )
+            .as_deref(),
+            Some(
+                "https://proxy.example/anthropic/messages?key=path-secret&tenant=base&trace=1&variant=custom"
+            )
+        );
     }
 
     #[test]
@@ -1040,7 +1563,7 @@ mod tests {
             "claude-sonnet-4",
             "claude:messages",
             true,
-            Some("conversationId=abc"),
+            Some("key=gateway-secret&conversationId=abc"),
             "us-west-2",
         )
         .expect("kiro url");
@@ -1049,6 +1572,7 @@ mod tests {
             "https://codewhisperer.us-west-2.amazonaws.com/generateAssistantResponse"
         ));
         assert!(url.contains("conversationId=abc"));
+        assert!(!url.contains("gateway-secret"));
     }
 
     #[test]
@@ -1093,6 +1617,7 @@ mod tests {
                     upstream_is_stream: false,
                     request_query: Some("tenant=demo"),
                     kiro_api_region: None,
+                    api_operation: None,
                 },
             )
             .as_deref(),
@@ -1107,6 +1632,7 @@ mod tests {
                     upstream_is_stream: false,
                     request_query: None,
                     kiro_api_region: None,
+                    api_operation: None,
                 },
             )
             .as_deref(),
@@ -1121,6 +1647,7 @@ mod tests {
                     upstream_is_stream: false,
                     request_query: Some("key=client-key&foo=bar"),
                     kiro_api_region: None,
+                    api_operation: None,
                 },
             )
             .as_deref(),
@@ -1137,6 +1664,7 @@ mod tests {
                     upstream_is_stream: false,
                     request_query: None,
                     kiro_api_region: None,
+                    api_operation: None,
                 },
             )
             .as_deref(),
@@ -1151,6 +1679,7 @@ mod tests {
                     upstream_is_stream: false,
                     request_query: None,
                     kiro_api_region: None,
+                    api_operation: None,
                 },
             )
             .as_deref(),
@@ -1182,6 +1711,7 @@ mod tests {
                     upstream_is_stream: false,
                     request_query: Some("key=client-key&trace=1"),
                     kiro_api_region: None,
+                    api_operation: None,
                 },
             )
             .as_deref(),
@@ -1196,6 +1726,7 @@ mod tests {
                     upstream_is_stream: true,
                     request_query: Some("key=client-key&trace=2"),
                     kiro_api_region: None,
+                    api_operation: None,
                 },
             )
             .as_deref(),
@@ -1221,6 +1752,7 @@ mod tests {
                     upstream_is_stream: false,
                     request_query: Some("key=client-key"),
                     kiro_api_region: None,
+                    api_operation: None,
                 },
             )
             .as_deref(),
@@ -1246,6 +1778,7 @@ mod tests {
                     upstream_is_stream: true,
                     request_query: Some("key=client-aether-key&trace=1&beta=true"),
                     kiro_api_region: None,
+                    api_operation: None,
                 },
             )
             .as_deref(),
@@ -1279,6 +1812,7 @@ mod tests {
                     upstream_is_stream: false,
                     request_query: Some("trace=1"),
                     kiro_api_region: None,
+                    api_operation: None,
                 },
             )
             .as_deref(),
@@ -1293,6 +1827,7 @@ mod tests {
                     upstream_is_stream: false,
                     request_query: None,
                     kiro_api_region: None,
+                    api_operation: None,
                 },
             )
             .as_deref(),
@@ -1332,6 +1867,7 @@ mod tests {
                     upstream_is_stream: false,
                     request_query: Some("key=client-key&foo=bar"),
                     kiro_api_region: None,
+                    api_operation: None,
                 },
                 Some(&batch_body),
             )
@@ -1368,6 +1904,7 @@ mod tests {
                     upstream_is_stream: false,
                     request_query: None,
                     kiro_api_region: None,
+                    api_operation: None,
                 },
                 Some(&batch_body),
             )
@@ -1397,6 +1934,7 @@ mod tests {
                     upstream_is_stream: false,
                     request_query: Some("tenant=demo"),
                     kiro_api_region: None,
+                    api_operation: None,
                 },
             )
             .as_deref(),
@@ -1411,6 +1949,7 @@ mod tests {
                     upstream_is_stream: false,
                     request_query: None,
                     kiro_api_region: None,
+                    api_operation: None,
                 },
             )
             .as_deref(),
@@ -1454,6 +1993,7 @@ mod tests {
                     upstream_is_stream: false,
                     request_query: Some("tenant=request&trace=1"),
                     kiro_api_region: None,
+                    api_operation: None,
                 },
             )
             .as_deref(),
@@ -1468,6 +2008,7 @@ mod tests {
                     upstream_is_stream: false,
                     request_query: Some("trace=2"),
                     kiro_api_region: None,
+                    api_operation: None,
                 },
             )
             .as_deref(),
@@ -1482,6 +2023,7 @@ mod tests {
                     upstream_is_stream: false,
                     request_query: Some("key=client-key&trace=3"),
                     kiro_api_region: None,
+                    api_operation: None,
                 },
             )
             .as_deref(),
@@ -1496,6 +2038,7 @@ mod tests {
                     upstream_is_stream: false,
                     request_query: Some("trace=4"),
                     kiro_api_region: None,
+                    api_operation: None,
                 },
             )
             .as_deref(),
@@ -1520,6 +2063,7 @@ mod tests {
                 upstream_is_stream: false,
                 request_query: None,
                 kiro_api_region: None,
+                api_operation: None,
             },
         )
         .is_none());
@@ -1542,6 +2086,7 @@ mod tests {
                 upstream_is_stream: true,
                 request_query: Some("key=client-key&foo=bar"),
                 kiro_api_region: None,
+                api_operation: None,
             },
         )
         .expect("expanded custom embedding path url");

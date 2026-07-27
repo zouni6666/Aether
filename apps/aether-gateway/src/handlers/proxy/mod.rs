@@ -17,8 +17,8 @@ use crate::ai_serving::api::{
 };
 use crate::api::response::{
     build_client_response, build_client_response_from_parts, build_local_auth_rejection_response,
-    build_local_http_error_response, build_local_overloaded_response,
-    build_local_user_rpm_limited_response,
+    build_local_http_error_response, build_local_http_error_response_with_request_path,
+    build_local_overloaded_response, build_local_user_rpm_limited_response,
 };
 use crate::constants::{
     CONTROL_CANDIDATE_ID_HEADER, DEPENDENCY_REASON_HEADER, EXECUTION_PATH_CONTROL_EXECUTE_STREAM,
@@ -935,7 +935,13 @@ async fn proxy_request_inner(
             limit,
         })) => {
             let trace_id = extract_or_generate_trace_id(request.headers());
-            let response = build_local_overloaded_response(&trace_id, None, gate, limit)?;
+            let response = build_local_overloaded_response(
+                &trace_id,
+                None,
+                Some(request.uri().path()),
+                gate,
+                limit,
+            )?;
             return Ok(finalize_gateway_response(
                 &state,
                 response,
@@ -965,7 +971,13 @@ async fn proxy_request_inner(
             aether_runtime_state::RuntimeSemaphoreError::Unavailable { gate, limit, .. },
         )) => {
             let trace_id = extract_or_generate_trace_id(request.headers());
-            let response = build_local_overloaded_response(&trace_id, None, gate, limit)?;
+            let response = build_local_overloaded_response(
+                &trace_id,
+                None,
+                Some(request.uri().path()),
+                gate,
+                limit,
+            )?;
             return Ok(finalize_gateway_response(
                 &state,
                 response,
@@ -999,9 +1011,10 @@ async fn proxy_request_inner(
                 path = %request.uri().path(),
                 "gateway rejected blacklisted client IP"
             );
-            let response = build_local_http_error_response(
+            let response = build_local_http_error_response_with_request_path(
                 &trace_id,
                 None,
+                Some(request.uri().path()),
                 http::StatusCode::FORBIDDEN,
                 "当前 IP 已被禁止访问",
             )?;
@@ -1057,9 +1070,10 @@ async fn proxy_request_inner(
             loop_guard_header = EXECUTION_RUNTIME_LOOP_GUARD_HEADER,
             "gateway rejected execution runtime request loop into frontdoor"
         );
-        let response = build_local_http_error_response(
+        let response = build_local_http_error_response_with_request_path(
             &trace_id,
             None,
+            Some(parts.uri.path()),
             http::StatusCode::LOOP_DETECTED,
             LOCAL_EXECUTION_LOOP_DETECTED_DETAIL,
         )?;
@@ -1534,9 +1548,10 @@ async fn proxy_request_inner(
     }
 
     if control_decision.is_none() {
-        let response = build_local_http_error_response(
+        let response = build_local_http_error_response_with_request_path(
             &trace_id,
             None,
+            Some(request_context.request_path.as_str()),
             http::StatusCode::NOT_FOUND,
             LOCAL_ROUTE_NOT_FOUND_DETAIL,
         )?;

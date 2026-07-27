@@ -375,6 +375,8 @@ impl IntoResponse for ExecutionRuntimeAppError {
                 | ExecutionRuntimeTransportError::BrowserClientBuild(_)
                 | ExecutionRuntimeTransportError::BrowserBody(_)
                 | ExecutionRuntimeTransportError::UpstreamRequest(_)
+                | ExecutionRuntimeTransportError::UpstreamResponseTooLarge { .. }
+                | ExecutionRuntimeTransportError::UpstreamResponseDecode { .. }
                 | ExecutionRuntimeTransportError::RelayError(_)
                 | ExecutionRuntimeTransportError::InvalidJson(_),
             ) => StatusCode::BAD_GATEWAY,

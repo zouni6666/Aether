@@ -103,6 +103,7 @@ dependencies = [
  "aether-pool-core",
  "aether-scheduler-core",
  "async-trait",
+ "base64 0.22.1",
  "http",
  "serde",
  "serde_json",

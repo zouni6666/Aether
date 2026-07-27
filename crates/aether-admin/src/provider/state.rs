@@ -38,6 +38,17 @@ pub fn provider_oauth_pkce_s256(verifier: &str) -> String {
 pub fn parse_provider_oauth_callback_params(callback_url: &str) -> BTreeMap<String, String> {
     let mut merged = BTreeMap::new();
     let raw_callback_url = callback_url.trim();
+    if !raw_callback_url.contains("://") {
+        if let Some((code, state)) = raw_callback_url.split_once('#') {
+            let code = code.trim();
+            let state = state.strip_prefix("state=").unwrap_or(state).trim();
+            if !code.is_empty() && !code.contains('=') && !state.is_empty() {
+                merged.insert("code".to_string(), code.to_string());
+                merged.insert("state".to_string(), state.to_string());
+                return merged;
+            }
+        }
+    }
     let parsed_url = Url::parse(raw_callback_url).or_else(|_| {
         Url::parse(&format!(
             "https://aether.local/{}",
@@ -262,6 +273,36 @@ pub fn enrich_admin_provider_oauth_auth_config(
         ],
     );
 
+    if provider_type.trim().eq_ignore_ascii_case("claude_code") {
+        if let Some(organization_uuid) = token_payload_object
+            .get("organization")
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("uuid"))
+            .cloned()
+        {
+            auth_config
+                .entry("org_uuid".to_string())
+                .or_insert(organization_uuid);
+        }
+        if let Some(account) = token_payload_object
+            .get("account")
+            .and_then(Value::as_object)
+        {
+            if let Some(account_uuid) = account.get("uuid").cloned() {
+                auth_config
+                    .entry("account_uuid".to_string())
+                    .or_insert(account_uuid);
+            }
+            if let Some(email) = account.get("email_address").cloned() {
+                auth_config
+                    .entry("email_address".to_string())
+                    .or_insert_with(|| email.clone());
+                auth_config.entry("email".to_string()).or_insert(email);
+            }
+        }
+        return;
+    }
+
     if !provider_type_uses_openai_chatgpt_identity(provider_type) {
         return;
     }
@@ -405,6 +446,21 @@ mod tests {
 
         assert_eq!(params.get("code").map(String::as_str), Some("code-value"));
         assert_eq!(params.get("state").map(String::as_str), Some("nonce-value"));
+    }
+
+    #[test]
+    fn parse_provider_oauth_callback_params_reads_raw_claude_code_and_state() {
+        for (input, expected_state) in [
+            ("claude-code#nonce-value", "nonce-value"),
+            ("claude-code#state=nonce-value", "nonce-value"),
+        ] {
+            let params = parse_provider_oauth_callback_params(input);
+            assert_eq!(params.get("code").map(String::as_str), Some("claude-code"));
+            assert_eq!(
+                params.get("state").map(String::as_str),
+                Some(expected_state)
+            );
+        }
     }
 
     #[test]

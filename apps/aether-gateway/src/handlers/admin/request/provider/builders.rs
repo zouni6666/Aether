@@ -259,6 +259,10 @@ impl<'a> AdminAppState<'a> {
             admin_endpoint_signature_parts(&payload.api_format)
                 .ok_or_else(|| format!("无效的 api_format: {}", payload.api_format))?;
         validate_admin_endpoint_stream_policy(normalized_api_format, payload.config.as_ref())?;
+        crate::provider_transport::validate_anthropic_compatibility_profile_config(
+            payload.config.as_ref(),
+        )
+        .map_err(|_| "无效的 Anthropic compatibility profile".to_string())?;
         let base_url = normalize_admin_base_url(&payload.base_url)?;
 
         let existing_endpoints = self
@@ -369,6 +373,10 @@ impl<'a> AdminAppState<'a> {
                 existing_endpoint.api_format.as_str(),
                 updated.config.as_ref(),
             )?;
+            crate::provider_transport::validate_anthropic_compatibility_profile_config(
+                updated.config.as_ref(),
+            )
+            .map_err(|_| "无效的 Anthropic compatibility profile".to_string())?;
         }
 
         if provider_type == "codex"

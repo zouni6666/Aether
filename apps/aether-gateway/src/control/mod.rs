@@ -12,7 +12,7 @@ pub(crate) use auth::{
     refresh_execution_runtime_auth_context, request_model_local_rejection,
     resolve_execution_runtime_auth_context, should_buffer_request_for_local_auth,
     trusted_auth_local_rejection, GatewayAdminPrincipalContext, GatewayControlAuthContext,
-    GatewayLocalAuthRejection,
+    GatewayCredentialCarrier, GatewayLocalAuthRejection,
 };
 pub(crate) use execute::{allows_control_execute_emergency, maybe_execute_via_control};
 pub(crate) use management_token_permissions::{

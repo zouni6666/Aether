@@ -3,11 +3,13 @@ use std::future::Future;
 use std::io::Error as IoError;
 use std::pin::Pin;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     Arc,
 };
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+use aether_ai_serving::{AiAttemptExecutionOutcome, AiAttemptRetryScope};
 use aether_contracts::{
     ExecutionPlan, ExecutionStreamTerminalSummary, ExecutionTelemetry, StandardizedUsage,
     StreamFrame, StreamFramePayload,
@@ -30,15 +32,19 @@ use axum::body::{Body, Bytes};
 use axum::http::Response;
 use base64::Engine as _;
 use futures_util::stream::{self as futures_stream, BoxStream};
-use futures_util::{StreamExt, TryStreamExt};
+use futures_util::{Stream, StreamExt, TryStreamExt};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
+use tokio::io::{AsyncRead, ReadBuf};
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 use tokio_util::codec::{FramedRead, LinesCodec};
-use tokio_util::io::StreamReader;
 use tracing::{debug, info, warn};
 
+use super::commit_policy::{
+    anthropic_error_status_code, find_sse_record_boundary, StreamCommitGate, StreamCommitPolicy,
+    StreamPrecommitObservation,
+};
 use super::error::{
     build_synthetic_non_success_stream_error_body, collect_error_body, decode_stream_error_body,
     inspect_prefetched_stream_body, read_next_frame,
@@ -92,8 +98,9 @@ use crate::execution_runtime::transport::{
 };
 use crate::execution_runtime::windsurf::maybe_execute_windsurf_stream;
 use crate::execution_runtime::{
-    apply_endpoint_response_header_rules, attach_provider_response_headers_to_report_context,
-    local_failover_response_text, resolve_core_stream_direct_finalize_report_kind,
+    ai_attempt_retry_scope_from_failure_disposition, apply_endpoint_response_header_rules,
+    attach_provider_response_headers_to_report_context, local_failover_response_text,
+    resolve_core_stream_direct_finalize_report_kind,
     resolve_core_stream_error_finalize_report_kind,
     resolve_local_candidate_failover_analysis_stream, should_fallback_to_control_stream,
     should_retry_next_local_candidate_stream, LocalFailoverDecision,
@@ -103,12 +110,13 @@ use crate::execution_runtime::{
 };
 use crate::log_ids::short_request_id;
 use crate::orchestration::{
-    apply_local_execution_effect, build_local_error_flow_metadata, cyber_continue_failover_enabled,
-    trace_upstream_response_body, with_error_flow_report_context,
-    with_upstream_response_report_context, LocalAdaptiveRateLimitEffect,
-    LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect, LocalExecutionEffect,
-    LocalExecutionEffectContext, LocalHealthFailureEffect, LocalHealthSuccessEffect,
-    LocalOAuthInvalidationEffect, LocalPoolErrorEffect,
+    apply_local_execution_effect, build_local_error_flow_metadata, classify_failure_disposition,
+    cyber_continue_failover_enabled, trace_upstream_response_body, with_error_flow_report_context,
+    with_upstream_response_report_context, FailureDisposition, FailureTokenAction,
+    LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect,
+    LocalExecutionEffect, LocalExecutionEffectContext, LocalFailoverAnalysis,
+    LocalHealthFailureEffect, LocalHealthSuccessEffect, LocalOAuthInvalidationEffect,
+    LocalPoolErrorEffect,
 };
 use crate::provider_pool_demand::{
     acquire_provider_pool_in_flight_guard, ProviderPoolInFlightGuard,
@@ -138,10 +146,17 @@ const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const SSE_KEEPALIVE_BYTES: &[u8] = b": aether-keepalive\n\n";
 const SSE_CONTROL_FILTER_MAX_BUFFER_BYTES: usize = 1024 * 1024;
 const SSE_TERMINAL_DETECTOR_MAX_LINE_BYTES: usize = 1024 * 1024;
+const SSE_TERMINAL_DETECTOR_MAX_RECORD_BYTES: usize = SSE_TERMINAL_DETECTOR_MAX_LINE_BYTES;
 const PROVIDER_STREAM_ERROR_INSPECTION_MAX_BYTES: usize = SSE_TERMINAL_DETECTOR_MAX_LINE_BYTES;
 const STREAM_IDLE_LOG_INTERVAL: Duration = Duration::from_secs(60);
 const STREAM_IDLE_LOG_INTERVAL_MS: u64 = 60_000;
 const REWRITTEN_STREAM_PREFETCH_TIMEOUT: Duration = Duration::from_millis(750);
+const OAUTH_ERROR_PREFETCH_MAX_WAIT: Duration = Duration::from_millis(750);
+const ANTHROPIC_POST_STOP_DRAIN_MAX_WAIT: Duration = Duration::from_millis(250);
+const ANTHROPIC_POST_STOP_DRAIN_MAX_FRAMES: usize = 8;
+const ANTHROPIC_POST_STOP_DRAIN_MAX_BYTES: usize = 64 * 1024;
+const POST_STOP_FRAME_READ_BUDGET_INACTIVE: usize = usize::MAX;
+const POST_STOP_MAX_EMPTY_CHUNKS_PER_POLL: usize = 32;
 const DEFAULT_DIRECT_PASSTHROUGH_CHANNEL_CAPACITY: usize = 16;
 const MAX_DIRECT_PASSTHROUGH_CHANNEL_CAPACITY: usize = 1024;
 const DIRECT_PASSTHROUGH_CHANNEL_CAPACITY_ENV: &str =
@@ -915,17 +930,37 @@ fn observe_stream_usage_bytes(
     buffered: &mut Vec<u8>,
     chunk: &[u8],
 ) {
-    if chunk.is_empty() {
+    if chunk.is_empty()
+        || observer
+            .latest_summary()
+            .and_then(|summary| summary.parser_error.as_deref())
+            .is_some()
+    {
         return;
     }
 
-    buffered.extend_from_slice(chunk);
-    while let Some(line_end) = buffered.iter().position(|byte| *byte == b'\n') {
-        let line = buffered.drain(..=line_end).collect::<Vec<_>>();
-        if let Err(err) = observer.push_line(report_context, line) {
-            observer.disable_with_error(err.to_string());
+    let mut remaining = chunk;
+    while !remaining.is_empty() {
+        let line_part_len = remaining
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(remaining.len(), |index| index + 1);
+        if buffered.len().saturating_add(line_part_len) > SSE_TERMINAL_DETECTOR_MAX_LINE_BYTES {
+            observer.disable_with_error(format!(
+                "stream usage event exceeded {SSE_TERMINAL_DETECTOR_MAX_LINE_BYTES} bytes"
+            ));
             buffered.clear();
-            break;
+            return;
+        }
+        buffered.extend_from_slice(&remaining[..line_part_len]);
+        remaining = &remaining[line_part_len..];
+        if buffered.last() == Some(&b'\n') {
+            let line = std::mem::take(buffered);
+            if let Err(err) = observer.push_line(report_context, line) {
+                observer.disable_with_error(err.to_string());
+                buffered.clear();
+                return;
+            }
         }
     }
 }
@@ -1122,18 +1157,53 @@ async fn execute_in_process_stream_with_oauth_retry(
 ) -> Result<DirectUpstreamStreamExecution, InProcessStreamExecutionError> {
     let mut execution = execute_in_process_stream(state, plan, trace_id).await?;
     apply_stream_summary_report_context(&mut execution, report_context);
-    let response_text = if execution.status_code == 401
+    let uses_oauth_credential = stream_plan_uses_oauth_credential(state, plan).await;
+    let embedded_oauth_credential = execution.status_code == 200
+        && plan
+            .provider_api_format
+            .eq_ignore_ascii_case("claude:messages")
+        && uses_oauth_credential;
+    let prefetched_failure = if embedded_oauth_credential {
+        prefetch_direct_anthropic_stream_failure(&mut execution, plan, report_context).await
+    } else {
+        None
+    };
+    let analyzed_prefetched_failure = match prefetched_failure {
+        Some(failure) => {
+            Some(analyze_prefetched_stream_failure(state, plan, report_context, failure).await)
+        }
+        None => None,
+    };
+    let response_text = if let Some(failure) = analyzed_prefetched_failure.as_ref() {
+        Some(failure.response_text.clone())
+    } else if execution.status_code == 403 && uses_oauth_credential {
+        prefetch_direct_stream_error_body(&mut execution).await
+    } else if execution.status_code == 401
         && stream_plan_uses_codex_agent_identity(state, plan).await
     {
         prefetch_direct_stream_error_body(&mut execution).await
     } else {
         None
     };
-    if execution.status_code >= 400
+    let retry_status_code = analyzed_prefetched_failure
+        .as_ref()
+        .map(|failure| failure.status_code)
+        .unwrap_or(execution.status_code);
+    let retry_requested =
+        analyzed_prefetched_failure
+            .as_ref()
+            .map_or(execution.status_code >= 400, |failure| {
+                matches!(
+                    failure.disposition.token_action,
+                    FailureTokenAction::ForceRefresh
+                )
+            });
+    if retry_requested
+        && uses_oauth_credential
         && refresh_oauth_plan_auth_for_retry(
             state,
             plan,
-            execution.status_code,
+            retry_status_code,
             response_text.as_deref(),
             trace_id,
         )
@@ -1144,6 +1214,196 @@ async fn execute_in_process_stream_with_oauth_retry(
         apply_stream_summary_report_context(&mut execution, report_context);
     }
     Ok(execution)
+}
+
+#[derive(Debug)]
+struct PrefetchedStreamFailure {
+    status_code: u16,
+    response_text: String,
+}
+
+#[derive(Debug)]
+struct AnalyzedPrefetchedStreamFailure {
+    status_code: u16,
+    response_text: String,
+    #[allow(dead_code)]
+    analysis: LocalFailoverAnalysis,
+    disposition: FailureDisposition,
+}
+
+async fn analyze_prefetched_stream_failure(
+    state: &AppState,
+    plan: &ExecutionPlan,
+    report_context: Option<&Value>,
+    failure: PrefetchedStreamFailure,
+) -> AnalyzedPrefetchedStreamFailure {
+    let analysis = resolve_local_candidate_failover_analysis_stream(
+        state,
+        plan,
+        report_context,
+        failure.status_code,
+        Some(failure.response_text.as_str()),
+    )
+    .await;
+    let disposition = classify_failure_disposition(
+        plan.provider_api_format.as_str(),
+        analysis.classification,
+        failure.status_code,
+    );
+    AnalyzedPrefetchedStreamFailure {
+        status_code: failure.status_code,
+        response_text: failure.response_text,
+        analysis,
+        disposition,
+    }
+}
+
+async fn stream_plan_uses_oauth_credential(state: &AppState, plan: &ExecutionPlan) -> bool {
+    state
+        .read_provider_transport_snapshot(&plan.provider_id, &plan.endpoint_id, &plan.key_id)
+        .await
+        .ok()
+        .flatten()
+        .as_ref()
+        .is_some_and(|transport| {
+            aether_provider_transport::auth::resolve_local_auth_type_for_transport_format(transport)
+                .eq_ignore_ascii_case("oauth")
+        })
+}
+
+async fn prefetch_direct_anthropic_stream_failure(
+    execution: &mut DirectUpstreamStreamExecution,
+    plan: &ExecutionPlan,
+    report_context: Option<&Value>,
+) -> Option<PrefetchedStreamFailure> {
+    if execution.status_code != 200 {
+        return None;
+    }
+    let normalized_stream_report_context =
+        normalize_provider_private_report_context(report_context);
+    let policy = StreamCommitPolicy::for_response(
+        true,
+        execution.headers.get("content-type").map(String::as_str),
+        plan.provider_api_format.as_str(),
+        plan.client_api_format.as_str(),
+        maybe_build_provider_private_stream_normalizer(report_context).is_some(),
+        maybe_build_stream_response_rewriter(normalized_stream_report_context.as_ref()).is_some(),
+        false,
+    );
+    if !policy.is_native_anthropic() {
+        return None;
+    }
+
+    let mut gate = StreamCommitGate::new(policy);
+    let precommit_started_at = Instant::now();
+    let max_wait = policy.max_precommit_wait()?;
+    let mut observed_first_body = execution
+        .prefetched_body
+        .iter()
+        .any(|item| item.as_ref().is_ok_and(|chunk| !chunk.is_empty()));
+    while gate.is_uncommitted() {
+        let wait = select_direct_anthropic_prefetch_wait(
+            precommit_started_at,
+            max_wait,
+            execution.started_at,
+            execution.stream_first_byte_timeout,
+            observed_first_body,
+            Instant::now(),
+        );
+        if wait.remaining.is_zero() {
+            if wait.commit_on_timeout {
+                gate.commit();
+            }
+            break;
+        }
+        let next_chunk = match tokio::time::timeout(
+            wait.remaining,
+            next_direct_upstream_response_chunk(&mut execution.response),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                if wait.commit_on_timeout {
+                    gate.commit();
+                }
+                break;
+            }
+        };
+        let chunk = match next_chunk {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(error) => {
+                execution.prefetched_body.push_back(Err(error));
+                break;
+            }
+        };
+        if chunk.is_empty() {
+            continue;
+        }
+        observed_first_body = true;
+        execution.prefetched_body.push_back(Ok(chunk.clone()));
+        match gate.observe_provider_bytes(&chunk) {
+            StreamPrecommitObservation::Pending => {}
+            StreamPrecommitObservation::Commit => break,
+            StreamPrecommitObservation::UpstreamError {
+                status_code,
+                body_json,
+            } => {
+                let response_text = serde_json::to_string(&body_json)
+                    .unwrap_or_else(|_| String::from_utf8_lossy(&chunk).into_owned());
+                return Some(PrefetchedStreamFailure {
+                    status_code,
+                    response_text,
+                });
+            }
+        }
+    }
+    execution.stream_precommit_committed = !gate.is_uncommitted();
+    None
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DirectAnthropicPrefetchWait {
+    remaining: Duration,
+    commit_on_timeout: bool,
+}
+
+fn select_direct_anthropic_prefetch_wait(
+    precommit_started_at: Instant,
+    max_precommit_wait: Duration,
+    upstream_started_at: Instant,
+    first_byte_timeout: Option<Duration>,
+    observed_first_body: bool,
+    now: Instant,
+) -> DirectAnthropicPrefetchWait {
+    let precommit_remaining =
+        max_precommit_wait.saturating_sub(now.saturating_duration_since(precommit_started_at));
+    if observed_first_body {
+        return DirectAnthropicPrefetchWait {
+            remaining: precommit_remaining,
+            commit_on_timeout: true,
+        };
+    }
+    let Some(first_byte_timeout) = first_byte_timeout else {
+        return DirectAnthropicPrefetchWait {
+            remaining: precommit_remaining,
+            commit_on_timeout: true,
+        };
+    };
+    let first_byte_remaining =
+        first_byte_timeout.saturating_sub(now.saturating_duration_since(upstream_started_at));
+    if first_byte_remaining <= precommit_remaining {
+        DirectAnthropicPrefetchWait {
+            remaining: first_byte_remaining,
+            commit_on_timeout: false,
+        }
+    } else {
+        DirectAnthropicPrefetchWait {
+            remaining: precommit_remaining,
+            commit_on_timeout: true,
+        }
+    }
 }
 
 async fn stream_plan_uses_codex_agent_identity(state: &AppState, plan: &ExecutionPlan) -> bool {
@@ -1184,22 +1444,38 @@ async fn next_direct_upstream_response_chunk(
 async fn prefetch_direct_stream_error_body(
     execution: &mut DirectUpstreamStreamExecution,
 ) -> Option<String> {
+    let prefetch_started_at = Instant::now();
     let mut inspected = Vec::with_capacity(MAX_ERROR_BODY_BYTES);
     let mut fully_buffered = false;
     while inspected.len() < MAX_ERROR_BODY_BYTES {
+        let remaining = OAUTH_ERROR_PREFETCH_MAX_WAIT.saturating_sub(prefetch_started_at.elapsed());
+        if remaining.is_zero() {
+            break;
+        }
         let next_chunk = if execution.prefetched_body.is_empty() {
-            match await_direct_passthrough_first_item(
+            match tokio::time::timeout(
+                remaining,
+                await_direct_passthrough_first_item(
+                    next_direct_upstream_response_chunk(&mut execution.response),
+                    execution.started_at,
+                    execution.stream_first_byte_timeout,
+                ),
+            )
+            .await
+            {
+                Ok(Ok(item)) => item,
+                Ok(Err(_)) | Err(_) => break,
+            }
+        } else {
+            match tokio::time::timeout(
+                remaining,
                 next_direct_upstream_response_chunk(&mut execution.response),
-                execution.started_at,
-                execution.stream_first_byte_timeout,
             )
             .await
             {
                 Ok(item) => item,
                 Err(_) => break,
             }
-        } else {
-            next_direct_upstream_response_chunk(&mut execution.response).await
         };
         let chunk = match next_chunk {
             Ok(Some(chunk)) => chunk,
@@ -1361,6 +1637,7 @@ async fn forward_direct_passthrough_client_chunk(
     downstream_dropped: &mut bool,
     client_visible_stream_completed: &mut bool,
     client_stream_completion_tracker: &mut ClientVisibleStreamCompletionTracker,
+    observe_stream_completion: bool,
     client_stream_bytes: &mut u64,
     buffered_body: &mut Vec<u8>,
     client_body_truncated: &mut bool,
@@ -1404,8 +1681,10 @@ async fn forward_direct_passthrough_client_chunk(
         observe_gateway_stage_ms("direct_passthrough_first_client_send_wait", send_wait_ms);
     }
 
-    *client_visible_stream_completed |=
-        client_stream_completion_tracker.observe_chunk(chunk.as_ref());
+    if observe_stream_completion {
+        *client_visible_stream_completed |=
+            client_stream_completion_tracker.observe_chunk(chunk.as_ref());
+    }
     *client_stream_bytes = client_stream_bytes.saturating_add(chunk_len);
     *last_client_chunk_elapsed_ms = stream_started_at
         .elapsed()
@@ -1445,6 +1724,7 @@ struct DirectPassthroughFinalizerCore {
     provider_body_truncated: bool,
     client_body_truncated: bool,
     client_stream_completion_tracker: ClientVisibleStreamCompletionTracker,
+    requires_anthropic_message_stop: bool,
     client_visible_stream_completed: bool,
     usage_stream_telemetry: Option<ExecutionTelemetry>,
     telemetry: Option<ExecutionTelemetry>,
@@ -1493,6 +1773,43 @@ impl DirectPassthroughFinalizer {
 
     fn set_terminal_failure(&mut self, failure: StreamFailureReport) {
         self.core_mut().terminal_failure = Some(failure);
+    }
+
+    fn prepare_upstream_chunk(&mut self, mut chunk: Bytes) -> Option<Bytes> {
+        let core = self.core_mut();
+        if !core.requires_anthropic_message_stop {
+            return Some(chunk);
+        }
+        if core.client_visible_stream_completed {
+            return None;
+        }
+        if let Some(terminal_end) = core
+            .client_stream_completion_tracker
+            .observe_anthropic_message_stop_terminal_end(chunk.as_ref())
+        {
+            chunk.truncate(terminal_end);
+            core.client_visible_stream_completed = true;
+        }
+        Some(chunk)
+    }
+
+    fn fail_if_anthropic_message_stop_missing(&mut self) {
+        let core = self.core_mut();
+        if core.requires_anthropic_message_stop
+            && !core.client_visible_stream_completed
+            && core.terminal_failure.is_none()
+        {
+            core.terminal_failure = Some(build_anthropic_premature_eof_failure(
+                "upstream Anthropic stream ended before message_stop",
+            ));
+        }
+    }
+
+    fn completed_native_anthropic_stream(&self) -> bool {
+        let core = self.core();
+        core.requires_anthropic_message_stop
+            && core.client_visible_stream_completed
+            && core.terminal_failure.is_none()
     }
 
     fn log_terminal_error_event_encode_failed(&self, err: impl std::fmt::Debug) {
@@ -1570,8 +1887,11 @@ impl DirectPassthroughFinalizer {
             .provider_error_inspection
             .observe(core.stream_usage_report_context.as_ref(), chunk.as_ref())
         {
-            let error_status_code =
-                resolve_local_sync_error_status_code(core.status_code, &error_body_json);
+            let error_status_code = resolve_provider_stream_error_status_code(
+                core.plan.provider_api_format.as_str(),
+                core.status_code,
+                &error_body_json,
+            );
             core.terminal_failure = Some(build_stream_failure_from_provider_error_body(
                 error_status_code,
                 &error_body_json,
@@ -1590,9 +1910,11 @@ impl DirectPassthroughFinalizer {
             DEFAULT_USAGE_RESPONSE_BODY_CAPTURE_LIMIT_BYTES,
             &mut core.client_body_truncated,
         );
-        core.client_visible_stream_completed |= core
-            .client_stream_completion_tracker
-            .observe_chunk(chunk.as_ref());
+        if !core.requires_anthropic_message_stop {
+            core.client_visible_stream_completed |= core
+                .client_stream_completion_tracker
+                .observe_chunk(chunk.as_ref());
+        }
         core.client_stream_bytes = core
             .client_stream_bytes
             .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
@@ -1777,6 +2099,7 @@ impl DirectPassthroughFinalizerCore {
             provider_body_truncated,
             client_body_truncated,
             client_stream_completion_tracker: _,
+            requires_anthropic_message_stop: _,
             client_visible_stream_completed,
             usage_stream_telemetry,
             telemetry,
@@ -2127,6 +2450,16 @@ impl DirectPassthroughInlineBodyState {
         if self.finalized {
             return None;
         }
+        if self
+            .finalizer
+            .as_ref()
+            .is_some_and(DirectPassthroughFinalizer::completed_native_anthropic_stream)
+        {
+            self.upstream.take();
+            self.finalized = true;
+            drop(self.finalizer.take());
+            return None;
+        }
         if !self.observed_first_body_poll {
             self.observed_first_body_poll = true;
             if let Some(finalizer) = self.finalizer.as_mut() {
@@ -2162,15 +2495,38 @@ impl DirectPassthroughInlineBodyState {
             }
 
             let observed_at = Instant::now();
-            if let Some(finalizer) = self.finalizer.as_mut() {
+            let Some(chunk) = self
+                .finalizer
+                .as_mut()
+                .and_then(|finalizer| finalizer.prepare_upstream_chunk(chunk))
+            else {
+                continue;
+            };
+            let provider_error_detected = if let Some(finalizer) = self.finalizer.as_mut() {
                 finalizer.observe_upstream_chunk(&chunk, observed_at);
-            }
+                finalizer.terminal_failure().is_some()
+            } else {
+                false
+            };
             if let Some(client_chunk) =
                 filter_upstream_sse_control_chunk(&mut self.upstream_control_filter, chunk)
             {
                 self.prepare_client_chunk_yield(&client_chunk);
+                self.terminal_error_sent |= provider_error_detected;
+                if self
+                    .finalizer
+                    .as_ref()
+                    .is_some_and(DirectPassthroughFinalizer::completed_native_anthropic_stream)
+                {
+                    self.upstream.take();
+                    self.upstream_done = true;
+                }
                 return Some((Ok(client_chunk), self));
             }
+        }
+
+        if let Some(finalizer) = self.finalizer.as_mut() {
+            finalizer.fail_if_anthropic_message_stop_missing();
         }
 
         if !self.control_filter_flushed
@@ -2193,7 +2549,8 @@ impl DirectPassthroughInlineBodyState {
             if let Some(finalizer) = self.finalizer.as_mut() {
                 if let Some(failure) = finalizer.terminal_failure() {
                     self.terminal_error_sent = true;
-                    match encode_terminal_sse_error_event(failure) {
+                    match encode_terminal_sse_error_event_for_plan(&finalizer.core().plan, failure)
+                    {
                         Ok(error_event) => {
                             self.prepare_client_chunk_yield(&error_event);
                             return Some((Ok(error_event), self));
@@ -2256,6 +2613,19 @@ impl DirectPassthroughInlineBodyState {
         let Some(finalizer) = self.finalizer.as_mut() else {
             return;
         };
+        if finalizer.completed_native_anthropic_stream() {
+            let core = finalizer.core();
+            debug!(
+                event_name = "direct_passthrough_read_error_ignored_after_anthropic_stop",
+                log_type = "debug",
+                trace_id = %core.trace_id,
+                request_id = %core.request_id_for_log,
+                candidate_id = ?core.candidate_id.as_deref(),
+                error = %message,
+                "gateway ignored direct passthrough teardown error after Anthropic message_stop"
+            );
+            return;
+        }
         let core = finalizer.core();
         warn!(
             event_name = "direct_passthrough_body_read_error",
@@ -2394,11 +2764,21 @@ async fn execute_stream_from_direct_passthrough(
         provider_api_format: _,
         stream_summary_report_context: _,
         prefetched_body,
+        stream_precommit_committed: _,
         response,
         started_at: upstream_started_at,
         stream_first_byte_timeout,
         upstream_target_permit,
     } = execution;
+
+    let requires_anthropic_message_stop = status_code == 200
+        && response_headers_indicate_sse(&headers)
+        && plan
+            .provider_api_format
+            .eq_ignore_ascii_case("claude:messages")
+        && plan
+            .client_api_format
+            .eq_ignore_ascii_case("claude:messages");
 
     let request_id = plan.request_id.clone();
     let candidate_id = plan.candidate_id.clone();
@@ -2514,6 +2894,7 @@ async fn execute_stream_from_direct_passthrough(
             provider_body_truncated: false,
             client_body_truncated: false,
             client_stream_completion_tracker: ClientVisibleStreamCompletionTracker::default(),
+            requires_anthropic_message_stop,
             client_visible_stream_completed: false,
             usage_stream_telemetry: None,
             telemetry: None,
@@ -2596,6 +2977,7 @@ async fn execute_stream_from_direct_passthrough(
         let mut client_body_truncated = false;
         let mut upstream_control_filter = Some(SseControlBlockFilter::default());
         let mut client_stream_completion_tracker = ClientVisibleStreamCompletionTracker::default();
+        let requires_anthropic_message_stop = requires_anthropic_message_stop;
         let mut client_visible_stream_completed = false;
         let mut usage_stream_telemetry: Option<ExecutionTelemetry> = None;
         let telemetry: Option<ExecutionTelemetry> = None;
@@ -2604,6 +2986,7 @@ async fn execute_stream_from_direct_passthrough(
         let mut last_client_chunk_elapsed_ms = 0u64;
         let mut downstream_dropped = false;
         let mut terminal_failure: Option<StreamFailureReport> = None;
+        let mut provider_error_forwarded_to_client = false;
         let mut upstream = direct_upstream_response_byte_stream(prefetched_body, response);
         let mut observed_first_upstream_body = false;
         let mut observed_first_client_send = false;
@@ -2658,6 +3041,18 @@ async fn execute_stream_from_direct_passthrough(
             let chunk = match item {
                 Ok(chunk) => chunk,
                 Err(message) => {
+                    if requires_anthropic_message_stop && client_visible_stream_completed {
+                        debug!(
+                            event_name = "direct_passthrough_read_error_ignored_after_anthropic_stop",
+                            log_type = "debug",
+                            trace_id = %trace_id_owned,
+                            request_id = %request_id_for_report_log,
+                            candidate_id = ?candidate_id_for_report.as_deref(),
+                            error = %message,
+                            "gateway ignored direct passthrough teardown error after Anthropic message_stop"
+                        );
+                        break;
+                    }
                     warn!(
                         event_name = "direct_passthrough_body_read_error",
                         log_type = "ops",
@@ -2678,6 +3073,19 @@ async fn execute_stream_from_direct_passthrough(
             };
             if chunk.is_empty() {
                 continue;
+            }
+            if requires_anthropic_message_stop && client_visible_stream_completed {
+                continue;
+            }
+
+            let mut provider_chunk = chunk;
+            if requires_anthropic_message_stop {
+                if let Some(terminal_end) = client_stream_completion_tracker
+                    .observe_anthropic_message_stop_terminal_end(provider_chunk.as_ref())
+                {
+                    provider_chunk.truncate(terminal_end);
+                    client_visible_stream_completed = true;
+                }
             }
 
             let observed_at = Instant::now();
@@ -2711,16 +3119,18 @@ async fn execute_stream_from_direct_passthrough(
                 );
             }
 
-            let provider_chunk = chunk.clone();
-            if let Some(client_chunk) =
-                filter_upstream_sse_control_chunk(&mut upstream_control_filter, chunk)
-            {
-                let sent_client_chunk = forward_direct_passthrough_client_chunk(
+            let mut sent_client_chunk = false;
+            if let Some(client_chunk) = filter_upstream_sse_control_chunk(
+                &mut upstream_control_filter,
+                provider_chunk.clone(),
+            ) {
+                sent_client_chunk = forward_direct_passthrough_client_chunk(
                     &tx,
                     client_chunk,
                     &mut downstream_dropped,
                     &mut client_visible_stream_completed,
                     &mut client_stream_completion_tracker,
+                    !requires_anthropic_message_stop,
                     &mut client_stream_bytes,
                     &mut buffered_body,
                     &mut client_body_truncated,
@@ -2767,14 +3177,34 @@ async fn execute_stream_from_direct_passthrough(
                 provider_chunk.as_ref(),
             );
             if let Some(error_body_json) = provider_private_error_body_json {
-                let error_status_code =
-                    resolve_local_sync_error_status_code(status_code, &error_body_json);
+                provider_error_forwarded_to_client = sent_client_chunk;
+                let error_status_code = resolve_provider_stream_error_status_code(
+                    plan_for_report.provider_api_format.as_str(),
+                    status_code,
+                    &error_body_json,
+                );
                 terminal_failure = Some(build_stream_failure_from_provider_error_body(
                     error_status_code,
                     &error_body_json,
                 ));
                 break;
             }
+            if requires_anthropic_message_stop && client_visible_stream_completed {
+                break;
+            }
+        }
+        drop(upstream);
+        drop(_provider_pool_in_flight_guard);
+        drop(_upstream_target_permit);
+
+        if terminal_failure.is_none()
+            && !downstream_dropped
+            && requires_anthropic_message_stop
+            && !client_visible_stream_completed
+        {
+            terminal_failure = Some(build_anthropic_premature_eof_failure(
+                "upstream Anthropic stream ended before message_stop",
+            ));
         }
 
         if terminal_failure.is_none() {
@@ -2787,6 +3217,7 @@ async fn execute_stream_from_direct_passthrough(
                     &mut downstream_dropped,
                     &mut client_visible_stream_completed,
                     &mut client_stream_completion_tracker,
+                    !requires_anthropic_message_stop,
                     &mut client_stream_bytes,
                     &mut buffered_body,
                     &mut client_body_truncated,
@@ -2802,8 +3233,11 @@ async fn execute_stream_from_direct_passthrough(
             }
         }
 
-        if let Some(failure) = terminal_failure.as_ref().filter(|_| !downstream_dropped) {
-            match encode_terminal_sse_error_event(failure) {
+        if let Some(failure) = terminal_failure
+            .as_ref()
+            .filter(|_| !downstream_dropped && !provider_error_forwarded_to_client)
+        {
+            match encode_terminal_sse_error_event_for_plan(&plan_for_report, failure) {
                 Ok(error_event) => {
                     let _ = forward_direct_passthrough_client_chunk(
                         &tx,
@@ -2811,6 +3245,7 @@ async fn execute_stream_from_direct_passthrough(
                         &mut downstream_dropped,
                         &mut client_visible_stream_completed,
                         &mut client_stream_completion_tracker,
+                        true,
                         &mut client_stream_bytes,
                         &mut buffered_body,
                         &mut client_body_truncated,
@@ -3111,7 +3546,14 @@ async fn execute_stream_from_direct_passthrough(
         }
     });
 
-    let body_stream = build_sse_body_stream(Vec::new(), rx, false, false, SSE_KEEPALIVE_INTERVAL);
+    let body_stream = build_sse_body_stream(
+        Vec::new(),
+        rx,
+        false,
+        false,
+        requires_anthropic_message_stop,
+        SSE_KEEPALIVE_INTERVAL,
+    );
     Ok(Some(build_client_response_from_parts(
         status_code,
         &headers,
@@ -3139,7 +3581,50 @@ pub(crate) fn execute_execution_runtime_stream<'a>(
         plan_kind,
         report_kind,
         report_context,
+        None,
+        None,
     ))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_execution_runtime_stream_with_retry_scope<'a>(
+    state: &'a AppState,
+    plan: ExecutionPlan,
+    trace_id: &'a str,
+    decision: &'a GatewayControlDecision,
+    plan_kind: &'a str,
+    report_kind: Option<String>,
+    report_context: Option<serde_json::Value>,
+) -> Pin<
+    Box<
+        dyn Future<Output = Result<AiAttemptExecutionOutcome<Response<Body>>, GatewayError>>
+            + Send
+            + 'a,
+    >,
+> {
+    Box::pin(async move {
+        let mut retry_scope = AiAttemptRetryScope::Candidate;
+        let mut fallback_response = None;
+        let response = execute_execution_runtime_stream_inner(
+            state,
+            plan,
+            trace_id,
+            decision,
+            plan_kind,
+            report_kind,
+            report_context,
+            Some(&mut retry_scope),
+            Some(&mut fallback_response),
+        )
+        .await?;
+        Ok(match response {
+            Some(response) => AiAttemptExecutionOutcome::Responded(response),
+            None => AiAttemptExecutionOutcome::Retry {
+                scope: retry_scope,
+                fallback_response,
+            },
+        })
+    })
 }
 
 async fn execute_execution_runtime_stream_inner(
@@ -3150,6 +3635,8 @@ async fn execute_execution_runtime_stream_inner(
     plan_kind: &str,
     report_kind: Option<String>,
     mut report_context: Option<serde_json::Value>,
+    mut retry_scope_out: Option<&mut AiAttemptRetryScope>,
+    mut retry_fallback_out: Option<&mut Option<Response<Body>>>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
     let stream_started_at = Instant::now();
     let mut stage_trace = RequestStageTrace::from_env();
@@ -3222,7 +3709,7 @@ async fn execute_execution_runtime_stream_inner(
     );
     match maybe_execute_grok_stream(&plan, report_context.as_ref()).await {
         Ok(Some(grok_stream)) => {
-            return execute_stream_from_frame_stream(
+            return execute_stream_from_frame_stream_with_retry_scope(
                 state,
                 plan,
                 trace_id,
@@ -3235,7 +3722,10 @@ async fn execute_execution_runtime_stream_inner(
                 stage_trace,
                 lifecycle_pending_recorded,
                 grok_stream.frame_stream,
+                false,
                 provider_pool_in_flight_guard.take(),
+                retry_scope_out.as_deref_mut(),
+                retry_fallback_out.as_deref_mut(),
             )
             .await;
         }
@@ -3276,7 +3766,7 @@ async fn execute_execution_runtime_stream_inner(
     }
     match maybe_execute_windsurf_stream(state, &plan, report_context.as_ref()).await {
         Ok(Some(windsurf_stream)) => {
-            return execute_stream_from_frame_stream(
+            return execute_stream_from_frame_stream_with_retry_scope(
                 state,
                 plan,
                 trace_id,
@@ -3289,7 +3779,10 @@ async fn execute_execution_runtime_stream_inner(
                 stage_trace,
                 lifecycle_pending_recorded,
                 windsurf_stream.frame_stream,
+                false,
                 provider_pool_in_flight_guard.take(),
+                retry_scope_out.as_deref_mut(),
+                retry_fallback_out.as_deref_mut(),
             )
             .await;
         }
@@ -3330,7 +3823,7 @@ async fn execute_execution_runtime_stream_inner(
     }
     match maybe_execute_kiro_web_search_stream(state, &plan, report_context.as_ref()).await {
         Ok(Some(kiro_web_search)) => {
-            return execute_stream_from_frame_stream(
+            return execute_stream_from_frame_stream_with_retry_scope(
                 state,
                 plan,
                 trace_id,
@@ -3343,7 +3836,10 @@ async fn execute_execution_runtime_stream_inner(
                 stage_trace,
                 lifecycle_pending_recorded,
                 kiro_web_search.frame_stream,
+                false,
                 provider_pool_in_flight_guard.take(),
+                retry_scope_out.as_deref_mut(),
+                retry_fallback_out.as_deref_mut(),
             )
             .await;
         }
@@ -3384,7 +3880,7 @@ async fn execute_execution_runtime_stream_inner(
     }
     match maybe_execute_chatgpt_web_image_stream(state, &plan, report_context.as_ref()).await {
         Ok(Some(chatgpt_web_image)) => {
-            return execute_stream_from_frame_stream(
+            return execute_stream_from_frame_stream_with_retry_scope(
                 state,
                 plan,
                 trace_id,
@@ -3397,7 +3893,10 @@ async fn execute_execution_runtime_stream_inner(
                 stage_trace,
                 lifecycle_pending_recorded,
                 chatgpt_web_image.frame_stream,
+                false,
                 provider_pool_in_flight_guard.take(),
+                retry_scope_out.as_deref_mut(),
+                retry_fallback_out.as_deref_mut(),
             )
             .await;
         }
@@ -3525,8 +4024,9 @@ async fn execute_execution_runtime_stream_inner(
             record_stream_pending_lifecycle(state, seed, &mut stage_trace).await;
             lifecycle_pending_recorded = true;
         }
+        let stream_precommit_committed = execution.stream_precommit_committed;
         let frame_stream = build_direct_execution_frame_stream(execution).boxed();
-        return execute_stream_from_frame_stream(
+        return execute_stream_from_frame_stream_with_retry_scope(
             state,
             plan,
             trace_id,
@@ -3539,7 +4039,10 @@ async fn execute_execution_runtime_stream_inner(
             stage_trace,
             lifecycle_pending_recorded,
             frame_stream,
+            stream_precommit_committed,
             provider_pool_in_flight_guard.take(),
+            retry_scope_out.as_deref_mut(),
+            retry_fallback_out.as_deref_mut(),
         )
         .await;
     }
@@ -3641,8 +4144,9 @@ async fn execute_execution_runtime_stream_inner(
                 record_stream_pending_lifecycle(state, seed, &mut stage_trace).await;
                 lifecycle_pending_recorded = true;
             }
+            let stream_precommit_committed = execution.stream_precommit_committed;
             let frame_stream = build_direct_execution_frame_stream(execution).boxed();
-            return execute_stream_from_frame_stream(
+            return execute_stream_from_frame_stream_with_retry_scope(
                 state,
                 plan,
                 trace_id,
@@ -3655,7 +4159,10 @@ async fn execute_execution_runtime_stream_inner(
                 stage_trace,
                 lifecycle_pending_recorded,
                 frame_stream,
+                stream_precommit_committed,
                 provider_pool_in_flight_guard.take(),
+                retry_scope_out.as_deref_mut(),
+                retry_fallback_out.as_deref_mut(),
             )
             .await;
         }
@@ -3730,7 +4237,7 @@ async fn execute_execution_runtime_stream_inner(
             .bytes_stream()
             .map_err(|err| IoError::other(err.to_string()))
             .boxed();
-        return execute_stream_from_frame_stream(
+        return execute_stream_from_frame_stream_with_retry_scope(
             state,
             plan,
             trace_id,
@@ -3743,7 +4250,10 @@ async fn execute_execution_runtime_stream_inner(
             stage_trace,
             lifecycle_pending_recorded,
             frame_stream,
+            false,
             provider_pool_in_flight_guard.take(),
+            retry_scope_out.as_deref_mut(),
+            retry_fallback_out.as_deref_mut(),
         )
         .await;
     }
@@ -3775,6 +4285,40 @@ fn parse_prefetched_sync_json_body(body: &[u8]) -> Option<Value> {
     serde_json::from_slice::<Value>(stripped).ok()
 }
 
+fn resolve_provider_stream_error_status_code(
+    provider_api_format: &str,
+    upstream_status_code: u16,
+    body_json: &Value,
+) -> u16 {
+    if (200..300).contains(&upstream_status_code)
+        && provider_api_format
+            .trim()
+            .eq_ignore_ascii_case("claude:messages")
+    {
+        anthropic_error_status_code(body_json)
+    } else {
+        resolve_local_sync_error_status_code(upstream_status_code, body_json)
+    }
+}
+
+fn anthropic_premature_eof_error_body(message: &str) -> Value {
+    serde_json::json!({
+        "type": "error",
+        "error": {
+            "type": "api_error",
+            "message": message,
+        }
+    })
+}
+
+fn build_anthropic_premature_eof_failure(message: &str) -> StreamFailureReport {
+    let body_json = anthropic_premature_eof_error_body(message);
+    build_stream_failure_from_provider_error_body(
+        anthropic_error_status_code(&body_json),
+        &body_json,
+    )
+}
+
 fn encode_terminal_sse_error_event(failure: &StreamFailureReport) -> Result<Bytes, std::io::Error> {
     let payload = failure
         .to_json_string()
@@ -3787,6 +4331,39 @@ fn encode_terminal_sse_error_event(failure: &StreamFailureReport) -> Result<Byte
     }
     event.push_str("\ndata: [DONE]\n\n");
     Ok(Bytes::from(event))
+}
+
+fn encode_anthropic_terminal_sse_error_event(
+    failure: &StreamFailureReport,
+) -> Result<Bytes, std::io::Error> {
+    let payload = serde_json::to_string(&serde_json::json!({
+        "type": "error",
+        "error": {
+            "type": "api_error",
+            "message": failure.error_message,
+        }
+    }))
+    .map_err(|err| IoError::other(err.to_string()))?;
+    Ok(Bytes::from(format!("event: error\ndata: {payload}\n\n")))
+}
+
+fn encode_terminal_sse_error_event_for_plan(
+    plan: &ExecutionPlan,
+    failure: &StreamFailureReport,
+) -> Result<Bytes, std::io::Error> {
+    if plan
+        .client_api_format
+        .trim()
+        .eq_ignore_ascii_case("claude:messages")
+        && plan
+            .provider_api_format
+            .trim()
+            .eq_ignore_ascii_case("claude:messages")
+    {
+        encode_anthropic_terminal_sse_error_event(failure)
+    } else {
+        encode_terminal_sse_error_event(failure)
+    }
 }
 
 fn image_stream_failed_event_name(report_context: Option<&Value>) -> &'static str {
@@ -3855,15 +4432,25 @@ fn build_sse_body_stream(
     mut rx: mpsc::Receiver<Result<Bytes, IoError>>,
     filter_control_blocks: bool,
     emit_keepalive: bool,
+    anthropic_message_stop_terminates_body: bool,
     keepalive_interval: Duration,
 ) -> impl futures_util::Stream<Item = Result<Bytes, IoError>> + Send + 'static {
     stream! {
         let mut upstream_control_filter = filter_control_blocks.then(SseControlBlockFilter::default);
+        let mut anthropic_completion_tracker =
+            anthropic_message_stop_terminates_body.then(ClientVisibleStreamCompletionTracker::default);
         let mut sent_prefetched_chunk = false;
         for chunk in prefetched_chunks_for_body {
-            if let Some(chunk) = filter_upstream_sse_control_chunk(&mut upstream_control_filter, chunk) {
+            if let Some(mut chunk) = filter_upstream_sse_control_chunk(&mut upstream_control_filter, chunk) {
+                let completed = truncate_at_anthropic_message_stop(
+                    anthropic_completion_tracker.as_mut(),
+                    &mut chunk,
+                );
                 sent_prefetched_chunk = true;
                 yield Ok(chunk);
+                if completed {
+                    return;
+                }
             }
         }
 
@@ -3883,8 +4470,15 @@ fn build_sse_body_stream(
                         };
                         match item {
                             Ok(chunk) => {
-                                if let Some(chunk) = filter_upstream_sse_control_chunk(&mut upstream_control_filter, chunk) {
+                                if let Some(mut chunk) = filter_upstream_sse_control_chunk(&mut upstream_control_filter, chunk) {
+                                    let completed = truncate_at_anthropic_message_stop(
+                                        anthropic_completion_tracker.as_mut(),
+                                        &mut chunk,
+                                    );
                                     yield Ok(chunk);
+                                    if completed {
+                                        break;
+                                    }
                                 }
                             }
                             Err(err) => yield Err(err),
@@ -3895,25 +4489,61 @@ fn build_sse_body_stream(
                     }
                 }
             }
-            if let Some(chunk) = flush_upstream_sse_control_filter(&mut upstream_control_filter) {
-                yield Ok(chunk);
+            if !anthropic_completion_tracker
+                .as_ref()
+                .is_some_and(|tracker| tracker.completed)
+            {
+                if let Some(chunk) =
+                    flush_upstream_sse_control_filter(&mut upstream_control_filter)
+                {
+                    yield Ok(chunk);
+                }
             }
         } else {
             while let Some(item) = rx.recv().await {
                 match item {
                     Ok(chunk) => {
-                        if let Some(chunk) = filter_upstream_sse_control_chunk(&mut upstream_control_filter, chunk) {
+                        if let Some(mut chunk) = filter_upstream_sse_control_chunk(&mut upstream_control_filter, chunk) {
+                            let completed = truncate_at_anthropic_message_stop(
+                                anthropic_completion_tracker.as_mut(),
+                                &mut chunk,
+                            );
                             yield Ok(chunk);
+                            if completed {
+                                break;
+                            }
                         }
                     }
                     Err(err) => yield Err(err),
                 }
             }
-            if let Some(chunk) = flush_upstream_sse_control_filter(&mut upstream_control_filter) {
-                yield Ok(chunk);
+            if !anthropic_completion_tracker
+                .as_ref()
+                .is_some_and(|tracker| tracker.completed)
+            {
+                if let Some(chunk) =
+                    flush_upstream_sse_control_filter(&mut upstream_control_filter)
+                {
+                    yield Ok(chunk);
+                }
             }
         }
     }
+}
+
+fn truncate_at_anthropic_message_stop(
+    tracker: Option<&mut ClientVisibleStreamCompletionTracker>,
+    chunk: &mut Bytes,
+) -> bool {
+    let Some(tracker) = tracker else {
+        return false;
+    };
+    if let Some(terminal_end) = tracker.observe_anthropic_message_stop_terminal_end(chunk.as_ref())
+    {
+        chunk.truncate(terminal_end);
+        return true;
+    }
+    false
 }
 
 #[derive(Default)]
@@ -4008,21 +4638,7 @@ fn flush_upstream_sse_control_filter(filter: &mut Option<SseControlBlockFilter>)
 }
 
 fn find_sse_block_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
-    let lf = buffer
-        .windows(2)
-        .position(|window| window == b"\n\n")
-        .map(|index| (index, 2));
-    let crlf = buffer
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .map(|index| (index, 4));
-
-    match (lf, crlf) {
-        (Some(lf), Some(crlf)) => Some(if lf.0 <= crlf.0 { lf } else { crlf }),
-        (Some(lf), None) => Some(lf),
-        (None, Some(crlf)) => Some(crlf),
-        (None, None) => None,
-    }
+    find_sse_record_boundary(buffer)
 }
 
 fn sse_block_has_data_line(block: &[u8]) -> bool {
@@ -4030,7 +4646,7 @@ fn sse_block_has_data_line(block: &[u8]) -> bool {
         return true;
     };
 
-    text.lines()
+    text.split(['\r', '\n'])
         .any(|line| line.trim_start().starts_with("data:"))
 }
 
@@ -4039,8 +4655,14 @@ fn sse_buffer_has_data_line(buffer: &[u8]) -> bool {
         return true;
     };
 
-    text.lines()
+    text.split(['\r', '\n'])
         .any(|line| line.trim_start().starts_with("data:"))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SseTerminalPolicy {
+    AnyKnown,
+    AnthropicMessageStop,
 }
 
 #[derive(Default)]
@@ -4049,20 +4671,55 @@ struct ClientVisibleStreamCompletionTracker {
     event_type: Option<String>,
     data_payload: String,
     has_data_payload: bool,
+    record_bytes: usize,
+    dropping_oversized_record: bool,
+    discarded_line_nonempty: bool,
     skip_next_lf: bool,
     completed: bool,
 }
 
 impl ClientVisibleStreamCompletionTracker {
     fn observe_chunk(&mut self, chunk: &[u8]) -> bool {
+        self.observe_chunk_terminal_end(chunk);
+        self.completed
+    }
+
+    fn observe_chunk_terminal_end(&mut self, chunk: &[u8]) -> Option<usize> {
+        self.observe_chunk_terminal_end_with_policy(chunk, SseTerminalPolicy::AnyKnown)
+    }
+
+    fn observe_anthropic_message_stop(&mut self, chunk: &[u8]) -> bool {
+        self.observe_anthropic_message_stop_terminal_end(chunk);
+        self.completed
+    }
+
+    fn observe_anthropic_message_stop_terminal_end(&mut self, chunk: &[u8]) -> Option<usize> {
+        self.observe_chunk_terminal_end_with_policy(chunk, SseTerminalPolicy::AnthropicMessageStop)
+    }
+
+    fn observe_chunk_terminal_end_with_policy(
+        &mut self,
+        chunk: &[u8],
+        policy: SseTerminalPolicy,
+    ) -> Option<usize> {
         if self.completed {
-            return true;
+            return None;
         }
         if chunk.is_empty() {
-            return false;
+            return None;
         }
 
-        for byte in chunk {
+        for (index, byte) in chunk.iter().enumerate() {
+            self.record_bytes = self.record_bytes.saturating_add(1);
+            if self.record_bytes > SSE_TERMINAL_DETECTOR_MAX_RECORD_BYTES
+                && !self.dropping_oversized_record
+            {
+                self.dropping_oversized_record = true;
+                self.discarded_line_nonempty = !self.line_buffer.is_empty();
+                self.line_buffer.clear();
+                self.reset_current_event();
+            }
+
             if self.skip_next_lf {
                 self.skip_next_lf = false;
                 if *byte == b'\n' {
@@ -4070,29 +4727,41 @@ impl ClientVisibleStreamCompletionTracker {
                 }
             }
 
+            if self.dropping_oversized_record {
+                match *byte {
+                    b'\n' => self.finish_discarded_line(),
+                    b'\r' => {
+                        self.finish_discarded_line();
+                        self.skip_next_lf = true;
+                    }
+                    _ => self.discarded_line_nonempty = true,
+                }
+                continue;
+            }
+
             match *byte {
-                b'\n' => self.finish_line(),
+                b'\n' => self.finish_line(policy),
                 b'\r' => {
-                    self.finish_line();
+                    self.finish_line(policy);
                     self.skip_next_lf = true;
                 }
-                _ => {
-                    self.line_buffer.push(*byte);
-                    if self.line_buffer.len() > SSE_TERMINAL_DETECTOR_MAX_LINE_BYTES {
-                        self.line_buffer.clear();
-                    }
-                }
+                _ => self.line_buffer.push(*byte),
             }
 
             if self.completed {
-                break;
+                let terminal_end = if *byte == b'\r' && chunk.get(index + 1) == Some(&b'\n') {
+                    index + 2
+                } else {
+                    index + 1
+                };
+                return Some(terminal_end);
             }
         }
 
-        self.completed
+        None
     }
 
-    fn finish_line(&mut self) {
+    fn finish_line(&mut self, policy: SseTerminalPolicy) {
         let line = std::mem::take(&mut self.line_buffer);
         let Ok(line) = std::str::from_utf8(&line) else {
             self.reset_current_event();
@@ -4101,8 +4770,9 @@ impl ClientVisibleStreamCompletionTracker {
         let line = line.trim();
 
         if line.is_empty() {
-            self.completed = self.current_event_is_terminal();
+            self.completed = self.current_event_is_terminal(policy);
             self.reset_current_event();
+            self.record_bytes = 0;
             return;
         }
 
@@ -4123,11 +4793,41 @@ impl ClientVisibleStreamCompletionTracker {
         }
     }
 
-    fn current_event_is_terminal(&self) -> bool {
-        self.event_type
-            .as_deref()
-            .is_some_and(is_terminal_sse_event_type)
-            || (self.has_data_payload && sse_data_payload_is_terminal(&self.data_payload))
+    fn finish_discarded_line(&mut self) {
+        if !self.discarded_line_nonempty {
+            self.dropping_oversized_record = false;
+            self.record_bytes = 0;
+            self.reset_current_event();
+        }
+        self.discarded_line_nonempty = false;
+    }
+
+    fn current_event_is_terminal(&self, policy: SseTerminalPolicy) -> bool {
+        match policy {
+            SseTerminalPolicy::AnyKnown => {
+                self.event_type
+                    .as_deref()
+                    .is_some_and(is_terminal_sse_event_type)
+                    || (self.has_data_payload && sse_data_payload_is_terminal(&self.data_payload))
+            }
+            SseTerminalPolicy::AnthropicMessageStop => {
+                let payload_type = self
+                    .has_data_payload
+                    .then(|| serde_json::from_str::<serde_json::Value>(&self.data_payload).ok())
+                    .flatten()
+                    .and_then(|value| {
+                        value
+                            .get("type")
+                            .and_then(serde_json::Value::as_str)
+                            .map(ToOwned::to_owned)
+                    });
+                payload_type.as_deref() == Some("message_stop")
+                    && self
+                        .event_type
+                        .as_deref()
+                        .is_none_or(|event_type| event_type == "message_stop")
+            }
+        }
     }
 
     fn reset_current_event(&mut self) {
@@ -4164,6 +4864,150 @@ struct ObservedStreamFrame {
     observed_at: Instant,
 }
 
+#[derive(Clone)]
+struct PostStopFrameReadBudget {
+    remaining: Arc<AtomicUsize>,
+}
+
+impl PostStopFrameReadBudget {
+    fn new() -> Self {
+        Self {
+            remaining: Arc::new(AtomicUsize::new(POST_STOP_FRAME_READ_BUDGET_INACTIVE)),
+        }
+    }
+
+    fn activate(&self, already_buffered: usize) -> bool {
+        let remaining = ANTHROPIC_POST_STOP_DRAIN_MAX_BYTES.saturating_sub(already_buffered);
+        let activated = self
+            .remaining
+            .compare_exchange(
+                POST_STOP_FRAME_READ_BUDGET_INACTIVE,
+                remaining,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok();
+        activated && already_buffered > ANTHROPIC_POST_STOP_DRAIN_MAX_BYTES
+    }
+}
+
+struct PostStopLimitedStreamReader<S> {
+    stream: S,
+    current: Option<Bytes>,
+    budget: PostStopFrameReadBudget,
+}
+
+impl<S> PostStopLimitedStreamReader<S> {
+    fn new(stream: S, budget: PostStopFrameReadBudget) -> Self {
+        Self {
+            stream,
+            current: None,
+            budget,
+        }
+    }
+
+    fn activate_post_stop_budget(&mut self, already_buffered: usize) -> bool {
+        let over_limit = self.budget.activate(already_buffered);
+        let remaining = self.budget.remaining.load(Ordering::Acquire);
+        self.trim_current_to_budget(remaining, true);
+        over_limit
+    }
+
+    fn trim_current_to_budget(&mut self, remaining: usize, detach_backing: bool) {
+        if remaining == POST_STOP_FRAME_READ_BUDGET_INACTIVE {
+            return;
+        }
+        if remaining == 0 {
+            self.current = None;
+            return;
+        }
+        if let Some(current) = self.current.as_mut() {
+            if detach_backing || current.len() > remaining {
+                let retained = current.len().min(remaining);
+                // Detach even a small slice because it can retain a giant
+                // producer allocation across post-stop backpressure.
+                *current = Bytes::copy_from_slice(&current[..retained]);
+            }
+        }
+    }
+}
+
+impl<S> AsyncRead for PostStopLimitedStreamReader<S>
+where
+    S: Stream<Item = Result<Bytes, IoError>> + Unpin,
+{
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<Result<(), IoError>> {
+        let this = self.get_mut();
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+
+        let mut empty_chunks = 0usize;
+        loop {
+            let remaining = this.budget.remaining.load(Ordering::Acquire);
+            if remaining == 0 {
+                this.current = None;
+                return Poll::Ready(Ok(()));
+            }
+            this.trim_current_to_budget(remaining, false);
+
+            if let Some(current) = this.current.as_mut() {
+                let read = current.len().min(buf.remaining());
+                if read > 0 {
+                    buf.put_slice(&current.split_to(read));
+                    if remaining != POST_STOP_FRAME_READ_BUDGET_INACTIVE {
+                        let previous = this.budget.remaining.fetch_sub(read, Ordering::AcqRel);
+                        debug_assert!(previous != POST_STOP_FRAME_READ_BUDGET_INACTIVE);
+                        debug_assert!(previous >= read);
+                    }
+                }
+                if current.is_empty() {
+                    this.current = None;
+                }
+                if read > 0 {
+                    return Poll::Ready(Ok(()));
+                }
+            }
+
+            match Pin::new(&mut this.stream).poll_next(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Some(Ok(chunk))) if chunk.is_empty() => {
+                    empty_chunks += 1;
+                    if empty_chunks >= POST_STOP_MAX_EMPTY_CHUNKS_PER_POLL {
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    }
+                }
+                Poll::Ready(Some(Ok(chunk))) => {
+                    this.current = Some(chunk);
+                    if remaining != POST_STOP_FRAME_READ_BUDGET_INACTIVE {
+                        this.trim_current_to_budget(remaining, true);
+                    }
+                }
+                Poll::Ready(Some(Err(err))) => return Poll::Ready(Err(err)),
+                Poll::Ready(None) => return Poll::Ready(Ok(())),
+            }
+        }
+    }
+}
+
+fn activate_post_stop_frame_read_budget<S>(
+    lines: &mut FramedRead<PostStopLimitedStreamReader<S>, LinesCodec>,
+) -> bool {
+    let already_buffered = lines.read_buffer().len();
+    let over_limit = already_buffered > ANTHROPIC_POST_STOP_DRAIN_MAX_BYTES;
+    let reader_over_limit = lines.get_mut().activate_post_stop_budget(already_buffered);
+    let retained = if over_limit { 0 } else { already_buffered };
+    let mut bounded = bytes::BytesMut::with_capacity(retained);
+    bounded.extend_from_slice(&lines.read_buffer()[..retained]);
+    *lines.read_buffer_mut() = bounded;
+    reader_over_limit || over_limit
+}
+
 async fn read_next_observed_stream_frame<R>(
     lines: &mut FramedRead<R, LinesCodec>,
 ) -> Result<Option<ObservedStreamFrame>, GatewayError>
@@ -4189,6 +5033,10 @@ where
         return Ok(Some(frame));
     }
     read_next_observed_stream_frame(lines).await
+}
+
+fn serialized_stream_frame_len(frame: &StreamFrame) -> usize {
+    serde_json::to_vec(frame).map_or(usize::MAX, |encoded| encoded.len())
 }
 
 fn should_refresh_stream_usage_telemetry(
@@ -4320,36 +5168,16 @@ fn should_skip_direct_finalize_prefetch(
     has_local_stream_rewriter: bool,
     force_prefetch: bool,
 ) -> bool {
-    if direct_stream_finalize_kind.is_none() {
-        return false;
-    }
-
-    if force_prefetch {
-        return false;
-    }
-
-    let content_type = content_type
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if content_type.contains("text/event-stream") {
-        return true;
-    }
-
-    if has_private_stream_normalizer || has_local_stream_rewriter {
-        return false;
-    }
-
-    if !provider_api_format.eq_ignore_ascii_case(client_api_format) {
-        return false;
-    }
-
-    if content_type.is_empty() {
-        return true;
-    }
-
-    !(content_type.contains("json") || content_type.ends_with("+json"))
+    StreamCommitPolicy::for_response(
+        direct_stream_finalize_kind.is_some(),
+        content_type,
+        provider_api_format,
+        client_api_format,
+        has_private_stream_normalizer,
+        has_local_stream_rewriter,
+        force_prefetch,
+    )
+    .commits_on_response_headers()
 }
 
 fn prefetched_openai_responses_body_has_output_boundary(body: &[u8]) -> bool {
@@ -4433,10 +5261,50 @@ async fn execute_stream_from_frame_stream(
     report_context: Option<serde_json::Value>,
     candidate_started_unix_secs: u64,
     stream_started_at: Instant,
-    mut stage_trace: RequestStageTrace,
+    stage_trace: RequestStageTrace,
     lifecycle_pending_recorded: bool,
     frame_stream: BoxStream<'static, Result<Bytes, IoError>>,
     in_flight_guard: Option<ProviderPoolInFlightGuard>,
+) -> Result<Option<Response<Body>>, GatewayError> {
+    execute_stream_from_frame_stream_with_retry_scope(
+        state,
+        plan,
+        trace_id,
+        decision,
+        plan_kind,
+        report_kind,
+        report_context,
+        candidate_started_unix_secs,
+        stream_started_at,
+        stage_trace,
+        lifecycle_pending_recorded,
+        frame_stream,
+        false,
+        in_flight_guard,
+        None,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_stream_from_frame_stream_with_retry_scope(
+    state: &AppState,
+    plan: ExecutionPlan,
+    trace_id: &str,
+    decision: &GatewayControlDecision,
+    plan_kind: &str,
+    report_kind: Option<String>,
+    report_context: Option<serde_json::Value>,
+    candidate_started_unix_secs: u64,
+    stream_started_at: Instant,
+    mut stage_trace: RequestStageTrace,
+    lifecycle_pending_recorded: bool,
+    frame_stream: BoxStream<'static, Result<Bytes, IoError>>,
+    stream_precommit_committed: bool,
+    in_flight_guard: Option<ProviderPoolInFlightGuard>,
+    mut retry_scope_out: Option<&mut AiAttemptRetryScope>,
+    mut retry_fallback_out: Option<&mut Option<Response<Body>>>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
     let request_id = plan.request_id.as_str();
     let request_id_for_log = short_request_id(request_id);
@@ -4453,7 +5321,7 @@ async fn execute_stream_from_frame_stream(
         .and_then(|context| context.candidate_index)
         .map(|value| value.to_string())
         .unwrap_or_else(|| "-".to_string());
-    let reader = StreamReader::new(frame_stream);
+    let reader = PostStopLimitedStreamReader::new(frame_stream, PostStopFrameReadBudget::new());
     let mut lines = FramedRead::new(reader, LinesCodec::new());
 
     let first_frame_started_at = Instant::now();
@@ -4671,6 +5539,37 @@ async fn execute_stream_from_frame_stream(
             "gateway resolved execution runtime stream failover decision"
         );
         if matches!(failover_decision, LocalFailoverDecision::RetryNextCandidate) {
+            let failure_disposition = classify_failure_disposition(
+                &plan.provider_api_format,
+                failover_analysis.classification,
+                status_code,
+            );
+            if let Some(retry_scope) = retry_scope_out.as_deref_mut() {
+                *retry_scope = ai_attempt_retry_scope_from_failure_disposition(failure_disposition);
+            }
+            if failure_disposition.preserve_upstream_error {
+                if let Some(retry_fallback) = retry_fallback_out.as_deref_mut() {
+                    let mut fallback_headers = headers.clone();
+                    apply_endpoint_response_header_rules(
+                        state,
+                        &plan,
+                        &mut fallback_headers,
+                        provider_body_json.as_ref(),
+                    )
+                    .await?;
+                    *retry_fallback = Some(attach_control_metadata_headers(
+                        build_client_response_from_parts(
+                            status_code,
+                            &fallback_headers,
+                            Body::from(provider_error_body.clone()),
+                            trace_id,
+                            Some(decision),
+                        )?,
+                        Some(request_id),
+                        candidate_id,
+                    )?);
+                }
+            }
             let terminal_unix_secs = current_request_candidate_unix_ms();
             let error_trace_report_context = with_stream_error_trace_context(
                 report_context.as_ref(),
@@ -4869,8 +5768,8 @@ async fn execute_stream_from_frame_stream(
     let prefetch_for_cyber_failover =
         is_openai_responses_family_format(plan.provider_api_format.as_str())
             && cyber_continue_failover_enabled(state).await;
-    let skip_direct_finalize_prefetch = should_skip_direct_finalize_prefetch(
-        direct_stream_finalize_kind.as_deref(),
+    let stream_commit_policy = StreamCommitPolicy::for_response(
+        direct_stream_finalize_kind.is_some(),
         upstream_content_type,
         plan.provider_api_format.as_str(),
         plan.client_api_format.as_str(),
@@ -4878,16 +5777,32 @@ async fn execute_stream_from_frame_stream(
         local_stream_rewriter.is_some(),
         prefetch_for_cyber_failover,
     );
+    let reuse_committed_precommit =
+        stream_precommit_committed && stream_commit_policy.is_native_anthropic();
+    let skip_direct_finalize_prefetch =
+        stream_commit_policy.commits_on_response_headers() || reuse_committed_precommit;
     let limit_direct_finalize_prefetch =
-        should_limit_direct_finalize_prefetch(plan_kind, local_stream_rewriter.is_some());
+        should_limit_direct_finalize_prefetch(plan_kind, local_stream_rewriter.is_some())
+            || stream_commit_policy.requires_bounded_frame_wait();
+    let mut stream_commit_gate = StreamCommitGate::new(stream_commit_policy);
+    let mut prefetch_client_completion_tracker = ClientVisibleStreamCompletionTracker::default();
+    let mut prefetched_client_visible_stream_completed = false;
+    let mut prefetched_anthropic_message_stop_observed_at = None;
+    let mut prefetched_anthropic_post_stop_buffer_over_limit = false;
+    if reuse_committed_precommit {
+        stream_commit_gate.commit();
+    }
     let mut prefetched_chunks: Vec<Bytes> = Vec::new();
     let mut provider_prefetched_body = Vec::new();
+    let mut provider_prefetched_body_truncated = false;
     let mut prefetched_body = Vec::new();
     let mut prefetched_inspection_body = Vec::new();
+    let mut prefetched_inspection_body_truncated = false;
     let mut prefetched_telemetry: Option<ExecutionTelemetry> = None;
     let mut prefetched_usage_telemetry: Option<ExecutionTelemetry> = None;
     let mut reached_eof = false;
     let mut sync_json_stream_bridge_active = false;
+    let precommit_started_at = Instant::now();
     if skip_direct_finalize_prefetch {
         debug!(
             event_name = "execution_runtime_stream_prefetch_skipped",
@@ -4911,18 +5826,47 @@ async fn execute_stream_from_frame_stream(
         .as_ref()
         .filter(|_| !skip_direct_finalize_prefetch)
     {
-        while prefetched_chunks.len() < MAX_STREAM_PREFETCH_FRAMES
+        while (stream_commit_policy.requires_bounded_frame_wait()
+            || prefetched_chunks.len() < MAX_STREAM_PREFETCH_FRAMES)
             && prefetched_inspection_body.len() < MAX_STREAM_PREFETCH_BYTES
         {
             let next_frame_result = if limit_direct_finalize_prefetch {
+                let prefetch_timeout = stream_commit_policy
+                    .max_precommit_wait()
+                    .map(|max_wait| max_wait.saturating_sub(precommit_started_at.elapsed()))
+                    .unwrap_or(REWRITTEN_STREAM_PREFETCH_TIMEOUT);
+                if prefetch_timeout.is_zero() {
+                    stream_commit_gate.commit();
+                    debug!(
+                        event_name = "execution_runtime_stream_prefetch_limited",
+                        log_type = "debug",
+                        trace_id = %trace_id,
+                        request_id = %request_id_for_log,
+                        candidate_id = ?candidate_id,
+                        plan_kind,
+                        report_kind,
+                        provider_name,
+                        endpoint_id = %plan.endpoint_id,
+                        key_id = %plan.key_id,
+                        model_name,
+                        candidate_index = candidate_index.as_str(),
+                        timeout_ms = stream_commit_policy
+                            .max_precommit_wait()
+                            .unwrap_or(REWRITTEN_STREAM_PREFETCH_TIMEOUT)
+                            .as_millis() as u64,
+                        "gateway reached bounded stream precommit deadline"
+                    );
+                    break;
+                }
                 match tokio::time::timeout(
-                    REWRITTEN_STREAM_PREFETCH_TIMEOUT,
+                    prefetch_timeout,
                     next_stream_frame(&mut buffered_frames, &mut lines),
                 )
                 .await
                 {
                     Ok(result) => result,
                     Err(_) => {
+                        stream_commit_gate.commit();
                         debug!(
                             event_name = "execution_runtime_stream_prefetch_limited",
                             log_type = "debug",
@@ -4936,8 +5880,11 @@ async fn execute_stream_from_frame_stream(
                             key_id = %plan.key_id,
                             model_name,
                             candidate_index = candidate_index.as_str(),
-                            timeout_ms = REWRITTEN_STREAM_PREFETCH_TIMEOUT.as_millis() as u64,
-                            "gateway stopped rewritten stream prefetch before client-visible body"
+                            timeout_ms = stream_commit_policy
+                                .max_precommit_wait()
+                                .unwrap_or(REWRITTEN_STREAM_PREFETCH_TIMEOUT)
+                                .as_millis() as u64,
+                            "gateway stopped bounded stream prefetch before client-visible body"
                         );
                         break;
                     }
@@ -4970,6 +5917,32 @@ async fn execute_stream_from_frame_stream(
                     .await;
                 }
             }) else {
+                if stream_commit_policy.is_native_anthropic() && stream_commit_gate.is_uncommitted()
+                {
+                    let error_body_json = anthropic_premature_eof_error_body(
+                        "upstream Anthropic stream ended before the first semantic event",
+                    );
+                    let error_status_code = anthropic_error_status_code(&error_body_json);
+                    return handle_prefetch_provider_private_stream_error(
+                        state,
+                        trace_id,
+                        decision,
+                        &plan,
+                        report_context,
+                        request_id,
+                        candidate_id,
+                        report_kind,
+                        headers,
+                        prefetched_usage_telemetry.clone(),
+                        &provider_prefetched_body,
+                        status_code,
+                        error_status_code,
+                        error_body_json,
+                        retry_scope_out.as_deref_mut(),
+                        None,
+                    )
+                    .await;
+                }
                 reached_eof = true;
                 break;
             };
@@ -4988,7 +5961,7 @@ async fn execute_stream_from_frame_stream(
                             stream_elapsed_ms_at(stream_started_at, frame_observed_at),
                         );
                     }
-                    let chunk =
+                    let mut chunk =
                         match decode_stream_data_chunk(chunk_b64.as_deref(), text.as_deref()) {
                             Ok(chunk) => chunk,
                             Err(err) => {
@@ -5020,38 +5993,105 @@ async fn execute_stream_from_frame_stream(
                     if chunk.is_empty() {
                         continue;
                     }
-
-                    provider_prefetched_body.extend_from_slice(&chunk);
-                    prefetched_inspection_body.extend_from_slice(&chunk);
-
-                    if let Some(error_body_json) = extract_provider_private_stream_error_body(
-                        report_context.as_ref(),
-                        &prefetched_inspection_body,
-                    ) {
-                        let error_status_code =
-                            resolve_local_sync_error_status_code(status_code, &error_body_json);
-                        return handle_prefetch_provider_private_stream_error(
-                            state,
-                            trace_id,
-                            decision,
-                            &plan,
-                            report_context,
-                            request_id,
-                            candidate_id,
-                            report_kind,
-                            headers,
-                            prefetched_usage_telemetry.clone(),
-                            &provider_prefetched_body,
-                            error_status_code,
-                            error_body_json,
-                        )
-                        .await;
+                    if stream_commit_policy.is_native_anthropic() {
+                        if prefetched_client_visible_stream_completed {
+                            continue;
+                        }
+                        if let Some(terminal_end) = prefetch_client_completion_tracker
+                            .observe_anthropic_message_stop_terminal_end(&chunk)
+                        {
+                            chunk.truncate(terminal_end);
+                            prefetched_client_visible_stream_completed = true;
+                            prefetched_anthropic_message_stop_observed_at
+                                .get_or_insert_with(Instant::now);
+                            prefetched_anthropic_post_stop_buffer_over_limit |=
+                                activate_post_stop_frame_read_budget(&mut lines);
+                        }
                     }
 
-                    let inspection = inspect_prefetched_stream_body(
-                        &upstream_headers,
-                        &prefetched_inspection_body,
+                    append_stream_capture_bytes(
+                        &mut provider_prefetched_body,
+                        &chunk,
+                        MAX_STREAM_PREFETCH_BYTES,
+                        &mut provider_prefetched_body_truncated,
                     );
+                    append_stream_capture_bytes(
+                        &mut prefetched_inspection_body,
+                        &chunk,
+                        MAX_STREAM_PREFETCH_BYTES,
+                        &mut prefetched_inspection_body_truncated,
+                    );
+
+                    let anthropic_commit_ready =
+                        match stream_commit_gate.observe_provider_bytes(&chunk) {
+                            StreamPrecommitObservation::Pending => false,
+                            StreamPrecommitObservation::Commit => true,
+                            StreamPrecommitObservation::UpstreamError {
+                                status_code: error_status_code,
+                                body_json: error_body_json,
+                            } => {
+                                return handle_prefetch_provider_private_stream_error(
+                                    state,
+                                    trace_id,
+                                    decision,
+                                    &plan,
+                                    report_context,
+                                    request_id,
+                                    candidate_id,
+                                    report_kind,
+                                    headers,
+                                    prefetched_usage_telemetry.clone(),
+                                    &provider_prefetched_body,
+                                    status_code,
+                                    error_status_code,
+                                    error_body_json,
+                                    retry_scope_out.as_deref_mut(),
+                                    retry_fallback_out.as_deref_mut(),
+                                )
+                                .await;
+                            }
+                        };
+
+                    if !anthropic_commit_ready {
+                        if let Some(error_body_json) = extract_provider_private_stream_error_body(
+                            report_context.as_ref(),
+                            &prefetched_inspection_body,
+                        ) {
+                            let error_status_code = resolve_provider_stream_error_status_code(
+                                plan.provider_api_format.as_str(),
+                                status_code,
+                                &error_body_json,
+                            );
+                            return handle_prefetch_provider_private_stream_error(
+                                state,
+                                trace_id,
+                                decision,
+                                &plan,
+                                report_context,
+                                request_id,
+                                candidate_id,
+                                report_kind,
+                                headers,
+                                prefetched_usage_telemetry.clone(),
+                                &provider_prefetched_body,
+                                status_code,
+                                error_status_code,
+                                error_body_json,
+                                retry_scope_out.as_deref_mut(),
+                                retry_fallback_out.as_deref_mut(),
+                            )
+                            .await;
+                        }
+                    }
+
+                    let inspection = if stream_commit_policy.is_native_anthropic() {
+                        StreamPrefetchInspection::NeedMore
+                    } else {
+                        inspect_prefetched_stream_body(
+                            &upstream_headers,
+                            &prefetched_inspection_body,
+                        )
+                    };
                     match inspection {
                         StreamPrefetchInspection::EmbeddedError(body_json) => {
                             debug!(
@@ -5224,11 +6264,12 @@ async fn execute_stream_from_frame_stream(
                         prefetched_chunks.push(Bytes::from(rewritten_chunk));
                     }
 
-                    if matches!(inspection, StreamPrefetchInspection::NonError)
-                        && (!prefetch_for_cyber_failover
-                            || prefetched_openai_responses_body_has_output_boundary(
-                                &prefetched_inspection_body,
-                            ))
+                    if anthropic_commit_ready
+                        || (matches!(inspection, StreamPrefetchInspection::NonError)
+                            && (!prefetch_for_cyber_failover
+                                || prefetched_openai_responses_body_has_output_boundary(
+                                    &prefetched_inspection_body,
+                                )))
                     {
                         break;
                     }
@@ -5239,6 +6280,33 @@ async fn execute_stream_from_frame_stream(
                     prefetched_telemetry = Some(frame_telemetry);
                 }
                 StreamFramePayload::Eof { summary } => {
+                    if stream_commit_policy.is_native_anthropic()
+                        && stream_commit_gate.is_uncommitted()
+                    {
+                        let error_body_json = anthropic_premature_eof_error_body(
+                            "upstream Anthropic stream ended before the first semantic event",
+                        );
+                        let error_status_code = anthropic_error_status_code(&error_body_json);
+                        return handle_prefetch_provider_private_stream_error(
+                            state,
+                            trace_id,
+                            decision,
+                            &plan,
+                            report_context,
+                            request_id,
+                            candidate_id,
+                            report_kind,
+                            headers,
+                            prefetched_usage_telemetry.clone(),
+                            &provider_prefetched_body,
+                            status_code,
+                            error_status_code,
+                            error_body_json,
+                            retry_scope_out.as_deref_mut(),
+                            None,
+                        )
+                        .await;
+                    }
                     if summary.is_some() {
                         stream_terminal_summary = summary;
                     }
@@ -5274,6 +6342,9 @@ async fn execute_stream_from_frame_stream(
                 StreamFramePayload::Headers { .. } => {}
             }
         }
+    }
+    if stream_commit_gate.is_uncommitted() {
+        stream_commit_gate.commit();
     }
     drop(private_stream_normalizer);
     drop(local_stream_rewriter);
@@ -5337,8 +6408,10 @@ async fn execute_stream_from_frame_stream(
     let response_headers_are_sse = response_headers_indicate_sse(&headers);
     let emit_proxy_generated_sse_control_blocks =
         response_headers_are_sse && client_format_allows_proxy_generated_sse_control_blocks(&plan);
+    let native_anthropic_stream_for_report = stream_commit_policy.is_native_anthropic();
     let plan_for_report = plan;
-    let emit_passthrough_sse_terminal_error = skip_direct_finalize_prefetch
+    let emit_passthrough_sse_terminal_error = (skip_direct_finalize_prefetch
+        || stream_commit_policy.is_native_anthropic())
         && response_headers_indicate_sse(&upstream_headers)
         && !is_openai_image_stream_for_report;
     let plan_kind_for_report = plan_kind.to_string();
@@ -5397,13 +6470,31 @@ async fn execute_stream_from_frame_stream(
             &mut client_body_truncated,
         );
         let mut client_stream_completion_tracker = ClientVisibleStreamCompletionTracker::default();
-        let mut client_visible_stream_completed =
-            client_stream_completion_tracker.observe_chunk(&prefetched_body_for_report);
+        let mut client_visible_stream_completed = if native_anthropic_stream_for_report {
+            client_stream_completion_tracker
+                .observe_anthropic_message_stop(&prefetched_body_for_report)
+        } else {
+            client_stream_completion_tracker.observe_chunk(&prefetched_body_for_report)
+        };
+        let mut anthropic_post_stop_drain_started_at = (native_anthropic_stream_for_report
+            && client_visible_stream_completed)
+            .then(|| prefetched_anthropic_message_stop_observed_at.unwrap_or_else(Instant::now));
+        let mut anthropic_post_stop_buffer_over_limit =
+            prefetched_anthropic_post_stop_buffer_over_limit;
+        if anthropic_post_stop_drain_started_at.is_some()
+            && prefetched_anthropic_message_stop_observed_at.is_none()
+        {
+            anthropic_post_stop_buffer_over_limit |=
+                activate_post_stop_frame_read_budget(&mut lines);
+        }
+        let mut anthropic_post_stop_drain_frames = 0usize;
+        let mut anthropic_post_stop_drain_bytes = 0usize;
         let mut usage_stream_telemetry: Option<ExecutionTelemetry> = initial_usage_telemetry;
         let mut telemetry: Option<ExecutionTelemetry> = initial_telemetry;
         let reached_eof = initial_reached_eof;
         let mut downstream_dropped = false;
         let mut terminal_failure: Option<StreamFailureReport> = None;
+        let mut provider_error_forwarded_to_client = false;
         let initial_elapsed_ms = stream_started_at_for_report
             .elapsed()
             .as_millis()
@@ -5548,8 +6639,12 @@ async fn execute_stream_from_frame_stream(
             if let Some(error_body_json) = provider_error_inspection
                 .observe(stream_usage_report_context.as_ref(), replay_chunk)
             {
-                let error_status_code =
-                    resolve_local_sync_error_status_code(status_code, &error_body_json);
+                provider_error_forwarded_to_client = !prefetched_body_for_report.is_empty();
+                let error_status_code = resolve_provider_stream_error_status_code(
+                    plan_for_report.provider_api_format.as_str(),
+                    status_code,
+                    &error_body_json,
+                );
                 terminal_failure = Some(build_stream_failure_from_provider_error_body(
                     error_status_code,
                     &error_body_json,
@@ -5592,17 +6687,55 @@ async fn execute_stream_from_frame_stream(
 
         if terminal_failure.is_none() && !reached_eof {
             loop {
-                let next_frame_result = tokio::select! {
-                    biased;
-                    _ = tx.closed(), if !downstream_dropped => {
-                        downstream_dropped = true;
+                let draining_after_anthropic_stop = anthropic_post_stop_drain_started_at.is_some();
+                let next_frame_result = if let Some(drain_started_at) =
+                    anthropic_post_stop_drain_started_at
+                {
+                    if anthropic_post_stop_drain_frames >= ANTHROPIC_POST_STOP_DRAIN_MAX_FRAMES
+                        || anthropic_post_stop_drain_bytes >= ANTHROPIC_POST_STOP_DRAIN_MAX_BYTES
+                        || anthropic_post_stop_buffer_over_limit
+                    {
                         break;
                     }
-                    result = next_stream_frame(&mut buffered_frames, &mut lines) => result,
+                    let remaining = ANTHROPIC_POST_STOP_DRAIN_MAX_WAIT
+                        .saturating_sub(drain_started_at.elapsed());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    match tokio::time::timeout(
+                        remaining,
+                        next_stream_frame(&mut buffered_frames, &mut lines),
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => break,
+                    }
+                } else {
+                    tokio::select! {
+                        biased;
+                        _ = tx.closed(), if !downstream_dropped => {
+                            downstream_dropped = true;
+                            break;
+                        }
+                        result = next_stream_frame(&mut buffered_frames, &mut lines) => result,
+                    }
                 };
                 let next_frame = match next_frame_result {
                     Ok(frame) => frame,
                     Err(err) => {
+                        if native_anthropic_stream_for_report && client_visible_stream_completed {
+                            debug!(
+                                event_name = "stream_execution_frame_decode_ignored_after_anthropic_stop",
+                                log_type = "debug",
+                                trace_id = %trace_id_owned,
+                                request_id = %request_id_for_report_log,
+                                candidate_id = ?candidate_id_for_report.as_deref(),
+                                error = ?err,
+                                "gateway ignored execution runtime teardown error after Anthropic message_stop"
+                            );
+                            break;
+                        }
                         warn!(
                             event_name = "stream_execution_frame_decode_failed",
                             log_type = "ops",
@@ -5623,15 +6756,36 @@ async fn execute_stream_from_frame_stream(
                 let Some(observed_frame) = next_frame else {
                     if tx.is_closed() {
                         downstream_dropped = true;
+                    } else if native_anthropic_stream_for_report && !client_visible_stream_completed
+                    {
+                        terminal_failure = Some(build_anthropic_premature_eof_failure(
+                            "upstream Anthropic stream ended before message_stop",
+                        ));
                     }
                     break;
                 };
+                if draining_after_anthropic_stop {
+                    anthropic_post_stop_drain_frames =
+                        anthropic_post_stop_drain_frames.saturating_add(1);
+                    let frame_bytes = serialized_stream_frame_len(&observed_frame.frame);
+                    if frame_bytes
+                        > ANTHROPIC_POST_STOP_DRAIN_MAX_BYTES
+                            .saturating_sub(anthropic_post_stop_drain_bytes)
+                    {
+                        break;
+                    }
+                    anthropic_post_stop_drain_bytes =
+                        anthropic_post_stop_drain_bytes.saturating_add(frame_bytes);
+                }
                 let frame_observed_at = observed_frame.observed_at;
                 let frame_elapsed_ms =
                     stream_elapsed_ms_at(stream_started_at_for_report, frame_observed_at);
                 last_upstream_frame_elapsed_ms.store(frame_elapsed_ms, Ordering::Relaxed);
                 match observed_frame.frame.payload {
                     StreamFramePayload::Data { chunk_b64, text } => {
+                        if native_anthropic_stream_for_report && client_visible_stream_completed {
+                            continue;
+                        }
                         let first_data_before = usage_stream_telemetry
                             .as_ref()
                             .and_then(|telemetry| telemetry.ttfb_ms)
@@ -5666,7 +6820,7 @@ async fn execute_stream_from_frame_stream(
                         if sync_json_stream_bridge_active_for_report {
                             continue;
                         }
-                        let chunk =
+                        let mut chunk =
                             match decode_stream_data_chunk(chunk_b64.as_deref(), text.as_deref()) {
                                 Ok(chunk) => chunk,
                                 Err(err) => {
@@ -5692,6 +6846,19 @@ async fn execute_stream_from_frame_stream(
 
                         if chunk.is_empty() {
                             continue;
+                        }
+                        if native_anthropic_stream_for_report {
+                            if let Some(terminal_end) = client_stream_completion_tracker
+                                .observe_anthropic_message_stop_terminal_end(&chunk)
+                            {
+                                chunk.truncate(terminal_end);
+                                client_visible_stream_completed = true;
+                                if anthropic_post_stop_drain_started_at.is_none() {
+                                    anthropic_post_stop_drain_started_at = Some(Instant::now());
+                                    anthropic_post_stop_buffer_over_limit |=
+                                        activate_post_stop_frame_read_budget(&mut lines);
+                                }
+                            }
                         }
 
                         provider_stream_bytes.fetch_add(
@@ -5771,7 +6938,8 @@ async fn execute_stream_from_frame_stream(
 
                         if rewritten_chunk.is_empty() {
                             if let Some(error_body_json) = provider_private_error_body_json {
-                                let error_status_code = resolve_local_sync_error_status_code(
+                                let error_status_code = resolve_provider_stream_error_status_code(
+                                    plan_for_report.provider_api_format.as_str(),
                                     status_code,
                                     &error_body_json,
                                 );
@@ -5809,8 +6977,10 @@ async fn execute_stream_from_frame_stream(
                             downstream_dropped = true;
                             break;
                         } else {
-                            client_visible_stream_completed |= client_stream_completion_tracker
-                                .observe_chunk(rewritten_chunk.as_ref());
+                            if !native_anthropic_stream_for_report {
+                                client_visible_stream_completed |= client_stream_completion_tracker
+                                    .observe_chunk(rewritten_chunk.as_ref());
+                            }
                             client_stream_bytes.fetch_add(rewritten_chunk_len, Ordering::Relaxed);
                             last_client_chunk_elapsed_ms.store(
                                 stream_started_at_for_report
@@ -5820,10 +6990,15 @@ async fn execute_stream_from_frame_stream(
                                     as u64,
                                 Ordering::Relaxed,
                             );
+                            provider_error_forwarded_to_client =
+                                provider_private_error_body_json.is_some();
                         }
                         if let Some(error_body_json) = provider_private_error_body_json {
-                            let error_status_code =
-                                resolve_local_sync_error_status_code(status_code, &error_body_json);
+                            let error_status_code = resolve_provider_stream_error_status_code(
+                                plan_for_report.provider_api_format.as_str(),
+                                status_code,
+                                &error_body_json,
+                            );
                             terminal_failure = Some(build_stream_failure_from_provider_error_body(
                                 error_status_code,
                                 &error_body_json,
@@ -5853,9 +7028,26 @@ async fn execute_stream_from_frame_stream(
                     StreamFramePayload::Eof { summary } => {
                         stream_terminal_summary =
                             merge_stream_terminal_summary(stream_terminal_summary.take(), summary);
+                        if native_anthropic_stream_for_report && !client_visible_stream_completed {
+                            terminal_failure = Some(build_anthropic_premature_eof_failure(
+                                "upstream Anthropic stream ended before message_stop",
+                            ));
+                        }
                         break;
                     }
                     StreamFramePayload::Error { error } => {
+                        if native_anthropic_stream_for_report && client_visible_stream_completed {
+                            debug!(
+                                event_name = "stream_execution_error_frame_ignored_after_anthropic_stop",
+                                log_type = "debug",
+                                trace_id = %trace_id_owned,
+                                request_id = %request_id_for_report_log,
+                                candidate_id = ?candidate_id_for_report.as_deref(),
+                                error = %error.message,
+                                "gateway ignored execution runtime error frame after Anthropic message_stop"
+                            );
+                            continue;
+                        }
                         warn!(
                             event_name = "stream_execution_error_frame",
                             log_type = "ops",
@@ -5872,6 +7064,9 @@ async fn execute_stream_from_frame_stream(
                 }
             }
         }
+        drop(lines);
+        drop(buffered_frames);
+        drop(_provider_pool_in_flight_guard);
 
         if downstream_dropped {
             debug!(
@@ -5968,8 +7163,11 @@ async fn execute_stream_from_frame_stream(
                             }
                         }
                         if let Some(error_body_json) = provider_private_error_body_json {
-                            let error_status_code =
-                                resolve_local_sync_error_status_code(status_code, &error_body_json);
+                            let error_status_code = resolve_provider_stream_error_status_code(
+                                plan_for_report.provider_api_format.as_str(),
+                                status_code,
+                                &error_body_json,
+                            );
                             terminal_failure.get_or_insert_with(|| {
                                 build_stream_failure_from_provider_error_body(
                                     error_status_code,
@@ -6067,8 +7265,12 @@ async fn execute_stream_from_frame_stream(
                         report_context_owned.as_ref(),
                         failure,
                     ))
-                } else if emit_passthrough_sse_terminal_error {
-                    Some(encode_terminal_sse_error_event(failure))
+                } else if emit_passthrough_sse_terminal_error && !provider_error_forwarded_to_client
+                {
+                    Some(encode_terminal_sse_error_event_for_plan(
+                        &plan_for_report,
+                        failure,
+                    ))
                 } else {
                     None
                 };
@@ -6431,6 +7633,7 @@ async fn execute_stream_from_frame_stream(
         rx,
         response_headers_are_sse,
         emit_proxy_generated_sse_control_blocks,
+        native_anthropic_stream_for_report,
         SSE_KEEPALIVE_INTERVAL,
     );
 
@@ -6462,6 +7665,7 @@ mod tests {
     };
     use std::time::{Duration, Instant};
 
+    use aether_ai_serving::{AiAttemptExecutionOutcome, AiAttemptRetryScope};
     use aether_contracts::{
         ExecutionError, ExecutionErrorKind, ExecutionPhase, ExecutionPlan,
         ExecutionStreamTerminalSummary, ExecutionTelemetry, ExecutionTimeouts, RequestBody,
@@ -6504,24 +7708,28 @@ mod tests {
     use tokio::sync::{mpsc, watch, Notify};
 
     use super::{
-        build_sse_body_stream, build_stream_sync_payload,
+        activate_post_stop_frame_read_budget, build_direct_execution_frame_stream,
+        build_sse_body_stream, build_stream_failure_report, build_stream_sync_payload,
         client_format_allows_proxy_generated_sse_control_blocks,
-        direct_upstream_response_byte_stream,
+        direct_upstream_response_byte_stream, encode_terminal_sse_error_event_for_plan,
         ensure_stream_terminal_summary_for_missing_observed_finish,
         execute_execution_runtime_stream, execute_in_process_stream_with_oauth_retry,
-        execute_stream_from_frame_stream, maybe_apply_kiro_prompt_cache_usage_to_stream_summary,
-        merge_stream_terminal_summary, parse_direct_passthrough_mode,
-        prefetch_direct_stream_error_body, prefetched_openai_responses_body_has_output_boundary,
+        execute_stream_from_frame_stream, execute_stream_from_frame_stream_with_retry_scope,
+        maybe_apply_kiro_prompt_cache_usage_to_stream_summary, merge_stream_terminal_summary,
+        parse_direct_passthrough_mode, prefetch_direct_stream_error_body,
+        prefetched_openai_responses_body_has_output_boundary,
         record_sync_terminal_usage_with_handoff,
-        record_sync_terminal_usage_with_handoff_after_spawn, should_limit_direct_finalize_prefetch,
-        should_probe_success_failover_before_stream, should_skip_direct_finalize_prefetch,
-        stream_chunk_contains_sse_done, stream_requires_observed_terminal_event,
-        stream_terminal_summary_missing_observed_finish,
+        record_sync_terminal_usage_with_handoff_after_spawn,
+        resolve_provider_stream_error_status_code, select_direct_anthropic_prefetch_wait,
+        should_limit_direct_finalize_prefetch, should_probe_success_failover_before_stream,
+        should_skip_direct_finalize_prefetch, stream_chunk_contains_sse_done,
+        stream_requires_observed_terminal_event, stream_terminal_summary_missing_observed_finish,
         stream_terminal_summary_missing_observed_finish_with_requirement,
         stream_terminal_summary_represents_failure_with_requirement,
         ClientVisibleStreamCompletionTracker, DirectPassthroughFinalizer,
         DirectPassthroughFinalizerCore, DirectPassthroughInlineBodyState, DirectPassthroughMode,
-        ProviderStreamErrorInspection,
+        PostStopFrameReadBudget, PostStopLimitedStreamReader, ProviderStreamErrorInspection,
+        ANTHROPIC_POST_STOP_DRAIN_MAX_BYTES, POST_STOP_MAX_EMPTY_CHUNKS_PER_POLL,
     };
     use crate::control::GatewayControlDecision;
     use crate::stage_metrics::RequestStageTrace;
@@ -6716,6 +7924,15 @@ mod tests {
         })
     }
 
+    fn generic_oauth_test_auth_config(provider_type: &str) -> Value {
+        json!({
+            "provider_type": provider_type,
+            "access_token": "stale-access-token",
+            "refresh_token": "refresh-token",
+            "expires_at": 4_102_444_800_u64
+        })
+    }
+
     async fn collect_direct_execution_body(
         mut execution: crate::execution_runtime::DirectUpstreamStreamExecution,
     ) -> Result<Vec<u8>, String> {
@@ -6839,6 +8056,207 @@ mod tests {
         )
         .await
         .expect("execution should succeed")
+    }
+
+    fn native_anthropic_stream_plan(request_id: &str) -> ExecutionPlan {
+        ExecutionPlan {
+            request_id: request_id.to_string(),
+            candidate_id: Some(format!("candidate-{request_id}")),
+            provider_name: Some("custom".to_string()),
+            provider_id: format!("provider-{request_id}"),
+            endpoint_id: format!("endpoint-{request_id}"),
+            key_id: format!("key-{request_id}"),
+            method: "POST".to_string(),
+            url: "https://api.anthropic.com/v1/messages".to_string(),
+            headers: BTreeMap::from([
+                ("content-type".to_string(), "application/json".to_string()),
+                ("accept".to_string(), "text/event-stream".to_string()),
+            ]),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({
+                "model": "claude-sonnet-4-6",
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_tokens": 32,
+                "stream": true
+            })),
+            stream: true,
+            client_api_format: "claude:messages".to_string(),
+            provider_api_format: "claude:messages".to_string(),
+            model_name: Some("claude-sonnet-4-6".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        }
+    }
+
+    struct StreamDropFlag(Arc<AtomicBool>);
+
+    impl Drop for StreamDropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn direct_anthropic_test_finalizer(request_id: &str) -> DirectPassthroughFinalizer {
+        let state = AppState::new().expect("app state should build");
+        let plan = native_anthropic_stream_plan(request_id);
+        let lifecycle_seed = aether_usage_runtime::build_lifecycle_usage_seed(&plan, None);
+        DirectPassthroughFinalizer::new(DirectPassthroughFinalizerCore {
+            state,
+            trace_id: format!("trace-{request_id}"),
+            report_kind: None,
+            report_context: None,
+            lifecycle_seed,
+            direct_stream_finalize_kind: None,
+            stream_started_at: Instant::now(),
+            stage_trace: RequestStageTrace::from_env(),
+            request_diagnostics: None,
+            request_id_for_log: request_id.to_string(),
+            candidate_id: plan.candidate_id.clone(),
+            request_candidate_status_snapshot: None,
+            deferred_request_candidate_status_record: None,
+            candidate_started_unix_secs: crate::clock::current_unix_ms(),
+            status_code: 200,
+            headers: BTreeMap::from([(
+                "content-type".to_string(),
+                "text/event-stream".to_string(),
+            )]),
+            stream_usage_report_context: None,
+            stream_usage_observer: None,
+            stream_usage_observer_buffered: Vec::new(),
+            provider_error_inspection: ProviderStreamErrorInspection::default(),
+            provider_buffered_body: Vec::new(),
+            buffered_body: Vec::new(),
+            provider_body_truncated: false,
+            client_body_truncated: false,
+            client_stream_completion_tracker: ClientVisibleStreamCompletionTracker::default(),
+            requires_anthropic_message_stop: true,
+            client_visible_stream_completed: false,
+            usage_stream_telemetry: None,
+            telemetry: None,
+            provider_stream_bytes: 0,
+            client_stream_bytes: 0,
+            last_client_chunk_elapsed_ms: 0,
+            pending_recorded: false,
+            stream_started_recorded: false,
+            terminal_failure: None,
+            _provider_pool_in_flight_guard: None,
+            _upstream_target_permit: None,
+            plan,
+        })
+    }
+
+    fn discard_direct_test_finalizer(state: &mut DirectPassthroughInlineBodyState) {
+        if let Some(mut finalizer) = state.finalizer.take() {
+            finalizer.core.take();
+        }
+    }
+
+    fn direct_anthropic_inline_state(
+        request_id: &str,
+        items: Vec<Result<Bytes, String>>,
+    ) -> DirectPassthroughInlineBodyState {
+        DirectPassthroughInlineBodyState {
+            finalizer: Some(direct_anthropic_test_finalizer(request_id)),
+            upstream: Some(futures_util::stream::iter(items).boxed()),
+            upstream_control_filter: Some(super::SseControlBlockFilter::default()),
+            upstream_started_at: Instant::now(),
+            stream_first_byte_timeout: None,
+            observed_first_body_poll: false,
+            observed_first_client_yield: false,
+            upstream_done: false,
+            control_filter_flushed: false,
+            terminal_error_sent: false,
+            finalized: false,
+        }
+    }
+
+    async fn execute_native_anthropic_prefetch_stream(
+        request_id: &str,
+        chunks: Vec<String>,
+    ) -> AiAttemptExecutionOutcome<axum::http::Response<Body>> {
+        execute_native_anthropic_prefetch_stream_with_terminal_error(request_id, chunks, None).await
+    }
+
+    async fn execute_native_anthropic_prefetch_stream_with_terminal_error(
+        request_id: &str,
+        chunks: Vec<String>,
+        terminal_error: Option<String>,
+    ) -> AiAttemptExecutionOutcome<axum::http::Response<Body>> {
+        let plan = native_anthropic_stream_plan(request_id);
+        let provider_catalog = provider_catalog_for_plan(&plan, None);
+        let data_state = crate::data::GatewayDataState::with_provider_transport_reader_for_tests(
+            Arc::new(provider_catalog),
+            "development-key",
+        );
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(data_state);
+        let frame_stream = stream! {
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                frame_type: StreamFrameType::Headers,
+                payload: StreamFramePayload::Headers {
+                    status_code: 200,
+                    headers: BTreeMap::from([(
+                        "content-type".to_string(),
+                        "text/event-stream".to_string(),
+                    )]),
+                },
+            }));
+            for chunk in chunks {
+                yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                    frame_type: StreamFrameType::Data,
+                    payload: StreamFramePayload::Data {
+                        chunk_b64: None,
+                        text: Some(chunk),
+                    },
+                }));
+            }
+            if let Some(error) = terminal_error {
+                yield Err::<Bytes, std::io::Error>(std::io::Error::other(error));
+            } else {
+                yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame::eof()));
+            }
+        }
+        .boxed();
+
+        let mut retry_scope = AiAttemptRetryScope::Candidate;
+        let mut fallback_response = None;
+        let response = execute_stream_from_frame_stream_with_retry_scope(
+            &state,
+            plan,
+            &format!("trace-{request_id}"),
+            &test_decision(),
+            "claude_chat_stream",
+            Some("claude_chat_stream_success".to_string()),
+            Some(json!({
+                "request_id": request_id,
+                "candidate_id": format!("candidate-{request_id}"),
+                "candidate_index": 0,
+                "retry_index": 0,
+                "provider_api_format": "claude:messages",
+                "client_api_format": "claude:messages"
+            })),
+            crate::clock::current_unix_ms(),
+            Instant::now(),
+            RequestStageTrace::from_env(),
+            true,
+            frame_stream,
+            false,
+            None,
+            Some(&mut retry_scope),
+            Some(&mut fallback_response),
+        )
+        .await
+        .expect("native Anthropic stream execution should succeed");
+        match response {
+            Some(response) => AiAttemptExecutionOutcome::Responded(response),
+            None => AiAttemptExecutionOutcome::Retry {
+                scope: retry_scope,
+                fallback_response,
+            },
+        }
     }
 
     fn test_decision() -> GatewayControlDecision {
@@ -7176,6 +8594,425 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn native_anthropic_embedded_auth_error_refreshes_oauth_and_retries_once() {
+        let upstream_hits = Arc::new(AtomicUsize::new(0));
+        let upstream_hits_for_server = Arc::clone(&upstream_hits);
+        let refresh_hits = Arc::new(AtomicUsize::new(0));
+        let refresh_hits_for_server = Arc::clone(&refresh_hits);
+        let observed_authorization = Arc::new(Mutex::new(Vec::<String>::new()));
+        let observed_authorization_for_server = Arc::clone(&observed_authorization);
+        let listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("address should resolve");
+        let server = tokio::spawn(async move {
+            let app = Router::new()
+                .route(
+                    "/v1/messages",
+                    any(move |request: Request| {
+                        let hits = Arc::clone(&upstream_hits_for_server);
+                        let authorizations = Arc::clone(&observed_authorization_for_server);
+                        async move {
+                            authorizations
+                                .lock()
+                                .expect("authorization mutex should lock")
+                                .push(
+                                    request
+                                        .headers()
+                                        .get(header::AUTHORIZATION)
+                                        .and_then(|value| value.to_str().ok())
+                                        .unwrap_or_default()
+                                        .to_string(),
+                                );
+                            let body = if hits.fetch_add(1, Ordering::SeqCst) == 0 {
+                                concat!(
+                                    "event: error\n",
+                                    "data: {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"expired token\"}}\n\n",
+                                )
+                            } else {
+                                concat!(
+                                    "event: message_start\n",
+                                    "data: {\"type\":\"message_start\",\"message\":{}}\n\n",
+                                    "event: message_stop\n",
+                                    "data: {\"type\":\"message_stop\"}\n\n",
+                                )
+                            };
+                            (
+                                StatusCode::OK,
+                                [(header::CONTENT_TYPE, "text/event-stream")],
+                                body,
+                            )
+                                .into_response()
+                        }
+                    }),
+                )
+                .route(
+                    "/oauth/token",
+                    any(move || {
+                        let hits = Arc::clone(&refresh_hits_for_server);
+                        async move {
+                            hits.fetch_add(1, Ordering::SeqCst);
+                            Json(json!({
+                                "access_token": "fresh-access-token",
+                                "refresh_token": "fresh-refresh-token",
+                                "expires_in": 3600,
+                                "token_type": "Bearer"
+                            }))
+                        }
+                    }),
+                );
+            axum::serve(listener, app)
+                .await
+                .expect("server should start");
+        });
+
+        let mut plan = native_anthropic_stream_plan("anthropic-embedded-oauth-refresh");
+        plan.url = format!("http://{addr}/v1/messages");
+        plan.provider_name = Some("claude_code".to_string());
+        plan.headers.insert(
+            "authorization".to_string(),
+            "Bearer stale-access-token".to_string(),
+        );
+        let repository = Arc::new(provider_catalog_for_stream_auth_plan(
+            &plan,
+            "claude_code",
+            "oauth",
+            Some(generic_oauth_test_auth_config("claude_code")),
+        ));
+        let oauth_refresh =
+            aether_provider_transport::LocalOAuthRefreshCoordinator::with_adapters_for_tests(vec![
+                Arc::new(
+                    aether_provider_transport::GenericOAuthRefreshAdapter::default()
+                        .with_token_url_for_tests(
+                            "claude_code",
+                            format!("http://{addr}/oauth/token"),
+                        ),
+                ),
+            ]);
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_provider_catalog_repository_for_tests(
+                    repository,
+                )
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            )
+            .with_oauth_refresh_coordinator_for_tests(oauth_refresh);
+
+        let execution = execute_in_process_stream_with_oauth_retry(
+            &state,
+            &mut plan,
+            "trace-anthropic-embedded-oauth-refresh",
+            None,
+        )
+        .await
+        .expect("embedded authentication error should recover");
+        let replayed = collect_direct_execution_body(execution)
+            .await
+            .expect("retried response should read");
+
+        assert_eq!(upstream_hits.load(Ordering::SeqCst), 2);
+        assert_eq!(refresh_hits.load(Ordering::SeqCst), 1);
+        assert!(String::from_utf8_lossy(&replayed).contains("event: message_start"));
+        assert_eq!(
+            observed_authorization
+                .lock()
+                .expect("authorization mutex should lock")
+                .as_slice(),
+            [
+                "Bearer stale-access-token".to_string(),
+                "Bearer fresh-access-token".to_string(),
+            ]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn native_anthropic_http_permission_error_does_not_refresh_oauth() {
+        let upstream_hits = Arc::new(AtomicUsize::new(0));
+        let upstream_hits_for_server = Arc::clone(&upstream_hits);
+        let refresh_hits = Arc::new(AtomicUsize::new(0));
+        let refresh_hits_for_server = Arc::clone(&refresh_hits);
+        let permission_body = concat!(
+            "{\"type\":\"error\",\"error\":{",
+            "\"type\":\"permission_error\",",
+            "\"message\":\"this token is not authorized for the workspace\"}}",
+        );
+        let listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("address should resolve");
+        let server = tokio::spawn(async move {
+            let app = Router::new()
+                .route(
+                    "/v1/messages",
+                    any(move || {
+                        let hits = Arc::clone(&upstream_hits_for_server);
+                        async move {
+                            hits.fetch_add(1, Ordering::SeqCst);
+                            (
+                                StatusCode::FORBIDDEN,
+                                [(header::CONTENT_TYPE, "application/json")],
+                                permission_body,
+                            )
+                        }
+                    }),
+                )
+                .route(
+                    "/oauth/token",
+                    any(move || {
+                        let hits = Arc::clone(&refresh_hits_for_server);
+                        async move {
+                            hits.fetch_add(1, Ordering::SeqCst);
+                            Json(json!({
+                                "access_token": "unexpected-access-token",
+                                "refresh_token": "unexpected-refresh-token",
+                                "expires_in": 3600,
+                                "token_type": "Bearer"
+                            }))
+                        }
+                    }),
+                );
+            axum::serve(listener, app)
+                .await
+                .expect("server should start");
+        });
+
+        let mut plan = native_anthropic_stream_plan("anthropic-http-oauth-permission");
+        plan.url = format!("http://{addr}/v1/messages");
+        plan.provider_name = Some("claude_code".to_string());
+        plan.headers.insert(
+            "authorization".to_string(),
+            "Bearer stale-access-token".to_string(),
+        );
+        let repository = Arc::new(provider_catalog_for_stream_auth_plan(
+            &plan,
+            "claude_code",
+            "oauth",
+            Some(generic_oauth_test_auth_config("claude_code")),
+        ));
+        let oauth_refresh =
+            aether_provider_transport::LocalOAuthRefreshCoordinator::with_adapters_for_tests(vec![
+                Arc::new(
+                    aether_provider_transport::GenericOAuthRefreshAdapter::default()
+                        .with_token_url_for_tests(
+                            "claude_code",
+                            format!("http://{addr}/oauth/token"),
+                        ),
+                ),
+            ]);
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_provider_catalog_repository_for_tests(
+                    repository,
+                )
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            )
+            .with_oauth_refresh_coordinator_for_tests(oauth_refresh);
+
+        let execution = execute_in_process_stream_with_oauth_retry(
+            &state,
+            &mut plan,
+            "trace-anthropic-http-oauth-permission",
+            None,
+        )
+        .await
+        .expect("permission response should remain available");
+        assert_eq!(execution.status_code, StatusCode::FORBIDDEN.as_u16());
+        let replayed = collect_direct_execution_body(execution)
+            .await
+            .expect("permission response should replay");
+
+        assert_eq!(upstream_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(refresh_hits.load(Ordering::SeqCst), 0);
+        assert_eq!(replayed, permission_body.as_bytes());
+        server.abort();
+    }
+
+    #[test]
+    fn native_anthropic_oauth_prefetch_respects_short_first_byte_timeout() {
+        let now = Instant::now();
+        let precommit_started_at = now
+            .checked_sub(Duration::from_millis(10))
+            .expect("precommit start should be representable");
+        let upstream_started_at = now
+            .checked_sub(Duration::from_millis(90))
+            .expect("upstream start should be representable");
+
+        let first_byte_wait = select_direct_anthropic_prefetch_wait(
+            precommit_started_at,
+            Duration::from_millis(750),
+            upstream_started_at,
+            Some(Duration::from_millis(100)),
+            false,
+            now,
+        );
+        assert_eq!(first_byte_wait.remaining, Duration::from_millis(10));
+        assert!(!first_byte_wait.commit_on_timeout);
+
+        let precommit_wait = select_direct_anthropic_prefetch_wait(
+            now.checked_sub(Duration::from_millis(750))
+                .expect("precommit start should be representable"),
+            Duration::from_millis(750),
+            upstream_started_at,
+            Some(Duration::from_secs(5)),
+            false,
+            now,
+        );
+        assert!(precommit_wait.remaining.is_zero());
+        assert!(precommit_wait.commit_on_timeout);
+    }
+
+    #[tokio::test]
+    async fn native_anthropic_oauth_pending_events_do_not_start_a_second_precommit_wait() {
+        let request_id = "anthropic-oauth-single-precommit";
+        let plan = native_anthropic_stream_plan(request_id);
+        let provider_catalog = provider_catalog_for_plan(&plan, None);
+        let data_state = crate::data::GatewayDataState::with_provider_transport_reader_for_tests(
+            Arc::new(provider_catalog),
+            DEVELOPMENT_ENCRYPTION_KEY,
+        );
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(data_state);
+        let frame_stream = stream! {
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                frame_type: StreamFrameType::Headers,
+                payload: StreamFramePayload::Headers {
+                    status_code: 200,
+                    headers: BTreeMap::from([(
+                        "content-type".to_string(),
+                        "text/event-stream".to_string(),
+                    )]),
+                },
+            }));
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                frame_type: StreamFrameType::Data,
+                payload: StreamFramePayload::Data {
+                    chunk_b64: None,
+                    text: Some(": ping\n\n".to_string()),
+                },
+            }));
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                frame_type: StreamFrameType::Data,
+                payload: StreamFramePayload::Data {
+                    chunk_b64: None,
+                    text: Some(
+                        "event: future_event\ndata: {\"type\":\"future_event\",\"value\":1}\n\n"
+                            .to_string(),
+                    ),
+                },
+            }));
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame::eof()));
+        }
+        .boxed();
+        let response = tokio::time::timeout(
+            Duration::from_millis(300),
+            execute_stream_from_frame_stream_with_retry_scope(
+                &state,
+                plan,
+                "trace-anthropic-oauth-single-precommit",
+                &test_decision(),
+                "claude_chat_stream",
+                Some("claude_chat_stream_success".to_string()),
+                Some(json!({
+                    "request_id": request_id,
+                    "candidate_id": format!("candidate-{request_id}"),
+                    "candidate_index": 0,
+                    "retry_index": 0,
+                    "provider_api_format": "claude:messages",
+                    "client_api_format": "claude:messages"
+                })),
+                crate::clock::current_unix_ms(),
+                Instant::now(),
+                RequestStageTrace::from_env(),
+                true,
+                frame_stream,
+                true,
+                None,
+                None,
+                None,
+            ),
+        )
+        .await
+        .expect("the committed OAuth prefetch must not be followed by another 750 ms wait")
+        .expect("frame stream execution should resolve");
+
+        assert!(response.is_some());
+    }
+
+    #[tokio::test]
+    async fn native_anthropic_embedded_auth_error_does_not_refresh_api_key() {
+        let upstream_hits = Arc::new(AtomicUsize::new(0));
+        let upstream_hits_for_server = Arc::clone(&upstream_hits);
+        let listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("address should resolve");
+        let upstream_body = concat!(
+            "event: error\n",
+            "data: {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"invalid key\"}}\n\n",
+        );
+        let server = tokio::spawn(async move {
+            let app = Router::new().route(
+                "/v1/messages",
+                any(move || {
+                    let hits = Arc::clone(&upstream_hits_for_server);
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        (
+                            StatusCode::OK,
+                            [(header::CONTENT_TYPE, "text/event-stream")],
+                            upstream_body,
+                        )
+                    }
+                }),
+            );
+            axum::serve(listener, app)
+                .await
+                .expect("server should start");
+        });
+
+        let mut plan = native_anthropic_stream_plan("anthropic-embedded-api-key");
+        plan.url = format!("http://{addr}/v1/messages");
+        plan.provider_name = Some("claude_code".to_string());
+        plan.headers
+            .insert("x-api-key".to_string(), "invalid-api-key".to_string());
+        let repository = Arc::new(provider_catalog_for_stream_auth_plan(
+            &plan,
+            "claude_code",
+            "api_key",
+            None,
+        ));
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_provider_catalog_repository_for_tests(
+                    repository,
+                )
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            );
+
+        let execution = execute_in_process_stream_with_oauth_retry(
+            &state,
+            &mut plan,
+            "trace-anthropic-embedded-api-key",
+            None,
+        )
+        .await
+        .expect("API-key error response should remain available");
+        let replayed = collect_direct_execution_body(execution)
+            .await
+            .expect("prefetched API-key error should replay");
+
+        assert_eq!(upstream_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(replayed, upstream_body.as_bytes());
+        server.abort();
+    }
+
     struct BlockingStreamingRequestCandidateRepository {
         inner: InMemoryRequestCandidateRepository,
         block_streaming: AtomicBool,
@@ -7408,6 +9245,7 @@ mod tests {
             provider_body_truncated: false,
             client_body_truncated: false,
             client_stream_completion_tracker: ClientVisibleStreamCompletionTracker::default(),
+            requires_anthropic_message_stop: false,
             client_visible_stream_completed: false,
             usage_stream_telemetry: Some(ExecutionTelemetry {
                 ttfb_ms: Some(7),
@@ -7760,6 +9598,64 @@ mod tests {
     }
 
     #[test]
+    fn client_visible_terminal_tracker_reports_the_exact_record_boundary() {
+        let message_stop = b"event: message_stop\r\ndata: {\"type\":\"message_stop\"}\r\n\r\n";
+        let trailing_error =
+            b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\"}}\n\n";
+        let chunk = [message_stop.as_slice(), trailing_error.as_slice()].concat();
+        let mut tracker = ClientVisibleStreamCompletionTracker::default();
+
+        assert_eq!(
+            tracker.observe_chunk_terminal_end(&chunk),
+            Some(message_stop.len())
+        );
+        assert!(tracker.completed);
+    }
+
+    #[test]
+    fn anthropic_terminal_tracker_ignores_non_message_stop_terminals() {
+        let mut tracker = ClientVisibleStreamCompletionTracker::default();
+
+        assert!(!tracker.observe_anthropic_message_stop(b"data: [DONE]\n\n"));
+        assert!(!tracker.observe_anthropic_message_stop(
+            b"event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"
+        ));
+        assert!(tracker.observe_anthropic_message_stop(
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+        ));
+    }
+
+    #[test]
+    fn terminal_tracker_caps_multiline_record_and_resumes_after_boundary() {
+        let line = b"data: short-payload\r\n";
+        let repeated = super::SSE_TERMINAL_DETECTOR_MAX_RECORD_BYTES / line.len() + 2;
+        let oversized_record = line.repeat(repeated);
+        let mut tracker = ClientVisibleStreamCompletionTracker::default();
+
+        assert!(!tracker.observe_anthropic_message_stop(&oversized_record));
+        assert!(tracker.dropping_oversized_record);
+        assert!(tracker.line_buffer.is_empty());
+        assert!(tracker.data_payload.is_empty());
+
+        assert!(!tracker.observe_anthropic_message_stop(b"\r\n"));
+        assert!(!tracker.dropping_oversized_record);
+        assert!(tracker.observe_anthropic_message_stop(
+            b"event: message_stop\r\ndata: {\"type\":\"message_stop\"}\r\n\r\n"
+        ));
+    }
+
+    #[test]
+    fn stream_capture_hard_caps_a_single_oversized_chunk() {
+        let mut buffer = vec![1, 2];
+        let mut truncated = false;
+
+        super::append_stream_capture_bytes(&mut buffer, &[3, 4, 5, 6], 4, &mut truncated);
+
+        assert_eq!(buffer, vec![1, 2, 3, 4]);
+        assert!(truncated);
+    }
+
+    #[test]
     fn provider_error_inspection_detects_response_failed_at_every_chunk_boundary() {
         let body = concat!(
             "event: response.created\n",
@@ -7846,6 +9742,100 @@ mod tests {
         let mut bytes = serde_json::to_vec(&frame).expect("stream frame should serialize");
         bytes.push(b'\n');
         Bytes::from(bytes)
+    }
+
+    #[test]
+    fn post_stop_reader_yields_after_bounded_empty_chunks() {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let polls_for_stream = Arc::clone(&polls);
+        let stream = futures_util::stream::poll_fn(move |_| {
+            let poll = polls_for_stream.fetch_add(1, Ordering::SeqCst);
+            if poll < POST_STOP_MAX_EMPTY_CHUNKS_PER_POLL * 2 {
+                std::task::Poll::Ready(Some(Ok::<Bytes, std::io::Error>(Bytes::new())))
+            } else {
+                std::task::Poll::Ready(Some(Ok::<Bytes, std::io::Error>(Bytes::from_static(b"x"))))
+            }
+        });
+        let mut reader = Box::pin(PostStopLimitedStreamReader::new(
+            stream,
+            PostStopFrameReadBudget::new(),
+        ));
+        let waker = futures_util::task::noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+        let mut storage = [0u8; 1];
+        let mut read_buf = tokio::io::ReadBuf::new(&mut storage);
+
+        let result = tokio::io::AsyncRead::poll_read(reader.as_mut(), &mut context, &mut read_buf);
+
+        assert!(result.is_pending());
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            POST_STOP_MAX_EMPTY_CHUNKS_PER_POLL
+        );
+    }
+
+    #[tokio::test]
+    async fn post_stop_activation_trims_prefetched_current_item_immediately() {
+        const GIANT_TAIL_BYTES: usize = 4 * 1024 * 1024;
+
+        let mut combined = ndjson_frame(StreamFrame {
+            frame_type: StreamFrameType::Data,
+            payload: StreamFramePayload::Data {
+                chunk_b64: None,
+                text: Some(
+                    "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".to_string(),
+                ),
+            },
+        })
+        .to_vec();
+        combined.resize(combined.len() + GIANT_TAIL_BYTES, b'x');
+        let frame_stream =
+            futures_util::stream::iter([Ok::<Bytes, std::io::Error>(Bytes::from(combined))]);
+        let reader = PostStopLimitedStreamReader::new(frame_stream, PostStopFrameReadBudget::new());
+        let mut lines =
+            tokio_util::codec::FramedRead::new(reader, tokio_util::codec::LinesCodec::new());
+
+        super::read_next_frame(&mut lines)
+            .await
+            .expect("frame should decode")
+            .expect("data frame should exist");
+        assert!(lines
+            .get_ref()
+            .current
+            .as_ref()
+            .is_some_and(|current| current.len() > ANTHROPIC_POST_STOP_DRAIN_MAX_BYTES));
+
+        let already_buffered = lines.read_buffer().len();
+        lines.read_buffer_mut().reserve(GIANT_TAIL_BYTES);
+        assert!(lines.read_buffer().capacity() >= GIANT_TAIL_BYTES);
+        assert!(!activate_post_stop_frame_read_budget(&mut lines));
+        let retained = lines
+            .get_ref()
+            .current
+            .as_ref()
+            .map(Bytes::len)
+            .unwrap_or_default();
+        assert_eq!(
+            retained,
+            ANTHROPIC_POST_STOP_DRAIN_MAX_BYTES.saturating_sub(already_buffered)
+        );
+        assert_eq!(lines.read_buffer().len(), already_buffered);
+        assert!(lines.read_buffer().capacity() <= ANTHROPIC_POST_STOP_DRAIN_MAX_BYTES);
+    }
+
+    #[test]
+    fn post_stop_activation_releases_over_limit_framed_buffer() {
+        let frame_stream = futures_util::stream::empty::<Result<Bytes, std::io::Error>>();
+        let reader = PostStopLimitedStreamReader::new(frame_stream, PostStopFrameReadBudget::new());
+        let mut lines =
+            tokio_util::codec::FramedRead::new(reader, tokio_util::codec::LinesCodec::new());
+        lines
+            .read_buffer_mut()
+            .resize(ANTHROPIC_POST_STOP_DRAIN_MAX_BYTES + 1, b'x');
+
+        assert!(activate_post_stop_frame_read_budget(&mut lines));
+        assert!(lines.read_buffer().is_empty());
+        assert_eq!(lines.read_buffer().capacity(), 0);
     }
 
     #[test]
@@ -8708,8 +10698,8 @@ mod tests {
     }
 
     #[test]
-    fn skips_prefetch_for_same_format_passthrough_event_streams() {
-        assert!(should_skip_direct_finalize_prefetch(
+    fn native_anthropic_event_stream_uses_bounded_precommit() {
+        assert!(!should_skip_direct_finalize_prefetch(
             Some("claude_cli_sync_finalize"),
             Some("text/event-stream"),
             "claude:messages",
@@ -8718,6 +10708,648 @@ mod tests {
             false,
             false,
         ));
+    }
+
+    #[test]
+    fn native_anthropic_terminal_error_uses_anthropic_sse_shape() {
+        let plan = native_anthropic_stream_plan("anthropic-terminal-error-shape");
+        let failure = build_stream_failure_report(
+            "execution_runtime_stream_read_error",
+            "upstream disconnected",
+            502,
+        );
+
+        let event = encode_terminal_sse_error_event_for_plan(&plan, &failure)
+            .expect("terminal event should encode");
+        let event = String::from_utf8(event.to_vec()).expect("event should be utf8");
+
+        assert!(event.starts_with("event: error\ndata: "));
+        assert!(event.contains("\"type\":\"error\""));
+        assert!(event.contains("\"type\":\"api_error\""));
+        assert!(event.contains("upstream disconnected"));
+        assert!(!event.contains("[DONE]"));
+    }
+
+    #[tokio::test]
+    async fn native_anthropic_error_before_semantic_event_allows_failover() {
+        let unknown = "event: future_event\ndata: {\"type\":\"future_event\",\"value\":1}\n\n";
+        let upstream_error = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n";
+        let outcome = execute_native_anthropic_prefetch_stream(
+            "req-anthropic-precommit-error",
+            vec![unknown.to_string(), upstream_error.to_string()],
+        )
+        .await;
+
+        let AiAttemptExecutionOutcome::Retry {
+            scope,
+            fallback_response: Some(fallback_response),
+        } = outcome
+        else {
+            panic!("precommit 529 should retry with the upstream response preserved")
+        };
+        assert_eq!(scope, AiAttemptRetryScope::Provider);
+        assert_eq!(fallback_response.status(), StatusCode::OK);
+        let fallback_body = to_bytes(fallback_response.into_body(), usize::MAX)
+            .await
+            .expect("fallback response body should read");
+        assert_eq!(
+            fallback_body.as_ref(),
+            format!("{unknown}{upstream_error}").as_bytes()
+        );
+    }
+
+    #[tokio::test]
+    async fn native_anthropic_eof_before_semantic_event_allows_failover() {
+        let outcome = execute_native_anthropic_prefetch_stream(
+            "req-anthropic-precommit-eof",
+            vec![": ping\n\n".to_string()],
+        )
+        .await;
+
+        let AiAttemptExecutionOutcome::Retry {
+            scope,
+            fallback_response,
+        } = outcome
+        else {
+            panic!("EOF before the first semantic event should retry another endpoint")
+        };
+        assert_eq!(scope, AiAttemptRetryScope::Endpoint);
+        assert!(fallback_response.is_none());
+    }
+
+    #[tokio::test]
+    async fn native_anthropic_auth_error_moves_to_the_next_credential() {
+        let upstream_error = concat!(
+            "event: error\n",
+            "data: {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"invalid credential\"}}\n\n",
+        );
+        let outcome = execute_native_anthropic_prefetch_stream(
+            "req-anthropic-precommit-auth-error",
+            vec![upstream_error.to_string()],
+        )
+        .await;
+
+        let AiAttemptExecutionOutcome::Retry {
+            scope,
+            fallback_response: Some(fallback_response),
+        } = outcome
+        else {
+            panic!("precommit authentication error should retry another credential")
+        };
+        assert_eq!(scope, AiAttemptRetryScope::Credential);
+        let fallback_body = to_bytes(fallback_response.into_body(), usize::MAX)
+            .await
+            .expect("fallback response body should read");
+        assert_eq!(fallback_body.as_ref(), upstream_error.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn native_anthropic_semantic_event_commits_before_later_error() {
+        let raw = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{}}\n\n",
+            "event: error\n",
+            "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"late\"}}\n\n",
+        );
+        let outcome = execute_native_anthropic_prefetch_stream(
+            "req-anthropic-postcommit-error",
+            vec![raw.to_string()],
+        )
+        .await;
+        let AiAttemptExecutionOutcome::Responded(response) = outcome else {
+            panic!("a semantic event should commit the selected candidate")
+        };
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+
+        assert_eq!(body.as_ref(), raw.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn native_anthropic_frame_error_after_commit_emits_anthropic_terminal_event() {
+        let message_start = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{}}\n\n",
+        );
+        let original_error = "upstream disconnected after message_start";
+        let outcome = execute_native_anthropic_prefetch_stream_with_terminal_error(
+            "req-anthropic-postcommit-frame-error",
+            vec![message_start.to_string()],
+            Some(original_error.to_string()),
+        )
+        .await;
+        let AiAttemptExecutionOutcome::Responded(response) = outcome else {
+            panic!("a semantic event should commit the selected candidate")
+        };
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        let body = String::from_utf8(body.to_vec()).expect("body should be utf8");
+
+        assert!(body.starts_with(message_start));
+        assert!(body.contains("event: error\ndata: {\"type\":\"error\""));
+        assert!(body.contains("\"type\":\"api_error\""));
+        assert!(body.contains(original_error));
+        assert!(!body.contains("[DONE]"));
+    }
+
+    #[tokio::test]
+    async fn native_anthropic_eof_after_commit_emits_anthropic_terminal_event() {
+        let message_start = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{}}\n\n",
+        );
+        let outcome = execute_native_anthropic_prefetch_stream(
+            "req-anthropic-postcommit-eof",
+            vec![message_start.to_string()],
+        )
+        .await;
+        let AiAttemptExecutionOutcome::Responded(response) = outcome else {
+            panic!("a semantic event should commit the selected candidate")
+        };
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        let body = String::from_utf8(body.to_vec()).expect("body should be utf8");
+
+        assert!(body.starts_with(message_start));
+        assert!(body.contains("event: error\ndata: {\"type\":\"error\""));
+        assert!(body.contains("ended before message_stop"));
+        assert!(!body.contains("[DONE]"));
+    }
+
+    #[tokio::test]
+    async fn native_anthropic_done_marker_does_not_replace_message_stop() {
+        let message_start = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{}}\n\n",
+        );
+        let done = "data: [DONE]\n\n";
+        let outcome = execute_native_anthropic_prefetch_stream(
+            "req-anthropic-done-without-message-stop",
+            vec![message_start.to_string(), done.to_string()],
+        )
+        .await;
+        let AiAttemptExecutionOutcome::Responded(response) = outcome else {
+            panic!("message_start should commit the selected candidate")
+        };
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        let body = String::from_utf8(body.to_vec()).expect("body should be utf8");
+
+        assert!(body.starts_with(message_start));
+        assert!(body.contains(done));
+        assert!(body.contains("event: error\ndata: {\"type\":\"error\""));
+        assert!(body.contains("ended before message_stop"));
+    }
+
+    #[tokio::test]
+    async fn native_anthropic_hanging_tail_does_not_delay_body_eof_and_is_bounded() {
+        let request_id = "req-anthropic-hanging-tail";
+        let plan = native_anthropic_stream_plan(request_id);
+        let provider_catalog = provider_catalog_for_plan(&plan, None);
+        let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_usage_repository_for_tests(Arc::clone(
+                    &usage_repository,
+                ))
+                .with_provider_catalog_reader(Arc::new(provider_catalog))
+                .with_encryption_key_for_tests("development-key"),
+            )
+            .with_usage_runtime_for_tests(UsageRuntimeConfig {
+                enabled: true,
+                ..UsageRuntimeConfig::default()
+            });
+        let message_start = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{}}\n\n",
+        );
+        let message_stop = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+        let stream_dropped = Arc::new(AtomicBool::new(false));
+        let drop_flag = StreamDropFlag(Arc::clone(&stream_dropped));
+        let frame_stream = stream! {
+            let _drop_flag = drop_flag;
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                frame_type: StreamFrameType::Headers,
+                payload: StreamFramePayload::Headers {
+                    status_code: 200,
+                    headers: BTreeMap::from([(
+                        "content-type".to_string(),
+                        "text/event-stream".to_string(),
+                    )]),
+                },
+            }));
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                frame_type: StreamFrameType::Data,
+                payload: StreamFramePayload::Data {
+                    chunk_b64: None,
+                    text: Some(message_start.to_string()),
+                },
+            }));
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                frame_type: StreamFrameType::Data,
+                payload: StreamFramePayload::Data {
+                    chunk_b64: None,
+                    text: Some(message_stop.to_string()),
+                },
+            }));
+            std::future::pending::<()>().await;
+        }
+        .boxed();
+
+        let response = execute_stream_from_frame_stream(
+            &state,
+            plan,
+            "trace-anthropic-hanging-tail",
+            &test_decision(),
+            "claude_chat_stream",
+            Some("claude_chat_stream_success".to_string()),
+            Some(json!({
+                "request_id": request_id,
+                "candidate_id": format!("candidate-{request_id}"),
+                "candidate_index": 0,
+                "retry_index": 0,
+                "provider_api_format": "claude:messages",
+                "client_api_format": "claude:messages"
+            })),
+            crate::clock::current_unix_ms(),
+            Instant::now(),
+            RequestStageTrace::from_env(),
+            false,
+            frame_stream,
+            None,
+        )
+        .await
+        .expect("stream execution should succeed")
+        .expect("stream execution should return a response");
+
+        let body = tokio::time::timeout(
+            Duration::from_secs(1),
+            to_bytes(response.into_body(), usize::MAX),
+        )
+        .await
+        .expect("client body EOF must not wait for the hanging producer tail")
+        .expect("client body should read");
+        assert_eq!(
+            body.as_ref(),
+            format!("{message_start}{message_stop}").as_bytes()
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !stream_dropped.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("producer tail should be dropped after the bounded drain window");
+
+        let stored_usage = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let usage = usage_repository
+                    .find_by_request_id(request_id)
+                    .await
+                    .expect("usage should read");
+                if usage
+                    .as_ref()
+                    .is_some_and(|usage| usage.status == "completed")
+                {
+                    break usage.expect("completed usage should exist");
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("bounded drain timeout should still settle usage successfully");
+        assert_eq!(stored_usage.status_code, Some(200));
+    }
+
+    #[tokio::test]
+    async fn native_anthropic_unterminated_oversized_tail_respects_read_budget() {
+        const TAIL_CHUNK_BYTES: usize = 4 * 1024 * 1024;
+
+        let request_id = "req-anthropic-oversized-tail";
+        let plan = native_anthropic_stream_plan(request_id);
+        let provider_catalog = provider_catalog_for_plan(&plan, None);
+        let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_usage_repository_for_tests(Arc::clone(
+                    &usage_repository,
+                ))
+                .with_provider_catalog_reader(Arc::new(provider_catalog))
+                .with_encryption_key_for_tests("development-key"),
+            )
+            .with_usage_runtime_for_tests(UsageRuntimeConfig {
+                enabled: true,
+                ..UsageRuntimeConfig::default()
+            });
+        let message_start = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{}}\n\n",
+        );
+        let message_stop = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+        let stream_dropped = Arc::new(AtomicBool::new(false));
+        let drop_flag = StreamDropFlag(Arc::clone(&stream_dropped));
+        let tail_chunks_polled = Arc::new(AtomicUsize::new(0));
+        let tail_chunks_polled_for_stream = Arc::clone(&tail_chunks_polled);
+        let tail_chunk = Bytes::from(vec![b'x'; TAIL_CHUNK_BYTES]);
+        let tail_chunk_count = 32;
+        let frame_stream = stream! {
+            let _drop_flag = drop_flag;
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                frame_type: StreamFrameType::Headers,
+                payload: StreamFramePayload::Headers {
+                    status_code: 200,
+                    headers: BTreeMap::from([(
+                        "content-type".to_string(),
+                        "text/event-stream".to_string(),
+                    )]),
+                },
+            }));
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                frame_type: StreamFrameType::Data,
+                payload: StreamFramePayload::Data {
+                    chunk_b64: None,
+                    text: Some(message_start.to_string()),
+                },
+            }));
+            yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
+                frame_type: StreamFrameType::Data,
+                payload: StreamFramePayload::Data {
+                    chunk_b64: None,
+                    text: Some(message_stop.to_string()),
+                },
+            }));
+            for _ in 0..tail_chunk_count {
+                tail_chunks_polled_for_stream.fetch_add(1, Ordering::SeqCst);
+                yield Ok::<Bytes, std::io::Error>(tail_chunk.clone());
+            }
+            std::future::pending::<()>().await;
+        }
+        .boxed();
+
+        let response = execute_stream_from_frame_stream(
+            &state,
+            plan,
+            "trace-anthropic-oversized-tail",
+            &test_decision(),
+            "claude_chat_stream",
+            Some("claude_chat_stream_success".to_string()),
+            Some(json!({
+                "request_id": request_id,
+                "candidate_id": format!("candidate-{request_id}"),
+                "candidate_index": 0,
+                "retry_index": 0,
+                "provider_api_format": "claude:messages",
+                "client_api_format": "claude:messages"
+            })),
+            crate::clock::current_unix_ms(),
+            Instant::now(),
+            RequestStageTrace::from_env(),
+            false,
+            frame_stream,
+            None,
+        )
+        .await
+        .expect("stream execution should succeed")
+        .expect("stream execution should return a response");
+
+        let body = tokio::time::timeout(
+            Duration::from_secs(1),
+            to_bytes(response.into_body(), usize::MAX),
+        )
+        .await
+        .expect("client body EOF must not wait for the oversized unterminated tail")
+        .expect("client body should read");
+        assert_eq!(
+            body.as_ref(),
+            format!("{message_start}{message_stop}").as_bytes()
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !stream_dropped.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("oversized tail producer should be released by the read budget");
+        assert!(
+            tail_chunks_polled.load(Ordering::SeqCst) <= 1,
+            "post-stop drain must retain at most one atomic upstream stream item"
+        );
+
+        let stored_usage = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let usage = usage_repository
+                    .find_by_request_id(request_id)
+                    .await
+                    .expect("usage should read");
+                if usage
+                    .as_ref()
+                    .is_some_and(|usage| usage.status == "completed")
+                {
+                    break usage.expect("completed usage should exist");
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("bounded oversized tail should still settle usage successfully");
+        assert_eq!(stored_usage.status_code, Some(200));
+    }
+
+    #[tokio::test]
+    async fn native_anthropic_frame_error_after_message_stop_is_ignored() {
+        let message_start = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{}}\n\n",
+        );
+        let message_stop = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+        let outcome = execute_native_anthropic_prefetch_stream_with_terminal_error(
+            "req-anthropic-error-after-message-stop",
+            vec![message_start.to_string(), message_stop.to_string()],
+            Some("connection reset after message_stop".to_string()),
+        )
+        .await;
+        let AiAttemptExecutionOutcome::Responded(response) = outcome else {
+            panic!("message_stop should keep the selected candidate committed")
+        };
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+
+        assert_eq!(
+            body.as_ref(),
+            format!("{message_start}{message_stop}").as_bytes()
+        );
+    }
+
+    #[tokio::test]
+    async fn native_anthropic_same_chunk_stops_at_message_stop_record() {
+        let message_start = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{}}\n\n",
+        );
+        let message_stop = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+        let trailing_error = concat!(
+            "event: error\n",
+            "data: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"after stop\"}}\n\n",
+        );
+        let outcome = execute_native_anthropic_prefetch_stream(
+            "req-anthropic-same-chunk-message-stop",
+            vec![format!("{message_start}{message_stop}{trailing_error}")],
+        )
+        .await;
+        let AiAttemptExecutionOutcome::Responded(response) = outcome else {
+            panic!("message_stop should complete the selected candidate")
+        };
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+
+        assert_eq!(
+            body.as_ref(),
+            format!("{message_start}{message_stop}").as_bytes()
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_anthropic_stops_at_message_stop_and_ignores_teardown_error() {
+        let message_start = Bytes::from_static(
+            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{}}\n\n",
+        );
+        let message_stop = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+        let trailing_error = concat!(
+            "event: error\n",
+            "data: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"after stop\"}}\n\n",
+        );
+        let state = direct_anthropic_inline_state(
+            "req-direct-anthropic-message-stop",
+            vec![
+                Ok(message_start.clone()),
+                Ok(Bytes::from(format!("{message_stop}{trailing_error}"))),
+                Err("connection reset after message_stop".to_string()),
+            ],
+        );
+
+        let (first, state) = state
+            .next_item()
+            .await
+            .expect("message_start should stream");
+        assert_eq!(first.expect("message_start should succeed"), message_start);
+        let (second, state) = state.next_item().await.expect("message_stop should stream");
+        assert_eq!(
+            second.expect("message_stop should succeed").as_ref(),
+            message_stop.as_bytes()
+        );
+        assert!(state.next_item().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn direct_anthropic_clean_eof_after_message_start_emits_one_error() {
+        let message_start = Bytes::from_static(
+            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{}}\n\n",
+        );
+        let state = direct_anthropic_inline_state(
+            "req-direct-anthropic-premature-eof",
+            vec![Ok(message_start.clone())],
+        );
+
+        let (first, state) = state
+            .next_item()
+            .await
+            .expect("message_start should stream");
+        assert_eq!(first.expect("message_start should succeed"), message_start);
+        let (error, mut state) = state
+            .next_item()
+            .await
+            .expect("premature EOF should emit an Anthropic error event");
+        let error = String::from_utf8(error.expect("error event should succeed").to_vec())
+            .expect("error event should be utf8");
+        assert!(error.starts_with("event: error\ndata: "));
+        assert!(error.contains("ended before message_stop"));
+        discard_direct_test_finalizer(&mut state);
+    }
+
+    #[tokio::test]
+    async fn direct_anthropic_provider_error_is_not_duplicated() {
+        let message_start = Bytes::from_static(
+            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{}}\n\n",
+        );
+        let provider_error = Bytes::from_static(
+            b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"busy\"}}\n\n",
+        );
+        let state = direct_anthropic_inline_state(
+            "req-direct-anthropic-provider-error",
+            vec![Ok(message_start.clone()), Ok(provider_error.clone())],
+        );
+
+        let (first, state) = state
+            .next_item()
+            .await
+            .expect("message_start should stream");
+        assert_eq!(first.expect("message_start should succeed"), message_start);
+        let (second, state) = state
+            .next_item()
+            .await
+            .expect("provider error should stream");
+        assert_eq!(
+            second.expect("provider error should succeed"),
+            provider_error
+        );
+        assert!(state.terminal_error_sent);
+        assert!(state.next_item().await.is_none());
+    }
+
+    #[test]
+    fn postcommit_anthropic_errors_use_the_precommit_status_taxonomy() {
+        for (error_type, expected_status) in [
+            ("request_too_large", 413),
+            ("overloaded_error", 529),
+            ("api_error", 500),
+        ] {
+            let body = json!({
+                "type": "error",
+                "error": { "type": error_type, "message": "upstream failure" }
+            });
+            assert_eq!(
+                resolve_provider_stream_error_status_code("claude:messages", 200, &body),
+                expected_status,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn native_anthropic_unknown_event_is_replayed_byte_for_byte() {
+        let unknown = "event: future_event\ndata: {\"type\":\"future_event\",\"value\":1}\n\n";
+        let message_start = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{}}\n\n",
+        );
+        let message_stop = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+        let expected = format!("{unknown}{message_start}{message_stop}");
+        let outcome = execute_native_anthropic_prefetch_stream(
+            "req-anthropic-unknown-replay",
+            vec![
+                unknown.to_string(),
+                message_start.to_string(),
+                message_stop.to_string(),
+            ],
+        )
+        .await;
+        let AiAttemptExecutionOutcome::Responded(response) = outcome else {
+            panic!("unknown event should not terminate the stream")
+        };
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+
+        assert_eq!(body.as_ref(), expected.as_bytes());
     }
 
     #[test]
@@ -8869,6 +11501,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_anthropic_sse_body_ends_at_message_stop_while_sender_is_alive() {
+        let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(1);
+        let message_stop =
+            Bytes::from_static(b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
+        tx.send(Ok(message_stop.clone()))
+            .await
+            .expect("message_stop should send");
+        let mut body_stream = Box::pin(build_sse_body_stream(
+            Vec::new(),
+            rx,
+            true,
+            false,
+            true,
+            Duration::from_secs(60),
+        ));
+
+        let chunk = tokio::time::timeout(Duration::from_millis(50), body_stream.next())
+            .await
+            .expect("message_stop should arrive immediately")
+            .expect("stream should yield message_stop")
+            .expect("message_stop should be successful");
+        assert_eq!(chunk, message_stop);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), body_stream.next())
+                .await
+                .expect("body EOF must not wait for the producer")
+                .is_none()
+        );
+        assert!(tx.is_closed(), "body EOF should drop the receiver");
+    }
+
+    #[tokio::test]
     async fn sse_body_stream_emits_initial_and_periodic_keepalive_without_business_chunks() {
         let (_tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(1);
         let mut body_stream = Box::pin(build_sse_body_stream(
@@ -8876,6 +11540,7 @@ mod tests {
             rx,
             true,
             true,
+            false,
             Duration::from_millis(10),
         ));
 
@@ -8901,6 +11566,7 @@ mod tests {
             vec![Bytes::from_static(b": upstream-keepalive\n\n")],
             rx,
             true,
+            false,
             false,
             Duration::from_millis(10),
         ));
@@ -8942,6 +11608,7 @@ mod tests {
             rx,
             true,
             true,
+            false,
             Duration::from_secs(60),
         ));
 
@@ -8971,6 +11638,7 @@ mod tests {
             rx,
             true,
             true,
+            false,
             Duration::from_secs(60),
         ));
 
@@ -8994,6 +11662,7 @@ mod tests {
             rx,
             true,
             true,
+            false,
             Duration::from_secs(60),
         ));
 
@@ -9050,6 +11719,7 @@ mod tests {
             rx,
             true,
             true,
+            false,
             Duration::from_secs(60),
         ));
 

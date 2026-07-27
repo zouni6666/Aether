@@ -322,6 +322,7 @@ async fn gateway_locally_denies_invalid_bearer_api_key_without_hitting_control_o
         Some(EXECUTION_PATH_LOCAL_AUTH_DENIED)
     );
     let payload: serde_json::Value = response.json().await.expect("response json should parse");
+    assert!(payload.get("type").is_none());
     assert_eq!(payload["error"]["type"], "http_error");
     assert_eq!(payload["error"]["message"], "无效的API密钥");
     assert_eq!(*auth_context_hits.lock().expect("mutex should lock"), 0);
@@ -329,6 +330,57 @@ async fn gateway_locally_denies_invalid_bearer_api_key_without_hitting_control_o
 
     gateway_handle.abort();
     upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_claude_routes_use_anthropic_authentication_error_for_invalid_api_key() {
+    let repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-other-claude-key")),
+        sample_currently_usable_auth_snapshot("key-claude-other", "user-claude-other"),
+    )]));
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway state should build")
+            .with_auth_api_key_data_reader_for_tests(repository),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+
+    for (path, trace_id) in [
+        ("/v1/messages", "trace-control-claude-invalid-key-messages"),
+        (
+            "/v1/messages/count_tokens",
+            "trace-control-claude-invalid-key-count-tokens",
+        ),
+    ] {
+        let response = client
+            .post(format!("{gateway_url}{path}"))
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .header("x-api-key", "sk-missing-claude-key")
+            .header(TRACE_ID_HEADER, trace_id)
+            .body("{\"model\":\"claude-sonnet-4-5\",\"messages\":[]}")
+            .send()
+            .await
+            .expect("request should complete locally");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "path: {path}");
+        assert_eq!(
+            response
+                .headers()
+                .get(EXECUTION_PATH_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some(EXECUTION_PATH_LOCAL_AUTH_DENIED),
+            "path: {path}"
+        );
+        let payload: serde_json::Value = response.json().await.expect("response json should parse");
+        assert_eq!(payload["type"], "error", "path: {path}");
+        assert_eq!(
+            payload["error"]["type"], "authentication_error",
+            "path: {path}"
+        );
+    }
+
+    gateway_handle.abort();
 }
 
 #[tokio::test]
@@ -498,7 +550,8 @@ async fn gateway_locally_denies_disallowed_claude_api_format_without_hitting_con
 
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let payload: serde_json::Value = response.json().await.expect("response json should parse");
-    assert_eq!(payload["error"]["type"], "http_error");
+    assert_eq!(payload["type"], "error");
+    assert_eq!(payload["error"]["type"], "permission_error");
     assert_eq!(
         payload["error"]["message"],
         "当前用户、用户组或密钥的访问控制策略不允许访问 claude:messages 格式"
@@ -581,7 +634,8 @@ async fn gateway_locally_denies_disallowed_provider_without_hitting_control_or_u
 
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let payload: serde_json::Value = response.json().await.expect("response json should parse");
-    assert_eq!(payload["error"]["type"], "http_error");
+    assert_eq!(payload["type"], "error");
+    assert_eq!(payload["error"]["type"], "permission_error");
     assert_eq!(
         payload["error"]["message"],
         "当前用户、用户组或密钥的访问控制策略不允许访问 claude 提供商"
@@ -816,4 +870,53 @@ async fn gateway_locally_denies_disallowed_openai_model_without_hitting_control_
 
     gateway_handle.abort();
     upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_locally_denies_disallowed_claude_model_with_anthropic_permission_error() {
+    let mut snapshot =
+        sample_currently_usable_auth_snapshot("key-claude-model-123", "user-claude-model-123");
+    snapshot.api_key_allowed_providers = Some(vec!["claude".to_string()]);
+    snapshot.user_allowed_providers = Some(vec!["claude".to_string()]);
+    snapshot.api_key_allowed_api_formats = Some(vec!["claude:messages".to_string()]);
+    snapshot.user_allowed_api_formats = Some(vec!["claude:messages".to_string()]);
+    snapshot.api_key_allowed_models = Some(vec!["claude-haiku-4-5".to_string()]);
+    let repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-claude-model-guard-123")),
+        snapshot,
+    )]));
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway state should build")
+            .with_auth_api_key_data_reader_for_tests(repository),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/v1/messages"))
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .header("x-api-key", "sk-claude-model-guard-123")
+        .header(TRACE_ID_HEADER, "trace-control-claude-model-guard-1")
+        .body("{\"model\":\"claude-sonnet-4-5\",\"messages\":[]}")
+        .send()
+        .await
+        .expect("request should complete locally");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        response
+            .headers()
+            .get(EXECUTION_PATH_HEADER)
+            .and_then(|value| value.to_str().ok()),
+        Some(EXECUTION_PATH_LOCAL_AUTH_DENIED)
+    );
+    let payload: serde_json::Value = response.json().await.expect("response json should parse");
+    assert_eq!(payload["type"], "error");
+    assert_eq!(payload["error"]["type"], "permission_error");
+    assert_eq!(
+        payload["error"]["message"],
+        "当前用户、用户组或密钥的访问控制策略不允许访问模型 claude-sonnet-4-5"
+    );
+
+    gateway_handle.abort();
 }

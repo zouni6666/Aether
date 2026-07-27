@@ -1121,7 +1121,8 @@ async fn gateway_records_failed_usage_for_claude_runtime_miss_without_execution_
         Some("candidate_list_empty")
     );
     let body_json: serde_json::Value = response.json().await.expect("body should parse");
-    assert_eq!(body_json["error"]["type"], "http_error");
+    assert_eq!(body_json["type"], "error");
+    assert_eq!(body_json["error"]["type"], "overloaded_error");
     assert_eq!(
         body_json["error"]["message"],
         "没有可用提供商支持模型 claude-sonnet-4-5 的同步请求"
@@ -1169,7 +1170,7 @@ async fn gateway_records_failed_usage_for_claude_runtime_miss_without_execution_
             .and_then(|value| value.get("error"))
             .and_then(|value| value.get("type"))
             .and_then(|value| value.as_str()),
-        Some("http_error")
+        Some("overloaded_error")
     );
 
     let stored_candidates = request_candidate_repository
@@ -1749,6 +1750,7 @@ async fn gateway_records_failed_usage_when_all_local_claude_cli_candidates_are_s
     let response = reqwest::Client::new()
         .post(format!("{gateway_url}/v1/messages?beta=true"))
         .header(http::header::CONTENT_TYPE, "application/json")
+        .header(http::header::USER_AGENT, "Claude-Code/2.1.0")
         .header(
             http::header::AUTHORIZATION,
             "Bearer sk-client-claude-cli-usage-local-miss",
@@ -1768,7 +1770,8 @@ async fn gateway_records_failed_usage_when_all_local_claude_cli_candidates_are_s
         Some("all_candidates_skipped")
     );
     let body_json: serde_json::Value = response.json().await.expect("body should parse");
-    assert_eq!(body_json["error"]["type"], "http_error");
+    assert_eq!(body_json["type"], "error");
+    assert_eq!(body_json["error"]["type"], "overloaded_error");
     assert_eq!(
         body_json["error"]["message"],
         "没有可用提供商支持模型 gpt-5.4 的同步请求"
@@ -2062,6 +2065,7 @@ fn gateway_keeps_failed_usage_request_capture_lightweight_for_large_local_claude
         let response = reqwest::Client::new()
             .post(format!("{gateway_url}/v1/messages?beta=true"))
             .header(http::header::CONTENT_TYPE, "application/json")
+            .header(http::header::USER_AGENT, "Claude-Code/2.1.0")
             .header(
                 http::header::AUTHORIZATION,
                 "Bearer sk-client-claude-cli-usage-local-miss-large",

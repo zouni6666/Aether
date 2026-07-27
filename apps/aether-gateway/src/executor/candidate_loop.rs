@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use aether_ai_serving::{
-    run_ai_attempt_loop, AiAttemptLoopOutcome, AiAttemptLoopPort, AiExecutionAttempt,
+    run_ai_attempt_loop, AiAttemptExecutionOutcome, AiAttemptLoopOutcome, AiAttemptLoopPort,
+    AiAttemptRetryScope, AiExecutionAttempt,
 };
 use aether_data_contracts::repository::candidates::RequestCandidateStatus;
 use aether_runtime::ConcurrencyPermit;
@@ -18,8 +19,13 @@ use tracing::{debug, warn, Instrument};
 use crate::ai_serving::LocalExecutionAttemptSource;
 use crate::clock::current_unix_ms;
 use crate::control::GatewayControlDecision;
-use crate::execution_runtime::{execute_execution_runtime_stream, execute_execution_runtime_sync};
-use crate::executor::{build_local_execution_exhaustion, LocalExecutionRequestOutcome};
+use crate::execution_runtime::{
+    execute_execution_runtime_stream_with_retry_scope,
+    execute_execution_runtime_sync_with_retry_scope,
+};
+use crate::executor::{
+    build_local_execution_exhaustion, mark_deferred_upstream_response, LocalExecutionRequestOutcome,
+};
 use crate::handlers::shared::provider_pool::release_admin_provider_pool_key_lease;
 use crate::log_ids::short_request_id;
 use crate::orchestration::{
@@ -124,6 +130,9 @@ where
             AiAttemptLoopOutcome::Responded(response) => {
                 Ok(LocalExecutionRequestOutcome::responded(response))
             }
+            AiAttemptLoopOutcome::Deferred(response) => Ok(
+                LocalExecutionRequestOutcome::responded(mark_deferred_upstream_response(response)),
+            ),
             AiAttemptLoopOutcome::Exhausted(exhaustion) => {
                 Ok(LocalExecutionRequestOutcome::Exhausted(exhaustion))
             }
@@ -251,7 +260,10 @@ where
         Ok(())
     }
 
-    async fn execute_attempt(&self, attempt: &T) -> Result<Option<Self::Response>, Self::Error> {
+    async fn execute_attempt(
+        &self,
+        attempt: &T,
+    ) -> Result<AiAttemptExecutionOutcome<Self::Response>, Self::Error> {
         let plan = attempt.execution_plan();
         let report_context = attempt.report_context();
         if let Some(response) = execution_plan_balance_capacity_response(
@@ -263,12 +275,12 @@ where
         )
         .await?
         {
-            return Ok(Some(response));
+            return Ok(AiAttemptExecutionOutcome::Responded(response));
         }
         prewarm_direct_reqwest_candidate_client(plan);
         let _permit = acquire_upstream_execution_gate(self.state, self.trace_id).await?;
         let upstream_execution_gate_held_started_at = std::time::Instant::now();
-        let mut response = execute_execution_runtime_sync(
+        let mut execution = execute_execution_runtime_sync_with_retry_scope(
             self.state,
             self.parts.uri.path(),
             plan.clone(),
@@ -285,10 +297,18 @@ where
                 .elapsed()
                 .as_millis() as u64,
         );
-        if let Some(response) = response.as_mut() {
-            attach_redaction_execution_candidate(response, plan.candidate_id.as_deref());
+        match &mut execution {
+            AiAttemptExecutionOutcome::Responded(response)
+            | AiAttemptExecutionOutcome::Retry {
+                fallback_response: Some(response),
+                ..
+            } => attach_redaction_execution_candidate(response, plan.candidate_id.as_deref()),
+            AiAttemptExecutionOutcome::Retry {
+                fallback_response: None,
+                ..
+            } => {}
         }
-        Ok(response)
+        Ok(execution)
     }
 
     async fn mark_unused_attempts(&self, attempts: Vec<T>) -> Result<(), Self::Error> {
@@ -389,6 +409,9 @@ where
             AiAttemptLoopOutcome::Responded(response) => {
                 Ok(LocalExecutionRequestOutcome::responded(response))
             }
+            AiAttemptLoopOutcome::Deferred(response) => Ok(
+                LocalExecutionRequestOutcome::responded(mark_deferred_upstream_response(response)),
+            ),
             AiAttemptLoopOutcome::Exhausted(exhaustion) => {
                 Ok(LocalExecutionRequestOutcome::Exhausted(exhaustion))
             }
@@ -760,6 +783,7 @@ where
     Attempt: AiExecutionAttempt + Send + Sync + 'static,
 {
     let mut last_attempted = None;
+    let mut fallback_response = None;
 
     loop {
         let next_started_at = std::time::Instant::now();
@@ -781,8 +805,8 @@ where
         }
         port.record_attempt_started(&attempt).await?;
         let execute_started_at = std::time::Instant::now();
-        let response = match port.execute_attempt(&attempt).await {
-            Ok(response) => response,
+        let execution = match port.execute_attempt(&attempt).await {
+            Ok(execution) => execution,
             Err(err) => {
                 let remaining = source.drain_execution_attempts().await?;
                 port.mark_unused_attempts(remaining).await?;
@@ -793,15 +817,26 @@ where
             "stream_candidate_execute",
             execute_started_at.elapsed().as_millis() as u64,
         );
-        if let Some(response) = response {
-            let remaining = source.drain_execution_attempts().await?;
-            let unused_started_at = std::time::Instant::now();
-            port.mark_unused_attempts(remaining).await?;
-            observe_gateway_stage_ms(
-                "stream_candidate_unused",
-                unused_started_at.elapsed().as_millis() as u64,
-            );
-            return Ok(LocalExecutionRequestOutcome::responded(response));
+        match execution {
+            AiAttemptExecutionOutcome::Responded(response) => {
+                let remaining = source.drain_execution_attempts().await?;
+                let unused_started_at = std::time::Instant::now();
+                port.mark_unused_attempts(remaining).await?;
+                observe_gateway_stage_ms(
+                    "stream_candidate_unused",
+                    unused_started_at.elapsed().as_millis() as u64,
+                );
+                return Ok(LocalExecutionRequestOutcome::responded(response));
+            }
+            AiAttemptExecutionOutcome::Retry {
+                scope,
+                fallback_response: attempt_fallback_response,
+            } => {
+                if attempt_fallback_response.is_some() {
+                    fallback_response = attempt_fallback_response;
+                }
+                apply_attempt_retry_scope(source, &attempt, scope).await?;
+            }
         }
 
         port.record_attempt_failed(&attempt).await?;
@@ -816,6 +851,12 @@ where
         last_attempted = Some((attempt.execution_plan().clone(), attempt.report_context()));
     }
 
+    if let Some(response) = fallback_response {
+        return Ok(LocalExecutionRequestOutcome::responded(
+            mark_deferred_upstream_response(response),
+        ));
+    }
+
     let Some((last_plan, last_report_context)) = last_attempted else {
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
@@ -824,6 +865,24 @@ where
         port.build_exhaustion(last_plan, last_report_context)
             .await?,
     ))
+}
+
+async fn apply_attempt_retry_scope<Source, Attempt>(
+    source: &mut Source,
+    attempt: &Attempt,
+    scope: AiAttemptRetryScope,
+) -> Result<(), GatewayError>
+where
+    Source: LocalExecutionAttemptSource<Attempt>,
+    Attempt: AiExecutionAttempt,
+{
+    let plan = attempt.execution_plan();
+    match scope {
+        AiAttemptRetryScope::Candidate => Ok(()),
+        AiAttemptRetryScope::Credential => source.skip_credential(plan.key_id.as_str()).await,
+        AiAttemptRetryScope::Endpoint => source.skip_endpoint(plan.endpoint_id.as_str()).await,
+        AiAttemptRetryScope::Provider => source.skip_provider(plan.provider_id.as_str()).await,
+    }
 }
 
 async fn next_execution_attempt_with_timeout<Source, Attempt>(
@@ -901,7 +960,10 @@ where
         Ok(())
     }
 
-    async fn execute_attempt(&self, attempt: &T) -> Result<Option<Self::Response>, Self::Error> {
+    async fn execute_attempt(
+        &self,
+        attempt: &T,
+    ) -> Result<AiAttemptExecutionOutcome<Self::Response>, Self::Error> {
         let plan = attempt.execution_plan();
         let report_context = attempt.report_context();
         let candidate_index = parse_request_candidate_report_context(report_context.as_ref())
@@ -931,7 +993,7 @@ where
         )
         .await?
         {
-            return Ok(Some(response));
+            return Ok(AiAttemptExecutionOutcome::Responded(response));
         }
         prewarm_direct_reqwest_candidate_client(plan);
         // The attempt owns the canonical report context. Borrow it for the
@@ -951,14 +1013,14 @@ where
         let execution_decision = self.decision.clone();
         let execution_report_kind = attempt.report_kind();
         let execution_plan = plan.clone();
-        let mut response = execute_stream_candidate_with_watchdog(
+        let mut execution = execute_stream_candidate_with_watchdog(
             self.state,
             self.trace_id,
             self.plan_kind,
             plan,
             watchdog_report_context,
             move || async move {
-                execute_execution_runtime_stream(
+                execute_execution_runtime_stream_with_retry_scope(
                     &execution_state,
                     execution_plan,
                     execution_trace_id.as_str(),
@@ -971,10 +1033,18 @@ where
             },
         )
         .await?;
-        if let Some(response) = response.as_mut() {
-            attach_redaction_execution_candidate(response, plan.candidate_id.as_deref());
+        match &mut execution {
+            AiAttemptExecutionOutcome::Responded(response)
+            | AiAttemptExecutionOutcome::Retry {
+                fallback_response: Some(response),
+                ..
+            } => attach_redaction_execution_candidate(response, plan.candidate_id.as_deref()),
+            AiAttemptExecutionOutcome::Retry {
+                fallback_response: None,
+                ..
+            } => {}
         }
-        Ok(response)
+        Ok(execution)
     }
 
     async fn mark_unused_attempts(&self, attempts: Vec<T>) -> Result<(), Self::Error> {
@@ -1234,9 +1304,11 @@ async fn execute_stream_candidate_with_watchdog<Fut>(
     plan: &aether_contracts::ExecutionPlan,
     report_context: Option<&serde_json::Value>,
     execute: impl FnOnce() -> Fut,
-) -> Result<Option<Response<Body>>, GatewayError>
+) -> Result<AiAttemptExecutionOutcome<Response<Body>>, GatewayError>
 where
-    Fut: std::future::Future<Output = Result<Option<Response<Body>>, GatewayError>> + Send,
+    Fut: std::future::Future<
+            Output = Result<AiAttemptExecutionOutcome<Response<Body>>, GatewayError>,
+        > + Send,
 {
     let timeout_duration = resolve_stream_candidate_watchdog_timeout(plan, report_context);
     let candidate_started_unix_ms = current_unix_ms();
@@ -1252,7 +1324,9 @@ where
             )
             .await;
             log_stream_candidate_admission_timeout(trace_id, plan_kind, plan, report_context, &err);
-            return Ok(None);
+            return Ok(AiAttemptExecutionOutcome::retry(
+                AiAttemptRetryScope::Candidate,
+            ));
         }
         Err(err) => return Err(err),
     };
@@ -1300,7 +1374,9 @@ where
                 timeout_ms,
                 "gateway local stream candidate watchdog timed out"
             );
-            Ok(None)
+            Ok(AiAttemptExecutionOutcome::retry(
+                AiAttemptRetryScope::Candidate,
+            ))
         }
     };
     observe_gateway_stage_ms(
@@ -1308,7 +1384,21 @@ where
         watchdog_started_at.elapsed().as_millis() as u64,
     );
     match outcome {
-        Ok(response) => Ok(maybe_hold_upstream_execution_permit(response, permit_hold)),
+        Ok(AiAttemptExecutionOutcome::Responded(response)) => {
+            let response = maybe_hold_upstream_execution_permit(Some(response), permit_hold)
+                .expect("responded stream attempt must retain its response");
+            Ok(AiAttemptExecutionOutcome::Responded(response))
+        }
+        Ok(AiAttemptExecutionOutcome::Retry {
+            scope,
+            fallback_response,
+        }) => {
+            drop(permit_hold);
+            Ok(AiAttemptExecutionOutcome::Retry {
+                scope,
+                fallback_response,
+            })
+        }
         Err(err) if is_candidate_level_admission_timeout(&err) => {
             drop(permit_hold);
             if should_record_candidate_admission_timeout(&err) {
@@ -1322,7 +1412,9 @@ where
                 .await;
             }
             log_stream_candidate_admission_timeout(trace_id, plan_kind, plan, report_context, &err);
-            Ok(None)
+            Ok(AiAttemptExecutionOutcome::retry(
+                AiAttemptRetryScope::Candidate,
+            ))
         }
         Err(err) => {
             drop(permit_hold);
@@ -1605,6 +1697,14 @@ mod tests {
             Ok(Vec::new())
         }
 
+        async fn skip_credential(&mut self, _key_id: &str) -> Result<(), GatewayError> {
+            Ok(())
+        }
+
+        async fn skip_endpoint(&mut self, _endpoint_id: &str) -> Result<(), GatewayError> {
+            Ok(())
+        }
+
         async fn skip_provider(&mut self, _provider_id: &str) -> Result<(), GatewayError> {
             Ok(())
         }
@@ -1638,6 +1738,7 @@ mod tests {
     struct TransferTestPort<'a> {
         state: &'a AppState,
         tracker: ProviderTransferTracker,
+        retry_scope: AiAttemptRetryScope,
         executed: StdMutex<Vec<&'static str>>,
         unused: StdMutex<Vec<&'static str>>,
     }
@@ -1651,6 +1752,17 @@ mod tests {
             Self {
                 state,
                 tracker,
+                retry_scope: AiAttemptRetryScope::Candidate,
+                executed: StdMutex::new(Vec::new()),
+                unused: StdMutex::new(Vec::new()),
+            }
+        }
+
+        fn with_retry_scope(state: &'a AppState, retry_scope: AiAttemptRetryScope) -> Self {
+            Self {
+                state,
+                tracker: ProviderTransferTracker::default(),
+                retry_scope,
                 executed: StdMutex::new(Vec::new()),
                 unused: StdMutex::new(Vec::new()),
             }
@@ -1702,9 +1814,13 @@ mod tests {
         async fn execute_attempt(
             &self,
             attempt: &TransferTestAttempt,
-        ) -> Result<Option<Self::Response>, Self::Error> {
+        ) -> Result<AiAttemptExecutionOutcome<Self::Response>, Self::Error> {
             self.executed.lock().unwrap().push(attempt.label);
-            Ok((attempt.plan.provider_id == "provider-b").then(|| Response::new(Body::from("ok"))))
+            Ok(if attempt.plan.provider_id == "provider-b" {
+                AiAttemptExecutionOutcome::Responded(Response::new(Body::from("ok")))
+            } else {
+                AiAttemptExecutionOutcome::retry(self.retry_scope)
+            })
         }
 
         async fn mark_unused_attempts(
@@ -1749,6 +1865,18 @@ mod tests {
             &mut self,
         ) -> Result<Vec<TransferTestAttempt>, GatewayError> {
             Ok(self.attempts.drain(..).collect())
+        }
+
+        async fn skip_credential(&mut self, key_id: &str) -> Result<(), GatewayError> {
+            self.attempts
+                .retain(|attempt| attempt.plan.key_id != key_id);
+            Ok(())
+        }
+
+        async fn skip_endpoint(&mut self, endpoint_id: &str) -> Result<(), GatewayError> {
+            self.attempts
+                .retain(|attempt| attempt.plan.endpoint_id != endpoint_id);
+            Ok(())
         }
 
         async fn skip_provider(&mut self, provider_id: &str) -> Result<(), GatewayError> {
@@ -1868,6 +1996,36 @@ mod tests {
                 "a-key2-retry1",
                 "b-key1-retry0"
             ]
+        );
+        assert_eq!(source.skipped_providers, ["provider-a"]);
+    }
+
+    #[tokio::test]
+    async fn dynamic_loop_applies_provider_scoped_retry_to_candidate_source() {
+        let state = AppState::new().expect("state should build");
+        let port = TransferTestPort::with_retry_scope(&state, AiAttemptRetryScope::Provider);
+        let mut source = TransferTestAttemptSource {
+            attempts: transfer_test_attempts().into(),
+            skipped_providers: Vec::new(),
+        };
+
+        let outcome = run_dynamic_attempt_loop(
+            &port,
+            &mut source,
+            "trace-provider-scope-test",
+            "provider_scope_test",
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("dynamic attempt loop should succeed");
+
+        assert!(matches!(
+            outcome,
+            LocalExecutionRequestOutcome::Responded(_)
+        ));
+        assert_eq!(
+            port.executed.lock().unwrap().as_slice(),
+            ["a-key1-retry0", "b-key1-retry0"]
         );
         assert_eq!(source.skipped_providers, ["provider-a"]);
     }
@@ -2171,14 +2329,24 @@ mod tests {
                 "claude_cli_stream",
                 &plan,
                 Some(&report_context),
-                || std::future::pending::<Result<Option<Response<Body>>, GatewayError>>(),
+                || {
+                    std::future::pending::<
+                        Result<AiAttemptExecutionOutcome<Response<Body>>, GatewayError>,
+                    >()
+                },
             )
             .await
         });
 
         tokio::time::sleep(Duration::from_millis(40)).await;
         let result = task.await.expect("watchdog task should join");
-        assert!(matches!(result, Ok(None)));
+        assert!(matches!(
+            result,
+            Ok(AiAttemptExecutionOutcome::Retry {
+                scope: AiAttemptRetryScope::Candidate,
+                fallback_response: None,
+            })
+        ));
 
         let records = writer.records.lock().await;
         assert_eq!(records.len(), 1);
@@ -2226,7 +2394,13 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(result, Ok(None)));
+        assert!(matches!(
+            result,
+            Ok(AiAttemptExecutionOutcome::Retry {
+                scope: AiAttemptRetryScope::Candidate,
+                fallback_response: None,
+            })
+        ));
         let records = writer.records.lock().await;
         assert_eq!(records.len(), 1);
         let record = &records[0];
@@ -2268,7 +2442,13 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(result, Ok(None)));
+        assert!(matches!(
+            result,
+            Ok(AiAttemptExecutionOutcome::Retry {
+                scope: AiAttemptRetryScope::Candidate,
+                fallback_response: None,
+            })
+        ));
         assert!(writer.records.lock().await.is_empty());
     }
 }

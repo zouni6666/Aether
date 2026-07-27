@@ -1281,6 +1281,19 @@ WHERE id = ?
                 "provider catalog OAuth api_key update must not be empty".to_string(),
             ));
         }
+        if update.expected_credential.as_ref().is_some_and(|expected| {
+            expected
+                .encrypted_api_key
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
+                || expected.auth_type.trim().is_empty()
+                || expected.provider_id.trim().is_empty()
+                || expected.provider_type.trim().is_empty()
+        }) {
+            return Err(DataLayerError::InvalidInput(
+                "provider catalog OAuth credential fence must not contain empty fields".to_string(),
+            ));
+        }
         if !update.status_snapshot_patch.is_object() {
             return Err(DataLayerError::InvalidInput(
                 "provider catalog status snapshot patch must be an object".to_string(),
@@ -1335,8 +1348,24 @@ WHERE id = ?
             )
             .push(" WHERE id = ")
             .push_bind(&update.key_id)
-            .push(" AND auth_config <=> ")
+            .push(" AND BINARY auth_config <=> BINARY ")
             .push_bind(update.expected_encrypted_auth_config.as_deref());
+        if let Some(expected) = update.expected_credential.as_ref() {
+            builder
+                .push(" AND BINARY api_key <=> BINARY ")
+                .push_bind(expected.encrypted_api_key.as_deref())
+                .push(" AND BINARY auth_type = BINARY ")
+                .push_bind(&expected.auth_type)
+                .push(" AND BINARY provider_id = BINARY ")
+                .push_bind(&expected.provider_id)
+                .push(
+                    " AND EXISTS (SELECT 1 FROM providers WHERE \
+                     BINARY providers.id = BINARY provider_api_keys.provider_id \
+                     AND BINARY providers.provider_type = BINARY ",
+                )
+                .push_bind(&expected.provider_type)
+                .push(")");
+        }
         let rows_affected = builder
             .build()
             .execute(&self.pool)

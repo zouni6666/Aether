@@ -67,13 +67,28 @@ pub struct ProviderCatalogKeyStatusSnapshotUpdate {
     pub updated_at_unix_secs: Option<u64>,
 }
 
+/// Credential context observed before an OAuth refresh started. Repositories
+/// compare every field atomically with the runtime-state update so an
+/// administrator replacement cannot be overwritten by an older refresh.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ProviderCatalogKeyOAuthCredentialFence {
+    /// Exact nullable ciphertext stored in `provider_api_keys.api_key`.
+    pub encrypted_api_key: Option<String>,
+    pub auth_type: String,
+    pub provider_id: String,
+    pub provider_type: String,
+}
+
 /// Agent/runtime-owned OAuth state update fenced by the exact encrypted
-/// auth_config observed before the refresh started. Repositories must update
-/// only these fields and return `false` when the expected config changed.
+/// auth_config and, when supplied, credential context observed before the
+/// refresh started. Repositories must update only these fields and return
+/// `false` when an expected value changed.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
     pub key_id: String,
     pub expected_encrypted_auth_config: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_credential: Option<ProviderCatalogKeyOAuthCredentialFence>,
     pub encrypted_auth_config: String,
     /// Optional access-token ciphertext replacement owned by refresh success.
     #[serde(default, skip_serializing_if = "Option::is_none")]

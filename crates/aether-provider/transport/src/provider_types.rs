@@ -363,7 +363,7 @@ const GEMINI_CLI_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderT
 
 const VERTEX_AI_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplate {
     provider_type: "vertex_ai",
-    version: 1,
+    version: 2,
     base_url: "https://aiplatform.googleapis.com",
     endpoints: &[
         FixedProviderEndpointTemplate {
@@ -375,12 +375,6 @@ const VERTEX_AI_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTe
         FixedProviderEndpointTemplate {
             item_key: "gemini:embedding",
             api_format: "gemini:embedding",
-            custom_path: None,
-            config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
-        },
-        FixedProviderEndpointTemplate {
-            item_key: "claude:messages",
-            api_format: "claude:messages",
             custom_path: None,
             config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
         },
@@ -546,13 +540,13 @@ pub fn provider_type_admin_oauth_template(provider_type: &str) -> Option<Provide
     match provider_type.trim().to_ascii_lowercase().as_str() {
         "claude_code" => Some(ProviderOAuthTemplate {
             provider_type: "claude_code",
-            display_name: "ClaudeCode",
-            authorize_url: "https://claude.ai/oauth/authorize",
-            token_url: "https://console.anthropic.com/v1/oauth/token",
-            client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+            display_name: "Claude Code",
+            authorize_url: aether_oauth::provider::providers::CLAUDE_CODE_AUTHORIZE_URL,
+            token_url: aether_oauth::provider::providers::CLAUDE_CODE_TOKEN_URL,
+            client_id: aether_oauth::provider::providers::CLAUDE_CODE_CLIENT_ID,
             client_secret: "",
-            scopes: &["org:create_api_key", "user:profile", "user:inference"],
-            redirect_uri: "http://localhost:54545/callback",
+            scopes: aether_oauth::provider::providers::CLAUDE_CODE_OAUTH_SCOPES,
+            redirect_uri: aether_oauth::provider::providers::CLAUDE_CODE_REDIRECT_URI,
             use_pkce: true,
         }),
         "codex" => Some(ProviderOAuthTemplate {
@@ -936,26 +930,27 @@ mod tests {
     }
 
     #[test]
-    fn vertex_fixed_provider_template_includes_gemini_embedding_endpoint() {
+    fn vertex_fixed_provider_template_exposes_only_implemented_gemini_endpoints() {
         let template =
             fixed_provider_template("vertex_ai").expect("vertex_ai template should exist");
 
+        assert_eq!(template.version, 2);
         assert_eq!(
             template
                 .endpoints
                 .iter()
                 .map(|item| item.api_format)
                 .collect::<Vec<_>>(),
-            vec![
-                "gemini:generate_content",
-                "gemini:embedding",
-                "claude:messages",
-            ]
+            vec!["gemini:generate_content", "gemini:embedding"]
         );
 
         assert!(
             fixed_provider_endpoint_template_by_api_format("vertex_ai", "gemini:embedding")
                 .is_some()
+        );
+        assert!(
+            fixed_provider_endpoint_template_by_api_format("vertex_ai", "claude:messages")
+                .is_none()
         );
     }
 }

@@ -1,3 +1,4 @@
+use aether_ai_serving::AiAttemptRetryScope;
 use aether_contracts::{ExecutionError, ExecutionPlan, ExecutionTelemetry};
 use aether_data_contracts::repository::candidates::RequestCandidateStatus;
 use aether_scheduler_core::SchedulerRequestCandidateStatusUpdate;
@@ -14,16 +15,17 @@ use tracing::warn;
 use crate::api::response::attach_control_metadata_headers;
 use crate::clock::current_unix_ms as current_request_candidate_unix_ms;
 use crate::control::GatewayControlDecision;
+use crate::execution_runtime::ai_attempt_retry_scope_from_failure_disposition;
 use crate::execution_runtime::submission::{
     resolve_core_error_background_report_kind, submit_local_core_error_or_sync_finalize,
 };
 use crate::log_ids::short_request_id;
 use crate::orchestration::{
-    apply_local_execution_effect, resolve_local_failover_analysis_for_attempt,
-    with_upstream_response_report_context, LocalAdaptiveRateLimitEffect, LocalAttemptFailureEffect,
-    LocalExecutionEffect, LocalExecutionEffectContext, LocalFailoverAnalysis,
-    LocalFailoverDecision, LocalHealthFailureEffect, LocalOAuthInvalidationEffect,
-    LocalPoolErrorEffect,
+    apply_local_execution_effect, classify_failure_disposition,
+    resolve_local_failover_analysis_for_attempt, with_upstream_response_report_context,
+    LocalAdaptiveRateLimitEffect, LocalAttemptFailureEffect, LocalExecutionEffect,
+    LocalExecutionEffectContext, LocalFailoverAnalysis, LocalFailoverDecision,
+    LocalHealthFailureEffect, LocalOAuthInvalidationEffect, LocalPoolErrorEffect,
 };
 use crate::request_candidate_runtime::record_report_request_candidate_status;
 use crate::request_diagnostics::attach_current_request_diagnostics_to_report_context;
@@ -409,9 +411,13 @@ pub(super) async fn handle_prefetch_provider_private_stream_error(
     mut headers: std::collections::BTreeMap<String, String>,
     telemetry: Option<ExecutionTelemetry>,
     buffered_body: &[u8],
+    upstream_status_code: u16,
     status_code: u16,
     body_json: Value,
+    retry_scope_out: Option<&mut AiAttemptRetryScope>,
+    retry_fallback_out: Option<&mut Option<Response<Body>>>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
+    let upstream_headers = headers.clone();
     headers.remove("content-encoding");
     headers.remove("content-length");
     headers.insert("content-type".to_string(), "application/json".to_string());
@@ -441,6 +447,29 @@ pub(super) async fn handle_prefetch_provider_private_stream_error(
         failure_analysis.decision,
         LocalFailoverDecision::RetryNextCandidate
     ) {
+        let failure_disposition = classify_failure_disposition(
+            &plan.provider_api_format,
+            failure_analysis.classification,
+            status_code,
+        );
+        if let Some(retry_scope) = retry_scope_out {
+            *retry_scope = ai_attempt_retry_scope_from_failure_disposition(failure_disposition);
+        }
+        if failure_disposition.preserve_upstream_error {
+            if let Some(retry_fallback) = retry_fallback_out {
+                *retry_fallback = Some(attach_control_metadata_headers(
+                    crate::api::response::build_client_response_from_parts(
+                        upstream_status_code,
+                        &upstream_headers,
+                        Body::from(buffered_body.to_vec()),
+                        trace_id,
+                        Some(decision),
+                    )?,
+                    Some(request_id),
+                    candidate_id,
+                )?);
+            }
+        }
         warn!(
             event_name = "local_stream_candidate_retry_scheduled",
             log_type = "event",

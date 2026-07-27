@@ -491,17 +491,21 @@ function syncGlobalModelSelection() {
 }
 
 // 监听打开状态
-watch(() => props.open, async (isOpen) => {
-  if (isOpen && props.providerId) {
-    await loadData()
-  } else {
-    searchQuery.value = ''
-    selectedGlobalModelIds.value = new Set()
-    initialGlobalModelIds.value = new Set()
-    providerKeys.value = []
-    fetchingAutoMatchedModels.value = false
-  }
-})
+watch(
+  () => props.open,
+  async (isOpen) => {
+    if (isOpen && props.providerId) {
+      await loadData()
+    } else {
+      searchQuery.value = ''
+      selectedGlobalModelIds.value = new Set()
+      initialGlobalModelIds.value = new Set()
+      providerKeys.value = []
+      fetchingAutoMatchedModels.value = false
+    }
+  },
+  { immediate: true },
+)
 
 // 加载数据
 async function loadData() {

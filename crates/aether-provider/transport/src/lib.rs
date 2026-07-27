@@ -1,4 +1,5 @@
 mod agent_identity;
+mod anthropic_compat;
 pub mod antigravity;
 pub mod auth;
 mod auth_config;
@@ -46,6 +47,10 @@ pub use agent_identity::{
     CODEX_AGENT_IDENTITY_AUTH_MODE, CODEX_AGENT_IDENTITY_CACHED_ENTRY_PROVIDER_TYPE,
     CODEX_AGENT_IDENTITY_PROVIDER_TYPE, CODEX_AGENT_IDENTITY_TASK_REGISTRATION_REQUEST_ID,
 };
+pub use anthropic_compat::{
+    resolve_anthropic_compatibility_profile, validate_anthropic_compatibility_profile_config,
+    AnthropicCompatibilityProfile, AnthropicCompatibilityProfileConfigError,
+};
 pub use auth::{build_passthrough_headers, ensure_upstream_auth_header};
 pub use auth_config::apply_local_auth_config_header_overrides;
 pub use cache::{provider_transport_snapshot_looks_refreshed, ProviderTransportSnapshotCacheKey};
@@ -76,6 +81,7 @@ pub use gemini_files::{
     GeminiFilesRequestBodyError, GeminiFilesRequestBodyParts,
 };
 pub use generic_oauth::{
+    resolve_local_generic_oauth_transport_authorization,
     supports_local_generic_oauth_request_auth_resolution, GenericOAuthRefreshAdapter,
 };
 pub use grok::{
@@ -122,7 +128,7 @@ pub use request_url::{
     build_kiro_cross_format_upstream_url, build_local_openai_chat_upstream_url,
     build_local_openai_responses_upstream_url, build_transport_request_url,
     build_transport_request_url_for_request_body, gemini_embedding_request_body_uses_batch,
-    TransportRequestUrlParams,
+    transport_supports_api_operation, TransportRequestUrlParams,
 };
 pub use rules::{
     apply_local_body_rules, apply_local_body_rules_with_request_headers, apply_local_header_rules,
@@ -134,6 +140,8 @@ pub use same_format_provider::{
     build_same_format_provider_headers, build_same_format_provider_request_body,
     build_same_format_provider_request_body_with_compatibility_report,
     build_same_format_provider_upstream_url, classify_same_format_provider_request_behavior,
+    classify_same_format_provider_request_behavior_for_operation,
+    enforce_same_format_provider_api_operation_body_policy,
     resolve_same_format_provider_direct_auth, same_format_provider_transport_supported,
     same_format_provider_transport_unsupported_reason,
     same_format_provider_transport_unsupported_reason_for_trace,

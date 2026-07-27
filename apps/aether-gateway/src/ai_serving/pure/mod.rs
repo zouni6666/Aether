@@ -92,9 +92,12 @@ pub(crate) use aether_ai_formats::api::{
     request_conversion_requires_enable_flag, request_path_implies_stream_request,
     resolve_claude_stream_spec, resolve_claude_sync_spec,
     resolve_codex_responses_model_capabilities, resolve_execution_runtime_stream_plan_kind,
-    resolve_execution_runtime_sync_plan_kind, resolve_finalize_stream_rewrite_mode,
-    resolve_gemini_files_stream_spec, resolve_gemini_files_sync_spec, resolve_gemini_stream_spec,
-    resolve_gemini_sync_spec, resolve_local_image_stream_spec, resolve_local_image_sync_spec,
+    resolve_execution_runtime_stream_plan_kind_with_client_surface,
+    resolve_execution_runtime_sync_plan_kind,
+    resolve_execution_runtime_sync_plan_kind_with_client_surface,
+    resolve_finalize_stream_rewrite_mode, resolve_gemini_files_stream_spec,
+    resolve_gemini_files_sync_spec, resolve_gemini_stream_spec, resolve_gemini_sync_spec,
+    resolve_local_image_stream_spec, resolve_local_image_sync_spec,
     resolve_local_same_format_stream_spec, resolve_local_same_format_sync_spec,
     resolve_local_video_sync_spec, resolve_openai_chat_max_tokens,
     resolve_openai_embedding_sync_spec, resolve_openai_responses_stream_spec,
@@ -129,14 +132,15 @@ pub(crate) use aether_ai_formats::api::{
     CLAUDE_CHAT_SYNC_SUCCESS_REPORT_KIND, CLAUDE_CLI_STREAM_PLAN_KIND,
     CLAUDE_CLI_STREAM_SUCCESS_REPORT_KIND, CLAUDE_CLI_SYNC_ERROR_REPORT_KIND,
     CLAUDE_CLI_SYNC_FINALIZE_REPORT_KIND, CLAUDE_CLI_SYNC_PLAN_KIND,
-    CLAUDE_CLI_SYNC_SUCCESS_REPORT_KIND, CODEX_OPENAI_IMAGE_DEFAULT_MODEL,
-    CODEX_OPENAI_IMAGE_DEFAULT_OUTPUT_FORMAT, CODEX_OPENAI_IMAGE_DEFAULT_VARIATION_MODEL,
-    CODEX_OPENAI_IMAGE_DEFAULT_VARIATION_PROMPT, CODEX_OPENAI_IMAGE_INTERNAL_MODEL,
-    EXECUTION_RUNTIME_STREAM_ACTION, EXECUTION_RUNTIME_STREAM_DECISION_ACTION,
-    EXECUTION_RUNTIME_SYNC_ACTION, EXECUTION_RUNTIME_SYNC_DECISION_ACTION,
-    GEMINI_CHAT_STREAM_PLAN_KIND, GEMINI_CHAT_STREAM_SUCCESS_REPORT_KIND,
-    GEMINI_CHAT_SYNC_ERROR_REPORT_KIND, GEMINI_CHAT_SYNC_FINALIZE_REPORT_KIND,
-    GEMINI_CHAT_SYNC_PLAN_KIND, GEMINI_CHAT_SYNC_SUCCESS_REPORT_KIND, GEMINI_CLI_STREAM_PLAN_KIND,
+    CLAUDE_CLI_SYNC_SUCCESS_REPORT_KIND, CLAUDE_COUNT_TOKENS_SYNC_PLAN_KIND,
+    CODEX_OPENAI_IMAGE_DEFAULT_MODEL, CODEX_OPENAI_IMAGE_DEFAULT_OUTPUT_FORMAT,
+    CODEX_OPENAI_IMAGE_DEFAULT_VARIATION_MODEL, CODEX_OPENAI_IMAGE_DEFAULT_VARIATION_PROMPT,
+    CODEX_OPENAI_IMAGE_INTERNAL_MODEL, EXECUTION_RUNTIME_STREAM_ACTION,
+    EXECUTION_RUNTIME_STREAM_DECISION_ACTION, EXECUTION_RUNTIME_SYNC_ACTION,
+    EXECUTION_RUNTIME_SYNC_DECISION_ACTION, GEMINI_CHAT_STREAM_PLAN_KIND,
+    GEMINI_CHAT_STREAM_SUCCESS_REPORT_KIND, GEMINI_CHAT_SYNC_ERROR_REPORT_KIND,
+    GEMINI_CHAT_SYNC_FINALIZE_REPORT_KIND, GEMINI_CHAT_SYNC_PLAN_KIND,
+    GEMINI_CHAT_SYNC_SUCCESS_REPORT_KIND, GEMINI_CLI_STREAM_PLAN_KIND,
     GEMINI_CLI_STREAM_SUCCESS_REPORT_KIND, GEMINI_CLI_SYNC_ERROR_REPORT_KIND,
     GEMINI_CLI_SYNC_FINALIZE_REPORT_KIND, GEMINI_CLI_SYNC_PLAN_KIND,
     GEMINI_CLI_SYNC_SUCCESS_REPORT_KIND, GEMINI_CLI_V1INTERNAL_ENVELOPE_NAME,
@@ -167,5 +171,28 @@ pub(crate) use aether_ai_formats::api::{
 pub(crate) use aether_ai_formats::{
     api_format_defaults_to_client_error_failover, api_format_defaults_to_non_stream,
     api_format_permission_covers, intersect_api_format_allowed_lists, is_embedding_api_format,
-    is_rerank_api_format, openai_responses_request_operation,
+    is_rerank_api_format, openai_responses_request_operation, ApiOperation, ClientSurface,
 };
+
+pub(crate) fn plan_kind_matches_api_operation(
+    plan_kind: &str,
+    require_streaming: bool,
+    expected_operation: Option<ApiOperation>,
+) -> bool {
+    let Some(expected_operation) = expected_operation else {
+        return true;
+    };
+    if expected_operation == ApiOperation::OpenAiResponsesCompact {
+        return if require_streaming {
+            plan_kind == OPENAI_RESPONSES_COMPACT_STREAM_PLAN_KIND
+        } else {
+            plan_kind == OPENAI_RESPONSES_COMPACT_SYNC_PLAN_KIND
+        };
+    }
+    let resolved_operation = if require_streaming {
+        resolve_local_same_format_stream_spec(plan_kind).and_then(|spec| spec.operation)
+    } else {
+        resolve_local_same_format_sync_spec(plan_kind).and_then(|spec| spec.operation)
+    };
+    resolved_operation == Some(expected_operation)
+}

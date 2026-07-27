@@ -1,5 +1,7 @@
 import client from '../client'
 
+const CLAUDE_COOKIE_AUTHORIZE_TIMEOUT_MS = 4 * 60 * 1000
+
 export interface ProviderOAuthStartResponse {
   authorization_url: string
   redirect_uri: string
@@ -36,6 +38,17 @@ export interface ProviderOAuthCompleteResponseWithKey {
   detail?: string
 }
 
+export interface ProviderCookieAuthorizeRequest {
+  cookie: string
+  name?: string
+  proxy_node_id?: string
+}
+
+export interface ProviderCookieAuthorizeBatchTaskRequest {
+  cookies: string[]
+  proxy_node_id?: string
+}
+
 export interface OAuthBatchImportResultItem {
   index: number
   status: 'success' | 'error'
@@ -47,9 +60,11 @@ export interface OAuthBatchImportResultItem {
 }
 
 export type OAuthBatchImportTaskStatus = 'submitted' | 'processing' | 'completed' | 'failed'
+export type OAuthBatchImportKind = 'oauth_batch' | 'agent_identity' | 'cookie_authorize'
 
 export interface OAuthBatchImportTaskStartResponse {
   task_id: string
+  import_kind?: OAuthBatchImportKind
   status: OAuthBatchImportTaskStatus
   total: number
   processed: number
@@ -63,6 +78,7 @@ export interface OAuthBatchImportTaskStartResponse {
 
 export interface OAuthBatchImportTaskStatusResponse {
   task_id: string
+  import_kind?: OAuthBatchImportKind
   provider_id: string
   provider_type: string
   status: OAuthBatchImportTaskStatus
@@ -230,6 +246,39 @@ export async function completeProviderLevelOAuth(
   data: ProviderOAuthCompleteRequest
 ): Promise<ProviderOAuthCompleteResponseWithKey> {
   const resp = await client.post(`/api/admin/provider-oauth/providers/${providerId}/complete`, data)
+  return resp.data
+}
+
+export async function authorizeProviderWithCookie(
+  providerId: string,
+  data: ProviderCookieAuthorizeRequest
+): Promise<ProviderOAuthCompleteResponseWithKey> {
+  const resp = await client.post(
+    `/api/admin/provider-oauth/providers/${providerId}/cookie-authorize`,
+    data,
+    { timeout: CLAUDE_COOKIE_AUTHORIZE_TIMEOUT_MS },
+  )
+  return resp.data
+}
+
+export async function startProviderCookieAuthorizeTask(
+  providerId: string,
+  data: ProviderCookieAuthorizeBatchTaskRequest,
+): Promise<OAuthBatchImportTaskStartResponse> {
+  const resp = await client.post(
+    `/api/admin/provider-oauth/providers/${providerId}/cookie-authorize/tasks`,
+    data,
+  )
+  return resp.data
+}
+
+export async function getProviderCookieAuthorizeTaskStatus(
+  providerId: string,
+  taskId: string,
+): Promise<OAuthBatchImportTaskStatusResponse> {
+  const resp = await client.get(
+    `/api/admin/provider-oauth/providers/${providerId}/cookie-authorize/tasks/${taskId}`,
+  )
   return resp.data
 }
 

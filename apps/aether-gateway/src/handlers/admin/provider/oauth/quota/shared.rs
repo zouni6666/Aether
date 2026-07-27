@@ -370,6 +370,7 @@ pub(crate) async fn persist_fenced_provider_quota_refresh_state(
             &ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
                 key_id: key_id.to_string(),
                 expected_encrypted_auth_config: Some(expected_encrypted_auth_config.to_string()),
+                expected_credential: None,
                 encrypted_auth_config: expected_encrypted_auth_config.to_string(),
                 encrypted_api_key_update: None,
                 expires_at_unix_secs_update: None,

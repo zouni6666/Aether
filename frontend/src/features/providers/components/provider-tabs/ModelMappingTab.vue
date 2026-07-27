@@ -304,6 +304,7 @@
 
   <!-- 添加/编辑映射对话框 -->
   <ModelMappingDialog
+    v-if="dialogOpen"
     v-model:open="dialogOpen"
     :provider-id="provider.id"
     :models="models"

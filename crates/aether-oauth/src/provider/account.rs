@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderOAuthCapabilities {
     pub supports_authorization_code: bool,
+    pub supports_cookie_authorization: bool,
     pub supports_refresh_token_import: bool,
     pub supports_batch_import: bool,
     pub supports_device_flow: bool,
@@ -16,12 +17,27 @@ pub struct ProviderOAuthCapabilities {
 impl ProviderOAuthCapabilities {
     pub const GENERIC_AUTH_CODE: Self = Self {
         supports_authorization_code: true,
+        supports_cookie_authorization: false,
         supports_refresh_token_import: true,
         supports_batch_import: true,
         supports_device_flow: false,
         supports_account_probe: false,
         rotates_refresh_token: true,
     };
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct ProviderOAuthCookieAuthorizationInput {
+    pub session_key: String,
+}
+
+impl std::fmt::Debug for ProviderOAuthCookieAuthorizationInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderOAuthCookieAuthorizationInput")
+            .field("session_key", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

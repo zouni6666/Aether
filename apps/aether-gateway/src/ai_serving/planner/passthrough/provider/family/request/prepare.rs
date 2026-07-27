@@ -59,6 +59,7 @@ pub(super) async fn prepare_local_same_format_provider_candidate(
         &transport,
         provider_api_format,
         spec_metadata,
+        spec.operation,
     );
 
     if !same_format_provider_transport_supported(

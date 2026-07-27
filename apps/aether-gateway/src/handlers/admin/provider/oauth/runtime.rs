@@ -100,14 +100,6 @@ fn select_provider_oauth_runtime_endpoint(
                 .api_format
                 .trim()
                 .eq_ignore_ascii_case("gemini:generate_content")
-        })
-        .or_else(|| {
-            matching_endpoint(endpoints, include_inactive, |endpoint| {
-                endpoint
-                    .api_format
-                    .trim()
-                    .eq_ignore_ascii_case("claude:messages")
-            })
         }),
         _ => matching_endpoint(endpoints, include_inactive, |_| true),
     }
@@ -254,4 +246,45 @@ pub(crate) fn spawn_provider_oauth_account_state_refresh_after_update(
         )
         .await;
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        provider_oauth_maintenance_endpoint_for_provider,
+        provider_oauth_runtime_endpoint_for_provider,
+    };
+    use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogEndpoint;
+
+    fn endpoint(id: &str, api_format: &str, is_active: bool) -> StoredProviderCatalogEndpoint {
+        StoredProviderCatalogEndpoint::new(
+            id.to_string(),
+            "provider-1".to_string(),
+            api_format.to_string(),
+            None,
+            None,
+            is_active,
+        )
+        .expect("endpoint should build")
+    }
+
+    #[test]
+    fn vertex_oauth_runtime_never_falls_back_to_retired_claude_endpoint() {
+        let endpoints = vec![endpoint("claude", "claude:messages", true)];
+
+        assert!(provider_oauth_runtime_endpoint_for_provider("vertex_ai", &endpoints).is_none());
+        assert!(
+            provider_oauth_maintenance_endpoint_for_provider("vertex_ai", &endpoints).is_none()
+        );
+
+        let endpoints = vec![
+            endpoint("claude", "claude:messages", true),
+            endpoint("gemini", "gemini:generate_content", true),
+        ];
+        assert_eq!(
+            provider_oauth_runtime_endpoint_for_provider("vertex_ai", &endpoints)
+                .map(|endpoint| endpoint.id),
+            Some("gemini".to_string())
+        );
+    }
 }

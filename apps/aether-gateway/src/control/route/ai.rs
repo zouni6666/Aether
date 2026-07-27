@@ -1,7 +1,8 @@
 use super::{
-    classified, classified_with_request_auth_channel, is_claude_cli_request, is_gemini_cli_request,
-    is_gemini_models_route, is_gemini_operation_route, ClassifiedRoute,
+    classified, classified_with_request_auth_channel, detect_claude_client_surface,
+    is_gemini_cli_request, is_gemini_models_route, is_gemini_operation_route, ClassifiedRoute,
 };
+use crate::ai_serving::ApiOperation;
 
 pub(super) fn classify_ai_public_route(
     method: &http::Method,
@@ -76,27 +77,33 @@ pub(super) fn classify_ai_public_route(
             true,
         ))
     } else if method == http::Method::POST && normalized_path == "/v1/messages/count_tokens" {
-        Some(classified(
-            "ai_public",
-            "claude",
-            "count_tokens",
-            "claude:messages",
-            false,
-        ))
+        let request_auth_channel = claude_request_auth_channel(headers);
+        Some(
+            classified_with_request_auth_channel(
+                "ai_public",
+                "claude",
+                "count_tokens",
+                request_auth_channel,
+                "claude:messages",
+                true,
+            )
+            .with_client_surface(detect_claude_client_surface(headers))
+            .with_api_operation(ApiOperation::ClaudeCountTokens),
+        )
     } else if method == http::Method::POST && normalized_path == "/v1/messages" {
-        let request_auth_channel = if is_claude_cli_request(headers) {
-            "bearer_like"
-        } else {
-            "api_key"
-        };
-        Some(classified_with_request_auth_channel(
-            "ai_public",
-            "claude",
-            "messages",
-            request_auth_channel,
-            "claude:messages",
-            true,
-        ))
+        let request_auth_channel = claude_request_auth_channel(headers);
+        Some(
+            classified_with_request_auth_channel(
+                "ai_public",
+                "claude",
+                "messages",
+                request_auth_channel,
+                "claude:messages",
+                true,
+            )
+            .with_client_surface(detect_claude_client_surface(headers))
+            .with_api_operation(ApiOperation::ClaudeMessagesCreate),
+        )
     } else if normalized_path.starts_with("/v1/videos") {
         Some(classified(
             "ai_public",
@@ -175,6 +182,20 @@ pub(super) fn classify_ai_public_route(
         ))
     } else {
         None
+    }
+}
+
+fn claude_request_auth_channel(headers: &http::HeaderMap) -> &'static str {
+    if crate::headers::header_value_str(headers, "x-api-key").is_some()
+        || crate::headers::header_value_str(headers, "api-key").is_some()
+    {
+        "api_key"
+    } else if crate::headers::header_value_str(headers, http::header::AUTHORIZATION.as_str())
+        .is_some_and(|value| value.trim().to_ascii_lowercase().starts_with("bearer "))
+    {
+        "bearer_like"
+    } else {
+        "api_key"
     }
 }
 

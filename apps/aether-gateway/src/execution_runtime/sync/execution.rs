@@ -3,7 +3,7 @@ use std::io::Error as IoError;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use aether_ai_serving::UPSTREAM_IS_STREAM_KEY;
+use aether_ai_serving::{AiAttemptExecutionOutcome, AiAttemptRetryScope, UPSTREAM_IS_STREAM_KEY};
 use aether_contracts::{
     ExecutionError, ExecutionErrorKind, ExecutionPhase, ExecutionPlan, ExecutionResult,
     ExecutionTelemetry,
@@ -55,17 +55,18 @@ use crate::execution_runtime::submission::{
     resolve_local_sync_error_status_code, submit_local_core_error_or_sync_finalize,
 };
 use crate::execution_runtime::transport::{
-    build_execution_response_body, build_request_body, collect_response_headers,
-    decode_response_body_bytes, format_hyper_error_chain, format_upstream_request_error,
-    format_wreq_upstream_request_error, response_body_is_json, send_request, DirectHttpResponse,
-    DirectSyncExecutionRuntime, ExecutionRuntimeTransportError,
+    append_upstream_response_body_chunk, build_execution_response_body, build_request_body,
+    collect_response_headers, decode_response_body_bytes, execution_response_body_mode,
+    format_hyper_error_chain, format_upstream_request_error, format_wreq_upstream_request_error,
+    response_body_is_json, send_request, DirectHttpResponse, DirectSyncExecutionRuntime,
+    ExecutionRuntimeTransportError,
 };
 use crate::execution_runtime::windsurf::maybe_execute_windsurf_sync;
 use crate::execution_runtime::{
-    analyze_local_candidate_failover_sync, apply_endpoint_response_header_rules,
-    attach_provider_response_headers_to_report_context, local_failover_response_text,
-    resolve_core_sync_error_finalize_report_kind, should_fallback_to_control_sync,
-    should_finalize_sync_response, LocalFailoverDecision,
+    ai_attempt_retry_scope_from_failure_disposition, analyze_local_candidate_failover_sync,
+    apply_endpoint_response_header_rules, attach_provider_response_headers_to_report_context,
+    local_failover_response_text, resolve_core_sync_error_finalize_report_kind,
+    should_fallback_to_control_sync, should_finalize_sync_response, LocalFailoverDecision,
 };
 use crate::log_ids::short_request_id;
 use crate::orchestration::{
@@ -113,6 +114,29 @@ struct SyncExecutionFailure {
     message: String,
     status_code: Option<u16>,
     latency_ms: Option<u64>,
+    fallback_kind: Option<SyncExecutionFailureFallbackKind>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncExecutionFailureFallbackKind {
+    UpstreamResponseTooLarge,
+    UpstreamResponseDecode,
+}
+
+impl SyncExecutionFailureFallbackKind {
+    fn error_type(self) -> &'static str {
+        match self {
+            Self::UpstreamResponseTooLarge => "upstream_response_too_large",
+            Self::UpstreamResponseDecode => "upstream_response_decode_failed",
+        }
+    }
+
+    fn client_message(self) -> &'static str {
+        match self {
+            Self::UpstreamResponseTooLarge => "Upstream response too large",
+            Self::UpstreamResponseDecode => "Failed to decode upstream response",
+        }
+    }
 }
 
 struct SyncAttemptTerminalGuard {
@@ -269,11 +293,23 @@ async fn record_sync_attempt_forced_terminal_state(
 
 impl SyncExecutionFailure {
     fn from_transport(err: ExecutionRuntimeTransportError) -> Self {
+        let fallback_kind = match &err {
+            ExecutionRuntimeTransportError::UpstreamResponseTooLarge { .. } => {
+                Some(SyncExecutionFailureFallbackKind::UpstreamResponseTooLarge)
+            }
+            ExecutionRuntimeTransportError::UpstreamResponseDecode { .. } => {
+                Some(SyncExecutionFailureFallbackKind::UpstreamResponseDecode)
+            }
+            _ => None,
+        };
         Self {
-            error_type: "execution_runtime_unavailable",
+            error_type: fallback_kind
+                .map(SyncExecutionFailureFallbackKind::error_type)
+                .unwrap_or("execution_runtime_unavailable"),
             message: err.to_string(),
-            status_code: None,
+            status_code: fallback_kind.map(|_| StatusCode::BAD_GATEWAY.as_u16()),
             latency_ms: None,
+            fallback_kind,
         }
     }
 
@@ -285,8 +321,92 @@ impl SyncExecutionFailure {
             ),
             status_code: Some(StatusCode::GATEWAY_TIMEOUT.as_u16()),
             latency_ms: Some(elapsed_ms),
+            fallback_kind: None,
         }
     }
+}
+
+fn build_sync_execution_failure_fallback_body(
+    client_api_format: &str,
+    kind: SyncExecutionFailureFallbackKind,
+) -> Value {
+    let message = kind.client_message();
+    let error_type = kind.error_type();
+    match crate::ai_serving::normalize_api_format_alias(client_api_format).as_str() {
+        "claude:messages" => json!({
+            "type": "error",
+            "error": {
+                "type": "upstream_error",
+                "message": message,
+            }
+        }),
+        "gemini:generate_content" => json!({
+            "error": {
+                "code": StatusCode::BAD_GATEWAY.as_u16(),
+                "message": message,
+                "status": "BAD_GATEWAY",
+            }
+        }),
+        _ => json!({
+            "error": {
+                "type": "upstream_error",
+                "message": message,
+                "code": error_type,
+            }
+        }),
+    }
+}
+
+fn build_sync_execution_failure_fallback_response(
+    failure: &SyncExecutionFailure,
+    plan: &ExecutionPlan,
+    trace_id: &str,
+    decision: &GatewayControlDecision,
+) -> Result<Option<Response<Body>>, GatewayError> {
+    let Some(kind) = failure.fallback_kind else {
+        return Ok(None);
+    };
+    let body_json = build_sync_execution_failure_fallback_body(&plan.client_api_format, kind);
+    let body_bytes = serde_json::to_vec(&body_json)
+        .map_err(|error| GatewayError::Internal(error.to_string()))?;
+    let headers = BTreeMap::from([
+        ("content-type".to_string(), "application/json".to_string()),
+        ("content-length".to_string(), body_bytes.len().to_string()),
+    ]);
+    let response = build_client_response_from_parts(
+        StatusCode::BAD_GATEWAY.as_u16(),
+        &headers,
+        Body::from(body_bytes),
+        trace_id,
+        Some(decision),
+    )?;
+    attach_control_metadata_headers(
+        response,
+        Some(plan.request_id.as_str()),
+        plan.candidate_id.as_deref(),
+    )
+    .map(Some)
+}
+
+fn maybe_store_sync_execution_failure_fallback(
+    failure: &SyncExecutionFailure,
+    plan: &ExecutionPlan,
+    trace_id: &str,
+    decision: &GatewayControlDecision,
+    retry_scope_out: &mut Option<&mut AiAttemptRetryScope>,
+    retry_fallback_out: &mut Option<&mut Option<Response<Body>>>,
+) -> Result<(), GatewayError> {
+    if failure.fallback_kind.is_none() {
+        return Ok(());
+    }
+    if let Some(retry_scope) = retry_scope_out.as_deref_mut() {
+        *retry_scope = AiAttemptRetryScope::Candidate;
+    }
+    if let Some(retry_fallback) = retry_fallback_out.as_deref_mut() {
+        *retry_fallback =
+            build_sync_execution_failure_fallback_response(failure, plan, trace_id, decision)?;
+    }
+    Ok(())
 }
 
 struct ImplicitSyncFinalizeOutcome {
@@ -1297,11 +1417,12 @@ async fn execute_openai_image_sync_upstream_sse_candidate(
                         ),
                     )
                 })?;
+                append_upstream_response_body_chunk(&mut body_bytes, &chunk)
+                    .map_err(SyncExecutionFailure::from_transport)?;
                 let elapsed_ms = started_at.elapsed().as_millis() as u64;
                 progress
                     .observe_chunk(&chunk, status_code, elapsed_ms)
                     .await;
-                body_bytes.extend_from_slice(&chunk);
             }
         }
         DirectHttpResponse::HyperH2c(response) => {
@@ -1314,11 +1435,12 @@ async fn execute_openai_image_sync_upstream_sse_candidate(
                         )),
                     )
                 })?;
+                append_upstream_response_body_chunk(&mut body_bytes, &chunk)
+                    .map_err(SyncExecutionFailure::from_transport)?;
                 let elapsed_ms = started_at.elapsed().as_millis() as u64;
                 progress
                     .observe_chunk(&chunk, status_code, elapsed_ms)
                     .await;
-                body_bytes.extend_from_slice(&chunk);
             }
         }
         DirectHttpResponse::BrowserWreq(response) => {
@@ -1331,24 +1453,30 @@ async fn execute_openai_image_sync_upstream_sse_candidate(
                         ),
                     )
                 })?;
+                append_upstream_response_body_chunk(&mut body_bytes, &chunk)
+                    .map_err(SyncExecutionFailure::from_transport)?;
                 let elapsed_ms = started_at.elapsed().as_millis() as u64;
                 progress
                     .observe_chunk(&chunk, status_code, elapsed_ms)
                     .await;
-                body_bytes.extend_from_slice(&chunk);
             }
         }
     }
 
-    let decoded_body_bytes =
-        decode_response_body_bytes(&headers, &body_bytes).unwrap_or_else(|| body_bytes.clone());
+    let decoded_body_bytes = decode_response_body_bytes(&headers, &body_bytes)
+        .map_err(SyncExecutionFailure::from_transport)?;
     let elapsed_ms = started_at.elapsed().as_millis() as u64;
     let upstream_bytes = body_bytes.len() as u64;
     progress.finish(status_code, elapsed_ms).await;
 
-    let body =
-        build_execution_response_body(&headers, &body_bytes, &decoded_body_bytes, plan.stream)
-            .map_err(SyncExecutionFailure::from_transport)?;
+    let body = build_execution_response_body(
+        &headers,
+        &body_bytes,
+        decoded_body_bytes.as_ref(),
+        plan.stream,
+        execution_response_body_mode(plan),
+    )
+    .map_err(SyncExecutionFailure::from_transport)?;
 
     Ok(ExecutionResult {
         request_id: plan.request_id.clone(),
@@ -1451,6 +1579,8 @@ fn build_openai_image_sync_json_heartbeat_response(
                 report_context,
                 false,
                 Some(progress_snapshot),
+                None,
+                None,
             )
             .await,
         )
@@ -1631,8 +1761,47 @@ pub(crate) async fn execute_execution_runtime_sync(
         report_context,
         true,
         None,
+        None,
+        None,
     )
     .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn execute_execution_runtime_sync_with_retry_scope(
+    state: &AppState,
+    request_path: &str,
+    plan: ExecutionPlan,
+    trace_id: &str,
+    decision: &GatewayControlDecision,
+    plan_kind: &str,
+    report_kind: Option<String>,
+    report_context: Option<serde_json::Value>,
+) -> Result<AiAttemptExecutionOutcome<Response<Body>>, GatewayError> {
+    let mut retry_scope = AiAttemptRetryScope::Candidate;
+    let mut fallback_response = None;
+    let response = execute_execution_runtime_sync_impl(
+        state,
+        request_path,
+        plan,
+        trace_id,
+        decision,
+        plan_kind,
+        report_kind,
+        report_context,
+        true,
+        None,
+        Some(&mut retry_scope),
+        Some(&mut fallback_response),
+    )
+    .await?;
+    Ok(match response {
+        Some(response) => AiAttemptExecutionOutcome::Responded(response),
+        None => AiAttemptExecutionOutcome::Retry {
+            scope: retry_scope,
+            fallback_response,
+        },
+    })
 }
 
 #[allow(clippy::too_many_arguments)] // internal function, grouping would add unnecessary indirection
@@ -1647,6 +1816,8 @@ async fn execute_execution_runtime_sync_impl(
     mut report_context: Option<serde_json::Value>,
     allow_json_heartbeat: bool,
     progress_snapshot: Option<Arc<Mutex<OpenAiImageSyncProgressSnapshot>>>,
+    mut retry_scope_out: Option<&mut AiAttemptRetryScope>,
+    mut retry_fallback_out: Option<&mut Option<Response<Body>>>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
     if allow_json_heartbeat
         && should_enable_openai_image_sync_json_heartbeat(plan_kind, &plan, report_context.as_ref())
@@ -1751,6 +1922,14 @@ async fn execute_execution_runtime_sync_impl(
                     {
                         Ok(result) => result,
                         Err(err) => {
+                            maybe_store_sync_execution_failure_fallback(
+                                &err,
+                                &plan,
+                                trace_id,
+                                decision,
+                                &mut retry_scope_out,
+                                &mut retry_fallback_out,
+                            )?;
                             warn!(
                                 event_name = "sync_execution_runtime_unavailable",
                                 log_type = "ops",
@@ -1932,6 +2111,14 @@ async fn execute_execution_runtime_sync_impl(
                     {
                         Ok(result) => result,
                         Err(err) => {
+                            maybe_store_sync_execution_failure_fallback(
+                                &err,
+                                &plan,
+                                trace_id,
+                                decision,
+                                &mut retry_scope_out,
+                                &mut retry_fallback_out,
+                            )?;
                             warn!(
                                 event_name = "sync_execution_runtime_unavailable",
                                 log_type = "ops",
@@ -2256,6 +2443,38 @@ async fn execute_execution_runtime_sync_impl(
         local_failover_analysis.decision,
         LocalFailoverDecision::RetryNextCandidate
     ) {
+        let failure_disposition = crate::orchestration::classify_failure_disposition(
+            &plan.provider_api_format,
+            local_failover_analysis.classification,
+            result.status_code,
+        );
+        if let Some(retry_scope) = retry_scope_out.as_deref_mut() {
+            *retry_scope =
+                ai_attempt_retry_scope_from_failure_disposition(failure_disposition);
+        }
+        if failure_disposition.preserve_upstream_error {
+            if let Some(retry_fallback) = retry_fallback_out.as_deref_mut() {
+                let mut fallback_headers = headers.clone();
+                apply_endpoint_response_header_rules(
+                    state,
+                    &plan,
+                    &mut fallback_headers,
+                    body_json.as_ref(),
+                )
+                .await?;
+                *retry_fallback = Some(attach_control_metadata_headers(
+                    build_client_response_from_parts(
+                        result.status_code,
+                        &fallback_headers,
+                        Body::from(body_bytes.clone()),
+                        trace_id,
+                        Some(decision),
+                    )?,
+                    Some(plan.request_id.as_str()),
+                    plan.candidate_id.as_deref(),
+                )?);
+            }
+        }
         let terminal_unix_secs = current_request_candidate_unix_ms();
         let error_trace_report_context = with_sync_error_trace_context(
             report_context.as_ref(),
@@ -2907,6 +3126,60 @@ mod tests {
             Some("openai:chat".to_string()),
         )
         .with_execution_runtime_candidate(true)
+    }
+
+    #[tokio::test]
+    async fn oversized_upstream_response_builds_claude_502_retry_fallback() {
+        let mut plan = test_openai_image_plan(false);
+        plan.client_api_format = "claude:messages".to_string();
+        plan.provider_api_format = "claude:messages".to_string();
+        let decision = GatewayControlDecision::synthetic(
+            "/v1/messages",
+            Some("ai_public".to_string()),
+            Some("claude".to_string()),
+            Some("messages".to_string()),
+            Some("claude:messages".to_string()),
+        )
+        .with_execution_runtime_candidate(true);
+        let failure = SyncExecutionFailure::from_transport(
+            ExecutionRuntimeTransportError::UpstreamResponseTooLarge {
+                phase: crate::execution_runtime::transport::UpstreamResponseBodyPhase::Wire,
+                limit_bytes: 8,
+            },
+        );
+
+        assert_eq!(failure.status_code, Some(StatusCode::BAD_GATEWAY.as_u16()));
+        assert_eq!(
+            failure.fallback_kind,
+            Some(SyncExecutionFailureFallbackKind::UpstreamResponseTooLarge)
+        );
+        let mut retry_scope = AiAttemptRetryScope::Provider;
+        let mut retry_fallback = None;
+        {
+            let mut retry_scope_out = Some(&mut retry_scope);
+            let mut retry_fallback_out = Some(&mut retry_fallback);
+            maybe_store_sync_execution_failure_fallback(
+                &failure,
+                &plan,
+                "trace-too-large",
+                &decision,
+                &mut retry_scope_out,
+                &mut retry_fallback_out,
+            )
+            .expect("fallback response should build");
+        }
+
+        assert_eq!(retry_scope, AiAttemptRetryScope::Candidate);
+        let response = retry_fallback.expect("oversized response should provide a fallback");
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = to_bytes(response.into_body(), 1024)
+            .await
+            .expect("fallback body should read");
+        let body: Value = serde_json::from_slice(&body).expect("fallback body should be json");
+        assert_eq!(body["type"], "error");
+        assert_eq!(body["error"]["type"], "upstream_error");
+        assert_eq!(body["error"]["message"], "Upstream response too large");
     }
 
     fn test_kiro_sync_plan() -> ExecutionPlan {

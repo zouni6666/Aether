@@ -1,6 +1,6 @@
 use aether_ai_serving::{
     run_ai_stream_execution_path, AiPlanFallbackReason, AiServingExecutionOutcome,
-    AiStreamExecutionPathPort, AiStreamExecutionStep,
+    AiStreamExecutionPathPort, AiStreamExecutionStep, OriginalRequestPayload,
 };
 use async_trait::async_trait;
 use axum::body::{Body, Bytes};
@@ -59,6 +59,21 @@ pub(crate) async fn maybe_execute_via_stream_decision_path(
         );
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
+    let mut planning_parts = parts.clone();
+    if crate::ai_serving::is_json_request(&planning_parts.headers) {
+        if let Ok(decoded_body) = crate::ai_serving::decoded_request_body_bytes(
+            &planning_parts.headers,
+            body_bytes.as_ref(),
+        ) {
+            planning_parts
+                .extensions
+                .insert(OriginalRequestPayload::from_parsed_json(
+                    body_json.clone(),
+                    decoded_body.as_ref(),
+                ));
+        }
+    }
+    let parts = &planning_parts;
     observe_gateway_stage_ms(
         "frontdoor_stream_parse",
         parse_started_at.elapsed().as_millis() as u64,
@@ -422,7 +437,11 @@ fn to_ai_serving_outcome(
 ) -> AiServingExecutionOutcome<Response<Body>, super::LocalExecutionExhaustion> {
     match outcome {
         LocalExecutionRequestOutcome::Responded(response) => {
-            AiServingExecutionOutcome::Responded(response)
+            if super::is_deferred_upstream_response(&response) {
+                AiServingExecutionOutcome::Deferred(response)
+            } else {
+                AiServingExecutionOutcome::Responded(response)
+            }
         }
         LocalExecutionRequestOutcome::Exhausted(outcome) => {
             AiServingExecutionOutcome::Exhausted(outcome)
@@ -436,6 +455,9 @@ fn from_ai_serving_outcome(
 ) -> LocalExecutionRequestOutcome {
     match outcome {
         AiServingExecutionOutcome::Responded(response) => {
+            LocalExecutionRequestOutcome::Responded(response)
+        }
+        AiServingExecutionOutcome::Deferred(response) => {
             LocalExecutionRequestOutcome::Responded(response)
         }
         AiServingExecutionOutcome::Exhausted(outcome) => {

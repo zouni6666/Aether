@@ -892,6 +892,15 @@ WHERE id = $1
                 .encrypted_api_key_update
                 .as_deref()
                 .is_some_and(|value| value.trim().is_empty())
+            || update.expected_credential.as_ref().is_some_and(|expected| {
+                expected
+                    .encrypted_api_key
+                    .as_deref()
+                    .is_some_and(|value| value.trim().is_empty())
+                    || expected.auth_type.trim().is_empty()
+                    || expected.provider_id.trim().is_empty()
+                    || expected.provider_type.trim().is_empty()
+            })
             || !update.status_snapshot_patch.is_object()
             || update
                 .upstream_metadata_patch
@@ -934,6 +943,18 @@ SET
   END
 WHERE id = $1
   AND auth_config IS NOT DISTINCT FROM $12
+  AND ($13::boolean IS FALSE OR api_key IS NOT DISTINCT FROM $14)
+  AND ($15::text IS NULL OR auth_type = $15)
+  AND ($16::text IS NULL OR provider_id = $16)
+  AND (
+    $17::text IS NULL
+    OR EXISTS (
+      SELECT 1
+      FROM providers
+      WHERE providers.id = provider_api_keys.provider_id
+        AND providers.provider_type = $17
+    )
+  )
 "#,
         )
         .bind(&update.key_id)
@@ -953,6 +974,31 @@ WHERE id = $1
         .bind(update.reset_error_count)
         .bind(update.updated_at_unix_secs.map(|value| value as f64))
         .bind(update.expected_encrypted_auth_config.as_deref())
+        .bind(update.expected_credential.is_some())
+        .bind(
+            update
+                .expected_credential
+                .as_ref()
+                .and_then(|expected| expected.encrypted_api_key.as_deref()),
+        )
+        .bind(
+            update
+                .expected_credential
+                .as_ref()
+                .map(|expected| expected.auth_type.as_str()),
+        )
+        .bind(
+            update
+                .expected_credential
+                .as_ref()
+                .map(|expected| expected.provider_id.as_str()),
+        )
+        .bind(
+            update
+                .expected_credential
+                .as_ref()
+                .map(|expected| expected.provider_type.as_str()),
+        )
         .execute(&self.pool)
         .await
         .map_postgres_err()?

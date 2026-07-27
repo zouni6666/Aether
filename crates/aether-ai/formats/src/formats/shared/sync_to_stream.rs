@@ -1814,6 +1814,12 @@ mod tests {
             "event: message_stop\n",
             "data: {\"type\":\"message_stop\"}\n\n",
         );
+        let report_context = json!({
+            "provider_api_format": "claude:messages",
+            "client_api_format": "claude:messages",
+            "needs_conversion": false,
+            "anthropic_compatibility_profile": "claude_code_legacy",
+        });
         let outcome = maybe_bridge_standard_sync_json_to_stream(
             &json!({
                 "status_code": 200,
@@ -1825,7 +1831,7 @@ mod tests {
             }),
             "openai:responses",
             "claude:messages",
-            None,
+            Some(&report_context),
         )
         .expect("bridge should succeed")
         .expect("capture should bridge");

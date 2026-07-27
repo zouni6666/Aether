@@ -1,31 +1,15 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
+use regex::Regex;
 use serde_json::{Map, Value};
 
 use super::super::auth::build_openai_passthrough_headers;
-use super::fingerprint::header_fingerprint_from_fingerprint;
+use super::profile::{
+    current_claude_code_transport_identity_profile, ClaudeCodeTransportIdentityProfile,
+};
 
-const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
-const DEFAULT_ACCEPT: &str = "application/json";
-const STREAM_HELPER_METHOD: &str = "stream";
 const DUMMY_THINKING_SIGNATURE: &str = "skip_thought_signature_validator";
-const REQUIRED_BETA_TOKENS: &[&str] = &[
-    "claude-code-20250219",
-    "oauth-2025-04-20",
-    "interleaved-thinking-2025-05-14",
-];
-const EXCLUDED_BETA_TOKENS: &[&str] = &["context-1m-2025-08-07"];
-
-/// Fingerprint field -> HTTP header mapping.
-/// Every stainless / identity dimension that can vary per-key is listed here.
-const FINGERPRINT_HEADER_MAP: &[(&str, &str)] = &[
-    ("stainless_package_version", "x-stainless-package-version"),
-    ("stainless_os", "x-stainless-os"),
-    ("stainless_arch", "x-stainless-arch"),
-    ("stainless_runtime_version", "x-stainless-runtime-version"),
-    ("stainless_timeout", "x-stainless-timeout"),
-    ("user_agent", "user-agent"),
-];
 
 pub fn build_claude_code_passthrough_headers(
     headers: &http::HeaderMap,
@@ -33,7 +17,6 @@ pub fn build_claude_code_passthrough_headers(
     auth_value: &str,
     extra_headers: &BTreeMap<String, String>,
     stream: bool,
-    fingerprint: Option<&Value>,
 ) -> BTreeMap<String, String> {
     let mut out = build_openai_passthrough_headers(
         headers,
@@ -43,77 +26,58 @@ pub fn build_claude_code_passthrough_headers(
         Some("application/json"),
     );
 
-    // -- Anthropic protocol headers --
-    out.insert("accept".to_string(), DEFAULT_ACCEPT.to_string());
-    out.insert(
-        "anthropic-version".to_string(),
-        DEFAULT_ANTHROPIC_VERSION.to_string(),
-    );
-    // Read incoming anthropic-beta directly from the original HeaderMap because the
-    // upstream passthrough filter now strips `anthropic-*` headers to avoid leaking
-    // them to non-Anthropic upstreams.
-    let incoming_anthropic_beta = headers
+    // The common passthrough filter intentionally strips Anthropic identity
+    // headers. Restore only the client beta input; the versioned profile owns
+    // all fixed identity values and the final beta policy.
+    let mut incoming_beta_values = headers
         .get("anthropic-beta")
-        .and_then(|value| value.to_str().ok());
-    out.insert(
-        "anthropic-beta".to_string(),
-        merge_anthropic_beta_tokens(incoming_anthropic_beta),
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    incoming_beta_values.extend(
+        extra_headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("anthropic-beta"))
+            .map(|(_, value)| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
     );
-    out.insert(
-        "anthropic-dangerous-direct-browser-access".to_string(),
-        "true".to_string(),
-    );
-    out.insert("x-app".to_string(), "cli".to_string());
-
-    // -- Stainless SDK identity headers --
-    // Fixed values: these don't vary per fingerprint.
-    out.insert("x-stainless-lang".to_string(), "js".to_string());
-    out.insert("x-stainless-runtime".to_string(), "node".to_string());
-    out.insert("x-stainless-retry-count".to_string(), "0".to_string());
-
-    // Defaults for fingerprint-overridable fields (used when no fingerprint is present).
-    out.insert(
-        "x-stainless-package-version".to_string(),
-        "0.70.0".to_string(),
-    );
-    out.insert("x-stainless-os".to_string(), "Linux".to_string());
-    out.insert("x-stainless-arch".to_string(), "arm64".to_string());
-    out.insert(
-        "x-stainless-runtime-version".to_string(),
-        "v24.13.0".to_string(),
-    );
-    out.insert("x-stainless-timeout".to_string(), "600".to_string());
-
-    if stream {
-        out.insert(
-            "x-stainless-helper-method".to_string(),
-            STREAM_HELPER_METHOD.to_string(),
-        );
-    } else {
-        out.remove("x-stainless-helper-method");
+    if !incoming_beta_values.is_empty() {
+        out.insert("anthropic-beta".to_string(), incoming_beta_values.join(","));
     }
 
-    // Override from the formal transport profile header fingerprint.
-    if let Some(fp) = fingerprint.and_then(header_fingerprint_from_fingerprint) {
-        for &(fp_key, header_key) in FINGERPRINT_HEADER_MAP {
-            if let Some(value) = fp
-                .get(fp_key)
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-            {
-                out.insert(header_key.to_string(), value.to_string());
-            }
-        }
-    }
+    let profile = *current_claude_code_transport_identity_profile();
+    profile.apply_fixed_headers(&mut out, stream);
+    profile.apply_beta_policy(&mut out, None);
 
     out
 }
 
 pub fn sanitize_claude_code_request_body(body: &mut Value) {
+    let profile = *current_claude_code_transport_identity_profile();
+    let beta_header = profile.merge_beta_tokens(None, None);
+    sanitize_claude_code_request_body_for_beta_header(body, &beta_header, profile);
+}
+
+pub fn sanitize_claude_code_request_body_for_beta_header(
+    body: &mut Value,
+    beta_header: &str,
+    profile: ClaudeCodeTransportIdentityProfile,
+) {
     let Some(body_object) = body.as_object_mut() else {
         return;
     };
+
+    synchronize_billing_header_version(body_object, profile.billing_cli_version());
+    for gate in profile.body_capability_gates() {
+        if !profile.beta_header_enables_body_field(beta_header, gate.body_field) {
+            body_object.remove(gate.body_field);
+        }
+    }
+
     let thinking_enabled = body_object
         .get("thinking")
         .and_then(Value::as_object)
@@ -121,6 +85,26 @@ pub fn sanitize_claude_code_request_body(body: &mut Value) {
         .and_then(Value::as_str)
         .map(str::trim)
         .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "enabled" | "adaptive"));
+
+    if let Some(gate) = profile.body_capability_gate("context_management") {
+        if thinking_enabled
+            && gate.inject_when_thinking_enabled
+            && profile.beta_header_enables_body_field(beta_header, gate.body_field)
+            && !body_object.contains_key(gate.body_field)
+        {
+            if let Some(default_edit_type) = gate.default_edit_type {
+                body_object.insert(
+                    gate.body_field.to_string(),
+                    serde_json::json!({
+                        "edits": [{
+                            "type": default_edit_type,
+                            "keep": "all"
+                        }]
+                    }),
+                );
+            }
+        }
+    }
 
     let Some(messages) = body_object
         .get_mut("messages")
@@ -160,6 +144,37 @@ pub fn sanitize_claude_code_request_body(body: &mut Value) {
     }
 }
 
+fn synchronize_billing_header_version(body: &mut Map<String, Value>, cli_version: &str) {
+    static CC_VERSION: OnceLock<Regex> = OnceLock::new();
+    let Some(system) = body.get_mut("system").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let regex = CC_VERSION.get_or_init(|| {
+        Regex::new(r"cc_version=\d+\.\d+\.\d+").expect("billing version regex must compile")
+    });
+    let replacement = format!("cc_version={cli_version}");
+
+    for block in system {
+        let Some(block) = block.as_object_mut() else {
+            continue;
+        };
+        let Some(text) = block
+            .get("text")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+        else {
+            continue;
+        };
+        if !text.starts_with("x-anthropic-billing-header") {
+            continue;
+        }
+        let updated = regex.replace_all(&text, replacement.as_str());
+        if updated != text {
+            block.insert("text".to_string(), Value::String(updated.into_owned()));
+        }
+    }
+}
+
 fn keep_claude_code_block(
     block_object: &Map<String, Value>,
     role: &str,
@@ -187,46 +202,18 @@ fn keep_claude_code_block(
     true
 }
 
-fn merge_anthropic_beta_tokens(incoming: Option<&str>) -> String {
-    let mut seen = BTreeSet::new();
-    let mut merged = Vec::new();
-
-    for token in REQUIRED_BETA_TOKENS {
-        append_beta_token(&mut seen, &mut merged, token);
-    }
-    for token in incoming.unwrap_or_default().split(',') {
-        let token = token.trim();
-        if EXCLUDED_BETA_TOKENS
-            .iter()
-            .any(|excluded| token.eq_ignore_ascii_case(excluded))
-        {
-            continue;
-        }
-        append_beta_token(&mut seen, &mut merged, token);
-    }
-
-    merged.join(",")
-}
-
-fn append_beta_token(seen: &mut BTreeSet<String>, merged: &mut Vec<String>, token: &str) {
-    let normalized = token.trim();
-    if normalized.is_empty() {
-        return;
-    }
-    let key = normalized.to_ascii_lowercase();
-    if seen.insert(key) {
-        merged.push(normalized.to_string());
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{build_claude_code_passthrough_headers, sanitize_claude_code_request_body};
+    use super::{
+        build_claude_code_passthrough_headers, sanitize_claude_code_request_body,
+        sanitize_claude_code_request_body_for_beta_header,
+    };
+    use crate::claude_code::current_claude_code_transport_identity_profile;
     use serde_json::json;
     use std::collections::BTreeMap;
 
     #[test]
-    fn claude_code_headers_use_transport_profile_header_fingerprint_and_merge_required_betas() {
+    fn claude_code_headers_use_versioned_identity_and_merge_preserved_betas() {
         let mut headers = http::HeaderMap::new();
         headers.insert(
             "anthropic-beta",
@@ -242,23 +229,12 @@ mod tests {
             "Bearer upstream-token",
             &BTreeMap::new(),
             true,
-            Some(&json!({
-                "transport_profile": {
-                    "profile_id": "claude_code_nodejs",
-                    "header_fingerprint": {
-                        "user_agent":"Claude-Code/9.9",
-                        "stainless_package_version":"1.0.5",
-                        "stainless_runtime_version":"v22.12.0",
-                        "stainless_timeout":"900"
-                    }
-                }
-            })),
         );
 
         assert_eq!(
             built.get("anthropic-beta").map(String::as_str),
             Some(
-                "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,custom-beta"
+                "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,effort-2025-11-24,context-management-2025-06-27,extended-cache-ttl-2025-04-11,context-1m-2025-08-07,custom-beta"
             )
         );
         assert_eq!(
@@ -276,19 +252,19 @@ mod tests {
         assert_eq!(built.get("x-app").map(String::as_str), Some("cli"));
         assert_eq!(
             built.get("x-stainless-package-version").map(String::as_str),
-            Some("1.0.5")
+            Some("0.94.0")
         );
         assert_eq!(
             built.get("x-stainless-runtime-version").map(String::as_str),
-            Some("v22.12.0")
+            Some("v24.3.0")
         );
         assert_eq!(
             built.get("x-stainless-timeout").map(String::as_str),
-            Some("900")
+            Some("600")
         );
         assert_eq!(
             built.get("user-agent").map(String::as_str),
-            Some("Claude-Code/9.9")
+            Some("claude-cli/2.1.161 (external, cli)")
         );
         assert_eq!(
             built.get("authorization").map(String::as_str),
@@ -322,6 +298,76 @@ mod tests {
                 {"type":"redacted_thinking","data":"keep-redacted","signature":"sig_redacted"},
                 {"type":"text","text":"ok"}
             ])
+        );
+    }
+
+    #[test]
+    fn context_management_body_is_gated_by_the_matching_beta_token() {
+        let profile = *current_claude_code_transport_identity_profile();
+        let original = json!({
+            "context_management": {
+                "edits": [{"type":"clear_thinking_20251015", "keep":"all"}]
+            },
+            "messages": []
+        });
+
+        let mut without_beta = original.clone();
+        sanitize_claude_code_request_body_for_beta_header(
+            &mut without_beta,
+            "oauth-2025-04-20",
+            profile,
+        );
+        assert!(without_beta.get("context_management").is_none());
+
+        let mut with_beta = original.clone();
+        sanitize_claude_code_request_body_for_beta_header(
+            &mut with_beta,
+            "oauth-2025-04-20, context-management-2025-06-27",
+            profile,
+        );
+        assert_eq!(with_beta, original);
+    }
+
+    #[test]
+    fn default_profile_keeps_header_and_injected_context_management_in_sync() {
+        let headers = build_claude_code_passthrough_headers(
+            &http::HeaderMap::new(),
+            "authorization",
+            "Bearer upstream-token",
+            &BTreeMap::new(),
+            false,
+        );
+        let mut body = json!({
+            "thinking": {"type":"adaptive"},
+            "messages": []
+        });
+
+        sanitize_claude_code_request_body(&mut body);
+
+        assert!(headers["anthropic-beta"]
+            .split(',')
+            .any(|token| token == "context-management-2025-06-27"));
+        assert_eq!(
+            body["context_management"],
+            json!({"edits":[{"type":"clear_thinking_20251015", "keep":"all"}]})
+        );
+    }
+
+    #[test]
+    fn billing_attribution_uses_the_profile_cli_version() {
+        let mut body = json!({
+            "system": [{
+                "type":"text",
+                "text":"x-anthropic-billing-header: cc_version=2.0.0.abc; cc_entrypoint=cli;"
+            }],
+            "messages": []
+        });
+
+        sanitize_claude_code_request_body(&mut body);
+
+        assert_eq!(
+            body["system"][0]["text"],
+            "x-anthropic-billing-header: cc_version=2.1.161.abc; cc_entrypoint=cli;"
         );
     }
 }

@@ -13,6 +13,7 @@ pub const GEMINI_VIDEO_CREATE_SYNC_PLAN_KIND: &str = "gemini_video_create_sync";
 pub const GEMINI_VIDEO_CANCEL_SYNC_PLAN_KIND: &str = "gemini_video_cancel_sync";
 pub const OPENAI_CHAT_STREAM_PLAN_KIND: &str = "openai_chat_stream";
 pub const CLAUDE_CHAT_STREAM_PLAN_KIND: &str = "claude_chat_stream";
+pub const CLAUDE_COUNT_TOKENS_SYNC_PLAN_KIND: &str = "claude_count_tokens_sync";
 pub const GEMINI_CHAT_STREAM_PLAN_KIND: &str = "gemini_chat_stream";
 pub const GEMINI_INTERACTIONS_STREAM_PLAN_KIND: &str = "gemini_interactions_stream";
 pub const OPENAI_RESPONSES_STREAM_PLAN_KIND: &str = "openai_responses_stream";

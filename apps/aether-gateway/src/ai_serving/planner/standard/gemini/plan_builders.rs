@@ -1,12 +1,10 @@
 use std::collections::BTreeMap;
 
-use aether_contracts::RequestBody;
-
 use super::{
     augment_sync_report_context, build_ai_execution_plan_from_decision,
-    generic_decision_missing_exact_provider_request, take_ai_decision_plan_core,
-    take_ai_upstream_auth_pair, take_non_empty_string, AiExecutionPlanFromDecisionParts,
-    AiStreamAttempt, AiSyncAttempt,
+    generic_decision_missing_exact_provider_request, resolve_ai_passthrough_sync_request_body,
+    take_ai_decision_plan_core, take_ai_upstream_auth_pair, take_non_empty_string,
+    AiExecutionPlanFromDecisionParts, AiStreamAttempt, AiSyncAttempt,
 };
 use crate::ai_serving::transport::{
     build_standard_plan_fallback_headers, StandardPlanFallbackAcceptPolicy,
@@ -61,6 +59,10 @@ pub(crate) fn build_gemini_sync_plan_from_decision(
         &provider_request_headers,
         &provider_request_body_value,
     )?;
+    let request_body = resolve_ai_passthrough_sync_request_body(
+        Some(provider_request_body_value),
+        payload.provider_request_body_base64.take(),
+    );
     let stream = payload.upstream_is_stream;
     let plan = build_ai_execution_plan_from_decision(
         &mut payload,
@@ -70,7 +72,7 @@ pub(crate) fn build_gemini_sync_plan_from_decision(
             url,
             headers: std::mem::take(&mut provider_request_headers),
             content_type,
-            body: RequestBody::from_json(provider_request_body_value),
+            body: request_body,
             stream,
         },
     );
@@ -129,6 +131,10 @@ pub(crate) fn build_gemini_stream_plan_from_decision(
         &provider_request_headers,
         &provider_request_body_value,
     )?;
+    let request_body = resolve_ai_passthrough_sync_request_body(
+        Some(provider_request_body_value),
+        payload.provider_request_body_base64.take(),
+    );
     let plan = build_ai_execution_plan_from_decision(
         &mut payload,
         AiExecutionPlanFromDecisionParts {
@@ -137,7 +143,7 @@ pub(crate) fn build_gemini_stream_plan_from_decision(
             url,
             headers: std::mem::take(&mut provider_request_headers),
             content_type,
-            body: RequestBody::from_json(provider_request_body_value),
+            body: request_body,
             stream: true,
         },
     );

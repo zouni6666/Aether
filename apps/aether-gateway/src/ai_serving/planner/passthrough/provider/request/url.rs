@@ -24,6 +24,7 @@ pub(crate) fn build_same_format_upstream_url(
             upstream_is_stream,
             request_query: parts.uri.query(),
             kiro_api_region: kiro_auth.map(|auth| auth.auth_config.effective_api_region()),
+            api_operation: spec.operation,
             provider_request_body,
         },
     )

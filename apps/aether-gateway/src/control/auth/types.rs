@@ -1,11 +1,31 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum GatewayCredentialCarrier {
+pub(crate) enum GatewayCredentialCarrier {
     AuthorizationBearer,
     XApiKey,
     ApiKey,
     XGoogApiKey,
     QueryKey,
     CookieHeader,
+}
+
+impl GatewayCredentialCarrier {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::AuthorizationBearer => "authorization_bearer",
+            Self::XApiKey => "x_api_key",
+            Self::ApiKey => "api_key",
+            Self::XGoogApiKey => "x_goog_api_key",
+            Self::QueryKey => "query_key",
+            Self::CookieHeader => "cookie_header",
+        }
+    }
+
+    pub(crate) const fn request_auth_channel(self) -> &'static str {
+        match self {
+            Self::AuthorizationBearer | Self::CookieHeader => "bearer_like",
+            Self::XApiKey | Self::ApiKey | Self::XGoogApiKey | Self::QueryKey => "api_key",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

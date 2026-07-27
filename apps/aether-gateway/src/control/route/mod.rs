@@ -1,5 +1,6 @@
 use axum::http::Uri;
 
+use crate::ai_serving::{ApiOperation, ClientSurface};
 use crate::headers::header_value_str;
 use crate::{AppState, GatewayError};
 
@@ -9,7 +10,10 @@ mod internal;
 mod oauth;
 mod public_support;
 
-use super::auth::{resolve_control_decision_auth, ControlDecisionAuthResolution};
+use super::auth::{
+    resolve_control_decision_auth, resolve_gateway_credential_carrier,
+    ControlDecisionAuthResolution, GatewayCredentialCarrier,
+};
 use super::{GatewayAdminPrincipalContext, GatewayControlAuthContext, GatewayLocalAuthRejection};
 
 #[derive(Debug, Clone)]
@@ -19,6 +23,9 @@ pub(crate) struct GatewayControlDecision {
     pub(crate) route_class: Option<String>,
     pub(crate) route_family: Option<String>,
     pub(crate) route_kind: Option<String>,
+    pub(crate) client_surface: Option<ClientSurface>,
+    pub(crate) api_operation: Option<ApiOperation>,
+    pub(crate) gateway_credential_carrier: Option<GatewayCredentialCarrier>,
     pub(crate) request_auth_channel: Option<String>,
     pub(crate) auth_endpoint_signature: Option<String>,
     pub(crate) execution_runtime_candidate: bool,
@@ -42,6 +49,9 @@ impl GatewayControlDecision {
             route_class,
             route_family,
             route_kind,
+            client_surface: None,
+            api_operation: None,
+            gateway_credential_carrier: None,
             request_auth_channel: None,
             auth_endpoint_signature,
             execution_runtime_candidate: false,
@@ -80,6 +90,8 @@ pub(super) struct ClassifiedRoute {
     route_family: &'static str,
     route_kind: &'static str,
     request_auth_channel: Option<&'static str>,
+    client_surface: Option<ClientSurface>,
+    api_operation: Option<ApiOperation>,
     auth_endpoint_signature: String,
     execution_runtime_candidate: bool,
 }
@@ -96,6 +108,8 @@ pub(super) fn classified(
         route_family,
         route_kind,
         request_auth_channel: None,
+        client_surface: None,
+        api_operation: None,
         auth_endpoint_signature: auth_endpoint_signature.into(),
         execution_runtime_candidate,
     }
@@ -114,8 +128,22 @@ pub(super) fn classified_with_request_auth_channel(
         route_family,
         route_kind,
         request_auth_channel: Some(request_auth_channel),
+        client_surface: None,
+        api_operation: None,
         auth_endpoint_signature: auth_endpoint_signature.into(),
         execution_runtime_candidate,
+    }
+}
+
+impl ClassifiedRoute {
+    pub(super) fn with_client_surface(mut self, client_surface: ClientSurface) -> Self {
+        self.client_surface = Some(client_surface);
+        self
+    }
+
+    pub(super) fn with_api_operation(mut self, api_operation: ApiOperation) -> Self {
+        self.api_operation = Some(api_operation);
+        self
     }
 }
 
@@ -127,6 +155,9 @@ impl ClassifiedRoute {
             route_class: Some(self.route_class.to_string()),
             route_family: Some(self.route_family.to_string()),
             route_kind: Some(self.route_kind.to_string()),
+            client_surface: self.client_surface,
+            api_operation: self.api_operation,
+            gateway_credential_carrier: None,
             request_auth_channel: self.request_auth_channel.map(str::to_string),
             auth_endpoint_signature: Some(self.auth_endpoint_signature),
             execution_runtime_candidate: self.execution_runtime_candidate,
@@ -183,7 +214,17 @@ pub(crate) fn classify_control_route(
     .or_else(|| internal::classify_internal_route(method, &normalized_path))
     .or_else(|| ai::classify_ai_public_route(method, &normalized_path, headers))?;
 
-    Some(classified.into_decision(normalized_path))
+    let mut decision = classified.into_decision(normalized_path);
+    if let Some(signature) = decision.auth_endpoint_signature.as_deref() {
+        decision.gateway_credential_carrier =
+            resolve_gateway_credential_carrier(headers, uri, signature);
+    }
+    if decision.route_family.as_deref() == Some("claude") {
+        if let Some(carrier) = decision.gateway_credential_carrier {
+            decision.request_auth_channel = Some(carrier.request_auth_channel().to_string());
+        }
+    }
+    Some(decision)
 }
 
 pub(super) fn detect_public_models_auth_signature(uri: &Uri, headers: &http::HeaderMap) -> String {
@@ -220,11 +261,26 @@ pub(super) fn detect_public_models_auth_signature(uri: &Uri, headers: &http::Hea
     "openai:chat".to_string()
 }
 
-pub(super) fn is_claude_cli_request(headers: &http::HeaderMap) -> bool {
-    let auth_header = header_value_str(headers, http::header::AUTHORIZATION.as_str())
+pub(super) fn detect_claude_client_surface(headers: &http::HeaderMap) -> ClientSurface {
+    let user_agent = header_value_str(headers, http::header::USER_AGENT.as_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    auth_header.starts_with("bearer ")
+    let x_app_is_cli = header_value_str(headers, "x-app")
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("cli"));
+    if user_agent.contains("claude-code")
+        || user_agent.contains("claude-cli")
+        || user_agent.contains("claude code")
+        || x_app_is_cli
+        || header_value_str(headers, "x-claude-code-session-id").is_some()
+    {
+        ClientSurface::ClaudeCode
+    } else if user_agent.contains("anthropic/")
+        || header_value_str(headers, "x-stainless-lang").is_some()
+    {
+        ClientSurface::AnthropicSdk
+    } else {
+        ClientSurface::GenericCompatible
+    }
 }
 
 pub(super) fn is_gemini_cli_request(headers: &http::HeaderMap) -> bool {

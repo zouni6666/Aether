@@ -3,6 +3,25 @@ use std::collections::BTreeMap;
 use url::form_urlencoded;
 use url::Url;
 
+pub(crate) const GATEWAY_CREDENTIAL_QUERY_KEYS: &[&str] = &["key"];
+
+pub(crate) fn strip_gateway_credential_query_parameters(query: Option<&str>) -> Option<String> {
+    let query = query.map(str::trim).filter(|value| !value.is_empty())?;
+    let mut serializer = form_urlencoded::Serializer::new(String::new());
+    let mut retained = false;
+    for (key, value) in form_urlencoded::parse(query.as_bytes()) {
+        if GATEWAY_CREDENTIAL_QUERY_KEYS
+            .iter()
+            .any(|blocked| key.eq_ignore_ascii_case(blocked))
+        {
+            continue;
+        }
+        serializer.append_pair(&key, &value);
+        retained = true;
+    }
+    retained.then(|| serializer.finish())
+}
+
 pub fn build_openai_chat_url(upstream_base_url: &str, query: Option<&str>) -> String {
     let (trimmed, base_query) = split_base_url_query(upstream_base_url);
     let trimmed = trimmed.trim_end_matches('/');
@@ -72,10 +91,61 @@ fn openai_image_base_includes_operation_path(base_url: &str) -> bool {
 }
 
 pub fn build_claude_messages_url(upstream_base_url: &str, query: Option<&str>) -> String {
+    build_claude_messages_operation_url(upstream_base_url, "", query)
+}
+
+pub(crate) fn build_claude_count_tokens_url(
+    upstream_base_url: &str,
+    query: Option<&str>,
+) -> String {
+    build_claude_messages_operation_url(upstream_base_url, "/count_tokens", query)
+}
+
+fn build_claude_messages_operation_url(
+    upstream_base_url: &str,
+    operation_suffix: &str,
+    query: Option<&str>,
+) -> String {
     let (trimmed, base_query) = split_base_url_query(upstream_base_url);
     let trimmed = trimmed.trim_end_matches('/');
-    let mut url = format!("{trimmed}/messages");
-    append_merged_query(&mut url, base_query, None, query, &[]);
+    let parsed_url = Url::parse(trimmed).ok();
+    let parsed_path = parsed_url
+        .as_ref()
+        .map(|url| url.path().trim_matches('/'))
+        .unwrap_or_default();
+    let base_includes_count_tokens =
+        parsed_path == "messages/count_tokens" || parsed_path.ends_with("/messages/count_tokens");
+    let messages_base = if base_includes_count_tokens {
+        trimmed
+            .strip_suffix("/count_tokens")
+            .unwrap_or(trimmed)
+            .to_string()
+    } else if parsed_path.is_empty()
+        && parsed_url
+            .as_ref()
+            .and_then(Url::host_str)
+            .is_some_and(|host| host.eq_ignore_ascii_case("api.anthropic.com"))
+    {
+        format!("{trimmed}/v1/messages")
+    } else if parsed_path.is_empty() {
+        format!("{trimmed}/messages")
+    } else if parsed_path.rsplit('/').next() == Some("messages") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/messages")
+    };
+    let mut url = if base_includes_count_tokens && operation_suffix == "/count_tokens" {
+        trimmed.to_string()
+    } else {
+        format!("{messages_base}{operation_suffix}")
+    };
+    append_merged_query(
+        &mut url,
+        base_query,
+        None,
+        query,
+        GATEWAY_CREDENTIAL_QUERY_KEYS,
+    );
     url
 }
 
@@ -358,9 +428,10 @@ fn append_merged_query(
     base_query: Option<&str>,
     path_query: Option<&str>,
     request_query: Option<&str>,
-    blocked_keys: &[&str],
+    blocked_request_keys: &[&str],
 ) {
-    let Some(query) = merge_query_layers(base_query, path_query, request_query, blocked_keys)
+    let Some(query) =
+        merge_query_layers(base_query, path_query, request_query, blocked_request_keys)
     else {
         return;
     };
@@ -376,9 +447,9 @@ fn merge_query_layers(
     base_query: Option<&str>,
     path_query: Option<&str>,
     request_query: Option<&str>,
-    blocked_keys: &[&str],
+    blocked_request_keys: &[&str],
 ) -> Option<String> {
-    if blocked_keys.is_empty()
+    if blocked_request_keys.is_empty()
         && path_query.is_none()
         && base_query.is_none()
         && request_query
@@ -392,9 +463,9 @@ fn merge_query_layers(
     }
 
     let mut merged = BTreeMap::new();
-    for source in [base_query, path_query, request_query] {
-        merge_query_string(&mut merged, source, blocked_keys);
-    }
+    merge_query_string(&mut merged, base_query, &[]);
+    merge_query_string(&mut merged, path_query, &[]);
+    merge_query_string(&mut merged, request_query, blocked_request_keys);
     if merged.is_empty() {
         return None;
     }
@@ -429,11 +500,11 @@ fn merge_query_string(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_bigmodel_coding_models_url, build_claude_messages_url, build_gemini_content_url,
-        build_gemini_files_passthrough_url, build_gemini_video_predict_long_running_url,
-        build_openai_chat_url, build_openai_compatible_models_url, build_openai_image_url,
-        build_openai_responses_url, build_openai_search_url, build_passthrough_path_url,
-        normalize_gemini_content_action_path,
+        build_bigmodel_coding_models_url, build_claude_count_tokens_url, build_claude_messages_url,
+        build_gemini_content_url, build_gemini_files_passthrough_url,
+        build_gemini_video_predict_long_running_url, build_openai_chat_url,
+        build_openai_compatible_models_url, build_openai_image_url, build_openai_responses_url,
+        build_openai_search_url, build_passthrough_path_url, normalize_gemini_content_action_path,
     };
 
     #[test]
@@ -533,6 +604,54 @@ mod tests {
         assert_eq!(
             build_claude_messages_url("https://api.anthropic.example", None),
             "https://api.anthropic.example/messages"
+        );
+        assert_eq!(
+            build_claude_messages_url("https://api.anthropic.com", None),
+            "https://api.anthropic.com/v1/messages"
+        );
+        assert_eq!(
+            build_claude_messages_url(
+                "https://proxy.example.com/anthropic?key=base-secret&tenant=base",
+                Some("KEY=request-secret&trace=1")
+            ),
+            "https://proxy.example.com/anthropic/messages?key=base-secret&tenant=base&trace=1"
+        );
+    }
+
+    #[test]
+    fn claude_count_tokens_url_preserves_configured_query_and_strips_request_credentials() {
+        assert_eq!(
+            build_claude_count_tokens_url(
+                "https://proxy.example.com/anthropic?key=base-secret&tenant=base",
+                Some("key=request-secret&trace=1")
+            ),
+            "https://proxy.example.com/anthropic/messages/count_tokens?key=base-secret&tenant=base&trace=1"
+        );
+        assert_eq!(
+            build_claude_count_tokens_url("https://api.anthropic.com", None),
+            "https://api.anthropic.com/v1/messages/count_tokens"
+        );
+        assert_eq!(
+            build_claude_count_tokens_url("https://api.anthropic.example", None),
+            "https://api.anthropic.example/messages/count_tokens"
+        );
+        assert_eq!(
+            build_claude_count_tokens_url(
+                "https://proxy.example.com/anthropic/messages",
+                Some("trace=1")
+            ),
+            "https://proxy.example.com/anthropic/messages/count_tokens?trace=1"
+        );
+        assert_eq!(
+            build_claude_count_tokens_url(
+                "https://proxy.example.com/v1/messages/count_tokens?key=base-secret",
+                Some("key=request-secret&trace=1")
+            ),
+            "https://proxy.example.com/v1/messages/count_tokens?key=base-secret&trace=1"
+        );
+        assert_eq!(
+            build_claude_messages_url("https://proxy.example.com/v1/messages/count_tokens", None),
+            "https://proxy.example.com/v1/messages"
         );
     }
 

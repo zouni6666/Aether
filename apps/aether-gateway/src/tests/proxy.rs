@@ -384,6 +384,86 @@ async fn gateway_rejects_execution_runtime_loop_guarded_ai_request() {
 }
 
 #[tokio::test]
+async fn gateway_shapes_execution_loop_rejections_for_claude_routes() {
+    let gateway = build_router().expect("gateway should build");
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    for path in ["/v1/messages", "/v1/messages/count_tokens"] {
+        let response = reqwest::Client::new()
+            .post(format!("{gateway_url}{path}"))
+            .header(
+                EXECUTION_RUNTIME_LOOP_GUARD_HEADER,
+                EXECUTION_RUNTIME_LOOP_GUARD_VALUE,
+            )
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(r#"{"model":"claude-sonnet-4","messages":[]}"#)
+            .send()
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::LOOP_DETECTED, "path: {path}");
+        assert_eq!(
+            response
+                .headers()
+                .get(EXECUTION_PATH_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some(EXECUTION_PATH_LOCAL_EXECUTION_LOOP_DETECTED),
+            "path: {path}"
+        );
+        let payload: serde_json::Value = response.json().await.expect("body should parse");
+        assert_eq!(payload["type"], "error", "path: {path}");
+        assert_eq!(payload["error"]["type"], "api_error", "path: {path}");
+        assert_eq!(
+            payload["error"]["message"],
+            "Gateway detected an execution runtime request loop back into the local frontdoor",
+            "path: {path}"
+        );
+    }
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_shapes_wrong_method_rejections_for_claude_routes() {
+    let gateway = build_router().expect("gateway should build");
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    for path in ["/v1/messages", "/v1/messages/count_tokens"] {
+        let response = reqwest::Client::new()
+            .get(format!("{gateway_url}{path}"))
+            .send()
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::METHOD_NOT_ALLOWED,
+            "path: {path}"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(http::header::ALLOW)
+                .and_then(|value| value.to_str().ok()),
+            Some("POST"),
+            "path: {path}"
+        );
+        let payload: serde_json::Value = response.json().await.expect("body should parse");
+        assert_eq!(payload["type"], "error", "path: {path}");
+        assert_eq!(
+            payload["error"]["type"], "invalid_request_error",
+            "path: {path}"
+        );
+        assert_eq!(
+            payload["error"]["message"], "Method not allowed",
+            "path: {path}"
+        );
+    }
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_rejects_execution_runtime_via_guarded_ai_request() {
     let gateway = build_router().expect("gateway should build");
     let (gateway_url, gateway_handle) = start_server(gateway).await;

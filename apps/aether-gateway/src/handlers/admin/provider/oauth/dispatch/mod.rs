@@ -6,9 +6,11 @@ use crate::handlers::admin::provider::shared::paths::{
     admin_provider_oauth_agent_identity_import_task_provider_id,
     admin_provider_oauth_batch_import_provider_id,
     admin_provider_oauth_batch_import_task_provider_id, admin_provider_oauth_complete_key_id,
-    admin_provider_oauth_complete_provider_id, admin_provider_oauth_device_authorize_provider_id,
-    admin_provider_oauth_import_provider_id, admin_provider_oauth_refresh_key_id,
-    admin_provider_oauth_start_key_id, admin_provider_oauth_start_provider_id,
+    admin_provider_oauth_complete_provider_id, admin_provider_oauth_cookie_provider_id,
+    admin_provider_oauth_cookie_task_provider_id,
+    admin_provider_oauth_device_authorize_provider_id, admin_provider_oauth_import_provider_id,
+    admin_provider_oauth_refresh_key_id, admin_provider_oauth_start_key_id,
+    admin_provider_oauth_start_provider_id,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::GatewayError;
@@ -21,6 +23,8 @@ use axum::{
 
 mod batch;
 mod complete;
+mod cookie;
+mod cookie_task;
 mod device;
 mod helpers;
 mod import;
@@ -94,6 +98,12 @@ pub(crate) async fn maybe_build_local_admin_provider_oauth_response(
         ));
     }
 
+    if route_kind == Some("get_cookie_authorize_task_status") && *method == http::Method::GET {
+        return Ok(Some(
+            tasks::handle_admin_provider_oauth_cookie_task_status(state, request_context).await?,
+        ));
+    }
+
     if route_kind == Some("complete_key_oauth") && *method == http::Method::POST {
         let response = complete::handle_admin_provider_oauth_complete_key(
             state,
@@ -153,6 +163,38 @@ pub(crate) async fn maybe_build_local_admin_provider_oauth_response(
             action,
             "provider",
             admin_provider_oauth_import_provider_id(request_context.path()),
+        )));
+    }
+
+    if route_kind == Some("cookie_authorize") && *method == http::Method::POST {
+        let response = cookie::handle_admin_provider_oauth_cookie_authorize(
+            state,
+            request_context,
+            request_body,
+        )
+        .await?;
+        return Ok(Some(helpers::attach_admin_provider_oauth_audit_response(
+            response,
+            "admin_provider_oauth_cookie_authorized",
+            "authorize_provider_oauth_with_cookie",
+            "provider",
+            admin_provider_oauth_cookie_provider_id(request_context.path()),
+        )));
+    }
+
+    if route_kind == Some("start_cookie_authorize_task") && *method == http::Method::POST {
+        let response = cookie_task::handle_admin_provider_oauth_start_cookie_task(
+            state,
+            request_context,
+            request_body,
+        )
+        .await?;
+        return Ok(Some(helpers::attach_admin_provider_oauth_audit_response(
+            response,
+            "admin_provider_oauth_cookie_task_started",
+            "start_provider_oauth_cookie_task",
+            "provider",
+            admin_provider_oauth_cookie_task_provider_id(request_context.path()),
         )));
     }
 
@@ -226,7 +268,12 @@ pub(crate) async fn maybe_build_local_admin_provider_oauth_response(
 
     if matches!(
         route_kind,
-        Some("refresh_key_oauth" | "import_refresh_token")
+        Some(
+            "refresh_key_oauth"
+                | "import_refresh_token"
+                | "cookie_authorize"
+                | "start_cookie_authorize_task",
+        )
     ) {
         return Ok(Some(
             build_admin_provider_oauth_backend_unavailable_response(),

@@ -42,7 +42,67 @@ pub(crate) use self::response_header_rules::{
 pub(crate) use crate::orchestration::{
     append_local_failover_policy_to_value, LocalFailoverAnalysis, LocalFailoverDecision,
 };
+pub(crate) use aether_ai_serving::AdaptationMode;
 pub(crate) use aether_ai_serving::{ConversionMode, ExecutionStrategy};
+
+pub(crate) fn ai_attempt_retry_scope_from_failure_disposition(
+    disposition: crate::orchestration::FailureDisposition,
+) -> aether_ai_serving::AiAttemptRetryScope {
+    use crate::orchestration::{FailureRetryAction, FailureScope};
+    use aether_ai_serving::AiAttemptRetryScope;
+
+    match disposition.failure_scope {
+        FailureScope::Credential | FailureScope::CredentialModel => AiAttemptRetryScope::Credential,
+        FailureScope::Endpoint => AiAttemptRetryScope::Endpoint,
+        FailureScope::Provider => AiAttemptRetryScope::Provider,
+        FailureScope::None => match disposition.retry_action {
+            FailureRetryAction::NextCredential => AiAttemptRetryScope::Credential,
+            FailureRetryAction::NextEndpoint => AiAttemptRetryScope::Endpoint,
+            FailureRetryAction::Stop
+            | FailureRetryAction::SameCredential
+            | FailureRetryAction::NextCandidate => AiAttemptRetryScope::Candidate,
+        },
+    }
+}
+
+#[cfg(test)]
+mod retry_scope_tests {
+    use aether_ai_serving::AiAttemptRetryScope;
+
+    use super::ai_attempt_retry_scope_from_failure_disposition;
+    use crate::orchestration::{classify_failure_disposition, LocalFailoverClassification};
+
+    #[test]
+    fn anthropic_failure_scope_survives_runtime_mapping() {
+        let retry_scope = |status_code| {
+            ai_attempt_retry_scope_from_failure_disposition(classify_failure_disposition(
+                "claude:messages",
+                LocalFailoverClassification::RetryUpstreamFailure,
+                status_code,
+            ))
+        };
+
+        assert_eq!(retry_scope(429), AiAttemptRetryScope::Credential);
+        assert_eq!(retry_scope(500), AiAttemptRetryScope::Endpoint);
+        assert_eq!(retry_scope(529), AiAttemptRetryScope::Provider);
+        assert_eq!(retry_scope(400), AiAttemptRetryScope::Candidate);
+    }
+
+    #[test]
+    fn non_anthropic_retry_keeps_existing_candidate_order() {
+        let disposition = classify_failure_disposition(
+            "openai:chat",
+            LocalFailoverClassification::RetryUpstreamFailure,
+            429,
+        );
+
+        assert_eq!(
+            ai_attempt_retry_scope_from_failure_disposition(disposition),
+            AiAttemptRetryScope::Candidate
+        );
+        assert!(!disposition.preserve_upstream_error);
+    }
+}
 pub use server::{
     build_execution_runtime_router, build_execution_runtime_router_with_request_concurrency_limit,
     build_execution_runtime_router_with_request_gates, serve_execution_runtime_tcp,
@@ -57,12 +117,14 @@ pub async fn prewarm_direct_h2c_sender_cache_from_env_for_startup(
         .map_err(|err| err.to_string())
 }
 
-pub(crate) use stream::execute_execution_runtime_stream;
+pub(crate) use stream::{
+    execute_execution_runtime_stream, execute_execution_runtime_stream_with_retry_scope,
+};
 pub(crate) use stream_pump::build_direct_execution_frame_stream;
 pub(crate) use sync::{
-    execute_execution_runtime_sync, maybe_build_local_sync_finalize_response,
-    maybe_build_local_video_error_response, maybe_build_local_video_success_outcome,
-    resolve_local_sync_error_background_report_kind,
+    execute_execution_runtime_sync, execute_execution_runtime_sync_with_retry_scope,
+    maybe_build_local_sync_finalize_response, maybe_build_local_video_error_response,
+    maybe_build_local_video_success_outcome, resolve_local_sync_error_background_report_kind,
     resolve_local_sync_success_background_report_kind, LocalVideoSyncSuccessBuild,
     LocalVideoSyncSuccessOutcome,
 };
@@ -220,6 +282,16 @@ pub(crate) fn append_execution_contract_fields(
         "provider_contract".to_string(),
         Value::String(provider_contract.to_string()),
     );
+    let default_adaptation_mode = if execution_strategy == ExecutionStrategy::LocalCrossFormat
+        || conversion_mode != ConversionMode::None
+    {
+        AdaptationMode::CrossFormat
+    } else {
+        AdaptationMode::NativeTransparent
+    };
+    object
+        .entry("adaptation_mode".to_string())
+        .or_insert_with(|| Value::String(default_adaptation_mode.as_str().to_string()));
 }
 
 pub(crate) fn append_execution_contract_fields_to_value(
@@ -263,6 +335,7 @@ mod tests {
         assert_eq!(value["conversion_mode"], "bidirectional");
         assert_eq!(value["client_contract"], "openai:chat");
         assert_eq!(value["provider_contract"], "gemini:generate_content");
+        assert_eq!(value["adaptation_mode"], "cross_format");
         assert_eq!(value["provider_api_format"], "gemini:generate_content");
     }
 }

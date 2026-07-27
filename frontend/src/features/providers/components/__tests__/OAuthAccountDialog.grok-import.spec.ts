@@ -5,6 +5,9 @@ import OAuthAccountDialog from '@/features/providers/components/OAuthAccountDial
 const endpointMocks = vi.hoisted(() => ({
   startProviderLevelOAuth: vi.fn(),
   completeProviderLevelOAuth: vi.fn(),
+  authorizeProviderWithCookie: vi.fn(),
+  startProviderCookieAuthorizeTask: vi.fn(),
+  getProviderCookieAuthorizeTaskStatus: vi.fn(),
   importProviderRefreshToken: vi.fn(),
   startBatchImportOAuthTask: vi.fn(),
   getBatchImportOAuthTaskStatus: vi.fn(),
@@ -46,9 +49,11 @@ vi.mock('@/components/ui', async () => {
       modelValue: Boolean,
     },
     setup(props, { slots }) {
-      return () => props.modelValue
-        ? h('section', [slots.headerActions?.(), slots.default?.(), slots.footer?.()])
-        : null
+      return () => {
+        if (!props.modelValue) return null
+        const headerActions = slots['header-actions'] ?? slots.headerActions
+        return h('section', [headerActions?.(), slots.default?.(), slots.footer?.()])
+      }
     },
   })
 
@@ -184,6 +189,7 @@ vi.mock('@/components/common/JsonImportInput.vue', async () => {
           h('p', props.pasteToggleText),
           h('p', props.fileToggleText),
           h('textarea', {
+            'data-testid': 'import-textarea',
             placeholder: props.manualPlaceholder,
             value: props.modelValue,
             onInput: (event: Event) => emit('update:modelValue', (event.target as HTMLTextAreaElement).value),
@@ -195,14 +201,24 @@ vi.mock('@/components/common/JsonImportInput.vue', async () => {
 })
 
 vi.mock('@/components/ui/Label.vue', () => ({}))
-vi.mock('./ProxyNodeSelect.vue', () => ({}))
-vi.mock('@/features/providers/components/ProxyNodeSelect.vue', async () => {
+vi.mock('../ProxyNodeSelect.vue', async () => {
   const { defineComponent, h } = await import('vue')
   return {
     default: defineComponent({
       name: 'ProxyNodeSelectStub',
-      setup() {
-        return () => h('div')
+      props: {
+        modelValue: {
+          type: String,
+          default: '',
+        },
+      },
+      emits: ['update:modelValue'],
+      setup(_, { emit }) {
+        return () => h('button', {
+          type: 'button',
+          'data-testid': 'proxy-node-select',
+          onClick: () => emit('update:modelValue', 'proxy-node-1'),
+        })
       },
     }),
   }
@@ -288,17 +304,20 @@ function getExactButton(root: HTMLElement, text: string) {
 }
 
 function getImportTextarea(root: HTMLElement) {
-  const textarea = root.querySelector('textarea')
+  const textarea = root.querySelector('[data-testid="import-textarea"]')
   if (!(textarea instanceof HTMLTextAreaElement)) {
     throw new Error('Expected import textarea to exist')
   }
   return textarea
 }
 
-describe('OAuthAccountDialog Grok import', () => {
+describe('OAuthAccountDialog authorization and import', () => {
   beforeEach(() => {
     endpointMocks.startProviderLevelOAuth.mockReset()
     endpointMocks.completeProviderLevelOAuth.mockReset()
+    endpointMocks.authorizeProviderWithCookie.mockReset()
+    endpointMocks.startProviderCookieAuthorizeTask.mockReset()
+    endpointMocks.getProviderCookieAuthorizeTaskStatus.mockReset()
     endpointMocks.importProviderRefreshToken.mockReset()
     endpointMocks.startBatchImportOAuthTask.mockReset()
     endpointMocks.getBatchImportOAuthTaskStatus.mockReset()
@@ -309,6 +328,28 @@ describe('OAuthAccountDialog Grok import', () => {
     toastMocks.warning.mockReset()
     toastMocks.error.mockReset()
 
+    endpointMocks.startProviderLevelOAuth.mockResolvedValue({
+      authorization_url: 'https://claude.ai/oauth/authorize',
+      redirect_uri: 'https://platform.claude.com/oauth/code/callback',
+      provider_type: 'claude_code',
+      instructions: '',
+    })
+    endpointMocks.authorizeProviderWithCookie.mockResolvedValue({
+      key_id: 'key-claude-cookie',
+      provider_type: 'claude_code',
+      has_refresh_token: true,
+      email: 'claude@example.com',
+      replaced: false,
+    })
+    endpointMocks.startProviderCookieAuthorizeTask.mockResolvedValue({
+      task_id: 'claude-cookie-task-1',
+      status: 'submitted',
+      total: 2,
+      processed: 0,
+      success: 0,
+      failed: 0,
+      progress_percent: 0,
+    })
     endpointMocks.importProviderRefreshToken.mockResolvedValue({
       provider_type: 'grok',
       has_refresh_token: false,
@@ -331,6 +372,7 @@ describe('OAuthAccountDialog Grok import', () => {
       app.unmount()
       root.remove()
     }
+    vi.useRealTimers()
   })
 
   it('opens Grok in import mode without starting unsupported OAuth', async () => {
@@ -342,6 +384,275 @@ describe('OAuthAccountDialog Grok import', () => {
     expect(root.querySelector('textarea')?.getAttribute('placeholder')).toContain('Grok sso/session token')
     expect(root.textContent).toContain('plan_type / pool_tier')
     expect(getButton(root, '导入账号')).toBeTruthy()
+  })
+
+  it('shows Claude authorization modes in the required order', async () => {
+    const root = mountDialog('claude_code')
+    await settle()
+    await settle()
+
+    const modeLabels = Array.from(root.querySelectorAll('button'))
+      .map(button => button.textContent?.trim())
+      .filter(label => ['获取授权', 'Cookie授权', '导入授权'].includes(label || ''))
+
+    expect(modeLabels).toEqual(['获取授权', 'Cookie授权', '导入授权'])
+    expect(Array.from(root.querySelectorAll<HTMLTextAreaElement>('textarea')).map(
+      textarea => textarea.placeholder,
+    )).toContain('粘贴完整回调 URL 或授权码（code#state）')
+
+    const callbackTextarea = root.querySelector<HTMLTextAreaElement>(
+      '[data-testid="oauth-callback-textarea"]',
+    )
+    expect(callbackTextarea?.classList.contains('h-full')).toBe(true)
+    expect(callbackTextarea?.classList.contains('min-h-[120px]')).toBe(true)
+    expect(callbackTextarea?.parentElement?.classList.contains('flex-1')).toBe(true)
+
+    const cookieInput = root.querySelector<HTMLTextAreaElement>(
+      'textarea[placeholder="每行粘贴一个 sessionKey Cookie 值或完整 Cookie 请求头，最多 20 个"]',
+    )
+    const cookiePanel = cookieInput?.closest('[inert]')
+    expect(cookiePanel?.getAttribute('aria-hidden')).toBe('true')
+  })
+
+  it('keeps Cookie authorization unavailable for non-Claude providers', async () => {
+    const root = mountDialog('codex')
+    await settle()
+
+    expect(getExactButton(root, 'Cookie授权')).toBeFalsy()
+  })
+
+  it('authorizes a Claude account with a cookie and selected proxy node', async () => {
+    const root = mountDialog('claude_code')
+    await settle()
+
+    getExactButton(root, 'Cookie授权')?.click()
+    await settle()
+
+    const cookieInput = root.querySelector<HTMLTextAreaElement>(
+      'textarea[placeholder="每行粘贴一个 sessionKey Cookie 值或完整 Cookie 请求头，最多 20 个"]',
+    )
+    if (!cookieInput) throw new Error('Expected Claude cookie input to exist')
+    expect(cookieInput.classList.contains('min-h-[200px]')).toBe(true)
+    expect(cookieInput.classList.contains('h-[200px]')).toBe(true)
+    expect(cookieInput.parentElement?.classList.contains('relative')).toBe(true)
+    expect(root.querySelector('#claude-session-cookie-status')?.classList.contains('absolute')).toBe(true)
+    expect(cookieInput.style.getPropertyValue('-webkit-text-security')).toBe('')
+    expect(cookieInput.closest('[aria-hidden="true"]')).toBeNull()
+    expect(cookieInput.closest('[inert]')).toBeNull()
+    expect(root.querySelector('[data-testid="cookie-visibility-toggle"]')).toBeNull()
+
+    const authorizeButton = getExactButton(root, '授权')
+    expect(authorizeButton?.disabled).toBe(true)
+
+    const proxyNodeSelect = root.querySelector<HTMLButtonElement>('[data-testid="proxy-node-select"]')
+    expect(proxyNodeSelect).toBeTruthy()
+    proxyNodeSelect?.click()
+    await settle()
+    cookieInput.value = 'Cookie: sessionKey=claude-session-key'
+    cookieInput.dispatchEvent(new Event('input'))
+    await settle()
+
+    expect(authorizeButton?.disabled).toBe(false)
+    authorizeButton?.click()
+    await settle()
+
+    expect(endpointMocks.authorizeProviderWithCookie).toHaveBeenCalledWith('provider-1', {
+      cookie: 'Cookie: sessionKey=claude-session-key',
+      proxy_node_id: 'proxy-node-1',
+    })
+    expect(toastMocks.success).toHaveBeenCalled()
+  })
+
+  it('authorizes multiple Claude cookies through a task and keeps only failed lines', async () => {
+    vi.useFakeTimers()
+    endpointMocks.getProviderCookieAuthorizeTaskStatus.mockResolvedValueOnce({
+      task_id: 'claude-cookie-task-1',
+      provider_id: 'provider-1',
+      provider_type: 'claude_code',
+      status: 'completed',
+      total: 3,
+      processed: 3,
+      success: 2,
+      failed: 1,
+      created_count: 1,
+      replaced_count: 1,
+      progress_percent: 100,
+      message: null,
+      error: null,
+      error_samples: [{ index: 1, status: 'error', error: 'expired cookie' }],
+      created_at: 1,
+      finished_at: 2,
+      updated_at: 2,
+    })
+    const root = mountDialog('claude_code')
+    await settle()
+
+    getExactButton(root, 'Cookie授权')?.click()
+    await settle()
+    const cookieInput = root.querySelector<HTMLTextAreaElement>('[data-testid="claude-cookie-input"]')
+    if (!cookieInput) throw new Error('Expected Claude cookie input to exist')
+    cookieInput.value = [
+      'sessionKey=claude-session-1',
+      '',
+      'Cookie: sessionKey=expired-session',
+      'sessionKey=claude-session-3',
+    ].join('\n')
+    cookieInput.dispatchEvent(new Event('input'))
+    await settle()
+
+    const batchButton = getExactButton(root, '批量授权')
+    expect(batchButton?.disabled).toBe(false)
+    batchButton?.click()
+    await settle()
+
+    expect(endpointMocks.startProviderCookieAuthorizeTask).toHaveBeenCalledWith('provider-1', {
+      cookies: [
+        'sessionKey=claude-session-1',
+        'Cookie: sessionKey=expired-session',
+        'sessionKey=claude-session-3',
+      ],
+      proxy_node_id: undefined,
+    })
+    expect(getExactButton(root, '授权中...')).toBeTruthy()
+
+    await vi.runOnlyPendingTimersAsync()
+    await settle()
+
+    expect(endpointMocks.getProviderCookieAuthorizeTaskStatus).toHaveBeenCalledWith(
+      'provider-1',
+      'claude-cookie-task-1',
+    )
+    expect(cookieInput.value).toBe('Cookie: sessionKey=expired-session')
+    expect(toastMocks.warning).toHaveBeenCalledWith(
+      '批量授权完成：成功 2 个（新增 1 个，替换 1 个），失败 1 个；#2 expired cookie',
+      '批量授权',
+    )
+    expect(toastMocks.error).not.toHaveBeenCalled()
+  })
+
+  it('keeps all Claude cookie lines when a batch task has no successes', async () => {
+    vi.useFakeTimers()
+    endpointMocks.getProviderCookieAuthorizeTaskStatus.mockResolvedValueOnce({
+      task_id: 'claude-cookie-task-1',
+      provider_id: 'provider-1',
+      provider_type: 'claude_code',
+      status: 'completed',
+      total: 4,
+      processed: 4,
+      success: 0,
+      failed: 4,
+      created_count: 0,
+      replaced_count: 0,
+      progress_percent: 100,
+      message: null,
+      error: null,
+      error_samples: [
+        { index: 0, status: 'error', error: 'sessionKey=must-not-leak' },
+        { index: 1, status: 'error', error: 'invalid cookie' },
+        { index: 2, status: 'error', error: 'expired cookie' },
+        { index: 3, status: 'error', error: 'third safe reason' },
+      ],
+      created_at: 1,
+      finished_at: 2,
+      updated_at: 2,
+    })
+    const root = mountDialog('claude_code')
+    await settle()
+
+    getExactButton(root, 'Cookie授权')?.click()
+    await settle()
+    const cookieInput = root.querySelector<HTMLTextAreaElement>('[data-testid="claude-cookie-input"]')
+    if (!cookieInput) throw new Error('Expected Claude cookie input to exist')
+    const originalInput = [
+      'sessionKey=secret',
+      'sessionKey=invalid',
+      'sessionKey=expired',
+      'sessionKey=other',
+    ].join('\n')
+    cookieInput.value = originalInput
+    cookieInput.dispatchEvent(new Event('input'))
+    await settle()
+    getExactButton(root, '批量授权')?.click()
+    await settle()
+    await vi.runOnlyPendingTimersAsync()
+    await settle()
+
+    expect(cookieInput.value).toBe(originalInput)
+    expect(toastMocks.error).toHaveBeenCalledWith(
+      '批量授权完成：成功 0 个（新增 0 个，替换 0 个），失败 4 个；#2 invalid cookie；#3 expired cookie',
+      '错误',
+    )
+    expect(toastMocks.error.mock.calls.at(-1)?.[0]).not.toContain('must-not-leak')
+    expect(toastMocks.error.mock.calls.at(-1)?.[0]).not.toContain('third safe reason')
+    expect(toastMocks.warning).not.toHaveBeenCalled()
+  })
+
+  it('blocks Claude cookie batches over the 20-account limit', async () => {
+    const root = mountDialog('claude_code')
+    await settle()
+
+    getExactButton(root, 'Cookie授权')?.click()
+    await settle()
+    const cookieInput = root.querySelector<HTMLTextAreaElement>('[data-testid="claude-cookie-input"]')
+    if (!cookieInput) throw new Error('Expected Claude cookie input to exist')
+    cookieInput.value = Array.from({ length: 21 }, (_, index) => `sessionKey=claude-${index}`).join('\n')
+    cookieInput.dispatchEvent(new Event('input'))
+    await settle()
+
+    expect(getExactButton(root, '批量授权')?.disabled).toBe(true)
+    expect(root.querySelector('#claude-session-cookie-status')?.textContent?.trim())
+      .toBe('已输入 21 个，最多 20 个')
+    expect(endpointMocks.startProviderCookieAuthorizeTask).not.toHaveBeenCalled()
+  })
+
+  it('uses a Claude-specific import credential placeholder', async () => {
+    const root = mountDialog('claude_code')
+    await settle()
+
+    getExactButton(root, '导入授权')?.click()
+    await settle()
+
+    const textarea = root.querySelector<HTMLTextAreaElement>(
+      'textarea[placeholder="粘贴 Claude Refresh Token 或 Claude Code .credentials.json 内容"]',
+    )
+    expect(textarea).toBeTruthy()
+  })
+
+  it('imports only Claude OAuth credentials from a Claude Code credentials file', async () => {
+    const root = mountDialog('claude_code')
+    await settle()
+
+    getExactButton(root, '导入授权')?.click()
+    await settle()
+
+    const textarea = root.querySelector<HTMLTextAreaElement>(
+      'textarea[placeholder="粘贴 Claude Refresh Token 或 Claude Code .credentials.json 内容"]',
+    )
+    if (!textarea) throw new Error('Expected Claude credentials import textarea to exist')
+    textarea.value = JSON.stringify({
+      claudeAiOauth: {
+        accessToken: 'claude-access-token',
+        refreshToken: 'claude-refresh-token',
+        expiresAt: 4_102_444_800_000,
+        scopes: ['user:inference'],
+      },
+      mcpOAuth: {
+        accessToken: 'mcp-access-token-must-not-be-imported',
+        refreshToken: 'mcp-refresh-token-must-not-be-imported',
+      },
+    })
+    textarea.dispatchEvent(new Event('input'))
+    await settle()
+
+    getExactButton(root, '导入')?.click()
+    await settle()
+
+    expect(endpointMocks.importProviderRefreshToken).toHaveBeenCalledWith('provider-1', {
+      access_token: 'claude-access-token',
+      refresh_token: 'claude-refresh-token',
+      expires_at: 4_102_444_800,
+      proxy_node_id: undefined,
+    })
   })
 
   it('maps a single Grok JSON token into account metadata import payload', async () => {

@@ -469,6 +469,7 @@ async fn gateway_executes_claude_code_cli_sync_via_local_decision_gate_with_loca
     let response = reqwest::Client::new()
         .post(format!("{gateway_url}/v1/messages"))
         .header(http::header::CONTENT_TYPE, "application/json")
+        .header(http::header::USER_AGENT, "Claude-Code/2.1.0")
         .header(
             http::header::AUTHORIZATION,
             "Bearer sk-client-claude-code-cli-local",
@@ -535,15 +536,18 @@ async fn gateway_executes_claude_code_cli_sync_via_local_decision_gate_with_loca
     );
     assert_eq!(
         seen_execution_runtime_request.anthropic_beta,
-        "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,custom-beta"
+        "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,effort-2025-11-24,context-management-2025-06-27,extended-cache-ttl-2025-04-11,context-1m-2025-08-07,custom-beta"
     );
     assert_eq!(seen_execution_runtime_request.x_app, "cli");
     assert_eq!(seen_execution_runtime_request.x_stainless_helper_method, "");
     assert_eq!(
         seen_execution_runtime_request.x_stainless_package_version,
-        "1.0.5"
+        "0.94.0"
     );
-    assert_eq!(seen_execution_runtime_request.user_agent, "Claude-Code/9.9");
+    assert_eq!(
+        seen_execution_runtime_request.user_agent,
+        "claude-cli/2.1.161 (external, cli)"
+    );
     assert_eq!(
         seen_execution_runtime_request.endpoint_tag,
         "claude-code-cli-local"

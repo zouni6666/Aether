@@ -63,7 +63,7 @@
       <div
         v-if="showAuthorizationMode"
         class="grid rounded-lg border border-border p-0.5 bg-muted/30"
-        :class="isCodexProvider ? 'grid-cols-3' : 'grid-cols-2'"
+        :class="isCodexProvider || isClaudeCodeProvider ? 'grid-cols-3' : 'grid-cols-2'"
       >
         <button
           class="min-w-0 min-h-8 px-2 py-1.5 text-xs font-medium leading-4 rounded-md transition-all disabled:cursor-not-allowed disabled:opacity-60"
@@ -72,17 +72,28 @@
               ? 'bg-background text-foreground shadow-sm'
               : 'text-muted-foreground hover:text-foreground',
           ]"
-          :disabled="importing || creatingAgentIdentity"
+          :disabled="importing || creatingAgentIdentity || cookieAuthorizing"
           @click="switchMode('oauth')"
         >
           {{ authorizationModeLabel }}
+        </button>
+        <button
+          v-if="isClaudeCodeProvider"
+          class="min-w-0 min-h-8 px-2 py-1.5 text-xs font-medium leading-4 rounded-md transition-all disabled:cursor-not-allowed disabled:opacity-60"
+          :class="mode === 'cookie'
+            ? 'bg-background text-foreground shadow-sm'
+            : 'text-muted-foreground hover:text-foreground'"
+          :disabled="importing || creatingAgentIdentity || cookieAuthorizing"
+          @click="switchMode('cookie')"
+        >
+          {{ legacyT('Cookie授权') }}
         </button>
         <button
           class="min-w-0 min-h-8 px-2 py-1.5 text-xs font-medium leading-4 rounded-md transition-all disabled:cursor-not-allowed disabled:opacity-60"
           :class="mode === 'import'
             ? 'bg-background text-foreground shadow-sm'
             : 'text-muted-foreground hover:text-foreground'"
-          :disabled="importing || creatingAgentIdentity"
+          :disabled="importing || creatingAgentIdentity || cookieAuthorizing"
           @click="switchMode('import')"
         >
           {{ importModeLabel }}
@@ -93,7 +104,7 @@
           :class="mode === 'agent_identity'
             ? 'bg-background text-foreground shadow-sm'
             : 'text-muted-foreground hover:text-foreground'"
-          :disabled="importing || creatingAgentIdentity"
+          :disabled="importing || creatingAgentIdentity || cookieAuthorizing"
           @click="switchMode('agent_identity')"
         >
           {{ legacyT('Agent Identity') }}
@@ -106,6 +117,8 @@
         <div
           class="space-y-4 transition-opacity duration-150"
           :class="mode === 'oauth' ? 'opacity-100' : 'opacity-0 pointer-events-none'"
+          :inert="mode !== 'oauth' ? '' : undefined"
+          :aria-hidden="mode !== 'oauth'"
         >
           <!-- Windsurf: 浏览器 session/poll 授权 -->
           <template v-if="isWindsurfProvider">
@@ -544,8 +557,11 @@
               </div>
             </div>
 
-            <template v-else-if="oauth.authorization_url">
-              <div class="space-y-2">
+            <div
+              v-else-if="oauth.authorization_url"
+              class="flex h-full min-h-0 flex-col gap-4"
+            >
+              <div class="shrink-0 space-y-2">
                 <div class="flex items-center gap-2">
                   <span class="flex items-center justify-center w-4 h-4 rounded-full bg-primary/10 text-primary text-[10px] font-semibold shrink-0">1</span>
                   <span class="text-xs font-medium">{{ legacyT('前往授权') }}</span>
@@ -571,29 +587,69 @@
                 </div>
               </div>
 
-              <div class="space-y-2">
-                <div class="flex items-center gap-2">
+              <div class="flex min-h-0 flex-1 flex-col gap-2">
+                <div class="flex shrink-0 items-center gap-2">
                   <span class="flex items-center justify-center w-4 h-4 rounded-full bg-primary/10 text-primary text-[10px] font-semibold shrink-0">2</span>
-                  <span class="text-xs font-medium">{{ legacyT('粘贴回调 URL') }}</span>
+                  <span class="text-xs font-medium">{{ oauthCallbackLabel }}</span>
                 </div>
-                <div class="pl-6">
+                <div class="min-h-0 flex-1 pl-6">
                   <Textarea
                     v-model="oauth.callback_url"
                     :disabled="oauthBusy"
-                    placeholder="http://localhost:xxx/callback?code=..."
-                    class="min-h-[120px] text-xs font-mono break-all !rounded-xl"
+                    :placeholder="oauthCallbackPlaceholder"
+                    class="h-full min-h-[120px] overflow-y-auto text-xs font-mono break-all !rounded-xl"
+                    data-testid="oauth-callback-textarea"
                     spellcheck="false"
                   />
                 </div>
               </div>
-            </template>
+            </div>
           </template>
+        </div>
+
+        <!-- ===== Cookie 授权 ===== -->
+        <div
+          v-if="isClaudeCodeProvider"
+          class="flex flex-col gap-3 justify-center transition-opacity duration-150"
+          :class="mode === 'cookie' ? 'opacity-100' : 'opacity-0 pointer-events-none'"
+          :inert="mode !== 'cookie' ? '' : undefined"
+          :aria-hidden="mode !== 'cookie'"
+        >
+          <label
+            class="sr-only"
+            for="claude-session-cookie"
+          >
+            {{ legacyT('Claude sessionKey Cookie') }}
+          </label>
+          <div class="relative">
+            <Textarea
+              id="claude-session-cookie"
+              v-model="cookieInput"
+              :disabled="cookieAuthorizing"
+              :placeholder="legacyT('每行粘贴一个 sessionKey Cookie 值或完整 Cookie 请求头，最多 20 个')"
+              aria-describedby="claude-session-cookie-status"
+              class="h-[200px] min-h-[200px] overflow-y-auto pb-7 text-xs font-mono break-words !rounded-xl"
+              data-testid="claude-cookie-input"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <p
+              id="claude-session-cookie-status"
+              class="pointer-events-none absolute bottom-2 right-3 text-[10px]"
+              :class="cookieInputOverLimit ? 'text-destructive' : 'text-muted-foreground'"
+              aria-live="polite"
+            >
+              {{ cookieInputStatusText }}
+            </p>
+          </div>
         </div>
 
         <!-- ===== 导入授权 ===== -->
         <div
           class="flex flex-col gap-3 justify-center transition-opacity duration-150"
           :class="mode === 'import' ? 'opacity-100' : 'opacity-0 pointer-events-none'"
+          :inert="mode !== 'import' ? '' : undefined"
+          :aria-hidden="mode !== 'import'"
         >
           <div
             v-if="isWindsurfProvider"
@@ -724,6 +780,8 @@
           v-if="isCodexProvider"
           class="flex flex-col gap-3 justify-center transition-opacity duration-150"
           :class="mode === 'agent_identity' ? 'opacity-100' : 'opacity-0 pointer-events-none'"
+          :inert="mode !== 'agent_identity' ? '' : undefined"
+          :aria-hidden="mode !== 'agent_identity'"
         >
           <Textarea
             v-model="agentIdentityInput"
@@ -759,6 +817,13 @@
         {{ device.completing ? legacyT('验证中...') : legacyT('验证') }}
       </Button>
       <Button
+        v-if="mode === 'cookie' && isClaudeCodeProvider"
+        :disabled="!canAuthorizeWithCookie"
+        @click="handleCookieAuthorize"
+      >
+        {{ cookieAuthorizeButtonText }}
+      </Button>
+      <Button
         v-if="mode === 'import'"
         :disabled="!canImport"
         @click="handleImport"
@@ -789,7 +854,16 @@ import {
   ComboboxTrigger,
   ComboboxViewport,
 } from 'radix-vue'
-import { UserPlus, Copy, ExternalLink, Globe, AlertCircle, ShieldCheck, ChevronsUpDown, Check } from 'lucide-vue-next'
+import {
+  UserPlus,
+  Copy,
+  ExternalLink,
+  Globe,
+  AlertCircle,
+  ShieldCheck,
+  ChevronsUpDown,
+  Check,
+} from 'lucide-vue-next'
 import { useToast } from '@/composables/useToast'
 import { useClipboard } from '@/composables/useClipboard'
 import { useTotp } from '@/composables/useTotp'
@@ -798,6 +872,9 @@ import { useI18n } from '@/i18n'
 import {
   startProviderLevelOAuth,
   completeProviderLevelOAuth,
+  authorizeProviderWithCookie,
+  startProviderCookieAuthorizeTask,
+  getProviderCookieAuthorizeTaskStatus,
   importProviderRefreshToken,
   startBatchImportOAuthTask,
   getBatchImportOAuthTaskStatus,
@@ -808,6 +885,7 @@ import {
 } from '@/api/endpoints'
 import type {
   OAuthBatchImportTaskStatus,
+  OAuthBatchImportTaskStartResponse,
   OAuthBatchImportTaskStatusResponse,
 } from '@/api/endpoints/provider_oauth'
 import ProxyNodeSelect from './ProxyNodeSelect.vue'
@@ -883,7 +961,7 @@ function localizedApiError(error: unknown, fallback: string): string {
 }
 
 // 模式
-type DialogMode = 'oauth' | 'import' | 'agent_identity'
+type DialogMode = 'oauth' | 'cookie' | 'import' | 'agent_identity'
 const mode = ref<DialogMode>((props.providerType || '').toLowerCase() === 'grok' ? 'import' : 'oauth')
 type WindsurfImportMethod = 'email_password' | 'token_json'
 
@@ -982,6 +1060,14 @@ const windsurfAccountName = ref('')
 const agentIdentityInput = ref('')
 const creatingAgentIdentity = ref(false)
 let agentIdentityRequestId = 0
+const cookieInput = ref('')
+const cookieAuthorizing = ref(false)
+let cookieAuthorizeRequestId = 0
+const cookieAuthorizeTask = ref<OAuthBatchImportTaskStartResponse | OAuthBatchImportTaskStatusResponse | null>(null)
+const cookieAuthorizeSubmittedEntries = ref<string[]>([])
+let cookieAuthorizePollTimer: ReturnType<typeof setTimeout> | null = null
+const cookieAuthorizePolling = ref(false)
+const CLAUDE_COOKIE_BATCH_LIMIT = 20
 
 const isOpen = computed(() => props.open)
 
@@ -989,6 +1075,7 @@ const isKiroProvider = computed(() => (props.providerType || '').toLowerCase() =
 const isGrokProvider = computed(() => (props.providerType || '').toLowerCase() === 'grok')
 const isWindsurfProvider = computed(() => (props.providerType || '').toLowerCase() === 'windsurf')
 const isCodexProvider = computed(() => (props.providerType || '').toLowerCase() === 'codex')
+const isClaudeCodeProvider = computed(() => (props.providerType || '').toLowerCase() === 'claude_code')
 const isDeviceBrowserProvider = computed(() => isKiroProvider.value || isWindsurfProvider.value)
 const showAuthorizationMode = computed(() => !isGrokProvider.value)
 const defaultMode = computed<DialogMode>(() => (isGrokProvider.value ? 'import' : 'oauth'))
@@ -1016,6 +1103,16 @@ const authorizationModeLabel = computed(() => {
   if (isDeviceBrowserProvider.value) return legacyT('设备授权')
   return legacyT('获取授权')
 })
+
+const oauthCallbackLabel = computed(() =>
+  legacyT(isClaudeCodeProvider.value ? '粘贴回调 URL 或授权码' : '粘贴回调 URL')
+)
+
+const oauthCallbackPlaceholder = computed(() =>
+  isClaudeCodeProvider.value
+    ? legacyT('粘贴完整回调 URL 或授权码（code#state）')
+    : 'http://localhost:xxx/callback?code=...'
+)
 
 const deviceCallbackPlaceholder = computed(() =>
   isWindsurfProvider.value
@@ -1067,6 +1164,35 @@ const canImport = computed(() => {
   return importText.value.trim().length > 0 && !importing.value
 })
 
+const cookieEntries = computed(() => cookieInput.value
+  .split(/\r?\n/)
+  .map(value => value.trim())
+  .filter(Boolean)
+)
+const cookieInputOverLimit = computed(() => cookieEntries.value.length > CLAUDE_COOKIE_BATCH_LIMIT)
+const canAuthorizeWithCookie = computed(() =>
+  isClaudeCodeProvider.value
+  && cookieEntries.value.length > 0
+  && !cookieInputOverLimit.value
+  && !cookieAuthorizing.value
+)
+const cookieAuthorizeButtonText = computed(() => {
+  if (cookieAuthorizing.value) return legacyT('授权中...')
+  return cookieEntries.value.length > 1 ? legacyT('批量授权') : legacyT('授权')
+})
+const cookieInputStatusText = computed(() => {
+  const task = cookieAuthorizeTask.value
+  if (cookieAuthorizing.value && task) {
+    return isEnglishLocale()
+      ? `${task.processed}/${task.total} · ${task.success} succeeded · ${task.failed} failed`
+      : `进度 ${task.processed}/${task.total} · 成功 ${task.success} · 失败 ${task.failed}`
+  }
+  const count = cookieEntries.value.length
+  if (count === 0) return legacyT('每行一个，最多 20 个')
+  if (isEnglishLocale()) return `${count} entered, maximum ${CLAUDE_COOKIE_BATCH_LIMIT}`
+  return `已输入 ${count} 个，最多 ${CLAUDE_COOKIE_BATCH_LIMIT} 个`
+})
+
 const canCreateAgentIdentity = computed(() =>
   isCodexProvider.value
   && agentIdentityInput.value.trim().length > 0
@@ -1081,13 +1207,18 @@ const importDropTitle = computed(() => (
 const importDropHint = computed(() => (
   legacyT(isGrokProvider.value ? '支持 .json / .txt，可多选、批量导入' : '支持 .json / .txt，可多选')
 ))
-const importManualPlaceholder = computed(() => (
-  isGrokProvider.value
-    ? legacyT('粘贴 Grok sso/session token，支持每行一个；或粘贴包含 token、sso_token、access_token、plan_type、pool_tier 的 JSON')
-    : isWindsurfProvider.value
-      ? legacyT('粘贴 show-auth-token Token、API key 或 JSON 内容')
-      : legacyT('粘贴 Refresh Token / Access Token / Agent Identity JSON 内容')
-))
+const importManualPlaceholder = computed(() => {
+  if (isGrokProvider.value) {
+    return legacyT('粘贴 Grok sso/session token，支持每行一个；或粘贴包含 token、sso_token、access_token、plan_type、pool_tier 的 JSON')
+  }
+  if (isClaudeCodeProvider.value) {
+    return legacyT('粘贴 Claude Refresh Token 或 Claude Code .credentials.json 内容')
+  }
+  if (isWindsurfProvider.value) {
+    return legacyT('粘贴 show-auth-token Token、API key 或 JSON 内容')
+  }
+  return legacyT('粘贴 Refresh Token / Access Token / Agent Identity JSON 内容')
+})
 const importManualDescription = computed(() => (
   isGrokProvider.value
     ? legacyT('plan_type / pool_tier 会作为账号套餐与能力特征保存，不是路由池选择。')
@@ -1359,8 +1490,10 @@ function resetForm() {
   oauthCompleteRequestId += 1
   deviceAuthRequestId += 1
   agentIdentityRequestId += 1
+  cookieAuthorizeRequestId += 1
   oauth.value = createInitialOAuthState()
   stopImportPolling()
+  stopCookieAuthorizePolling()
   stopDevicePolling()
   totp.stop()
   device.value = createInitialDeviceState()
@@ -1377,6 +1510,10 @@ function resetForm() {
   windsurfAccountName.value = ''
   agentIdentityInput.value = ''
   creatingAgentIdentity.value = false
+  cookieInput.value = ''
+  cookieAuthorizing.value = false
+  cookieAuthorizeTask.value = null
+  cookieAuthorizeSubmittedEntries.value = []
   proxyPopoverOpen.value = false
   selectedProxyNodeId.value = ''
   mode.value = defaultMode.value
@@ -1385,8 +1522,9 @@ function resetForm() {
 function switchMode(newMode: DialogMode) {
   if (mode.value === newMode) return
   if (newMode === 'oauth' && !showAuthorizationMode.value) return
+  if (newMode === 'cookie' && !isClaudeCodeProvider.value) return
   if (newMode === 'agent_identity' && !isCodexProvider.value) return
-  if (importing.value || creatingAgentIdentity.value) return
+  if (importing.value || creatingAgentIdentity.value || cookieAuthorizing.value) return
 
   mode.value = newMode
   if (newMode === 'oauth') {
@@ -1467,6 +1605,198 @@ async function handleCompleteOAuth() {
   }
 }
 
+async function handleCookieAuthorize() {
+  if (!canAuthorizeWithCookie.value || !props.providerId) return
+
+  const entries = [...cookieEntries.value]
+  const requestId = ++cookieAuthorizeRequestId
+  cookieAuthorizing.value = true
+  try {
+    if (entries.length === 1) {
+      const result = await authorizeProviderWithCookie(props.providerId, {
+        cookie: entries[0],
+        proxy_node_id: selectedProxyNodeId.value || undefined,
+      })
+      if (requestId !== cookieAuthorizeRequestId) return
+
+      success(getOAuthSuccessMessage('授权', result))
+      emit('saved')
+      handleClose()
+      return
+    }
+
+    const task = await startProviderCookieAuthorizeTask(props.providerId, {
+      cookies: entries,
+      proxy_node_id: selectedProxyNodeId.value || undefined,
+    })
+    if (requestId !== cookieAuthorizeRequestId) return
+
+    cookieAuthorizeTask.value = task
+    cookieAuthorizeSubmittedEntries.value = entries
+    scheduleCookieAuthorizePoll(task.task_id, requestId, 0)
+  } catch (err: unknown) {
+    if (requestId !== cookieAuthorizeRequestId) return
+    const errorMessage = localizedApiError(err, 'Cookie 授权失败')
+    showError(errorMessage, legacyT('错误'))
+  } finally {
+    if (requestId === cookieAuthorizeRequestId && !cookieAuthorizeTask.value) {
+      cookieAuthorizing.value = false
+    }
+  }
+}
+
+function stopCookieAuthorizePolling() {
+  if (cookieAuthorizePollTimer) {
+    clearTimeout(cookieAuthorizePollTimer)
+    cookieAuthorizePollTimer = null
+  }
+  cookieAuthorizePolling.value = false
+}
+
+function scheduleCookieAuthorizePoll(taskId: string, requestId: number, delayMs = 1200) {
+  stopCookieAuthorizePolling()
+  cookieAuthorizePollTimer = setTimeout(() => {
+    void pollCookieAuthorizeTaskStatus(taskId, requestId)
+  }, delayMs)
+}
+
+function cookieAuthorizeBatchSummary(task: OAuthBatchImportTaskStatusResponse): string {
+  const replaced = Math.max(task.replaced_count ?? 0, 0)
+  const created = Math.max(task.created_count ?? task.success - replaced, 0)
+  const successDetail = isEnglishLocale()
+    ? `${task.success} succeeded (${created} added, ${replaced} replaced)`
+    : `成功 ${task.success} 个（新增 ${created} 个，替换 ${replaced} 个）`
+
+  if (isEnglishLocale()) {
+    return task.failed > 0
+      ? `Batch authorization complete: ${successDetail}, ${task.failed} failed`
+      : `Batch authorization succeeded: ${successDetail}`
+  }
+  return task.failed > 0
+    ? `批量授权完成：${successDetail}，失败 ${task.failed} 个`
+    : `批量授权成功：${successDetail}`
+}
+
+function cookieAuthorizeFailureReasons(task: OAuthBatchImportTaskStatusResponse): string[] {
+  const reasons: string[] = []
+  const seenIndexes = new Set<number>()
+  for (const item of task.error_samples) {
+    const index = item.index
+    const detail = item.error?.trim()
+    if (
+      item.status !== 'error'
+      || !Number.isInteger(index)
+      || index < 0
+      || index >= task.total
+      || seenIndexes.has(index)
+      || !detail
+      || detail.length > 512
+    ) {
+      continue
+    }
+
+    const normalized = detail.toLowerCase()
+    if (
+      normalized.includes('sessionkey')
+      || normalized.includes('sk-ant-')
+      || normalized.includes('cookie:')
+    ) {
+      continue
+    }
+
+    seenIndexes.add(index)
+    reasons.push(`#${index + 1} ${legacyT(detail)}`)
+    if (reasons.length === 2) break
+  }
+  return reasons
+}
+
+function cookieAuthorizeBatchResultMessage(task: OAuthBatchImportTaskStatusResponse): string {
+  const summary = cookieAuthorizeBatchSummary(task)
+  const reasons = cookieAuthorizeFailureReasons(task)
+  if (reasons.length === 0) return summary
+  return `${summary}${isEnglishLocale() ? '; ' : '；'}${reasons.join(isEnglishLocale() ? '; ' : '；')}`
+}
+
+function failedCookieAuthorizeEntries(
+  task: OAuthBatchImportTaskStatusResponse,
+  entries: string[],
+): string[] {
+  const failedIndexes = task.error_samples
+    .filter(item => item.status === 'error' && Number.isInteger(item.index))
+    .map(item => item.index)
+    .filter(index => index >= 0 && index < entries.length)
+
+  // Keep every original line if the response is incomplete, so credentials are never discarded.
+  if (new Set(failedIndexes).size !== task.failed) return entries
+  return failedIndexes.map(index => entries[index])
+}
+
+function handleCookieAuthorizeBatchResult(
+  task: OAuthBatchImportTaskStatusResponse,
+  entries: string[],
+) {
+  const message = cookieAuthorizeBatchResultMessage(task)
+  cookieAuthorizeTask.value = null
+  cookieAuthorizeSubmittedEntries.value = []
+
+  if (task.failed === 0) {
+    success(message)
+    emit('saved')
+    handleClose()
+    return
+  }
+
+  if (task.success > 0) {
+    cookieInput.value = failedCookieAuthorizeEntries(task, entries).join('\n')
+    emit('saved')
+    warning(message, legacyT('批量授权'))
+    return
+  }
+
+  showError(message, legacyT('错误'))
+}
+
+async function pollCookieAuthorizeTaskStatus(taskId: string, requestId: number) {
+  if (!props.providerId || cookieAuthorizePolling.value || requestId !== cookieAuthorizeRequestId) return
+
+  cookieAuthorizePolling.value = true
+  try {
+    const task = await getProviderCookieAuthorizeTaskStatus(props.providerId, taskId)
+    if (requestId !== cookieAuthorizeRequestId) return
+    cookieAuthorizeTask.value = task
+
+    if (task.status === 'completed') {
+      stopCookieAuthorizePolling()
+      cookieAuthorizing.value = false
+      handleCookieAuthorizeBatchResult(task, [...cookieAuthorizeSubmittedEntries.value])
+      return
+    }
+
+    if (task.status === 'failed') {
+      stopCookieAuthorizePolling()
+      cookieAuthorizing.value = false
+      cookieAuthorizeTask.value = null
+      cookieAuthorizeSubmittedEntries.value = []
+      showError(
+        legacyT(task.error || task.message || 'Cookie 授权失败'),
+        legacyT('Cookie 授权失败'),
+      )
+      return
+    }
+
+    scheduleCookieAuthorizePoll(taskId, requestId)
+  } catch {
+    if (cookieAuthorizing.value && requestId === cookieAuthorizeRequestId) {
+      scheduleCookieAuthorizePoll(taskId, requestId, 2000)
+    }
+  } finally {
+    if (requestId === cookieAuthorizeRequestId) {
+      cookieAuthorizePolling.value = false
+    }
+  }
+}
+
 function parseImportText(text: string): {
   api_key?: string
   token?: string
@@ -1531,6 +1861,30 @@ function parseImportText(text: string): {
       // Not JSON: treat as token copied from show-auth-token.
     }
     return { token: trimmed }
+  }
+
+  if (isClaudeCodeProvider.value) {
+    try {
+      const parsed: unknown = JSON.parse(trimmed)
+      if (isObjectRecord(parsed) && isObjectRecord(parsed.claudeAiOauth)) {
+        const claudeAiOauth = parsed.claudeAiOauth
+        const refreshToken = normalizeStringField(claudeAiOauth.refreshToken)
+          ?? normalizeStringField(claudeAiOauth.refresh_token)
+        const accessToken = normalizeStringField(claudeAiOauth.accessToken)
+          ?? normalizeStringField(claudeAiOauth.access_token)
+        if (refreshToken || accessToken) {
+          return {
+            refresh_token: refreshToken,
+            access_token: accessToken,
+            expires_at: normalizeClaudeCredentialsExpiry(
+              claudeAiOauth.expiresAt ?? claudeAiOauth.expires_at,
+            ),
+          }
+        }
+      }
+    } catch {
+      // Raw Claude refresh tokens continue through the generic import path.
+    }
   }
 
   try {
@@ -1721,6 +2075,12 @@ function normalizeExpiryField(value: unknown): number | undefined {
     }
   }
   return undefined
+}
+
+function normalizeClaudeCredentialsExpiry(value: unknown): number | undefined {
+  const expiresAt = normalizeExpiryField(value)
+  if (!expiresAt) return undefined
+  return expiresAt >= 10_000_000_000 ? Math.floor(expiresAt / 1000) : expiresAt
 }
 
 function isLikelyJwtToken(token: string): boolean {
@@ -2138,27 +2498,32 @@ async function pollDevice(withCallback = false) {
 
 onBeforeUnmount(() => {
   stopImportPolling()
+  stopCookieAuthorizePolling()
   stopDevicePolling()
 })
 
-watch(() => props.open, (newOpen) => {
-  if (newOpen) {
-    proxyNodesStore.ensureLoaded()
-    mode.value = defaultMode.value
-    if (!showAuthorizationMode.value) {
-      return
-    }
-    if (isWindsurfProvider.value) {
-      device.value.auth_type = 'default'
-    } else if (isKiroProvider.value) {
-      void ensureKiroSocialDeviceAuth()
+watch(
+  () => props.open,
+  (newOpen) => {
+    if (newOpen) {
+      proxyNodesStore.ensureLoaded()
+      mode.value = defaultMode.value
+      if (!showAuthorizationMode.value) {
+        return
+      }
+      if (isWindsurfProvider.value) {
+        device.value.auth_type = 'default'
+      } else if (isKiroProvider.value) {
+        void ensureKiroSocialDeviceAuth()
+      } else {
+        initOAuth()
+      }
     } else {
-      initOAuth()
+      resetForm()
     }
-  } else {
-    resetForm()
-  }
-})
+  },
+  { immediate: true },
+)
 
 watch(
   () => [props.open, props.providerId, props.providerType] as const,
@@ -2168,6 +2533,9 @@ watch(
       return
     }
     if (props.open && mode.value === 'agent_identity' && !isCodexProvider.value) {
+      mode.value = defaultMode.value
+    }
+    if (props.open && mode.value === 'cookie' && !isClaudeCodeProvider.value) {
       mode.value = defaultMode.value
     }
     if (props.open && isWindsurfProvider.value && mode.value === 'oauth') {

@@ -5,6 +5,10 @@ import ModelMappingDialog, { type AliasGroup } from '../ModelMappingDialog.vue'
 import type { Model, ProviderEndpoint } from '@/api/endpoints'
 import { updateModel } from '@/api/endpoints/models'
 
+const upstreamModelMocks = vi.hoisted(() => ({
+  fetchModels: vi.fn(),
+}))
+
 vi.mock('@/components/ui', async () => {
   const { defineComponent, h } = await import('vue')
 
@@ -106,7 +110,7 @@ vi.mock('@/composables/useToast', () => ({
 
 vi.mock('../../composables/useUpstreamModelsCache', () => ({
   useUpstreamModelsCache: () => ({
-    fetchModels: vi.fn(),
+    fetchModels: upstreamModelMocks.fetchModels,
   }),
 }))
 
@@ -114,6 +118,7 @@ const mountedApps: Array<{ app: App, root: HTMLElement }> = []
 
 afterEach(() => {
   vi.mocked(updateModel).mockClear()
+  upstreamModelMocks.fetchModels.mockReset()
   for (const { app, root } of mountedApps.splice(0)) {
     app.unmount()
     root.remove()
@@ -121,6 +126,36 @@ afterEach(() => {
 })
 
 describe('ModelMappingDialog', () => {
+  it('initializes upstream models when lazily mounted in the open state', async () => {
+    upstreamModelMocks.fetchModels.mockResolvedValue({
+      models: [],
+      error: null,
+      warning: null,
+    })
+    const model = {
+      id: 'model-1',
+      provider_model_name: 'provider-model-1',
+      provider_model_mappings: [],
+    } as Model
+    const root = document.createElement('div')
+    document.body.appendChild(root)
+    const app = createApp(defineComponent({
+      setup() {
+        return () => h(ModelMappingDialog, {
+          open: true,
+          providerId: 'provider-1',
+          models: [model],
+          hasAutoFetchKey: true,
+        })
+      },
+    }))
+    app.mount(root)
+    mountedApps.push({ app, root })
+
+    await vi.waitFor(() => expect(upstreamModelMocks.fetchModels).toHaveBeenCalledTimes(1))
+    expect(upstreamModelMocks.fetchModels).toHaveBeenCalledWith('provider-1')
+  })
+
   it('offers session compaction only for an explicitly selected Responses endpoint', async () => {
     const chatEndpoint = {
       id: 'endpoint-chat',

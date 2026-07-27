@@ -71,7 +71,7 @@ pub(crate) use self::transport::{
     request_pair_allowed_for_transport, request_pair_direct_auth,
     request_pair_transport_unsupported_reason, CandidateTransportPolicyFacts,
 };
-pub(crate) use crate::control::GatewayControlDecision;
+pub(crate) use crate::control::{GatewayControlDecision, GatewayCredentialCarrier};
 pub(crate) use crate::execution_runtime::{ConversionMode, ExecutionStrategy};
 pub(crate) use crate::headers::RequestOrigin;
 pub(crate) use aether_ai_serving::{
@@ -89,6 +89,7 @@ pub(crate) fn build_provider_transport_request_url(
     upstream_is_stream: bool,
     request_query: Option<&str>,
     kiro_api_region: Option<&str>,
+    api_operation: Option<ApiOperation>,
 ) -> Option<String> {
     self::transport::build_transport_request_url(
         transport,
@@ -98,6 +99,7 @@ pub(crate) fn build_provider_transport_request_url(
             upstream_is_stream,
             request_query,
             kiro_api_region,
+            api_operation,
         },
     )
 }
@@ -109,6 +111,7 @@ pub(crate) fn build_provider_transport_request_url_for_request_body(
     upstream_is_stream: bool,
     request_query: Option<&str>,
     kiro_api_region: Option<&str>,
+    api_operation: Option<ApiOperation>,
     provider_request_body: Option<&serde_json::Value>,
 ) -> Option<String> {
     self::transport::build_transport_request_url_for_request_body(
@@ -119,6 +122,7 @@ pub(crate) fn build_provider_transport_request_url_for_request_body(
             upstream_is_stream,
             request_query,
             kiro_api_region,
+            api_operation,
         },
         provider_request_body,
     )

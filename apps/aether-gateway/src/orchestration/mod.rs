@@ -9,6 +9,7 @@ mod attempt;
 mod classifier;
 mod effects;
 mod health;
+mod oauth_error;
 mod policy;
 mod recovery;
 mod report_effects;
@@ -24,8 +25,10 @@ pub(crate) use self::attempt::{
     LocalExecutionCandidateMetadata, SCHEDULER_AFFINITY_EPOCH_REPORT_FIELD,
 };
 pub(crate) use self::classifier::{
-    classify_local_failover, local_failover_error_message, LocalFailoverClassification,
-    LocalFailoverInput,
+    classify_anthropic_failure_disposition, classify_failure_disposition, classify_local_failover,
+    failure_disposition_from_local_classification, local_failover_error_message,
+    FailureDisposition, FailureRetryAction, FailureScope, FailureTokenAction,
+    LocalFailoverClassification, LocalFailoverInput,
 };
 pub(crate) use self::effects::{
     apply_local_execution_effect, LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect,
@@ -37,6 +40,9 @@ pub(crate) use self::health::{
     project_local_failure_health, project_local_key_circuit_closed,
     project_local_key_circuit_failure, project_local_success_health,
 };
+pub(crate) use self::oauth_error::{
+    oauth_status_may_be_invalid, oauth_status_proves_access_token_invalid,
+};
 pub(crate) use self::policy::{
     append_local_failover_policy_to_value, codex_cyber_flag_passthrough_enabled,
     cyber_continue_failover_enabled, local_failover_policy_from_report_context,
@@ -44,8 +50,8 @@ pub(crate) use self::policy::{
     LocalFailoverRegexRule, CYBER_CONTINUE_FAILOVER_CONFIG_KEY,
 };
 pub(crate) use self::recovery::{
-    analyze_local_failover, recover_local_failover_decision, LocalFailoverAnalysis,
-    LocalFailoverDecision,
+    analyze_local_failover, apply_provider_failure_disposition, recover_local_failover_decision,
+    LocalFailoverAnalysis, LocalFailoverDecision,
 };
 #[cfg(test)]
 pub(crate) use self::report_effects::clear_local_report_effect_caches_for_tests;
@@ -65,7 +71,9 @@ pub(crate) async fn resolve_local_failover_analysis_for_attempt(
     }
 
     let policy = resolve_local_failover_policy(state, plan, report_context).await;
-    analyze_local_failover(&policy, LocalFailoverInput::new(status_code, response_text))
+    let analysis =
+        analyze_local_failover(&policy, LocalFailoverInput::new(status_code, response_text));
+    apply_provider_failure_disposition(&plan.provider_api_format, status_code, analysis)
 }
 
 pub(crate) async fn resolve_local_failover_decision_for_attempt(

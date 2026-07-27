@@ -3,15 +3,22 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::anthropic_compat::{
+    resolve_anthropic_compatibility_profile, AnthropicCompatibilityProfile,
+};
 use crate::antigravity::is_antigravity_provider_transport;
 use crate::auth::{
     build_complete_passthrough_headers, build_complete_passthrough_headers_with_auth,
-    resolve_local_gemini_auth, resolve_local_openai_bearer_auth, resolve_local_standard_auth,
+    replace_upstream_auth_headers, resolve_local_gemini_auth, resolve_local_openai_bearer_auth,
+    resolve_local_standard_auth,
 };
-use crate::claude_code::build_claude_code_passthrough_headers;
-use crate::claude_code::local_claude_code_transport_unsupported_reason_with_network;
+use crate::claude_code::{
+    build_claude_code_passthrough_headers, current_claude_code_transport_identity_profile,
+    local_claude_code_transport_unsupported_reason_with_network,
+};
 use crate::gemini_cli::is_gemini_cli_provider_transport;
 use crate::grok::{is_grok_provider_transport, resolve_grok_session_auth};
+use crate::headers::{force_identity_accept_encoding, upstream_credential_header_names};
 use crate::kiro::{
     build_kiro_provider_headers, build_kiro_provider_request_body, is_kiro_provider_transport,
     local_kiro_request_transport_unsupported_reason_with_network, KiroAuthConfig,
@@ -29,10 +36,8 @@ use crate::vertex::{
     is_vertex_service_account_transport_context, is_vertex_transport_context,
     local_vertex_gemini_transport_unsupported_reason_with_network,
 };
-use crate::{
-    build_transport_request_url_for_request_body, ensure_upstream_auth_header,
-    TransportRequestUrlParams,
-};
+
+use crate::{build_transport_request_url_for_request_body, TransportRequestUrlParams};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SameFormatProviderFamily {
@@ -52,6 +57,8 @@ pub struct SameFormatProviderRequestBehavior {
     pub is_antigravity: bool,
     pub is_gemini_cli: bool,
     pub is_claude_code: bool,
+    pub is_claude_code_transport: bool,
+    pub anthropic_compatibility_profile: AnthropicCompatibilityProfile,
     pub is_vertex: bool,
     pub is_kiro: bool,
     pub upstream_is_stream: bool,
@@ -106,6 +113,7 @@ pub struct SameFormatProviderUpstreamUrlParams<'a> {
     pub upstream_is_stream: bool,
     pub request_query: Option<&'a str>,
     pub kiro_api_region: Option<&'a str>,
+    pub api_operation: Option<aether_ai_formats::ApiOperation>,
     pub provider_request_body: Option<&'a Value>,
 }
 
@@ -116,10 +124,10 @@ pub struct SameFormatProviderHeadersInput<'a> {
     pub original_request_body: &'a Value,
     pub header_rules: Option<&'a Value>,
     pub behavior: SameFormatProviderRequestBehavior,
+    pub api_operation: Option<aether_ai_formats::ApiOperation>,
     pub auth_header: Option<&'a str>,
     pub auth_value: Option<&'a str>,
     pub extra_headers: &'a BTreeMap<String, String>,
-    pub key_fingerprint: Option<&'a Value>,
     pub kiro_auth_config: Option<&'a KiroAuthConfig>,
     pub kiro_machine_id: Option<&'a str>,
 }
@@ -128,13 +136,24 @@ pub fn classify_same_format_provider_request_behavior(
     transport: &GatewayProviderTransportSnapshot,
     params: SameFormatProviderRequestBehaviorParams<'_>,
 ) -> SameFormatProviderRequestBehavior {
+    classify_same_format_provider_request_behavior_for_operation(transport, params, None)
+}
+
+pub fn classify_same_format_provider_request_behavior_for_operation(
+    transport: &GatewayProviderTransportSnapshot,
+    params: SameFormatProviderRequestBehaviorParams<'_>,
+    api_operation: Option<aether_ai_formats::ApiOperation>,
+) -> SameFormatProviderRequestBehavior {
     let is_antigravity = is_antigravity_provider_transport(transport);
     let is_gemini_cli = is_gemini_cli_provider_transport(transport);
-    let is_claude_code = transport
+    let is_claude_code_transport = transport
         .provider
         .provider_type
         .trim()
         .eq_ignore_ascii_case("claude_code");
+    let anthropic_compatibility_profile =
+        resolve_anthropic_compatibility_profile(transport, params.provider_api_format);
+    let is_claude_code = anthropic_compatibility_profile.uses_claude_code_compatibility();
     let is_vertex = is_vertex_transport_context(transport);
     let is_kiro = is_kiro_provider_transport(transport);
     let gemini_cli_requires_upstream_streaming = is_gemini_cli
@@ -142,18 +161,23 @@ pub fn classify_same_format_provider_request_behavior(
             params.provider_api_format,
             params.require_streaming,
         );
-    let upstream_is_stream = aether_ai_formats::resolve_upstream_is_stream_for_provider(
-        transport.endpoint.config.as_ref(),
-        transport.provider.provider_type.as_str(),
-        params.provider_api_format,
-        params.require_streaming,
-        is_kiro || is_antigravity || gemini_cli_requires_upstream_streaming,
+    let operation_requires_sync = matches!(
+        api_operation,
+        Some(aether_ai_formats::ApiOperation::ClaudeCountTokens)
     );
-    let force_body_stream_field =
-        aether_ai_formats::api_format_uses_body_stream_field(params.provider_api_format)
-            && aether_ai_formats::endpoint_config_forces_upstream_stream_policy(
-                transport.endpoint.config.as_ref(),
-            );
+    let upstream_is_stream = !operation_requires_sync
+        && aether_ai_formats::resolve_upstream_is_stream_for_provider(
+            transport.endpoint.config.as_ref(),
+            transport.provider.provider_type.as_str(),
+            params.provider_api_format,
+            params.require_streaming,
+            is_kiro || is_antigravity || gemini_cli_requires_upstream_streaming,
+        );
+    let force_body_stream_field = !operation_requires_sync
+        && aether_ai_formats::api_format_uses_body_stream_field(params.provider_api_format)
+        && aether_ai_formats::endpoint_config_forces_upstream_stream_policy(
+            transport.endpoint.config.as_ref(),
+        );
     let report_kind = if is_kiro && !params.require_streaming {
         "claude_cli_sync_finalize"
     } else if (is_gemini_cli || is_antigravity) && !params.require_streaming {
@@ -170,6 +194,8 @@ pub fn classify_same_format_provider_request_behavior(
         is_antigravity,
         is_gemini_cli,
         is_claude_code,
+        is_claude_code_transport,
+        anthropic_compatibility_profile,
         is_vertex,
         is_kiro,
         upstream_is_stream,
@@ -194,6 +220,20 @@ pub fn build_same_format_provider_request_body_with_compatibility_report(
         body,
         compatibility_edits,
     })
+}
+
+pub fn enforce_same_format_provider_api_operation_body_policy(
+    body: &mut Value,
+    api_operation: Option<aether_ai_formats::ApiOperation>,
+) -> bool {
+    if !matches!(
+        api_operation,
+        Some(aether_ai_formats::ApiOperation::ClaudeCountTokens)
+    ) {
+        return false;
+    }
+    body.as_object_mut()
+        .is_some_and(|object| object.remove("stream").is_some())
 }
 
 fn build_same_format_provider_request_body_inner(
@@ -503,6 +543,7 @@ pub fn build_same_format_provider_upstream_url(
             upstream_is_stream: params.upstream_is_stream,
             request_query: params.request_query,
             kiro_api_region: params.kiro_api_region,
+            api_operation: params.api_operation,
         },
         params.provider_request_body,
     )
@@ -526,14 +567,13 @@ pub fn build_same_format_provider_headers(
 
     let auth_header = input.auth_header.unwrap_or_default();
     let auth_value = input.auth_value.unwrap_or_default();
-    let mut provider_request_headers = if input.behavior.is_claude_code {
+    let mut provider_request_headers = if input.behavior.is_claude_code_transport {
         build_claude_code_passthrough_headers(
             input.headers,
             auth_header,
             auth_value,
             input.extra_headers,
             input.behavior.upstream_is_stream,
-            input.key_fingerprint,
         )
     } else if input.behavior.is_vertex {
         build_complete_passthrough_headers(
@@ -551,11 +591,8 @@ pub fn build_same_format_provider_headers(
         )
     };
 
-    let protected_headers = input
-        .auth_header
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| vec![value, "content-type"])
-        .unwrap_or_else(|| vec!["content-type"]);
+    let mut protected_headers = upstream_credential_header_names().to_vec();
+    protected_headers.push("content-type");
     if !apply_local_header_rules_with_request_headers(
         &mut provider_request_headers,
         input.header_rules,
@@ -567,10 +604,28 @@ pub fn build_same_format_provider_headers(
         return None;
     }
     if let (Some(auth_header), Some(auth_value)) = (input.auth_header, input.auth_value) {
-        ensure_upstream_auth_header(&mut provider_request_headers, auth_header, auth_value);
+        replace_upstream_auth_headers(&mut provider_request_headers, auth_header, auth_value);
+    } else {
+        replace_upstream_auth_headers(&mut provider_request_headers, "", "");
     }
-    if input.behavior.upstream_is_stream {
+    let claude_code_profile = *current_claude_code_transport_identity_profile();
+    if input.behavior.is_claude_code_transport {
+        claude_code_profile.apply_fixed_headers(
+            &mut provider_request_headers,
+            input.behavior.upstream_is_stream,
+        );
+    }
+    if input.behavior.is_claude_code_transport || input.behavior.is_claude_code {
+        claude_code_profile.apply_beta_policy(&mut provider_request_headers, input.api_operation);
+    }
+    if matches!(
+        input.api_operation,
+        Some(aether_ai_formats::ApiOperation::ClaudeCountTokens)
+    ) {
+        provider_request_headers.insert("accept".to_string(), "application/json".to_string());
+    } else if input.behavior.upstream_is_stream {
         provider_request_headers.insert("accept".to_string(), "text/event-stream".to_string());
+        force_identity_accept_encoding(&mut provider_request_headers);
     }
     Some(provider_request_headers)
 }
@@ -599,7 +654,7 @@ pub fn same_format_provider_transport_unsupported_reason(
         local_kiro_request_transport_unsupported_reason_with_network(transport)
     } else if behavior.is_antigravity {
         None
-    } else if behavior.is_claude_code {
+    } else if behavior.is_claude_code_transport {
         local_claude_code_transport_unsupported_reason_with_network(transport, api_format)
     } else if behavior.is_vertex {
         local_vertex_gemini_transport_unsupported_reason_with_network(transport)
@@ -639,7 +694,7 @@ pub fn same_format_provider_transport_unsupported_reason_for_trace(
         },
     );
     if !behavior.is_antigravity
-        && !behavior.is_claude_code
+        && !behavior.is_claude_code_transport
         && !behavior.is_gemini_cli
         && !behavior.is_vertex
         && !behavior.is_kiro
@@ -826,6 +881,183 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_compatibility_profile_controls_legacy_claude_code_edits() {
+        let mut native = sample_transport("custom");
+        native.endpoint.api_format = "claude:messages".to_string();
+        let native_behavior = classify_same_format_provider_request_behavior(
+            &native,
+            SameFormatProviderRequestBehaviorParams {
+                require_streaming: false,
+                provider_api_format: "claude:messages",
+                report_kind: "claude_chat_sync_success",
+            },
+        );
+        assert!(!native_behavior.is_claude_code);
+        assert!(!native_behavior.is_claude_code_transport);
+        assert_eq!(
+            native_behavior.anthropic_compatibility_profile,
+            AnthropicCompatibilityProfile::NativeTransparent
+        );
+
+        native.endpoint.config = Some(json!({
+            "anthropic": {"compatibility_profile": "claude_code_legacy"}
+        }));
+        let compat_behavior = classify_same_format_provider_request_behavior(
+            &native,
+            SameFormatProviderRequestBehaviorParams {
+                require_streaming: false,
+                provider_api_format: "claude:messages",
+                report_kind: "claude_chat_sync_success",
+            },
+        );
+        assert!(compat_behavior.is_claude_code);
+        assert!(!compat_behavior.is_claude_code_transport);
+        assert_eq!(
+            compat_behavior.anthropic_compatibility_profile,
+            AnthropicCompatibilityProfile::ClaudeCodeLegacy
+        );
+
+        let request_body = json!({
+            "model": "claude-client",
+            "thinking": {"type": "enabled"},
+            "context_management": {"edits": [{"type": "client_strategy"}]},
+            "system": [{
+                "type": "text",
+                "text": "x-anthropic-billing-header: cc_version=9.9.9.abc; cc_entrypoint=cli;"
+            }],
+            "messages": [{
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "visible"},
+                    {"type": "thinking", "thinking": "unsigned", "signature": ""}
+                ]
+            }]
+        });
+        let build_body = |behavior: SameFormatProviderRequestBehavior| {
+            build_same_format_provider_request_body(SameFormatProviderRequestBodyInput {
+                body_json: &request_body,
+                mapped_model: "claude-upstream",
+                client_api_format: "claude:messages",
+                provider_api_format: "claude:messages",
+                source_model: Some("claude-client"),
+                family: SameFormatProviderFamily::Standard,
+                body_rules: None,
+                request_headers: None,
+                upstream_is_stream: false,
+                force_body_stream_field: false,
+                kiro_auth_config: None,
+                is_claude_code: behavior.is_claude_code,
+                enable_model_directives: false,
+            })
+            .expect("body should build")
+        };
+        assert_eq!(
+            build_body(native_behavior)["messages"][0]["content"]
+                .as_array()
+                .map(Vec::len),
+            Some(2),
+            "native Anthropic requests must remain untouched"
+        );
+        assert_eq!(
+            build_body(native_behavior)["system"][0]["text"],
+            request_body["system"][0]["text"],
+            "native transparent requests must not rewrite billing identity"
+        );
+        assert_eq!(
+            build_body(native_behavior)["context_management"],
+            request_body["context_management"],
+            "native transparent requests must not apply Claude Code body gates"
+        );
+        assert_eq!(
+            build_body(compat_behavior)["messages"][0]["content"]
+                .as_array()
+                .map(Vec::len),
+            Some(1),
+            "legacy compatibility may sanitize invalid thinking blocks"
+        );
+        assert_eq!(
+            build_body(compat_behavior)["system"][0]["text"],
+            "x-anthropic-billing-header: cc_version=2.1.161.abc; cc_entrypoint=cli;"
+        );
+
+        let mut legacy = sample_transport("claude_code");
+        legacy.endpoint.api_format = "claude:messages".to_string();
+        legacy.endpoint.config = Some(json!({
+            "anthropic": {"compatibility_profile": "native_transparent"}
+        }));
+        let transparent_legacy_transport = classify_same_format_provider_request_behavior(
+            &legacy,
+            SameFormatProviderRequestBehaviorParams {
+                require_streaming: false,
+                provider_api_format: "claude:messages",
+                report_kind: "claude_chat_sync_success",
+            },
+        );
+        assert!(!transparent_legacy_transport.is_claude_code);
+        assert!(transparent_legacy_transport.is_claude_code_transport);
+
+        let provider_request_body = json!({"model": "claude-upstream"});
+        let empty_headers = http::HeaderMap::new();
+        let empty_extra_headers = BTreeMap::new();
+        let build_headers =
+            |behavior: SameFormatProviderRequestBehavior,
+             api_operation: Option<aether_ai_formats::ApiOperation>| {
+                build_same_format_provider_headers(SameFormatProviderHeadersInput {
+                    headers: &empty_headers,
+                    provider_request_body: &provider_request_body,
+                    original_request_body: &request_body,
+                    header_rules: None,
+                    behavior,
+                    api_operation,
+                    auth_header: Some("x-api-key"),
+                    auth_value: Some("upstream-secret"),
+                    extra_headers: &empty_extra_headers,
+                    kiro_auth_config: None,
+                    kiro_machine_id: None,
+                })
+                .expect("headers should build")
+            };
+        assert!(
+            build_headers(compat_behavior, None).get("x-app").is_none(),
+            "compatibility profile must not impersonate the Claude Code transport"
+        );
+        assert_eq!(
+            build_headers(transparent_legacy_transport, None)
+                .get("x-app")
+                .map(String::as_str),
+            Some("cli"),
+            "Claude Code transport headers must survive a transparent body profile"
+        );
+        assert!(
+            build_headers(
+                native_behavior,
+                Some(aether_ai_formats::ApiOperation::ClaudeCountTokens),
+            )
+            .get("anthropic-beta")
+            .is_none(),
+            "native transparent token counting must not inject compatibility betas"
+        );
+        assert!(
+            build_headers(
+                compat_behavior,
+                Some(aether_ai_formats::ApiOperation::ClaudeCountTokens),
+            )["anthropic-beta"]
+                .split(',')
+                .any(|token| token == "token-counting-2024-11-01"),
+            "legacy compatibility token counting requires the token-counting beta"
+        );
+        assert!(
+            build_headers(
+                transparent_legacy_transport,
+                Some(aether_ai_formats::ApiOperation::ClaudeCountTokens),
+            )["anthropic-beta"]
+                .split(',')
+                .any(|token| token == "token-counting-2024-11-01"),
+            "Claude Code transport token counting requires the token-counting beta"
+        );
+    }
+
+    #[test]
     fn same_format_behavior_resolves_endpoint_stream_policy() {
         let mut force_stream = sample_transport("openai");
         force_stream.endpoint.config = Some(json!({
@@ -906,6 +1138,53 @@ mod tests {
         );
         assert!(!search_behavior.upstream_is_stream);
         assert!(!search_behavior.force_body_stream_field);
+    }
+
+    #[test]
+    fn count_tokens_overrides_endpoint_stream_policy_and_removes_stream_field() {
+        let mut transport = sample_transport("custom");
+        transport.endpoint.api_format = "claude:messages".to_string();
+        transport.endpoint.config = Some(json!({
+            "upstream_stream_policy": "force_stream"
+        }));
+        let behavior = classify_same_format_provider_request_behavior_for_operation(
+            &transport,
+            SameFormatProviderRequestBehaviorParams {
+                require_streaming: false,
+                provider_api_format: "claude:messages",
+                report_kind: "claude_count_tokens_sync_success",
+            },
+            Some(aether_ai_formats::ApiOperation::ClaudeCountTokens),
+        );
+
+        assert!(!behavior.upstream_is_stream);
+        assert!(!behavior.force_body_stream_field);
+
+        let mut body = json!({"model": "claude-sonnet-4", "messages": [], "stream": true});
+        assert!(enforce_same_format_provider_api_operation_body_policy(
+            &mut body,
+            Some(aether_ai_formats::ApiOperation::ClaudeCountTokens),
+        ));
+        assert!(body.get("stream").is_none());
+
+        let headers = build_same_format_provider_headers(SameFormatProviderHeadersInput {
+            headers: &http::HeaderMap::new(),
+            provider_request_body: &body,
+            original_request_body: &body,
+            header_rules: None,
+            behavior,
+            api_operation: Some(aether_ai_formats::ApiOperation::ClaudeCountTokens),
+            auth_header: Some("x-api-key"),
+            auth_value: Some("secret"),
+            extra_headers: &BTreeMap::new(),
+            kiro_auth_config: None,
+            kiro_machine_id: None,
+        })
+        .expect("headers should build");
+        assert_eq!(
+            headers.get("accept").map(String::as_str),
+            Some("application/json")
+        );
     }
 
     #[test]
@@ -1857,8 +2136,13 @@ mod tests {
     fn builds_same_format_headers_with_auth_and_stream_accept() {
         let provider_request_body = json!({"model": "upstream-model"});
         let original_request_body = json!({"model": "client-model"});
+        let mut request_headers = http::HeaderMap::new();
+        request_headers.insert(
+            http::header::ACCEPT_ENCODING,
+            http::HeaderValue::from_static("gzip, br"),
+        );
         let headers = build_same_format_provider_headers(SameFormatProviderHeadersInput {
-            headers: &http::HeaderMap::new(),
+            headers: &request_headers,
             provider_request_body: &provider_request_body,
             original_request_body: &original_request_body,
             header_rules: None,
@@ -1866,16 +2150,18 @@ mod tests {
                 is_antigravity: false,
                 is_gemini_cli: false,
                 is_claude_code: false,
+                is_claude_code_transport: false,
+                anthropic_compatibility_profile: AnthropicCompatibilityProfile::NativeTransparent,
                 is_vertex: false,
                 is_kiro: false,
                 upstream_is_stream: true,
                 force_body_stream_field: false,
                 report_kind: "openai_chat_stream_success",
             },
+            api_operation: None,
             auth_header: Some("x-api-key"),
             auth_value: Some("secret"),
             extra_headers: &BTreeMap::new(),
-            key_fingerprint: None,
             kiro_auth_config: None,
             kiro_machine_id: None,
         })
@@ -1889,6 +2175,90 @@ mod tests {
         assert_eq!(
             headers.get("accept").map(String::as_str),
             Some("text/event-stream")
+        );
+        assert_eq!(
+            headers.get("accept-encoding").map(String::as_str),
+            Some("identity")
+        );
+    }
+
+    #[test]
+    fn same_format_headers_cannot_restore_credentials_or_internal_headers() {
+        let provider_request_body = json!({"model": "upstream-model"});
+        let original_request_body = json!({"model": "client-model"});
+        let mut request_headers = http::HeaderMap::new();
+        for (name, value) in [
+            ("authorization", "Bearer client"),
+            ("api-key", "client-api-key"),
+            ("x-api-key", "client-x-api-key"),
+            ("cookie", "session=client"),
+            ("proxy-authorization", "Basic client"),
+            ("x-aether-auth-user-id", "user-private"),
+            ("x-aether-auth-api-key-id", "key-private"),
+            ("x-aether-auth-balance-remaining", "12.34"),
+            ("x-aether-gateway", "gateway-internal"),
+        ] {
+            request_headers.insert(
+                http::HeaderName::from_bytes(name.as_bytes()).expect("valid header name"),
+                http::HeaderValue::from_str(value).expect("valid header value"),
+            );
+        }
+        let behavior = SameFormatProviderRequestBehavior {
+            is_antigravity: false,
+            is_gemini_cli: false,
+            is_claude_code: false,
+            is_claude_code_transport: false,
+            anthropic_compatibility_profile: AnthropicCompatibilityProfile::NativeTransparent,
+            is_vertex: false,
+            is_kiro: false,
+            upstream_is_stream: false,
+            force_body_stream_field: false,
+            report_kind: "claude_chat_sync_success",
+        };
+        let header_rules = json!([
+            {"action": "set", "key": "cookie", "value": "session=rule"},
+            {"action": "set", "key": "authorization", "value": "Bearer rule"},
+            {"action": "set", "key": "x-aether-auth-user-id", "value": "user-rule"}
+        ]);
+        let extra_headers = BTreeMap::from([
+            ("api-key".to_string(), "extra-api-key".to_string()),
+            ("authorization".to_string(), "Bearer extra".to_string()),
+            (
+                "x-aether-auth-balance-remaining".to_string(),
+                "99.99".to_string(),
+            ),
+            ("anthropic-beta".to_string(), "custom-beta".to_string()),
+        ]);
+
+        let headers = build_same_format_provider_headers(SameFormatProviderHeadersInput {
+            headers: &request_headers,
+            provider_request_body: &provider_request_body,
+            original_request_body: &original_request_body,
+            header_rules: Some(&header_rules),
+            behavior,
+            api_operation: None,
+            auth_header: Some("x-api-key"),
+            auth_value: Some("upstream-secret"),
+            extra_headers: &extra_headers,
+            kiro_auth_config: None,
+            kiro_machine_id: None,
+        })
+        .expect("headers should build");
+
+        assert_eq!(
+            headers.get("x-api-key").map(String::as_str),
+            Some("upstream-secret")
+        );
+        for stripped in ["authorization", "api-key", "cookie", "proxy-authorization"] {
+            assert!(!headers.contains_key(stripped), "should strip {stripped}");
+        }
+        assert!(
+            headers.keys().all(|name| !name.starts_with("x-aether-")),
+            "Aether-owned headers must never leave provider egress: {headers:?}"
+        );
+        assert_eq!(
+            headers.get("anthropic-beta").map(String::as_str),
+            Some("custom-beta")
         );
     }
 }

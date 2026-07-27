@@ -312,6 +312,10 @@ pub(crate) async fn build_admin_update_provider_record(
     }
 
     updated.config = (!config_map.is_empty()).then_some(serde_json::Value::Object(config_map));
+    crate::provider_transport::validate_anthropic_compatibility_profile_config(
+        updated.config.as_ref(),
+    )
+    .map_err(|_| "无效的 Anthropic compatibility profile".to_string())?;
     updated.updated_at_unix_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()

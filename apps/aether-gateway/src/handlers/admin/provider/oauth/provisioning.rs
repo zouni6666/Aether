@@ -1,3 +1,9 @@
+use super::duplicates::{
+    acquire_claude_oauth_account_lock, acquire_codex_oauth_account_locks,
+    release_provider_oauth_account_locks,
+};
+use super::errors::build_internal_control_error_response;
+use super::runtime::spawn_provider_oauth_account_state_refresh_after_update;
 use super::state::{
     decode_jwt_claims, enrich_admin_provider_oauth_auth_config, json_non_empty_string,
     json_u64_value,
@@ -9,14 +15,21 @@ use crate::handlers::admin::admin_provider_pool_config;
 use crate::handlers::admin::request::AdminAppState;
 use crate::provider_key_auth::provider_active_api_formats;
 use crate::GatewayError;
+use aether_contracts::ProxySnapshot;
 use aether_data_contracts::repository::pool_scores::{
     GetPoolMemberScoresByIdsQuery, PoolMemberIdentity,
 };
 use aether_data_contracts::repository::provider_catalog::{
-    StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
+    StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
 use aether_provider_transport::{
     grok_browser_transport_fingerprint_from_auth_config, provider_types::provider_type_is_fixed,
+};
+use axum::{
+    body::Body,
+    http,
+    response::{IntoResponse, Response},
+    Json,
 };
 use serde_json::{json, Map, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -99,6 +112,168 @@ pub(crate) fn build_provider_oauth_auth_config_from_token_payload(
     }
     enrich_admin_provider_oauth_auth_config(provider_type, &mut auth_config, token_payload);
     (auth_config, access_token, refresh_token, expires_at)
+}
+
+pub(crate) async fn provision_provider_oauth_token_payload_for_provider(
+    state: &AdminAppState<'_>,
+    provider: &StoredProviderCatalogProvider,
+    endpoints: &[StoredProviderCatalogEndpoint],
+    token_payload: &Value,
+    requested_name: Option<String>,
+    key_proxy: Option<Value>,
+    request_proxy: Option<ProxySnapshot>,
+    lock_operation: &'static str,
+) -> Result<Response<Body>, GatewayError> {
+    let provider_id = provider.id.clone();
+    let provider_type = provider.provider_type.trim().to_ascii_lowercase();
+    let (auth_config, access_token, refresh_token, expires_at) =
+        build_provider_oauth_auth_config_from_token_payload(&provider_type, token_payload);
+    let Some(access_token) = access_token else {
+        return Ok(build_internal_control_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "token exchange 返回缺少 access_token",
+        ));
+    };
+
+    let api_formats = provider_oauth_active_api_formats(endpoints);
+    let oauth_account_leases = if provider_type == "codex" {
+        match acquire_codex_oauth_account_locks(state, &provider_id, &auth_config, lock_operation)
+            .await
+        {
+            Ok(leases) => leases,
+            Err(error) => {
+                return Ok(build_internal_control_error_response(
+                    error.status_code(),
+                    error.detail(),
+                ));
+            }
+        }
+    } else if provider_type == "claude_code" {
+        match acquire_claude_oauth_account_lock(state, &provider_id, &auth_config, lock_operation)
+            .await
+        {
+            Ok(leases) => leases,
+            Err(error) => {
+                return Ok(build_internal_control_error_response(
+                    error.status_code(),
+                    error.detail(),
+                ));
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    let duplicate = match state
+        .find_duplicate_provider_oauth_key(&provider_id, &auth_config, None)
+        .await
+    {
+        Ok(duplicate) => duplicate,
+        Err(detail) => {
+            release_provider_oauth_account_locks(state, oauth_account_leases).await;
+            return Ok(build_internal_control_error_response(
+                if provider_type == "codex" {
+                    http::StatusCode::CONFLICT
+                } else {
+                    http::StatusCode::BAD_REQUEST
+                },
+                detail,
+            ));
+        }
+    };
+
+    let replaced = duplicate.is_some();
+    let persisted_key = if let Some(existing_key) = duplicate {
+        match state
+            .update_existing_provider_oauth_catalog_key(
+                &existing_key,
+                &provider_type,
+                &access_token,
+                &auth_config,
+                &api_formats,
+                key_proxy.clone(),
+                expires_at,
+            )
+            .await
+        {
+            Err(error) => {
+                release_provider_oauth_account_locks(state, oauth_account_leases).await;
+                return Err(error);
+            }
+            Ok(Some(key)) => key,
+            Ok(None) => {
+                release_provider_oauth_account_locks(state, oauth_account_leases).await;
+                return Ok(build_internal_control_error_response(
+                    http::StatusCode::SERVICE_UNAVAILABLE,
+                    "provider oauth write unavailable",
+                ));
+            }
+        }
+    } else {
+        let name = requested_name
+            .or_else(|| {
+                auth_config
+                    .get("email")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned)
+            })
+            .unwrap_or_else(|| {
+                format!(
+                    "账号_{}",
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .ok()
+                        .map(|duration| duration.as_secs())
+                        .unwrap_or(0)
+                )
+            });
+        match state
+            .create_provider_oauth_catalog_key(
+                &provider_id,
+                &provider_type,
+                &name,
+                &access_token,
+                &auth_config,
+                &api_formats,
+                key_proxy,
+                expires_at,
+            )
+            .await
+        {
+            Err(error) => {
+                release_provider_oauth_account_locks(state, oauth_account_leases).await;
+                return Err(error);
+            }
+            Ok(Some(key)) => key,
+            Ok(None) => {
+                release_provider_oauth_account_locks(state, oauth_account_leases).await;
+                return Ok(build_internal_control_error_response(
+                    http::StatusCode::SERVICE_UNAVAILABLE,
+                    "provider oauth write unavailable",
+                ));
+            }
+        }
+    };
+    release_provider_oauth_account_locks(state, oauth_account_leases).await;
+
+    spawn_provider_oauth_account_state_refresh_after_update(
+        state.cloned_app(),
+        provider.clone(),
+        persisted_key.id.clone(),
+        request_proxy,
+    );
+
+    Ok(Json(json!({
+        "key_id": persisted_key.id,
+        "provider_type": provider_type,
+        "expires_at": expires_at,
+        "has_refresh_token": refresh_token.is_some(),
+        "temporary": refresh_token.is_none(),
+        "email": auth_config.get("email").cloned().unwrap_or(Value::Null),
+        "replaced": replaced,
+    }))
+    .into_response())
 }
 
 fn grok_oauth_catalog_key_fingerprint(

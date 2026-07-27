@@ -26,9 +26,10 @@ use tokio::sync::Mutex as TokioMutex;
 use tracing::warn;
 
 use super::{
-    local_failover_error_message, project_local_adaptive_rate_limit,
+    classify_failure_disposition, local_failover_error_message, project_local_adaptive_rate_limit,
     project_local_adaptive_success, project_local_failure_health, project_local_key_circuit_closed,
-    project_local_key_circuit_failure, project_local_success_health, LocalFailoverClassification,
+    project_local_key_circuit_failure, project_local_success_health, FailureScope,
+    LocalFailoverClassification,
 };
 use crate::ai_serving::extract_pool_sticky_session_token;
 use crate::client_session_affinity::{
@@ -613,7 +614,8 @@ async fn record_attempt_failure_effect(
     context: LocalExecutionEffectContext<'_>,
     effect: LocalAttemptFailureEffect,
 ) {
-    if !local_candidate_failure_should_invalidate_affinity(
+    if !local_candidate_failure_should_invalidate_affinity_for_provider(
+        &context.plan.provider_api_format,
         effect.classification,
         effect.status_code,
     ) {
@@ -683,6 +685,13 @@ async fn record_adaptive_rate_limit_effect(
     context: LocalExecutionEffectContext<'_>,
     effect: LocalAdaptiveRateLimitEffect<'_>,
 ) {
+    if !local_candidate_failure_should_apply_key_effects(
+        &context.plan.provider_api_format,
+        effect.classification,
+        effect.status_code,
+    ) {
+        return;
+    }
     let Some(auth_config_fence) =
         capture_local_execution_auth_config_fence(state, context.plan).await
     else {
@@ -964,6 +973,13 @@ async fn record_health_failure_effect(
     context: LocalExecutionEffectContext<'_>,
     effect: LocalHealthFailureEffect,
 ) {
+    if !local_candidate_failure_should_apply_key_effects(
+        &context.plan.provider_api_format,
+        effect.classification,
+        effect.status_code,
+    ) {
+        return;
+    }
     let api_format = context.plan.provider_api_format.trim();
     if api_format.is_empty() {
         return;
@@ -1231,6 +1247,13 @@ async fn record_pool_error_effect(
     context: LocalExecutionEffectContext<'_>,
     effect: LocalPoolErrorEffect<'_>,
 ) {
+    if !local_candidate_failure_should_apply_key_effects(
+        &context.plan.provider_api_format,
+        effect.classification,
+        effect.status_code,
+    ) {
+        return;
+    }
     let terminal_error_reason =
         admin_provider_pool_key_terminal_error_reason(effect.status_code, effect.error_body);
     if terminal_error_reason.is_none()
@@ -1379,13 +1402,7 @@ async fn record_oauth_invalidation_effect(
     if !transport.key.auth_type.trim().eq_ignore_ascii_case("oauth") {
         return;
     }
-    if transport
-        .provider
-        .provider_type
-        .trim()
-        .eq_ignore_ascii_case("codex")
-        && !execution_plan_bearer_matches_transport(plan, &transport)
-    {
+    if !execution_plan_bearer_matches_transport(plan, &transport) {
         return;
     }
 
@@ -1397,28 +1414,8 @@ async fn record_oauth_invalidation_effect(
         return;
     };
 
-    let expected_auth_config = match state
-        .capture_provider_transport_auth_config_fence(&transport)
-        .await
-    {
-        Ok(Some(ciphertext)) => ciphertext,
-        Ok(None) => return,
-        Err(err) => {
-            warn!(
-                "gateway orchestration effects: failed to capture oauth invalidation fence for provider {} endpoint {} key {}: {:?}",
-                plan.provider_id, plan.endpoint_id, plan.key_id, err
-            );
-            return;
-        }
-    };
-
     if let Err(err) = state
-        .mark_provider_catalog_key_oauth_invalid_fenced(
-            &plan.key_id,
-            transport.provider.provider_type.as_str(),
-            invalid_reason.as_str(),
-            expected_auth_config.as_str(),
-        )
+        .mark_provider_transport_oauth_invalid_fenced(&transport, invalid_reason.as_str())
         .await
     {
         warn!(
@@ -1444,16 +1441,20 @@ fn execution_plan_bearer_matches_transport(
     plan: &ExecutionPlan,
     transport: &crate::provider_transport::GatewayProviderTransportSnapshot,
 ) -> bool {
-    let current_token = transport.key.decrypted_api_key.trim();
-    !current_token.is_empty()
-        && plan.headers.iter().any(|(name, value)| {
-            name.eq_ignore_ascii_case("authorization")
-                && value
-                    .trim()
-                    .strip_prefix("Bearer ")
-                    .map(str::trim)
-                    .is_some_and(|token| token == current_token)
-        })
+    let Some(plan_token) = execution_plan_authorization(plan).and_then(bearer_access_token) else {
+        return false;
+    };
+    crate::provider_transport::resolve_local_generic_oauth_transport_authorization(transport)
+        .as_deref()
+        .and_then(bearer_access_token)
+        .is_some_and(|current_token| current_token == plan_token)
+}
+
+fn bearer_access_token(authorization: &str) -> Option<&str> {
+    let mut parts = authorization.split_ascii_whitespace();
+    let scheme = parts.next()?;
+    let token = parts.next()?;
+    (scheme.eq_ignore_ascii_case("bearer") && parts.next().is_none()).then_some(token)
 }
 
 fn resolve_local_oauth_invalid_reason(
@@ -1467,6 +1468,12 @@ fn resolve_local_oauth_invalid_reason(
             status_code,
             upstream_message.as_deref(),
         ),
+        _ if super::oauth_status_may_be_invalid(status_code, response_text) => Some(format!(
+            "[OAUTH_EXPIRED] {}",
+            upstream_message
+                .as_deref()
+                .unwrap_or("OAuth access token was rejected")
+        )),
         _ => None,
     }
 }
@@ -1490,6 +1497,46 @@ fn local_candidate_failure_should_invalidate_affinity(
         | LocalFailoverClassification::StopExecutionError
         | LocalFailoverClassification::StopCyberPolicy => false,
     }
+}
+
+fn local_candidate_failure_should_invalidate_affinity_for_provider(
+    provider_api_format: &str,
+    classification: LocalFailoverClassification,
+    status_code: u16,
+) -> bool {
+    if !local_candidate_failure_should_invalidate_affinity(classification, status_code) {
+        return false;
+    }
+    if !provider_api_format
+        .trim()
+        .eq_ignore_ascii_case("claude:messages")
+    {
+        return true;
+    }
+
+    let disposition =
+        classify_failure_disposition(provider_api_format, classification, status_code);
+    !(disposition.retry_action == crate::orchestration::FailureRetryAction::Stop
+        && disposition.failure_scope == FailureScope::None)
+}
+
+fn local_candidate_failure_should_apply_key_effects(
+    provider_api_format: &str,
+    classification: LocalFailoverClassification,
+    status_code: u16,
+) -> bool {
+    if !provider_api_format
+        .trim()
+        .eq_ignore_ascii_case("claude:messages")
+    {
+        return true;
+    }
+
+    matches!(
+        classify_failure_disposition(provider_api_format, classification, status_code)
+            .failure_scope,
+        FailureScope::Credential
+    )
 }
 
 fn local_candidate_failure_should_record_pool_error(
@@ -1708,12 +1755,13 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::{
-        apply_local_execution_effect, local_candidate_failure_should_record_pool_error,
-        pool_score_feedback_gate_allows, pool_score_hard_state_for_status,
-        LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect,
-        LocalExecutionEffect, LocalExecutionEffectContext, LocalHealthFailureEffect,
-        LocalHealthSuccessEffect, LocalOAuthInvalidationEffect, LocalPoolErrorEffect,
-        ProviderKeyEffectLockPool,
+        apply_local_execution_effect, execution_plan_bearer_matches_transport,
+        local_candidate_failure_should_apply_key_effects,
+        local_candidate_failure_should_record_pool_error, pool_score_feedback_gate_allows,
+        pool_score_hard_state_for_status, LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect,
+        LocalAttemptFailureEffect, LocalExecutionEffect, LocalExecutionEffectContext,
+        LocalHealthFailureEffect, LocalHealthSuccessEffect, LocalOAuthInvalidationEffect,
+        LocalPoolErrorEffect, ProviderKeyEffectLockPool,
     };
     use crate::data::{GatewayDataConfig, GatewayDataState};
     use crate::orchestration::LocalFailoverClassification;
@@ -1758,6 +1806,13 @@ mod tests {
             transport_profile: None,
             timeouts: None,
         }
+    }
+
+    fn sample_claude_plan() -> ExecutionPlan {
+        let mut plan = sample_plan();
+        plan.provider_name = Some("anthropic".to_string());
+        plan.provider_api_format = "claude:messages".to_string();
+        plan
     }
 
     #[test]
@@ -1864,7 +1919,7 @@ mod tests {
             url: "https://chatgpt.com/backend-api/codex".to_string(),
             headers: BTreeMap::from([(
                 "authorization".to_string(),
-                "Bearer __placeholder__".to_string(),
+                "Bearer codex-access-token".to_string(),
             )]),
             content_type: Some("application/json".to_string()),
             content_encoding: None,
@@ -1959,8 +2014,8 @@ mod tests {
         .expect("key should build")
         .with_transport_fields(
             Some(serde_json::json!(["openai:responses"])),
-            encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "__placeholder__")
-                .expect("placeholder api key should encrypt"),
+            encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "codex-access-token")
+                .expect("access token should encrypt"),
             Some(encrypted_auth_config),
             None,
             Some(serde_json::json!({"openai:responses": 1})),
@@ -1975,6 +2030,10 @@ mod tests {
     fn sample_codex_agent_identity_key() -> StoredProviderCatalogKey {
         let mut key = sample_codex_key();
         key.name = "Agent Identity".to_string();
+        key.encrypted_api_key = Some(
+            encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "__placeholder__")
+                .expect("placeholder api key should encrypt"),
+        );
         key.encrypted_auth_config = Some(
             encrypt_python_fernet_plaintext(
                 DEVELOPMENT_ENCRYPTION_KEY,
@@ -2004,6 +2063,36 @@ mod tests {
         let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
             vec![provider],
             vec![sample_codex_endpoint()],
+            vec![key],
+        ));
+        AppState::new()
+            .expect("gateway state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(repository)
+                    .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            )
+    }
+
+    fn claude_code_oauth_state() -> AppState {
+        let mut provider = sample_codex_provider();
+        provider.name = "claude_code".to_string();
+        provider.provider_type = "claude_code".to_string();
+        let mut endpoint = sample_codex_endpoint();
+        endpoint.api_format = "claude:messages".to_string();
+        endpoint.api_family = Some("claude".to_string());
+        endpoint.base_url = "https://api.anthropic.com".to_string();
+        let mut key = sample_codex_key();
+        key.api_formats = Some(json!(["claude:messages"]));
+        key.encrypted_auth_config = Some(
+            encrypt_python_fernet_plaintext(
+                DEVELOPMENT_ENCRYPTION_KEY,
+                r#"{"provider_type":"claude_code","refresh_token":"rt-claude-local-123"}"#,
+            )
+            .expect("Claude Code auth config should encrypt"),
+        );
+        let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![provider],
+            vec![endpoint],
             vec![key],
         ));
         AppState::new()
@@ -2725,6 +2814,179 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_non_credential_failures_do_not_apply_key_wide_effects() {
+        assert!(!local_candidate_failure_should_apply_key_effects(
+            "claude:messages",
+            LocalFailoverClassification::RetryUpstreamFailure,
+            529,
+        ));
+        assert!(!local_candidate_failure_should_apply_key_effects(
+            "claude:messages",
+            LocalFailoverClassification::RetryUpstreamFailure,
+            429,
+        ));
+        assert!(!local_candidate_failure_should_apply_key_effects(
+            "claude:messages",
+            LocalFailoverClassification::RetryUpstreamFailure,
+            503,
+        ));
+        assert!(local_candidate_failure_should_apply_key_effects(
+            "claude:messages",
+            LocalFailoverClassification::RetryUpstreamFailure,
+            401,
+        ));
+        assert!(local_candidate_failure_should_apply_key_effects(
+            "claude:messages",
+            LocalFailoverClassification::RetryUpstreamFailure,
+            403,
+        ));
+        assert!(!local_candidate_failure_should_apply_key_effects(
+            "claude:messages",
+            LocalFailoverClassification::RetryUpstreamFailure,
+            400,
+        ));
+        assert!(local_candidate_failure_should_apply_key_effects(
+            "openai:chat",
+            LocalFailoverClassification::RetryUpstreamFailure,
+            529,
+        ));
+        assert!(local_candidate_failure_should_apply_key_effects(
+            "openai:chat",
+            LocalFailoverClassification::RetryUpstreamFailure,
+            429,
+        ));
+        assert!(local_candidate_failure_should_apply_key_effects(
+            "openai:chat",
+            LocalFailoverClassification::RetryUpstreamFailure,
+            503,
+        ));
+    }
+
+    #[tokio::test]
+    async fn anthropic_non_credential_failures_preserve_key_wide_state() {
+        for status_code in [400, 429, 503, 529] {
+            let mut key = sample_adaptive_key();
+            let circuit = json!({
+                "openai:chat": {
+                    "open": true,
+                    "reason": "existing-state"
+                }
+            });
+            key.circuit_breaker_by_format = Some(circuit.clone());
+            let expected_adaptive_state = ProviderCatalogKeyAdaptiveState::from(&key);
+            let expected_health = key.health_by_format.clone();
+            let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+                vec![sample_pool_health_provider()],
+                vec![sample_health_endpoint()],
+                vec![key],
+            ));
+            let state = AppState::new()
+                .expect("gateway state should build")
+                .with_data_state_for_tests(
+                    GatewayDataState::with_provider_catalog_repository_for_tests(repository)
+                        .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+                );
+            let plan = sample_claude_plan();
+            let report_context = json!({
+                "api_key_id": "api-key-1",
+                "client_api_format": "claude:messages",
+                "model": "claude-sonnet-4-5",
+            });
+            let cache_key = build_scheduler_affinity_cache_key_for_api_key_id(
+                "api-key-1",
+                "claude:messages",
+                "claude-sonnet-4-5",
+            )
+            .expect("scheduler affinity cache key should build");
+            let target = SchedulerAffinityTarget {
+                provider_id: plan.provider_id.clone(),
+                endpoint_id: plan.endpoint_id.clone(),
+                key_id: plan.key_id.clone(),
+            };
+            state.remember_scheduler_affinity_target(
+                &cache_key,
+                target.clone(),
+                SCHEDULER_AFFINITY_TTL,
+                16,
+            );
+            let headers = BTreeMap::from([("Retry-After".to_string(), "120".to_string())]);
+            let context = LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: Some(&report_context),
+            };
+            let classification = LocalFailoverClassification::RetryUpstreamFailure;
+
+            apply_local_execution_effect(
+                &state,
+                context,
+                LocalExecutionEffect::AttemptFailure(LocalAttemptFailureEffect {
+                    status_code,
+                    classification,
+                }),
+            )
+            .await;
+            apply_local_execution_effect(
+                &state,
+                context,
+                LocalExecutionEffect::AdaptiveRateLimit(LocalAdaptiveRateLimitEffect {
+                    status_code,
+                    classification,
+                    headers: Some(&headers),
+                }),
+            )
+            .await;
+            apply_local_execution_effect(
+                &state,
+                context,
+                LocalExecutionEffect::HealthFailure(LocalHealthFailureEffect {
+                    status_code,
+                    classification,
+                }),
+            )
+            .await;
+            apply_local_execution_effect(
+                &state,
+                context,
+                LocalExecutionEffect::PoolError(LocalPoolErrorEffect {
+                    status_code,
+                    classification,
+                    headers: &headers,
+                    error_body: Some(r#"{"error":{"message":"temporarily unavailable"}}"#),
+                }),
+            )
+            .await;
+
+            let stored_key = state
+                .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
+                .await
+                .expect("provider catalog keys should load")
+                .into_iter()
+                .next()
+                .expect("stored key should exist");
+            assert_eq!(
+                ProviderCatalogKeyAdaptiveState::from(&stored_key),
+                expected_adaptive_state,
+                "Anthropic status {status_code} must not update key-wide adaptive state"
+            );
+            assert_eq!(
+                stored_key.health_by_format, expected_health,
+                "Anthropic status {status_code} must not update key-wide health"
+            );
+            assert_eq!(
+                stored_key.circuit_breaker_by_format,
+                Some(circuit),
+                "Anthropic status {status_code} must not clear pool key state"
+            );
+            let expected_affinity = (status_code == 400).then_some(target);
+            assert_eq!(
+                state.read_scheduler_affinity_target(&cache_key, SCHEDULER_AFFINITY_TTL),
+                expected_affinity,
+                "Anthropic status {status_code} must invalidate only retryable target affinity"
+            );
+        }
+    }
+
+    #[test]
     fn terminal_pool_account_errors_project_pool_hard_state() {
         assert_eq!(
             pool_score_hard_state_for_status(
@@ -2788,6 +3050,162 @@ mod tests {
             .next()
             .expect("stored key should exist");
         assert_eq!(stored_key.circuit_breaker_by_format, None);
+    }
+
+    #[tokio::test]
+    async fn oauth_bearer_generation_match_supports_generic_auth_config_token() {
+        let state = codex_state();
+        let mut transport = state
+            .read_provider_transport_snapshot(
+                "provider-codex-cli-local-1",
+                "endpoint-codex-cli-local-1",
+                "key-codex-cli-local-1",
+            )
+            .await
+            .expect("transport should load")
+            .expect("transport should exist");
+        transport.provider.provider_type = "claude_code".to_string();
+        transport.key.decrypted_api_key = "__placeholder__".to_string();
+        transport.key.decrypted_auth_config =
+            Some(json!({"accessToken": "current-access-token"}).to_string());
+        let mut plan = sample_codex_plan();
+        plan.headers.insert(
+            "authorization".to_string(),
+            "Bearer current-access-token".to_string(),
+        );
+        assert!(execution_plan_bearer_matches_transport(&plan, &transport));
+
+        plan.headers.insert(
+            "authorization".to_string(),
+            "Bearer stale-access-token".to_string(),
+        );
+        assert!(!execution_plan_bearer_matches_transport(&plan, &transport));
+
+        transport.key.decrypted_api_key = "replacement-access-token".to_string();
+        plan.headers.insert(
+            "authorization".to_string(),
+            "Bearer current-access-token".to_string(),
+        );
+        assert!(!execution_plan_bearer_matches_transport(&plan, &transport));
+        plan.headers.insert(
+            "authorization".to_string(),
+            "Bearer replacement-access-token".to_string(),
+        );
+        assert!(execution_plan_bearer_matches_transport(&plan, &transport));
+
+        transport.key.decrypted_auth_config = Some(
+            json!({
+                "accessToken": "current-access-token",
+                "request": {
+                    "extraHeaders": {
+                        "Authorization": "Bearer nested-override-token"
+                    }
+                }
+            })
+            .to_string(),
+        );
+        plan.headers.insert(
+            "authorization".to_string(),
+            "Bearer replacement-access-token".to_string(),
+        );
+        assert!(!execution_plan_bearer_matches_transport(&plan, &transport));
+        plan.headers.insert(
+            "authorization".to_string(),
+            "Bearer nested-override-token".to_string(),
+        );
+        assert!(execution_plan_bearer_matches_transport(&plan, &transport));
+    }
+
+    #[tokio::test]
+    async fn oauth_invalidation_marks_claude_code_authentication_failures_only() {
+        let state = claude_code_oauth_state();
+        let mut plan = sample_codex_plan();
+        plan.provider_name = Some("claude_code".to_string());
+        plan.provider_api_format = "claude:messages".to_string();
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: None,
+            },
+            LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
+                status_code: 403,
+                response_text: Some(
+                    r#"{"type":"error","error":{"type":"permission_error","message":"insufficient scope"}}"#,
+                ),
+            }),
+        )
+        .await;
+        let unmarked = state
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
+            .await
+            .expect("provider catalog keys should load")
+            .into_iter()
+            .next()
+            .expect("stored key should exist");
+        assert!(unmarked.oauth_invalid_at_unix_secs.is_none());
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: None,
+            },
+            LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
+                status_code: 403,
+                response_text: Some(
+                    r#"{"type":"error","error":{"type":"authentication_error","message":"invalid access token"}}"#,
+                ),
+            }),
+        )
+        .await;
+        let marked = state
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
+            .await
+            .expect("provider catalog keys should load")
+            .into_iter()
+            .next()
+            .expect("stored key should exist");
+        assert!(marked.oauth_invalid_at_unix_secs.is_some());
+        assert_eq!(
+            marked.oauth_invalid_reason.as_deref(),
+            Some("[OAUTH_EXPIRED] invalid access token")
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth_invalidation_marks_claude_code_unauthorized_without_body() {
+        let state = claude_code_oauth_state();
+        let mut plan = sample_codex_plan();
+        plan.provider_name = Some("claude_code".to_string());
+        plan.provider_api_format = "claude:messages".to_string();
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: None,
+            },
+            LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
+                status_code: 401,
+                response_text: None,
+            }),
+        )
+        .await;
+
+        let stored_key = state
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
+            .await
+            .expect("provider catalog keys should load")
+            .into_iter()
+            .next()
+            .expect("stored key should exist");
+        assert!(stored_key.oauth_invalid_at_unix_secs.is_some());
+        assert_eq!(
+            stored_key.oauth_invalid_reason.as_deref(),
+            Some("[OAUTH_EXPIRED] OAuth access token was rejected")
+        );
     }
 
     #[tokio::test]

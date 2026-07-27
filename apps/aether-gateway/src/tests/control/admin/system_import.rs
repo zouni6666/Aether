@@ -1759,6 +1759,144 @@ async fn gateway_reports_field_path_for_invalid_admin_system_config_import_shape
 }
 
 #[test]
+fn gateway_rejects_invalid_anthropic_profiles_during_admin_system_config_import() {
+    run_admin_system_import_test(
+        "gateway_rejects_invalid_anthropic_profiles_during_admin_system_config_import",
+        gateway_rejects_invalid_anthropic_profiles_during_admin_system_config_import_impl,
+    );
+}
+
+async fn gateway_rejects_invalid_anthropic_profiles_during_admin_system_config_import_impl() {
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(build_empty_admin_system_data_state()),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+
+    for config_scope in ["provider", "endpoint"] {
+        let mut payload = sample_system_import_payload();
+        let invalid_config = json!({
+            "anthropic": {"compatibility_profile": "claude_cod_typo"}
+        });
+        if config_scope == "provider" {
+            payload["providers"][0]["config"] = invalid_config;
+        } else {
+            payload["providers"][0]["endpoints"][0]["config"] = invalid_config;
+        }
+
+        let response = client
+            .post(format!("{gateway_url}/api/admin/system/config/import"))
+            .header(GATEWAY_HEADER, "rust-phase3b")
+            .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+            .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+            .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+            .json(&payload)
+            .send()
+            .await
+            .expect("invalid Anthropic profile import should complete locally");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: Value = response.json().await.expect("json body should parse");
+        assert_eq!(
+            body["detail"], "无效的 Anthropic compatibility profile",
+            "unexpected {config_scope} validation response: {body}"
+        );
+    }
+
+    gateway_handle.abort();
+}
+
+#[test]
+fn gateway_does_not_restore_retired_vertex_claude_endpoint_from_system_import() {
+    run_admin_system_import_test(
+        "gateway_does_not_restore_retired_vertex_claude_endpoint_from_system_import",
+        gateway_does_not_restore_retired_vertex_claude_endpoint_from_system_import_impl,
+    );
+}
+
+async fn gateway_does_not_restore_retired_vertex_claude_endpoint_from_system_import_impl() {
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    ));
+    let global_model_repository = Arc::new(InMemoryGlobalModelReadRepository::seed(Vec::<
+        StoredPublicGlobalModel,
+    >::new()));
+    let data_state = build_admin_system_data_state_with_repositories(
+        Arc::clone(&provider_catalog_repository),
+        Arc::clone(&global_model_repository),
+    );
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(data_state),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let mut payload = sample_system_import_payload();
+    payload["providers"][0]["name"] = json!("legacy-vertex-backup");
+    payload["providers"][0]["provider_type"] = json!("vertex_ai");
+    payload["providers"][0]["endpoints"] = json!([
+        {
+            "api_format": "gemini:generate_content",
+            "base_url": "https://aiplatform.googleapis.com",
+            "max_retries": 2,
+            "is_active": true
+        },
+        {
+            "api_format": "claude:messages",
+            "base_url": "https://aiplatform.googleapis.com",
+            "max_retries": 2,
+            "is_active": true
+        }
+    ]);
+    payload["providers"][0]["api_keys"] = json!([]);
+    payload["providers"][0]["models"] = json!([]);
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/system/config/import"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&payload)
+        .send()
+        .await
+        .expect("legacy Vertex import should complete");
+
+    let status = response.status();
+    let response_body: Value = response.json().await.expect("json body should parse");
+    assert_eq!(status, StatusCode::OK, "payload={response_body}");
+    assert_eq!(response_body["stats"]["endpoints"]["created"], json!(1));
+    assert_eq!(response_body["stats"]["endpoints"]["skipped"], json!(1));
+    assert!(response_body["stats"]["errors"]
+        .as_array()
+        .is_some_and(|errors| errors.iter().any(|error| {
+            error
+                .as_str()
+                .is_some_and(|error| error.contains("claude:messages"))
+        })));
+
+    let providers = provider_catalog_repository
+        .list_providers(false)
+        .await
+        .expect("providers should load");
+    assert_eq!(providers.len(), 1);
+    let endpoints = provider_catalog_repository
+        .list_endpoints_by_provider_ids(std::slice::from_ref(&providers[0].id))
+        .await
+        .expect("endpoints should load");
+    assert_eq!(endpoints.len(), 1, "unexpected endpoints: {endpoints:?}");
+    assert_eq!(endpoints[0].api_format, "gemini:generate_content");
+    assert!(endpoints[0].is_active);
+
+    gateway_handle.abort();
+}
+
+#[test]
 fn gateway_imports_admin_system_config_with_numeric_string_prices() {
     run_admin_system_import_test(
         "gateway_imports_admin_system_config_with_numeric_string_prices",

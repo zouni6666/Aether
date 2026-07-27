@@ -12,6 +12,11 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use url::form_urlencoded;
 
+use super::claude_code::{
+    CLAUDE_CODE_AUTHORIZE_URL, CLAUDE_CODE_CLIENT_ID, CLAUDE_CODE_OAUTH_SCOPES,
+    CLAUDE_CODE_PROVIDER_TYPE, CLAUDE_CODE_REDIRECT_URI, CLAUDE_CODE_TOKEN_URL,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GenericProviderOAuthTemplate {
     pub provider_type: &'static str,
@@ -24,20 +29,22 @@ pub struct GenericProviderOAuthTemplate {
     pub redirect_uri: &'static str,
     pub use_pkce: bool,
     pub uses_json_payload: bool,
+    pub include_scope_in_token_request: bool,
 }
 
 pub const GENERIC_PROVIDER_OAUTH_TEMPLATES: &[GenericProviderOAuthTemplate] = &[
     GenericProviderOAuthTemplate {
-        provider_type: "claude_code",
+        provider_type: CLAUDE_CODE_PROVIDER_TYPE,
         display_name: "ClaudeCode",
-        authorize_url: "https://claude.ai/oauth/authorize",
-        token_url: "https://console.anthropic.com/v1/oauth/token",
-        client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+        authorize_url: CLAUDE_CODE_AUTHORIZE_URL,
+        token_url: CLAUDE_CODE_TOKEN_URL,
+        client_id: CLAUDE_CODE_CLIENT_ID,
         client_secret: "",
-        scopes: &["org:create_api_key", "user:profile", "user:inference"],
-        redirect_uri: "http://localhost:54545/callback",
+        scopes: CLAUDE_CODE_OAUTH_SCOPES,
+        redirect_uri: CLAUDE_CODE_REDIRECT_URI,
         use_pkce: true,
         uses_json_payload: true,
+        include_scope_in_token_request: false,
     },
     GenericProviderOAuthTemplate {
         provider_type: "codex",
@@ -50,6 +57,7 @@ pub const GENERIC_PROVIDER_OAUTH_TEMPLATES: &[GenericProviderOAuthTemplate] = &[
         redirect_uri: "http://localhost:1455/auth/callback",
         use_pkce: true,
         uses_json_payload: false,
+        include_scope_in_token_request: true,
     },
     GenericProviderOAuthTemplate {
         provider_type: "chatgpt_web",
@@ -62,6 +70,7 @@ pub const GENERIC_PROVIDER_OAUTH_TEMPLATES: &[GenericProviderOAuthTemplate] = &[
         redirect_uri: "http://localhost:1455/auth/callback",
         use_pkce: true,
         uses_json_payload: false,
+        include_scope_in_token_request: true,
     },
     GenericProviderOAuthTemplate {
         provider_type: "gemini_cli",
@@ -78,6 +87,7 @@ pub const GENERIC_PROVIDER_OAUTH_TEMPLATES: &[GenericProviderOAuthTemplate] = &[
         redirect_uri: "http://localhost:8085/oauth2callback",
         use_pkce: false,
         uses_json_payload: false,
+        include_scope_in_token_request: true,
     },
     GenericProviderOAuthTemplate {
         provider_type: "antigravity",
@@ -96,6 +106,7 @@ pub const GENERIC_PROVIDER_OAUTH_TEMPLATES: &[GenericProviderOAuthTemplate] = &[
         redirect_uri: "http://localhost:51121/oauth2callback",
         use_pkce: true,
         uses_json_payload: false,
+        include_scope_in_token_request: true,
     },
 ];
 
@@ -185,19 +196,22 @@ impl GenericProviderOAuthAdapter {
                     Value::String(code_or_refresh_token.to_string()),
                 );
             }
-            if let Some(scope) = scope.as_ref() {
-                body.insert("scope".to_string(), Value::String(scope.clone()));
+            if self.template.include_scope_in_token_request {
+                if let Some(scope) = scope.as_ref() {
+                    body.insert("scope".to_string(), Value::String(scope.clone()));
+                }
             }
             executor
                 .execute(OAuthHttpRequest {
                     request_id: request_id.clone(),
                     method: reqwest::Method::POST,
                     url: self.token_url(),
-                    headers: json_headers(),
+                    headers: json_headers(self.template.provider_type),
                     content_type: Some("application/json".to_string()),
                     json_body: Some(Value::Object(body)),
                     body_bytes: None,
                     network: ctx.network.clone(),
+                    transport_profile: None,
                 })
                 .await?
         } else {
@@ -214,8 +228,10 @@ impl GenericProviderOAuthAdapter {
                 } else {
                     form.append_pair("refresh_token", code_or_refresh_token);
                 }
-                if let Some(scope) = scope.as_ref() {
-                    form.append_pair("scope", scope);
+                if self.template.include_scope_in_token_request {
+                    if let Some(scope) = scope.as_ref() {
+                        form.append_pair("scope", scope);
+                    }
                 }
                 if !self.template.client_secret.trim().is_empty() {
                     form.append_pair("client_secret", self.template.client_secret);
@@ -232,6 +248,7 @@ impl GenericProviderOAuthAdapter {
                     json_body: None,
                     body_bytes: Some(form_body),
                     network: ctx.network.clone(),
+                    transport_profile: None,
                 })
                 .await?
         };
@@ -422,11 +439,19 @@ fn form_headers() -> BTreeMap<String, String> {
     ])
 }
 
-fn json_headers() -> BTreeMap<String, String> {
-    BTreeMap::from([
+fn json_headers(provider_type: &str) -> BTreeMap<String, String> {
+    let mut headers = BTreeMap::from([
         ("content-type".to_string(), "application/json".to_string()),
         ("accept".to_string(), "application/json".to_string()),
-    ])
+    ]);
+    if provider_type.eq_ignore_ascii_case(CLAUDE_CODE_PROVIDER_TYPE) {
+        headers.insert(
+            "accept".to_string(),
+            "application/json, text/plain, */*".to_string(),
+        );
+        headers.insert("user-agent".to_string(), "axios/1.13.6".to_string());
+    }
+    headers
 }
 
 fn truncate_body(body: &str) -> String {
@@ -469,6 +494,32 @@ fn enrich_generic_identity(
                 }
             }
         }
+    }
+    if provider_type.eq_ignore_ascii_case(CLAUDE_CODE_PROVIDER_TYPE) {
+        if let Some(organization_uuid) = token_payload
+            .get("organization")
+            .and_then(Value::as_object)
+            .and_then(|value| value.get("uuid"))
+            .cloned()
+        {
+            auth_config
+                .entry("org_uuid".to_string())
+                .or_insert(organization_uuid);
+        }
+        if let Some(account) = token_payload.get("account").and_then(Value::as_object) {
+            if let Some(account_uuid) = account.get("uuid").cloned() {
+                auth_config
+                    .entry("account_uuid".to_string())
+                    .or_insert(account_uuid);
+            }
+            if let Some(email) = account.get("email_address").cloned() {
+                auth_config
+                    .entry("email_address".to_string())
+                    .or_insert_with(|| email.clone());
+                auth_config.entry("email".to_string()).or_insert(email);
+            }
+        }
+        return;
     }
     if !matches!(
         provider_type.trim().to_ascii_lowercase().as_str(),

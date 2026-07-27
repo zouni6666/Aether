@@ -2668,6 +2668,7 @@ async fn provider_query_execute_antigravity_test_candidate(
             upstream_is_stream: false,
             request_query: parts.uri.query(),
             kiro_api_region: None,
+            api_operation: None,
         },
     );
     let Some(request_url) = request_url else {
@@ -3364,6 +3365,7 @@ async fn provider_query_execute_standard_test_candidate(
             upstream_is_stream,
             request_query: parts.uri.query(),
             kiro_api_region: None,
+            api_operation: None,
         },
         Some(&provider_request_body),
     );

@@ -390,7 +390,7 @@ fn build_best_effort_local_core_error_body_converts_sync_errors_across_standard_
                 "type": "error",
                 "error": {
                     "message": "backend busy",
-                    "type": "api_error",
+                    "type": "overloaded_error",
                     "code": "UNAVAILABLE"
                 }
             }),

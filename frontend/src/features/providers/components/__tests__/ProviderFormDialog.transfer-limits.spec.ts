@@ -20,6 +20,49 @@ vi.mock('@/api/endpoints', () => ({
   },
 }))
 
+vi.mock('@/components/ui', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/components/ui')>()
+  const { defineComponent, h } = await import('vue')
+  const passthrough = (name: string) => defineComponent({
+    name,
+    setup: (_props, { slots }) => () => slots.default?.(),
+  })
+
+  return {
+    ...actual,
+    Select: defineComponent({
+      name: 'SelectStub',
+      props: {
+        modelValue: String,
+        disabled: Boolean,
+      },
+      emits: ['update:modelValue'],
+      setup: (props, { emit, slots }) => () => h('select', {
+        value: props.modelValue,
+        disabled: props.disabled,
+        onChange: (event: Event) => emit(
+          'update:modelValue',
+          (event.target as HTMLSelectElement).value,
+        ),
+      }, slots.default?.()),
+    }),
+    SelectTrigger: passthrough('SelectTriggerStub'),
+    SelectValue: passthrough('SelectValueStub'),
+    SelectContent: passthrough('SelectContentStub'),
+    SelectItem: defineComponent({
+      name: 'SelectItemStub',
+      props: {
+        value: { type: String, required: true },
+        disabled: Boolean,
+      },
+      setup: (props, { slots }) => () => h('option', {
+        value: props.value,
+        disabled: props.disabled,
+      }, slots.default?.()),
+    }),
+  }
+})
+
 vi.mock('@/composables/useToast', () => ({
   useToast: () => ({
     success: vi.fn(),
@@ -171,6 +214,38 @@ describe('ProviderFormDialog transfer limits', () => {
       expect.objectContaining({
         max_transfer_count: 0,
         max_transfer_timeout_seconds: 0,
+      }),
+    )
+  })
+})
+
+describe('ProviderFormDialog provider types', () => {
+  it('creates an experimental Claude Code provider from the add dialog', async () => {
+    mountDialog(null)
+    await settle()
+
+    const providerTypeSelect = [...document.body.querySelectorAll<HTMLSelectElement>('select')]
+      .find(select => select.querySelector('option[value="claude_code"]'))
+    const claudeCodeOption = providerTypeSelect?.querySelector<HTMLOptionElement>(
+      'option[value="claude_code"]',
+    )
+
+    expect(claudeCodeOption?.disabled).toBe(false)
+    expect(claudeCodeOption?.textContent?.trim()).toBe('Claude Code（实验性功能）')
+
+    await setInput('#name', 'Claude Code Provider')
+    if (!providerTypeSelect) throw new Error('Missing provider type select')
+    providerTypeSelect.value = 'claude_code'
+    providerTypeSelect.dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+
+    clickButton('创建')
+    await settle()
+
+    expect(endpointMocks.createProvider).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'Claude Code Provider',
+        provider_type: 'claude_code',
       }),
     )
   })

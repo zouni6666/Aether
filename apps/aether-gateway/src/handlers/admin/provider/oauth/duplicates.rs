@@ -8,6 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 const CODEX_OAUTH_ACCOUNT_LOCK_TTL: Duration = Duration::from_secs(180);
+const CLAUDE_OAUTH_ACCOUNT_LOCK_TTL: Duration = Duration::from_secs(180);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CodexOAuthAccountLockError {
@@ -30,6 +31,31 @@ impl CodexOAuthAccountLockError {
             Self::MissingIdentity => "Codex 账号身份字段缺失，无法安全写入授权",
             Self::Contended => "该 ChatGPT 账号正在更新授权，请稍后重试",
             Self::Unavailable => "Codex 账号授权锁暂不可用，请稍后重试",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClaudeOAuthAccountLockError {
+    MissingIdentity,
+    Contended,
+    Unavailable,
+}
+
+impl ClaudeOAuthAccountLockError {
+    pub(crate) const fn status_code(self) -> http::StatusCode {
+        match self {
+            Self::MissingIdentity => http::StatusCode::BAD_REQUEST,
+            Self::Contended => http::StatusCode::CONFLICT,
+            Self::Unavailable => http::StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
+
+    pub(crate) const fn detail(self) -> &'static str {
+        match self {
+            Self::MissingIdentity => "Claude 账号身份字段缺失，无法安全写入授权",
+            Self::Contended => "该 Claude 账号正在更新授权，请稍后重试",
+            Self::Unavailable => "Claude 账号授权锁暂不可用，请稍后重试",
         }
     }
 }
@@ -209,20 +235,93 @@ pub(crate) async fn release_codex_oauth_account_locks(
     state: &AdminAppState<'_>,
     leases: Vec<RuntimeLockLease>,
 ) {
+    release_provider_oauth_account_locks(state, leases).await;
+}
+
+pub(crate) async fn release_provider_oauth_account_locks(
+    state: &AdminAppState<'_>,
+    leases: Vec<RuntimeLockLease>,
+) {
     for lease in leases.into_iter().rev() {
         match state.runtime_state().lock_release(&lease).await {
             Ok(true) => {}
             Ok(false) => tracing::warn!(
                 lock_key = %lease.key,
-                "gateway Codex OAuth account lock was not owned during release"
+                "gateway provider OAuth account lock was not owned during release"
             ),
             Err(error) => tracing::warn!(
                 lock_key = %lease.key,
                 error = ?error,
-                "gateway Codex OAuth account lock release failed"
+                "gateway provider OAuth account lock release failed"
             ),
         }
     }
+}
+
+fn claude_oauth_account_lock_key(
+    provider_id: &str,
+    auth_config: &serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
+    let (identity_kind, identity) = normalize_provider_oauth_identity_value_from_keys(
+        auth_config,
+        &["account_uuid", "accountUuid"],
+    )
+    .map(|value| ("account_uuid", value))
+    .or_else(|| {
+        normalize_provider_oauth_identity_value_from_keys(auth_config, &["email"])
+            .map(|value| ("email", value.to_ascii_lowercase()))
+    })?;
+    let mut digest = Sha256::new();
+    digest.update(provider_id.trim().as_bytes());
+    digest.update([0]);
+    digest.update(identity_kind.as_bytes());
+    digest.update([0]);
+    digest.update(identity.as_bytes());
+    Some(format!(
+        "provider_oauth_claude_account:{:x}",
+        digest.finalize()
+    ))
+}
+
+pub(crate) async fn acquire_claude_oauth_account_lock(
+    state: &AdminAppState<'_>,
+    provider_id: &str,
+    auth_config: &serde_json::Map<String, serde_json::Value>,
+    operation: &str,
+) -> Result<Vec<RuntimeLockLease>, ClaudeOAuthAccountLockError> {
+    let Some(lock_key) = claude_oauth_account_lock_key(provider_id, auth_config) else {
+        return Err(ClaudeOAuthAccountLockError::MissingIdentity);
+    };
+    let owner = format!(
+        "aether-gateway-claude-oauth-{}-{}",
+        operation.trim(),
+        Uuid::new_v4()
+    );
+    let lease = match state
+        .runtime_state()
+        .lock_try_acquire(
+            lock_key.as_str(),
+            owner.as_str(),
+            CLAUDE_OAUTH_ACCOUNT_LOCK_TTL,
+        )
+        .await
+    {
+        Ok(Some(lease)) => lease,
+        Ok(None) => return Err(ClaudeOAuthAccountLockError::Contended),
+        Err(error) => {
+            tracing::warn!(
+                provider_id = %provider_id,
+                lock_key = %lock_key,
+                operation,
+                error = ?error,
+                "gateway Claude OAuth account lock unavailable"
+            );
+            return Err(ClaudeOAuthAccountLockError::Unavailable);
+        }
+    };
+
+    state.app().data.clear_provider_catalog_cache();
+    Ok(vec![lease])
 }
 
 fn is_openai_provider_oauth_provider_type(value: Option<&serde_json::Value>) -> bool {
@@ -240,6 +339,37 @@ fn is_windsurf_provider_oauth_provider_type(value: Option<&serde_json::Value>) -
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .is_some_and(|provider_type| provider_type.eq_ignore_ascii_case("windsurf"))
+}
+
+fn is_claude_provider_oauth_provider_type(value: Option<&serde_json::Value>) -> bool {
+    value
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .is_some_and(|provider_type| provider_type.eq_ignore_ascii_case("claude_code"))
+}
+
+fn match_claude_provider_oauth_identity(
+    new_auth_config: &serde_json::Map<String, serde_json::Value>,
+    existing_auth_config: &serde_json::Map<String, serde_json::Value>,
+) -> Option<bool> {
+    if !is_claude_provider_oauth_provider_type(new_auth_config.get("provider_type"))
+        && !is_claude_provider_oauth_provider_type(existing_auth_config.get("provider_type"))
+    {
+        return None;
+    }
+
+    let new_account_uuid = normalize_provider_oauth_identity_value_from_keys(
+        new_auth_config,
+        &["account_uuid", "accountUuid"],
+    );
+    let existing_account_uuid = normalize_provider_oauth_identity_value_from_keys(
+        existing_auth_config,
+        &["account_uuid", "accountUuid"],
+    );
+    match (new_account_uuid, existing_account_uuid) {
+        (Some(left), Some(right)) => Some(left == right),
+        _ => None,
+    }
 }
 
 fn match_codex_provider_oauth_identity(
@@ -429,6 +559,10 @@ pub(crate) async fn find_duplicate_provider_oauth_key(
     let new_email = normalize_provider_oauth_identity_value(auth_config.get("email"));
     let new_user_id = normalize_provider_oauth_identity_value(auth_config.get("user_id"));
     let new_account_id = normalize_provider_oauth_identity_value(auth_config.get("account_id"));
+    let new_account_uuid = normalize_provider_oauth_identity_value_from_keys(
+        auth_config,
+        &["account_uuid", "accountUuid"],
+    );
     let new_agent_runtime_id = normalize_provider_oauth_identity_value(
         auth_config
             .get("agent_runtime_id")
@@ -442,6 +576,7 @@ pub(crate) async fn find_duplicate_provider_oauth_key(
     if new_email.is_none()
         && new_user_id.is_none()
         && new_account_id.is_none()
+        && new_account_uuid.is_none()
         && new_agent_runtime_id.is_none()
         && new_credential_fingerprint.is_none()
     {
@@ -486,17 +621,22 @@ pub(crate) async fn find_duplicate_provider_oauth_key(
                 .is_some_and(|value| value.eq_ignore_ascii_case("windsurf"));
 
         let mut is_duplicate = false;
+        let claude_identity_match =
+            match_claude_provider_oauth_identity(auth_config, &existing_auth_config);
         let codex_identity_match =
             match_codex_provider_oauth_identity(auth_config, &existing_auth_config);
         let windsurf_identity_match =
             match_windsurf_provider_oauth_identity(auth_config, &existing_auth_config);
-        if let Some(codex_identity_match) = codex_identity_match {
+        if let Some(claude_identity_match) = claude_identity_match {
+            is_duplicate = claude_identity_match;
+        } else if let Some(codex_identity_match) = codex_identity_match {
             is_duplicate = codex_identity_match;
         } else if let Some(windsurf_identity_match) = windsurf_identity_match {
             is_duplicate = windsurf_identity_match;
         }
 
-        if codex_identity_match.is_none()
+        if claude_identity_match.is_none()
+            && codex_identity_match.is_none()
             && windsurf_identity_match.is_none()
             && !is_duplicate
             && new_user_id.is_some()
@@ -507,7 +647,8 @@ pub(crate) async fn find_duplicate_provider_oauth_key(
             is_duplicate = true;
         }
 
-        if codex_identity_match.is_none()
+        if claude_identity_match.is_none()
+            && codex_identity_match.is_none()
             && windsurf_identity_match.is_none()
             && !is_duplicate
             && !is_windsurf
@@ -548,19 +689,20 @@ pub(crate) async fn find_duplicate_provider_oauth_key(
         if existing_provider_oauth_key_is_replaceable(&existing_key) {
             return Ok(Some(existing_key));
         }
-        let identifier =
-            normalize_provider_oauth_identity_value(auth_config.get("account_user_id"))
-                .or_else(|| normalize_provider_oauth_identity_value(auth_config.get("account_id")))
-                .or_else(|| new_agent_runtime_id.clone())
-                .or_else(|| {
-                    normalize_provider_oauth_identity_value(
-                        auth_config.get("credential_fingerprint"),
-                    )
-                    .map(|value| format!("fingerprint:{value}"))
-                })
-                .or_else(|| new_email.clone())
-                .or_else(|| new_user_id.clone())
-                .unwrap_or_default();
+        let identifier = normalize_provider_oauth_identity_value_from_keys(
+            auth_config,
+            &["account_uuid", "accountUuid"],
+        )
+        .or_else(|| normalize_provider_oauth_identity_value(auth_config.get("account_user_id")))
+        .or_else(|| normalize_provider_oauth_identity_value(auth_config.get("account_id")))
+        .or_else(|| new_agent_runtime_id.clone())
+        .or_else(|| {
+            normalize_provider_oauth_identity_value(auth_config.get("credential_fingerprint"))
+                .map(|value| format!("fingerprint:{value}"))
+        })
+        .or_else(|| new_email.clone())
+        .or_else(|| new_user_id.clone())
+        .unwrap_or_default();
         return Err(format!(
             "该 OAuth 账号 ({identifier}) 已存在于当前 Provider 中（名称: {}）",
             existing_key.name
@@ -573,9 +715,12 @@ pub(crate) async fn find_duplicate_provider_oauth_key(
 #[cfg(test)]
 mod tests {
     use super::{
-        acquire_codex_oauth_account_locks, codex_agent_identity_account_lock_keys,
-        match_codex_provider_oauth_identity, match_windsurf_provider_oauth_identity,
-        release_codex_oauth_account_locks, CodexOAuthAccountLockError,
+        acquire_claude_oauth_account_lock, acquire_codex_oauth_account_locks,
+        claude_oauth_account_lock_key, codex_agent_identity_account_lock_keys,
+        match_claude_provider_oauth_identity, match_codex_provider_oauth_identity,
+        match_windsurf_provider_oauth_identity, release_codex_oauth_account_locks,
+        release_provider_oauth_account_locks, ClaudeOAuthAccountLockError,
+        CodexOAuthAccountLockError,
     };
     use crate::handlers::admin::request::AdminAppState;
     use crate::AppState;
@@ -602,6 +747,99 @@ mod tests {
             match_windsurf_provider_oauth_identity(&new_auth_config, &existing_auth_config),
             Some(true)
         );
+    }
+
+    #[test]
+    fn claude_identity_prefers_account_uuid_without_using_organization_uuid() {
+        let new_auth_config = auth_config(json!({
+            "provider_type": "claude_code",
+            "account_uuid": "account-1",
+            "org_uuid": "shared-org"
+        }));
+        let same_account = auth_config(json!({
+            "provider_type": "claude_code",
+            "accountUuid": "account-1",
+            "org_uuid": "other-org"
+        }));
+        let different_account = auth_config(json!({
+            "provider_type": "claude_code",
+            "account_uuid": "account-2",
+            "email": "same@example.com",
+            "org_uuid": "shared-org"
+        }));
+        let organization_only = auth_config(json!({
+            "provider_type": "claude_code",
+            "org_uuid": "shared-org"
+        }));
+
+        assert_eq!(
+            match_claude_provider_oauth_identity(&new_auth_config, &same_account),
+            Some(true)
+        );
+        assert_eq!(
+            match_claude_provider_oauth_identity(&new_auth_config, &different_account),
+            Some(false)
+        );
+        assert_eq!(
+            match_claude_provider_oauth_identity(&new_auth_config, &organization_only),
+            None
+        );
+    }
+
+    #[test]
+    fn claude_account_lock_prefers_uuid_and_falls_back_to_normalized_email() {
+        let with_uuid = auth_config(json!({
+            "account_uuid": "account-1",
+            "email": "first@example.com"
+        }));
+        let same_uuid_other_email = auth_config(json!({
+            "accountUuid": "account-1",
+            "email": "other@example.com"
+        }));
+        let email_only_uppercase = auth_config(json!({"email": "User@Example.COM"}));
+        let email_only_lowercase = auth_config(json!({"email": "user@example.com"}));
+
+        let uuid_key = claude_oauth_account_lock_key("provider-claude", &with_uuid)
+            .expect("uuid lock key should build");
+        assert_eq!(
+            Some(uuid_key.as_str()),
+            claude_oauth_account_lock_key("provider-claude", &same_uuid_other_email).as_deref()
+        );
+        assert_eq!(
+            claude_oauth_account_lock_key("provider-claude", &email_only_uppercase),
+            claude_oauth_account_lock_key("provider-claude", &email_only_lowercase)
+        );
+        assert!(uuid_key.starts_with("provider_oauth_claude_account:"));
+        assert!(!uuid_key.contains("account-1"));
+        assert!(claude_oauth_account_lock_key("provider-claude", &Map::new()).is_none());
+    }
+
+    #[tokio::test]
+    async fn concurrent_claude_writes_contend_on_the_same_account_lock() {
+        let app = AppState::new().expect("app state should build");
+        let state = AdminAppState::new(&app);
+        let config = auth_config(json!({
+            "provider_type": "claude_code",
+            "account_uuid": "account-shared",
+            "email": "claude@example.com"
+        }));
+
+        let first =
+            acquire_claude_oauth_account_lock(&state, "provider-claude", &config, "first-test")
+                .await
+                .expect("first Claude lock should acquire");
+        let second =
+            acquire_claude_oauth_account_lock(&state, "provider-claude", &config, "second-test")
+                .await
+                .expect_err("second Claude lock should contend");
+        assert_eq!(second, ClaudeOAuthAccountLockError::Contended);
+
+        release_provider_oauth_account_locks(&state, first).await;
+        let retry =
+            acquire_claude_oauth_account_lock(&state, "provider-claude", &config, "retry-test")
+                .await
+                .expect("Claude lock should be reusable after release");
+        release_provider_oauth_account_locks(&state, retry).await;
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use crate::ai_serving::planner::spec_metadata::LocalExecutionSurfaceSpecMetadata;
 use crate::ai_serving::transport::{
-    classify_same_format_provider_request_behavior as classify_same_format_provider_request_behavior_impl,
+    classify_same_format_provider_request_behavior_for_operation as classify_same_format_provider_request_behavior_impl,
     resolve_same_format_provider_direct_auth as resolve_same_format_provider_direct_auth_impl,
     same_format_provider_transport_supported as same_format_provider_transport_supported_impl,
     same_format_provider_transport_unsupported_reason as same_format_provider_transport_unsupported_reason_impl,
@@ -15,6 +15,7 @@ pub(super) fn classify_same_format_provider_request_behavior(
     transport: &GatewayProviderTransportSnapshot,
     provider_api_format: &str,
     spec_metadata: LocalExecutionSurfaceSpecMetadata,
+    api_operation: Option<crate::ai_serving::ApiOperation>,
 ) -> SameFormatProviderRequestBehavior {
     classify_same_format_provider_request_behavior_impl(
         transport,
@@ -25,6 +26,7 @@ pub(super) fn classify_same_format_provider_request_behavior(
                 .report_kind
                 .expect("same-format provider specs should declare report kind"),
         },
+        api_operation,
     )
 }
 

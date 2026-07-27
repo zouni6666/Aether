@@ -12,7 +12,6 @@ const FIXED_PROVIDER_RECONCILIATION_LOCK_KEY: &str =
     "task_runtime:lock:maintenance.provider.fixed_template.reconcile";
 const FIXED_PROVIDER_RECONCILIATION_LOCK_TTL: Duration = Duration::from_secs(10 * 60);
 const FIXED_PROVIDER_RECONCILIATION_RETRY_DELAY: Duration = Duration::from_secs(2);
-const RECONCILED_PROVIDER_TYPE: &str = "codex";
 
 pub(crate) async fn perform_fixed_provider_reconciliation_once(
     state: &AppState,
@@ -51,13 +50,9 @@ async fn reconcile_fixed_provider_templates(state: &AppState) -> Result<(), Gate
     let admin_state = AdminAppState::new(state);
     let mut failures = Vec::new();
     for provider in &providers {
-        if !provider
-            .provider_type
-            .trim()
-            .eq_ignore_ascii_case(RECONCILED_PROVIDER_TYPE)
-            || admin_state
-                .fixed_provider_template(&provider.provider_type)
-                .is_none()
+        if admin_state
+            .fixed_provider_template(&provider.provider_type)
+            .is_none()
         {
             continue;
         }
@@ -226,16 +221,16 @@ mod tests {
         .expect("key should build");
         key.api_formats = Some(json!(["openai:responses"]));
 
-        let unrelated_fixed_provider = StoredProviderCatalogProvider::new(
-            "provider-claude-code".to_string(),
-            "Claude Code".to_string(),
+        let unrelated_provider = StoredProviderCatalogProvider::new(
+            "provider-custom".to_string(),
+            "Custom".to_string(),
             None,
-            "claude_code".to_string(),
+            "custom".to_string(),
         )
-        .expect("unrelated fixed provider should build");
+        .expect("unrelated provider should build");
 
         let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
-            vec![provider, unrelated_fixed_provider],
+            vec![provider, unrelated_provider],
             vec![responses],
             vec![key],
         ));
@@ -284,7 +279,7 @@ mod tests {
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].api_formats, Some(json!(["openai:responses"])));
         assert!(repository
-            .list_endpoints_by_provider_ids(&["provider-claude-code".to_string()])
+            .list_endpoints_by_provider_ids(&["provider-custom".to_string()])
             .await
             .expect("unrelated endpoints should list")
             .is_empty());
@@ -297,5 +292,107 @@ mod tests {
             .await
             .expect("endpoints should list again");
         assert_eq!(second_endpoints, first_endpoints);
+    }
+
+    #[tokio::test]
+    async fn fixed_provider_reconciliation_retires_removed_vertex_claude_endpoint() {
+        let provider = StoredProviderCatalogProvider::new(
+            "provider-vertex".to_string(),
+            "Vertex AI".to_string(),
+            None,
+            "vertex_ai".to_string(),
+        )
+        .expect("provider should build");
+
+        let gemini = StoredProviderCatalogEndpoint::new(
+            "endpoint-vertex-gemini".to_string(),
+            provider.id.clone(),
+            "gemini:generate_content".to_string(),
+            Some("gemini".to_string()),
+            Some("generate_content".to_string()),
+            true,
+        )
+        .expect("gemini endpoint should build")
+        .with_transport_fields(
+            "https://aiplatform.googleapis.com".to_string(),
+            None,
+            None,
+            Some(2),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("gemini endpoint transport should build");
+
+        let claude = StoredProviderCatalogEndpoint::new(
+            "endpoint-vertex-claude".to_string(),
+            provider.id.clone(),
+            "claude:messages".to_string(),
+            Some("claude".to_string()),
+            Some("messages".to_string()),
+            true,
+        )
+        .expect("claude endpoint should build")
+        .with_transport_fields(
+            "https://aiplatform.googleapis.com".to_string(),
+            None,
+            None,
+            Some(2),
+            None,
+            Some(json!({
+                "_aether_fixed_provider_template": {
+                    "managed": true,
+                    "provider_type": "vertex_ai",
+                    "item_key": "claude:messages",
+                    "version": 1,
+                    "retired": false,
+                    "overrides": [],
+                    "config_keys": []
+                }
+            })),
+            None,
+            None,
+        )
+        .expect("claude endpoint transport should build");
+
+        let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![provider],
+            vec![gemini, claude],
+            vec![],
+        ));
+        let state = AppState::new()
+            .expect("gateway state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(repository.clone()),
+            );
+
+        assert!(perform_fixed_provider_reconciliation_once(&state)
+            .await
+            .expect("reconciliation should run"));
+
+        let endpoints = repository
+            .list_endpoints_by_provider_ids(&["provider-vertex".to_string()])
+            .await
+            .expect("vertex endpoints should list");
+        let gemini = endpoints
+            .iter()
+            .find(|endpoint| endpoint.id == "endpoint-vertex-gemini")
+            .expect("gemini endpoint should remain");
+        assert!(gemini.is_active);
+
+        let claude = endpoints
+            .iter()
+            .find(|endpoint| endpoint.id == "endpoint-vertex-claude")
+            .expect("legacy claude endpoint should remain as retired history");
+        assert!(!claude.is_active);
+        assert_eq!(
+            claude
+                .config
+                .as_ref()
+                .and_then(|value| value.get("_aether_fixed_provider_template"))
+                .and_then(|value| value.get("retired")),
+            Some(&json!(true))
+        );
     }
 }

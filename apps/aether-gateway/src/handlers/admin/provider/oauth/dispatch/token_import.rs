@@ -100,6 +100,12 @@ pub(super) fn normalize_provider_import_tokens(
     if provider_type == "grok" {
         return (None, access_token.or(refresh_token));
     }
+    if provider_type == "claude_code" {
+        if access_token.is_none() && refresh_token.as_deref().is_some_and(is_claude_access_token) {
+            return (None, refresh_token);
+        }
+        return (refresh_token, access_token);
+    }
 
     normalize_single_import_tokens(refresh_token.as_deref(), access_token.as_deref())
 }
@@ -210,8 +216,73 @@ pub(super) fn provider_oauth_import_authorization_bearer_token_from_object(
 pub(super) fn provider_type_supports_access_token_import(provider_type: &str) -> bool {
     matches!(
         provider_type.trim().to_ascii_lowercase().as_str(),
-        "codex" | "chatgpt_web" | "grok"
+        "claude_code" | "codex" | "chatgpt_web" | "grok"
     )
+}
+
+pub(super) fn is_claude_access_token(value: &str) -> bool {
+    value.trim().starts_with("sk-ant-oat")
+}
+
+pub(super) fn is_claude_session_key(value: &str) -> bool {
+    value.trim().starts_with("sk-ant-sid")
+}
+
+pub(super) fn flatten_claude_code_credentials_payload(payload: &mut Map<String, Value>) {
+    let nested = payload
+        .get("claudeAiOauth")
+        .or_else(|| payload.get("claude_ai_oauth"))
+        .and_then(Value::as_object)
+        .cloned();
+    let Some(nested) = nested else {
+        return;
+    };
+
+    for (target, aliases) in [
+        ("access_token", &["access_token", "accessToken"][..]),
+        ("refresh_token", &["refresh_token", "refreshToken"][..]),
+        ("scopes", &["scopes"][..]),
+        (
+            "subscription_type",
+            &["subscription_type", "subscriptionType"][..],
+        ),
+        ("rate_limit_tier", &["rate_limit_tier", "rateLimitTier"][..]),
+        (
+            "organization_uuid",
+            &["organization_uuid", "organizationUuid", "org_uuid"][..],
+        ),
+    ] {
+        if payload.contains_key(target) {
+            continue;
+        }
+        if let Some(value) = aliases.iter().find_map(|key| nested.get(*key)).cloned() {
+            payload.insert(target.to_string(), value);
+        }
+    }
+
+    if !payload.contains_key("expires_at") {
+        if let Some(expires_at) = json_u64_value(nested.get("expires_at")) {
+            payload.insert("expires_at".to_string(), json!(expires_at));
+        } else if let Some(expires_at_ms) = json_u64_value(nested.get("expiresAt")) {
+            payload.insert("expires_at".to_string(), json!(expires_at_ms / 1_000));
+        }
+    }
+}
+
+pub(super) fn validate_claude_access_token_import(
+    access_token: &str,
+    imported_expires_at: Option<u64>,
+    now_unix_secs: u64,
+) -> Result<(), &'static str> {
+    if !is_claude_access_token(access_token) {
+        return Err("Claude Access Token 格式无效，请导入 sk-ant-oat 凭据");
+    }
+    if imported_expires_at.is_none_or(|expires_at| expires_at <= now_unix_secs) {
+        return Err(
+            "Claude Access Token 单独导入必须提供有效的未来 expires_at；建议导入完整 Claude credentials 或 Refresh Token",
+        );
+    }
+    Ok(())
 }
 
 pub(super) fn build_provider_access_token_import_auth_config(
@@ -266,9 +337,10 @@ pub(super) fn build_provider_access_token_import_auth_config(
 mod tests {
     use super::{
         build_provider_access_token_import_auth_config, decode_access_token_expires_at,
-        looks_like_access_token, normalize_provider_import_tokens,
-        normalize_provider_oauth_import_headers, normalize_single_import_tokens,
-        provider_oauth_import_authorization_bearer_token,
+        flatten_claude_code_credentials_payload, looks_like_access_token,
+        normalize_provider_import_tokens, normalize_provider_oauth_import_headers,
+        normalize_single_import_tokens, provider_oauth_import_authorization_bearer_token,
+        validate_claude_access_token_import,
     };
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     use serde_json::json;
@@ -430,5 +502,65 @@ mod tests {
             auth_config.get("expires_at"),
             Some(&json!(2_200_000_000u64))
         );
+    }
+
+    #[test]
+    fn flattens_only_claude_ai_oauth_credentials_and_converts_expiry_ms() {
+        let mut payload = json!({
+            "claudeAiOauth": {
+                "accessToken": "sk-ant-oat01-access",
+                "refreshToken": "sk-ant-ort01-refresh",
+                "expiresAt": 2_100_000_000_123u64,
+                "scopes": ["user:profile"],
+                "subscriptionType": "pro",
+                "rateLimitTier": "tier_1",
+                "organizationUuid": "org-123"
+            },
+            "mcpOAuth": {
+                "accessToken": "must-not-be-imported"
+            }
+        })
+        .as_object()
+        .cloned()
+        .expect("payload should be an object");
+
+        flatten_claude_code_credentials_payload(&mut payload);
+
+        assert_eq!(
+            payload.get("access_token"),
+            Some(&json!("sk-ant-oat01-access"))
+        );
+        assert_eq!(
+            payload.get("refresh_token"),
+            Some(&json!("sk-ant-ort01-refresh"))
+        );
+        assert_eq!(payload.get("expires_at"), Some(&json!(2_100_000_000u64)));
+        assert_eq!(payload.get("organization_uuid"), Some(&json!("org-123")));
+        assert_ne!(
+            payload.get("access_token"),
+            Some(&json!("must-not-be-imported"))
+        );
+    }
+
+    #[test]
+    fn validates_claude_access_token_prefix_and_future_expiry() {
+        assert!(validate_claude_access_token_import(
+            "sk-ant-oat01-access",
+            Some(2_100_000_000),
+            2_000_000_000,
+        )
+        .is_ok());
+        assert!(validate_claude_access_token_import(
+            "arbitrary-token",
+            Some(2_100_000_000),
+            2_000_000_000,
+        )
+        .is_err());
+        assert!(validate_claude_access_token_import(
+            "sk-ant-oat01-expired",
+            Some(1_900_000_000),
+            2_000_000_000,
+        )
+        .is_err());
     }
 }

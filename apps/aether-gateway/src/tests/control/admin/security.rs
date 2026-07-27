@@ -49,6 +49,45 @@ async fn gateway_blocks_blacklisted_ip_before_routing() {
 }
 
 #[tokio::test]
+async fn gateway_shapes_blacklist_rejections_for_claude_routes_before_routing() {
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_admin_security_blacklist_for_tests([(
+                "127.0.0.1".to_string(),
+                "blocked".to_string(),
+            )]),
+    );
+
+    for path in ["/v1/messages", "/v1/messages/count_tokens"] {
+        let request = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"model":"claude-sonnet-4","messages":[]}"#))
+            .expect("request should build");
+
+        let response = send_request(gateway.clone(), request).await;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "path: {path}");
+        let payload = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&payload).expect("response should be json");
+        assert_eq!(payload["type"], "error", "path: {path}");
+        assert_eq!(payload["error"]["type"], "permission_error", "path: {path}");
+        assert_eq!(
+            payload["error"]["message"], "当前 IP 已被禁止访问",
+            "path: {path}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn gateway_blocks_forwarded_ip_from_trusted_proxy() {
     let gateway = build_router_with_state(
         AppState::new()

@@ -114,16 +114,8 @@ INNER JOIN LATERAL (
       )
       OR (
         LOWER(BTRIM(p.provider_type)) = 'vertex_ai'
-        AND (
-          (
-            LOWER(BTRIM(pak.auth_type)) = 'api_key'
-            AND LOWER($3) IN ('gemini:generate_content', 'gemini:embedding')
-          )
-          OR (
-            LOWER(BTRIM(pak.auth_type)) IN ('service_account', 'vertex_ai')
-            AND LOWER($3) IN ('claude:messages', 'gemini:generate_content', 'gemini:embedding')
-          )
-        )
+        AND LOWER(BTRIM(pak.auth_type)) IN ('api_key', 'service_account', 'vertex_ai')
+        AND LOWER($3) IN ('gemini:generate_content', 'gemini:embedding')
       )
       OR (
         LOWER(BTRIM(p.provider_type)) NOT IN (
@@ -207,16 +199,8 @@ WHERE p.is_active = TRUE
     )
     OR (
       LOWER(BTRIM(p.provider_type)) = 'vertex_ai'
-      AND (
-        (
-          LOWER(BTRIM(pak.auth_type)) = 'api_key'
-          AND LOWER($3) IN ('gemini:generate_content', 'gemini:embedding')
-        )
-        OR (
-          LOWER(BTRIM(pak.auth_type)) IN ('service_account', 'vertex_ai')
-          AND LOWER($3) IN ('claude:messages', 'gemini:generate_content', 'gemini:embedding')
-        )
-      )
+      AND LOWER(BTRIM(pak.auth_type)) IN ('api_key', 'service_account', 'vertex_ai')
+      AND LOWER($3) IN ('gemini:generate_content', 'gemini:embedding')
     )
     OR (
       LOWER(BTRIM(p.provider_type)) NOT IN (
@@ -393,16 +377,8 @@ INNER JOIN LATERAL (
       )
       OR (
         LOWER(BTRIM(p.provider_type)) = 'vertex_ai'
-        AND (
-          (
-            LOWER(BTRIM(pak.auth_type)) = 'api_key'
-            AND LOWER($4) IN ('gemini:generate_content', 'gemini:embedding')
-          )
-          OR (
-            LOWER(BTRIM(pak.auth_type)) IN ('service_account', 'vertex_ai')
-            AND LOWER($4) IN ('claude:messages', 'gemini:generate_content', 'gemini:embedding')
-          )
-        )
+        AND LOWER(BTRIM(pak.auth_type)) IN ('api_key', 'service_account', 'vertex_ai')
+        AND LOWER($4) IN ('gemini:generate_content', 'gemini:embedding')
       )
       OR (
         LOWER(BTRIM(p.provider_type)) NOT IN (
@@ -487,16 +463,8 @@ WHERE p.is_active = TRUE
     )
     OR (
       LOWER(BTRIM(p.provider_type)) = 'vertex_ai'
-      AND (
-        (
-          LOWER(BTRIM(pak.auth_type)) = 'api_key'
-          AND LOWER($4) IN ('gemini:generate_content', 'gemini:embedding')
-        )
-        OR (
-          LOWER(BTRIM(pak.auth_type)) IN ('service_account', 'vertex_ai')
-          AND LOWER($4) IN ('claude:messages', 'gemini:generate_content', 'gemini:embedding')
-        )
-      )
+      AND LOWER(BTRIM(pak.auth_type)) IN ('api_key', 'service_account', 'vertex_ai')
+      AND LOWER($4) IN ('gemini:generate_content', 'gemini:embedding')
     )
     OR (
       LOWER(BTRIM(p.provider_type)) NOT IN (
@@ -681,16 +649,8 @@ WHERE p.is_active = TRUE
     )
     OR (
       LOWER(BTRIM(p.provider_type)) = 'vertex_ai'
-      AND (
-        (
-          LOWER(BTRIM(pak.auth_type)) = 'api_key'
-          AND LOWER($6) IN ('gemini:generate_content', 'gemini:embedding')
-        )
-        OR (
-          LOWER(BTRIM(pak.auth_type)) IN ('service_account', 'vertex_ai')
-          AND LOWER($6) IN ('claude:messages', 'gemini:generate_content', 'gemini:embedding')
-        )
-      )
+      AND LOWER(BTRIM(pak.auth_type)) IN ('api_key', 'service_account', 'vertex_ai')
+      AND LOWER($6) IN ('gemini:generate_content', 'gemini:embedding')
     )
     OR (
       LOWER(BTRIM(p.provider_type)) NOT IN (
@@ -1579,18 +1539,39 @@ mod tests {
     }
 
     #[test]
-    fn candidate_selection_sql_allows_vertex_embedding_auth() {
+    fn candidate_selection_sql_rejects_retired_vertex_claude_auth() {
         let requested_model_sql = requested_model_selection_sql();
-        for sql in [
-            LIST_FOR_EXACT_API_FORMAT_SQL,
-            LIST_FOR_EXACT_API_FORMAT_AND_GLOBAL_MODEL_SQL,
-            LIST_POOL_KEYS_FOR_GROUP_SQL,
-            requested_model_sql.as_str(),
+        for (name, sql, expected_occurrences) in [
+            ("exact", LIST_FOR_EXACT_API_FORMAT_SQL, 2),
+            (
+                "global_model",
+                LIST_FOR_EXACT_API_FORMAT_AND_GLOBAL_MODEL_SQL,
+                2,
+            ),
+            ("pool_keys", LIST_POOL_KEYS_FOR_GROUP_SQL, 1),
+            ("requested_model", requested_model_sql.as_str(), 2),
         ] {
-            assert!(sql.contains("LOWER(BTRIM(p.provider_type)) = 'vertex_ai'"));
-            assert!(sql.contains("gemini:embedding"));
-            assert!(sql.contains("gemini:generate_content"));
-            assert!(sql.contains("claude:messages"));
+            let mut remaining = sql;
+            let mut occurrences = 0;
+            while let Some((_, suffix)) =
+                remaining.split_once("LOWER(BTRIM(p.provider_type)) = 'vertex_ai'")
+            {
+                let (vertex_clause, rest) = suffix
+                    .split_once("LOWER(BTRIM(p.provider_type)) NOT IN")
+                    .expect("each Vertex auth clause should have a following fallback clause");
+                assert!(vertex_clause.contains(
+                    "LOWER(BTRIM(pak.auth_type)) IN ('api_key', 'service_account', 'vertex_ai')"
+                ));
+                assert!(vertex_clause.contains("gemini:embedding"));
+                assert!(vertex_clause.contains("gemini:generate_content"));
+                assert!(!vertex_clause.contains("claude:messages"));
+                occurrences += 1;
+                remaining = rest;
+            }
+            assert_eq!(
+                occurrences, expected_occurrences,
+                "unexpected Vertex auth clause count in {name} SQL"
+            );
         }
     }
 

@@ -1,11 +1,12 @@
 use crate::contracts::{
-    CLAUDE_CHAT_STREAM_PLAN_KIND, CLAUDE_CHAT_SYNC_PLAN_KIND, CLAUDE_CLI_STREAM_PLAN_KIND,
-    CLAUDE_CLI_SYNC_PLAN_KIND, GEMINI_CHAT_STREAM_PLAN_KIND, GEMINI_CHAT_SYNC_PLAN_KIND,
-    GEMINI_CLI_STREAM_PLAN_KIND, GEMINI_CLI_SYNC_PLAN_KIND, GEMINI_EMBEDDING_SYNC_PLAN_KIND,
-    GEMINI_EMBEDDING_SYNC_SUCCESS_REPORT_KIND, GEMINI_INTERACTIONS_STREAM_PLAN_KIND,
-    GEMINI_INTERACTIONS_STREAM_SUCCESS_REPORT_KIND, GEMINI_INTERACTIONS_SYNC_PLAN_KIND,
-    GEMINI_INTERACTIONS_SYNC_SUCCESS_REPORT_KIND, OPENAI_EMBEDDING_SYNC_PLAN_KIND,
-    OPENAI_RERANK_SYNC_PLAN_KIND, OPENAI_SEARCH_SYNC_PLAN_KIND,
+    ApiOperation, CLAUDE_CHAT_STREAM_PLAN_KIND, CLAUDE_CHAT_SYNC_PLAN_KIND,
+    CLAUDE_CLI_STREAM_PLAN_KIND, CLAUDE_CLI_SYNC_PLAN_KIND, CLAUDE_COUNT_TOKENS_SYNC_PLAN_KIND,
+    CLAUDE_COUNT_TOKENS_SYNC_SUCCESS_REPORT_KIND, GEMINI_CHAT_STREAM_PLAN_KIND,
+    GEMINI_CHAT_SYNC_PLAN_KIND, GEMINI_CLI_STREAM_PLAN_KIND, GEMINI_CLI_SYNC_PLAN_KIND,
+    GEMINI_EMBEDDING_SYNC_PLAN_KIND, GEMINI_EMBEDDING_SYNC_SUCCESS_REPORT_KIND,
+    GEMINI_INTERACTIONS_STREAM_PLAN_KIND, GEMINI_INTERACTIONS_STREAM_SUCCESS_REPORT_KIND,
+    GEMINI_INTERACTIONS_SYNC_PLAN_KIND, GEMINI_INTERACTIONS_SYNC_SUCCESS_REPORT_KIND,
+    OPENAI_EMBEDDING_SYNC_PLAN_KIND, OPENAI_RERANK_SYNC_PLAN_KIND, OPENAI_SEARCH_SYNC_PLAN_KIND,
     OPENAI_SEARCH_SYNC_SUCCESS_REPORT_KIND,
 };
 
@@ -22,6 +23,7 @@ pub struct LocalSameFormatProviderSpec {
     pub report_kind: &'static str,
     pub family: LocalSameFormatProviderFamily,
     pub require_streaming: bool,
+    pub operation: Option<ApiOperation>,
 }
 
 pub fn resolve_sync_spec(plan_kind: &str) -> Option<LocalSameFormatProviderSpec> {
@@ -32,6 +34,7 @@ pub fn resolve_sync_spec(plan_kind: &str) -> Option<LocalSameFormatProviderSpec>
             report_kind: "claude_chat_sync_success",
             family: LocalSameFormatProviderFamily::Standard,
             require_streaming: false,
+            operation: Some(ApiOperation::ClaudeMessagesCreate),
         }),
         CLAUDE_CLI_SYNC_PLAN_KIND => Some(LocalSameFormatProviderSpec {
             api_format: "claude:messages",
@@ -39,6 +42,15 @@ pub fn resolve_sync_spec(plan_kind: &str) -> Option<LocalSameFormatProviderSpec>
             report_kind: "claude_cli_sync_success",
             family: LocalSameFormatProviderFamily::Standard,
             require_streaming: false,
+            operation: Some(ApiOperation::ClaudeMessagesCreate),
+        }),
+        CLAUDE_COUNT_TOKENS_SYNC_PLAN_KIND => Some(LocalSameFormatProviderSpec {
+            api_format: "claude:messages",
+            decision_kind: CLAUDE_COUNT_TOKENS_SYNC_PLAN_KIND,
+            report_kind: CLAUDE_COUNT_TOKENS_SYNC_SUCCESS_REPORT_KIND,
+            family: LocalSameFormatProviderFamily::Standard,
+            require_streaming: false,
+            operation: Some(ApiOperation::ClaudeCountTokens),
         }),
         GEMINI_CHAT_SYNC_PLAN_KIND => Some(LocalSameFormatProviderSpec {
             api_format: "gemini:generate_content",
@@ -46,6 +58,7 @@ pub fn resolve_sync_spec(plan_kind: &str) -> Option<LocalSameFormatProviderSpec>
             report_kind: "gemini_chat_sync_success",
             family: LocalSameFormatProviderFamily::Gemini,
             require_streaming: false,
+            operation: None,
         }),
         GEMINI_CLI_SYNC_PLAN_KIND => Some(LocalSameFormatProviderSpec {
             api_format: "gemini:generate_content",
@@ -53,6 +66,7 @@ pub fn resolve_sync_spec(plan_kind: &str) -> Option<LocalSameFormatProviderSpec>
             report_kind: "gemini_cli_sync_success",
             family: LocalSameFormatProviderFamily::Gemini,
             require_streaming: false,
+            operation: None,
         }),
         GEMINI_EMBEDDING_SYNC_PLAN_KIND => Some(LocalSameFormatProviderSpec {
             api_format: "gemini:embedding",
@@ -60,6 +74,7 @@ pub fn resolve_sync_spec(plan_kind: &str) -> Option<LocalSameFormatProviderSpec>
             report_kind: GEMINI_EMBEDDING_SYNC_SUCCESS_REPORT_KIND,
             family: LocalSameFormatProviderFamily::Gemini,
             require_streaming: false,
+            operation: None,
         }),
         GEMINI_INTERACTIONS_SYNC_PLAN_KIND => Some(LocalSameFormatProviderSpec {
             api_format: "gemini:interactions",
@@ -67,6 +82,7 @@ pub fn resolve_sync_spec(plan_kind: &str) -> Option<LocalSameFormatProviderSpec>
             report_kind: GEMINI_INTERACTIONS_SYNC_SUCCESS_REPORT_KIND,
             family: LocalSameFormatProviderFamily::Gemini,
             require_streaming: false,
+            operation: None,
         }),
         OPENAI_EMBEDDING_SYNC_PLAN_KIND => Some(LocalSameFormatProviderSpec {
             api_format: "openai:embedding",
@@ -74,6 +90,7 @@ pub fn resolve_sync_spec(plan_kind: &str) -> Option<LocalSameFormatProviderSpec>
             report_kind: "openai_embedding_sync_success",
             family: LocalSameFormatProviderFamily::Standard,
             require_streaming: false,
+            operation: None,
         }),
         OPENAI_RERANK_SYNC_PLAN_KIND => Some(LocalSameFormatProviderSpec {
             api_format: "openai:rerank",
@@ -81,6 +98,7 @@ pub fn resolve_sync_spec(plan_kind: &str) -> Option<LocalSameFormatProviderSpec>
             report_kind: "openai_rerank_sync_success",
             family: LocalSameFormatProviderFamily::Standard,
             require_streaming: false,
+            operation: None,
         }),
         OPENAI_SEARCH_SYNC_PLAN_KIND => Some(LocalSameFormatProviderSpec {
             api_format: "openai:search",
@@ -88,6 +106,7 @@ pub fn resolve_sync_spec(plan_kind: &str) -> Option<LocalSameFormatProviderSpec>
             report_kind: OPENAI_SEARCH_SYNC_SUCCESS_REPORT_KIND,
             family: LocalSameFormatProviderFamily::Standard,
             require_streaming: false,
+            operation: None,
         }),
         _ => None,
     }
@@ -101,6 +120,7 @@ pub fn resolve_stream_spec(plan_kind: &str) -> Option<LocalSameFormatProviderSpe
             report_kind: "claude_chat_stream_success",
             family: LocalSameFormatProviderFamily::Standard,
             require_streaming: true,
+            operation: Some(ApiOperation::ClaudeMessagesCreate),
         }),
         CLAUDE_CLI_STREAM_PLAN_KIND => Some(LocalSameFormatProviderSpec {
             api_format: "claude:messages",
@@ -108,6 +128,7 @@ pub fn resolve_stream_spec(plan_kind: &str) -> Option<LocalSameFormatProviderSpe
             report_kind: "claude_cli_stream_success",
             family: LocalSameFormatProviderFamily::Standard,
             require_streaming: true,
+            operation: Some(ApiOperation::ClaudeMessagesCreate),
         }),
         GEMINI_CHAT_STREAM_PLAN_KIND => Some(LocalSameFormatProviderSpec {
             api_format: "gemini:generate_content",
@@ -115,6 +136,7 @@ pub fn resolve_stream_spec(plan_kind: &str) -> Option<LocalSameFormatProviderSpe
             report_kind: "gemini_chat_stream_success",
             family: LocalSameFormatProviderFamily::Gemini,
             require_streaming: true,
+            operation: None,
         }),
         GEMINI_CLI_STREAM_PLAN_KIND => Some(LocalSameFormatProviderSpec {
             api_format: "gemini:generate_content",
@@ -122,6 +144,7 @@ pub fn resolve_stream_spec(plan_kind: &str) -> Option<LocalSameFormatProviderSpe
             report_kind: "gemini_cli_stream_success",
             family: LocalSameFormatProviderFamily::Gemini,
             require_streaming: true,
+            operation: None,
         }),
         GEMINI_INTERACTIONS_STREAM_PLAN_KIND => Some(LocalSameFormatProviderSpec {
             api_format: "gemini:interactions",
@@ -129,6 +152,7 @@ pub fn resolve_stream_spec(plan_kind: &str) -> Option<LocalSameFormatProviderSpe
             report_kind: GEMINI_INTERACTIONS_STREAM_SUCCESS_REPORT_KIND,
             family: LocalSameFormatProviderFamily::Gemini,
             require_streaming: true,
+            operation: None,
         }),
         _ => None,
     }

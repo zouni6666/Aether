@@ -1,7 +1,8 @@
 use super::super::helpers::admin_provider_oauth_key_name_from_auth_config;
 use super::super::token_import::{
     build_provider_access_token_import_auth_config, decode_access_token_expires_at,
-    provider_oauth_import_authorization_bearer_token, provider_type_supports_access_token_import,
+    is_claude_session_key, provider_oauth_import_authorization_bearer_token,
+    provider_type_supports_access_token_import, validate_claude_access_token_import,
 };
 use super::kiro_import::execute_admin_provider_oauth_kiro_batch_import;
 use super::parse::{
@@ -54,6 +55,33 @@ fn sanitize_windsurf_batch_import_error(error: &OAuthError) -> String {
         }
         _ => "Windsurf 凭据验证失败".to_string(),
     }
+}
+
+fn can_fallback_batch_refresh_to_access_token(
+    provider_type: &str,
+    access_token: Option<&str>,
+) -> bool {
+    !provider_type.eq_ignore_ascii_case("claude_code")
+        && access_token.is_some()
+        && provider_type_supports_access_token_import(provider_type)
+}
+
+fn validate_batch_access_token_import(
+    provider_type: &str,
+    access_token: &str,
+    imported_expires_at: Option<u64>,
+    now_unix_secs: u64,
+) -> Result<(), String> {
+    if !provider_type_supports_access_token_import(provider_type) {
+        return Err(
+            "Access Token 导入仅支持 Claude Code / Codex / ChatGPT Web / Grok Provider".to_string(),
+        );
+    }
+    if provider_type.eq_ignore_ascii_case("claude_code") {
+        validate_claude_access_token_import(access_token, imported_expires_at, now_unix_secs)
+            .map_err(str::to_string)?;
+    }
+    Ok(())
 }
 
 const CODEX_AGENT_IDENTITY_SAFE_FIELDS: &[(&str, &[&str])] = &[
@@ -249,6 +277,15 @@ async fn resolve_admin_provider_oauth_batch_import_tokens(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let is_claude = provider_type.eq_ignore_ascii_case("claude_code");
+    if is_claude
+        && refresh_token
+            .into_iter()
+            .chain(access_token)
+            .any(is_claude_session_key)
+    {
+        return Err("Claude sessionKey 请使用 Cookie 授权，不能作为导入凭据".to_string());
+    }
 
     if provider_type.eq_ignore_ascii_case("windsurf") {
         let token_for_import = refresh_token.or(access_token);
@@ -307,7 +344,7 @@ async fn resolve_admin_provider_oauth_batch_import_tokens(
 
     if let Some(refresh_token) = refresh_token {
         let Some(template) = template else {
-            if provider_type_supports_access_token_import(provider_type) {
+            if can_fallback_batch_refresh_to_access_token(provider_type, access_token) {
                 if let Some(access_token) = access_token {
                     let (auth_config, expires_at) = build_provider_access_token_import_auth_config(
                         provider_type,
@@ -340,7 +377,7 @@ async fn resolve_admin_provider_oauth_batch_import_tokens(
             Ok(payload) => payload,
             Err(response) => {
                 let detail = extract_admin_provider_oauth_batch_error_detail(response).await;
-                if provider_type_supports_access_token_import(provider_type) {
+                if can_fallback_batch_refresh_to_access_token(provider_type, access_token) {
                     if let Some(access_token) = access_token {
                         let (auth_config, expires_at) =
                             build_provider_access_token_import_auth_config(
@@ -381,9 +418,17 @@ async fn resolve_admin_provider_oauth_batch_import_tokens(
     }
 
     if let Some(access_token) = access_token {
-        if !provider_type_supports_access_token_import(provider_type) {
-            return Err("Access Token 导入仅支持 Codex / ChatGPT Web / Grok Provider".to_string());
-        }
+        let now_unix_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        validate_batch_access_token_import(
+            provider_type,
+            access_token,
+            entry.expires_at,
+            now_unix_secs,
+        )?;
         let (auth_config, expires_at) = build_provider_access_token_import_auth_config(
             provider_type,
             access_token,
@@ -734,7 +779,8 @@ pub(super) async fn execute_admin_provider_oauth_batch_import(
 mod tests {
     use super::super::parse::parse_admin_provider_oauth_batch_import_entries;
     use super::{
-        codex_agent_identity_auth_config_from_import, sanitize_windsurf_batch_import_error,
+        can_fallback_batch_refresh_to_access_token, codex_agent_identity_auth_config_from_import,
+        sanitize_windsurf_batch_import_error, validate_batch_access_token_import,
     };
     use aether_oauth::core::OAuthError;
     use serde_json::json;
@@ -761,6 +807,51 @@ mod tests {
         assert_eq!(detail, "Windsurf 凭据验证失败");
         assert!(!detail.contains("sk-secret"));
         assert!(!detail.contains("secret-token"));
+    }
+
+    #[test]
+    fn claude_batch_refresh_failure_never_falls_back_to_imported_access_token() {
+        assert!(!can_fallback_batch_refresh_to_access_token(
+            "claude_code",
+            Some("sk-ant-oat01-stale")
+        ));
+        assert!(can_fallback_batch_refresh_to_access_token(
+            "codex",
+            Some("fallback-access-token")
+        ));
+    }
+
+    #[test]
+    fn claude_batch_access_only_requires_oat_prefix_and_future_expiry() {
+        let now = 2_000_000_000;
+        assert!(validate_batch_access_token_import(
+            "claude_code",
+            "sk-ant-oat01-valid",
+            Some(now + 3600),
+            now,
+        )
+        .is_ok());
+        assert!(validate_batch_access_token_import(
+            "claude_code",
+            "not-an-oat",
+            Some(now + 3600),
+            now,
+        )
+        .is_err());
+        assert!(validate_batch_access_token_import(
+            "claude_code",
+            "sk-ant-oat01-missing-expiry",
+            None,
+            now,
+        )
+        .is_err());
+        assert!(validate_batch_access_token_import(
+            "claude_code",
+            "sk-ant-oat01-expired",
+            Some(now),
+            now,
+        )
+        .is_err());
     }
 
     #[test]

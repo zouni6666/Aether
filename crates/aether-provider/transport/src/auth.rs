@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use super::headers::{
-    normalize_upstream_accept_encoding, should_skip_upstream_complete_passthrough_header,
-    should_skip_upstream_passthrough_header,
+    is_aether_internal_header, is_upstream_credential_header, normalize_upstream_accept_encoding,
+    should_skip_upstream_complete_passthrough_header, should_skip_upstream_passthrough_header,
 };
 use super::snapshot::GatewayProviderTransportSnapshot;
 
@@ -30,6 +30,9 @@ fn collect_passthrough_headers(
 
     for (key, value) in extra_headers {
         let normalized_key = key.to_ascii_lowercase();
+        if should_skip_upstream_passthrough_header(&normalized_key) {
+            continue;
+        }
         let Some(value) = normalize_passthrough_header_value(&normalized_key, value) else {
             continue;
         };
@@ -60,6 +63,9 @@ fn collect_complete_passthrough_headers(
 
     for (key, value) in extra_headers {
         let normalized_key = key.to_ascii_lowercase();
+        if should_skip_upstream_complete_passthrough_header(&normalized_key) {
+            continue;
+        }
         let Some(value) = normalize_passthrough_header_value(&normalized_key, value) else {
             continue;
         };
@@ -136,7 +142,7 @@ pub fn build_complete_passthrough_headers_with_auth(
     content_type: Option<&str>,
 ) -> BTreeMap<String, String> {
     let mut out = build_complete_passthrough_headers(headers, extra_headers, content_type);
-    ensure_upstream_auth_header(&mut out, auth_header, auth_value);
+    replace_upstream_auth_headers(&mut out, auth_header, auth_value);
     out
 }
 
@@ -154,6 +160,24 @@ pub fn build_claude_passthrough_headers(
         extra_headers,
         content_type,
     );
+
+    for (name, value) in extra_headers {
+        let key = name.to_ascii_lowercase();
+        let value = value.trim();
+        if value.is_empty() || !should_restore_claude_passthrough_header(&key) {
+            continue;
+        }
+
+        if key == "anthropic-beta" {
+            let merged = merge_comma_header_values(out.get(&key).map(String::as_str), Some(value));
+            if let Some(merged) = merged {
+                out.insert(key, merged);
+            }
+            continue;
+        }
+
+        out.insert(key, value.to_string());
+    }
 
     for (name, value) in headers.iter() {
         let Ok(value) = value.to_str() else {
@@ -188,7 +212,7 @@ pub fn build_passthrough_headers_with_auth(
     extra_headers: &BTreeMap<String, String>,
 ) -> BTreeMap<String, String> {
     let mut out = collect_passthrough_headers(headers, extra_headers);
-    ensure_upstream_auth_header(&mut out, auth_header, auth_value);
+    replace_upstream_auth_headers(&mut out, auth_header, auth_value);
     out.remove("content-length");
     out
 }
@@ -200,7 +224,9 @@ pub fn ensure_upstream_auth_header(
 ) {
     let header_name = auth_header.trim().to_ascii_lowercase();
     let header_value = auth_value.trim();
-    if header_name.is_empty() || header_value.is_empty() {
+    headers.retain(|name, _| !is_aether_internal_header(name));
+    if header_name.is_empty() || header_value.is_empty() || is_aether_internal_header(&header_name)
+    {
         return;
     }
 
@@ -211,6 +237,16 @@ pub fn ensure_upstream_auth_header(
     {
         headers.insert(header_name, header_value.to_string());
     }
+}
+
+pub(crate) fn replace_upstream_auth_headers(
+    headers: &mut BTreeMap<String, String>,
+    auth_header: &str,
+    auth_value: &str,
+) {
+    headers
+        .retain(|name, _| !is_upstream_credential_header(name) && !is_aether_internal_header(name));
+    ensure_upstream_auth_header(headers, auth_header, auth_value);
 }
 
 fn should_restore_claude_passthrough_header(name: &str) -> bool {
@@ -405,7 +441,14 @@ mod tests {
             &headers,
             "x-api-key",
             "sk-upstream-claude",
-            &BTreeMap::from([("anthropic-beta".to_string(), "custom-beta".to_string())]),
+            &BTreeMap::from([
+                ("anthropic-beta".to_string(), "custom-beta".to_string()),
+                ("authorization".to_string(), "Bearer extra".to_string()),
+                (
+                    "x-aether-auth-user-id".to_string(),
+                    "user-private".to_string(),
+                ),
+            ]),
             Some("application/json"),
         );
 
@@ -422,6 +465,8 @@ mod tests {
             Some("v22.14.0")
         );
         assert_eq!(built.get("x-app").map(String::as_str), Some("cli"));
+        assert_eq!(built.get("authorization"), None);
+        assert!(built.keys().all(|name| !name.starts_with("x-aether-")));
         assert_eq!(
             built.get("x-api-key").map(String::as_str),
             Some("sk-upstream-claude")
@@ -488,12 +533,34 @@ mod tests {
             "authorization",
             http::HeaderValue::from_static("Bearer client-token"),
         );
+        headers.insert("api-key", http::HeaderValue::from_static("client-api-key"));
+        headers.insert(
+            "x-api-key",
+            http::HeaderValue::from_static("client-x-api-key"),
+        );
+        headers.insert("cookie", http::HeaderValue::from_static("session=client"));
+        headers.insert(
+            "proxy-authorization",
+            http::HeaderValue::from_static("Basic client-proxy"),
+        );
+        headers.insert(
+            "x-aether-auth-user-id",
+            http::HeaderValue::from_static("user-private"),
+        );
 
         let built = build_complete_passthrough_headers_with_auth(
             &headers,
             "x-api-key",
             "sk-upstream",
-            &BTreeMap::new(),
+            &BTreeMap::from([
+                ("authorization".to_string(), "Bearer extra".to_string()),
+                ("cookie".to_string(), "session=extra".to_string()),
+                ("x-api-key".to_string(), "extra-x-api-key".to_string()),
+                (
+                    "x-aether-auth-api-key-id".to_string(),
+                    "key-private".to_string(),
+                ),
+            ]),
             Some("application/json"),
         );
 
@@ -507,6 +574,10 @@ mod tests {
         );
         assert_eq!(built.get("x-app").map(String::as_str), Some("cli"));
         assert_eq!(built.get("authorization"), None);
+        assert_eq!(built.get("api-key"), None);
+        assert_eq!(built.get("cookie"), None);
+        assert_eq!(built.get("proxy-authorization"), None);
+        assert!(built.keys().all(|name| !name.starts_with("x-aether-")));
         assert_eq!(
             built.get("x-api-key").map(String::as_str),
             Some("sk-upstream")

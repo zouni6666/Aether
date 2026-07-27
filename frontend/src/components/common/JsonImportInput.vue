@@ -10,52 +10,65 @@
     >
 
     <div
-      v-if="!showManualInput"
-      class="rounded-xl border-2 border-dashed transition-colors cursor-pointer"
-      :class="isDragging
-        ? 'border-primary bg-primary/5'
-        : 'border-border hover:border-muted-foreground/40'"
-      @click="fileInputRef?.click()"
-      @dragover.prevent="isDragging = true"
-      @dragleave.prevent="isDragging = false"
-      @drop.prevent="handleFileDrop"
+      class="grid [&>*]:col-start-1 [&>*]:row-start-1"
+      data-testid="json-import-mode-panels"
     >
-      <div class="flex flex-col items-center justify-center py-10 gap-2">
-        <div class="w-9 h-9 rounded-full bg-muted/60 flex items-center justify-center">
-          <Upload class="w-4 h-4 text-muted-foreground" />
-        </div>
-        <div class="text-center">
-          <p class="text-xs font-medium">
-            {{ localizedDropTitle }}
-          </p>
-          <p class="text-[11px] text-muted-foreground mt-0.5">
-            {{ localizedDropHint }}
-          </p>
+      <div
+        class="rounded-xl border-2 border-dashed transition-all duration-150 cursor-pointer"
+        :class="[
+          isDragging
+            ? 'border-primary bg-primary/5'
+            : 'border-border hover:border-muted-foreground/40',
+          showManualInput ? 'opacity-0 pointer-events-none' : 'opacity-100',
+        ]"
+        :inert="showManualInput ? '' : undefined"
+        :aria-hidden="showManualInput"
+        data-testid="json-import-file-panel"
+        @click="fileInputRef?.click()"
+        @dragover.prevent="isDragging = true"
+        @dragleave.prevent="isDragging = false"
+        @drop.prevent="handleFileDrop"
+      >
+        <div class="flex h-full flex-col items-center justify-center py-10 gap-2">
+          <div class="w-9 h-9 rounded-full bg-muted/60 flex items-center justify-center">
+            <Upload class="w-4 h-4 text-muted-foreground" />
+          </div>
+          <div class="text-center">
+            <p class="text-xs font-medium">
+              {{ localizedDropTitle }}
+            </p>
+            <p class="text-[11px] text-muted-foreground mt-0.5">
+              {{ localizedDropHint }}
+            </p>
+          </div>
         </div>
       </div>
-    </div>
 
-    <div
-      v-else
-      class="space-y-1.5"
-    >
-      <Label v-if="manualLabel">
-        {{ localizedManualLabel }}
-      </Label>
-      <Textarea
-        :model-value="modelValue"
-        :disabled="disabled"
-        :placeholder="localizedManualPlaceholder"
-        :class="textareaClass"
-        spellcheck="false"
-        @update:model-value="emit('update:modelValue', $event)"
-      />
-      <p
-        v-if="manualDescription"
-        class="text-xs text-muted-foreground"
+      <div
+        class="space-y-1.5 transition-opacity duration-150"
+        :class="showManualInput ? 'opacity-100' : 'opacity-0 pointer-events-none'"
+        :inert="showManualInput ? undefined : ''"
+        :aria-hidden="!showManualInput"
+        data-testid="json-import-manual-panel"
       >
-        {{ localizedManualDescription }}
-      </p>
+        <Label v-if="manualLabel">
+          {{ localizedManualLabel }}
+        </Label>
+        <Textarea
+          :model-value="modelValue"
+          :disabled="disabled"
+          :placeholder="localizedManualPlaceholder"
+          :class="textareaClass"
+          spellcheck="false"
+          @update:model-value="emit('update:modelValue', $event)"
+        />
+        <p
+          v-if="manualDescription"
+          class="text-xs text-muted-foreground"
+        >
+          {{ localizedManualDescription }}
+        </p>
+      </div>
     </div>
 
     <div class="flex items-center justify-center pt-1">
@@ -63,6 +76,7 @@
         v-if="!showManualInput"
         type="button"
         class="text-sm text-muted-foreground hover:text-foreground transition-colors"
+        data-testid="json-import-mode-toggle"
         @click="showManualInput = true"
       >
         {{ localizedPasteToggleText }}
@@ -71,6 +85,7 @@
         v-else
         type="button"
         class="text-sm text-muted-foreground hover:text-foreground transition-colors"
+        data-testid="json-import-mode-toggle"
         @click="switchToFileMode"
       >
         {{ localizedFileToggleText }}

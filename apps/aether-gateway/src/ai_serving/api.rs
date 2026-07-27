@@ -87,28 +87,36 @@ pub(crate) fn resolve_execution_runtime_stream_plan_kind(
     parts: &http::request::Parts,
     decision: &GatewayControlDecision,
 ) -> Option<&'static str> {
-    aether_ai_formats::api::resolve_execution_runtime_stream_plan_kind(
-        decision.route_class.as_deref(),
-        decision.route_family.as_deref(),
-        decision.route_kind.as_deref(),
-        decision.request_auth_channel.as_deref(),
-        &parts.method,
-        parts.uri.path(),
-    )
+    let plan_kind =
+        aether_ai_formats::api::resolve_execution_runtime_stream_plan_kind_with_client_surface(
+            decision.route_class.as_deref(),
+            decision.route_family.as_deref(),
+            decision.route_kind.as_deref(),
+            decision.client_surface,
+            decision.request_auth_channel.as_deref(),
+            &parts.method,
+            parts.uri.path(),
+        )?;
+    crate::ai_serving::plan_kind_matches_api_operation(plan_kind, true, decision.api_operation)
+        .then_some(plan_kind)
 }
 
 pub(crate) fn resolve_execution_runtime_sync_plan_kind(
     parts: &http::request::Parts,
     decision: &GatewayControlDecision,
 ) -> Option<&'static str> {
-    aether_ai_formats::api::resolve_execution_runtime_sync_plan_kind(
-        decision.route_class.as_deref(),
-        decision.route_family.as_deref(),
-        decision.route_kind.as_deref(),
-        decision.request_auth_channel.as_deref(),
-        &parts.method,
-        parts.uri.path(),
-    )
+    let plan_kind =
+        aether_ai_formats::api::resolve_execution_runtime_sync_plan_kind_with_client_surface(
+            decision.route_class.as_deref(),
+            decision.route_family.as_deref(),
+            decision.route_kind.as_deref(),
+            decision.client_surface,
+            decision.request_auth_channel.as_deref(),
+            &parts.method,
+            parts.uri.path(),
+        )?;
+    crate::ai_serving::plan_kind_matches_api_operation(plan_kind, false, decision.api_operation)
+        .then_some(plan_kind)
 }
 
 pub(crate) fn is_matching_stream_request(

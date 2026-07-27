@@ -2,8 +2,37 @@ use std::collections::BTreeMap;
 
 use aether_contracts::USAGE_SERVER_NOW_UNIX_MS_HEADER;
 
+const UPSTREAM_CREDENTIAL_HEADER_NAMES: &[&str] = &[
+    "authorization",
+    "proxy-authorization",
+    "api-key",
+    "x-api-key",
+    "x-goog-api-key",
+    "cookie",
+    "cookie2",
+    "set-cookie",
+];
+
+pub(crate) fn upstream_credential_header_names() -> &'static [&'static str] {
+    UPSTREAM_CREDENTIAL_HEADER_NAMES
+}
+
+pub(crate) fn is_upstream_credential_header(name: &str) -> bool {
+    let name = name.trim();
+    UPSTREAM_CREDENTIAL_HEADER_NAMES
+        .iter()
+        .any(|candidate| name.eq_ignore_ascii_case(candidate))
+}
+
+pub(crate) fn is_aether_internal_header(name: &str) -> bool {
+    name.trim().to_ascii_lowercase().starts_with("x-aether-")
+}
+
 pub fn should_skip_request_header(name: &str) -> bool {
     let normalized = name.to_ascii_lowercase();
+    if is_aether_internal_header(&normalized) {
+        return true;
+    }
     matches!(
         normalized.as_str(),
         "connection"
@@ -15,11 +44,7 @@ pub fn should_skip_request_header(name: &str) -> bool {
             | "trailer"
             | "transfer-encoding"
             | "upgrade"
-            | "x-aether-execution-path"
-            | "x-aether-dependency-reason"
-            | "x-aether-execution-loop-guard"
-            | "x-aether-control-execute-fallback"
-            | "x-aether-rate-limit-preflight"
+            | "set-cookie"
             | USAGE_SERVER_NOW_UNIX_MS_HEADER
     )
 }
@@ -35,12 +60,10 @@ pub fn should_skip_upstream_passthrough_header(name: &str) -> bool {
     if lower.starts_with("x-stainless-") || lower.starts_with("anthropic-") {
         return true;
     }
-    matches!(
-        lower.as_str(),
-        "authorization"
-            | "x-api-key"
-            | "x-goog-api-key"
-            | "host"
+    is_upstream_credential_header(&lower)
+        || matches!(
+            lower.as_str(),
+            "host"
             | "content-length"
             | "transfer-encoding"
             | "connection"
@@ -55,29 +78,29 @@ pub fn should_skip_upstream_passthrough_header(name: &str) -> bool {
             // Claude CLI client identifier; re-injected by the Claude Code adapter
             // when the upstream is Anthropic, filtered for everybody else.
             | "x-app"
-    ) || should_skip_request_header(name)
+        )
+        || should_skip_request_header(name)
 }
 
 pub(crate) fn should_skip_upstream_complete_passthrough_header(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "authorization"
-            | "x-api-key"
-            | "x-goog-api-key"
-            | "host"
-            | "content-length"
-            | "transfer-encoding"
-            | "connection"
-            | "content-encoding"
-            | "x-real-ip"
-            | "x-real-proto"
-            | "x-forwarded-for"
-            | "x-forwarded-proto"
-            | "x-forwarded-scheme"
-            | "x-forwarded-host"
-            | "x-forwarded-port"
-    ) || should_skip_request_header(name)
+    is_upstream_credential_header(&lower)
+        || matches!(
+            lower.as_str(),
+            "host"
+                | "content-length"
+                | "transfer-encoding"
+                | "connection"
+                | "content-encoding"
+                | "x-real-ip"
+                | "x-real-proto"
+                | "x-forwarded-for"
+                | "x-forwarded-proto"
+                | "x-forwarded-scheme"
+                | "x-forwarded-host"
+                | "x-forwarded-port"
+        )
+        || should_skip_request_header(name)
 }
 
 pub fn normalize_upstream_accept_encoding(value: &str) -> Option<String> {
@@ -170,9 +193,9 @@ pub fn force_identity_accept_encoding(headers: &mut BTreeMap<String, String>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        force_identity_accept_encoding, normalize_upstream_accept_encoding,
-        should_skip_request_header, should_skip_upstream_complete_passthrough_header,
-        should_skip_upstream_passthrough_header,
+        force_identity_accept_encoding, is_upstream_credential_header,
+        normalize_upstream_accept_encoding, should_skip_request_header,
+        should_skip_upstream_complete_passthrough_header, should_skip_upstream_passthrough_header,
     };
     use aether_contracts::USAGE_SERVER_NOW_UNIX_MS_HEADER;
     use std::collections::BTreeMap;
@@ -270,6 +293,47 @@ mod tests {
                 should_skip_upstream_passthrough_header(h),
                 "should skip {h}"
             );
+        }
+    }
+
+    #[test]
+    fn strips_all_client_credential_carriers_from_passthrough() {
+        for header in [
+            "authorization",
+            "proxy-authorization",
+            "api-key",
+            "x-api-key",
+            "x-goog-api-key",
+            "cookie",
+            "cookie2",
+            "set-cookie",
+            "Authorization",
+            "COOKIE",
+        ] {
+            assert!(is_upstream_credential_header(header), "credential {header}");
+            assert!(
+                should_skip_upstream_passthrough_header(header),
+                "normal passthrough should strip {header}"
+            );
+            assert!(
+                should_skip_upstream_complete_passthrough_header(header),
+                "complete passthrough should strip {header}"
+            );
+        }
+    }
+
+    #[test]
+    fn strips_all_aether_owned_headers_from_provider_requests() {
+        for header in [
+            "x-aether-gateway",
+            "x-aether-auth-user-id",
+            "x-aether-auth-api-key-id",
+            "x-aether-auth-balance-remaining",
+            "X-Aether-Tunnel-Forwarded-By",
+        ] {
+            assert!(should_skip_request_header(header));
+            assert!(should_skip_upstream_passthrough_header(header));
+            assert!(should_skip_upstream_complete_passthrough_header(header));
         }
     }
 

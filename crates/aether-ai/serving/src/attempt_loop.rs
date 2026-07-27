@@ -18,8 +18,43 @@ pub trait AiExecutionAttempt {
 #[derive(Debug)]
 pub enum AiAttemptLoopOutcome<Response, Exhaustion> {
     Responded(Response),
+    Deferred(Response),
     Exhausted(Exhaustion),
     NoPath,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AiAttemptRetryScope {
+    #[default]
+    Candidate,
+    Credential,
+    Endpoint,
+    Provider,
+}
+
+#[derive(Debug)]
+pub enum AiAttemptExecutionOutcome<Response> {
+    Responded(Response),
+    Retry {
+        scope: AiAttemptRetryScope,
+        fallback_response: Option<Response>,
+    },
+}
+
+impl<Response> AiAttemptExecutionOutcome<Response> {
+    pub fn retry(scope: AiAttemptRetryScope) -> Self {
+        Self::Retry {
+            scope,
+            fallback_response: None,
+        }
+    }
+
+    pub fn from_optional_response(response: Option<Response>) -> Self {
+        match response {
+            Some(response) => Self::Responded(response),
+            None => Self::retry(AiAttemptRetryScope::Candidate),
+        }
+    }
 }
 
 #[async_trait]
@@ -34,7 +69,7 @@ where
     async fn execute_attempt(
         &self,
         attempt: &Attempt,
-    ) -> Result<Option<Self::Response>, Self::Error>;
+    ) -> Result<AiAttemptExecutionOutcome<Self::Response>, Self::Error>;
 
     async fn should_skip_attempt(&self, _attempt: &Attempt) -> Result<bool, Self::Error> {
         Ok(false)
@@ -67,30 +102,50 @@ where
 {
     let mut remaining = attempts.into_iter();
     let mut last_attempted = None;
+    let mut retry_filters: Vec<AiAttemptRetryFilter> = Vec::new();
+    let mut fallback_response = None;
 
     while let Some(attempt) = remaining.next() {
-        if port.should_skip_attempt(&attempt).await? {
+        if retry_filters.iter().any(|filter| filter.matches(&attempt))
+            || port.should_skip_attempt(&attempt).await?
+        {
             port.mark_unused_attempts(vec![attempt]).await?;
             continue;
         }
         port.record_attempt_started(&attempt).await?;
-        let response = match port.execute_attempt(&attempt).await {
-            Ok(response) => response,
+        let execution = match port.execute_attempt(&attempt).await {
+            Ok(execution) => execution,
             Err(err) => {
                 port.mark_unused_attempts(remaining.collect()).await?;
                 return Err(err);
             }
         };
-        if let Some(response) = response {
-            port.mark_unused_attempts(remaining.collect()).await?;
-            return Ok(AiAttemptLoopOutcome::Responded(response));
+        match execution {
+            AiAttemptExecutionOutcome::Responded(response) => {
+                port.mark_unused_attempts(remaining.collect()).await?;
+                return Ok(AiAttemptLoopOutcome::Responded(response));
+            }
+            AiAttemptExecutionOutcome::Retry {
+                scope,
+                fallback_response: attempt_fallback_response,
+            } => {
+                port.record_attempt_failed(&attempt).await?;
+                if attempt_fallback_response.is_some() {
+                    fallback_response = attempt_fallback_response;
+                }
+                if scope != AiAttemptRetryScope::Candidate {
+                    retry_filters.push(AiAttemptRetryFilter::new(&attempt, scope));
+                }
+            }
         }
-
-        port.record_attempt_failed(&attempt).await?;
 
         // Exhaustion diagnostics are only needed after an attempt fails. Keep
         // the common successful path free of a deep plan/report-context clone.
         last_attempted = Some((attempt.execution_plan().clone(), attempt.report_context()));
+    }
+
+    if let Some(response) = fallback_response {
+        return Ok(AiAttemptLoopOutcome::Deferred(response));
     }
 
     let Some((last_plan, last_report_context)) = last_attempted else {
@@ -101,6 +156,36 @@ where
         port.build_exhaustion(last_plan, last_report_context)
             .await?,
     ))
+}
+
+#[derive(Debug)]
+struct AiAttemptRetryFilter {
+    scope: AiAttemptRetryScope,
+    provider_id: String,
+    endpoint_id: String,
+    key_id: String,
+}
+
+impl AiAttemptRetryFilter {
+    fn new<Attempt: AiExecutionAttempt>(attempt: &Attempt, scope: AiAttemptRetryScope) -> Self {
+        let plan = attempt.execution_plan();
+        Self {
+            scope,
+            provider_id: plan.provider_id.clone(),
+            endpoint_id: plan.endpoint_id.clone(),
+            key_id: plan.key_id.clone(),
+        }
+    }
+
+    fn matches<Attempt: AiExecutionAttempt>(&self, attempt: &Attempt) -> bool {
+        let plan = attempt.execution_plan();
+        match self.scope {
+            AiAttemptRetryScope::Candidate => false,
+            AiAttemptRetryScope::Credential => plan.key_id == self.key_id,
+            AiAttemptRetryScope::Endpoint => plan.endpoint_id == self.endpoint_id,
+            AiAttemptRetryScope::Provider => plan.provider_id == self.provider_id,
+        }
+    }
 }
 
 impl AiExecutionAttempt for crate::dto::AiSyncAttempt {
@@ -146,7 +231,10 @@ mod tests {
 
     use async_trait::async_trait;
 
-    use super::{run_ai_attempt_loop, AiAttemptLoopPort, AiExecutionAttempt};
+    use super::{
+        run_ai_attempt_loop, AiAttemptExecutionOutcome, AiAttemptLoopPort, AiAttemptRetryScope,
+        AiExecutionAttempt,
+    };
 
     #[derive(Clone)]
     struct TestAttempt {
@@ -173,6 +261,60 @@ mod tests {
         unused: Mutex<Vec<&'static str>>,
     }
 
+    struct ScopedRetryPort {
+        executed: Mutex<Vec<&'static str>>,
+        unused: Mutex<Vec<&'static str>>,
+    }
+
+    #[async_trait]
+    impl AiAttemptLoopPort<TestAttempt> for ScopedRetryPort {
+        type Response = &'static str;
+        type Exhaustion = ();
+        type Error = &'static str;
+
+        async fn execute_attempt(
+            &self,
+            attempt: &TestAttempt,
+        ) -> Result<AiAttemptExecutionOutcome<Self::Response>, Self::Error> {
+            self.executed
+                .lock()
+                .expect("executed attempts should lock")
+                .push(attempt.id);
+            Ok(match attempt.id {
+                "endpoint-failure" => {
+                    AiAttemptExecutionOutcome::retry(AiAttemptRetryScope::Endpoint)
+                }
+                "credential-failure" => {
+                    AiAttemptExecutionOutcome::retry(AiAttemptRetryScope::Credential)
+                }
+                "provider-failure" => AiAttemptExecutionOutcome::Retry {
+                    scope: AiAttemptRetryScope::Provider,
+                    fallback_response: Some("provider-error"),
+                },
+                _ => AiAttemptExecutionOutcome::Responded(attempt.id),
+            })
+        }
+
+        async fn mark_unused_attempts(
+            &self,
+            attempts: Vec<TestAttempt>,
+        ) -> Result<(), Self::Error> {
+            self.unused
+                .lock()
+                .expect("unused attempts should lock")
+                .extend(attempts.into_iter().map(|attempt| attempt.id));
+            Ok(())
+        }
+
+        async fn build_exhaustion(
+            &self,
+            _last_plan: aether_contracts::ExecutionPlan,
+            _last_report_context: Option<serde_json::Value>,
+        ) -> Result<Self::Exhaustion, Self::Error> {
+            Ok(())
+        }
+    }
+
     #[async_trait]
     impl AiAttemptLoopPort<TestAttempt> for FailingPort {
         type Response = ();
@@ -182,11 +324,13 @@ mod tests {
         async fn execute_attempt(
             &self,
             attempt: &TestAttempt,
-        ) -> Result<Option<Self::Response>, Self::Error> {
+        ) -> Result<AiAttemptExecutionOutcome<Self::Response>, Self::Error> {
             if attempt.id == self.fail_on {
                 Err("attempt failed")
             } else {
-                Ok(None)
+                Ok(AiAttemptExecutionOutcome::retry(
+                    AiAttemptRetryScope::Candidate,
+                ))
             }
         }
 
@@ -237,6 +381,19 @@ mod tests {
         }
     }
 
+    fn routed_attempt(
+        id: &'static str,
+        provider_id: &str,
+        endpoint_id: &str,
+        key_id: &str,
+    ) -> TestAttempt {
+        let mut attempt = attempt(id);
+        attempt.plan.provider_id = provider_id.to_string();
+        attempt.plan.endpoint_id = endpoint_id.to_string();
+        attempt.plan.key_id = key_id.to_string();
+        attempt
+    }
+
     #[tokio::test]
     async fn marks_unattempted_candidates_unused_when_execution_returns_error() {
         let port = FailingPort {
@@ -259,6 +416,71 @@ mod tests {
         assert_eq!(
             *port.unused.lock().expect("unused attempts should lock"),
             vec!["candidate-3"]
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_scopes_skip_matching_static_candidates() {
+        let port = ScopedRetryPort {
+            executed: Mutex::new(Vec::new()),
+            unused: Mutex::new(Vec::new()),
+        };
+        let attempts = vec![
+            routed_attempt("endpoint-failure", "provider-a", "endpoint-a", "key-a"),
+            routed_attempt("same-endpoint", "provider-a", "endpoint-a", "key-b"),
+            routed_attempt("credential-failure", "provider-a", "endpoint-b", "key-c"),
+            routed_attempt("same-credential", "provider-a", "endpoint-c", "key-c"),
+            routed_attempt("provider-failure", "provider-b", "endpoint-d", "key-d"),
+            routed_attempt("same-provider", "provider-b", "endpoint-e", "key-e"),
+            routed_attempt("success", "provider-c", "endpoint-f", "key-f"),
+        ];
+
+        let outcome = run_ai_attempt_loop(&port, attempts)
+            .await
+            .expect("scoped retry loop should succeed");
+
+        assert!(matches!(
+            outcome,
+            super::AiAttemptLoopOutcome::Responded("success")
+        ));
+        assert_eq!(
+            *port.executed.lock().expect("executed attempts should lock"),
+            vec![
+                "endpoint-failure",
+                "credential-failure",
+                "provider-failure",
+                "success"
+            ]
+        );
+        assert_eq!(
+            *port.unused.lock().expect("unused attempts should lock"),
+            vec!["same-endpoint", "same-credential", "same-provider"]
+        );
+    }
+
+    #[tokio::test]
+    async fn returns_preserved_upstream_response_after_candidates_exhaust() {
+        let port = ScopedRetryPort {
+            executed: Mutex::new(Vec::new()),
+            unused: Mutex::new(Vec::new()),
+        };
+        let outcome = run_ai_attempt_loop(
+            &port,
+            vec![
+                routed_attempt("provider-failure", "provider-a", "endpoint-a", "key-a"),
+                routed_attempt("same-provider", "provider-a", "endpoint-b", "key-b"),
+            ],
+        )
+        .await
+        .expect("fallback response loop should succeed");
+
+        assert!(matches!(
+            outcome,
+            super::AiAttemptLoopOutcome::Deferred("provider-error")
+        ));
+        assert_eq!(
+            *port.unused.lock().expect("unused attempts should lock"),
+            vec!["same-provider"]
         );
     }
 }

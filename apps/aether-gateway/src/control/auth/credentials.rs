@@ -71,6 +71,20 @@ pub(super) fn extract_request_credentials(
     }
 }
 
+pub(in crate::control) fn resolve_gateway_credential_carrier(
+    headers: &http::HeaderMap,
+    uri: &Uri,
+    auth_endpoint_signature: &str,
+) -> Option<GatewayCredentialCarrier> {
+    extract_request_credentials(headers, uri, auth_endpoint_signature)
+        .primary
+        .map(|credential| match credential {
+            GatewayPrimaryCredential::ProviderApiKey { carrier, .. }
+            | GatewayPrimaryCredential::BearerToken { carrier, .. }
+            | GatewayPrimaryCredential::CookieHeader { carrier, .. } => carrier,
+        })
+}
+
 fn has_trusted_gateway_marker(headers: &http::HeaderMap) -> bool {
     header_value_str(headers, crate::constants::GATEWAY_HEADER)
         .unwrap_or_default()

@@ -1326,6 +1326,7 @@ async fn gateway_executes_claude_cli_sync_upstream_stream_via_local_finalize_res
     let response = reqwest::Client::new()
         .post(format!("{gateway_url}/v1/messages"))
         .header(http::header::CONTENT_TYPE, "application/json")
+        .header(http::header::USER_AGENT, "Claude-Code/2.1.0")
         .header(
             http::header::AUTHORIZATION,
             "Bearer sk-client-claude-cli-stream-sync-local",

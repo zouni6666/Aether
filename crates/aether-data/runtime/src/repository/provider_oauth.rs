@@ -72,6 +72,13 @@ pub fn build_provider_oauth_batch_task_status_payload(
         "submitted" | "processing" | "completed" | "failed" => raw_status,
         _ => "failed",
     };
+    let import_kind = match state.get("import_kind").and_then(serde_json::Value::as_str) {
+        Some("oauth_batch" | "agent_identity" | "cookie_authorize") => state
+            .get("import_kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default(),
+        _ => "",
+    };
     let error_samples = state
         .get("error_samples")
         .and_then(serde_json::Value::as_array)
@@ -94,6 +101,7 @@ pub fn build_provider_oauth_batch_task_status_payload(
             .get("provider_type")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default(),
+        "import_kind": import_kind,
         "status": normalized_status,
         "total": state.get("total").and_then(serde_json::Value::as_i64).unwrap_or(0),
         "processed": state.get("processed").and_then(serde_json::Value::as_i64).unwrap_or(0),
@@ -169,6 +177,7 @@ mod tests {
         let input = json!({
             "task_id": "task-123",
             "provider_type": "codex",
+            "import_kind": "oauth_batch",
             "status": "weird",
             "total": 4,
             "processed": 2,
@@ -193,6 +202,10 @@ mod tests {
         assert_eq!(
             payload.get("provider_id").and_then(|v| v.as_str()),
             Some("provider-123")
+        );
+        assert_eq!(
+            payload.get("import_kind").and_then(|v| v.as_str()),
+            Some("oauth_batch")
         );
         assert_eq!(
             payload.get("status").and_then(|v| v.as_str()),

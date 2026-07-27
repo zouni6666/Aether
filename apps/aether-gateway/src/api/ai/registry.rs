@@ -1,8 +1,13 @@
+use axum::body::Body;
+use axum::extract::Request;
+use axum::http::{header, HeaderValue, Response, StatusCode};
 use axum::routing::{any, post};
 use axum::Router;
 
 use super::{aliyun, claude, doubao, gemini, jina, openai};
-use crate::{handlers::proxy::proxy_request, state::AppState};
+use crate::api::response::build_local_http_error_response_with_request_path;
+use crate::headers::extract_or_generate_trace_id;
+use crate::{handlers::proxy::proxy_request, state::AppState, GatewayError};
 
 // Router registration patterns live here so AI public ingress has a single mount registry.
 // They intentionally stay separate from manifest-facing route inventories in constants.rs,
@@ -11,8 +16,6 @@ const AI_POST_ROUTE_PATTERNS: &[&str] = &[
     "/v1/chat/completions",
     "/v1/embeddings",
     "/v1/rerank",
-    "/v1/messages",
-    "/v1/messages/count_tokens",
     "/v1/responses",
     "/v1/responses/compact",
     "/v1/alpha/search",
@@ -32,6 +35,8 @@ const AI_POST_ROUTE_PATTERNS: &[&str] = &[
     "/v1internal:streamGenerateContent",
 ];
 
+const CLAUDE_POST_ROUTE_PATTERNS: &[&str] = &["/v1/messages", "/v1/messages/count_tokens"];
+
 const AI_ANY_ROUTE_PATTERNS: &[&str] = &[
     "/v1/models/{*gemini_path}",
     "/v1beta/models/{*gemini_path}",
@@ -48,10 +53,31 @@ pub(crate) fn mount_ai_routes(mut router: Router<AppState>) -> Router<AppState> 
     for path in AI_POST_ROUTE_PATTERNS {
         router = router.route(path, post(proxy_request));
     }
+    for path in CLAUDE_POST_ROUTE_PATTERNS {
+        router = router.route(
+            path,
+            post(proxy_request).fallback(claude_method_not_allowed),
+        );
+    }
     for path in AI_ANY_ROUTE_PATTERNS {
         router = router.route(path, any(proxy_request));
     }
     router
+}
+
+async fn claude_method_not_allowed(request: Request) -> Result<Response<Body>, GatewayError> {
+    let trace_id = extract_or_generate_trace_id(request.headers());
+    let mut response = build_local_http_error_response_with_request_path(
+        &trace_id,
+        None,
+        Some(request.uri().path()),
+        StatusCode::METHOD_NOT_ALLOWED,
+        "Method not allowed",
+    )?;
+    response
+        .headers_mut()
+        .insert(header::ALLOW, HeaderValue::from_static("POST"));
+    Ok(response)
 }
 
 pub(crate) fn public_api_format_local_path(api_format: &str) -> &'static str {
