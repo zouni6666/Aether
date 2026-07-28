@@ -65,6 +65,8 @@ use aether_model_fetch::{
     aggregate_models_for_cache, fetch_models_from_transports, json_string_list,
     preset_models_for_provider, selected_models_fetch_endpoints,
 };
+use aether_pool_core::PoolSchedulingPreset;
+use aether_provider_pool::ProviderPoolService;
 use aether_scheduler_core::provider_key_circuit_payload_is_active_open_at;
 use axum::{
     body::{to_bytes, Body},
@@ -1106,15 +1108,26 @@ fn provider_query_pool_sort_seed() -> String {
 
 fn provider_query_ai_pool_scheduling_config(
     config: &AdminProviderPoolConfig,
+    provider_type: &str,
 ) -> AiPoolSchedulingConfig {
+    let presets = config
+        .scheduling_presets
+        .iter()
+        .map(|preset| PoolSchedulingPreset {
+            preset: preset.preset.clone(),
+            enabled: preset.enabled,
+            mode: preset.mode.clone(),
+        })
+        .collect::<Vec<_>>();
+    let normalized_presets = ProviderPoolService::with_builtin_adapters()
+        .normalize_scheduling_presets(provider_type, &presets);
     AiPoolSchedulingConfig {
-        scheduling_presets: config
-            .scheduling_presets
-            .iter()
+        scheduling_presets: normalized_presets
+            .into_iter()
             .map(|preset| AiPoolSchedulingPreset {
-                preset: preset.preset.clone(),
+                preset: preset.preset,
                 enabled: preset.enabled,
-                mode: preset.mode.clone(),
+                mode: preset.mode,
             })
             .collect(),
         lru_enabled: config.lru_enabled,
@@ -1324,7 +1337,8 @@ async fn provider_query_apply_pool_scheduler_to_test_candidates(
         provider.id.clone(),
         provider_query_ai_pool_runtime_state(&runtime),
     );
-    let pool_config = provider_query_ai_pool_scheduling_config(pool_config);
+    let pool_config =
+        provider_query_ai_pool_scheduling_config(pool_config, provider.provider_type.as_str());
     let inputs = keys
         .into_iter()
         .map(|key| {

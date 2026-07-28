@@ -9,8 +9,10 @@ mod request_candidate;
 
 pub use affinity::{
     build_scheduler_affinity_cache_key_for_api_key_id,
-    build_scheduler_affinity_cache_key_for_api_key_id_with_client_session, candidate_affinity_hash,
-    candidate_key, matches_affinity_target, ClientSessionAffinity, SchedulerAffinityTarget,
+    build_scheduler_affinity_cache_key_for_api_key_id_with_client_session,
+    build_scheduler_affinity_cache_key_for_api_key_id_with_client_session_and_scope,
+    candidate_affinity_hash, candidate_key, matches_affinity_target, ClientSessionAffinity,
+    SchedulerAffinityScope, SchedulerAffinityTarget,
 };
 pub use auth::{
     api_format_matches_allowed_value, auth_constraints_allow_api_format,

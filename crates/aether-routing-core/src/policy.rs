@@ -11,6 +11,7 @@ use crate::conditions::RoutingConditionContext;
 use crate::model::{RoutingGroupConfig, RoutingModelPolicy, RoutingPoolPolicyOverride};
 use crate::mutations::{validate_header_patch, validate_json_patch_operations, MutationPlan};
 use crate::ranking::RankingOverlay;
+use crate::validation::validate_routing_group_config;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum RoutingPolicyError {
@@ -68,6 +69,9 @@ pub fn resolve_routing_policy(
     config: &RoutingGroupConfig,
     input: RoutingPolicyInput<'_>,
 ) -> Result<ResolvedRoutingPolicy, RoutingPolicyError> {
+    validate_routing_group_config(config)
+        .map_err(|error| RoutingPolicyError::InvalidConfig(error.to_string()))?;
+
     if !model_allowed(&config.allowed_models, input.requested_model)
         && !model_allowed(&config.allowed_models, input.resolved_model)
     {

@@ -63,24 +63,6 @@ impl PostgresRoutingGroupRepository {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
-
-    async fn reload_group(&self, id: &str) -> Result<Option<StoredRoutingGroup>, DataLayerError> {
-        self.find_routing_group(RoutingGroupLookupKey::Id(id)).await
-    }
-
-    async fn find_binding_by_id(
-        &self,
-        id: &str,
-    ) -> Result<Option<StoredRoutingGroupBinding>, DataLayerError> {
-        let row = sqlx::query(&format!(
-            "{ROUTING_GROUP_BINDING_SELECT} WHERE id = $1 LIMIT 1"
-        ))
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_postgres_err()?;
-        row.as_ref().map(map_binding_row).transpose()
-    }
 }
 
 #[async_trait]
@@ -180,6 +162,19 @@ impl RoutingGroupWriteRepository for PostgresRoutingGroupRepository {
         record: CreateRoutingGroupRecord,
     ) -> Result<StoredRoutingGroup, DataLayerError> {
         let group = StoredRoutingGroup::new(record)?;
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
+        if group.is_system_default {
+            sqlx::query("LOCK TABLE routing_groups IN SHARE ROW EXCLUSIVE MODE")
+                .execute(&mut *tx)
+                .await
+                .map_postgres_err()?;
+            sqlx::query(
+                "UPDATE routing_groups SET is_system_default = FALSE WHERE is_system_default = TRUE",
+            )
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        }
         sqlx::query(
             r#"
 INSERT INTO routing_groups (
@@ -199,9 +194,10 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         .bind(group.created_at)
         .bind(group.updated_at)
         .bind(group.published_at)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_postgres_err()?;
+        tx.commit().await.map_postgres_err()?;
         Ok(group)
     }
 
@@ -210,10 +206,31 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         id: &str,
         patch: UpdateRoutingGroupRecord,
     ) -> Result<Option<StoredRoutingGroup>, DataLayerError> {
-        let Some(mut group) = self.reload_group(id).await? else {
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
+        sqlx::query("LOCK TABLE routing_groups IN SHARE ROW EXCLUSIVE MODE")
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        let row = sqlx::query(&format!(
+            "{ROUTING_GROUP_SELECT} WHERE id = $1 LIMIT 1 FOR UPDATE"
+        ))
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_postgres_err()?;
+        let Some(mut group) = row.as_ref().map(map_group_row).transpose()? else {
             return Ok(None);
         };
         apply_group_patch(&mut group, patch)?;
+        if group.is_system_default {
+            sqlx::query(
+                "UPDATE routing_groups SET is_system_default = FALSE WHERE is_system_default = TRUE AND id <> $1",
+            )
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        }
         sqlx::query(
             r#"
 UPDATE routing_groups
@@ -237,9 +254,10 @@ WHERE id = $1
         .bind(group.version)
         .bind(group.updated_at)
         .bind(group.published_at)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_postgres_err()?;
+        tx.commit().await.map_postgres_err()?;
         Ok(Some(group))
     }
 
@@ -270,6 +288,25 @@ WHERE id = $1
         record: CreateRoutingGroupBindingRecord,
     ) -> Result<StoredRoutingGroupBinding, DataLayerError> {
         let binding = StoredRoutingGroupBinding::new(record)?;
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
+        if binding.is_default {
+            sqlx::query("LOCK TABLE routing_group_bindings IN SHARE ROW EXCLUSIVE MODE")
+                .execute(&mut *tx)
+                .await
+                .map_postgres_err()?;
+            sqlx::query(
+                r#"
+UPDATE routing_group_bindings
+SET is_default = FALSE
+WHERE is_default = TRUE AND subject_type = $1 AND subject_id = $2
+"#,
+            )
+            .bind(binding_subject_to_database(binding.subject_type))
+            .bind(&binding.subject_id)
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        }
         sqlx::query(
             r#"
 INSERT INTO routing_group_bindings (
@@ -287,9 +324,10 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         .bind(binding.allow_explicit_select)
         .bind(binding.created_at)
         .bind(binding.updated_at)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_postgres_err()?;
+        tx.commit().await.map_postgres_err()?;
         Ok(binding)
     }
 
@@ -310,10 +348,40 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         id: &str,
         patch: UpdateRoutingGroupBindingRecord,
     ) -> Result<Option<StoredRoutingGroupBinding>, DataLayerError> {
-        let Some(mut binding) = self.find_binding_by_id(id).await? else {
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
+        sqlx::query("LOCK TABLE routing_group_bindings IN SHARE ROW EXCLUSIVE MODE")
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        let row = sqlx::query(&format!(
+            "{ROUTING_GROUP_BINDING_SELECT} WHERE id = $1 LIMIT 1 FOR UPDATE"
+        ))
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_postgres_err()?;
+        let Some(mut binding) = row.as_ref().map(map_binding_row).transpose()? else {
             return Ok(None);
         };
         apply_binding_patch(&mut binding, patch)?;
+        if binding.is_default {
+            sqlx::query(
+                r#"
+UPDATE routing_group_bindings
+SET is_default = FALSE
+WHERE is_default = TRUE
+  AND subject_type = $1
+  AND subject_id = $2
+  AND id <> $3
+"#,
+            )
+            .bind(binding_subject_to_database(binding.subject_type))
+            .bind(&binding.subject_id)
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        }
         sqlx::query(
             r#"
 UPDATE routing_group_bindings
@@ -333,9 +401,10 @@ WHERE id = $1
         .bind(binding.is_default)
         .bind(binding.allow_explicit_select)
         .bind(binding.updated_at)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_postgres_err()?;
+        tx.commit().await.map_postgres_err()?;
         Ok(Some(binding))
     }
 

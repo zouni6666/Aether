@@ -6,6 +6,7 @@ use aether_ai_serving::{
     provider_stream_event_api_format_for_provider_type as ai_provider_stream_event_api_format_for_provider_type,
     AiExecutionReportContextParts, AiRequestOrigin,
 };
+use aether_routing_core::ResolvedRoutingPolicy;
 use aether_runtime_state::RuntimeLockLease;
 use aether_scheduler_core::{ClientSessionAffinity, SchedulerRankingOutcome};
 use serde_json::{Map, Value};
@@ -20,8 +21,9 @@ use crate::client_session_affinity::{
 };
 use crate::orchestration::{
     insert_pool_key_lease_report_context_fields, ExecutionAttemptIdentity,
-    SCHEDULER_AFFINITY_EPOCH_REPORT_FIELD,
+    ROUTING_POOL_POLICY_OVERRIDE_REPORT_FIELD, SCHEDULER_AFFINITY_EPOCH_REPORT_FIELD,
 };
+use crate::scheduler::affinity::insert_scheduler_affinity_policy_report_context_field;
 
 pub(crate) struct LocalExecutionReportContextParts<'a> {
     pub(crate) auth_context: &'a ExecutionRuntimeAuthContext,
@@ -55,6 +57,7 @@ pub(crate) struct LocalExecutionReportContextParts<'a> {
     pub(crate) original_request_body_json: Option<&'a Value>,
     pub(crate) original_request_body_base64: Option<&'a str>,
     pub(crate) client_session_affinity: Option<&'a ClientSessionAffinity>,
+    pub(crate) routing_policy: Option<&'a ResolvedRoutingPolicy>,
     pub(crate) scheduler_affinity_epoch: Option<u64>,
     pub(crate) client_requested_stream: bool,
     pub(crate) upstream_is_stream: bool,
@@ -105,6 +108,16 @@ pub(crate) fn build_local_execution_report_context(
         merge_incoming_tls_fingerprint(&mut extra_fields, incoming_tls);
     }
     insert_pool_key_lease_report_context_fields(&mut extra_fields, parts.pool_key_lease);
+    insert_scheduler_affinity_policy_report_context_field(&mut extra_fields, parts.routing_policy);
+    if let Some(override_policy) = parts
+        .routing_policy
+        .and_then(|policy| policy.pool_policy_overrides.get(parts.provider_id))
+        .filter(|override_policy| !override_policy.scheduling_presets.is_empty())
+    {
+        if let Ok(value) = serde_json::to_value(override_policy) {
+            extra_fields.insert(ROUTING_POOL_POLICY_OVERRIDE_REPORT_FIELD.to_string(), value);
+        }
+    }
     if let Some(epoch) = parts.scheduler_affinity_epoch {
         extra_fields.insert(
             SCHEDULER_AFFINITY_EPOCH_REPORT_FIELD.to_string(),
@@ -315,6 +328,7 @@ mod tests {
                 original_request_body_json: Some(&json!({"model": "gpt-5"})),
                 original_request_body_base64: None,
                 client_session_affinity: Some(&client_session_affinity),
+                routing_policy: None,
                 scheduler_affinity_epoch: None,
                 client_requested_stream: false,
                 upstream_is_stream: false,
@@ -397,6 +411,7 @@ mod tests {
                 })),
                 original_request_body_base64: None,
                 client_session_affinity: None,
+                routing_policy: None,
                 scheduler_affinity_epoch: None,
                 client_requested_stream: false,
                 upstream_is_stream: true,
@@ -463,6 +478,7 @@ mod tests {
                 original_request_body_json: Some(&json!({"model": "gpt-5"})),
                 original_request_body_base64: None,
                 client_session_affinity: None,
+                routing_policy: None,
                 scheduler_affinity_epoch: None,
                 client_requested_stream: false,
                 upstream_is_stream: false,

@@ -4,10 +4,10 @@ use sqlx::{PgPool, Row};
 use std::collections::BTreeSet;
 
 use aether_data_contracts::repository::candidate_selection::{
-    MinimalCandidateSelectionReadRepository, StoredMinimalCandidateSelectionRow,
-    StoredPoolKeyCandidateOrder, StoredPoolKeyCandidateRowsByKeyIdsQuery,
-    StoredPoolKeyCandidateRowsQuery, StoredProviderModelMapping,
-    StoredRequestedModelCandidateRowsQuery,
+    MinimalCandidateSelectionReadRepository, StoredApiFormatCandidateRowsQuery,
+    StoredMinimalCandidateSelectionRow, StoredPoolKeyCandidateOrder,
+    StoredPoolKeyCandidateRowsByKeyIdsQuery, StoredPoolKeyCandidateRowsQuery,
+    StoredProviderModelMapping, StoredRequestedModelCandidateRowsQuery,
 };
 use aether_data_contracts::DataLayerError;
 
@@ -764,6 +764,44 @@ impl SqlxMinimalCandidateSelectionReadRepository {
         Ok(dedupe_candidate_selection_rows(rows))
     }
 
+    pub async fn list_for_exact_api_format_page(
+        &self,
+        query: &StoredApiFormatCandidateRowsQuery,
+    ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
+        if query.limit == 0 {
+            return Ok(Vec::new());
+        }
+        let canonical_api_format = normalize_api_format(&query.api_format);
+        let storage_aliases = api_format_aliases(&canonical_api_format);
+        let sql_match_aliases =
+            sql_match_aliases(&api_format_permission_aliases(&canonical_api_format));
+        let fetch_limit = i64::from(query.offset.saturating_add(query.limit));
+        let sql = format!("{LIST_FOR_EXACT_API_FORMAT_SQL}\nLIMIT $4\nOFFSET $5");
+        let mut rows = Vec::new();
+        for api_format in storage_aliases {
+            rows.extend(
+                Self::collect_query_rows(
+                    sqlx::query(sql.as_str())
+                        .bind(api_format)
+                        .bind(sql_match_aliases.clone())
+                        .bind(canonical_api_format.clone())
+                        .bind(fetch_limit)
+                        .bind(0_i64)
+                        .fetch(&self.pool),
+                    map_candidate_selection_row,
+                )
+                .await?,
+            );
+        }
+        let mut rows = dedupe_candidate_selection_rows(rows);
+        sort_candidate_selection_rows(&mut rows, true);
+        Ok(rows
+            .into_iter()
+            .skip(query.offset as usize)
+            .take(query.limit as usize)
+            .collect())
+    }
+
     pub async fn list_for_exact_api_format_and_global_model(
         &self,
         api_format: &str,
@@ -1109,6 +1147,24 @@ fn dedupe_candidate_selection_rows(
         .collect()
 }
 
+fn sort_candidate_selection_rows(
+    rows: &mut [StoredMinimalCandidateSelectionRow],
+    include_global_model: bool,
+) {
+    rows.sort_by(|left, right| {
+        let global_model_order = include_global_model
+            .then(|| left.global_model_name.cmp(&right.global_model_name))
+            .unwrap_or(std::cmp::Ordering::Equal);
+        global_model_order
+            .then(left.provider_priority.cmp(&right.provider_priority))
+            .then(left.key_internal_priority.cmp(&right.key_internal_priority))
+            .then(left.provider_id.cmp(&right.provider_id))
+            .then(left.endpoint_id.cmp(&right.endpoint_id))
+            .then(left.key_id.cmp(&right.key_id))
+            .then(left.model_id.cmp(&right.model_id))
+    });
+}
+
 #[async_trait]
 impl MinimalCandidateSelectionReadRepository for SqlxMinimalCandidateSelectionReadRepository {
     async fn list_for_exact_api_format(
@@ -1116,6 +1172,13 @@ impl MinimalCandidateSelectionReadRepository for SqlxMinimalCandidateSelectionRe
         api_format: &str,
     ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
         Self::list_for_exact_api_format(self, api_format).await
+    }
+
+    async fn list_for_exact_api_format_page(
+        &self,
+        query: &StoredApiFormatCandidateRowsQuery,
+    ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
+        Self::list_for_exact_api_format_page(self, query).await
     }
 
     async fn list_for_exact_api_format_and_global_model(

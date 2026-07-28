@@ -3,9 +3,10 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 
 use super::{
-    MinimalCandidateSelectionReadRepository, StoredMinimalCandidateSelectionRow,
-    StoredPoolKeyCandidateOrder, StoredPoolKeyCandidateRowsByKeyIdsQuery,
-    StoredPoolKeyCandidateRowsQuery, StoredRequestedModelCandidateRowsQuery,
+    MinimalCandidateSelectionReadRepository, StoredApiFormatCandidateRowsQuery,
+    StoredMinimalCandidateSelectionRow, StoredPoolKeyCandidateOrder,
+    StoredPoolKeyCandidateRowsByKeyIdsQuery, StoredPoolKeyCandidateRowsQuery,
+    StoredRequestedModelCandidateRowsQuery,
 };
 use crate::DataLayerError;
 
@@ -59,6 +60,19 @@ impl MinimalCandidateSelectionReadRepository for InMemoryMinimalCandidateSelecti
                 .then(left.model_id.cmp(&right.model_id))
         });
         Ok(rows)
+    }
+
+    async fn list_for_exact_api_format_page(
+        &self,
+        query: &StoredApiFormatCandidateRowsQuery,
+    ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
+        Ok(self
+            .list_for_exact_api_format(&query.api_format)
+            .await?
+            .into_iter()
+            .skip(query.offset as usize)
+            .take(query.limit as usize)
+            .collect())
     }
 
     async fn list_for_exact_api_format_and_global_model(
@@ -351,8 +365,9 @@ fn key_auth_channel_matches(row: &StoredMinimalCandidateSelectionRow, api_format
 mod tests {
     use super::InMemoryMinimalCandidateSelectionReadRepository;
     use crate::repository::candidate_selection::{
-        MinimalCandidateSelectionReadRepository, StoredMinimalCandidateSelectionRow,
-        StoredPoolKeyCandidateOrder, StoredPoolKeyCandidateRowsQuery, StoredProviderModelMapping,
+        MinimalCandidateSelectionReadRepository, StoredApiFormatCandidateRowsQuery,
+        StoredMinimalCandidateSelectionRow, StoredPoolKeyCandidateOrder,
+        StoredPoolKeyCandidateRowsQuery, StoredProviderModelMapping,
         StoredRequestedModelCandidateRowsQuery,
     };
 
@@ -695,6 +710,27 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].provider_id, "provider-1");
         assert_eq!(rows[1].provider_id, "provider-2");
+    }
+
+    #[tokio::test]
+    async fn lists_exact_api_format_in_stable_pages() {
+        let repository = InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+            sample_row("provider-3", "openai:chat", "gpt-4.1", 30),
+            sample_row("provider-1", "openai:chat", "gpt-4.1", 10),
+            sample_row("provider-2", "openai:chat", "gpt-4.1", 20),
+        ]);
+
+        let page = repository
+            .list_for_exact_api_format_page(&StoredApiFormatCandidateRowsQuery {
+                api_format: "openai:chat".to_string(),
+                offset: 1,
+                limit: 1,
+            })
+            .await
+            .expect("API-format page should load");
+
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].provider_id, "provider-2");
     }
 
     #[tokio::test]

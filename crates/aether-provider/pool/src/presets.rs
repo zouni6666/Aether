@@ -110,6 +110,7 @@ pub fn build_admin_pool_scheduling_presets_payload() -> Value {
             "依据窗口成本/Token 用量，缺失时回退配额使用率",
             &service,
         ),
+        legacy_free_team_first_preset_payload(&service),
         provider_pool_preset_payload(
             "free_first",
             "Free 优先",
@@ -201,6 +202,24 @@ pub fn build_admin_pool_scheduling_presets_payload() -> Value {
     ])
 }
 
+fn legacy_free_team_first_preset_payload(service: &ProviderPoolService) -> Value {
+    let mut payload = provider_pool_preset_payload(
+        "free_team_first",
+        "Free/Team 优先",
+        "兼容旧配置：优先消耗 Free、Team 或两者",
+        Some(ProviderPoolCapability::PlanTier),
+        "依据 plan_type，保留旧 free_only/team_only/both 语义",
+        service,
+    );
+    payload["modes"] = json!([
+        {"value": "free_only", "label": "Free"},
+        {"value": "team_only", "label": "Team"},
+        {"value": "both", "label": "Free + Team"}
+    ]);
+    payload["default_mode"] = json!("both");
+    payload
+}
+
 fn provider_pool_preset_payload(
     name: &'static str,
     label: &'static str,
@@ -212,11 +231,24 @@ fn provider_pool_preset_payload(
     let providers = capability
         .map(|capability| service.provider_types_for_capability(capability))
         .unwrap_or_default();
+    let default_enabled_providers = service
+        .provider_types()
+        .filter(|provider_type| {
+            service
+                .adapter(provider_type)
+                .default_scheduling_presets()
+                .iter()
+                .any(|preset| preset.enabled && preset.preset.eq_ignore_ascii_case(name))
+        })
+        .map(str::to_string)
+        .collect::<Vec<_>>();
     json!({
         "name": name,
         "label": label,
         "description": description,
         "providers": providers,
+        "default_enabled": name == "cache_affinity",
+        "default_enabled_providers": default_enabled_providers,
         "modes": Value::Null,
         "default_mode": Value::Null,
         "mutex_group": provider_pool_preset_mutex_group(name),
@@ -226,7 +258,7 @@ fn provider_pool_preset_payload(
 
 fn provider_pool_supports_preset(adapter: &dyn ProviderPoolAdapter, preset: &str) -> bool {
     match preset {
-        "free_first" | "plus_first" | "pro_first" | "team_first" => adapter
+        "free_first" | "free_team_first" | "plus_first" | "pro_first" | "team_first" => adapter
             .capabilities()
             .supports(ProviderPoolCapability::PlanTier),
         "recent_refresh" => adapter

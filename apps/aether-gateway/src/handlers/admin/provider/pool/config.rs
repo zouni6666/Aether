@@ -10,6 +10,7 @@ const POOL_ALLOWED_SCHEDULING_PRESETS: &[&str] = &[
     "load_balance",
     "single_account",
     "priority_first",
+    "free_team_first",
     "free_first",
     "team_first",
     "plus_first",
@@ -166,8 +167,9 @@ fn parse_pool_score_rules(pool_advanced: &Map<String, Value>) -> PoolMemberScore
 
 fn normalize_pool_preset_mode(preset: &str, raw_mode: Option<&Value>) -> Option<String> {
     match preset {
-        "free_first" | "team_first" | "plus_first" | "pro_first" => {
+        "free_team_first" | "free_first" | "team_first" | "plus_first" | "pro_first" => {
             let default_mode = match preset {
+                "free_team_first" => "both",
                 "free_first" => "free_only",
                 "team_first" => "team_only",
                 "plus_first" => "plus_only",
@@ -180,6 +182,9 @@ fn normalize_pool_preset_mode(preset: &str, raw_mode: Option<&Value>) -> Option<
                 .filter(|value| !value.is_empty())
                 .map(|value| value.to_ascii_lowercase())
                 .filter(|value| match preset {
+                    "free_team_first" => {
+                        matches!(value.as_str(), "free_only" | "team_only" | "both")
+                    }
                     "free_first" => value == "free_only",
                     "team_first" => value == "team_only",
                     "plus_first" => value == "plus_only",
@@ -786,7 +791,7 @@ mod tests {
     }
 
     #[test]
-    fn retired_free_team_first_preset_is_rejected() {
+    fn legacy_free_team_first_preset_is_preserved() {
         let config = admin_provider_pool_config_from_config_value(Some(&json!({
             "pool_advanced": {
                 "scheduling_presets": [
@@ -797,8 +802,11 @@ mod tests {
         .expect("pool config should parse");
 
         assert_eq!(config.scheduling_presets.len(), 1);
-        assert_eq!(config.scheduling_presets[0].preset, "lru");
-        assert_eq!(config.scheduling_presets[0].mode, None);
+        assert_eq!(config.scheduling_presets[0].preset, "free_team_first");
+        assert_eq!(
+            config.scheduling_presets[0].mode.as_deref(),
+            Some("team_only")
+        );
     }
 
     #[test]

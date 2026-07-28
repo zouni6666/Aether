@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::RwLock;
 
+use aether_data_contracts::repository::routing_profiles::{apply_binding_patch, apply_group_patch};
 use async_trait::async_trait;
 
 use super::{
@@ -149,10 +150,13 @@ impl RoutingGroupWriteRepository for InMemoryRoutingGroupRepository {
         record: CreateRoutingGroupRecord,
     ) -> Result<StoredRoutingGroup, DataLayerError> {
         let group = StoredRoutingGroup::new(record)?;
-        self.groups
-            .write()
-            .expect("routing group repository lock")
-            .insert(group.id.clone(), group.clone());
+        let mut groups = self.groups.write().expect("routing group repository lock");
+        if group.is_system_default {
+            for existing in groups.values_mut() {
+                existing.is_system_default = false;
+            }
+        }
+        groups.insert(group.id.clone(), group.clone());
         Ok(group)
     }
 
@@ -162,42 +166,17 @@ impl RoutingGroupWriteRepository for InMemoryRoutingGroupRepository {
         patch: UpdateRoutingGroupRecord,
     ) -> Result<Option<StoredRoutingGroup>, DataLayerError> {
         let mut groups = self.groups.write().expect("routing group repository lock");
-        let Some(group) = groups.get_mut(id) else {
+        let Some(mut group) = groups.get(id).cloned() else {
             return Ok(None);
         };
-        if let Some(name) = patch.name {
-            if name.trim().is_empty() {
-                return Err(DataLayerError::InvalidInput(
-                    "routing_groups.name is empty".to_string(),
-                ));
+        apply_group_patch(&mut group, patch)?;
+        if group.is_system_default {
+            for existing in groups.values_mut() {
+                existing.is_system_default = false;
             }
-            group.name = name;
         }
-        if let Some(description) = patch.description {
-            group.description = description;
-        }
-        if let Some(enabled) = patch.enabled {
-            group.enabled = enabled;
-        }
-        if let Some(is_system_default) = patch.is_system_default {
-            group.is_system_default = is_system_default;
-        }
-        if let Some(config_json) = patch.config_json {
-            if !config_json.is_object() {
-                return Err(DataLayerError::InvalidInput(
-                    "routing_groups.config_json must be a JSON object".to_string(),
-                ));
-            }
-            group.config_json = config_json;
-        }
-        if let Some(version) = patch.version {
-            group.version = version.max(1);
-        }
-        if let Some(published_at) = patch.published_at {
-            group.published_at = published_at;
-        }
-        group.updated_at = patch.updated_at;
-        Ok(Some(group.clone()))
+        groups.insert(id.to_string(), group.clone());
+        Ok(Some(group))
     }
 
     async fn delete_routing_group(&self, id: &str) -> Result<bool, DataLayerError> {
@@ -214,10 +193,19 @@ impl RoutingGroupWriteRepository for InMemoryRoutingGroupRepository {
         record: CreateRoutingGroupBindingRecord,
     ) -> Result<StoredRoutingGroupBinding, DataLayerError> {
         let binding = StoredRoutingGroupBinding::new(record)?;
-        self.bindings
+        let mut bindings = self
+            .bindings
             .write()
-            .expect("routing group binding repository lock")
-            .insert(binding.id.clone(), binding.clone());
+            .expect("routing group binding repository lock");
+        if binding.is_default {
+            for existing in bindings.values_mut().filter(|existing| {
+                existing.subject_type == binding.subject_type
+                    && existing.subject_id == binding.subject_id
+            }) {
+                existing.is_default = false;
+            }
+        }
+        bindings.insert(binding.id.clone(), binding.clone());
         Ok(binding)
     }
 
@@ -239,36 +227,20 @@ impl RoutingGroupWriteRepository for InMemoryRoutingGroupRepository {
             .bindings
             .write()
             .expect("routing group binding repository lock");
-        let Some(binding) = bindings.get_mut(id) else {
+        let Some(mut binding) = bindings.get(id).cloned() else {
             return Ok(None);
         };
-        if let Some(group_id) = patch.group_id {
-            if group_id.trim().is_empty() {
-                return Err(DataLayerError::InvalidInput(
-                    "routing_group_bindings.group_id is empty".to_string(),
-                ));
+        apply_binding_patch(&mut binding, patch)?;
+        if binding.is_default {
+            for existing in bindings.values_mut().filter(|existing| {
+                existing.subject_type == binding.subject_type
+                    && existing.subject_id == binding.subject_id
+            }) {
+                existing.is_default = false;
             }
-            binding.group_id = group_id;
         }
-        if let Some(subject_type) = patch.subject_type {
-            binding.subject_type = subject_type;
-        }
-        if let Some(subject_id) = patch.subject_id {
-            if subject_id.trim().is_empty() {
-                return Err(DataLayerError::InvalidInput(
-                    "routing_group_bindings.subject_id is empty".to_string(),
-                ));
-            }
-            binding.subject_id = subject_id;
-        }
-        if let Some(is_default) = patch.is_default {
-            binding.is_default = is_default;
-        }
-        if let Some(allow_explicit_select) = patch.allow_explicit_select {
-            binding.allow_explicit_select = allow_explicit_select;
-        }
-        binding.updated_at = patch.updated_at;
-        Ok(Some(binding.clone()))
+        bindings.insert(id.to_string(), binding.clone());
+        Ok(Some(binding))
     }
 
     async fn create_routing_group_version(
@@ -346,5 +318,154 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn keeps_system_and_subject_defaults_unique() {
+        let repository = InMemoryRoutingGroupRepository::default();
+        for (id, is_system_default) in [("group-1", true), ("group-2", true), ("group-3", false)] {
+            repository
+                .create_routing_group(group_record(id, is_system_default))
+                .await
+                .expect("group should store");
+        }
+
+        assert_eq!(system_default_ids(&repository).await, vec!["group-2"]);
+
+        repository
+            .update_routing_group(
+                "group-1",
+                UpdateRoutingGroupRecord {
+                    is_system_default: Some(true),
+                    updated_at: 2,
+                    ..UpdateRoutingGroupRecord::default()
+                },
+            )
+            .await
+            .expect("group should update");
+        assert_eq!(system_default_ids(&repository).await, vec!["group-1"]);
+
+        repository
+            .create_routing_group_binding(binding_record("binding-1", "group-1", "subject-1", true))
+            .await
+            .expect("binding should store");
+        repository
+            .create_routing_group_binding(binding_record("binding-2", "group-2", "subject-1", true))
+            .await
+            .expect("binding should store");
+        repository
+            .create_routing_group_binding(binding_record("binding-3", "group-3", "subject-2", true))
+            .await
+            .expect("binding should store");
+
+        assert_eq!(
+            default_binding_ids(&repository, "subject-1").await,
+            vec!["binding-2"]
+        );
+        assert_eq!(
+            default_binding_ids(&repository, "subject-2").await,
+            vec!["binding-3"]
+        );
+
+        repository
+            .update_routing_group_binding(
+                "binding-1",
+                UpdateRoutingGroupBindingRecord {
+                    is_default: Some(true),
+                    updated_at: 2,
+                    ..UpdateRoutingGroupBindingRecord::default()
+                },
+            )
+            .await
+            .expect("binding should update");
+        assert_eq!(
+            default_binding_ids(&repository, "subject-1").await,
+            vec!["binding-1"]
+        );
+        assert_eq!(
+            default_binding_ids(&repository, "subject-2").await,
+            vec!["binding-3"]
+        );
+
+        repository
+            .update_routing_group_binding(
+                "binding-3",
+                UpdateRoutingGroupBindingRecord {
+                    subject_id: Some("subject-1".to_string()),
+                    updated_at: 3,
+                    ..UpdateRoutingGroupBindingRecord::default()
+                },
+            )
+            .await
+            .expect("binding should move");
+        assert_eq!(
+            default_binding_ids(&repository, "subject-1").await,
+            vec!["binding-3"]
+        );
+        assert!(default_binding_ids(&repository, "subject-2")
+            .await
+            .is_empty());
+    }
+
+    fn group_record(id: &str, is_system_default: bool) -> CreateRoutingGroupRecord {
+        CreateRoutingGroupRecord {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: None,
+            enabled: true,
+            is_system_default,
+            config_json: json!({}),
+            version: 1,
+            created_at: 1,
+            updated_at: 1,
+            published_at: None,
+        }
+    }
+
+    fn binding_record(
+        id: &str,
+        group_id: &str,
+        subject_id: &str,
+        is_default: bool,
+    ) -> CreateRoutingGroupBindingRecord {
+        CreateRoutingGroupBindingRecord {
+            id: id.to_string(),
+            group_id: group_id.to_string(),
+            subject_type: RoutingGroupBindingSubject::ApiKey,
+            subject_id: subject_id.to_string(),
+            is_default,
+            allow_explicit_select: true,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    async fn system_default_ids(repository: &InMemoryRoutingGroupRepository) -> Vec<String> {
+        repository
+            .list_routing_groups()
+            .await
+            .expect("groups should list")
+            .into_iter()
+            .filter(|group| group.is_system_default)
+            .map(|group| group.id)
+            .collect()
+    }
+
+    async fn default_binding_ids(
+        repository: &InMemoryRoutingGroupRepository,
+        subject_id: &str,
+    ) -> Vec<String> {
+        repository
+            .list_routing_group_bindings(&RoutingGroupBindingQuery {
+                group_id: None,
+                subject_type: Some(RoutingGroupBindingSubject::ApiKey),
+                subject_id: Some(subject_id.to_string()),
+            })
+            .await
+            .expect("bindings should list")
+            .into_iter()
+            .filter(|binding| binding.is_default)
+            .map(|binding| binding.id)
+            .collect()
     }
 }

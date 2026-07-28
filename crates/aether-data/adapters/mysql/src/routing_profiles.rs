@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use serde_json::Value;
-use sqlx::{mysql::MySqlRow, Row};
+use sqlx::{mysql::MySqlRow, Acquire, Row};
 
 use aether_data_contracts::repository::routing_profiles::*;
 use aether_data_contracts::DataLayerError;
@@ -55,24 +55,6 @@ pub struct MysqlRoutingGroupRepository {
 impl MysqlRoutingGroupRepository {
     pub fn new(pool: MysqlPool) -> Self {
         Self { pool }
-    }
-
-    async fn reload_group(&self, id: &str) -> Result<Option<StoredRoutingGroup>, DataLayerError> {
-        self.find_routing_group(RoutingGroupLookupKey::Id(id)).await
-    }
-
-    async fn find_binding_by_id(
-        &self,
-        id: &str,
-    ) -> Result<Option<StoredRoutingGroupBinding>, DataLayerError> {
-        let row = sqlx::query(&format!(
-            "{ROUTING_GROUP_BINDING_SELECT} WHERE id = ? LIMIT 1"
-        ))
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_sql_err()?;
-        row.as_ref().map(map_binding_row).transpose()
     }
 }
 
@@ -170,6 +152,24 @@ impl RoutingGroupWriteRepository for MysqlRoutingGroupRepository {
         record: CreateRoutingGroupRecord,
     ) -> Result<StoredRoutingGroup, DataLayerError> {
         let group = StoredRoutingGroup::new(record)?;
+        let mut connection = self.pool.acquire().await.map_sql_err()?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+            .execute(&mut *connection)
+            .await
+            .map_sql_err()?;
+        let mut tx = connection.begin().await.map_sql_err()?;
+        sqlx::query("SELECT id FROM routing_groups ORDER BY id FOR UPDATE")
+            .fetch_all(&mut *tx)
+            .await
+            .map_sql_err()?;
+        if group.is_system_default {
+            sqlx::query(
+                "UPDATE routing_groups SET is_system_default = 0 WHERE is_system_default = 1",
+            )
+            .execute(&mut *tx)
+            .await
+            .map_sql_err()?;
+        }
         sqlx::query(
             r#"
 INSERT INTO routing_groups (
@@ -192,9 +192,10 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         .bind(group.created_at)
         .bind(group.updated_at)
         .bind(group.published_at)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_sql_err()?;
+        tx.commit().await.map_sql_err()?;
         Ok(group)
     }
 
@@ -203,10 +204,36 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         id: &str,
         patch: UpdateRoutingGroupRecord,
     ) -> Result<Option<StoredRoutingGroup>, DataLayerError> {
-        let Some(mut group) = self.reload_group(id).await? else {
+        let mut connection = self.pool.acquire().await.map_sql_err()?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+            .execute(&mut *connection)
+            .await
+            .map_sql_err()?;
+        let mut tx = connection.begin().await.map_sql_err()?;
+        sqlx::query("SELECT id FROM routing_groups ORDER BY id FOR UPDATE")
+            .fetch_all(&mut *tx)
+            .await
+            .map_sql_err()?;
+        let row = sqlx::query(&format!(
+            "{ROUTING_GROUP_SELECT} WHERE id = ? LIMIT 1 FOR UPDATE"
+        ))
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_sql_err()?;
+        let Some(mut group) = row.as_ref().map(map_group_row).transpose()? else {
             return Ok(None);
         };
         apply_group_patch(&mut group, patch)?;
+        if group.is_system_default {
+            sqlx::query(
+                "UPDATE routing_groups SET is_system_default = 0 WHERE is_system_default = 1 AND id <> ?",
+            )
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_sql_err()?;
+        }
         sqlx::query(
             r#"
 UPDATE routing_groups
@@ -233,9 +260,10 @@ WHERE id = ?
         .bind(group.updated_at)
         .bind(group.published_at)
         .bind(id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_sql_err()?;
+        tx.commit().await.map_sql_err()?;
         Ok(Some(group))
     }
 
@@ -266,6 +294,30 @@ WHERE id = ?
         record: CreateRoutingGroupBindingRecord,
     ) -> Result<StoredRoutingGroupBinding, DataLayerError> {
         let binding = StoredRoutingGroupBinding::new(record)?;
+        let mut connection = self.pool.acquire().await.map_sql_err()?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+            .execute(&mut *connection)
+            .await
+            .map_sql_err()?;
+        let mut tx = connection.begin().await.map_sql_err()?;
+        sqlx::query("SELECT id FROM routing_group_bindings ORDER BY id FOR UPDATE")
+            .fetch_all(&mut *tx)
+            .await
+            .map_sql_err()?;
+        if binding.is_default {
+            sqlx::query(
+                r#"
+UPDATE routing_group_bindings
+SET is_default = 0
+WHERE is_default = 1 AND subject_type = ? AND subject_id = ?
+"#,
+            )
+            .bind(binding_subject_to_database(binding.subject_type))
+            .bind(&binding.subject_id)
+            .execute(&mut *tx)
+            .await
+            .map_sql_err()?;
+        }
         sqlx::query(
             r#"
 INSERT INTO routing_group_bindings (
@@ -283,9 +335,10 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         .bind(binding.allow_explicit_select)
         .bind(binding.created_at)
         .bind(binding.updated_at)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_sql_err()?;
+        tx.commit().await.map_sql_err()?;
         Ok(binding)
     }
 
@@ -306,10 +359,45 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         id: &str,
         patch: UpdateRoutingGroupBindingRecord,
     ) -> Result<Option<StoredRoutingGroupBinding>, DataLayerError> {
-        let Some(mut binding) = self.find_binding_by_id(id).await? else {
+        let mut connection = self.pool.acquire().await.map_sql_err()?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+            .execute(&mut *connection)
+            .await
+            .map_sql_err()?;
+        let mut tx = connection.begin().await.map_sql_err()?;
+        sqlx::query("SELECT id FROM routing_group_bindings ORDER BY id FOR UPDATE")
+            .fetch_all(&mut *tx)
+            .await
+            .map_sql_err()?;
+        let row = sqlx::query(&format!(
+            "{ROUTING_GROUP_BINDING_SELECT} WHERE id = ? LIMIT 1 FOR UPDATE"
+        ))
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_sql_err()?;
+        let Some(mut binding) = row.as_ref().map(map_binding_row).transpose()? else {
             return Ok(None);
         };
         apply_binding_patch(&mut binding, patch)?;
+        if binding.is_default {
+            sqlx::query(
+                r#"
+UPDATE routing_group_bindings
+SET is_default = 0
+WHERE is_default = 1
+  AND subject_type = ?
+  AND subject_id = ?
+  AND id <> ?
+"#,
+            )
+            .bind(binding_subject_to_database(binding.subject_type))
+            .bind(&binding.subject_id)
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_sql_err()?;
+        }
         sqlx::query(
             r#"
 UPDATE routing_group_bindings
@@ -329,9 +417,10 @@ WHERE id = ?
         .bind(binding.allow_explicit_select)
         .bind(binding.updated_at)
         .bind(id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_sql_err()?;
+        tx.commit().await.map_sql_err()?;
         Ok(Some(binding))
     }
 

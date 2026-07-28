@@ -360,21 +360,12 @@ fn build_pool_sort_vectors<Candidate>(
     let lru_ranks = lru_rank_indices(items, false);
     let cache_affinity_ranks = lru_rank_indices(items, true);
 
-    if lru_enabled {
-        for item in items {
-            let key_id = item.item.facts.key_id.clone();
-            vectors
-                .entry(key_id.clone())
-                .or_default()
-                .push(*lru_ranks.get(&key_id).unwrap_or(&0));
-        }
-    }
-
     for preset in presets {
         let ranks = match preset.preset.as_str() {
             "cache_affinity" => cache_affinity_ranks.clone(),
             "priority_first" => priority_first_ranks(items, &lru_ranks),
             "single_account" => single_account_ranks(items),
+            "free_team_first" => plan_ranks(items, &lru_ranks, preset.mode.as_deref()),
             "plus_first" => plan_ranks(items, &lru_ranks, Some("plus_only")),
             "pro_first" => plan_ranks(items, &lru_ranks, Some("pro_only")),
             "free_first" => plan_ranks(items, &lru_ranks, Some("free_only")),
@@ -393,6 +384,16 @@ fn build_pool_sort_vectors<Candidate>(
                 .entry(key_id.clone())
                 .or_default()
                 .push(*ranks.get(&key_id).unwrap_or(&0));
+        }
+    }
+
+    if lru_enabled {
+        for item in items {
+            let key_id = item.item.facts.key_id.clone();
+            vectors
+                .entry(key_id.clone())
+                .or_default()
+                .push(*lru_ranks.get(&key_id).unwrap_or(&0));
         }
     }
 
@@ -415,13 +416,13 @@ fn lru_rank_indices<Candidate>(
 
 fn priority_first_ranks<Candidate>(
     items: &[PoolGroupCandidateOrdering<Candidate>],
-    _lru_ranks: &BTreeMap<String, usize>,
+    lru_ranks: &BTreeMap<String, usize>,
 ) -> BTreeMap<String, usize> {
     let scores = collect_metric_scores(items, |item| {
         Some(f64::from(item.item.facts.key_internal_priority))
     });
     if !score_map_has_variation(&scores) {
-        return neutral_rank_indices(items);
+        return lru_ranks.clone();
     }
     rank_indices_from_score_map(items, &scores, false)
 }
@@ -457,7 +458,7 @@ fn single_account_ranks<Candidate>(
 
 fn plan_ranks<Candidate>(
     items: &[PoolGroupCandidateOrdering<Candidate>],
-    _lru_ranks: &BTreeMap<String, usize>,
+    lru_ranks: &BTreeMap<String, usize>,
     mode: Option<&str>,
 ) -> BTreeMap<String, usize> {
     let scores = items
@@ -473,14 +474,14 @@ fn plan_ranks<Candidate>(
         })
         .collect::<BTreeMap<_, _>>();
     if !score_map_has_variation(&scores) {
-        return neutral_rank_indices(items);
+        return lru_ranks.clone();
     }
     rank_indices_from_score_map(items, &scores, false)
 }
 
 fn health_first_ranks<Candidate>(
     items: &[PoolGroupCandidateOrdering<Candidate>],
-    _lru_ranks: &BTreeMap<String, usize>,
+    lru_ranks: &BTreeMap<String, usize>,
 ) -> BTreeMap<String, usize> {
     let scores = collect_metric_scores(items, |item| {
         item.item
@@ -489,60 +490,63 @@ fn health_first_ranks<Candidate>(
             .map(|score| 1.0 - score.clamp(0.0, 1.0))
     });
     if !score_map_has_signal(&scores) {
-        return neutral_rank_indices(items);
+        return lru_ranks.clone();
     }
     rank_indices_from_score_map(items, &scores, false)
 }
 
 fn latency_first_ranks<Candidate>(
     items: &[PoolGroupCandidateOrdering<Candidate>],
-    _lru_ranks: &BTreeMap<String, usize>,
+    lru_ranks: &BTreeMap<String, usize>,
 ) -> BTreeMap<String, usize> {
     let scores = collect_metric_scores(items, |item| item.item.key_context.latency_avg_ms);
     if !score_map_has_signal(&scores) {
-        return neutral_rank_indices(items);
+        return lru_ranks.clone();
     }
     rank_indices_from_score_map(items, &scores, false)
 }
 
 fn cost_first_ranks<Candidate>(
     items: &[PoolGroupCandidateOrdering<Candidate>],
-    _lru_ranks: &BTreeMap<String, usize>,
+    lru_ranks: &BTreeMap<String, usize>,
     cost_limit_per_key_tokens: Option<u64>,
 ) -> BTreeMap<String, usize> {
+    let has_cost_signal = items.iter().any(|item| item.cost_usage > 0);
     let scores = collect_metric_scores(items, |item| {
-        cost_penalty(item, cost_limit_per_key_tokens).or(item.item.key_context.quota_usage_ratio)
+        cost_penalty(item, cost_limit_per_key_tokens, has_cost_signal)
+            .or(item.item.key_context.quota_usage_ratio)
     });
     if !score_map_has_signal(&scores) {
-        return neutral_rank_indices(items);
+        return lru_ranks.clone();
     }
     rank_indices_from_score_map(items, &scores, false)
 }
 
 fn quota_balanced_ranks<Candidate>(
     items: &[PoolGroupCandidateOrdering<Candidate>],
-    _lru_ranks: &BTreeMap<String, usize>,
+    lru_ranks: &BTreeMap<String, usize>,
     cost_limit_per_key_tokens: Option<u64>,
 ) -> BTreeMap<String, usize> {
+    let has_cost_signal = items.iter().any(|item| item.cost_usage > 0);
     let scores = collect_metric_scores(items, |item| {
         item.item
             .key_context
             .quota_usage_ratio
-            .or_else(|| cost_penalty(item, cost_limit_per_key_tokens))
+            .or_else(|| cost_penalty(item, cost_limit_per_key_tokens, has_cost_signal))
     });
     if !score_map_has_signal(&scores) {
-        return neutral_rank_indices(items);
+        return lru_ranks.clone();
     }
     rank_indices_from_score_map(items, &scores, false)
 }
 
 fn recent_refresh_ranks<Candidate>(
     items: &[PoolGroupCandidateOrdering<Candidate>],
-    _lru_ranks: &BTreeMap<String, usize>,
+    lru_ranks: &BTreeMap<String, usize>,
 ) -> BTreeMap<String, usize> {
     let scores = collect_metric_scores(items, |item| item.item.key_context.quota_reset_seconds);
     if !score_map_has_signal(&scores) {
-        return neutral_rank_indices(items);
+        return lru_ranks.clone();
     }
     rank_indices_from_score_map(items, &scores, false)
 }
@@ -653,28 +657,32 @@ fn rank_indices_from_score_map<Candidate>(
             .then(left.2.cmp(&right.2))
     });
 
-    decorated
-        .into_iter()
-        .enumerate()
-        .map(|(rank, (_, _, _, key_id))| (key_id, rank))
-        .collect()
-}
-
-fn neutral_rank_indices<Candidate>(
-    items: &[PoolGroupCandidateOrdering<Candidate>],
-) -> BTreeMap<String, usize> {
-    items
-        .iter()
-        .map(|item| (item.item.facts.key_id.clone(), 0))
-        .collect()
+    let mut ranks = BTreeMap::new();
+    let mut previous_score = None::<(bool, f64)>;
+    let mut rank = 0;
+    for (index, (missing, score, _, key_id)) in decorated.into_iter().enumerate() {
+        if previous_score
+            .as_ref()
+            .is_some_and(|previous| previous.0 != missing || previous.1 != score)
+        {
+            rank = index;
+        }
+        previous_score = Some((missing, score));
+        ranks.insert(key_id, rank);
+    }
+    ranks
 }
 
 fn cost_penalty<Candidate>(
     item: &PoolGroupCandidateOrdering<Candidate>,
     cost_limit_per_key_tokens: Option<u64>,
+    has_cost_signal: bool,
 ) -> Option<f64> {
-    if item.cost_usage == 0 {
+    if !has_cost_signal {
         return None;
+    }
+    if item.cost_usage == 0 {
+        return Some(0.0);
     }
 
     if let Some(limit) = cost_limit_per_key_tokens.filter(|limit| *limit > 0) {
@@ -1007,6 +1015,223 @@ mod tests {
     }
 
     #[test]
+    fn cost_first_treats_zero_usage_as_the_lowest_cost() {
+        let unused = sample_candidate("provider-pool", "endpoint-1", "key-unused", 10, true)
+            .with_presets(vec![PoolSchedulingPreset {
+                preset: "cost_first".to_string(),
+                enabled: true,
+                mode: None,
+            }]);
+        let used = sample_candidate("provider-pool", "endpoint-1", "key-used", 10, true)
+            .with_presets(vec![PoolSchedulingPreset {
+                preset: "cost_first".to_string(),
+                enabled: true,
+                mode: None,
+            }]);
+        let runtime_by_provider = BTreeMap::from([(
+            "provider-pool".to_string(),
+            PoolRuntimeState {
+                cost_window_usage_by_key: BTreeMap::from([("key-used".to_string(), 100)]),
+                lru_score_by_key: BTreeMap::from([
+                    ("key-used".to_string(), 0.0),
+                    ("key-unused".to_string(), 100.0),
+                ]),
+                ..PoolRuntimeState::default()
+            },
+        )]);
+
+        let outcome = run_pool_scheduler(vec![used, unused], &runtime_by_provider, "seed");
+
+        assert!(outcome.skipped_candidates.is_empty());
+        assert_eq!(
+            outcome
+                .candidates
+                .iter()
+                .map(|item| item.candidate.as_str())
+                .collect::<Vec<_>>(),
+            vec!["key-unused", "key-used"]
+        );
+    }
+
+    #[test]
+    fn cost_first_falls_back_to_quota_without_cost_signal() {
+        let high_quota_usage =
+            sample_candidate("provider-pool", "endpoint-1", "key-high-quota", 10, true)
+                .with_presets(vec![PoolSchedulingPreset {
+                    preset: "cost_first".to_string(),
+                    enabled: true,
+                    mode: None,
+                }])
+                .with_quota_usage(0.8);
+        let low_quota_usage =
+            sample_candidate("provider-pool", "endpoint-1", "key-low-quota", 10, true)
+                .with_presets(vec![PoolSchedulingPreset {
+                    preset: "cost_first".to_string(),
+                    enabled: true,
+                    mode: None,
+                }])
+                .with_quota_usage(0.2);
+        let runtime_by_provider = BTreeMap::from([(
+            "provider-pool".to_string(),
+            PoolRuntimeState {
+                lru_score_by_key: BTreeMap::from([
+                    ("key-high-quota".to_string(), 0.0),
+                    ("key-low-quota".to_string(), 100.0),
+                ]),
+                ..PoolRuntimeState::default()
+            },
+        )]);
+
+        let outcome = run_pool_scheduler(
+            vec![high_quota_usage, low_quota_usage],
+            &runtime_by_provider,
+            "seed",
+        );
+
+        assert_eq!(
+            outcome
+                .candidates
+                .iter()
+                .map(|item| item.candidate.as_str())
+                .collect::<Vec<_>>(),
+            vec!["key-low-quota", "key-high-quota"]
+        );
+    }
+
+    #[test]
+    fn cost_first_falls_back_to_lru_without_cost_or_quota_signal() {
+        let key_recent = sample_candidate("provider-pool", "endpoint-1", "key-recent", 10, true)
+            .with_presets(vec![PoolSchedulingPreset {
+                preset: "cost_first".to_string(),
+                enabled: true,
+                mode: None,
+            }]);
+        let key_old = sample_candidate("provider-pool", "endpoint-1", "key-old", 10, true)
+            .with_presets(vec![PoolSchedulingPreset {
+                preset: "cost_first".to_string(),
+                enabled: true,
+                mode: None,
+            }]);
+        let runtime_by_provider = BTreeMap::from([(
+            "provider-pool".to_string(),
+            PoolRuntimeState {
+                lru_score_by_key: BTreeMap::from([
+                    ("key-recent".to_string(), 100.0),
+                    ("key-old".to_string(), 0.0),
+                ]),
+                ..PoolRuntimeState::default()
+            },
+        )]);
+
+        let outcome = run_pool_scheduler(vec![key_recent, key_old], &runtime_by_provider, "seed");
+
+        assert_eq!(
+            outcome
+                .candidates
+                .iter()
+                .map(|item| item.candidate.as_str())
+                .collect::<Vec<_>>(),
+            vec!["key-old", "key-recent"]
+        );
+    }
+
+    #[test]
+    fn legacy_free_team_first_preserves_all_modes() {
+        let scheduled = |mode: &str, key_plans: &[(&str, &str)]| {
+            let candidates = key_plans
+                .iter()
+                .map(|(key_id, plan)| {
+                    sample_candidate("provider-pool", "endpoint-1", key_id, 10, true)
+                        .with_presets(vec![PoolSchedulingPreset {
+                            preset: "free_team_first".to_string(),
+                            enabled: true,
+                            mode: Some(mode.to_string()),
+                        }])
+                        .with_plan(plan)
+                })
+                .collect::<Vec<_>>();
+            run_pool_scheduler(candidates, &BTreeMap::new(), "seed")
+                .candidates
+                .into_iter()
+                .map(|item| item.candidate)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            scheduled("free_only", &[("key-team", "team"), ("key-free", "free")]),
+            ["key-free", "key-team"]
+        );
+        assert_eq!(
+            scheduled("team_only", &[("key-free", "free"), ("key-team", "team")]),
+            ["key-team", "key-free"]
+        );
+        assert_eq!(
+            scheduled(
+                "both",
+                &[
+                    ("key-plus", "plus"),
+                    ("key-team", "team"),
+                    ("key-free", "free")
+                ],
+            ),
+            ["key-team", "key-free", "key-plus"]
+        );
+    }
+
+    #[test]
+    fn strategy_ties_use_lru_as_the_final_tiebreaker() {
+        let recent_free =
+            sample_candidate("provider-pool", "endpoint-1", "key-recent-free", 10, true)
+                .with_presets(vec![PoolSchedulingPreset {
+                    preset: "free_first".to_string(),
+                    enabled: true,
+                    mode: None,
+                }])
+                .with_plan("free");
+        let plus = sample_candidate("provider-pool", "endpoint-1", "key-plus", 10, true)
+            .with_presets(vec![PoolSchedulingPreset {
+                preset: "free_first".to_string(),
+                enabled: true,
+                mode: None,
+            }])
+            .with_plan("plus");
+        let old_free = sample_candidate("provider-pool", "endpoint-1", "key-old-free", 10, true)
+            .with_presets(vec![PoolSchedulingPreset {
+                preset: "free_first".to_string(),
+                enabled: true,
+                mode: None,
+            }])
+            .with_plan("free");
+        let runtime_by_provider = BTreeMap::from([(
+            "provider-pool".to_string(),
+            PoolRuntimeState {
+                lru_score_by_key: BTreeMap::from([
+                    ("key-recent-free".to_string(), 200.0),
+                    ("key-old-free".to_string(), 10.0),
+                    ("key-plus".to_string(), 0.0),
+                ]),
+                ..PoolRuntimeState::default()
+            },
+        )]);
+
+        let outcome = run_pool_scheduler(
+            vec![recent_free, plus, old_free],
+            &runtime_by_provider,
+            "seed",
+        );
+
+        assert!(outcome.skipped_candidates.is_empty());
+        assert_eq!(
+            outcome
+                .candidates
+                .iter()
+                .map(|item| item.candidate.as_str())
+                .collect::<Vec<_>>(),
+            ["key-old-free", "key-recent-free", "key-plus"]
+        );
+    }
+
+    #[test]
     fn pool_scheduler_applies_distribution_mode_before_strategy_presets() {
         let key_cache_hit =
             sample_candidate("provider-pool", "endpoint-1", "key-cache-hit", 50, true)
@@ -1276,6 +1501,7 @@ mod tests {
         fn with_cost_limit(self, limit: u64) -> Self;
         fn with_presets(self, presets: Vec<PoolSchedulingPreset>) -> Self;
         fn with_plan(self, plan: &str) -> Self;
+        fn with_quota_usage(self, ratio: f64) -> Self;
     }
 
     impl TestCandidateExt for PoolCandidateInput<String> {
@@ -1295,6 +1521,11 @@ mod tests {
 
         fn with_plan(mut self, plan: &str) -> Self {
             self.key_context.plan_tier = Some(plan.to_string());
+            self
+        }
+
+        fn with_quota_usage(mut self, ratio: f64) -> Self {
+            self.key_context.quota_usage_ratio = Some(ratio);
             self
         }
     }

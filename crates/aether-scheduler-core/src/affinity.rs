@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::SchedulerMinimalCandidateSelectionCandidate;
@@ -7,6 +8,26 @@ pub struct SchedulerAffinityTarget {
     pub provider_id: String,
     pub endpoint_id: String,
     pub key_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchedulerAffinityScope {
+    pub routing_group_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_group_version: Option<i64>,
+}
+
+impl SchedulerAffinityScope {
+    pub fn new(routing_group_id: impl Into<String>, routing_group_version: Option<i64>) -> Self {
+        Self {
+            routing_group_id: routing_group_id.into(),
+            routing_group_version,
+        }
+    }
+
+    pub fn is_valid(&self) -> bool {
+        !self.routing_group_id.trim().is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -57,6 +78,22 @@ pub fn build_scheduler_affinity_cache_key_for_api_key_id_with_client_session(
     global_model_name: &str,
     client_session_affinity: Option<&ClientSessionAffinity>,
 ) -> Option<String> {
+    build_scheduler_affinity_cache_key_for_api_key_id_with_client_session_and_scope(
+        api_key_id,
+        api_format,
+        global_model_name,
+        client_session_affinity,
+        None,
+    )
+}
+
+pub fn build_scheduler_affinity_cache_key_for_api_key_id_with_client_session_and_scope(
+    api_key_id: &str,
+    api_format: &str,
+    global_model_name: &str,
+    client_session_affinity: Option<&ClientSessionAffinity>,
+    affinity_scope: Option<&SchedulerAffinityScope>,
+) -> Option<String> {
     let api_key_id = api_key_id.trim();
     if api_key_id.is_empty() {
         return None;
@@ -67,36 +104,63 @@ pub fn build_scheduler_affinity_cache_key_for_api_key_id_with_client_session(
         return None;
     }
 
-    let legacy_key = format!("scheduler_affinity:{api_key_id}:{api_format}:{global_model_name}");
-    let Some(client_session_affinity) = client_session_affinity else {
-        return Some(legacy_key);
-    };
-    let Some(session_key) = client_session_affinity
-        .session_key
-        .as_deref()
+    let affinity_scope = affinity_scope.filter(|scope| scope.is_valid());
+    let session_key = client_session_affinity
+        .and_then(|affinity| affinity.session_key.as_deref())
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return Some(legacy_key);
-    };
+        .filter(|value| !value.is_empty());
+    if session_key.is_none() && affinity_scope.is_none() {
+        return Some(format!(
+            "scheduler_affinity:{api_key_id}:{api_format}:{global_model_name}"
+        ));
+    }
     let client_family = client_session_affinity
-        .client_family
-        .as_deref()
+        .and_then(|affinity| affinity.client_family.as_deref())
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_ascii_lowercase)
         .unwrap_or_else(|| "generic".to_string());
-    let session_hash = hash_session_key(session_key);
+    let session_hash = match affinity_scope {
+        Some(scope) => hash_scoped_session_key(session_key, scope),
+        None => hash_session_key(session_key.expect("session key should exist without scope")),
+    };
 
     Some(format!(
         "scheduler_affinity:v2:{api_key_id}:{api_format}:{global_model_name}:{client_family}:{session_hash}"
     ))
 }
 
+fn hash_scoped_session_key(
+    session_key: Option<&str>,
+    affinity_scope: &SchedulerAffinityScope,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"scheduler-affinity-scope-v1\0");
+    hasher.update(affinity_scope.routing_group_id.trim().as_bytes());
+    hasher.update(b"\0");
+    match affinity_scope.routing_group_version {
+        Some(version) => hasher.update(version.to_string().as_bytes()),
+        None => hasher.update(b"unversioned"),
+    }
+    hasher.update(b"\0");
+    match session_key {
+        Some(session_key) => {
+            hasher.update(b"session\0");
+            hasher.update(session_key.as_bytes());
+        }
+        None => hasher.update(b"api-key-scope"),
+    }
+    hex_digest(hasher.finalize())
+}
+
 fn hash_session_key(session_key: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(session_key.as_bytes());
-    let digest = hasher.finalize();
+    hex_digest(hasher.finalize())
+}
+
+fn hex_digest(digest: impl AsRef<[u8]>) -> String {
+    let digest = digest.as_ref();
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
@@ -142,8 +206,9 @@ mod tests {
     use super::{
         build_scheduler_affinity_cache_key_for_api_key_id,
         build_scheduler_affinity_cache_key_for_api_key_id_with_client_session,
+        build_scheduler_affinity_cache_key_for_api_key_id_with_client_session_and_scope,
         candidate_affinity_hash, candidate_key, matches_affinity_target, ClientSessionAffinity,
-        SchedulerAffinityTarget,
+        SchedulerAffinityScope, SchedulerAffinityTarget,
     };
     use crate::SchedulerMinimalCandidateSelectionCandidate;
 
@@ -260,6 +325,47 @@ mod tests {
 
         assert_ne!(left_key, right_key);
         assert_ne!(left_key, other_client_key);
+    }
+
+    #[test]
+    fn routing_scoped_affinity_keys_split_groups_and_versions() {
+        let affinity =
+            ClientSessionAffinity::new(Some("generic".to_string()), Some("session-a".to_string()));
+        let group_one_v1 = SchedulerAffinityScope::new("group-1", Some(1));
+        let group_one_v2 = SchedulerAffinityScope::new("group-1", Some(2));
+        let group_two_v1 = SchedulerAffinityScope::new("group-2", Some(1));
+        let key_for = |scope: &SchedulerAffinityScope| {
+            build_scheduler_affinity_cache_key_for_api_key_id_with_client_session_and_scope(
+                "api-key-1",
+                "openai:chat",
+                "gpt-5",
+                Some(&affinity),
+                Some(scope),
+            )
+            .expect("scoped affinity key should build")
+        };
+
+        assert_ne!(key_for(&group_one_v1), key_for(&group_one_v2));
+        assert_ne!(key_for(&group_one_v1), key_for(&group_two_v1));
+    }
+
+    #[test]
+    fn routing_scoped_affinity_key_isolated_without_client_session() {
+        let group_one = SchedulerAffinityScope::new("group-1", Some(1));
+        let group_two = SchedulerAffinityScope::new("group-2", Some(1));
+        let key_for = |scope: &SchedulerAffinityScope| {
+            build_scheduler_affinity_cache_key_for_api_key_id_with_client_session_and_scope(
+                "api-key-1",
+                "openai:chat",
+                "gpt-5",
+                None,
+                Some(scope),
+            )
+            .expect("scoped affinity key should build")
+        };
+
+        assert!(key_for(&group_one).starts_with("scheduler_affinity:v2:"));
+        assert_ne!(key_for(&group_one), key_for(&group_two));
     }
 
     #[test]

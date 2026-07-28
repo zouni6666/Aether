@@ -72,11 +72,21 @@ struct CandidatePageCacheMetrics {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct CandidateRowPageCacheKey {
     api_format: String,
-    requested_model_name: String,
-    requested_name: String,
+    kind: CandidateRowPageCacheKind,
     offset: u32,
     limit: u32,
-    enable_model_directives: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum CandidateRowPageCacheKind {
+    RequestedModel {
+        requested_model_name: String,
+        requested_name: String,
+        enable_model_directives: bool,
+    },
+    ApiFormatFallback {
+        scan_epoch: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -119,11 +129,27 @@ impl CandidateRowPageCacheKey {
     ) -> Self {
         Self {
             api_format: normalize_api_format(api_format),
-            requested_model_name: normalize_text_key(requested_model_name),
-            requested_name: normalize_text_key(requested_name),
+            kind: CandidateRowPageCacheKind::RequestedModel {
+                requested_model_name: normalize_text_key(requested_model_name),
+                requested_name: normalize_text_key(requested_name),
+                enable_model_directives,
+            },
             offset,
             limit,
-            enable_model_directives,
+        }
+    }
+
+    pub(crate) fn for_api_format_fallback(
+        api_format: &str,
+        offset: u32,
+        limit: u32,
+        scan_epoch: u32,
+    ) -> Self {
+        Self {
+            api_format: normalize_api_format(api_format),
+            kind: CandidateRowPageCacheKind::ApiFormatFallback { scan_epoch },
+            offset,
+            limit,
         }
     }
 }

@@ -13,8 +13,9 @@ use aether_data_contracts::repository::provider_catalog::{
     ProviderCatalogKeyAdaptiveState, ProviderCatalogKeyAdaptiveStateUpdate,
     ProviderCatalogKeyHealthStateUpdate,
 };
+use aether_routing_core::RoutingPoolPolicyOverride;
 use aether_scheduler_core::{
-    build_scheduler_affinity_cache_key_for_api_key_id_with_client_session,
+    build_scheduler_affinity_cache_key_for_api_key_id_with_client_session_and_scope,
     count_recent_rpm_requests_for_provider_key, ClientSessionAffinity, SchedulerAffinityTarget,
 };
 use aether_usage_runtime::{
@@ -41,9 +42,16 @@ use crate::handlers::shared::provider_pool::{
     admin_provider_pool_key_terminal_error_reason, record_admin_provider_pool_error,
     record_admin_provider_pool_stream_timeout, record_admin_provider_pool_success,
     release_admin_provider_pool_key_lease, AdminProviderPoolConfig,
+    AdminProviderPoolSchedulingPreset,
 };
-use crate::orchestration::local_execution_candidate_metadata_from_report_context;
-use crate::scheduler::affinity::SCHEDULER_AFFINITY_TTL;
+use crate::orchestration::{
+    local_execution_candidate_metadata_from_report_context,
+    ROUTING_POOL_POLICY_OVERRIDE_REPORT_FIELD,
+};
+use crate::scheduler::affinity::{
+    scheduler_affinity_policy_context_from_report_context, SCHEDULER_AFFINITY_POLICY_REPORT_FIELD,
+    SCHEDULER_AFFINITY_TTL,
+};
 use crate::scheduler::config::{read_scheduler_ordering_config, SchedulerSchedulingMode};
 use crate::AppState;
 
@@ -343,11 +351,22 @@ fn report_context_string_field<'a>(
 
 fn local_scheduler_affinity_cache_key(report_context: Option<&Value>) -> Option<String> {
     let client_session_affinity = local_client_session_affinity(report_context);
-    build_scheduler_affinity_cache_key_for_api_key_id_with_client_session(
+    let policy_context = scheduler_affinity_policy_context_from_report_context(report_context);
+    if report_context
+        .and_then(|context| context.get(SCHEDULER_AFFINITY_POLICY_REPORT_FIELD))
+        .is_some()
+        && policy_context.is_none()
+    {
+        return None;
+    }
+    build_scheduler_affinity_cache_key_for_api_key_id_with_client_session_and_scope(
         report_context_string_field(report_context, "api_key_id")?,
         report_context_string_field(report_context, "client_api_format")?,
         report_context_string_field(report_context, "model")?,
         client_session_affinity.as_ref(),
+        policy_context
+            .as_ref()
+            .and_then(|context| context.scope.as_ref()),
     )
 }
 
@@ -504,7 +523,17 @@ async fn local_scheduler_affinity_matches_failed_target(
     local_execution_plan_uses_pool(state, plan).await
 }
 
-async fn scheduler_cache_affinity_enabled(state: &AppState) -> bool {
+async fn scheduler_cache_affinity_enabled(
+    state: &AppState,
+    report_context: Option<&Value>,
+) -> bool {
+    if report_context
+        .and_then(|context| context.get(SCHEDULER_AFFINITY_POLICY_REPORT_FIELD))
+        .is_some()
+    {
+        return scheduler_affinity_policy_context_from_report_context(report_context)
+            .is_some_and(|context| context.cache_affinity_enabled());
+    }
     match read_scheduler_ordering_config(state).await {
         Ok(config) => config.scheduling_mode == SchedulerSchedulingMode::CacheAffinity,
         Err(error) => {
@@ -523,7 +552,7 @@ async fn remember_successful_local_scheduler_affinity(
     state: &AppState,
     context: LocalExecutionEffectContext<'_>,
 ) {
-    if !scheduler_cache_affinity_enabled(state).await {
+    if !scheduler_cache_affinity_enabled(state, context.report_context).await {
         return;
     }
     let Some(cache_key) = local_scheduler_affinity_cache_key(context.report_context) else {
@@ -577,11 +606,32 @@ async fn resolve_pool_feedback_context(
         }
     };
 
-    let Some(pool_config) =
+    let Some(mut pool_config) =
         admin_provider_pool_config_from_config_value(transport.provider.config.as_ref())
     else {
         return None;
     };
+
+    if let Some(override_policy) = context
+        .report_context
+        .and_then(|report_context| report_context.get(ROUTING_POOL_POLICY_OVERRIDE_REPORT_FIELD))
+        .and_then(|value| serde_json::from_value::<RoutingPoolPolicyOverride>(value.clone()).ok())
+        .filter(|override_policy| !override_policy.scheduling_presets.is_empty())
+    {
+        let scheduling_presets = override_policy
+            .scheduling_presets
+            .into_iter()
+            .map(|preset| AdminProviderPoolSchedulingPreset {
+                preset: preset.preset,
+                enabled: preset.enabled,
+                mode: preset.mode,
+            })
+            .collect::<Vec<_>>();
+        pool_config.lru_enabled = scheduling_presets
+            .iter()
+            .any(|preset| preset.enabled && preset.preset.eq_ignore_ascii_case("lru"));
+        pool_config.scheduling_presets = scheduling_presets;
+    }
 
     let sticky_session_token = pool_feedback_request_body(plan, context.report_context)
         .and_then(extract_pool_sticky_session_token);
@@ -1758,10 +1808,11 @@ mod tests {
         apply_local_execution_effect, execution_plan_bearer_matches_transport,
         local_candidate_failure_should_apply_key_effects,
         local_candidate_failure_should_record_pool_error, pool_score_feedback_gate_allows,
-        pool_score_hard_state_for_status, LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect,
-        LocalAttemptFailureEffect, LocalExecutionEffect, LocalExecutionEffectContext,
-        LocalHealthFailureEffect, LocalHealthSuccessEffect, LocalOAuthInvalidationEffect,
-        LocalPoolErrorEffect, ProviderKeyEffectLockPool,
+        pool_score_hard_state_for_status, resolve_pool_feedback_context,
+        LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect,
+        LocalExecutionEffect, LocalExecutionEffectContext, LocalHealthFailureEffect,
+        LocalHealthSuccessEffect, LocalOAuthInvalidationEffect, LocalPoolErrorEffect,
+        ProviderKeyEffectLockPool,
     };
     use crate::data::{GatewayDataConfig, GatewayDataState};
     use crate::orchestration::LocalFailoverClassification;
@@ -1770,7 +1821,8 @@ mod tests {
     use aether_scheduler_core::{
         build_scheduler_affinity_cache_key_for_api_key_id,
         build_scheduler_affinity_cache_key_for_api_key_id_with_client_session,
-        ClientSessionAffinity, SchedulerAffinityTarget,
+        build_scheduler_affinity_cache_key_for_api_key_id_with_client_session_and_scope,
+        ClientSessionAffinity, SchedulerAffinityScope, SchedulerAffinityTarget,
     };
 
     async fn start_managed_redis_or_skip() -> Option<ManagedRedisServer> {
@@ -2221,6 +2273,61 @@ mod tests {
             )
     }
 
+    #[tokio::test]
+    async fn pool_feedback_uses_routing_profile_scheduling_override() {
+        let mut provider = sample_pool_health_provider();
+        provider.config = Some(json!({
+            "pool_advanced": {
+                "scheduling_presets": [{
+                    "preset": "lru",
+                    "enabled": true
+                }]
+            }
+        }));
+        let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![provider],
+            vec![sample_health_endpoint()],
+            vec![sample_health_key()],
+        ));
+        let state = AppState::new()
+            .expect("gateway state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(repository)
+                    .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            );
+        let plan = sample_plan();
+        let report_context = json!({
+            "routing_pool_policy_override": {
+                "scheduling_presets": [{
+                    "preset": "cache_affinity",
+                    "enabled": true
+                }]
+            }
+        });
+
+        let feedback = resolve_pool_feedback_context(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: Some(&report_context),
+            },
+        )
+        .await
+        .expect("pool feedback context should resolve");
+
+        assert!(
+            crate::handlers::shared::provider_pool::admin_provider_pool_cache_affinity_enabled(
+                &feedback.pool_config
+            )
+        );
+        assert!(!feedback.pool_config.lru_enabled);
+        assert_eq!(feedback.pool_config.scheduling_presets.len(), 1);
+        assert_eq!(
+            feedback.pool_config.scheduling_presets[0].preset,
+            "cache_affinity"
+        );
+    }
+
     fn health_state_with_key(key: StoredProviderCatalogKey) -> AppState {
         let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
             vec![sample_health_provider()],
@@ -2630,6 +2737,144 @@ mod tests {
                 key_id: "key-1".to_string(),
             })
         );
+    }
+
+    #[tokio::test]
+    async fn routing_profile_cache_affinity_overrides_legacy_fixed_mode_on_success() {
+        let state = AppState::new()
+            .expect("gateway state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::disabled().with_system_config_values_for_tests(vec![(
+                    "scheduling_mode".to_string(),
+                    json!("fixed_order"),
+                )]),
+            );
+        let plan = sample_plan();
+        let affinity = session_affinity();
+        let scope = SchedulerAffinityScope::new("routing-group-1", Some(7));
+        let report_context = json!({
+            "api_key_id": "api-key-1",
+            "client_api_format": "openai:chat",
+            "model": "gpt-5",
+            "client_session_affinity": {
+                "client_family": "generic",
+                "session_key": "session=session-1;agent=coder"
+            },
+            "scheduler_affinity_policy": {
+                "scheduling_mode": "cache_affinity",
+                "scope": {
+                    "routing_group_id": "routing-group-1",
+                    "routing_group_version": 7
+                }
+            }
+        });
+        let scoped_cache_key =
+            build_scheduler_affinity_cache_key_for_api_key_id_with_client_session_and_scope(
+                "api-key-1",
+                "openai:chat",
+                "gpt-5",
+                Some(&affinity),
+                Some(&scope),
+            )
+            .expect("scoped scheduler affinity cache key should build");
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: Some(&report_context),
+            },
+            LocalExecutionEffect::HealthSuccess(LocalHealthSuccessEffect),
+        )
+        .await;
+
+        assert_eq!(
+            state.read_scheduler_affinity_target(scoped_cache_key.as_str(), SCHEDULER_AFFINITY_TTL),
+            Some(SchedulerAffinityTarget {
+                provider_id: "prov-1".to_string(),
+                endpoint_id: "ep-1".to_string(),
+                key_id: "key-1".to_string(),
+            })
+        );
+        assert!(state
+            .read_scheduler_affinity_target(
+                session_scheduler_affinity_cache_key().as_str(),
+                SCHEDULER_AFFINITY_TTL
+            )
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn routing_profile_fixed_mode_overrides_legacy_cache_affinity_on_success() {
+        let state = AppState::new().expect("gateway state should build");
+        let plan = sample_plan();
+        let report_context = json!({
+            "api_key_id": "api-key-1",
+            "client_api_format": "openai:chat",
+            "model": "gpt-5",
+            "scheduler_affinity_policy": {
+                "scheduling_mode": "fixed_order",
+                "scope": {
+                    "routing_group_id": "routing-group-1",
+                    "routing_group_version": 7
+                }
+            }
+        });
+        let scope = SchedulerAffinityScope::new("routing-group-1", Some(7));
+        let scoped_cache_key =
+            build_scheduler_affinity_cache_key_for_api_key_id_with_client_session_and_scope(
+                "api-key-1",
+                "openai:chat",
+                "gpt-5",
+                None,
+                Some(&scope),
+            )
+            .expect("scoped scheduler affinity cache key should build");
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: Some(&report_context),
+            },
+            LocalExecutionEffect::HealthSuccess(LocalHealthSuccessEffect),
+        )
+        .await;
+
+        assert!(state
+            .read_scheduler_affinity_target(scoped_cache_key.as_str(), SCHEDULER_AFFINITY_TTL)
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn malformed_routing_affinity_context_does_not_fall_back_to_legacy_mode() {
+        let state = AppState::new().expect("gateway state should build");
+        let plan = sample_plan();
+        let report_context = json!({
+            "api_key_id": "api-key-1",
+            "client_api_format": "openai:chat",
+            "model": "gpt-5",
+            "scheduler_affinity_policy": {
+                "scheduling_mode": "unknown"
+            }
+        });
+        let legacy_cache_key =
+            build_scheduler_affinity_cache_key_for_api_key_id("api-key-1", "openai:chat", "gpt-5")
+                .expect("legacy scheduler affinity cache key should build");
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: Some(&report_context),
+            },
+            LocalExecutionEffect::HealthSuccess(LocalHealthSuccessEffect),
+        )
+        .await;
+
+        assert!(state
+            .read_scheduler_affinity_target(legacy_cache_key.as_str(), SCHEDULER_AFFINITY_TTL)
+            .is_none());
     }
 
     #[tokio::test]

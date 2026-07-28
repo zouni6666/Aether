@@ -7,9 +7,10 @@ use std::time::Duration;
 use aether_cache::ExpiringMap;
 use aether_data::DataLayerError;
 use aether_data_contracts::repository::candidate_selection::{
-    MinimalCandidateSelectionReadRepository, StoredMinimalCandidateSelectionRow,
-    StoredPoolKeyCandidateOrder, StoredPoolKeyCandidateRowsByKeyIdsQuery,
-    StoredPoolKeyCandidateRowsQuery, StoredRequestedModelCandidateRowsQuery,
+    MinimalCandidateSelectionReadRepository, StoredApiFormatCandidateRowsQuery,
+    StoredMinimalCandidateSelectionRow, StoredPoolKeyCandidateOrder,
+    StoredPoolKeyCandidateRowsByKeyIdsQuery, StoredPoolKeyCandidateRowsQuery,
+    StoredRequestedModelCandidateRowsQuery,
 };
 use async_trait::async_trait;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
@@ -389,6 +390,19 @@ impl MinimalCandidateSelectionReadRepository for CachedMinimalCandidateSelection
             .await
     }
 
+    async fn list_for_exact_api_format_page(
+        &self,
+        query: &StoredApiFormatCandidateRowsQuery,
+    ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
+        let key = CandidateSelectionCacheKey::ApiFormatPage {
+            api_format: normalize_api_format_key(&query.api_format),
+            offset: query.offset,
+            limit: query.limit,
+        };
+        self.get_or_load(key, || self.inner.list_for_exact_api_format_page(query))
+            .await
+    }
+
     async fn list_for_exact_api_format_and_global_model(
         &self,
         api_format: &str,
@@ -479,6 +493,11 @@ impl MinimalCandidateSelectionReadRepository for CachedMinimalCandidateSelection
 enum CandidateSelectionCacheKey {
     ApiFormat {
         api_format: String,
+    },
+    ApiFormatPage {
+        api_format: String,
+        offset: u32,
+        limit: u32,
     },
     ApiFormatAndGlobalModel {
         api_format: String,
@@ -1042,6 +1061,36 @@ mod tests {
         assert_eq!(rows, expected);
         assert_eq!(loads.load(Ordering::SeqCst), 0);
         assert!(cache.inflight.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn candidate_selection_cache_keys_api_format_pages_by_offset() {
+        let inner = Arc::new(StubCandidateSelectionRepository::new(Duration::ZERO));
+        let cache = CachedMinimalCandidateSelectionReadRepository::new(inner.clone());
+        let first = StoredApiFormatCandidateRowsQuery {
+            api_format: "openai:chat".to_string(),
+            offset: 0,
+            limit: 256,
+        };
+        let second = StoredApiFormatCandidateRowsQuery {
+            offset: 256,
+            ..first.clone()
+        };
+
+        cache
+            .list_for_exact_api_format_page(&first)
+            .await
+            .expect("first page should load");
+        cache
+            .list_for_exact_api_format_page(&first)
+            .await
+            .expect("first page should be cached");
+        cache
+            .list_for_exact_api_format_page(&second)
+            .await
+            .expect("second page should load independently");
+
+        assert_eq!(inner.calls(), 2);
     }
 
     #[tokio::test]

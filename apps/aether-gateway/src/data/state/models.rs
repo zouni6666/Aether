@@ -2,11 +2,12 @@ use super::{
     AdminGlobalModelListQuery, AdminProviderModelListQuery, CreateAdminGlobalModelRecord,
     DataLayerError, GatewayDataState, PublicCatalogModelListQuery, PublicCatalogModelSearchQuery,
     PublicGlobalModelQuery, StoredAdminGlobalModel, StoredAdminGlobalModelPage,
-    StoredAdminProviderModel, StoredMinimalCandidateSelectionRow,
-    StoredPoolKeyCandidateRowsByKeyIdsQuery, StoredPoolKeyCandidateRowsQuery,
-    StoredProviderActiveGlobalModel, StoredProviderModelStats, StoredPublicCatalogModel,
-    StoredPublicGlobalModel, StoredPublicGlobalModelPage, StoredRequestedModelCandidateRowsQuery,
-    UpdateAdminGlobalModelRecord, UpsertAdminProviderModelRecord,
+    StoredAdminProviderModel, StoredApiFormatCandidateRowsQuery,
+    StoredMinimalCandidateSelectionRow, StoredPoolKeyCandidateRowsByKeyIdsQuery,
+    StoredPoolKeyCandidateRowsQuery, StoredProviderActiveGlobalModel, StoredProviderModelStats,
+    StoredPublicCatalogModel, StoredPublicGlobalModel, StoredPublicGlobalModelPage,
+    StoredRequestedModelCandidateRowsQuery, UpdateAdminGlobalModelRecord,
+    UpsertAdminProviderModelRecord,
 };
 
 impl GatewayDataState {
@@ -91,6 +92,23 @@ impl GatewayDataState {
             async {
                 match &self.minimal_candidate_selection_reader {
                     Some(repository) => repository.list_for_exact_api_format(api_format).await,
+                    None => Ok(Vec::new()),
+                }
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn list_minimal_candidate_selection_rows_for_api_format_page(
+        &self,
+        query: &StoredApiFormatCandidateRowsQuery,
+    ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
+        crate::request_diagnostics::observe_db_operation(
+            "candidate_selection",
+            self.database_pool_summary(),
+            async {
+                match &self.minimal_candidate_selection_reader {
+                    Some(repository) => repository.list_for_exact_api_format_page(query).await,
                     None => Ok(Vec::new()),
                 }
             },

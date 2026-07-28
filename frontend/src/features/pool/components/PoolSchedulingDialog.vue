@@ -218,9 +218,13 @@ import { GripVertical } from 'lucide-vue-next'
 import { Dialog, Button, Switch } from '@/components/ui'
 import { useToast } from '@/composables/useToast'
 import { parseApiError } from '@/utils/errorParser'
-import { updateProvider } from '@/api/endpoints'
+import { getProvider, updateProvider } from '@/api/endpoints'
 import { getPoolSchedulingPresets } from '@/api/endpoints/pool'
-import { moveStrategyItem } from '@/features/pool/utils/poolSchedulingDialog'
+import {
+  mergePoolAdvancedPatch,
+  moveStrategyItem,
+  normalizeMutexSelection,
+} from '@/features/pool/utils/poolSchedulingDialog'
 import type { PoolPresetMeta } from '@/api/endpoints/pool'
 import type {
   PoolAdvancedConfig,
@@ -267,6 +271,7 @@ const FALLBACK_PRESET_DEFS: PoolPresetMeta[] = [
     mutex_group: DISTRIBUTION_GROUP,
     evidence_hint: '依据 LRU 时间戳（最近使用优先，与 LRU 轮转相反）',
     providers: [],
+    default_enabled: true,
     modes: null,
     default_mode: null,
   },
@@ -301,11 +306,24 @@ const FALLBACK_PRESET_DEFS: PoolPresetMeta[] = [
     default_mode: null,
   },
   {
+    name: 'free_team_first',
+    label: 'Free/Team 优先',
+    description: '兼容旧配置：优先消耗 Free、Team 或两者',
+    evidence_hint: '依据 plan_type，保留旧 free_only/team_only/both 语义',
+    providers: ['codex', 'grok', 'kiro', 'windsurf'],
+    modes: [
+      { value: 'free_only', label: 'Free' },
+      { value: 'team_only', label: 'Team' },
+      { value: 'both', label: 'Free + Team' },
+    ],
+    default_mode: 'both',
+  },
+  {
     name: 'free_first',
     label: 'Free 优先',
     description: '优先消耗 Free 账号（依赖 plan_type）',
     evidence_hint: '依据 plan_type（Free 账号优先调度）',
-    providers: ['codex', 'kiro'],
+    providers: ['codex', 'grok', 'kiro', 'windsurf'],
     modes: null,
     default_mode: null,
   },
@@ -314,7 +332,7 @@ const FALLBACK_PRESET_DEFS: PoolPresetMeta[] = [
     label: 'Team 优先',
     description: '优先消耗 Team 账号（依赖 plan_type）',
     evidence_hint: '依据 plan_type（Team 账号优先调度）',
-    providers: ['codex', 'kiro'],
+    providers: ['codex', 'grok', 'kiro', 'windsurf'],
     modes: null,
     default_mode: null,
   },
@@ -323,7 +341,7 @@ const FALLBACK_PRESET_DEFS: PoolPresetMeta[] = [
     label: 'Plus 优先',
     description: '优先消耗 Plus 账号（依赖 plan_type）',
     evidence_hint: '依据 plan_type（Plus 账号优先调度）',
-    providers: ['codex', 'kiro'],
+    providers: ['codex', 'grok', 'kiro', 'windsurf'],
     modes: null,
     default_mode: null,
   },
@@ -332,7 +350,7 @@ const FALLBACK_PRESET_DEFS: PoolPresetMeta[] = [
     label: 'Pro 优先',
     description: '优先消耗 Pro 账号（依赖 plan_type）',
     evidence_hint: '依据 plan_type（Pro 账号优先调度）',
-    providers: ['codex', 'kiro'],
+    providers: ['codex', 'grok', 'kiro', 'windsurf'],
     modes: null,
     default_mode: null,
   },
@@ -350,7 +368,8 @@ const FALLBACK_PRESET_DEFS: PoolPresetMeta[] = [
     label: '额度刷新优先',
     description: '优先选即将刷新额度的账号',
     evidence_hint: '依据账号额度重置倒计时（next_reset / reset_seconds）',
-    providers: ['codex', 'kiro'],
+    providers: ['codex', 'grok', 'kiro', 'windsurf'],
+    default_enabled_providers: ['codex', 'windsurf'],
     modes: null,
     default_mode: null,
   },
@@ -392,10 +411,9 @@ const FALLBACK_PRESET_DEFS: PoolPresetMeta[] = [
   },
 ]
 
-const DEFAULT_ENABLED_PRESETS = new Set(['cache_affinity', 'recent_refresh'])
-
 const { success, error: showError } = useToast()
 const loading = ref(false)
+let dialogRevision = 0
 const presetDefs = ref<PoolPresetMeta[]>([])
 const presetDefsLoaded = ref(false)
 const loadingPresetDefs = ref(false)
@@ -443,11 +461,16 @@ function normalizePresetDefs(defs: PoolPresetMeta[]): PoolPresetMeta[] {
         .filter(mode => Boolean(mode.value))
       : null
     const defaultMode = normalizeMode(raw.default_mode)
+    const defaultEnabledProviders = Array.isArray(raw.default_enabled_providers)
+      ? raw.default_enabled_providers.map(p => normalizeProviderType(p)).filter(Boolean)
+      : []
     ordered.push({
       name,
       label: String(raw.label ?? '').trim() || name,
       description: String(raw.description ?? '').trim(),
       providers,
+      default_enabled: raw.default_enabled === true,
+      default_enabled_providers: defaultEnabledProviders,
       modes: modes && modes.length > 0 ? modes : null,
       default_mode: defaultMode,
       mutex_group: normalizeMutexGroup(raw.mutex_group),
@@ -478,11 +501,11 @@ async function ensurePresetDefsLoaded(): Promise<void> {
     const normalized = normalizePresetDefs(Array.isArray(remoteDefs) ? remoteDefs : [])
     if (normalized.length > 0) {
       presetDefs.value = normalized
+      presetDefsLoaded.value = true
     }
   } catch (err) {
     showError(parseApiError(err))
   } finally {
-    presetDefsLoaded.value = true
     loadingPresetDefs.value = false
   }
 }
@@ -530,7 +553,15 @@ function buildPresetListItem(def: PoolPresetMeta, enabled: boolean, mode?: unkno
 }
 
 function buildDefaultPresetList(): PresetListItem[] {
-  return getPresetDefs().map(def => buildPresetListItem(def, DEFAULT_ENABLED_PRESETS.has(def.name)))
+  const providerType = normalizeProviderType(props.providerType)
+  return getPresetDefs().map((def) => {
+    const providerDefaults = Array.isArray(def.default_enabled_providers)
+      ? def.default_enabled_providers.map(normalizeProviderType)
+      : []
+    const enabled = def.default_enabled === true
+      || (Boolean(providerType) && providerDefaults.includes(providerType))
+    return buildPresetListItem(def, enabled)
+  })
 }
 
 function isNewFormatPresetItem(item: unknown): item is SchedulingPresetItem {
@@ -641,7 +672,7 @@ function loadFromConfig(cfg: PoolAdvancedConfig | null): PresetListItem[] {
     }
 
     insertMissingByPreferredOrder(ordered, seen, defs, defsByName)
-    return reorderDistributionGroup(ordered)
+    return reorderDistributionGroup(normalizeMutexSelection(ordered))
   }
 
   const legacyPresets = rawPresets as string[]
@@ -664,33 +695,7 @@ function loadFromConfig(cfg: PoolAdvancedConfig | null): PresetListItem[] {
   }
 
   insertMissingByPreferredOrder(ordered, seen, defs, defsByName)
-  return reorderDistributionGroup(ordered)
-}
-
-function normalizeMutexSelection(items: PresetListItem[]): PresetListItem[] {
-  const next = [...items]
-  const groups = new Map<string, number[]>()
-
-  next.forEach((item, index) => {
-    if (!item.mutexGroup) return
-    if (!groups.has(item.mutexGroup)) groups.set(item.mutexGroup, [])
-    groups.get(item.mutexGroup)?.push(index)
-  })
-
-  for (const indexes of groups.values()) {
-    if (indexes.length <= 1) continue
-    const enabledApplicable = indexes.find(index => {
-      const item = next[index]
-      return item.enabled && item.applicable
-    })
-    const firstApplicable = indexes.find(index => next[index].applicable)
-    const winner = enabledApplicable ?? firstApplicable ?? indexes[0]
-    indexes.forEach((index) => {
-      next[index].enabled = index === winner && next[index].applicable
-    })
-  }
-
-  return next
+  return reorderDistributionGroup(normalizeMutexSelection(ordered))
 }
 
 function togglePreset(index: number, enabled: boolean) {
@@ -814,15 +819,26 @@ function handleDrop(dropIndex: number) {
   dragOverIndex.value = null
 }
 
-watch(() => props.modelValue, async (open) => {
+watch([() => props.modelValue, () => props.providerId], async ([open]) => {
+  const revision = ++dialogRevision
+  loading.value = false
   if (!open) return
   await ensurePresetDefsLoaded()
+  if (!props.modelValue || dialogRevision !== revision) return
   presetList.value = normalizeMutexSelection(loadFromConfig(props.currentConfig))
 })
 
 async function handleSave() {
+  const providerId = props.providerId
+  const revision = dialogRevision
   loading.value = true
   try {
+    await ensurePresetDefsLoaded()
+    if (!props.modelValue || props.providerId !== providerId || dialogRevision !== revision) return
+    if (!presetDefsLoaded.value) {
+      showError('调度策略元数据加载失败，请重试')
+      return
+    }
     presetList.value = normalizeMutexSelection(presetList.value)
     const schedulingPresets: SchedulingPresetItem[] = presetList.value.map(item => {
       const result: SchedulingPresetItem = {
@@ -835,14 +851,17 @@ async function handleSave() {
       return result
     })
 
-    const mergedAdvanced: Record<string, unknown> = {
-      ...(props.currentConfig ?? {}),
+    const latestProvider = await getProvider(providerId)
+    if (!props.modelValue || props.providerId !== providerId || dialogRevision !== revision) return
+    const latestAdvanced = (latestProvider as Record<string, unknown>).pool_advanced
+    const mergedAdvanced = mergePoolAdvancedPatch(latestAdvanced, {
       scheduling_presets: schedulingPresets,
-    }
+    })
     const payload: Parameters<typeof updateProvider>[1] = {
       pool_advanced: mergedAdvanced as PoolAdvancedConfig,
     }
-    const updatedProvider = await updateProvider(props.providerId, payload)
+    const updatedProvider = await updateProvider(providerId, payload)
+    if (!props.modelValue || props.providerId !== providerId || dialogRevision !== revision) return
 
     success('号池调度已保存')
     emit('saved', updatedProvider)
@@ -850,7 +869,9 @@ async function handleSave() {
   } catch (err) {
     showError(parseApiError(err))
   } finally {
-    loading.value = false
+    if (dialogRevision === revision) {
+      loading.value = false
+    }
   }
 }
 </script>

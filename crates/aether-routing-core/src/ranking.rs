@@ -40,6 +40,13 @@ impl RankingOverlay {
             .unwrap_or(fallback)
     }
 
+    pub fn pool_priority(&self, provider_id: &str, fallback: i32) -> i32 {
+        self.pool_priority_overrides
+            .get(provider_id)
+            .copied()
+            .unwrap_or(fallback)
+    }
+
     pub fn provider_priority_or_unspecified(&self, provider_id: &str) -> i32 {
         self.provider_priority_overrides
             .get(provider_id)
@@ -100,15 +107,18 @@ pub fn rank_vector_for_candidate(
 ) -> RoutingCandidateRankVector {
     RoutingCandidateRankVector {
         provider_priority_before: facts.provider_priority,
-        provider_priority_after: overlay.provider_priority_or_unspecified(&facts.provider_id),
+        provider_priority_after: overlay
+            .provider_priority(&facts.provider_id, facts.provider_priority),
         key_priority_before: facts.key_priority,
         key_priority_after: match facts.candidate_kind {
             CandidateKind::Provider => facts
                 .key_id
                 .as_deref()
-                .map(|key_id| overlay.key_priority_or_unspecified(key_id))
-                .unwrap_or(ROUTING_PRIORITY_UNSPECIFIED),
-            CandidateKind::PoolGroup => overlay.pool_priority_or_unspecified(&facts.provider_id),
+                .map(|key_id| overlay.key_priority(key_id, facts.key_priority))
+                .unwrap_or(facts.key_priority),
+            CandidateKind::PoolGroup => {
+                overlay.pool_priority(&facts.provider_id, facts.key_priority)
+            }
         },
     }
 }
@@ -142,7 +152,7 @@ mod tests {
     }
 
     #[test]
-    fn rank_vector_marks_missing_routing_priorities_unspecified() {
+    fn rank_vector_falls_back_to_existing_priorities() {
         let facts = RoutingCandidateFacts {
             candidate_kind: CandidateKind::Provider,
             provider_id: "provider-a".to_string(),
@@ -154,8 +164,8 @@ mod tests {
         };
 
         let vector = rank_vector_for_candidate(&RankingOverlay::default(), &facts);
-        assert_eq!(vector.provider_priority_after, ROUTING_PRIORITY_UNSPECIFIED);
-        assert_eq!(vector.key_priority_after, ROUTING_PRIORITY_UNSPECIFIED);
+        assert_eq!(vector.provider_priority_after, 10);
+        assert_eq!(vector.key_priority_after, 20);
     }
 
     #[test]

@@ -93,6 +93,71 @@ pub(crate) use aether_ai_serving::{
     CandidateFailureDiagnostic, CandidateFailureDiagnosticKind,
 };
 
+pub(crate) struct ResolvedTunnelSchedulerAffinityContext {
+    pub(crate) requested_model: String,
+    pub(crate) client_session_affinity: Option<aether_scheduler_core::ClientSessionAffinity>,
+    pub(crate) policy_context: Option<crate::scheduler::affinity::SchedulerAffinityPolicyContext>,
+    pub(crate) routing_overlay: Option<aether_routing_core::RankingOverlay>,
+}
+
+pub(crate) async fn resolve_tunnel_scheduler_affinity_context(
+    state: &AppState,
+    parts: &http::request::Parts,
+    decision: &GatewayControlDecision,
+    requested_model: String,
+    body_json: &serde_json::Value,
+    client_api_format: &str,
+) -> Result<Option<ResolvedTunnelSchedulerAffinityContext>, GatewayError> {
+    let Some(auth_context) = decision.auth_context.as_ref() else {
+        return Ok(None);
+    };
+    let execution_auth_context =
+        crate::ai_serving::build_execution_runtime_auth_context(auth_context);
+    let Some(auth_snapshot) = state
+        .read_cached_auth_api_key_snapshot(
+            &execution_auth_context.user_id,
+            &execution_auth_context.api_key_id,
+            crate::clock::current_unix_secs(),
+        )
+        .await?
+    else {
+        return Ok(None);
+    };
+    let resolved_auth_input = decision_input::ResolvedLocalDecisionAuthInput {
+        auth_context: execution_auth_context,
+        auth_snapshot,
+        required_capabilities: None,
+        model_directive_policy: decision.model_directive_policy.clone(),
+    };
+    let mut input = decision_input::build_local_requested_model_decision_input(
+        resolved_auth_input,
+        requested_model,
+    );
+    decision_input::attach_routing_policy_to_local_requested_model_input(
+        state,
+        parts,
+        &mut input,
+        body_json,
+        client_api_format,
+    )
+    .await?;
+    let policy_context = input
+        .routing_policy
+        .as_ref()
+        .map(crate::scheduler::affinity::SchedulerAffinityPolicyContext::from_routing_policy);
+    let routing_overlay = input
+        .routing_policy
+        .as_ref()
+        .map(|policy| policy.ranking_overlay.clone());
+
+    Ok(Some(ResolvedTunnelSchedulerAffinityContext {
+        requested_model: input.requested_model,
+        client_session_affinity: input.client_session_affinity,
+        policy_context,
+        routing_overlay,
+    }))
+}
+
 pub(crate) async fn maybe_build_sync_decision_payload(
     state: &AppState,
     parts: &http::request::Parts,

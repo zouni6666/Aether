@@ -17,7 +17,10 @@ pub fn merge_score_reason_patch(
 }
 
 pub fn score_with_delta(score: f64, delta_basis_points: Option<i32>) -> f64 {
-    let delta = delta_basis_points.unwrap_or_default() as f64 / 10_000.0;
+    let Some(delta_basis_points) = delta_basis_points else {
+        return score;
+    };
+    let delta = delta_basis_points as f64 / 10_000.0;
     (score + delta).clamp(0.0, 1.0)
 }
 
@@ -45,4 +48,20 @@ pub fn u64_opt_from_i64(
     field: &str,
 ) -> Result<Option<u64>, crate::DataLayerError> {
     value.map(|value| u64_from_i64(value, field)).transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::score_with_delta;
+
+    #[test]
+    fn score_without_delta_is_unchanged() {
+        assert_eq!(score_with_delta(1_000.0, None), 1_000.0);
+    }
+
+    #[test]
+    fn score_with_delta_remains_bounded() {
+        assert_eq!(score_with_delta(0.95, Some(1_000)), 1.0);
+        assert_eq!(score_with_delta(0.05, Some(-1_000)), 0.0);
+    }
 }

@@ -25,7 +25,7 @@
         @import="showImportDialog = true"
         @scheduling="openSchedulingDialog"
         @demand-metrics="showDemandMetricsDialog = true"
-        @advanced="showAdvancedDialog = true"
+        @advanced="openAdvancedDialog"
         @toggle-select-all="toggleAllFilteredPoolKeys"
         @batch-action="openAccountBatchDialog"
         @refresh="refreshCurrentPage"
@@ -1368,13 +1368,12 @@ async function loadOverview(options: { cacheTtlMs?: number, silent?: boolean } =
 }
 
 async function handleSchedulingSaved(updatedProvider: ProviderWithEndpointsSummary) {
+  if (!selectedProviderId.value || updatedProvider.id !== selectedProviderId.value) return
   // 优先回写保存接口返回值，避免弹窗立即重开时读到旧配置。
-  if (selectedProviderId.value && updatedProvider.id === selectedProviderId.value) {
-    if (selectedProviderData.value) {
-      Object.assign(selectedProviderData.value, updatedProvider)
-    } else {
-      selectedProviderData.value = updatedProvider
-    }
+  if (selectedProviderData.value) {
+    Object.assign(selectedProviderData.value, updatedProvider)
+  } else {
+    selectedProviderData.value = updatedProvider
   }
   showSchedulingDialog.value = false
   showAdvancedDialog.value = false
@@ -1405,10 +1404,13 @@ const selectedProviderClaudeConfig = computed(() => {
   return (selectedProviderData.value as Record<string, unknown> | null)?.claude_code_advanced as ClaudeCodeAdvancedConfig | null ?? null
 })
 
-const DEFAULT_ENABLED_PRESETS = new Set(['cache_affinity', 'recent_refresh'])
+function defaultEnabledPresetCount(providerType: string): number {
+  return ['codex', 'windsurf'].includes(providerType) ? 2 : 1
+}
 
 const DEFAULT_PRESET_LABELS: Record<string, string> = {
   lru: 'LRU',
+  free_team_first: 'Free/Team',
   free_first: 'Free',
   team_first: 'Team',
   plus_first: 'Plus',
@@ -1546,7 +1548,7 @@ const poolSchedulingLabel = computed(() => {
   const cfg = selectedProviderConfig.value
 
   // No pool_advanced config at all: use default enabled presets count
-  if (!cfg) return `${DEFAULT_ENABLED_PRESETS.size} 维度`
+  if (!cfg) return `${defaultEnabledPresetCount(selectedProviderType.value)} 维度`
 
   const presets = Array.isArray(cfg.scheduling_presets) ? cfg.scheduling_presets : []
   const presetLabels = presetLabelsByName.value
@@ -1582,7 +1584,7 @@ const poolSchedulingLabel = computed(() => {
   if (lruEnabled && stickyEnabled) return 'LRU + 粘性'
   if (lruEnabled) return 'LRU'
   if (!cfg.scheduling_mode && (cfg.lru_enabled === null || cfg.lru_enabled === undefined)) {
-    return `${DEFAULT_ENABLED_PRESETS.size} 维度`
+    return `${defaultEnabledPresetCount(selectedProviderType.value)} 维度`
   }
   if (stickyEnabled) return '粘性'
   return '随机'
@@ -1712,6 +1714,8 @@ async function selectProvider(
   hasHydratedInitialProviderSelection = true
   selectedProviderId.value = id
   selectedProviderData.value = null
+  showSchedulingDialog.value = false
+  showAdvancedDialog.value = false
   resetPoolKeySelection(true)
   providerDrawerOpen.value = false
   editingKeyDetail.value = null
@@ -2873,8 +2877,27 @@ const showAccountBatchDialog = ref(false)
 const pendingAccountBatchAction = ref<PoolBatchActionValue | null>(null)
 const togglingProviderStatus = ref(false)
 
-function openSchedulingDialog() {
-  showSchedulingDialog.value = true
+async function ensureSelectedProviderDetail(): Promise<boolean> {
+  const providerId = selectedProviderId.value
+  if (!providerId) return false
+  if (selectedProviderData.value?.id !== providerId) {
+    await loadProviderData(providerId, { preserveOnError: true })
+  }
+  if (selectedProviderData.value?.id === providerId) return true
+  showWarning('Provider 详情尚未加载，无法编辑调度配置')
+  return false
+}
+
+async function openSchedulingDialog() {
+  if (await ensureSelectedProviderDetail()) {
+    showSchedulingDialog.value = true
+  }
+}
+
+async function openAdvancedDialog() {
+  if (await ensureSelectedProviderDetail()) {
+    showAdvancedDialog.value = true
+  }
 }
 
 function openAccountBatchDialog(action: PoolBatchActionValue = 'refresh_quota'): void {

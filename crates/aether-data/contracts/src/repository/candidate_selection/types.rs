@@ -89,6 +89,13 @@ pub struct StoredRequestedModelCandidateRowsQuery {
     pub limit: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StoredApiFormatCandidateRowsQuery {
+    pub api_format: String,
+    pub offset: u32,
+    pub limit: u32,
+}
+
 impl StoredMinimalCandidateSelectionRow {
     pub fn supports_streaming(&self) -> bool {
         self.model_supports_streaming
@@ -118,6 +125,19 @@ pub trait MinimalCandidateSelectionReadRepository: Send + Sync {
         &self,
         api_format: &str,
     ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, crate::DataLayerError>;
+
+    async fn list_for_exact_api_format_page(
+        &self,
+        query: &StoredApiFormatCandidateRowsQuery,
+    ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, crate::DataLayerError> {
+        Ok(self
+            .list_for_exact_api_format(&query.api_format)
+            .await?
+            .into_iter()
+            .skip(query.offset as usize)
+            .take(query.limit as usize)
+            .collect())
+    }
 
     async fn list_for_exact_api_format_and_global_model(
         &self,

@@ -88,6 +88,7 @@ pub(super) async fn maybe_build_local_video_create_decision_payload_for_candidat
         original_request_body_json: Some(body_json),
         original_request_body_base64: None,
         client_session_affinity: input.client_session_affinity.as_ref(),
+        routing_policy: input.routing_policy.as_ref(),
         scheduler_affinity_epoch: eligible.orchestration.scheduler_affinity_epoch,
         client_requested_stream: false,
         upstream_is_stream: false,

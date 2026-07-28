@@ -56,24 +56,6 @@ impl SqliteRoutingGroupRepository {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
-
-    async fn reload_group(&self, id: &str) -> Result<Option<StoredRoutingGroup>, DataLayerError> {
-        self.find_routing_group(RoutingGroupLookupKey::Id(id)).await
-    }
-
-    async fn find_binding_by_id(
-        &self,
-        id: &str,
-    ) -> Result<Option<StoredRoutingGroupBinding>, DataLayerError> {
-        let row = sqlx::query(&format!(
-            "{ROUTING_GROUP_BINDING_SELECT} WHERE id = ? LIMIT 1"
-        ))
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_sql_err()?;
-        row.as_ref().map(map_binding_row).transpose()
-    }
 }
 
 #[async_trait]
@@ -170,6 +152,19 @@ impl RoutingGroupWriteRepository for SqliteRoutingGroupRepository {
         record: CreateRoutingGroupRecord,
     ) -> Result<StoredRoutingGroup, DataLayerError> {
         let group = StoredRoutingGroup::new(record)?;
+        let mut tx = self.pool.begin().await.map_sql_err()?;
+        sqlx::query("UPDATE routing_groups SET is_system_default = is_system_default WHERE 0")
+            .execute(&mut *tx)
+            .await
+            .map_sql_err()?;
+        if group.is_system_default {
+            sqlx::query(
+                "UPDATE routing_groups SET is_system_default = 0 WHERE is_system_default = 1",
+            )
+            .execute(&mut *tx)
+            .await
+            .map_sql_err()?;
+        }
         sqlx::query(
             r#"
 INSERT INTO routing_groups (
@@ -192,9 +187,10 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         .bind(group.created_at)
         .bind(group.updated_at)
         .bind(group.published_at)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_sql_err()?;
+        tx.commit().await.map_sql_err()?;
         Ok(group)
     }
 
@@ -203,10 +199,29 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         id: &str,
         patch: UpdateRoutingGroupRecord,
     ) -> Result<Option<StoredRoutingGroup>, DataLayerError> {
-        let Some(mut group) = self.reload_group(id).await? else {
+        let mut tx = self.pool.begin().await.map_sql_err()?;
+        sqlx::query("UPDATE routing_groups SET is_system_default = is_system_default WHERE 0")
+            .execute(&mut *tx)
+            .await
+            .map_sql_err()?;
+        let row = sqlx::query(&format!("{ROUTING_GROUP_SELECT} WHERE id = ? LIMIT 1"))
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_sql_err()?;
+        let Some(mut group) = row.as_ref().map(map_group_row).transpose()? else {
             return Ok(None);
         };
         apply_group_patch(&mut group, patch)?;
+        if group.is_system_default {
+            sqlx::query(
+                "UPDATE routing_groups SET is_system_default = 0 WHERE is_system_default = 1 AND id <> ?",
+            )
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_sql_err()?;
+        }
         sqlx::query(
             r#"
 UPDATE routing_groups
@@ -233,9 +248,10 @@ WHERE id = ?
         .bind(group.updated_at)
         .bind(group.published_at)
         .bind(id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_sql_err()?;
+        tx.commit().await.map_sql_err()?;
         Ok(Some(group))
     }
 
@@ -266,6 +282,25 @@ WHERE id = ?
         record: CreateRoutingGroupBindingRecord,
     ) -> Result<StoredRoutingGroupBinding, DataLayerError> {
         let binding = StoredRoutingGroupBinding::new(record)?;
+        let mut tx = self.pool.begin().await.map_sql_err()?;
+        sqlx::query("UPDATE routing_group_bindings SET is_default = is_default WHERE 0")
+            .execute(&mut *tx)
+            .await
+            .map_sql_err()?;
+        if binding.is_default {
+            sqlx::query(
+                r#"
+UPDATE routing_group_bindings
+SET is_default = 0
+WHERE is_default = 1 AND subject_type = ? AND subject_id = ?
+"#,
+            )
+            .bind(binding_subject_to_database(binding.subject_type))
+            .bind(&binding.subject_id)
+            .execute(&mut *tx)
+            .await
+            .map_sql_err()?;
+        }
         sqlx::query(
             r#"
 INSERT INTO routing_group_bindings (
@@ -283,9 +318,10 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         .bind(binding.allow_explicit_select)
         .bind(binding.created_at)
         .bind(binding.updated_at)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_sql_err()?;
+        tx.commit().await.map_sql_err()?;
         Ok(binding)
     }
 
@@ -306,10 +342,40 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         id: &str,
         patch: UpdateRoutingGroupBindingRecord,
     ) -> Result<Option<StoredRoutingGroupBinding>, DataLayerError> {
-        let Some(mut binding) = self.find_binding_by_id(id).await? else {
+        let mut tx = self.pool.begin().await.map_sql_err()?;
+        sqlx::query("UPDATE routing_group_bindings SET is_default = is_default WHERE 0")
+            .execute(&mut *tx)
+            .await
+            .map_sql_err()?;
+        let row = sqlx::query(&format!(
+            "{ROUTING_GROUP_BINDING_SELECT} WHERE id = ? LIMIT 1"
+        ))
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_sql_err()?;
+        let Some(mut binding) = row.as_ref().map(map_binding_row).transpose()? else {
             return Ok(None);
         };
         apply_binding_patch(&mut binding, patch)?;
+        if binding.is_default {
+            sqlx::query(
+                r#"
+UPDATE routing_group_bindings
+SET is_default = 0
+WHERE is_default = 1
+  AND subject_type = ?
+  AND subject_id = ?
+  AND id <> ?
+"#,
+            )
+            .bind(binding_subject_to_database(binding.subject_type))
+            .bind(&binding.subject_id)
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_sql_err()?;
+        }
         sqlx::query(
             r#"
 UPDATE routing_group_bindings
@@ -329,9 +395,10 @@ WHERE id = ?
         .bind(binding.allow_explicit_select)
         .bind(binding.updated_at)
         .bind(id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_sql_err()?;
+        tx.commit().await.map_sql_err()?;
         Ok(Some(binding))
     }
 
@@ -525,5 +592,256 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn sqlite_keeps_system_and_subject_defaults_unique() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool should connect");
+        run_sqlite_migrations(&pool)
+            .await
+            .expect("sqlite migrations should run");
+        let repository = SqliteRoutingGroupRepository::new(pool);
+
+        for (id, is_system_default) in [("group-1", true), ("group-2", true), ("group-3", false)] {
+            repository
+                .create_routing_group(group_record(id, is_system_default))
+                .await
+                .expect("group should create");
+        }
+        assert_eq!(system_default_ids(&repository).await, vec!["group-2"]);
+
+        repository
+            .update_routing_group(
+                "group-1",
+                UpdateRoutingGroupRecord {
+                    is_system_default: Some(true),
+                    updated_at: 2,
+                    ..UpdateRoutingGroupRecord::default()
+                },
+            )
+            .await
+            .expect("group should update");
+        assert_eq!(system_default_ids(&repository).await, vec!["group-1"]);
+
+        repository
+            .create_routing_group_binding(binding_record("binding-1", "group-1", "subject-1", true))
+            .await
+            .expect("binding should create");
+        repository
+            .create_routing_group_binding(binding_record("binding-2", "group-2", "subject-1", true))
+            .await
+            .expect("binding should create");
+        repository
+            .create_routing_group_binding(binding_record("binding-3", "group-3", "subject-2", true))
+            .await
+            .expect("binding should create");
+
+        assert_eq!(
+            default_binding_ids(&repository, "subject-1").await,
+            vec!["binding-2"]
+        );
+        assert_eq!(
+            default_binding_ids(&repository, "subject-2").await,
+            vec!["binding-3"]
+        );
+
+        repository
+            .update_routing_group_binding(
+                "binding-1",
+                UpdateRoutingGroupBindingRecord {
+                    is_default: Some(true),
+                    updated_at: 2,
+                    ..UpdateRoutingGroupBindingRecord::default()
+                },
+            )
+            .await
+            .expect("binding should update");
+        assert_eq!(
+            default_binding_ids(&repository, "subject-1").await,
+            vec!["binding-1"]
+        );
+        assert_eq!(
+            default_binding_ids(&repository, "subject-2").await,
+            vec!["binding-3"]
+        );
+
+        repository
+            .update_routing_group_binding(
+                "binding-3",
+                UpdateRoutingGroupBindingRecord {
+                    subject_id: Some("subject-1".to_string()),
+                    updated_at: 3,
+                    ..UpdateRoutingGroupBindingRecord::default()
+                },
+            )
+            .await
+            .expect("binding should move");
+        assert_eq!(
+            default_binding_ids(&repository, "subject-1").await,
+            vec!["binding-3"]
+        );
+        assert!(default_binding_ids(&repository, "subject-2")
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn sqlite_repair_migration_resolves_existing_duplicate_defaults() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool should connect");
+        run_sqlite_migrations(&pool)
+            .await
+            .expect("sqlite migrations should run");
+        let repository = SqliteRoutingGroupRepository::new(pool.clone());
+        sqlx::raw_sql(
+            r#"
+DROP INDEX routing_groups_one_system_default_key;
+DROP INDEX routing_group_bindings_subject_default_key;
+"#,
+        )
+        .execute(&pool)
+        .await
+        .expect("unique indexes should be removable to simulate a pre-repair database");
+
+        for id in ["group-1", "group-2", "group-3"] {
+            repository
+                .create_routing_group(group_record(id, false))
+                .await
+                .expect("group should create");
+        }
+        sqlx::query(
+            r#"
+UPDATE routing_groups
+SET is_system_default = 1,
+    enabled = CASE id WHEN 'group-3' THEN 0 ELSE 1 END,
+    updated_at = CASE id
+        WHEN 'group-1' THEN 1
+        WHEN 'group-2' THEN 2
+        ELSE 3
+    END
+"#,
+        )
+        .execute(&pool)
+        .await
+        .expect("duplicate system defaults should seed");
+
+        for (id, subject_id) in [
+            ("binding-3", "subject-1"),
+            ("binding-2", "subject-1"),
+            ("binding-1", "subject-1"),
+            ("binding-4", "subject-2"),
+        ] {
+            repository
+                .create_routing_group_binding(binding_record(id, "group-1", subject_id, false))
+                .await
+                .expect("binding should create");
+        }
+        sqlx::query(
+            r#"
+UPDATE routing_group_bindings
+SET is_default = 1,
+    created_at = CASE id WHEN 'binding-3' THEN 2 ELSE 1 END
+"#,
+        )
+        .execute(&pool)
+        .await
+        .expect("duplicate binding defaults should seed");
+
+        let repair_migration =
+            include_str!("../migrations/20260727000000_repair_routing_default_uniqueness.sql");
+        for _ in 0..2 {
+            sqlx::raw_sql(repair_migration)
+                .execute(&pool)
+                .await
+                .expect("repair migration should be idempotent");
+        }
+
+        assert_eq!(system_default_ids(&repository).await, vec!["group-2"]);
+        assert_eq!(
+            default_binding_ids(&repository, "subject-1").await,
+            vec!["binding-1"]
+        );
+        assert_eq!(
+            default_binding_ids(&repository, "subject-2").await,
+            vec!["binding-4"]
+        );
+
+        sqlx::query("UPDATE routing_groups SET is_system_default = 1 WHERE id = 'group-3'")
+            .execute(&pool)
+            .await
+            .expect_err("database should reject a second system default");
+        sqlx::query("UPDATE routing_group_bindings SET is_default = 1 WHERE id = 'binding-2'")
+            .execute(&pool)
+            .await
+            .expect_err("database should reject a second default for the same subject");
+    }
+
+    fn group_record(id: &str, is_system_default: bool) -> CreateRoutingGroupRecord {
+        CreateRoutingGroupRecord {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: None,
+            enabled: true,
+            is_system_default,
+            config_json: json!({}),
+            version: 1,
+            created_at: 1,
+            updated_at: 1,
+            published_at: None,
+        }
+    }
+
+    fn binding_record(
+        id: &str,
+        group_id: &str,
+        subject_id: &str,
+        is_default: bool,
+    ) -> CreateRoutingGroupBindingRecord {
+        CreateRoutingGroupBindingRecord {
+            id: id.to_string(),
+            group_id: group_id.to_string(),
+            subject_type: RoutingGroupBindingSubject::ApiKey,
+            subject_id: subject_id.to_string(),
+            is_default,
+            allow_explicit_select: true,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    async fn system_default_ids(repository: &SqliteRoutingGroupRepository) -> Vec<String> {
+        repository
+            .list_routing_groups()
+            .await
+            .expect("groups should list")
+            .into_iter()
+            .filter(|group| group.is_system_default)
+            .map(|group| group.id)
+            .collect()
+    }
+
+    async fn default_binding_ids(
+        repository: &SqliteRoutingGroupRepository,
+        subject_id: &str,
+    ) -> Vec<String> {
+        repository
+            .list_routing_group_bindings(&RoutingGroupBindingQuery {
+                group_id: None,
+                subject_type: Some(RoutingGroupBindingSubject::ApiKey),
+                subject_id: Some(subject_id.to_string()),
+            })
+            .await
+            .expect("bindings should list")
+            .into_iter()
+            .filter(|binding| binding.is_default)
+            .map(|binding| binding.id)
+            .collect()
     }
 }

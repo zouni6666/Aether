@@ -321,6 +321,31 @@ fn provider_query_model_test_empty_selected_key_ids_keep_default_selection() {
 }
 
 #[test]
+fn provider_query_codex_pool_config_injects_recent_refresh() {
+    let raw_config = json!({
+        "pool_advanced": {
+            "scheduling_presets": [{
+                "preset": "cache_affinity",
+                "enabled": true
+            }]
+        }
+    });
+    let config = admin_provider_pool_config_from_config_value(Some(&raw_config))
+        .expect("pool config should parse");
+
+    let normalized = provider_query_ai_pool_scheduling_config(&config, "codex");
+
+    assert_eq!(
+        normalized
+            .scheduling_presets
+            .iter()
+            .map(|preset| preset.preset.as_str())
+            .collect::<Vec<_>>(),
+        ["cache_affinity", "recent_refresh"]
+    );
+}
+
+#[test]
 fn provider_query_standard_test_resolves_codex_responses_upstream_streaming() {
     assert!(provider_query_resolve_standard_test_upstream_is_stream(
         None,

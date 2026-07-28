@@ -279,11 +279,24 @@ async fn gateway_handles_admin_pool_scheduling_presets_locally_with_trusted_admi
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     let items = payload.as_array().expect("payload should be an array");
-    assert_eq!(items.len(), 14);
-    assert_eq!(items[0]["name"], "lru");
-    assert_eq!(items[1]["name"], "cache_affinity");
-    assert_eq!(items[8]["name"], "pro_first");
-    assert_eq!(items[13]["name"], "team_first");
+    assert_eq!(items.len(), 15);
+    let preset_names = items
+        .iter()
+        .filter_map(|item| item["name"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(preset_names.first(), Some(&"lru"));
+    assert_eq!(preset_names.get(1), Some(&"cache_affinity"));
+    assert_eq!(preset_names.last(), Some(&"team_first"));
+
+    let preset_index = |name| {
+        preset_names
+            .iter()
+            .position(|preset_name| *preset_name == name)
+            .unwrap_or_else(|| panic!("missing scheduling preset {name}"))
+    };
+    assert!(preset_index("cost_first") < preset_index("free_team_first"));
+    assert!(preset_index("free_team_first") < preset_index("free_first"));
+    assert!(preset_index("pro_first") < preset_index("team_first"));
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

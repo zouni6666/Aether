@@ -1,6 +1,8 @@
+use aether_routing_core::ResolvedRoutingPolicy;
 use aether_scheduler_core::{
-    build_scheduler_affinity_cache_key_for_api_key_id_with_client_session, ClientSessionAffinity,
-    SchedulerAffinityTarget, SchedulerMinimalCandidateSelectionCandidate,
+    build_scheduler_affinity_cache_key_for_api_key_id_with_client_session_and_scope,
+    ClientSessionAffinity, SchedulerAffinityScope, SchedulerAffinityTarget,
+    SchedulerMinimalCandidateSelectionCandidate,
 };
 
 use crate::ai_serving::{GatewayAuthApiKeySnapshot, PlannerAppState};
@@ -20,6 +22,7 @@ pub(crate) fn read_cached_scheduler_affinity_target(
     client_session_affinity: Option<&ClientSessionAffinity>,
     client_api_format: &str,
     requested_model: Option<&str>,
+    routing_policy: Option<&ResolvedRoutingPolicy>,
 ) -> Option<SchedulerAffinityTarget> {
     if !has_explicit_session_affinity(client_session_affinity) {
         return None;
@@ -30,12 +33,15 @@ pub(crate) fn read_cached_scheduler_affinity_target(
     let api_key_id = auth_snapshot
         .map(|snapshot| snapshot.api_key_id.trim())
         .filter(|value| !value.is_empty())?;
-    let cache_key = build_scheduler_affinity_cache_key_for_api_key_id_with_client_session(
-        api_key_id,
-        client_api_format,
-        requested_model,
-        client_session_affinity,
-    )?;
+    let affinity_scope = scheduler_affinity_scope_for_routing_policy(routing_policy);
+    let cache_key =
+        build_scheduler_affinity_cache_key_for_api_key_id_with_client_session_and_scope(
+            api_key_id,
+            client_api_format,
+            requested_model,
+            client_session_affinity,
+            affinity_scope.as_ref(),
+        )?;
 
     state
         .app()
@@ -73,6 +79,53 @@ pub(crate) fn remember_scheduler_affinity_for_candidate_at_epoch(
     candidate: &SchedulerMinimalCandidateSelectionCandidate,
     expected_epoch: Option<u64>,
 ) {
+    remember_scheduler_affinity_for_candidate_with_scope_at_epoch(
+        state,
+        auth_snapshot,
+        client_session_affinity,
+        client_api_format,
+        requested_model,
+        candidate,
+        None,
+        expected_epoch,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn remember_scheduler_affinity_for_candidate_with_routing_policy_at_epoch(
+    state: PlannerAppState<'_>,
+    auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
+    client_session_affinity: Option<&ClientSessionAffinity>,
+    client_api_format: &str,
+    requested_model: &str,
+    candidate: &SchedulerMinimalCandidateSelectionCandidate,
+    routing_policy: Option<&ResolvedRoutingPolicy>,
+    expected_epoch: Option<u64>,
+) {
+    let affinity_scope = scheduler_affinity_scope_for_routing_policy(routing_policy);
+    remember_scheduler_affinity_for_candidate_with_scope_at_epoch(
+        state,
+        auth_snapshot,
+        client_session_affinity,
+        client_api_format,
+        requested_model,
+        candidate,
+        affinity_scope.as_ref(),
+        expected_epoch,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn remember_scheduler_affinity_for_candidate_with_scope_at_epoch(
+    state: PlannerAppState<'_>,
+    auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
+    client_session_affinity: Option<&ClientSessionAffinity>,
+    client_api_format: &str,
+    requested_model: &str,
+    candidate: &SchedulerMinimalCandidateSelectionCandidate,
+    affinity_scope: Option<&SchedulerAffinityScope>,
+    expected_epoch: Option<u64>,
+) {
     if !has_explicit_session_affinity(client_session_affinity) {
         return;
     }
@@ -82,12 +135,15 @@ pub(crate) fn remember_scheduler_affinity_for_candidate_at_epoch(
     else {
         return;
     };
-    let Some(cache_key) = build_scheduler_affinity_cache_key_for_api_key_id_with_client_session(
-        api_key_id,
-        client_api_format,
-        requested_model,
-        client_session_affinity,
-    ) else {
+    let Some(cache_key) =
+        build_scheduler_affinity_cache_key_for_api_key_id_with_client_session_and_scope(
+            api_key_id,
+            client_api_format,
+            requested_model,
+            client_session_affinity,
+            affinity_scope,
+        )
+    else {
         return;
     };
 
@@ -102,4 +158,16 @@ pub(crate) fn remember_scheduler_affinity_for_candidate_at_epoch(
         PLANNER_SCHEDULER_AFFINITY_MAX_ENTRIES,
         expected_epoch,
     );
+}
+
+fn scheduler_affinity_scope_for_routing_policy(
+    routing_policy: Option<&ResolvedRoutingPolicy>,
+) -> Option<SchedulerAffinityScope> {
+    let policy = routing_policy?;
+    let group_id = policy
+        .group_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|group_id| !group_id.is_empty())?;
+    Some(SchedulerAffinityScope::new(group_id, policy.group_version))
 }

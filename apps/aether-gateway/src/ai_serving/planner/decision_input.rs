@@ -11,7 +11,6 @@ use async_trait::async_trait;
 use http::StatusCode;
 use http::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{json, Value};
-use tracing::warn;
 
 use crate::ai_serving::planner::common::extract_standard_requested_model;
 use crate::ai_serving::{
@@ -408,29 +407,28 @@ pub(crate) async fn attach_routing_policy_to_local_requested_model_input(
             let principal_context_required = if explicit_group.is_some() {
                 true
             } else {
-                !matches!(repository.has_any_routing_group_binding().await, Ok(false))
+                repository
+                    .has_any_routing_group_binding()
+                    .await
+                    .map_err(|error| {
+                        routing_selection_error(GatewayRoutingSelectionError::Repository(
+                            error.to_string(),
+                        ))
+                    })?
             };
             let user_group_ids = if principal_context_required {
                 let user_groups_lookup_started_at = std::time::Instant::now();
-                let user_group_ids = match state
+                let user_groups = state
                     .list_user_groups_for_user(&input.auth_context.user_id)
-                    .await
-                {
-                    Ok(groups) => groups.into_iter().map(|group| group.id).collect::<Vec<_>>(),
-                    Err(error) => {
-                        warn!(
-                            user_id = %input.auth_context.user_id,
-                            error = ?error,
-                            "gateway routing profile user group lookup failed"
-                        );
-                        Vec::new()
-                    }
-                };
+                    .await;
                 observe_gateway_stage_ms(
                     "routing_user_groups_lookup",
                     user_groups_lookup_started_at.elapsed().as_millis() as u64,
                 );
-                user_group_ids
+                user_groups?
+                    .into_iter()
+                    .map(|group| group.id)
+                    .collect::<Vec<_>>()
             } else {
                 Vec::new()
             };
@@ -735,9 +733,14 @@ pub(crate) async fn resolve_local_authenticated_decision_input(
 }
 
 fn routing_selection_error(error: GatewayRoutingSelectionError) -> GatewayError {
-    GatewayError::Client {
-        status: StatusCode::FORBIDDEN,
-        message: error.to_string(),
+    match error {
+        GatewayRoutingSelectionError::Repository(message) => {
+            GatewayError::Internal(format!("routing group repository lookup failed: {message}"))
+        }
+        error => GatewayError::Client {
+            status: StatusCode::FORBIDDEN,
+            message: error.to_string(),
+        },
     }
 }
 
@@ -1004,6 +1007,21 @@ mod tests {
         assert!(first.contains("user=user-1"));
         assert!(first.contains("api_key=key-1"));
         assert!(first.contains("groups=team-1"));
+    }
+
+    #[test]
+    fn routing_repository_failure_maps_to_internal_gateway_error() {
+        let error = routing_selection_error(GatewayRoutingSelectionError::Repository(
+            "sql error: database unavailable".to_string(),
+        ));
+
+        match error {
+            GatewayError::Internal(message) => {
+                assert!(message.contains("routing group repository lookup failed"));
+                assert!(message.contains("database unavailable"));
+            }
+            other => panic!("unexpected routing repository error mapping: {other:?}"),
+        }
     }
 
     #[tokio::test]

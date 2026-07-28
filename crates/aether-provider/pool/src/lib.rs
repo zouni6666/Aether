@@ -604,6 +604,10 @@ mod tests {
             .iter()
             .find(|item| item["name"] == "recent_refresh")
             .expect("recent_refresh should exist");
+        let legacy_free_team = items
+            .iter()
+            .find(|item| item["name"] == "free_team_first")
+            .expect("legacy free_team_first should remain configurable");
 
         assert_eq!(
             free_first["providers"],
@@ -613,6 +617,14 @@ mod tests {
             recent_refresh["providers"],
             json!(["codex", "grok", "kiro", "windsurf"])
         );
+        assert_eq!(free_first["default_enabled"], json!(false));
+        assert_eq!(recent_refresh["default_enabled"], json!(false));
+        assert_eq!(
+            recent_refresh["default_enabled_providers"],
+            json!(["codex", "windsurf"])
+        );
+        assert_eq!(legacy_free_team["default_mode"], json!("both"));
+        assert_eq!(legacy_free_team["modes"].as_array().map(Vec::len), Some(3));
     }
 
     #[test]
@@ -656,6 +668,17 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["cache_affinity", "recent_refresh"]
         );
+
+        let legacy_free_team = service.normalize_scheduling_presets(
+            "codex",
+            &[PoolSchedulingPreset {
+                preset: "free_team_first".to_string(),
+                enabled: true,
+                mode: Some("team_only".to_string()),
+            }],
+        );
+        assert_eq!(legacy_free_team[0].preset, "free_team_first");
+        assert_eq!(legacy_free_team[0].mode.as_deref(), Some("team_only"));
 
         let unsupported = service.normalize_scheduling_presets(
             "chatgpt_web",

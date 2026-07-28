@@ -33,4 +33,6 @@ pub use trace::{
     RoutingCandidateTrace, RoutingDecisionTrace, RoutingPatchSummary, RoutingPoolExpansionTrace,
     RoutingRuntimeFacts,
 };
-pub use validation::{validate_routing_group_config, RoutingValidationError};
+pub use validation::{
+    validate_routing_group_config, RoutingValidationError, MAX_ROUTING_ALLOWED_KEYS,
+};

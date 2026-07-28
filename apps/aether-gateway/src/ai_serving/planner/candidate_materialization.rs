@@ -24,7 +24,7 @@ use tokio::time::Instant;
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::ai_serving::planner::candidate_affinity_cache::remember_scheduler_affinity_for_candidate_at_epoch;
+use crate::ai_serving::planner::candidate_affinity_cache::remember_scheduler_affinity_for_candidate_with_routing_policy_at_epoch;
 use crate::ai_serving::planner::candidate_ranking::scheduler_ordering_config_for_routing_policy;
 use crate::ai_serving::planner::candidate_resolution::{
     resolve_and_rank_logical_local_execution_candidates, EligibleLocalExecutionCandidate,
@@ -421,6 +421,7 @@ where
             self.client_session_affinity,
             self.client_api_format,
             self.requested_model,
+            self.routing_policy,
             candidates,
         );
     }
@@ -691,6 +692,7 @@ where
             client_session_affinity,
             client_api_format,
             requested_model,
+            routing_policy,
             &candidates,
         );
     }
@@ -983,15 +985,7 @@ impl<'a> RequestedModelAttemptPageCursor<'a> {
                         "candidate_page_load",
                         page_started_at.elapsed().as_millis() as u64,
                     );
-                    if matches!(error, GatewayError::AdmissionTimeout { .. }) {
-                        return Err(error);
-                    }
-                    warn!(
-                        trace_id = %self.trace_id,
-                        error = ?error,
-                        "gateway lazy requested-model candidate page read failed"
-                    );
-                    return Ok(false);
+                    return Err(error);
                 }
             };
             observe_gateway_stage_ms(
@@ -1035,6 +1029,7 @@ impl<'a> RequestedModelAttemptPageCursor<'a> {
                     self.client_session_affinity.as_ref(),
                     &self.client_api_format,
                     Some(&self.requested_model),
+                    self.routing_policy.as_ref(),
                     &candidates,
                 );
                 self.remembered_affinity = true;
@@ -1259,6 +1254,7 @@ pub(crate) fn remember_first_local_candidate_affinity(
     client_session_affinity: Option<&ClientSessionAffinity>,
     client_api_format: &str,
     requested_model: Option<&str>,
+    routing_policy: Option<&ResolvedRoutingPolicy>,
     candidates: &[EligibleLocalExecutionCandidate],
 ) {
     let Some(first_candidate) = candidates.first() else {
@@ -1268,13 +1264,14 @@ pub(crate) fn remember_first_local_candidate_affinity(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(first_candidate.candidate.global_model_name.as_str());
-    remember_scheduler_affinity_for_candidate_at_epoch(
+    remember_scheduler_affinity_for_candidate_with_routing_policy_at_epoch(
         state,
         auth_snapshot,
         client_session_affinity,
         client_api_format,
         affinity_requested_model,
         &first_candidate.candidate,
+        routing_policy,
         first_candidate.orchestration.scheduler_affinity_epoch,
     );
 }

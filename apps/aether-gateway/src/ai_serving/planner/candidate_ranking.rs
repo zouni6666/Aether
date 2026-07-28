@@ -66,6 +66,7 @@ impl AiCandidateRankingPort for GatewayLocalCandidateRankingPort<'_> {
             self.client_session_affinity,
             normalized_client_api_format,
             affinity_requested_model,
+            self.routing_policy,
         ))
     }
 
@@ -221,17 +222,21 @@ fn routing_overlaid_candidate(
     let mut overlaid = candidate.clone();
     overlaid.provider_priority = policy
         .ranking_overlay
-        .provider_priority_or_unspecified(candidate.provider_id.as_str());
+        .provider_priority(candidate.provider_id.as_str(), candidate.provider_priority);
     let overlaid_key_priority = match kind {
         LocalExecutionCandidateKind::SingleKey => policy
             .ranking_overlay
-            .key_priority_or_unspecified(candidate.key_id.as_str()),
+            .key_priority_overrides
+            .get(candidate.key_id.as_str()),
         LocalExecutionCandidateKind::PoolGroup => policy
             .ranking_overlay
-            .pool_priority_or_unspecified(candidate.provider_id.as_str()),
+            .pool_priority_overrides
+            .get(candidate.provider_id.as_str()),
     };
-    overlaid.key_internal_priority = overlaid_key_priority;
-    overlaid.key_global_priority_for_format = Some(overlaid_key_priority);
+    if let Some(overlaid_key_priority) = overlaid_key_priority.copied() {
+        overlaid.key_internal_priority = overlaid_key_priority;
+        overlaid.key_global_priority_for_format = Some(overlaid_key_priority);
+    }
     overlaid
 }
 
@@ -354,7 +359,7 @@ mod tests {
     }
 
     #[test]
-    fn routing_policy_priorities_do_not_fall_back_to_candidate_priorities() {
+    fn routing_policy_priorities_fall_back_to_candidate_priorities() {
         let mut candidate = sample_candidate("endpoint-1", "key-1");
         candidate.provider_priority = 7;
         candidate.key_internal_priority = 3;
@@ -380,18 +385,9 @@ mod tests {
             &candidate,
         );
 
-        assert_eq!(
-            overlaid.provider_priority,
-            aether_routing_core::ROUTING_PRIORITY_UNSPECIFIED
-        );
-        assert_eq!(
-            overlaid.key_internal_priority,
-            aether_routing_core::ROUTING_PRIORITY_UNSPECIFIED
-        );
-        assert_eq!(
-            overlaid.key_global_priority_for_format,
-            Some(aether_routing_core::ROUTING_PRIORITY_UNSPECIFIED)
-        );
+        assert_eq!(overlaid.provider_priority, 7);
+        assert_eq!(overlaid.key_internal_priority, 3);
+        assert_eq!(overlaid.key_global_priority_for_format, Some(2));
     }
 
     #[test]

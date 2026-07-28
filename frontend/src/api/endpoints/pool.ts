@@ -103,6 +103,8 @@ export interface PoolPresetMeta {
   label: string
   description: string
   providers: string[]
+  default_enabled?: boolean
+  default_enabled_providers?: string[]
   modes?: PoolPresetModeMeta[] | null
   default_mode?: string | null
   mutex_group?: string | null
