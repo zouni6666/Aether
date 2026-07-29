@@ -332,7 +332,8 @@ fn testkit_gateway_harness_is_opt_in() {
         "aether-gateway = { workspace = true, features = [\"testkit\"], optional = true }"
     ));
 
-    let testkit_lib = read_workspace_file("crates/aether-testing/testkit/src/lib.rs");
+    let testkit_lib =
+        read_workspace_file("crates/aether-testing/testkit/src/lib.rs").replace("\r\n", "\n");
     for module in ["execution_runtime", "gateway", "tunnel"] {
         assert!(
             testkit_lib.contains(&format!("#[cfg(feature = \"gateway\")]\nmod {module};")),

@@ -4994,6 +4994,8 @@ fn retired_api_format_occurrences_are_whitelisted() {
         "crates/aether-data/runtime/src/lifecycle/migrate/tests.rs",
         "crates/aether-usage/runtime/src/report.rs",
         "frontend/src/api/endpoints/types/__tests__/api-format.spec.ts",
+        "frontend/src/views/admin/module-management/modelDirectivesConfig.ts",
+        "frontend/src/views/admin/module-management/__tests__/modelDirectivesConfig.spec.ts",
     ];
     let allowed = allowed_paths
         .into_iter()

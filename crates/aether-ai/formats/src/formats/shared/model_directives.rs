@@ -374,6 +374,9 @@ pub fn apply_model_directive_overrides_from_model(
 ) -> Option<ModelDirective> {
     let directive = parse_model_directive(source_model)?;
     let mut patched_body = provider_request_body.clone();
+    let is_openai_search =
+        crate::normalize_api_format_alias(provider_api_format) == "openai:search";
+    let mut applied_override = false;
     for override_item in &directive.overrides {
         match override_item {
             ModelOverride::ReasoningEffort(effort) => {
@@ -384,6 +387,7 @@ pub fn apply_model_directive_overrides_from_model(
                     &directive.base_model,
                     *effort,
                 )?;
+                applied_override = true;
             }
             ModelOverride::CodexReasoningPreset(preset) => {
                 apply_codex_reasoning_preset_override(
@@ -391,11 +395,19 @@ pub fn apply_model_directive_overrides_from_model(
                     provider_api_format,
                     *preset,
                 )?;
+                applied_override = true;
             }
             ModelOverride::ServiceTier(tier) => {
+                if is_openai_search {
+                    continue;
+                }
                 apply_service_tier_override(&mut patched_body, provider_api_format, *tier)?;
+                applied_override = true;
             }
         }
+    }
+    if !applied_override {
+        return None;
     }
     *provider_request_body = patched_body;
     Some(directive)

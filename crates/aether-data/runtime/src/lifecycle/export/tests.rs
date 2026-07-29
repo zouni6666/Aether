@@ -290,6 +290,23 @@ fn cross_driver_timestamp_normalization_preserves_usage_second_contract() {
         normalized["created_at_unix_ms"],
         json!("2023-11-14T22:13:20+00:00")
     );
+
+    let target_columns = BTreeMap::from([(
+        "created_at_unix_ms".to_string(),
+        postgres_column("bigint", "int8"),
+    )]);
+    let row = ExportRow {
+        id: "usage-1".to_string(),
+        payload: json!({ "created_at_unix_ms": "1970-01-01T00:00:01.234900Z" }),
+    };
+    let normalized = normalize_postgres_import_payload(
+        "public.usage",
+        ExportDomain::Usage,
+        &row,
+        &target_columns,
+    )
+    .expect("postgres integer usage timestamp should normalize");
+    assert_eq!(normalized["created_at_unix_ms"], json!(1));
 }
 
 #[test]

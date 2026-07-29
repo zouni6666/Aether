@@ -54,7 +54,7 @@ fn mysql_dashboard_reads_imported_daily_aggregates() {
 
 #[test]
 fn mysql_usage_stat_rebuilds_aggregate_in_sql() {
-    let source = include_str!("../usage.rs");
+    let source = include_str!("../usage.rs").replace("\r\n", "\n");
     assert!(source.contains("UPDATE api_keys\nJOIN ("));
     assert!(source.contains("AND status NOT IN ('pending', 'streaming')"));
     assert!(source.contains("MYSQL_USAGE_CANONICAL_TOTAL_TOKENS_EXPR"));

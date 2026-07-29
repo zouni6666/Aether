@@ -476,9 +476,9 @@ async fn load_mysql_import_columns(
     let rows = sqlx::query(
         r#"
 SELECT
-  COLUMN_NAME AS column_name,
-  DATA_TYPE AS data_type,
-  COLUMN_KEY AS column_key,
+    CAST(COLUMN_NAME AS CHAR) AS column_name,
+    CAST(DATA_TYPE AS CHAR) AS data_type,
+    CAST(COLUMN_KEY AS CHAR) AS column_key,
   ORDINAL_POSITION AS ordinal_position
 FROM information_schema.columns
 WHERE table_schema = DATABASE()
@@ -506,7 +506,7 @@ WHERE table_schema = DATABASE()
             .eq_ignore_ascii_case("PRI")
         {
             primary_key.insert(
-                row.try_get::<i64, _>("ordinal_position").map_sql_err()?,
+                row.try_get::<u32, _>("ordinal_position").map_sql_err()?,
                 name,
             );
         }
@@ -662,7 +662,9 @@ fn mysql_value_to_json(row: &sqlx::mysql::MySqlRow, index: usize) -> Result<Valu
                 })
         }
         "DECIMAL" | "NEWDECIMAL" => Ok(Value::String(
-            row.try_get::<String, _>(index).map_sql_err()?,
+            row.try_get::<sqlx::types::BigDecimal, _>(index)
+                .map_sql_err()?
+                .to_string(),
         )),
         "VARCHAR" | "VAR_STRING" | "STRING" | "TEXT" | "TINYTEXT" | "MEDIUMTEXT" | "LONGTEXT"
         | "JSON" | "ENUM" | "SET" | "DATE" | "DATETIME" | "TIMESTAMP" | "TIME" => Ok(

@@ -2307,8 +2307,8 @@ mod tests {
         transport.provider.provider_type = "antigravity".to_string();
         transport.endpoint.base_url = "https://antigravity.googleapis.com".to_string();
         transport.endpoint.custom_path = None;
-        transport.key.auth_type = "oauth".to_string();
-        transport.key.decrypted_api_key = "__placeholder__".to_string();
+        transport.key.auth_type = "bearer".to_string();
+        transport.key.decrypted_api_key = "imported-antigravity-token".to_string();
         transport.key.upstream_metadata = None;
         transport.key.decrypted_auth_config = Some(
             json!({

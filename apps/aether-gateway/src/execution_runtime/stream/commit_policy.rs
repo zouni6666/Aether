@@ -8,9 +8,9 @@ const ANTHROPIC_PRECOMMIT_MAX_WAIT: Duration = Duration::from_millis(750);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StreamCommitPolicy {
-    OnResponseHeaders,
-    OnFirstClassifiedBody,
-    OnFirstAnthropicSemanticEvent {
+    ResponseHeaders,
+    FirstClassifiedBody,
+    FirstAnthropicSemanticEvent {
         max_bytes: usize,
         max_wait: Duration,
     },
@@ -28,11 +28,11 @@ impl StreamCommitPolicy {
         force_prefetch: bool,
     ) -> Self {
         if !has_direct_finalize {
-            return Self::OnFirstClassifiedBody;
+            return Self::FirstClassifiedBody;
         }
 
         if force_prefetch {
-            return Self::OnFirstClassifiedBody;
+            return Self::FirstClassifiedBody;
         }
 
         let content_type = content_type
@@ -46,50 +46,50 @@ impl StreamCommitPolicy {
                 && !has_private_stream_normalizer
                 && !has_local_stream_rewriter
             {
-                return Self::OnFirstAnthropicSemanticEvent {
+                return Self::FirstAnthropicSemanticEvent {
                     max_bytes: MAX_STREAM_PREFETCH_BYTES,
                     max_wait: ANTHROPIC_PRECOMMIT_MAX_WAIT,
                 };
             }
-            return Self::OnResponseHeaders;
+            return Self::ResponseHeaders;
         }
 
         if has_private_stream_normalizer || has_local_stream_rewriter {
-            return Self::OnFirstClassifiedBody;
+            return Self::FirstClassifiedBody;
         }
 
         if !provider_api_format.eq_ignore_ascii_case(client_api_format) {
-            return Self::OnFirstClassifiedBody;
+            return Self::FirstClassifiedBody;
         }
 
         if content_type.is_empty() {
-            return Self::OnResponseHeaders;
+            return Self::ResponseHeaders;
         }
 
         if content_type.contains("json") || content_type.ends_with("+json") {
-            Self::OnFirstClassifiedBody
+            Self::FirstClassifiedBody
         } else {
-            Self::OnResponseHeaders
+            Self::ResponseHeaders
         }
     }
 
     pub(super) const fn commits_on_response_headers(self) -> bool {
-        matches!(self, Self::OnResponseHeaders)
+        matches!(self, Self::ResponseHeaders)
     }
 
     pub(super) const fn requires_bounded_frame_wait(self) -> bool {
-        matches!(self, Self::OnFirstAnthropicSemanticEvent { .. })
+        matches!(self, Self::FirstAnthropicSemanticEvent { .. })
     }
 
     pub(super) const fn max_precommit_wait(self) -> Option<Duration> {
         match self {
-            Self::OnFirstAnthropicSemanticEvent { max_wait, .. } => Some(max_wait),
-            Self::OnResponseHeaders | Self::OnFirstClassifiedBody => None,
+            Self::FirstAnthropicSemanticEvent { max_wait, .. } => Some(max_wait),
+            Self::ResponseHeaders | Self::FirstClassifiedBody => None,
         }
     }
 
     pub(super) const fn is_native_anthropic(self) -> bool {
-        matches!(self, Self::OnFirstAnthropicSemanticEvent { .. })
+        matches!(self, Self::FirstAnthropicSemanticEvent { .. })
     }
 }
 
@@ -143,8 +143,7 @@ impl StreamCommitGate {
             return StreamPrecommitObservation::Commit;
         }
 
-        let StreamCommitPolicy::OnFirstAnthropicSemanticEvent { max_bytes, .. } = self.policy
-        else {
+        let StreamCommitPolicy::FirstAnthropicSemanticEvent { max_bytes, .. } = self.policy else {
             return StreamPrecommitObservation::Pending;
         };
 
@@ -341,7 +340,7 @@ mod tests {
     };
 
     fn native_anthropic_policy() -> StreamCommitPolicy {
-        StreamCommitPolicy::OnFirstAnthropicSemanticEvent {
+        StreamCommitPolicy::FirstAnthropicSemanticEvent {
             max_bytes: 16_384,
             max_wait: Duration::from_millis(750),
         }
@@ -480,7 +479,7 @@ mod tests {
 
     #[test]
     fn transport_fragment_count_does_not_commit_an_incomplete_anthropic_error() {
-        let policy = StreamCommitPolicy::OnFirstAnthropicSemanticEvent {
+        let policy = StreamCommitPolicy::FirstAnthropicSemanticEvent {
             max_bytes: 1024,
             max_wait: Duration::from_millis(750),
         };

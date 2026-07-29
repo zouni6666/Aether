@@ -171,7 +171,7 @@ async fn mysql_wallet_read_repository_reads_wallet_contract_views() {
 
     let page = repository
         .list_admin_wallets(&AdminWalletListQuery {
-            status: Some("active".to_string()),
+            status: Some("wallet-read-smoke".to_string()),
             owner_type: Some("user".to_string()),
             limit: 1,
             offset: 1,
@@ -186,7 +186,7 @@ async fn mysql_wallet_read_repository_reads_wallet_contract_views() {
 
     let unknown_owner = repository
         .list_admin_wallets(&AdminWalletListQuery {
-            status: Some("active".to_string()),
+            status: Some("wallet-read-smoke".to_string()),
             owner_type: Some("unknown".to_string()),
             limit: 10,
             offset: 0,
@@ -430,12 +430,12 @@ VALUES ('api-key-1', 'user-1', 'wallet-test-api-key-hash-1', 'Standalone Key', 1
     sqlx::query(
         r#"
 INSERT INTO wallets (
-  id, user_id, api_key_id, balance, gift_balance, total_recharged, total_consumed,
-  total_refunded, total_adjusted, created_at, updated_at
+    id, user_id, api_key_id, balance, gift_balance, status, total_recharged,
+    total_consumed, total_refunded, total_adjusted, created_at, updated_at
 ) VALUES
-  ('wallet-1', 'user-1', NULL, 10.0, 2.0, 20.0, 4.0, 1.0, 3.0, 1, 2),
-  ('wallet-2', 'user-2', NULL, 4.0, 1.0, 5.0, 2.0, 0.0, 0.0, 1, 3),
-  ('wallet-api-1', NULL, 'api-key-1', 7.0, 0.0, 7.0, 0.0, 0.0, 0.0, 1, 4)
+    ('wallet-1', 'user-1', NULL, 10.0, 2.0, 'wallet-read-smoke', 20.0, 4.0, 1.0, 3.0, 1, 2),
+    ('wallet-2', 'user-2', NULL, 4.0, 1.0, 'wallet-read-smoke', 5.0, 2.0, 0.0, 0.0, 1, 3),
+    ('wallet-api-1', NULL, 'api-key-1', 7.0, 0.0, 'wallet-read-smoke', 7.0, 0.0, 0.0, 0.0, 1, 4)
 "#,
     )
     .execute(pool)

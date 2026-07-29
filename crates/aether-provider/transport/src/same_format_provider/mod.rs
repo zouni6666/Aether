@@ -1018,7 +1018,7 @@ mod tests {
                 .expect("headers should build")
             };
         assert!(
-            build_headers(compat_behavior, None).get("x-app").is_none(),
+            !build_headers(compat_behavior, None).contains_key("x-app"),
             "compatibility profile must not impersonate the Claude Code transport"
         );
         assert_eq!(
@@ -1029,12 +1029,11 @@ mod tests {
             "Claude Code transport headers must survive a transparent body profile"
         );
         assert!(
-            build_headers(
+            !build_headers(
                 native_behavior,
                 Some(aether_ai_formats::ApiOperation::ClaudeCountTokens),
             )
-            .get("anthropic-beta")
-            .is_none(),
+            .contains_key("anthropic-beta"),
             "native transparent token counting must not inject compatibility betas"
         );
         assert!(

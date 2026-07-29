@@ -664,7 +664,7 @@ mod tests {
                 let provider_id = format!(
                     "vertex-{}-{}",
                     auth_type,
-                    api_format.replace(':', "-").replace('_', "-")
+                    api_format.replace([':', '_'], "-")
                 );
                 let mut row = sample_row(&provider_id, api_format, "vertex-model", 10);
                 row.provider_type = "vertex_ai".to_string();

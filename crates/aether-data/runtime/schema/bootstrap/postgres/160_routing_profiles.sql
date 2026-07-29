@@ -28,6 +28,9 @@ BEGIN
 END $$;
 CREATE INDEX IF NOT EXISTS routing_groups_system_default_idx
     ON public.routing_groups USING btree (is_system_default, enabled);
+CREATE UNIQUE INDEX IF NOT EXISTS routing_groups_one_system_default_key
+    ON public.routing_groups (is_system_default)
+    WHERE is_system_default = TRUE;
 
 CREATE TABLE IF NOT EXISTS public.routing_group_bindings (
     id character varying(64) NOT NULL,
@@ -53,6 +56,9 @@ CREATE INDEX IF NOT EXISTS routing_group_bindings_group_id_idx
     ON public.routing_group_bindings USING btree (group_id);
 CREATE INDEX IF NOT EXISTS routing_group_bindings_subject_idx
     ON public.routing_group_bindings USING btree (subject_type, subject_id);
+CREATE UNIQUE INDEX IF NOT EXISTS routing_group_bindings_subject_default_key
+    ON public.routing_group_bindings (subject_type, subject_id)
+    WHERE is_default = TRUE;
 
 CREATE TABLE IF NOT EXISTS public.routing_group_versions (
     id character varying(64) NOT NULL,

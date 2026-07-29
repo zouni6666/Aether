@@ -591,7 +591,7 @@ jobs:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
           AETHER_TEST_MYSQL_URL: mysql://aether:aether@127.0.0.1:3306/aether_test
-        run: cargo test -p aether-data-mysql mysql_usage_write_repository_upserts_when_url_is_set --lib -- --nocapture
+        run: cargo test -p aether-data-mysql mysql_usage_write_repository_upserts_and_flushes_counters_when_url_is_set --lib -- --nocapture
 
       - name: Run MySQL usage read smoke test
         env:

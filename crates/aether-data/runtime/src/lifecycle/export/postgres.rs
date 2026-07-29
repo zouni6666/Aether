@@ -488,6 +488,10 @@ fn normalize_postgres_import_value(
     if is_postgres_boolean_column(target_column) {
         return normalize_postgres_boolean_value(column_name, value);
     }
+    if is_postgres_integer_column(target_column) && import_column_stores_timestamp(column_name) {
+        return normalize_imported_integer_timestamp("postgres", table_name, column_name, value)
+            .map(|timestamp| timestamp.map_or(Value::Null, |value| Value::Number(value.into())));
+    }
     if is_postgres_timestamp_column(target_column) {
         return normalize_postgres_timestamp_value(table_name, column_name, value);
     }
@@ -510,6 +514,13 @@ pub(super) fn is_postgres_timestamp_column(target_column: &PostgresImportColumn)
         target_column.data_type.as_str(),
         "timestamp with time zone" | "timestamp without time zone"
     ) || matches!(target_column.udt_name.as_str(), "timestamptz" | "timestamp")
+}
+
+fn is_postgres_integer_column(target_column: &PostgresImportColumn) -> bool {
+    matches!(
+        target_column.data_type.as_str(),
+        "smallint" | "integer" | "bigint"
+    ) || matches!(target_column.udt_name.as_str(), "int2" | "int4" | "int8")
 }
 
 fn is_postgres_json_column(target_column: &PostgresImportColumn) -> bool {
@@ -655,20 +666,6 @@ fn postgres_billing_table_name(
     }
 }
 
-#[cfg(test)]
-mod billing_table_tests {
-    use super::postgres_billing_table_name;
-
-    #[test]
-    fn settlement_snapshot_import_uses_request_id_conflict_key() {
-        assert_eq!(
-            postgres_billing_table_name("usage_settlement_snapshots")
-                .expect("settlement snapshot table should be supported"),
-            ("public.usage_settlement_snapshots", "request_id")
-        );
-    }
-}
-
 async fn import_postgres_wallet_row(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     row: &ExportRow,
@@ -720,4 +717,18 @@ fn postgres_wallet_table_name(
                 "unsupported postgres wallet export table '{table_name}'"
             ))
         })
+}
+
+#[cfg(test)]
+mod billing_table_tests {
+    use super::postgres_billing_table_name;
+
+    #[test]
+    fn settlement_snapshot_import_uses_request_id_conflict_key() {
+        assert_eq!(
+            postgres_billing_table_name("usage_settlement_snapshots")
+                .expect("settlement snapshot table should be supported"),
+            ("public.usage_settlement_snapshots", "request_id")
+        );
+    }
 }

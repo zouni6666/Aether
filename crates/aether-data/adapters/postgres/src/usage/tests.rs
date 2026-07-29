@@ -25,6 +25,10 @@ use aether_data_contracts::repository::usage::{
     UsageProviderPerformanceQuery, UsageTimeSeriesGranularity, UsageWriteRepository,
 };
 
+fn normalize_newlines(value: &str) -> String {
+    value.replace("\r\n", "\n")
+}
+
 fn fast_clear_usage_record(
     request_id: &str,
     provider_name: &str,
@@ -2352,7 +2356,7 @@ fn usage_counter_pending_health_does_not_scan_processed_history() {
 
 #[test]
 fn usage_sql_rebuild_matches_online_api_key_usage_semantics() {
-    let sql = super::REBUILD_API_KEY_USAGE_STATS_SQL;
+    let sql = normalize_newlines(super::REBUILD_API_KEY_USAGE_STATS_SQL);
     assert!(sql.contains("COUNT(*)::BIGINT"));
     assert!(sql.contains("GREATEST(\n        COALESCE(total_tokens, 0),"));
     assert!(!sql.contains("COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)"));
@@ -2362,7 +2366,7 @@ fn usage_sql_rebuild_matches_online_api_key_usage_semantics() {
 
 #[test]
 fn usage_sql_rebuild_matches_online_provider_key_usage_semantics() {
-    let sql = super::REBUILD_PROVIDER_API_KEY_USAGE_STATS_SQL;
+    let sql = normalize_newlines(super::REBUILD_PROVIDER_API_KEY_USAGE_STATS_SQL);
     assert!(sql.contains("COUNT(*)::BIGINT"));
     assert!(sql.contains("NULLIF(BTRIM(error_message), '') IS NULL"));
     assert!(sql.contains("GREATEST(\n          COALESCE(total_tokens, 0),"));
@@ -2574,7 +2578,7 @@ fn usage_sql_aggregate_reads_use_materialized_total_tokens_only_when_available()
         projections
     }
 
-    let source = include_str!("mod.rs");
+    let source = normalize_newlines(include_str!("mod.rs"));
     let breakdown = source
         .split("async fn summarize_usage_breakdown_from_daily_aggregates")
         .nth(1)
@@ -2647,7 +2651,7 @@ fn usage_sql_aggregate_usage_audits_supports_daily_model_and_provider_aggregates
 
 #[test]
 fn usage_sql_provider_aggregation_excludes_unknown_provider_labels() {
-    let source = include_str!("mod.rs");
+    let source = normalize_newlines(include_str!("mod.rs"));
     assert!(source.contains("const USAGE_PROVIDER_IDENTITY_FILTER_SQL"));
     assert!(source.contains("const USAGE_PROVIDER_IDENTITY_SOURCE_SQL"));
     assert!(source.contains(r#"BTRIM(COALESCE("usage".provider_id, '')) <> ''"#));
@@ -3280,9 +3284,10 @@ fn usage_sql_casts_json_payload_bind_parameters_explicitly() {
 
 #[test]
 fn usage_sql_insert_values_aligns_request_metadata_and_timestamps() {
-    assert!(super::UPSERT_SQL.contains("\n  $51::json,\n  $52,\n  $53::json,\n  CASE"));
-    assert!(super::UPSERT_SQL.contains("WHEN $54 IS NULL THEN NULL"));
-    assert!(super::UPSERT_SQL.contains("TO_TIMESTAMP($55::double precision)"));
+    let sql = normalize_newlines(super::UPSERT_SQL);
+    assert!(sql.contains("\n  $51::json,\n  $52,\n  $53::json,\n  CASE"));
+    assert!(sql.contains("WHEN $54 IS NULL THEN NULL"));
+    assert!(sql.contains("TO_TIMESTAMP($55::double precision)"));
 }
 
 #[test]
@@ -3529,7 +3534,7 @@ fn usage_sql_does_not_allow_streaming_to_regress_back_to_pending() {
 
 #[test]
 fn first_byte_upsert_sql_is_single_row_guarded_and_preserves_existing_metadata() {
-    let sql = super::UPSERT_FIRST_BYTE_SQL;
+    let sql = normalize_newlines(super::UPSERT_FIRST_BYTE_SQL);
     assert_eq!(sql.matches("INSERT INTO").count(), 1);
     assert!(!sql.contains("usage_http_audits"));
     assert!(!sql.contains("usage_routing_snapshots"));

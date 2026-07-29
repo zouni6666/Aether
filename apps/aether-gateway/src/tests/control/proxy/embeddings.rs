@@ -4,6 +4,7 @@ use std::sync::Arc;
 use aether_contracts::{ExecutionPlan, ExecutionResult, ResponseBody};
 use aether_crypto::DEVELOPMENT_ENCRYPTION_KEY;
 use aether_data::repository::candidate_selection::InMemoryMinimalCandidateSelectionReadRepository;
+use base64::Engine as _;
 use http::StatusCode;
 use serde_json::json;
 
@@ -634,7 +635,17 @@ fn assert_native_gemini_embedding_execution_plan(plan: &ExecutionPlan) {
         Some("gemini-embedding-2-preview")
     );
     assert!(!plan.stream);
-    let body = plan.body.json_body.as_ref().expect("json request body");
+    assert!(plan.body.json_body.is_none());
+    let body_bytes = base64::engine::general_purpose::STANDARD
+        .decode(
+            plan.body
+                .body_bytes_b64
+                .as_deref()
+                .expect("original request body bytes"),
+        )
+        .expect("request body should decode");
+    let body: serde_json::Value =
+        serde_json::from_slice(&body_bytes).expect("request body should parse");
     assert_eq!(body["content"]["parts"][0]["text"], "hello");
     assert!(body.get("input").is_none());
     assert!(body.get("messages").is_none());

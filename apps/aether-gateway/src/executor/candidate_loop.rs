@@ -573,7 +573,7 @@ impl ProviderTransferStateTracker {
         now: Instant,
     ) -> Option<ProviderTransferLimitReached> {
         if self.exhausted_provider_ids.contains(&plan.provider_id) {
-            return Some(self.reached_snapshot(plan.provider_id.as_str(), now, false, false)?);
+            return self.reached_snapshot(plan.provider_id.as_str(), now, false, false);
         }
 
         let state = self.by_provider.get(&plan.provider_id)?;

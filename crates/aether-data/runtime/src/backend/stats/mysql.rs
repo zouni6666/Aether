@@ -651,7 +651,7 @@ SELECT SHA2(UUID(), 256), usage.api_key_id, ?, COUNT(*),
   COALESCE(SUM(usage.cache_creation_input_tokens), 0),
   COALESCE(SUM(usage.cache_read_input_tokens), 0),
   COALESCE(SUM(usage.total_cost_usd), 0), MAX(api_keys.name), ?, ?
-FROM `usage` AS usage
+FROM `usage` AS `usage`
 LEFT JOIN api_keys ON api_keys.id = usage.api_key_id
 WHERE usage.created_at_unix_ms >= ? AND usage.created_at_unix_ms < ?
   AND usage.api_key_id IS NOT NULL AND usage.api_key_id <> ''
@@ -736,7 +736,7 @@ SELECT SHA2(UUID(), 256), usage.user_id, ?, COUNT(*),
   COALESCE(SUM(usage.cache_creation_input_tokens), 0),
   COALESCE(SUM(usage.cache_read_input_tokens), 0),
   COALESCE(SUM(usage.total_cost_usd), 0), MAX(users.username), ?, ?
-FROM `usage` AS usage
+FROM `usage` AS `usage`
 LEFT JOIN users ON users.id = usage.user_id
 WHERE usage.created_at_unix_ms >= ? AND usage.created_at_unix_ms < ?
   AND usage.user_id IS NOT NULL AND usage.user_id <> ''

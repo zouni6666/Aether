@@ -536,6 +536,7 @@ const REQUEST_BODY_DETAIL_TABLES: &[&str] = &["usage_body_blobs"];
 #[cfg(all(feature = "postgres", feature = "sqlite"))]
 const LIFECYCLE_TABLES: &[&str] = &["_sqlx_migrations", "schema_backfills"];
 
+#[cfg(any(feature = "mysql", feature = "postgres", feature = "sqlite"))]
 fn import_column_stores_timestamp(column_name: &str) -> bool {
     column_name.ends_with("_at")
         || column_name.ends_with("_unix_secs")
@@ -547,6 +548,7 @@ fn import_column_stores_timestamp(column_name: &str) -> bool {
         )
 }
 
+#[cfg(any(feature = "mysql", feature = "postgres", feature = "sqlite"))]
 fn import_timestamp_uses_millis(table_name: &str, column_name: &str) -> bool {
     if !column_name.ends_with("_unix_ms") {
         return false;
@@ -562,6 +564,7 @@ fn import_timestamp_uses_millis(table_name: &str, column_name: &str) -> bool {
     !(relation_name == "usage" && column_name == "created_at_unix_ms")
 }
 
+#[cfg(any(feature = "mysql", feature = "postgres", feature = "sqlite"))]
 fn normalize_imported_integer_timestamp(
     driver_name: &str,
     table_name: &str,
@@ -597,6 +600,7 @@ fn normalize_imported_integer_timestamp(
     Ok(Some(timestamp))
 }
 
+#[cfg(any(feature = "mysql", feature = "postgres", feature = "sqlite"))]
 fn parse_imported_datetime(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     let value = value.trim();
     if let Ok(datetime) = chrono::DateTime::parse_from_rfc3339(value) {

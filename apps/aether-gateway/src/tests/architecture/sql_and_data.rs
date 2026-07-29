@@ -1750,7 +1750,8 @@ fn usage_repositories_are_owned_by_contracts_and_driver_adapters() {
     }
     let mysql_facade =
         read_workspace_file("crates/aether-data/runtime/src/repository/usage/mysql.rs");
-    assert!(mysql_facade.contains("aether_data_mysql::MysqlUsageStorage"));
+    assert!(mysql_facade.contains("use aether_data_mysql::"));
+    assert!(mysql_facade.contains("MysqlUsageStorage"));
     for forbidden in ["sqlx::query", "FROM `usage`", "INSERT INTO `usage`"] {
         assert!(
             !mysql_facade.contains(forbidden),

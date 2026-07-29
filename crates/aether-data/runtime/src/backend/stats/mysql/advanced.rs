@@ -143,7 +143,7 @@ JOIN (
     MAX(CASE WHEN {SETTLED} THEN COALESCE(settlement.finalized_at, usage.finalized_at) END) AS settled_last_finalized_at_unix_secs,
     COALESCE(SUM(CASE WHEN usage.response_time_ms IS NOT NULL AND {AGGREGATABLE} THEN GREATEST(usage.response_time_ms, 0) ELSE 0 END), 0) AS response_time_sum_ms,
     COALESCE(SUM(CASE WHEN usage.response_time_ms IS NOT NULL AND {AGGREGATABLE} THEN 1 ELSE 0 END), 0) AS response_time_samples
-  FROM `usage` AS usage
+    FROM `usage` AS `usage`
   LEFT JOIN usage_settlement_snapshots AS settlement ON settlement.request_id = usage.request_id
   WHERE usage.created_at_unix_ms >= ? AND usage.created_at_unix_ms < ?
 ) AS aggregated
@@ -207,7 +207,7 @@ JOIN (
     COALESCE(SUM(CASE WHEN {SETTLED} THEN GREATEST(COALESCE(usage.cache_read_input_tokens, 0), 0) ELSE 0 END), 0) AS settled_cache_read_tokens,
     MIN(CASE WHEN {SETTLED} THEN COALESCE(settlement.finalized_at, usage.finalized_at) END) AS settled_first_finalized_at_unix_secs,
     MAX(CASE WHEN {SETTLED} THEN COALESCE(settlement.finalized_at, usage.finalized_at) END) AS settled_last_finalized_at_unix_secs
-  FROM `usage` AS usage
+    FROM `usage` AS `usage`
   LEFT JOIN usage_settlement_snapshots AS settlement ON settlement.request_id = usage.request_id
   WHERE usage.created_at_unix_ms >= ? AND usage.created_at_unix_ms < ?
     AND usage.user_id IS NOT NULL AND usage.user_id <> '' AND {AGGREGATABLE}
@@ -266,7 +266,7 @@ JOIN (
   SELECT {select_dimensions},
     COALESCE(SUM(CASE WHEN usage.response_time_ms IS NOT NULL THEN GREATEST(usage.response_time_ms, 0) ELSE 0 END), 0) AS response_time_sum_ms,
     COALESCE(SUM(CASE WHEN usage.response_time_ms IS NOT NULL THEN 1 ELSE 0 END), 0) AS response_time_samples
-  FROM `usage` AS usage
+    FROM `usage` AS `usage`
   WHERE usage.created_at_unix_ms >= ? AND usage.created_at_unix_ms < ? AND {AGGREGATABLE}
   GROUP BY {group_by}
 ) AS aggregated ON {join}
@@ -391,7 +391,7 @@ JOIN (
     COALESCE(SUM(CASE WHEN {SETTLED} THEN GREATEST(COALESCE(usage.cache_read_input_tokens, 0), 0) ELSE 0 END), 0) AS settled_cache_read_tokens,
     MIN(CASE WHEN {SETTLED} THEN COALESCE(settlement.finalized_at, usage.finalized_at) END) AS settled_first_finalized_at_unix_secs,
     MAX(CASE WHEN {SETTLED} THEN COALESCE(settlement.finalized_at, usage.finalized_at) END) AS settled_last_finalized_at_unix_secs
-  FROM `usage` AS usage
+    FROM `usage` AS `usage`
   LEFT JOIN usage_settlement_snapshots AS settlement ON settlement.request_id = usage.request_id
   WHERE usage.created_at_unix_ms >= ? AND usage.created_at_unix_ms < ?
 ) AS aggregated
@@ -461,7 +461,7 @@ JOIN (
     COALESCE(SUM(CASE WHEN usage.response_time_ms IS NOT NULL THEN 1 ELSE 0 END), 0) AS response_time_samples,
     COALESCE(SUM({CACHE_5M}), 0) AS cache_creation_ephemeral_5m_tokens,
     COALESCE(SUM({CACHE_1H}), 0) AS cache_creation_ephemeral_1h_tokens
-  FROM `usage` AS usage
+    FROM `usage` AS `usage`
   WHERE usage.created_at_unix_ms >= ? AND usage.created_at_unix_ms < ?
     AND {AGGREGATABLE} AND usage.model IS NOT NULL AND usage.model <> ''
   GROUP BY usage.model
@@ -503,7 +503,7 @@ JOIN (
     COALESCE(SUM(CASE WHEN {SETTLED} THEN GREATEST(COALESCE(usage.cache_read_input_tokens, 0), 0) ELSE 0 END), 0) AS settled_cache_read_tokens,
     MIN(CASE WHEN {SETTLED} THEN COALESCE(settlement.finalized_at, usage.finalized_at) END) AS settled_first_finalized_at_unix_secs,
     MAX(CASE WHEN {SETTLED} THEN COALESCE(settlement.finalized_at, usage.finalized_at) END) AS settled_last_finalized_at_unix_secs
-  FROM `usage` AS usage
+    FROM `usage` AS `usage`
   LEFT JOIN usage_settlement_snapshots AS settlement ON settlement.request_id = usage.request_id
   WHERE usage.created_at_unix_ms >= ? AND usage.created_at_unix_ms < ?
     AND usage.user_id IS NOT NULL AND usage.user_id <> '' AND {AGGREGATABLE}
@@ -581,7 +581,7 @@ SELECT SHA2(UUID(), 256), usage.user_id,
   COALESCE(SUM(CASE WHEN ({SUCCESS}) = 1 AND usage.response_time_ms IS NOT NULL THEN GREATEST(usage.response_time_ms, 0) ELSE 0 END), 0),
   COALESCE(SUM(CASE WHEN ({SUCCESS}) = 1 AND usage.response_time_ms IS NOT NULL THEN 1 ELSE 0 END), 0),
   ?, ?
-FROM `usage` AS usage
+ FROM `usage` AS `usage`
 LEFT JOIN users ON users.id = usage.user_id
 LEFT JOIN usage_settlement_snapshots AS settlement ON settlement.request_id = usage.request_id
 WHERE usage.created_at_unix_ms >= ? AND usage.created_at_unix_ms < ?
@@ -637,7 +637,7 @@ SELECT SHA2(UUID(), 256), ?, usage.model, usage.provider_name, COUNT(*),
   COALESCE(SUM(COALESCE(settlement.billing_total_cost_usd, usage.total_cost_usd, 0)), 0),
   COALESCE(SUM(CASE WHEN usage.response_time_ms IS NOT NULL THEN GREATEST(usage.response_time_ms, 0) ELSE 0 END), 0),
   COALESCE(SUM(CASE WHEN usage.response_time_ms IS NOT NULL THEN 1 ELSE 0 END), 0), ?, ?
-FROM `usage` AS usage
+ FROM `usage` AS `usage`
 LEFT JOIN usage_settlement_snapshots AS settlement ON settlement.request_id = usage.request_id
 WHERE usage.created_at_unix_ms >= ? AND usage.created_at_unix_ms < ?
   AND usage.model IS NOT NULL AND usage.model <> '' AND {AGGREGATABLE}
@@ -669,7 +669,7 @@ SELECT SHA2(UUID(), 256), usage.user_id, MAX(COALESCE(usage.username, users.user
   COALESCE(SUM(COALESCE(settlement.billing_total_cost_usd, usage.total_cost_usd, 0)), 0),
   COALESCE(SUM(CASE WHEN usage.response_time_ms IS NOT NULL THEN GREATEST(usage.response_time_ms, 0) ELSE 0 END), 0),
   COALESCE(SUM(CASE WHEN usage.response_time_ms IS NOT NULL THEN 1 ELSE 0 END), 0), ?, ?
-FROM `usage` AS usage
+ FROM `usage` AS `usage`
 LEFT JOIN users ON users.id = usage.user_id
 LEFT JOIN usage_settlement_snapshots AS settlement ON settlement.request_id = usage.request_id
 WHERE usage.created_at_unix_ms >= ? AND usage.created_at_unix_ms < ?
@@ -834,7 +834,7 @@ SELECT SHA2(UUID(), 256), {user_select}?, {dimension_select_sql}
     COALESCE(settlement.input_price_per_1m, usage.input_price_per_1m, 0)
       * GREATEST(COALESCE(usage.cache_read_input_tokens, 0), 0) / 1000000.0
   ), 0), ?, ?
-FROM `usage` AS usage
+ FROM `usage` AS `usage`
 LEFT JOIN usage_settlement_snapshots AS settlement ON settlement.request_id = usage.request_id
 {user_join}
 WHERE usage.created_at_unix_ms >= ? AND usage.created_at_unix_ms < ? {user_filter}

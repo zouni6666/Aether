@@ -409,6 +409,7 @@ fn empty_database_snapshot_covers_current_cutoff_versions() {
             20260718000000,
             20260718010000,
             20260720000000,
+            20260727000000,
         ]
     );
 }
@@ -1023,6 +1024,7 @@ fn mysql_and_sqlite_migrations_include_enabled_incrementals() {
             20260725010000,
             20260725020000,
             20260725030000,
+            20260727000000,
         ]
     );
     assert_eq!(
@@ -1055,6 +1057,7 @@ fn mysql_and_sqlite_migrations_include_enabled_incrementals() {
             20260725020000,
             20260725030000,
             20260725040000,
+            20260727000000,
         ]
     );
 }

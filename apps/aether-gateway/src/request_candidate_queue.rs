@@ -3915,7 +3915,9 @@ mod tests {
 
         repository.failing.store(false, Ordering::Release);
         tokio::time::timeout(Duration::from_secs(2), async {
-            while runtime.metrics.pending_current.load(Ordering::Acquire) != 0 {
+            while runtime.metrics.pending_current.load(Ordering::Acquire) != 0
+                || runtime.normal_admission.available_permits() != 2
+            {
                 tokio::task::yield_now().await;
             }
         })

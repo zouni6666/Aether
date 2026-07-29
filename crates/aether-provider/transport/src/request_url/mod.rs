@@ -541,10 +541,11 @@ fn build_configured_claude_count_tokens_url(
         .map(str::trim)
         .filter(|value| !value.is_empty());
     let path = path?;
-    let path = path
-        .starts_with('/')
-        .then(|| path.to_string())
-        .unwrap_or_else(|| format!("/{path}"));
+    let path = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    };
     build_passthrough_path_url(
         &transport.endpoint.base_url,
         path.as_str(),

@@ -4041,8 +4041,8 @@ async fn execute_execution_runtime_stream_inner(
             frame_stream,
             stream_precommit_committed,
             provider_pool_in_flight_guard.take(),
-            retry_scope_out.as_deref_mut(),
-            retry_fallback_out.as_deref_mut(),
+            retry_scope_out,
+            retry_fallback_out,
         )
         .await;
     }

@@ -1611,7 +1611,9 @@ async fn proxy_request_inner(
         let buffered_body = buffered_body
             .as_ref()
             .expect("execution runtime/control auth gate should have buffered request body");
-        let stream_request = request_wants_stream(&request_context, &parts.headers, buffered_body);
+        let stream_request = control_decision.is_some_and(|decision| {
+            owner_forward_request_is_stream(&parts, decision, buffered_body)
+        });
         let mut local_execution_exhaustion = None;
         if stream_request {
             let execute_stream_started_at = Instant::now();

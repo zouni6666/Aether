@@ -1152,9 +1152,11 @@ fn sort_candidate_selection_rows(
     include_global_model: bool,
 ) {
     rows.sort_by(|left, right| {
-        let global_model_order = include_global_model
-            .then(|| left.global_model_name.cmp(&right.global_model_name))
-            .unwrap_or(std::cmp::Ordering::Equal);
+        let global_model_order = if include_global_model {
+            left.global_model_name.cmp(&right.global_model_name)
+        } else {
+            std::cmp::Ordering::Equal
+        };
         global_model_order
             .then(left.provider_priority.cmp(&right.provider_priority))
             .then(left.key_internal_priority.cmp(&right.key_internal_priority))
