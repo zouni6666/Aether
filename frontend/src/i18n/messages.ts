@@ -1831,6 +1831,7 @@ const legacyExactEnglishMessages: Record<string, string> = {
   '账号配额': 'Account quota',
   '模型配额': 'Model quota',
   '周限额': 'Weekly limit',
+  '月限额': 'Monthly limit',
   '5H限额': '5H limit',
   'Spark 周': 'Spark weekly',
   'Spark 5H': 'Spark 5H',

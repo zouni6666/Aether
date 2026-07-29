@@ -60,3 +60,20 @@ export function getCodexQuotaWindowPresentation(
     sortOrder: (isSpark ? 10_000_000 : 0) + (hasExplicitWindowMinutes ? windowMinutes : fallbackOrder),
   }
 }
+
+export function getCodexQuotaWindowLimitLabel(window: QuotaWindowSnapshot): string | null {
+  const presentation = getCodexQuotaWindowPresentation(window)
+  return presentation ? `${presentation.label}限额` : null
+}
+
+export function getCodexPrimaryQuotaWindow(
+  windows: QuotaWindowSnapshot[] | null | undefined,
+): QuotaWindowSnapshot | null {
+  if (!Array.isArray(windows)) return null
+
+  for (const code of ['monthly', 'weekly']) {
+    const window = windows.find(candidate => String(candidate.code || '').trim().toLowerCase() === code)
+    if (window && getCodexQuotaWindowPresentation(window)) return window
+  }
+  return null
+}

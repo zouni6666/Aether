@@ -189,10 +189,10 @@
                         class="grid gap-3"
                         :class="isCodexTeamPlan(key) ? 'grid-cols-2' : 'grid-cols-1'"
                       >
-                        <!-- 周限额 -->
+                        <!-- 主限额 -->
                         <ProviderQuotaProgressRow
                           v-if="getCodexQuotaDisplay(key)?.primary_used_percent !== undefined"
-                          :label="legacyT('周限额')"
+                          :label="legacyT(getCodexPrimaryQuotaLabel(key))"
                           :used-percent="getCodexQuotaDisplay(key)?.primary_used_percent || 0"
                           :remaining-percent="toCodexRemainingPercent(getCodexQuotaDisplay(key)?.primary_used_percent)"
                           :meter-class="getQuotaRemainingClass(getCodexQuotaDisplay(key)?.primary_used_percent || 0)"
@@ -1021,6 +1021,10 @@ import { formatApiFormatShort } from '@/api/endpoints/types/api-format'
 import { isOAuthAccountProviderType, isKeyManagedProviderType } from '../utils/providerTypeUtils'
 import { getOAuthOrgBadge } from '@/utils/oauthIdentity'
 import { getOAuthRefreshFeedback } from '@/utils/oauthRefreshFeedback'
+import {
+  getCodexPrimaryQuotaWindow,
+  getCodexQuotaWindowLimitLabel,
+} from '@/utils/codexQuotaWindow'
 import { formatCompactNumber } from '@/utils/format'
 import {
   canEditOAuthCredential,
@@ -1945,7 +1949,7 @@ function getCodexQuotaDisplayFromSnapshot(quota: QuotaStatusSnapshot | null | un
   if (updatedAt !== undefined) display.updated_at = updatedAt
   if (quota.plan_type) display.plan_type = quota.plan_type
 
-  const primaryWindow = getQuotaWindow(quota, 'weekly')
+  const primaryWindow = getCodexPrimaryQuotaWindow(quota.windows)
   const primaryUsedPercent = getQuotaWindowUsedPercent(primaryWindow)
   if (primaryUsedPercent !== undefined) display.primary_used_percent = primaryUsedPercent
   const primaryResetAt = getQuotaWindowResetAt(primaryWindow)
@@ -2002,6 +2006,14 @@ function getCodexQuotaDisplay(key: EndpointAPIKey): CodexUpstreamMetadata | null
   const snapshotDisplay = getCodexQuotaDisplayFromSnapshot(getQuotaSnapshotForProvider(key, 'codex'))
   const metadataDisplay = getCodexQuotaDisplayFromMetadata(key.upstream_metadata?.codex)
   return mergeCodexQuotaDisplays(snapshotDisplay, metadataDisplay)
+}
+
+function getCodexPrimaryQuotaLabel(key: EndpointAPIKey): string {
+  return getCodexQuotaWindowLimitLabel({
+    code: 'weekly',
+    label: '周',
+    window_minutes: getCodexQuotaDisplay(key)?.primary_window_minutes,
+  }) || '周限额'
 }
 
 function hasCodexQuotaDisplayData(key: EndpointAPIKey): boolean {

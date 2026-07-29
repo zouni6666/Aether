@@ -43,9 +43,10 @@ pub use agent_identity::{
     is_codex_agent_identity_cached_entry, is_codex_agent_identity_invalid_task_response,
     is_codex_agent_identity_transport, register_codex_agent_identity_from_access_token,
     validate_codex_agent_identity_auth_config, CodexAgentIdentityEnrollmentError,
-    CodexAgentIdentityRefreshAdapter, CODEX_AGENT_IDENTITY_AGENT_REGISTRATION_REQUEST_ID,
-    CODEX_AGENT_IDENTITY_AUTH_MODE, CODEX_AGENT_IDENTITY_CACHED_ENTRY_PROVIDER_TYPE,
-    CODEX_AGENT_IDENTITY_PROVIDER_TYPE, CODEX_AGENT_IDENTITY_TASK_REGISTRATION_REQUEST_ID,
+    CodexAgentIdentityRefreshAdapter, CodexAgentIdentityRegistrationOptions,
+    CODEX_AGENT_IDENTITY_AGENT_REGISTRATION_REQUEST_ID, CODEX_AGENT_IDENTITY_AUTH_MODE,
+    CODEX_AGENT_IDENTITY_CACHED_ENTRY_PROVIDER_TYPE, CODEX_AGENT_IDENTITY_PROVIDER_TYPE,
+    CODEX_AGENT_IDENTITY_TASK_REGISTRATION_REQUEST_ID,
 };
 pub use anthropic_compat::{
     resolve_anthropic_compatibility_profile, validate_anthropic_compatibility_profile_config,

@@ -1363,6 +1363,14 @@ fn request_extension_key_is_cross_format_safe(
     namespace: &str,
     key: &str,
 ) -> bool {
+    if matches!(
+        source,
+        FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact
+    ) && matches!(namespace, "openai_responses" | "openai_cli")
+        && key == "client_metadata"
+    {
+        return true;
+    }
     if location == "messages[].content[]"
         && key == "prompt_cache_breakpoint"
         && matches!(
@@ -1419,7 +1427,6 @@ fn request_extension_key_is_cross_format_safe(
             FormatId::OpenAiChat,
             "openai_responses" | "openai_cli",
             "stream"
-                | "client_metadata"
                 | "store"
                 | "service_tier"
                 | "safety_identifier"
@@ -3795,6 +3802,26 @@ mod tests {
         });
 
         let converted = convert_request_pure("openai:responses", "openai:chat", &body)
+            .expect("client transport metadata should not block cross-format conversion")
+            .value;
+
+        assert_eq!(converted["model"], "gpt-source");
+        assert_eq!(converted["messages"][0]["content"], "hello");
+        assert!(converted.get("client_metadata").is_none());
+    }
+
+    #[test]
+    fn pure_openai_responses_to_claude_ignores_client_transport_metadata() {
+        let body = json!({
+            "model": "gpt-source",
+            "input": [{"role": "user", "content": "hello"}],
+            "client_metadata": {
+                "session_id": "session-123",
+                "thread_id": "thread-123"
+            }
+        });
+
+        let converted = convert_request_pure("openai:responses", "claude:messages", &body)
             .expect("client transport metadata should not block cross-format conversion")
             .value;
 

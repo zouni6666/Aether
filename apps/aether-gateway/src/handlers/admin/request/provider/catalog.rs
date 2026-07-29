@@ -389,6 +389,15 @@ impl<'a> AdminAppState<'a> {
         self.app.delete_provider_catalog_key(key_id).await
     }
 
+    pub(crate) async fn compare_and_delete_provider_catalog_key_oauth_credential(
+        &self,
+        delete: &aether_data_contracts::repository::provider_catalog::ProviderCatalogKeyOAuthCredentialCasDelete,
+    ) -> Result<bool, GatewayError> {
+        self.app
+            .compare_and_delete_provider_catalog_key_oauth_credential(delete)
+            .await
+    }
+
     pub(crate) async fn create_provider_catalog_provider(
         &self,
         provider: &aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider,

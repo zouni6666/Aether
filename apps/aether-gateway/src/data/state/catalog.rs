@@ -2,12 +2,13 @@ use super::{
     ApiKeyLastUsedDelta, DataLayerError, GatewayDataState, GeminiFileMappingListQuery,
     GeminiFileMappingStats, ProviderCatalogKeyAdaptiveStateUpdate,
     ProviderCatalogKeyHealthStateUpdate, ProviderCatalogKeyListQuery,
-    ProviderCatalogKeyOAuthRuntimeStateCasUpdate, ProviderCatalogKeyRuntimeMetadataUpdate,
-    ProviderCatalogKeyStatusSnapshotUpdate, PublicHealthStatusCount, PublicHealthTimelineBucket,
-    StoredGeminiFileMapping, StoredGeminiFileMappingListPage, StoredProviderCatalogEndpoint,
-    StoredProviderCatalogKey, StoredProviderCatalogKeyMaintenanceSummary,
-    StoredProviderCatalogKeyPage, StoredProviderCatalogKeyStats, StoredProviderCatalogProvider,
-    StoredRequestCandidate, UpsertGeminiFileMappingRecord, UpsertRequestCandidateRecord,
+    ProviderCatalogKeyOAuthCredentialCasDelete, ProviderCatalogKeyOAuthRuntimeStateCasUpdate,
+    ProviderCatalogKeyRuntimeMetadataUpdate, ProviderCatalogKeyStatusSnapshotUpdate,
+    PublicHealthStatusCount, PublicHealthTimelineBucket, StoredGeminiFileMapping,
+    StoredGeminiFileMappingListPage, StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
+    StoredProviderCatalogKeyMaintenanceSummary, StoredProviderCatalogKeyPage,
+    StoredProviderCatalogKeyStats, StoredProviderCatalogProvider, StoredRequestCandidate,
+    UpsertGeminiFileMappingRecord, UpsertRequestCandidateRecord,
 };
 
 impl GatewayDataState {
@@ -687,6 +688,22 @@ impl GatewayDataState {
         if deleted {
             self.clear_provider_catalog_cache();
         }
+        Ok(deleted)
+    }
+
+    pub(crate) async fn compare_and_delete_provider_catalog_key_oauth_credential(
+        &self,
+        delete: &ProviderCatalogKeyOAuthCredentialCasDelete,
+    ) -> Result<bool, DataLayerError> {
+        let deleted = match &self.provider_catalog_writer {
+            Some(repository) => {
+                repository
+                    .compare_and_delete_key_oauth_credential(delete)
+                    .await
+            }
+            None => Ok(false),
+        }?;
+        self.clear_provider_catalog_cache();
         Ok(deleted)
     }
 

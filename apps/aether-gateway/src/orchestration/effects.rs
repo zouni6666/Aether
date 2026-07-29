@@ -3581,7 +3581,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oauth_invalidation_retains_inactive_pat_owner_when_auto_remove_is_enabled() {
+    async fn oauth_invalidation_auto_removes_inactive_pat_owner() {
         let state = codex_state_with_auto_remove();
         let plan = sample_codex_plan();
 
@@ -3600,17 +3600,11 @@ mod tests {
         )
         .await;
 
-        let stored_key = state
+        let stored_keys = state
             .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
             .await
-            .expect("provider catalog keys should load")
-            .into_iter()
-            .next()
-            .expect("runtime invalidation must not race-delete a replacement key");
-        assert_eq!(
-            stored_key.oauth_invalid_reason.as_deref(),
-            Some("[OAUTH_EXPIRED] Personal access token owner is inactive.")
-        );
+            .expect("provider catalog keys should load");
+        assert!(stored_keys.is_empty());
     }
 
     #[tokio::test]

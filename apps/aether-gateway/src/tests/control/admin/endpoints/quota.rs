@@ -417,7 +417,7 @@ async fn gateway_marks_codex_quota_exhausted_when_wham_usage_returns_payment_req
 }
 
 #[tokio::test]
-async fn gateway_retains_codex_key_when_quota_only_reports_oauth_invalid() {
+async fn gateway_auto_removes_codex_key_when_quota_proves_oauth_invalid() {
     let upstream = Router::new().route(
         "/api/admin/endpoints/providers/provider-codex/refresh-quota",
         any(move |_request: Request| async move {
@@ -521,19 +521,15 @@ async fn gateway_retains_codex_key_when_quota_only_reports_oauth_invalid() {
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["success"], 0);
     assert_eq!(payload["failed"], 1);
-    assert_eq!(payload["auto_removed"], 0);
+    assert_eq!(payload["auto_removed"], 1);
     assert_eq!(payload["results"][0]["status"], "auth_invalid");
-    assert!(payload["results"][0].get("auto_removed").is_none());
+    assert_eq!(payload["results"][0]["auto_removed"], true);
 
     let reloaded = provider_catalog_repository
         .list_keys_by_ids(&["key-codex-expired".to_string()])
         .await
         .expect("keys should read");
-    assert_eq!(reloaded.len(), 1);
-    assert!(reloaded[0]
-        .oauth_invalid_reason
-        .as_deref()
-        .is_some_and(|reason| reason.starts_with("[OAUTH_EXPIRED]")));
+    assert!(reloaded.is_empty());
 
     gateway_handle.abort();
     execution_runtime_handle.abort();

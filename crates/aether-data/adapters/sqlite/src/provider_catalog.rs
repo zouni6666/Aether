@@ -10,10 +10,10 @@ use sqlx::{
 use aether_data_contracts::repository::provider_catalog::{
     ProviderCatalogKeyAdaptiveStateUpdate, ProviderCatalogKeyHealthStateUpdate,
     ProviderCatalogKeyListOrder, ProviderCatalogKeyListQuery,
-    ProviderCatalogKeyOAuthRuntimeStateCasUpdate, ProviderCatalogKeyRuntimeMetadataUpdate,
-    ProviderCatalogKeyStatusSnapshotUpdate, ProviderCatalogReadRepository,
-    ProviderCatalogUpstreamMetadataNamespaceUpdate, ProviderCatalogWriteRepository,
-    StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
+    ProviderCatalogKeyOAuthCredentialCasDelete, ProviderCatalogKeyOAuthRuntimeStateCasUpdate,
+    ProviderCatalogKeyRuntimeMetadataUpdate, ProviderCatalogKeyStatusSnapshotUpdate,
+    ProviderCatalogReadRepository, ProviderCatalogUpstreamMetadataNamespaceUpdate,
+    ProviderCatalogWriteRepository, StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
     StoredProviderCatalogKeyMaintenanceSummary, StoredProviderCatalogKeyPage,
     StoredProviderCatalogKeyStats, StoredProviderCatalogProvider,
 };
@@ -1175,6 +1175,53 @@ WHERE id = ?
         Ok(rows_affected > 0)
     }
 
+    pub async fn compare_and_delete_key_oauth_credential(
+        &self,
+        delete: &ProviderCatalogKeyOAuthCredentialCasDelete,
+    ) -> Result<bool, DataLayerError> {
+        validate_non_empty(&delete.key_id, "provider catalog key_id")?;
+        let expected = &delete.expected_credential;
+        if expected
+            .encrypted_api_key
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+            || expected.auth_type.trim().is_empty()
+            || expected.provider_id.trim().is_empty()
+            || expected.provider_type.trim().is_empty()
+        {
+            return Err(DataLayerError::InvalidInput(
+                "provider catalog OAuth credential CAS delete contains empty fields".to_string(),
+            ));
+        }
+        let rows_affected = sqlx::query(
+            r#"
+DELETE FROM provider_api_keys
+WHERE id = ?
+  AND auth_config IS ?
+  AND api_key IS ?
+  AND auth_type = ?
+  AND provider_id = ?
+  AND EXISTS (
+    SELECT 1
+    FROM providers
+    WHERE providers.id = provider_api_keys.provider_id
+      AND providers.provider_type = ?
+  )
+"#,
+        )
+        .bind(&delete.key_id)
+        .bind(delete.expected_encrypted_auth_config.as_deref())
+        .bind(expected.encrypted_api_key.as_deref())
+        .bind(&expected.auth_type)
+        .bind(&expected.provider_id)
+        .bind(&expected.provider_type)
+        .execute(&self.pool)
+        .await
+        .map_sql_err()?
+        .rows_affected();
+        Ok(rows_affected > 0)
+    }
+
     pub async fn update_key_upstream_metadata(
         &self,
         key_id: &str,
@@ -2121,6 +2168,13 @@ impl ProviderCatalogWriteRepository for SqliteProviderCatalogReadRepository {
         Self::delete_key(self, key_id).await
     }
 
+    async fn compare_and_delete_key_oauth_credential(
+        &self,
+        delete: &ProviderCatalogKeyOAuthCredentialCasDelete,
+    ) -> Result<bool, DataLayerError> {
+        Self::compare_and_delete_key_oauth_credential(self, delete).await
+    }
+
     async fn clear_key_oauth_invalid_marker(&self, key_id: &str) -> Result<bool, DataLayerError> {
         Self::clear_key_oauth_invalid_marker(self, key_id).await
     }
@@ -2967,10 +3021,10 @@ mod tests {
     use aether_data_contracts::repository::provider_catalog::{
         ProviderCatalogKeyAdaptiveState, ProviderCatalogKeyAdaptiveStateUpdate,
         ProviderCatalogKeyHealthStateUpdate, ProviderCatalogKeyListOrder,
-        ProviderCatalogKeyListQuery, ProviderCatalogKeyOAuthCredentialFence,
-        ProviderCatalogKeyOAuthRuntimeStateCasUpdate, ProviderCatalogKeyRuntimeMetadataUpdate,
-        ProviderCatalogUpstreamMetadataNamespaceUpdate, StoredProviderCatalogEndpoint,
-        StoredProviderCatalogKey, StoredProviderCatalogProvider,
+        ProviderCatalogKeyListQuery, ProviderCatalogKeyOAuthCredentialCasDelete,
+        ProviderCatalogKeyOAuthCredentialFence, ProviderCatalogKeyOAuthRuntimeStateCasUpdate,
+        ProviderCatalogKeyRuntimeMetadataUpdate, ProviderCatalogUpstreamMetadataNamespaceUpdate,
+        StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
     };
     use serde_json::json;
 
@@ -3391,6 +3445,41 @@ mod tests {
             stored_after_stale.upstream_metadata.as_ref().unwrap()["codex"]["remaining"],
             3
         );
+
+        let stale_delete = ProviderCatalogKeyOAuthCredentialCasDelete {
+            key_id: stored_after_stale.id.clone(),
+            expected_encrypted_auth_config: Some("encrypted-auth-v1".to_string()),
+            expected_credential: ProviderCatalogKeyOAuthCredentialFence {
+                encrypted_api_key: Some("encrypted-api-key".to_string()),
+                auth_type: "oauth".to_string(),
+                provider_id: "oauth-cas-provider".to_string(),
+                provider_type: "codex".to_string(),
+            },
+        };
+        assert!(!repository
+            .compare_and_delete_key_oauth_credential(&stale_delete)
+            .await
+            .expect("stale credential delete should conflict"));
+
+        let current_delete = ProviderCatalogKeyOAuthCredentialCasDelete {
+            key_id: stored_after_stale.id.clone(),
+            expected_encrypted_auth_config: stored_after_stale.encrypted_auth_config.clone(),
+            expected_credential: ProviderCatalogKeyOAuthCredentialFence {
+                encrypted_api_key: stored_after_stale.encrypted_api_key.clone(),
+                auth_type: stored_after_stale.auth_type.clone(),
+                provider_id: stored_after_stale.provider_id.clone(),
+                provider_type: "codex".to_string(),
+            },
+        };
+        assert!(repository
+            .compare_and_delete_key_oauth_credential(&current_delete)
+            .await
+            .expect("current credential generation should delete"));
+        assert!(repository
+            .list_keys_by_ids(&[stored_after_stale.id])
+            .await
+            .expect("deleted key lookup should succeed")
+            .is_empty());
     }
 
     #[tokio::test]

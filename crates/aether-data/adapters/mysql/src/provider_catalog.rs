@@ -10,10 +10,10 @@ use sqlx::{
 use aether_data_contracts::repository::provider_catalog::{
     ProviderCatalogKeyAdaptiveStateUpdate, ProviderCatalogKeyHealthStateUpdate,
     ProviderCatalogKeyListOrder, ProviderCatalogKeyListQuery,
-    ProviderCatalogKeyOAuthRuntimeStateCasUpdate, ProviderCatalogKeyRuntimeMetadataUpdate,
-    ProviderCatalogKeyStatusSnapshotUpdate, ProviderCatalogReadRepository,
-    ProviderCatalogUpstreamMetadataNamespaceUpdate, ProviderCatalogWriteRepository,
-    StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
+    ProviderCatalogKeyOAuthCredentialCasDelete, ProviderCatalogKeyOAuthRuntimeStateCasUpdate,
+    ProviderCatalogKeyRuntimeMetadataUpdate, ProviderCatalogKeyStatusSnapshotUpdate,
+    ProviderCatalogReadRepository, ProviderCatalogUpstreamMetadataNamespaceUpdate,
+    ProviderCatalogWriteRepository, StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
     StoredProviderCatalogKeyMaintenanceSummary, StoredProviderCatalogKeyPage,
     StoredProviderCatalogKeyStats, StoredProviderCatalogProvider,
 };
@@ -994,6 +994,51 @@ WHERE id = ?
         Ok(rows_affected > 0)
     }
 
+    pub async fn compare_and_delete_key_oauth_credential(
+        &self,
+        delete: &ProviderCatalogKeyOAuthCredentialCasDelete,
+    ) -> Result<bool, DataLayerError> {
+        validate_non_empty(&delete.key_id, "provider catalog key_id")?;
+        let expected = &delete.expected_credential;
+        if expected
+            .encrypted_api_key
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+            || expected.auth_type.trim().is_empty()
+            || expected.provider_id.trim().is_empty()
+            || expected.provider_type.trim().is_empty()
+        {
+            return Err(DataLayerError::InvalidInput(
+                "provider catalog OAuth credential CAS delete contains empty fields".to_string(),
+            ));
+        }
+        let mut builder = QueryBuilder::<MySql>::new("DELETE FROM provider_api_keys WHERE id = ");
+        builder
+            .push_bind(&delete.key_id)
+            .push(" AND BINARY auth_config <=> BINARY ")
+            .push_bind(delete.expected_encrypted_auth_config.as_deref())
+            .push(" AND BINARY api_key <=> BINARY ")
+            .push_bind(expected.encrypted_api_key.as_deref())
+            .push(" AND BINARY auth_type = BINARY ")
+            .push_bind(&expected.auth_type)
+            .push(" AND BINARY provider_id = BINARY ")
+            .push_bind(&expected.provider_id)
+            .push(
+                " AND EXISTS (SELECT 1 FROM providers WHERE \
+                 BINARY providers.id = BINARY provider_api_keys.provider_id \
+                 AND BINARY providers.provider_type = BINARY ",
+            )
+            .push_bind(&expected.provider_type)
+            .push(")");
+        let rows_affected = builder
+            .build()
+            .execute(&self.pool)
+            .await
+            .map_sql_err()?
+            .rows_affected();
+        Ok(rows_affected > 0)
+    }
+
     pub async fn update_key_upstream_metadata(
         &self,
         key_id: &str,
@@ -1926,6 +1971,13 @@ impl ProviderCatalogWriteRepository for MysqlProviderCatalogReadRepository {
 
     async fn delete_key(&self, key_id: &str) -> Result<bool, DataLayerError> {
         Self::delete_key(self, key_id).await
+    }
+
+    async fn compare_and_delete_key_oauth_credential(
+        &self,
+        delete: &ProviderCatalogKeyOAuthCredentialCasDelete,
+    ) -> Result<bool, DataLayerError> {
+        Self::compare_and_delete_key_oauth_credential(self, delete).await
     }
 
     async fn clear_key_oauth_invalid_marker(&self, key_id: &str) -> Result<bool, DataLayerError> {

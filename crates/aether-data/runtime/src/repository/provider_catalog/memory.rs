@@ -8,8 +8,9 @@ use serde_json::{json, Map, Value};
 use super::{
     ProviderCatalogKeyAdaptiveState, ProviderCatalogKeyAdaptiveStateUpdate,
     ProviderCatalogKeyHealthStateUpdate, ProviderCatalogKeyListQuery,
-    ProviderCatalogKeyOAuthRuntimeStateCasUpdate, ProviderCatalogKeyRuntimeMetadataUpdate,
-    ProviderCatalogKeyStatusSnapshotUpdate, ProviderCatalogReadRepository, ProviderCatalogSnapshot,
+    ProviderCatalogKeyOAuthCredentialCasDelete, ProviderCatalogKeyOAuthRuntimeStateCasUpdate,
+    ProviderCatalogKeyRuntimeMetadataUpdate, ProviderCatalogKeyStatusSnapshotUpdate,
+    ProviderCatalogReadRepository, ProviderCatalogSnapshot,
     ProviderCatalogUpstreamMetadataNamespaceUpdate, ProviderCatalogWriteRepository,
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
     StoredProviderCatalogKeyMaintenanceSummary, StoredProviderCatalogKeyPage,
@@ -702,6 +703,46 @@ impl ProviderCatalogWriteRepository for InMemoryProviderCatalogReadRepository {
         Ok(index.keys.remove(key_id).is_some())
     }
 
+    async fn compare_and_delete_key_oauth_credential(
+        &self,
+        delete: &ProviderCatalogKeyOAuthCredentialCasDelete,
+    ) -> Result<bool, DataLayerError> {
+        let expected = &delete.expected_credential;
+        if delete.key_id.trim().is_empty()
+            || expected
+                .encrypted_api_key
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
+            || expected.auth_type.trim().is_empty()
+            || expected.provider_id.trim().is_empty()
+            || expected.provider_type.trim().is_empty()
+        {
+            return Err(DataLayerError::InvalidInput(
+                "provider catalog OAuth credential CAS delete contains empty fields".to_string(),
+            ));
+        }
+        let mut index = self
+            .index
+            .write()
+            .expect("provider catalog repository lock");
+        let Some(key) = index.keys.get(&delete.key_id) else {
+            return Ok(false);
+        };
+        let provider_type_matches = index
+            .providers
+            .get(&key.provider_id)
+            .is_some_and(|provider| provider.provider_type == expected.provider_type);
+        if key.encrypted_auth_config != delete.expected_encrypted_auth_config
+            || key.encrypted_api_key != expected.encrypted_api_key
+            || key.auth_type != expected.auth_type
+            || key.provider_id != expected.provider_id
+            || !provider_type_matches
+        {
+            return Ok(false);
+        }
+        Ok(index.keys.remove(&delete.key_id).is_some())
+    }
+
     async fn clear_key_oauth_invalid_marker(&self, key_id: &str) -> Result<bool, DataLayerError> {
         let mut index = self
             .index
@@ -1196,10 +1237,11 @@ mod tests {
     use crate::repository::provider_catalog::{
         ProviderCatalogKeyAdaptiveState, ProviderCatalogKeyAdaptiveStateUpdate,
         ProviderCatalogKeyHealthStateUpdate, ProviderCatalogKeyListOrder,
-        ProviderCatalogKeyListQuery, ProviderCatalogKeyOAuthCredentialFence,
-        ProviderCatalogKeyOAuthRuntimeStateCasUpdate, ProviderCatalogKeyRuntimeMetadataUpdate,
-        ProviderCatalogReadRepository, ProviderCatalogWriteRepository,
-        StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
+        ProviderCatalogKeyListQuery, ProviderCatalogKeyOAuthCredentialCasDelete,
+        ProviderCatalogKeyOAuthCredentialFence, ProviderCatalogKeyOAuthRuntimeStateCasUpdate,
+        ProviderCatalogKeyRuntimeMetadataUpdate, ProviderCatalogReadRepository,
+        ProviderCatalogWriteRepository, StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
+        StoredProviderCatalogProvider,
     };
     use crate::repository::usage::ProviderApiKeyUsageDelta;
     use serde_json::{json, Value};
@@ -1514,6 +1556,85 @@ mod tests {
             .compare_and_update_key_oauth_runtime_state(&update())
             .await
             .expect("provider type mismatch should be a CAS miss"));
+    }
+
+    #[tokio::test]
+    async fn oauth_credential_cas_delete_rejects_replacement_generation() {
+        let repository = InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider("provider-1")],
+            vec![],
+            vec![sample_key("key-1", "provider-1")
+                .with_transport_fields(
+                    None,
+                    "ciphertext-api-1".to_string(),
+                    Some("ciphertext-auth-1".to_string()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .expect("key transport should build")],
+        );
+        let stale_delete = ProviderCatalogKeyOAuthCredentialCasDelete {
+            key_id: "key-1".to_string(),
+            expected_encrypted_auth_config: Some("ciphertext-auth-1".to_string()),
+            expected_credential: ProviderCatalogKeyOAuthCredentialFence {
+                encrypted_api_key: Some("ciphertext-api-1".to_string()),
+                auth_type: "api_key".to_string(),
+                provider_id: "provider-1".to_string(),
+                provider_type: "custom".to_string(),
+            },
+        };
+
+        let mut replacement = repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key should load")
+            .pop()
+            .expect("key should exist");
+        replacement.encrypted_api_key = Some("ciphertext-api-2".to_string());
+        replacement.encrypted_auth_config = Some("ciphertext-auth-2".to_string());
+        replacement.auth_type = "oauth".to_string();
+        repository
+            .update_key(&replacement)
+            .await
+            .expect("replacement should persist");
+
+        assert!(!repository
+            .compare_and_delete_key_oauth_credential(&stale_delete)
+            .await
+            .expect("stale delete should be a CAS miss"));
+        assert_eq!(
+            repository
+                .list_keys_by_ids(&["key-1".to_string()])
+                .await
+                .expect("replacement should load")[0]
+                .encrypted_auth_config
+                .as_deref(),
+            Some("ciphertext-auth-2")
+        );
+
+        let current_delete = ProviderCatalogKeyOAuthCredentialCasDelete {
+            key_id: "key-1".to_string(),
+            expected_encrypted_auth_config: Some("ciphertext-auth-2".to_string()),
+            expected_credential: ProviderCatalogKeyOAuthCredentialFence {
+                encrypted_api_key: Some("ciphertext-api-2".to_string()),
+                auth_type: "oauth".to_string(),
+                provider_id: "provider-1".to_string(),
+                provider_type: "custom".to_string(),
+            },
+        };
+        assert!(repository
+            .compare_and_delete_key_oauth_credential(&current_delete)
+            .await
+            .expect("current generation should delete"));
+        assert!(repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("deleted key lookup should succeed")
+            .is_empty());
     }
 
     #[tokio::test]

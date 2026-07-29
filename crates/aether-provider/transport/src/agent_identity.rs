@@ -38,7 +38,7 @@ const CODEX_AGENT_IDENTITY_AUTH_API_BASE_URL: &str = "https://auth.openai.com/ap
 const AUTHORIZATION_HEADER: &str = "authorization";
 const ASSERTION_PREFIX: &str = "AgentAssertion ";
 const CODEX_AGENT_IDENTITY_AGENT_HARNESS_ID: &str = "codex-cli";
-const CODEX_AGENT_IDENTITY_RUNNING_LOCATION: &str = "local";
+const CODEX_AGENT_IDENTITY_RESPONSES_API_CAPABILITY: &str = "responsesapi";
 
 /// The AgentAssertion scheme is generated internally after an Agent Identity
 /// task has been registered.  Keep the scheme check separate from envelope
@@ -54,8 +54,11 @@ pub enum CodexAgentIdentityEnrollmentError {
     MissingSessionToken,
     #[error("Agent Identity 注册请求失败")]
     RegistrationRequestFailed,
-    #[error("Agent Identity 注册被拒绝（HTTP {status_code}）")]
-    RegistrationRejected { status_code: u16 },
+    #[error("Agent Identity 注册被拒绝（HTTP {status_code}）{reason}")]
+    RegistrationRejected {
+        status_code: u16,
+        reason: &'static str,
+    },
     #[error("Agent Identity 注册响应无效")]
     InvalidRegistrationResponse,
     #[error("Agent Identity 密钥生成失败")]
@@ -66,6 +69,11 @@ pub enum CodexAgentIdentityEnrollmentError {
     TaskRegistrationRejected { status_code: u16 },
     #[error("Agent Identity task 初始化响应无效")]
     InvalidTaskRegistrationResponse,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CodexAgentIdentityRegistrationOptions {
+    pub is_fedramp_account: bool,
 }
 
 #[derive(Clone)]
@@ -598,16 +606,29 @@ fn agent_runtime_id_from_registration_response(body: &str) -> Result<String, ()>
         .ok_or(())
 }
 
+fn agent_identity_registration_rejection_reason(status_code: u16) -> &'static str {
+    match status_code {
+        401 => "：AccessToken 无效或已过期",
+        403 => {
+            "：账户、工作区或出口区域未获服务端 Agent Identity 资格；该资格无法由 Aether 本地开通"
+        }
+        429 => "：请求过于频繁，请稍后重试",
+        _ => "",
+    }
+}
+
 /// Uses a ChatGPT access token once to register a fresh Agent Identity. The returned config
 /// contains only the generated signing credentials and is deliberately free of the access token.
 pub async fn register_codex_agent_identity_from_access_token(
     executor: &dyn OAuthHttpExecutor,
     access_token: &str,
+    options: CodexAgentIdentityRegistrationOptions,
     network: OAuthNetworkContext,
 ) -> Result<Map<String, Value>, CodexAgentIdentityEnrollmentError> {
     register_codex_agent_identity_from_access_token_with_auth_api_base_url(
         executor,
         access_token,
+        options,
         network,
         CODEX_AGENT_IDENTITY_AUTH_API_BASE_URL,
     )
@@ -647,6 +668,7 @@ async fn create_codex_agent_identity_from_session_token_with_auth_api_base_url(
     let mut auth_config = register_codex_agent_identity_from_access_token_with_auth_api_base_url(
         executor,
         session_token,
+        CodexAgentIdentityRegistrationOptions::default(),
         network.clone(),
         auth_api_base_url,
     )
@@ -696,6 +718,7 @@ async fn create_codex_agent_identity_from_session_token_with_auth_api_base_url(
 async fn register_codex_agent_identity_from_access_token_with_auth_api_base_url(
     executor: &dyn OAuthHttpExecutor,
     access_token: &str,
+    options: CodexAgentIdentityRegistrationOptions,
     network: OAuthNetworkContext,
     auth_api_base_url: &str,
 ) -> Result<Map<String, Value>, CodexAgentIdentityEnrollmentError> {
@@ -712,35 +735,41 @@ async fn register_codex_agent_identity_from_access_token_with_auth_api_base_url(
     let agent_public_key = agent_identity_ssh_public_key(&signing_key);
     let registration_url = agent_registration_url(auth_api_base_url)
         .map_err(|_| CodexAgentIdentityEnrollmentError::RegistrationRequestFailed)?;
+    let mut headers = BTreeMap::from([
+        ("accept".to_string(), "application/json".to_string()),
+        ("content-type".to_string(), "application/json".to_string()),
+        (
+            "authorization".to_string(),
+            format!("Bearer {access_token}"),
+        ),
+        (
+            "user-agent".to_string(),
+            aether_ai_formats::CODEX_CLIENT_USER_AGENT.to_string(),
+        ),
+        (
+            "originator".to_string(),
+            aether_ai_formats::CODEX_CLIENT_ORIGINATOR.to_string(),
+        ),
+    ]);
+    if options.is_fedramp_account {
+        headers.insert("x-openai-fedramp".to_string(), "true".to_string());
+    }
     let response = executor
         .execute(OAuthHttpRequest {
             request_id: CODEX_AGENT_IDENTITY_AGENT_REGISTRATION_REQUEST_ID.to_string(),
             method: reqwest::Method::POST,
             url: registration_url,
-            headers: BTreeMap::from([
-                ("accept".to_string(), "application/json".to_string()),
-                ("content-type".to_string(), "application/json".to_string()),
-                (
-                    "authorization".to_string(),
-                    format!("Bearer {access_token}"),
-                ),
-                (
-                    "user-agent".to_string(),
-                    aether_ai_formats::CODEX_CLIENT_USER_AGENT.to_string(),
-                ),
-                (
-                    "originator".to_string(),
-                    aether_ai_formats::CODEX_CLIENT_ORIGINATOR.to_string(),
-                ),
-            ]),
+            headers,
             content_type: Some("application/json".to_string()),
             json_body: Some(json!({
                 "abom": {
                     "agent_version": aether_ai_formats::CODEX_CLIENT_VERSION,
                     "agent_harness_id": CODEX_AGENT_IDENTITY_AGENT_HARNESS_ID,
-                    "running_location": CODEX_AGENT_IDENTITY_RUNNING_LOCATION,
+                    "running_location": format!("cli-{}", std::env::consts::OS),
                 },
                 "agent_public_key": agent_public_key,
+                "capabilities": [CODEX_AGENT_IDENTITY_RESPONSES_API_CAPABILITY],
+                "ttl": null,
             })),
             body_bytes: None,
             network,
@@ -751,6 +780,7 @@ async fn register_codex_agent_identity_from_access_token_with_auth_api_base_url(
     if !(200..300).contains(&response.status_code) {
         return Err(CodexAgentIdentityEnrollmentError::RegistrationRejected {
             status_code: response.status_code,
+            reason: agent_identity_registration_rejection_reason(response.status_code),
         });
     }
     let agent_runtime_id = agent_runtime_id_from_registration_response(response.body_text.as_str())
@@ -1034,7 +1064,8 @@ mod tests {
         register_codex_agent_identity_from_access_token_with_auth_api_base_url,
         task_id_from_registration_response, validate_codex_agent_identity_auth_config,
         with_agent_identity_task_id, CodexAgentIdentityEnrollmentError,
-        CodexAgentIdentityRefreshAdapter, CODEX_AGENT_IDENTITY_CACHED_ENTRY_PROVIDER_TYPE,
+        CodexAgentIdentityRefreshAdapter, CodexAgentIdentityRegistrationOptions,
+        CODEX_AGENT_IDENTITY_CACHED_ENTRY_PROVIDER_TYPE,
     };
     use crate::oauth_refresh::{
         LocalOAuthHttpExecutor, LocalOAuthHttpRequest, LocalOAuthHttpResponse,
@@ -1416,6 +1447,20 @@ mod tests {
                 .and_then(|abom| abom.get("agent_harness_id")),
             Some(&json!("codex-cli"))
         );
+        assert_eq!(
+            requests[0]
+                .json_body
+                .as_ref()
+                .and_then(|body| body.get("capabilities")),
+            Some(&json!(["responsesapi"]))
+        );
+        assert_eq!(
+            requests[0]
+                .json_body
+                .as_ref()
+                .and_then(|body| body.get("ttl")),
+            Some(&json!(null))
+        );
         assert!(requests[0]
             .json_body
             .as_ref()
@@ -1443,6 +1488,9 @@ mod tests {
         let config = register_codex_agent_identity_from_access_token_with_auth_api_base_url(
             &executor,
             "access-token-for-test-only",
+            CodexAgentIdentityRegistrationOptions {
+                is_fedramp_account: true,
+            },
             OAuthNetworkContext::direct_identity(),
             "https://auth.test/api/accounts",
         )
@@ -1458,6 +1506,21 @@ mod tests {
         let requests = requests.lock().expect("recording lock should hold");
         assert_eq!(requests.len(), 1);
         assert!(requests[0].url.ends_with("/v1/agent/register"));
+        assert_eq!(
+            requests[0]
+                .headers
+                .get("x-openai-fedramp")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            requests[0]
+                .json_body
+                .as_ref()
+                .and_then(|body| body.get("abom"))
+                .and_then(|abom| abom.get("running_location")),
+            Some(&json!(format!("cli-{}", std::env::consts::OS)))
+        );
     }
 
     #[tokio::test]
@@ -1465,7 +1528,7 @@ mod tests {
         let executor = RecordingEnrollmentExecutor {
             requests: Arc::new(Mutex::new(Vec::new())),
             responses: Arc::new(Mutex::new(vec![OAuthHttpResponse {
-                status_code: 401,
+                status_code: 403,
                 body_text: r#"{"detail":"session-token-for-test-only"}"#.to_string(),
                 json_body: None,
             }])),
@@ -1482,7 +1545,10 @@ mod tests {
 
         assert_eq!(
             error,
-            CodexAgentIdentityEnrollmentError::RegistrationRejected { status_code: 401 }
+            CodexAgentIdentityEnrollmentError::RegistrationRejected {
+                status_code: 403,
+                reason: "：账户、工作区或出口区域未获服务端 Agent Identity 资格；该资格无法由 Aether 本地开通",
+            }
         );
         assert!(!error.to_string().contains("session-token-for-test-only"));
         assert!(!error.to_string().contains("detail"));

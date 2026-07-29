@@ -17,8 +17,9 @@ use aether_contracts::{
     EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER, EXECUTION_REQUEST_HTTP1_ONLY_HEADER,
 };
 use aether_data_contracts::repository::provider_catalog::{
-    ProviderCatalogKeyOAuthCredentialFence, ProviderCatalogKeyOAuthRuntimeStateCasUpdate,
-    ProviderCatalogKeyStatusSnapshotUpdate, StoredProviderCatalogKey,
+    ProviderCatalogKeyOAuthCredentialCasDelete, ProviderCatalogKeyOAuthCredentialFence,
+    ProviderCatalogKeyOAuthRuntimeStateCasUpdate, ProviderCatalogKeyStatusSnapshotUpdate,
+    StoredProviderCatalogKey,
 };
 use aether_runtime_state::RuntimeLockLease;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -1988,8 +1989,8 @@ impl AppState {
                     expected_encrypted_auth_config: Some(
                         expected_credential_fence.encrypted_auth_config.clone(),
                     ),
-                    expected_credential: Some(expected_credential_fence.credential),
-                    encrypted_auth_config: expected_credential_fence.encrypted_auth_config,
+                    expected_credential: Some(expected_credential_fence.credential.clone()),
+                    encrypted_auth_config: expected_credential_fence.encrypted_auth_config.clone(),
                     encrypted_api_key_update: None,
                     expires_at_unix_secs_update: None,
                     oauth_invalid_at_unix_secs: latest_key.oauth_invalid_at_unix_secs,
@@ -2002,10 +2003,66 @@ impl AppState {
                 },
             )
             .await?;
+        let auto_removed = if updated
+            && admin_provider_quota_pure::provider_auto_remove_banned_keys(
+                transport.provider.config.as_ref(),
+            )
+            && admin_provider_quota_pure::should_auto_remove_oauth_invalid_key(
+                &latest_key,
+                None,
+                true,
+                now_unix_secs,
+            ) {
+            self.delete_provider_transport_oauth_credential_fenced(
+                key_id,
+                &expected_credential_fence,
+            )
+            .await?
+        } else {
+            false
+        };
         if updated {
             let _ = self.invalidate_local_oauth_refresh_entry(key_id).await;
         }
+        tracing::info!(
+            key_id,
+            provider_id = %transport.provider.id,
+            provider_type,
+            updated,
+            auto_removed,
+            "gateway fenced OAuth invalidation persisted"
+        );
         Ok(updated)
+    }
+
+    async fn delete_provider_transport_oauth_credential_fenced(
+        &self,
+        key_id: &str,
+        expected: &ProviderTransportCredentialFence,
+    ) -> Result<bool, GatewayError> {
+        let deleted = self
+            .compare_and_delete_provider_catalog_key_oauth_credential(
+                &ProviderCatalogKeyOAuthCredentialCasDelete {
+                    key_id: key_id.to_string(),
+                    expected_encrypted_auth_config: Some(expected.encrypted_auth_config.clone()),
+                    expected_credential: expected.credential.clone(),
+                },
+            )
+            .await?;
+        if !deleted {
+            return Ok(false);
+        }
+        let deleted_key_ids = [key_id.to_string()];
+        self.cleanup_deleted_provider_catalog_refs(
+            &expected.credential.provider_id,
+            false,
+            &[],
+            &deleted_key_ids,
+        )
+        .await?;
+        self.clear_provider_transport_snapshot_cache();
+        let _ = self.invalidate_local_oauth_refresh_entry(key_id).await;
+        Ok(true)
     }
 
     async fn persist_local_oauth_refresh_entry(
@@ -2482,24 +2539,29 @@ impl AppState {
             }
         }
 
-        // Codex credentials are replaceable under a stable key id. Without a
-        // conditional delete, refresh failure handling must retain them after
-        // writing the generation-fenced marker.
-        let auto_removed = if expected_credential_fence.is_none()
-            && !transport
-                .provider
-                .provider_type
-                .trim()
-                .eq_ignore_ascii_case("codex")
-            && admin_provider_quota_pure::provider_auto_remove_banned_keys(
-                transport.provider.config.as_ref(),
-            )
+        let should_auto_remove = admin_provider_quota_pure::provider_auto_remove_banned_keys(
+            transport.provider.config.as_ref(),
+        )
             && admin_provider_quota_pure::should_auto_remove_oauth_invalid_key(
                 &latest_key,
                 None,
                 access_token_invalid_proven,
                 now_unix_secs,
-            ) {
+            );
+        let auto_removed = if !should_auto_remove {
+            false
+        } else if let Some(expected_credential_fence) = expected_credential_fence {
+            self.delete_provider_transport_oauth_credential_fenced(
+                key_id,
+                &expected_credential_fence,
+            )
+            .await?
+        } else if !transport
+            .provider
+            .provider_type
+            .trim()
+            .eq_ignore_ascii_case("codex")
+        {
             self.clear_provider_transport_snapshot_cache();
             if self.delete_provider_catalog_key(key_id).await? {
                 let deleted_key_ids = [key_id.to_string()];

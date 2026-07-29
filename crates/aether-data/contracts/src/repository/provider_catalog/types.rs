@@ -79,6 +79,15 @@ pub struct ProviderCatalogKeyOAuthCredentialFence {
     pub provider_type: String,
 }
 
+/// Atomic key deletion fenced by the exact OAuth credential generation that
+/// produced the terminal failure.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ProviderCatalogKeyOAuthCredentialCasDelete {
+    pub key_id: String,
+    pub expected_encrypted_auth_config: Option<String>,
+    pub expected_credential: ProviderCatalogKeyOAuthCredentialFence,
+}
+
 /// Agent/runtime-owned OAuth state update fenced by the exact encrypted
 /// auth_config and, when supplied, credential context observed before the
 /// refresh started. Repositories must update only these fields and return
@@ -852,6 +861,16 @@ pub trait ProviderCatalogWriteRepository: Send + Sync {
     ) -> Result<bool, crate::DataLayerError>;
 
     async fn delete_key(&self, key_id: &str) -> Result<bool, crate::DataLayerError>;
+
+    async fn compare_and_delete_key_oauth_credential(
+        &self,
+        _delete: &ProviderCatalogKeyOAuthCredentialCasDelete,
+    ) -> Result<bool, crate::DataLayerError> {
+        Err(crate::DataLayerError::InvalidConfiguration(
+            "provider catalog OAuth credential CAS deletes are not supported by this repository"
+                .to_string(),
+        ))
+    }
 
     async fn clear_key_oauth_invalid_marker(
         &self,

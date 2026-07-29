@@ -312,7 +312,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retains_codex_key_after_request_proven_terminal_refresh_failure() {
+    async fn auto_removes_codex_key_after_request_proven_terminal_refresh_failure() {
         let token_hits = Arc::new(Mutex::new(0usize));
         let token_hits_clone = Arc::clone(&token_hits);
         let token_server = Router::new().route(
@@ -467,13 +467,7 @@ mod tests {
             .list_keys_by_ids(&["key-codex-oauth-retry".to_string()])
             .await
             .expect("keys should read");
-        assert_eq!(keys.len(), 1);
-        assert!(keys[0].oauth_invalid_at_unix_secs.is_some());
-        assert!(keys[0]
-            .oauth_invalid_reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("[REFRESH_FAILED]")
-                && reason.contains("Token 续期失败 (401)")));
+        assert!(keys.is_empty());
 
         token_handle.abort();
     }

@@ -344,10 +344,15 @@ async fn resolve_admin_provider_oauth_codex_access_token_agent_identity_import(
     request_proxy: Option<ProxySnapshot>,
 ) -> Result<AdminProviderOAuthSingleImportTokens, Response<Body>> {
     let executor = crate::oauth::GatewayOAuthHttpExecutor::new(*state);
+    let is_fedramp_account = identity_hints
+        .get("is_fedramp")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
     let mut auth_config =
         aether_provider_transport::register_codex_agent_identity_from_access_token(
             &executor,
             access_token,
+            aether_provider_transport::CodexAgentIdentityRegistrationOptions { is_fedramp_account },
             OAuthNetworkContext::provider_operation(request_proxy),
         )
         .await
@@ -1334,7 +1339,8 @@ mod tests {
             "https://api.openai.com/auth": {
                 "chatgpt_account_id": "account-1",
                 "chatgpt_user_id": "user-1",
-                "chatgpt_plan_type": "plus"
+                "chatgpt_plan_type": "plus",
+                "chatgpt_account_is_fedramp": true
             },
             "https://api.openai.com/profile": {
                 "email": "agent@example.com"
@@ -1347,6 +1353,7 @@ mod tests {
         assert_eq!(hints.get("account_id"), Some(&json!("account-1")));
         assert_eq!(hints.get("user_id"), Some(&json!("user-1")));
         assert_eq!(hints.get("plan_type"), Some(&json!("plus")));
+        assert_eq!(hints.get("is_fedramp"), Some(&json!(true)));
         assert_eq!(hints.get("email"), Some(&json!("agent@example.com")));
         assert!(!hints.contains_key("access_token"));
         assert!(!hints.contains_key("id_token"));
