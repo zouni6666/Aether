@@ -68,6 +68,8 @@ export interface UsageRecordDetail {
   rate_multiplier?: number  // 成本倍率（仅管理员可见）
   response_time_ms?: number | null
   first_byte_time_ms?: number | null
+  end_to_end_time_ms?: number | null
+  end_to_end_first_byte_time_ms?: number | null
   updated_at?: string | null
   response_time_updated_at?: string | null
   is_stream: boolean
@@ -357,6 +359,8 @@ export const meApi = {
       rate_multiplier?: number | null
       response_time_ms: number | null
       first_byte_time_ms: number | null
+      end_to_end_time_ms?: number | null
+      end_to_end_first_byte_time_ms?: number | null
       updated_at?: string | null
       response_time_updated_at?: string | null
       status_code?: number | null

@@ -116,15 +116,11 @@
           <RequestLogSection
             id="section-request-log"
             :request-record-level="systemConfig.request_record_level"
-            :max-request-body-size-k-b="maxRequestBodySizeKB"
-            :max-response-body-size-k-b="maxResponseBodySizeKB"
             :sensitive-headers-str="sensitiveHeadersStr"
             :loading="systemConfigLoading || logConfigLoading"
             :has-changes="hasLogConfigChanges"
             @save="saveLogConfig"
             @update:request-record-level="systemConfig.request_record_level = $event"
-            @update:max-request-body-size-k-b="maxRequestBodySizeKB = $event"
-            @update:max-response-body-size-k-b="maxResponseBodySizeKB = $event"
             @update:sensitive-headers-str="sensitiveHeadersStr = $event"
           />
 
@@ -359,8 +355,6 @@ const {
   hasBasicConfigChanges,
   hasLogConfigChanges,
   hasCleanupConfigChanges,
-  maxRequestBodySizeKB,
-  maxResponseBodySizeKB,
   sensitiveHeadersStr,
   turnstileAllowedHostnamesStr,
   loadSystemConfig,

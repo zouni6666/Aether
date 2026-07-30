@@ -1728,14 +1728,17 @@ fn build_usage_event_data_seed_with_detail(
         .as_deref()
         .and_then(infer_endpoint_kind)
         .map(ToOwned::to_owned);
-    let request_metadata = build_runtime_request_metadata_seed_from_parts(
-        plan,
-        context,
-        request_capture.request_body.is_some(),
-        request_capture.request_body_ref.as_deref(),
-        request_capture.provider_request.is_some(),
-        request_capture.provider_request_body_ref.as_deref(),
-        plan.body.body_bytes_b64.as_deref(),
+    let request_metadata = merge_usage_request_metadata_owned(
+        build_usage_request_metadata_seed(plan, context),
+        build_runtime_request_metadata_seed_from_parts(
+            plan,
+            context,
+            request_capture.request_body.is_some(),
+            request_capture.request_body_ref.as_deref(),
+            request_capture.provider_request.is_some(),
+            request_capture.provider_request_body_ref.as_deref(),
+            plan.body.body_bytes_b64.as_deref(),
+        ),
     );
     sanitize_usage_event_data(UsageEventData {
         user_id: context_string(context, "user_id"),
@@ -6727,6 +6730,67 @@ mod tests {
                 "payload": "x".repeat(MAX_USAGE_CAPTURE_BYTES + 1)
             }))
         );
+    }
+
+    #[test]
+    fn usage_event_data_seed_preserves_timing_and_runtime_body_metadata() {
+        let plan = ExecutionPlan {
+            request_id: "req-seed-metadata-1".to_string(),
+            candidate_id: Some("cand-seed-metadata-1".to_string()),
+            provider_name: Some("OpenAI".to_string()),
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            key_id: "key-1".to_string(),
+            method: "POST".to_string(),
+            url: "https://example.com/v1/chat/completions".to_string(),
+            headers: BTreeMap::new(),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({"model": "gpt-5"})),
+            stream: false,
+            client_api_format: "openai:chat".to_string(),
+            provider_api_format: "openai:chat".to_string(),
+            model_name: Some("gpt-5".to_string()),
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+        };
+
+        let data = build_usage_event_data_seed(
+            &plan,
+            Some(&json!({
+                "trace_id": "trace-seed-metadata-1",
+                "end_to_end_time_ms": 10_626,
+                "end_to_end_first_byte_time_ms": 10_120,
+                "db_timings_ms": {"query_count": 2},
+                "original_request_body": {"messages": []}
+            })),
+        );
+        let metadata = data
+            .request_metadata
+            .as_ref()
+            .and_then(Value::as_object)
+            .expect("request metadata should be preserved");
+
+        assert_eq!(metadata.get("end_to_end_time_ms"), Some(&json!(10_626)));
+        assert_eq!(
+            metadata.get("end_to_end_first_byte_time_ms"),
+            Some(&json!(10_120))
+        );
+        assert_eq!(
+            metadata.get("db_timings_ms"),
+            Some(&json!({"query_count": 2}))
+        );
+        assert_eq!(
+            metadata.get("trace_id"),
+            Some(&json!("trace-seed-metadata-1"))
+        );
+        let body_size = metadata
+            .get("body_size")
+            .and_then(Value::as_object)
+            .expect("runtime body size metadata should remain");
+        assert!(body_size.get("client_request_body").is_some());
+        assert!(body_size.get("provider_request_body").is_some());
     }
 
     #[test]

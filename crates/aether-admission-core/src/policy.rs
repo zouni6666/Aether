@@ -61,4 +61,17 @@ mod tests {
             AdmissionDecision::Reject(AdmissionRejectReason::InvalidRequest)
         );
     }
+
+    #[test]
+    fn default_policy_admits_uploads_above_the_legacy_body_limit() {
+        let decision = DefaultAdmissionPolicy.decide(AdmissionRequest {
+            trace_id: "trace-upload",
+            class: ResourceClass::Upload,
+            body_bytes: 64 * 1024 * 1024 + 1,
+        });
+        let AdmissionDecision::Admit(budget) = decision else {
+            panic!("upload body should be admitted without a size limit");
+        };
+        assert_eq!(budget.body_bytes, 0);
+    }
 }

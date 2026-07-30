@@ -117,6 +117,8 @@ export interface UsageRecord {
   actual_cost?: number
   response_time_ms?: number | null
   first_byte_time_ms?: number | null  // 首字时间 (TTFB)
+  end_to_end_time_ms?: number | null  // 客户端从请求进入网关到完成的总耗时
+  end_to_end_first_byte_time_ms?: number | null  // 客户端从请求进入网关到首字节的耗时
   is_stream: boolean
   upstream_is_stream?: boolean
   client_requested_stream?: boolean

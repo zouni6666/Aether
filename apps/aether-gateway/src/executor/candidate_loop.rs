@@ -20,8 +20,9 @@ use crate::ai_serving::LocalExecutionAttemptSource;
 use crate::clock::current_unix_ms;
 use crate::control::GatewayControlDecision;
 use crate::execution_runtime::{
-    execute_execution_runtime_stream_with_retry_scope,
+    build_transport_error_stop_response, execute_execution_runtime_stream_with_retry_scope,
     execute_execution_runtime_sync_with_retry_scope,
+    mark_stream_candidate_watchdog_terminal_started, StreamCandidateWatchdogProgress,
 };
 use crate::executor::{
     build_local_execution_exhaustion, mark_deferred_upstream_response, LocalExecutionRequestOutcome,
@@ -30,7 +31,9 @@ use crate::handlers::shared::provider_pool::release_admin_provider_pool_key_leas
 use crate::log_ids::short_request_id;
 use crate::orchestration::{
     local_execution_candidate_metadata_from_report_context,
-    local_failover_policy_from_report_context, resolve_local_failover_policy, LocalFailoverPolicy,
+    local_failover_policy_from_report_context, resolve_local_failover_policy,
+    resolve_local_transport_failover_analysis_for_attempt, LocalFailoverDecision,
+    LocalFailoverPolicy,
 };
 use crate::privacy::RedactionExecutionCandidateId;
 use crate::request_candidate_runtime::{
@@ -1013,12 +1016,24 @@ where
         let execution_decision = self.decision.clone();
         let execution_report_kind = attempt.report_kind();
         let execution_plan = plan.clone();
-        let mut execution = execute_stream_candidate_with_watchdog(
+        let stop_on_transport_errors = matches!(
+            resolve_local_transport_failover_analysis_for_attempt(
+                self.state,
+                plan,
+                watchdog_report_context,
+            )
+            .await
+            .decision,
+            LocalFailoverDecision::StopLocalFailover
+        );
+        let watchdog_started_at = std::time::Instant::now();
+        let execution = execute_stream_candidate_with_watchdog(
             self.state,
             self.trace_id,
             self.plan_kind,
             plan,
             watchdog_report_context,
+            stop_on_transport_errors,
             move || async move {
                 execute_execution_runtime_stream_with_retry_scope(
                     &execution_state,
@@ -1033,6 +1048,25 @@ where
             },
         )
         .await?;
+        let mut execution = match execution {
+            StreamCandidateWatchdogOutcome::TransportTimeout => {
+                AiAttemptExecutionOutcome::Responded(
+                    build_transport_error_stop_response(
+                        self.state,
+                        plan,
+                        watchdog_report_context,
+                        self.trace_id,
+                        self.decision,
+                        http::StatusCode::GATEWAY_TIMEOUT.as_u16(),
+                        "local_stream_candidate_watchdog_timeout",
+                        stream_candidate_watchdog_timeout_message(),
+                        watchdog_started_at.elapsed().as_millis() as u64,
+                    )
+                    .await?,
+                )
+            }
+            StreamCandidateWatchdogOutcome::Executed(execution) => execution,
+        };
         match &mut execution {
             AiAttemptExecutionOutcome::Responded(response)
             | AiAttemptExecutionOutcome::Retry {
@@ -1297,20 +1331,28 @@ fn log_stream_candidate_admission_timeout(
     );
 }
 
+#[derive(Debug)]
+enum StreamCandidateWatchdogOutcome {
+    Executed(AiAttemptExecutionOutcome<Response<Body>>),
+    TransportTimeout,
+}
+
 async fn execute_stream_candidate_with_watchdog<Fut>(
     state: &(impl RequestCandidateRuntimeWriter + UpstreamExecutionGateProvider + ?Sized),
     trace_id: &str,
     plan_kind: &str,
     plan: &aether_contracts::ExecutionPlan,
     report_context: Option<&serde_json::Value>,
+    stop_on_transport_errors: bool,
     execute: impl FnOnce() -> Fut,
-) -> Result<AiAttemptExecutionOutcome<Response<Body>>, GatewayError>
+) -> Result<StreamCandidateWatchdogOutcome, GatewayError>
 where
     Fut: std::future::Future<
             Output = Result<AiAttemptExecutionOutcome<Response<Body>>, GatewayError>,
         > + Send,
 {
     let timeout_duration = resolve_stream_candidate_watchdog_timeout(plan, report_context);
+    let candidate_started_at = std::time::Instant::now();
     let candidate_started_unix_ms = current_unix_ms();
     let permit = match acquire_upstream_execution_gate(state, trace_id).await {
         Ok(permit) => permit,
@@ -1324,17 +1366,33 @@ where
             )
             .await;
             log_stream_candidate_admission_timeout(trace_id, plan_kind, plan, report_context, &err);
-            return Ok(AiAttemptExecutionOutcome::retry(
-                AiAttemptRetryScope::Candidate,
+            return Ok(StreamCandidateWatchdogOutcome::Executed(
+                AiAttemptExecutionOutcome::retry(AiAttemptRetryScope::Candidate),
             ));
         }
         Err(err) => return Err(err),
     };
     let permit_hold = permit.map(UpstreamExecutionPermitHold::new);
     let watchdog_started_at = std::time::Instant::now();
-    let outcome = match timeout(timeout_duration, execute()).await {
-        Ok(result) => result,
-        Err(_) => {
+    let watchdog_progress = StreamCandidateWatchdogProgress::shared();
+    let execution = watchdog_progress.clone().scope(execute());
+    tokio::pin!(execution);
+    let deadline = tokio::time::sleep(timeout_duration);
+    tokio::pin!(deadline);
+    let execution_result = tokio::select! {
+        biased;
+        result = &mut execution => Some(result),
+        () = &mut deadline => {
+            if watchdog_progress.terminal_started() {
+                Some(execution.await)
+            } else {
+                None
+            }
+        }
+    };
+    let outcome = match execution_result {
+        Some(result) => result.map(StreamCandidateWatchdogOutcome::Executed),
+        None => {
             let finished_at_unix_ms = current_unix_ms();
             let request_id = short_request_id(plan.request_id.as_str());
             let provider_name = plan.provider_name.as_deref().unwrap_or("-");
@@ -1350,10 +1408,10 @@ where
                 report_context,
                 SchedulerRequestCandidateStatusUpdate {
                     status: RequestCandidateStatus::Failed,
-                    status_code: Some(http::StatusCode::GATEWAY_TIMEOUT.as_u16()),
+                    status_code: None,
                     error_type: Some("local_stream_candidate_watchdog_timeout".to_string()),
                     error_message: Some(stream_candidate_watchdog_timeout_message().to_string()),
-                    latency_ms: None,
+                    latency_ms: Some(candidate_started_at.elapsed().as_millis() as u64),
                     started_at_unix_ms: Some(candidate_started_unix_ms),
                     finished_at_unix_ms: Some(finished_at_unix_ms),
                 },
@@ -1374,9 +1432,13 @@ where
                 timeout_ms,
                 "gateway local stream candidate watchdog timed out"
             );
-            Ok(AiAttemptExecutionOutcome::retry(
-                AiAttemptRetryScope::Candidate,
-            ))
+            if stop_on_transport_errors {
+                Ok(StreamCandidateWatchdogOutcome::TransportTimeout)
+            } else {
+                Ok(StreamCandidateWatchdogOutcome::Executed(
+                    AiAttemptExecutionOutcome::retry(AiAttemptRetryScope::Candidate),
+                ))
+            }
         }
     };
     observe_gateway_stage_ms(
@@ -1384,20 +1446,30 @@ where
         watchdog_started_at.elapsed().as_millis() as u64,
     );
     match outcome {
-        Ok(AiAttemptExecutionOutcome::Responded(response)) => {
+        Ok(StreamCandidateWatchdogOutcome::Executed(AiAttemptExecutionOutcome::Responded(
+            response,
+        ))) => {
             let response = maybe_hold_upstream_execution_permit(Some(response), permit_hold)
                 .expect("responded stream attempt must retain its response");
-            Ok(AiAttemptExecutionOutcome::Responded(response))
+            Ok(StreamCandidateWatchdogOutcome::Executed(
+                AiAttemptExecutionOutcome::Responded(response),
+            ))
         }
-        Ok(AiAttemptExecutionOutcome::Retry {
+        Ok(StreamCandidateWatchdogOutcome::Executed(AiAttemptExecutionOutcome::Retry {
             scope,
             fallback_response,
-        }) => {
+        })) => {
             drop(permit_hold);
-            Ok(AiAttemptExecutionOutcome::Retry {
-                scope,
-                fallback_response,
-            })
+            Ok(StreamCandidateWatchdogOutcome::Executed(
+                AiAttemptExecutionOutcome::Retry {
+                    scope,
+                    fallback_response,
+                },
+            ))
+        }
+        Ok(StreamCandidateWatchdogOutcome::TransportTimeout) => {
+            drop(permit_hold);
+            Ok(StreamCandidateWatchdogOutcome::TransportTimeout)
         }
         Err(err) if is_candidate_level_admission_timeout(&err) => {
             drop(permit_hold);
@@ -1412,8 +1484,8 @@ where
                 .await;
             }
             log_stream_candidate_admission_timeout(trace_id, plan_kind, plan, report_context, &err);
-            Ok(AiAttemptExecutionOutcome::retry(
-                AiAttemptRetryScope::Candidate,
+            Ok(StreamCandidateWatchdogOutcome::Executed(
+                AiAttemptExecutionOutcome::retry(AiAttemptRetryScope::Candidate),
             ))
         }
         Err(err) => {
@@ -2329,6 +2401,7 @@ mod tests {
                 "claude_cli_stream",
                 &plan,
                 Some(&report_context),
+                false,
                 || {
                     std::future::pending::<
                         Result<AiAttemptExecutionOutcome<Response<Body>>, GatewayError>,
@@ -2342,20 +2415,19 @@ mod tests {
         let result = task.await.expect("watchdog task should join");
         assert!(matches!(
             result,
-            Ok(AiAttemptExecutionOutcome::Retry {
-                scope: AiAttemptRetryScope::Candidate,
-                fallback_response: None,
-            })
+            Ok(StreamCandidateWatchdogOutcome::Executed(
+                AiAttemptExecutionOutcome::Retry {
+                    scope: AiAttemptRetryScope::Candidate,
+                    fallback_response: None,
+                }
+            ))
         ));
 
         let records = writer.records.lock().await;
         assert_eq!(records.len(), 1);
         let record = &records[0];
         assert_eq!(record.status, RequestCandidateStatus::Failed);
-        assert_eq!(
-            record.status_code,
-            Some(http::StatusCode::GATEWAY_TIMEOUT.as_u16())
-        );
+        assert_eq!(record.status_code, None);
         assert_eq!(
             record.error_type.as_deref(),
             Some("local_stream_candidate_watchdog_timeout")
@@ -2365,6 +2437,108 @@ mod tests {
             .as_deref()
             .is_some_and(|message| message == "Stream first byte timeout"));
         assert_eq!(record.candidate_index, 2);
+    }
+
+    #[tokio::test]
+    async fn stream_candidate_watchdog_can_stop_on_transport_error() {
+        let writer = Arc::new(TestRequestCandidateWriter::default());
+        let plan = test_plan(Some(ExecutionTimeouts {
+            first_byte_ms: Some(5),
+            ..ExecutionTimeouts::default()
+        }));
+        let report_context = test_report_context();
+
+        let result = execute_stream_candidate_with_watchdog(
+            writer.as_ref(),
+            "trace_watchdog_stop",
+            "claude_cli_stream",
+            &plan,
+            Some(&report_context),
+            true,
+            || {
+                std::future::pending::<
+                    Result<AiAttemptExecutionOutcome<Response<Body>>, GatewayError>,
+                >()
+            },
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Ok(StreamCandidateWatchdogOutcome::TransportTimeout)
+        ));
+        let records = writer.records.lock().await;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].status_code, None);
+        assert_eq!(
+            records[0].error_type.as_deref(),
+            Some("local_stream_candidate_watchdog_timeout")
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_candidate_watchdog_does_not_cancel_started_terminalization() {
+        let writer = Arc::new(TestRequestCandidateWriter::default());
+        let plan = test_plan(Some(ExecutionTimeouts {
+            first_byte_ms: Some(5),
+            ..ExecutionTimeouts::default()
+        }));
+        let report_context = test_report_context();
+
+        let result = execute_stream_candidate_with_watchdog(
+            writer.as_ref(),
+            "trace_terminalization",
+            "claude_cli_stream",
+            &plan,
+            Some(&report_context),
+            true,
+            || async {
+                mark_stream_candidate_watchdog_terminal_started();
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                Ok(AiAttemptExecutionOutcome::Responded(Response::new(
+                    Body::from("terminal response"),
+                )))
+            },
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Ok(StreamCandidateWatchdogOutcome::Executed(
+                AiAttemptExecutionOutcome::Responded(_)
+            ))
+        ));
+        assert!(writer.records.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stream_candidate_watchdog_does_not_relabel_execution_error_as_timeout() {
+        let writer = Arc::new(TestRequestCandidateWriter::default());
+        let plan = test_plan(None);
+        let report_context = test_report_context();
+
+        let result = execute_stream_candidate_with_watchdog(
+            writer.as_ref(),
+            "trace_execution_error",
+            "claude_cli_stream",
+            &plan,
+            Some(&report_context),
+            true,
+            || async {
+                Err(GatewayError::UpstreamUnavailable {
+                    trace_id: "trace_execution_error".to_string(),
+                    message: "upstream connect failed".to_string(),
+                })
+            },
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(GatewayError::UpstreamUnavailable { message, .. })
+                if message == "upstream connect failed"
+        ));
+        assert!(writer.records.lock().await.is_empty());
     }
 
     #[tokio::test]
@@ -2388,6 +2562,7 @@ mod tests {
             "claude_cli_stream",
             &plan,
             Some(&report_context),
+            false,
             || async {
                 panic!("execute future should not run while upstream execution gate is saturated")
             },
@@ -2396,10 +2571,12 @@ mod tests {
 
         assert!(matches!(
             result,
-            Ok(AiAttemptExecutionOutcome::Retry {
-                scope: AiAttemptRetryScope::Candidate,
-                fallback_response: None,
-            })
+            Ok(StreamCandidateWatchdogOutcome::Executed(
+                AiAttemptExecutionOutcome::Retry {
+                    scope: AiAttemptRetryScope::Candidate,
+                    fallback_response: None,
+                }
+            ))
         ));
         let records = writer.records.lock().await;
         assert_eq!(records.len(), 1);
@@ -2432,6 +2609,7 @@ mod tests {
             "claude_cli_stream",
             &plan,
             Some(&report_context),
+            false,
             || async {
                 Err(GatewayError::AdmissionTimeout {
                     trace_id: "trace_target_admission".to_string(),
@@ -2444,10 +2622,12 @@ mod tests {
 
         assert!(matches!(
             result,
-            Ok(AiAttemptExecutionOutcome::Retry {
-                scope: AiAttemptRetryScope::Candidate,
-                fallback_response: None,
-            })
+            Ok(StreamCandidateWatchdogOutcome::Executed(
+                AiAttemptExecutionOutcome::Retry {
+                    scope: AiAttemptRetryScope::Candidate,
+                    fallback_response: None,
+                }
+            ))
         ));
         assert!(writer.records.lock().await.is_empty());
     }

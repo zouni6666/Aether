@@ -62,7 +62,7 @@ impl ResourceBudget {
             ResourceClass::Interactive => Self::interactive(),
             ResourceClass::Streaming => Self::streaming(),
             ResourceClass::Upload => Self {
-                body_bytes: 64 * 1024 * 1024,
+                body_bytes: 0,
                 ..Self::interactive()
             },
             ResourceClass::Background => Self {

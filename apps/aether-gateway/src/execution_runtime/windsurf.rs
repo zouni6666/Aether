@@ -700,24 +700,66 @@ fn windsurf_execution_error_from_transport_error(
             failover_recommended: false,
         };
     }
-    if is_windsurf_cascade_transport_error(err) {
-        return ExecutionError {
-            kind: ExecutionErrorKind::Upstream5xx,
-            phase,
-            message: format!("{message}; Windsurf IDE language server is unavailable"),
-            upstream_status: Some(503),
-            retryable: true,
-            failover_recommended: true,
-        };
-    }
+    let (kind, phase) = classify_windsurf_transport_execution_error(&lower, phase);
     ExecutionError {
-        kind: ExecutionErrorKind::ProtocolError,
+        kind,
         phase,
         message,
         upstream_status: None,
         retryable: true,
         failover_recommended: true,
     }
+}
+
+fn classify_windsurf_transport_execution_error(
+    message: &str,
+    phase: ExecutionPhase,
+) -> (ExecutionErrorKind, ExecutionPhase) {
+    if message.contains("proxy") {
+        return (ExecutionErrorKind::ProxyError, ExecutionPhase::Connect);
+    }
+    if ["tls", "ssl", "certificate", "handshake"]
+        .iter()
+        .any(|needle| message.contains(needle))
+    {
+        return (ExecutionErrorKind::TlsError, ExecutionPhase::Handshake);
+    }
+    if message.contains("first byte") {
+        return (
+            ExecutionErrorKind::FirstByteTimeout,
+            ExecutionPhase::FirstByte,
+        );
+    }
+    if ["timed out", "timeout", "deadline exceeded"]
+        .iter()
+        .any(|needle| message.contains(needle))
+    {
+        let kind = match &phase {
+            ExecutionPhase::Connect | ExecutionPhase::Handshake | ExecutionPhase::Write => {
+                ExecutionErrorKind::ConnectTimeout
+            }
+            ExecutionPhase::FirstByte => ExecutionErrorKind::FirstByteTimeout,
+            _ => ExecutionErrorKind::ReadTimeout,
+        };
+        return (kind, phase);
+    }
+    if [
+        "dns",
+        "failed to lookup address",
+        "name or service not known",
+        "no such host",
+        "connection refused",
+        "tcp connect",
+        "kind=connect",
+        "connect error",
+        "failed to connect",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+    {
+        return (ExecutionErrorKind::ProtocolError, ExecutionPhase::Connect);
+    }
+    (ExecutionErrorKind::ProtocolError, phase)
 }
 
 async fn poll_windsurf_cascade_with_transport_recovery<F>(
@@ -4552,6 +4594,56 @@ mod tests {
         assert_eq!(execution_error.upstream_status, Some(429));
         assert!(execution_error.retryable);
         assert!(execution_error.failover_recommended);
+    }
+
+    #[test]
+    fn windsurf_transport_errors_do_not_synthesize_provider_status() {
+        let cases = [
+            (
+                "tcp connect error: connection refused",
+                ExecutionErrorKind::ProtocolError,
+                ExecutionPhase::Connect,
+            ),
+            (
+                "dns lookup failed: no such host",
+                ExecutionErrorKind::ProtocolError,
+                ExecutionPhase::Connect,
+            ),
+            (
+                "TLS certificate handshake failed",
+                ExecutionErrorKind::TlsError,
+                ExecutionPhase::Handshake,
+            ),
+            (
+                "proxy connection failed",
+                ExecutionErrorKind::ProxyError,
+                ExecutionPhase::Connect,
+            ),
+            (
+                "cascade polling timed out",
+                ExecutionErrorKind::ReadTimeout,
+                ExecutionPhase::StreamRead,
+            ),
+            (
+                "connection reset by peer",
+                ExecutionErrorKind::ProtocolError,
+                ExecutionPhase::StreamRead,
+            ),
+        ];
+
+        for (message, expected_kind, expected_phase) in cases {
+            let err = ExecutionRuntimeTransportError::UpstreamRequest(message.to_string());
+            let execution_error = super::windsurf_execution_error_from_transport_error(
+                &err,
+                ExecutionPhase::StreamRead,
+            );
+
+            assert_eq!(execution_error.kind, expected_kind, "{message}");
+            assert_eq!(execution_error.phase, expected_phase, "{message}");
+            assert_eq!(execution_error.upstream_status, None, "{message}");
+            assert!(execution_error.retryable, "{message}");
+            assert!(execution_error.failover_recommended, "{message}");
+        }
     }
 
     #[test]

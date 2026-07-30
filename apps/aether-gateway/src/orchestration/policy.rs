@@ -16,6 +16,7 @@ pub(crate) struct LocalFailoverPolicy {
     pub(crate) max_transfer_timeout_seconds: u64,
     pub(crate) stop_status_codes: BTreeSet<u16>,
     pub(crate) continue_status_codes: BTreeSet<u16>,
+    pub(crate) stop_on_transport_errors: bool,
     pub(crate) success_failover_patterns: Vec<LocalFailoverRegexRule>,
     pub(crate) error_stop_patterns: Vec<LocalFailoverRegexRule>,
     pub(crate) stop_cyber_policy_errors: bool,
@@ -30,6 +31,7 @@ impl Default for LocalFailoverPolicy {
             max_transfer_timeout_seconds: 0,
             stop_status_codes: BTreeSet::new(),
             continue_status_codes: BTreeSet::new(),
+            stop_on_transport_errors: false,
             success_failover_patterns: Vec::new(),
             error_stop_patterns: Vec::new(),
             stop_cyber_policy_errors: true,
@@ -71,6 +73,7 @@ pub(crate) async fn resolve_local_failover_policy(
         max_transfer_timeout_seconds = policy.max_transfer_timeout_seconds,
         stop_status_code_count = policy.stop_status_codes.len(),
         continue_status_code_count = policy.continue_status_codes.len(),
+        stop_on_transport_errors = policy.stop_on_transport_errors,
         success_failover_pattern_count = policy.success_failover_patterns.len(),
         error_stop_pattern_count = policy.error_stop_patterns.len(),
         cyber_continue_failover,
@@ -157,6 +160,10 @@ pub(crate) fn local_failover_policy_from_transport(
                 )
             })
             .unwrap_or_default(),
+        stop_on_transport_errors: rules
+            .and_then(|value| value.get("stop_on_transport_errors"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         success_failover_patterns: rules
             .map(|value| parse_regex_rules(value, "success_failover_patterns"))
             .unwrap_or_default(),
@@ -192,6 +199,10 @@ pub(crate) fn local_failover_policy_from_report_context(
             .get("continue_status_codes")
             .map(parse_status_code_list)
             .unwrap_or_default(),
+        stop_on_transport_errors: object
+            .get("stop_on_transport_errors")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         success_failover_patterns: parse_regex_rules(object, "success_failover_patterns"),
         error_stop_patterns: parse_regex_rules(object, "error_stop_patterns"),
         stop_cyber_policy_errors: object
@@ -235,6 +246,7 @@ fn local_failover_policy_to_value(policy: &LocalFailoverPolicy) -> Value {
         "max_transfer_timeout_seconds": policy.max_transfer_timeout_seconds,
         "stop_status_codes": policy.stop_status_codes.iter().copied().collect::<Vec<_>>(),
         "continue_status_codes": policy.continue_status_codes.iter().copied().collect::<Vec<_>>(),
+        "stop_on_transport_errors": policy.stop_on_transport_errors,
         "success_failover_patterns": policy.success_failover_patterns.iter().map(local_failover_regex_rule_to_value).collect::<Vec<_>>(),
         "error_stop_patterns": policy.error_stop_patterns.iter().map(local_failover_regex_rule_to_value).collect::<Vec<_>>(),
         "stop_cyber_policy_errors": policy.stop_cyber_policy_errors,
@@ -416,6 +428,7 @@ mod tests {
                         "max_retries": 2,
                         "continue_status_codes": [429],
                         "stop_status_codes": [400],
+                        "stop_on_transport_errors": true,
                         "success_failover_patterns": [{"pattern": "quota", "status_codes": [200]}],
                         "error_stop_patterns": [{"pattern": "validation", "status_codes": [422]}]
                     }
@@ -431,6 +444,7 @@ mod tests {
                 max_transfer_timeout_seconds: 60,
                 stop_status_codes: [400].into_iter().collect(),
                 continue_status_codes: [429].into_iter().collect(),
+                stop_on_transport_errors: true,
                 success_failover_patterns: vec![LocalFailoverRegexRule {
                     pattern: "quota".to_string(),
                     status_codes: [200].into_iter().collect(),
@@ -443,6 +457,35 @@ mod tests {
                 retry_client_errors_by_default: true,
             })
         );
+    }
+
+    #[test]
+    fn transport_error_failover_defaults_to_continue_and_accepts_explicit_stop() {
+        let default_policy =
+            local_failover_policy_from_transport(&sample_transport(None, None, None));
+        assert!(!default_policy.stop_on_transport_errors);
+
+        let stop_policy = local_failover_policy_from_transport(&sample_transport(
+            None,
+            None,
+            Some(json!({
+                "failover_rules": {
+                    "stop_on_transport_errors": true,
+                }
+            })),
+        ));
+        assert!(stop_policy.stop_on_transport_errors);
+
+        let invalid_policy = local_failover_policy_from_transport(&sample_transport(
+            None,
+            None,
+            Some(json!({
+                "failover_rules": {
+                    "stop_on_transport_errors": "true",
+                }
+            })),
+        ));
+        assert!(!invalid_policy.stop_on_transport_errors);
     }
 
     #[test]

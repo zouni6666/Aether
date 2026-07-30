@@ -1691,8 +1691,8 @@ pub fn admin_system_config_default_value(key: &str) -> Option<serde_json::Value>
         "default_user_initial_gift_usd" => Some(json!(10.0)),
         "password_policy_level" => Some(json!("weak")),
         REQUEST_RECORD_LEVEL_KEY => Some(json!("full")),
-        "max_request_body_size" => Some(json!(5_242_880)),
-        "max_response_body_size" => Some(json!(5_242_880)),
+        "max_request_body_size" => Some(json!(0)),
+        "max_response_body_size" => Some(json!(0)),
         "sensitive_headers" => Some(json!([
             "authorization",
             "x-api-key",

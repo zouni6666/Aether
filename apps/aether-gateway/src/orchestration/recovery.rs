@@ -1,6 +1,7 @@
 use super::classifier::{
-    classify_failure_disposition, classify_local_failover, FailureRetryAction,
-    LocalFailoverClassification, LocalFailoverInput,
+    classify_failure_disposition, classify_local_failover, classify_local_transport_error,
+    FailureRetryAction, LocalFailoverClassification, LocalFailoverInput,
+    LocalTransportFailoverClassification,
 };
 use super::LocalFailoverPolicy;
 
@@ -27,6 +28,12 @@ pub(crate) struct LocalFailoverAnalysis {
     pub(crate) decision: LocalFailoverDecision,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LocalTransportFailoverAnalysis {
+    pub(crate) classification: LocalTransportFailoverClassification,
+    pub(crate) decision: LocalFailoverDecision,
+}
+
 impl LocalFailoverAnalysis {
     pub(crate) const fn use_default() -> Self {
         Self {
@@ -44,6 +51,24 @@ pub(crate) fn analyze_local_failover(
     LocalFailoverAnalysis {
         classification,
         decision: decision_from_classification(classification),
+    }
+}
+
+pub(crate) fn analyze_local_transport_error(
+    policy: &LocalFailoverPolicy,
+) -> LocalTransportFailoverAnalysis {
+    let classification = classify_local_transport_error(policy);
+    let decision = match classification {
+        LocalTransportFailoverClassification::StopTransportError => {
+            LocalFailoverDecision::StopLocalFailover
+        }
+        LocalTransportFailoverClassification::RetryTransportError => {
+            LocalFailoverDecision::RetryNextCandidate
+        }
+    };
+    LocalTransportFailoverAnalysis {
+        classification,
+        decision,
     }
 }
 
@@ -105,7 +130,7 @@ const fn decision_from_classification(
 #[cfg(test)]
 mod tests {
     use super::{
-        analyze_local_failover, apply_provider_failure_disposition,
+        analyze_local_failover, analyze_local_transport_error, apply_provider_failure_disposition,
         recover_local_failover_decision, LocalFailoverAnalysis, LocalFailoverDecision,
     };
     use crate::orchestration::{
@@ -133,6 +158,23 @@ mod tests {
                 LocalFailoverInput::new(200, None)
             ),
             LocalFailoverDecision::UseDefault
+        );
+    }
+
+    #[test]
+    fn transport_error_recovery_defaults_to_retry_and_can_stop() {
+        assert_eq!(
+            analyze_local_transport_error(&LocalFailoverPolicy::default()).decision,
+            LocalFailoverDecision::RetryNextCandidate
+        );
+
+        let stop_policy = LocalFailoverPolicy {
+            stop_on_transport_errors: true,
+            ..LocalFailoverPolicy::default()
+        };
+        assert_eq!(
+            analyze_local_transport_error(&stop_policy).decision,
+            LocalFailoverDecision::StopLocalFailover
         );
     }
 

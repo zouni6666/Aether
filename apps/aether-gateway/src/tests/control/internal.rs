@@ -444,15 +444,18 @@ async fn gateway_streams_tunnel_relay_body_to_attachment_owner() {
     );
 
     let (owner_url, owner_handle) = start_server(owner).await;
-    let data_state = GatewayDataState::disabled().with_system_config_values_for_tests(vec![(
-        "tunnel.attachments.node-123".to_string(),
-        json!({
-            "gateway_instance_id": "gateway-b",
-            "relay_base_url": owner_url,
-            "conn_count": 1,
-            "observed_at_unix_secs": 4_102_444_800u64,
-        }),
-    )]);
+    let data_state = GatewayDataState::disabled().with_system_config_values_for_tests(vec![
+        (
+            "tunnel.attachments.node-123".to_string(),
+            json!({
+                "gateway_instance_id": "gateway-b",
+                "relay_base_url": owner_url,
+                "conn_count": 1,
+                "observed_at_unix_secs": 4_102_444_800u64,
+            }),
+        ),
+        ("max_request_body_size".to_string(), json!(8)),
+    ]);
     let mut state = AppState::new()
         .expect("gateway should build")
         .with_data_state_for_tests(data_state)
@@ -539,16 +542,21 @@ async fn gateway_does_not_forward_tunnel_relay_twice() {
 }
 
 #[tokio::test]
-async fn gateway_rejects_owner_relay_body_above_configured_limit() {
-    let owner_hits = Arc::new(Mutex::new(0usize));
-    let owner_hits_clone = Arc::clone(&owner_hits);
+async fn gateway_forwards_owner_relay_body_above_recording_limit() {
+    const RECORDING_LIMIT_BYTES: usize = 8 * 1024 * 1024;
+
+    let captured_body = Arc::new(Mutex::new(None::<Bytes>));
+    let captured_body_clone = Arc::clone(&captured_body);
     let owner = Router::new().route(
         "/api/internal/tunnel/relay/node-123",
-        post(move |_request: Request| {
-            let owner_hits_inner = Arc::clone(&owner_hits_clone);
+        post(move |body: Body| {
+            let captured_body_inner = Arc::clone(&captured_body_clone);
             async move {
-                *owner_hits_inner.lock().expect("mutex should lock") += 1;
-                (StatusCode::OK, Body::from("unexpected owner hit"))
+                let body = axum::body::to_bytes(body, usize::MAX)
+                    .await
+                    .expect("owner body should read");
+                *captured_body_inner.lock().expect("mutex should lock") = Some(body);
+                StatusCode::OK
             }
         }),
     );
@@ -564,7 +572,10 @@ async fn gateway_rejects_owner_relay_body_above_configured_limit() {
                 "observed_at_unix_secs": 4_102_444_800u64,
             }),
         ),
-        ("max_request_body_size".to_string(), json!(8)),
+        (
+            "max_request_body_size".to_string(),
+            json!(RECORDING_LIMIT_BYTES),
+        ),
     ]);
     let gateway = build_router_with_state(
         AppState::new()
@@ -574,15 +585,24 @@ async fn gateway_rejects_owner_relay_body_above_configured_limit() {
     );
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
+    let request_payload = vec![b'x'; RECORDING_LIMIT_BYTES + 1];
+    let envelope = relay_envelope(
+        &relay_request_meta(false, Some(60_000), None),
+        &request_payload,
+    );
+    assert!(envelope.len() > RECORDING_LIMIT_BYTES);
     let response = reqwest::Client::new()
         .post(format!("{gateway_url}/api/internal/tunnel/relay/node-123"))
-        .body("relay-envelope")
+        .body(envelope.clone())
         .send()
         .await
         .expect("request should succeed");
 
-    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-    assert_eq!(*owner_hits.lock().expect("mutex should lock"), 0);
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        captured_body.lock().expect("mutex should lock").as_ref(),
+        Some(&Bytes::from(envelope))
+    );
 
     gateway_handle.abort();
     owner_handle.abort();

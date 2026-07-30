@@ -55,6 +55,7 @@ use crate::executor::{
     LocalExecutionRequestOutcome,
 };
 use crate::handlers::shared::system_config_bool;
+use crate::request_diagnostics::{current_request_diagnostics, scope_request_diagnostics_with};
 use crate::stage_metrics::observe_gateway_stage_ms;
 use crate::{AiExecutionDecision, AppState, GatewayError};
 
@@ -844,15 +845,19 @@ where
     let decision_for_response = decision.clone();
     let started_at = Instant::now();
     let (tx, rx) = mpsc::channel::<Result<Bytes, IoError>>(1);
+    let request_diagnostics = current_request_diagnostics();
 
     tokio::spawn(async move {
-        let bytes = standard_text_sync_heartbeat_final_bytes(
-            client_api_format.as_str(),
-            redaction_slot.as_ref(),
-            execute(state, parts, trace_id, decision, plan_kind, started_at).await,
-        )
+        scope_request_diagnostics_with(request_diagnostics, async move {
+            let bytes = standard_text_sync_heartbeat_final_bytes(
+                client_api_format.as_str(),
+                redaction_slot.as_ref(),
+                execute(state, parts, trace_id, decision, plan_kind, started_at).await,
+            )
+            .await;
+            let _ = tx.send(Ok(Bytes::from(bytes))).await;
+        })
         .await;
-        let _ = tx.send(Ok(Bytes::from(bytes))).await;
     });
 
     let headers = BTreeMap::from([(
@@ -1115,23 +1120,27 @@ fn build_openai_image_sync_heartbeat_shell_response(
     let decision_for_response = decision.clone();
     let started_at = Instant::now();
     let (tx, rx) = mpsc::channel::<Result<Bytes, IoError>>(1);
+    let request_diagnostics = current_request_diagnostics();
 
     tokio::spawn(async move {
-        let bytes = openai_image_sync_heartbeat_final_bytes(
-            execute_openai_image_sync_heartbeat_attempts(
-                state,
-                request_path,
-                trace_id,
-                decision,
-                plan_kind,
-                attempts,
-                transfer_tracker,
-                started_at,
+        scope_request_diagnostics_with(request_diagnostics, async move {
+            let bytes = openai_image_sync_heartbeat_final_bytes(
+                execute_openai_image_sync_heartbeat_attempts(
+                    state,
+                    request_path,
+                    trace_id,
+                    decision,
+                    plan_kind,
+                    attempts,
+                    transfer_tracker,
+                    started_at,
+                )
+                .await,
             )
-            .await,
-        )
+            .await;
+            let _ = tx.send(Ok(Bytes::from(bytes))).await;
+        })
         .await;
-        let _ = tx.send(Ok(Bytes::from(bytes))).await;
     });
 
     let headers = BTreeMap::from([(
@@ -1557,12 +1566,19 @@ pub(crate) fn decision_payload_is_direct_execution(payload: &AiExecutionDecision
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aether_data::repository::candidates::InMemoryRequestCandidateRepository;
+    use aether_data::repository::usage::InMemoryUsageReadRepository;
+    use aether_data_contracts::repository::usage::UsageReadRepository;
+    use aether_usage_runtime::UsageRuntimeConfig;
     use futures_util::StreamExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::time::Duration;
 
     const TEST_OPENAI_IMAGE_SYNC_PLAN_KIND: &str = "openai_image_sync";
     const TEST_STANDARD_TEXT_SYNC_PLAN_KIND: &str = "openai_responses_compact_sync";
+    const HEARTBEAT_USAGE_POLL_INTERVAL: Duration = Duration::from_millis(10);
+    const HEARTBEAT_USAGE_SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
 
     struct TestSyncAttemptSource {
         attempts: VecDeque<AiSyncAttempt>,
@@ -1684,6 +1700,82 @@ mod tests {
         }
     }
 
+    fn heartbeat_usage_test_state(
+        response_body: Value,
+    ) -> (AppState, Arc<InMemoryUsageReadRepository>) {
+        let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
+        let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
+                    request_candidate_repository,
+                    Arc::clone(&usage_repository),
+                ),
+            )
+            .with_usage_runtime_for_tests(UsageRuntimeConfig {
+                enabled: true,
+                ..UsageRuntimeConfig::default()
+            })
+            .with_execution_runtime_sync_override_for_tests(move |plan| {
+                let mut result = test_openai_image_execution_result(
+                    plan,
+                    StatusCode::OK.as_u16(),
+                    response_body.clone(),
+                );
+                if let Some(telemetry) = result.telemetry.as_mut() {
+                    telemetry.ttfb_ms = Some(5);
+                }
+                Ok(result)
+            });
+        (state, usage_repository)
+    }
+
+    async fn assert_usage_has_end_to_end_timings(
+        usage_repository: &InMemoryUsageReadRepository,
+        request_id: &str,
+    ) {
+        let deadline = Instant::now() + HEARTBEAT_USAGE_SETTLE_TIMEOUT;
+        let usage = loop {
+            let usage = usage_repository
+                .find_by_request_id(request_id)
+                .await
+                .expect("usage should read");
+            if usage.as_ref().is_some_and(|usage| {
+                matches!(usage.status.as_str(), "completed" | "failed" | "cancelled")
+            }) {
+                break usage.expect("terminal usage should be recorded");
+            }
+
+            let now = Instant::now();
+            let last_status = usage.as_ref().map(|usage| usage.status.as_str());
+            assert!(
+                now < deadline,
+                "terminal usage should be recorded within {HEARTBEAT_USAGE_SETTLE_TIMEOUT:?}; \
+                 last status: {}",
+                last_status.unwrap_or("<missing>")
+            );
+            tokio::time::sleep(HEARTBEAT_USAGE_POLL_INTERVAL.min(deadline - now)).await;
+        };
+        assert_eq!(
+            usage.status, "completed",
+            "heartbeat usage should complete successfully"
+        );
+        let request_metadata = usage
+            .request_metadata
+            .as_ref()
+            .expect("terminal usage should retain request diagnostics");
+        let end_to_end_time_ms = request_metadata
+            .get("end_to_end_time_ms")
+            .and_then(Value::as_u64)
+            .expect("end-to-end time should be recorded");
+        let end_to_end_first_byte_time_ms = request_metadata
+            .get("end_to_end_first_byte_time_ms")
+            .and_then(Value::as_u64)
+            .expect("end-to-end first-byte time should be recorded");
+        assert!(end_to_end_first_byte_time_ms <= end_to_end_time_ms);
+    }
+
     fn test_standard_text_heartbeat_decision() -> GatewayControlDecision {
         GatewayControlDecision::synthetic(
             "/v1/responses",
@@ -1797,6 +1889,46 @@ mod tests {
 
         assert_eq!(body["error"]["type"], json!("upstream_error"));
         assert_eq!(body["error"]["upstream_status"], json!(503));
+    }
+
+    #[tokio::test]
+    async fn openai_image_sync_heartbeat_propagates_request_diagnostics_to_terminal_usage() {
+        let (state, usage_repository) = heartbeat_usage_test_state(json!({
+            "data": [{"b64_json": "heartbeat-image"}]
+        }));
+        let response = crate::request_diagnostics::scope_request_diagnostics(async move {
+            crate::request_diagnostics::record_request_accepted_at(
+                Instant::now() - Duration::from_millis(25),
+            );
+            build_openai_image_sync_heartbeat_shell_response(
+                state,
+                "/v1/images/generations".to_string(),
+                "trace-image-heartbeat-retry".to_string(),
+                test_openai_image_heartbeat_decision(),
+                TEST_OPENAI_IMAGE_SYNC_PLAN_KIND.to_string(),
+                vec![test_openai_image_heartbeat_attempt(
+                    0,
+                    "endpoint-success",
+                    "candidate-success",
+                )],
+                ProviderTransferTracker::default(),
+            )
+        })
+        .await
+        .expect("heartbeat shell should build");
+
+        let body = to_bytes(
+            response.into_body(),
+            crate::headers::max_internal_buffered_body_bytes(),
+        )
+        .await
+        .expect("heartbeat response body should complete");
+        assert!(!body.is_empty());
+        assert_usage_has_end_to_end_timings(
+            usage_repository.as_ref(),
+            "trace-image-heartbeat-retry",
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -2063,6 +2195,63 @@ mod tests {
             .expect("heartbeat chunk should be ok");
         assert_eq!(first.as_ref(), b"\n");
         let _ = release_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn standard_text_sync_heartbeat_propagates_request_diagnostics_to_terminal_usage() {
+        let (state, usage_repository) = heartbeat_usage_test_state(json!({
+            "id": "resp_heartbeat",
+            "output": []
+        }));
+        let (parts, _) = http::Request::builder()
+            .method(http::Method::POST)
+            .uri("/v1/responses")
+            .body(())
+            .expect("request should build")
+            .into_parts();
+        let response = crate::request_diagnostics::scope_request_diagnostics(async move {
+            crate::request_diagnostics::record_request_accepted_at(
+                Instant::now() - Duration::from_millis(25),
+            );
+            build_standard_text_sync_heartbeat_shell_response(
+                state,
+                parts,
+                "trace-standard-text-heartbeat-retry".to_string(),
+                test_standard_text_heartbeat_decision(),
+                TEST_STANDARD_TEXT_SYNC_PLAN_KIND.to_string(),
+                move |state, parts, trace_id, decision, plan_kind, _started_at| async move {
+                    execute_sync_attempt_source::<AiSyncAttempt, _>(
+                        &state,
+                        &parts,
+                        trace_id.as_str(),
+                        &decision,
+                        plan_kind.as_str(),
+                        TestSyncAttemptSource::new(vec![test_standard_text_heartbeat_attempt(
+                            0,
+                            "endpoint-success",
+                            "candidate-success",
+                            "openai:responses:compact",
+                        )]),
+                    )
+                    .await
+                },
+            )
+        })
+        .await
+        .expect("heartbeat shell should build");
+
+        let body = to_bytes(
+            response.into_body(),
+            crate::headers::max_internal_buffered_body_bytes(),
+        )
+        .await
+        .expect("heartbeat response body should complete");
+        assert!(!body.is_empty());
+        assert_usage_has_end_to_end_timings(
+            usage_repository.as_ref(),
+            "trace-standard-text-heartbeat-retry",
+        )
+        .await;
     }
 
     #[test]

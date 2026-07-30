@@ -165,7 +165,7 @@ impl UsageBodyCaptureEngine {
         apply_usage_body_capture_limit(
             UsageBodyField::RequestBody,
             "request",
-            self.policy.max_request_body_bytes,
+            None,
             payload.request_body,
             payload.request_body_ref,
             payload.request_body_state,
@@ -174,7 +174,7 @@ impl UsageBodyCaptureEngine {
         apply_usage_body_capture_limit(
             UsageBodyField::ProviderRequestBody,
             "provider_request",
-            self.policy.max_request_body_bytes,
+            None,
             payload.provider_request_body,
             payload.provider_request_body_ref,
             payload.provider_request_body_state,
@@ -183,7 +183,7 @@ impl UsageBodyCaptureEngine {
         apply_usage_body_capture_limit(
             UsageBodyField::ResponseBody,
             "response",
-            self.policy.max_response_body_bytes,
+            None,
             payload.response_body,
             payload.response_body_ref,
             payload.response_body_state,
@@ -192,7 +192,7 @@ impl UsageBodyCaptureEngine {
         apply_usage_body_capture_limit(
             UsageBodyField::ClientResponseBody,
             "client_response",
-            self.policy.max_response_body_bytes,
+            None,
             payload.client_response_body,
             payload.client_response_body_ref,
             payload.client_response_body_state,

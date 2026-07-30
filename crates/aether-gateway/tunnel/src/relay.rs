@@ -6,7 +6,6 @@ pub const TUNNEL_NODE_STATUS_PATH: &str = "/api/internal/tunnel/node-status";
 pub const TUNNEL_RELAY_PATH_PATTERN: &str = "/api/internal/tunnel/relay/{node_id}";
 pub const TUNNEL_ROUTE_FAMILY: &str = "tunnel_manage";
 
-pub const DEFAULT_OWNER_RELAY_BODY_LIMIT_BYTES: usize = 5_242_880;
 pub const DEFAULT_TUNNEL_PROBE_BODY_LIMIT_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

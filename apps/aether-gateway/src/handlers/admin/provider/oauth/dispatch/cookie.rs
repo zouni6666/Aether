@@ -9,9 +9,6 @@ use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::GatewayError;
 use axum::{body::Body, http, response::Response};
 
-pub(super) const MAX_CLAUDE_COOKIE_AUTHORIZE_BODY_BYTES: usize = 32 * 1024;
-pub(super) const MAX_CLAUDE_SESSION_KEY_BYTES: usize = 16 * 1024;
-
 struct ClaudeCookieAuthorizeRequest {
     session_key: String,
     name: Option<String>,
@@ -102,9 +99,6 @@ fn parse_claude_cookie_authorize_request(
     let Some(request_body) = request_body else {
         return Err(bad_cookie_request("请求体必须是合法的 JSON 对象"));
     };
-    if request_body.len() > MAX_CLAUDE_COOKIE_AUTHORIZE_BODY_BYTES {
-        return Err(bad_cookie_request("Cookie 授权请求体过大"));
-    }
     let payload = serde_json::from_slice::<serde_json::Value>(request_body)
         .ok()
         .and_then(|value| value.as_object().cloned())
@@ -126,7 +120,7 @@ fn parse_claude_cookie_authorize_request(
 
 pub(super) fn normalize_claude_session_key(raw: &str) -> Option<String> {
     let raw = raw.trim();
-    if raw.is_empty() || raw.len() > MAX_CLAUDE_SESSION_KEY_BYTES || raw.contains(['\r', '\n']) {
+    if raw.is_empty() || raw.contains(['\r', '\n']) {
         return None;
     }
     let cookie = raw
@@ -155,7 +149,6 @@ pub(super) fn normalize_claude_session_key(raw: &str) -> Option<String> {
 
 fn valid_session_key_value(value: &str) -> bool {
     !value.is_empty()
-        && value.len() <= MAX_CLAUDE_SESSION_KEY_BYTES
         && !value.contains(['\r', '\n', ';'])
         && http::HeaderValue::from_str(value).is_ok()
 }
@@ -178,7 +171,9 @@ fn bad_cookie_request(detail: &'static str) -> Response<Body> {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_claude_session_key;
+    use super::{normalize_claude_session_key, parse_claude_cookie_authorize_request};
+    use axum::body::Bytes;
+    use serde_json::json;
 
     #[test]
     fn normalizes_supported_claude_cookie_inputs() {
@@ -210,5 +205,16 @@ mod tests {
                 "input={input:?}"
             );
         }
+    }
+
+    #[test]
+    fn accepts_authorize_body_and_session_key_above_previous_caps() {
+        let session_key = "x".repeat(40 * 1024);
+        let body = Bytes::from(json!({ "sessionKey": session_key }).to_string());
+        assert!(body.len() > 32 * 1024);
+
+        let parsed = parse_claude_cookie_authorize_request(Some(&body))
+            .expect("large Cookie authorization payload should parse");
+        assert_eq!(parsed.session_key.len(), 40 * 1024);
     }
 }

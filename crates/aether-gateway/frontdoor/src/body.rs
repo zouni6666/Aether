@@ -78,7 +78,7 @@ impl BodyBufferPolicy {
     }
 
     pub fn reservation_bytes(&self, headers: &HeaderMap) -> usize {
-        reservation_bytes(headers, self.max_bytes)
+        reservation_bytes(headers, self.max_bytes, self.budget_bytes)
     }
 
     pub fn reservation_permits(&self, reservation_bytes: usize) -> u32 {
@@ -264,19 +264,25 @@ fn declared_content_length(headers: &HeaderMap) -> Option<u64> {
         .and_then(|value| value.trim().parse::<u64>().ok())
 }
 
-fn reservation_bytes(headers: &HeaderMap, max_bytes: u64) -> usize {
-    let max_bytes = usize::try_from(max_bytes).unwrap_or(usize::MAX);
+fn reservation_bytes(headers: &HeaderMap, max_bytes: u64, budget_bytes: usize) -> usize {
+    let reservation_ceiling = usize::try_from(max_bytes)
+        .unwrap_or(usize::MAX)
+        .min(budget_bytes);
     let encoded = headers
         .get(header::CONTENT_ENCODING)
         .and_then(|value| value.to_str().ok())
         .map(str::trim)
         .is_some_and(|value| !value.is_empty() && !value.eq_ignore_ascii_case("identity"));
     if encoded {
-        return max_bytes;
+        return reservation_ceiling;
     }
     declared_content_length(headers)
-        .map(|value| usize::try_from(value).unwrap_or(usize::MAX).min(max_bytes))
-        .unwrap_or(max_bytes)
+        .map(|value| {
+            usize::try_from(value)
+                .unwrap_or(usize::MAX)
+                .min(reservation_ceiling)
+        })
+        .unwrap_or(reservation_ceiling)
 }
 
 fn reservation_permits(reservation_bytes: usize, permit_bytes: usize) -> u32 {
@@ -332,6 +338,58 @@ mod tests {
             .await
             .expect_err("declared body should be rejected");
         assert_eq!(error, BodyBufferError::TooLarge { limit_bytes: 5 });
+    }
+
+    #[tokio::test]
+    async fn unlimited_body_uses_budget_as_reservation_ceiling() {
+        let budget = Arc::new(Semaphore::new(5));
+        let policy = BodyBufferPolicy::with_permit_bytes(
+            u64::MAX,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            5,
+            1,
+            Arc::clone(&budget),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("10"));
+
+        let reservation = policy
+            .reserve(&headers)
+            .await
+            .expect("unlimited body should reserve the available budget");
+        assert_eq!(reservation.requested_bytes(), 5);
+        assert_eq!(budget.available_permits(), 0);
+
+        let buffered = reservation
+            .collect(Body::from(Bytes::from_static(b"0123456789")))
+            .await
+            .expect("unlimited body should collect beyond the reservation ceiling");
+        assert_eq!(buffered.bytes().as_ref(), b"0123456789");
+        drop(buffered);
+        assert_eq!(budget.available_permits(), 5);
+    }
+
+    #[tokio::test]
+    async fn encoded_unlimited_body_reserves_the_full_budget() {
+        let budget = Arc::new(Semaphore::new(4));
+        let policy = BodyBufferPolicy::with_permit_bytes(
+            u64::MAX,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            4,
+            1,
+            Arc::clone(&budget),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+
+        let reservation = policy
+            .reserve(&headers)
+            .await
+            .expect("encoded unlimited body should reserve the available budget");
+        assert_eq!(reservation.requested_bytes(), 4);
+        assert_eq!(budget.available_permits(), 0);
     }
 
     #[tokio::test]

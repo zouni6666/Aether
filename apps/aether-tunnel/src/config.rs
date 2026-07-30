@@ -27,6 +27,9 @@ const REMOVED_TUNNEL_SECONDS_KEYS: &[&str] = &[
     "tunnel_stale_timeout_secs",
 ];
 const REMOVED_SINGLE_SERVER_KEYS: &[&str] = &["aether_url", "management_token"];
+/// Configuration keys that no longer affect runtime behavior but are ignored
+/// while loading so existing installations can upgrade without editing TOML.
+const IGNORED_CONFIG_KEYS: &[&str] = &["redirect_replay_budget_bytes"];
 
 /// Fields renamed from 0.1.x `delegate_*` to 0.2.0 `upstream_*`.
 const DELEGATE_TO_UPSTREAM: &[(&str, &str)] = &[
@@ -46,13 +49,7 @@ const DELEGATE_TO_UPSTREAM: &[(&str, &str)] = &[
     ("delegate_tcp_nodelay", "upstream_tcp_nodelay"),
 ];
 
-/// Default bytes buffered before a tunnel request becomes non-replayable for
-/// 307/308 redirects. Kept aligned with the current admin-side request size
-/// default, but exposed as an independent proxy transport budget.
 pub const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 5;
-#[allow(dead_code)]
-pub const DEFAULT_REDIRECT_REPLAY_BUDGET_BYTES: usize = 5_242_880;
-pub const DEFAULT_REDIRECT_REPLAY_BUDGET_HUMAN: &str = "5M";
 pub const DEFAULT_LOG_RETENTION_DAYS: u64 = 7;
 pub const DEFAULT_LOG_MAX_FILES: usize = 30;
 pub const DEFAULT_LOG_DIR: &str = "logs";
@@ -87,139 +84,6 @@ pub struct TunnelPoolSizing {
     pub initial_connections: u32,
     pub max_connections: u32,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ByteSizeValue {
-    Text(String),
-    Integer(u64),
-}
-
-impl<'de> Deserialize<'de> for ByteSizeValue {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct ByteSizeValueVisitor;
-
-        impl serde::de::Visitor<'_> for ByteSizeValueVisitor {
-            type Value = ByteSizeValue;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a byte-size string like 5M or an integer byte count")
-            }
-
-            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                Ok(ByteSizeValue::Integer(value))
-            }
-
-            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                if value < 0 {
-                    return Err(E::custom("byte size must be >= 0"));
-                }
-                Ok(ByteSizeValue::Integer(value as u64))
-            }
-
-            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                Ok(ByteSizeValue::Text(value.to_string()))
-            }
-
-            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                Ok(ByteSizeValue::Text(value))
-            }
-        }
-
-        deserializer.deserialize_any(ByteSizeValueVisitor)
-    }
-}
-
-fn deserialize_optional_byte_size<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = Option::<ByteSizeValue>::deserialize(deserializer)?;
-    value
-        .map(|value| match value {
-            ByteSizeValue::Text(text) => {
-                normalize_byte_size_text(&text).map_err(serde::de::Error::custom)
-            }
-            ByteSizeValue::Integer(value) => usize::try_from(value)
-                .map(format_byte_size_human)
-                .map_err(|_| serde::de::Error::custom("byte size exceeds usize")),
-        })
-        .transpose()
-}
-
-pub fn parse_byte_size(input: &str) -> Result<usize, String> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return Err("byte size must not be empty".to_string());
-    }
-
-    let digits_end = trimmed
-        .find(|ch: char| !ch.is_ascii_digit())
-        .unwrap_or(trimmed.len());
-    if digits_end == 0 {
-        return Err(format!("invalid byte size `{trimmed}`"));
-    }
-
-    let number = trimmed[..digits_end]
-        .parse::<u64>()
-        .map_err(|_| format!("invalid byte size `{trimmed}`"))?;
-    let suffix = trimmed[digits_end..].trim().to_ascii_lowercase();
-    let multiplier = match suffix.as_str() {
-        "" | "b" => 1u64,
-        "k" | "kb" | "kib" => 1024u64,
-        "m" | "mb" | "mib" => 1024u64.pow(2),
-        "g" | "gb" | "gib" => 1024u64.pow(3),
-        _ => {
-            return Err(format!(
-                "invalid byte size suffix `{}`; use B, K, M, or G",
-                &trimmed[digits_end..].trim()
-            ))
-        }
-    };
-
-    let total = number
-        .checked_mul(multiplier)
-        .ok_or_else(|| format!("byte size `{trimmed}` is too large"))?;
-    usize::try_from(total).map_err(|_| format!("byte size `{trimmed}` exceeds usize"))
-}
-
-fn normalize_byte_size_text(input: &str) -> Result<String, String> {
-    parse_byte_size(input).map(format_byte_size_human)
-}
-
-pub fn format_byte_size_human(bytes: usize) -> String {
-    const KIB: usize = 1024;
-    const MIB: usize = 1024 * 1024;
-    const GIB: usize = 1024 * 1024 * 1024;
-
-    if bytes == 0 {
-        return "0".to_string();
-    }
-    if bytes.is_multiple_of(GIB) {
-        return format!("{}G", bytes / GIB);
-    }
-    if bytes.is_multiple_of(MIB) {
-        return format!("{}M", bytes / MIB);
-    }
-    if bytes.is_multiple_of(KIB) {
-        return format!("{}K", bytes / KIB);
-    }
-    bytes.to_string()
-}
-
 #[derive(clap::ValueEnum, Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum TunnelLogDestinationArg {
@@ -577,15 +441,14 @@ pub struct Config {
     #[arg(long, env = "AETHER_TUNNEL_UPSTREAM_PROXY_URL")]
     pub upstream_proxy_url: Option<String>,
 
-    /// Maximum request body bytes buffered to support 307/308 redirect replay.
-    /// Accepts values like 5M / 512K / 1G. Set to 0 to disable request-body replay buffering.
+    /// Accepted only so older launch commands and environments keep working.
+    /// Redirect request bodies are always replayed without a cumulative size limit.
     #[arg(
-        long,
+        long = "redirect-replay-budget-bytes",
         env = "AETHER_TUNNEL_REDIRECT_REPLAY_BUDGET_BYTES",
-        value_parser = parse_byte_size,
-        default_value = DEFAULT_REDIRECT_REPLAY_BUDGET_HUMAN
+        hide = true
     )]
-    pub redirect_replay_budget_bytes: usize,
+    pub legacy_redirect_replay_budget_bytes_ignored: Option<String>,
 
     /// Emit detailed x-proxy-timing headers on tunneled upstream responses.
     #[arg(
@@ -1127,12 +990,6 @@ pub struct ConfigFile {
     pub upstream_tcp_nodelay: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upstream_proxy_url: Option<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_byte_size"
-    )]
-    pub redirect_replay_budget_bytes: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub emit_proxy_timing_header: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1325,10 +1182,6 @@ impl ConfigFile {
         );
         set!("AETHER_TUNNEL_UPSTREAM_PROXY_URL", self.upstream_proxy_url);
         set!(
-            "AETHER_TUNNEL_REDIRECT_REPLAY_BUDGET_BYTES",
-            self.redirect_replay_budget_bytes
-        );
-        set!(
             "AETHER_TUNNEL_EMIT_PROXY_TIMING_HEADER",
             self.emit_proxy_timing_header
         );
@@ -1418,8 +1271,18 @@ impl ConfigFile {
 fn parse_config_file_content(content: &str) -> anyhow::Result<ConfigFile> {
     reject_removed_config_keys(content)?;
     let mut value: toml::Value = toml::from_str(content)?;
+    discard_ignored_config_keys(&mut value);
     promote_server_scoped_upstream_proxy_url(&mut value)?;
     Ok(value.try_into()?)
+}
+
+fn discard_ignored_config_keys(value: &mut toml::Value) {
+    let Some(root) = value.as_table_mut() else {
+        return;
+    };
+    for key in IGNORED_CONFIG_KEYS {
+        root.remove(*key);
+    }
 }
 
 fn normalized_proxy_url(value: &Option<String>) -> Option<&str> {
@@ -1534,31 +1397,46 @@ mod tests {
     use crate::hardware::HardwareInfo;
 
     #[test]
-    fn parse_byte_size_supports_human_units() {
-        assert_eq!(
-            parse_byte_size("5M").expect("5M should parse"),
-            5 * 1024 * 1024
-        );
-        assert_eq!(
-            parse_byte_size("512K").expect("512K should parse"),
-            512 * 1024
-        );
-        assert_eq!(
-            parse_byte_size("1G").expect("1G should parse"),
-            1024 * 1024 * 1024
-        );
-        assert_eq!(parse_byte_size("0").expect("0 should parse"), 0);
+    fn config_file_load_ignores_removed_redirect_replay_budget() {
+        let config = parse_config_file_content("redirect_replay_budget_bytes = \"1K\"")
+            .expect("removed replay budget should not break existing config files");
+        let serialized = toml::to_string(&config).expect("config should serialize");
+        assert!(!serialized.contains("redirect_replay_budget_bytes"));
     }
 
     #[test]
-    fn config_file_deserializes_budget_from_integer_and_string() {
-        let numeric: ConfigFile =
-            toml::from_str("redirect_replay_budget_bytes = 5242880").expect("numeric toml");
-        assert_eq!(numeric.redirect_replay_budget_bytes.as_deref(), Some("5M"));
+    fn cli_accepts_but_hides_legacy_redirect_replay_budget() {
+        let config = Config::parse_from([
+            "aether-tunnel",
+            "--aether-url",
+            "https://example.com",
+            "--management-token",
+            "ae_test",
+            "--node-name",
+            "tunnel-test",
+            "--redirect-replay-budget-bytes",
+            "1K",
+        ]);
 
-        let stringy: ConfigFile =
-            toml::from_str("redirect_replay_budget_bytes = \"6m\"").expect("string toml");
-        assert_eq!(stringy.redirect_replay_budget_bytes.as_deref(), Some("6M"));
+        assert_eq!(
+            config
+                .legacy_redirect_replay_budget_bytes_ignored
+                .as_deref(),
+            Some("1K")
+        );
+        let mut command = Config::command();
+        let legacy_arg = command
+            .get_arguments()
+            .find(|arg| arg.get_id() == "legacy_redirect_replay_budget_bytes_ignored")
+            .expect("legacy redirect replay argument");
+        assert_eq!(
+            legacy_arg.get_env(),
+            Some(std::ffi::OsStr::new(
+                "AETHER_TUNNEL_REDIRECT_REPLAY_BUDGET_BYTES"
+            ))
+        );
+        let help = command.render_long_help().to_string();
+        assert!(!help.contains("redirect-replay-budget-bytes"));
     }
 
     #[test]

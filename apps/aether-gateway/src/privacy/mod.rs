@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::convert::Infallible;
 use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,8 +20,6 @@ use crate::GatewayError;
 type HmacSha256 = hmac::Hmac<sha2::Sha256>;
 
 const DEFAULT_REDACTION_TTL_SECONDS: u64 = 300;
-const DEFAULT_MAX_SCANNED_CHAT_TEXT_BYTES: usize = 2 * 1024 * 1024;
-const DEFAULT_MAX_REDACTION_DETECTIONS: usize = 1024;
 const HMAC96_BYTES: usize = 12;
 const DEFAULT_SENTINEL_NAMESPACE: &str = "AETHER";
 const MAX_SENTINEL_NAMESPACE_LEN: usize = 32;
@@ -245,87 +244,17 @@ impl RedactionSessionConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct RedactionScanLimits {
-    pub(crate) max_scanned_text_bytes: usize,
-    pub(crate) max_detections: usize,
-}
+pub(crate) type RedactionMaskError = Infallible;
 
-impl Default for RedactionScanLimits {
-    fn default() -> Self {
-        Self {
-            max_scanned_text_bytes: DEFAULT_MAX_SCANNED_CHAT_TEXT_BYTES,
-            max_detections: DEFAULT_MAX_REDACTION_DETECTIONS,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum RedactionLimitError {
-    ScannedTextTooLarge { limit: usize },
-    TooManyDetections { limit: usize },
-}
-
-impl RedactionLimitError {
-    pub(crate) const fn client_status(&self) -> http::StatusCode {
-        match self {
-            Self::ScannedTextTooLarge { .. } => http::StatusCode::PAYLOAD_TOO_LARGE,
-            Self::TooManyDetections { .. } => http::StatusCode::UNPROCESSABLE_ENTITY,
-        }
-    }
-
-    pub(crate) const fn safe_message(&self) -> &'static str {
-        match self {
-            Self::ScannedTextTooLarge { .. } => "chat pii redaction scanned text limit exceeded",
-            Self::TooManyDetections { .. } => "chat pii redaction detection limit exceeded",
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(crate) enum RedactionMaskError {
-    Limit(RedactionLimitError),
-}
-
-impl From<RedactionLimitError> for RedactionMaskError {
-    fn from(error: RedactionLimitError) -> Self {
-        Self::Limit(error)
-    }
-}
-
-#[derive(Clone, Copy)]
-struct RedactionScanState {
-    limits: RedactionScanLimits,
-    scanned_text_bytes: usize,
-    detections: usize,
-}
+#[derive(Clone, Copy, Default)]
+struct RedactionScanState;
 
 impl RedactionScanState {
-    fn new(limits: RedactionScanLimits) -> Self {
-        Self {
-            limits,
-            scanned_text_bytes: 0,
-            detections: 0,
-        }
-    }
-
-    fn record_scan(&mut self, text: &str) -> Result<(), RedactionLimitError> {
-        self.scanned_text_bytes = self.scanned_text_bytes.saturating_add(text.len());
-        if self.scanned_text_bytes > self.limits.max_scanned_text_bytes {
-            return Err(RedactionLimitError::ScannedTextTooLarge {
-                limit: self.limits.max_scanned_text_bytes,
-            });
-        }
+    fn record_scan(&mut self, _text: &str) -> Result<(), Infallible> {
         Ok(())
     }
 
-    fn record_detections(&mut self, count: usize) -> Result<(), RedactionLimitError> {
-        self.detections = self.detections.saturating_add(count);
-        if self.detections > self.limits.max_detections {
-            return Err(RedactionLimitError::TooManyDetections {
-                limit: self.limits.max_detections,
-            });
-        }
+    fn record_detections(&mut self, _count: usize) -> Result<(), Infallible> {
         Ok(())
     }
 }
@@ -403,7 +332,7 @@ impl RedactionSession {
         &mut self,
         input: &str,
         scan_state: &mut RedactionScanState,
-    ) -> Result<RedactedText, RedactionLimitError> {
+    ) -> Result<RedactedText, Infallible> {
         scan_state.record_scan(input)?;
         self.redact_text_internal(input, Some(scan_state))
     }
@@ -460,7 +389,7 @@ impl RedactionSession {
         &mut self,
         input: &str,
         mut scan_state: Option<&mut RedactionScanState>,
-    ) -> Result<RedactedText, RedactionLimitError> {
+    ) -> Result<RedactedText, Infallible> {
         let candidates = select_non_overlapping(detect_candidates_for_session_config(
             input,
             &self.config,
@@ -1043,21 +972,12 @@ impl ChatPiiRedactionRuntimeConfigCache {
     }
 }
 
-pub(crate) struct MaskChatRequestOptions {
-    pub(crate) scan_limits: RedactionScanLimits,
-}
+#[derive(Clone, Copy, Default)]
+pub(crate) struct MaskChatRequestOptions;
 
 impl MaskChatRequestOptions {
     pub(crate) fn runtime() -> Self {
-        Self {
-            scan_limits: RedactionScanLimits::default(),
-        }
-    }
-
-    #[cfg(test)]
-    fn with_scan_limits(mut self, scan_limits: RedactionScanLimits) -> Self {
-        self.scan_limits = scan_limits;
-        self
+        Self
     }
 }
 
@@ -1453,7 +1373,7 @@ pub(crate) fn mask_chat_request_json_with_options(
     options: MaskChatRequestOptions,
 ) -> MaskedChatRequest {
     try_mask_chat_request_json_with_options(body, config, options)
-        .expect("default chat redaction limits should not be exceeded")
+        .expect("chat redaction masking should be infallible")
 }
 
 pub(crate) fn mask_chat_request_json(
@@ -1467,7 +1387,7 @@ pub(crate) fn try_mask_chat_request_json_with_options(
     body: &[u8],
     config: RedactionSessionConfig,
     options: MaskChatRequestOptions,
-) -> Result<MaskedChatRequest, RedactionLimitError> {
+) -> Result<MaskedChatRequest, Infallible> {
     try_mask_chat_pii_request_json_with_options(
         body,
         ChatPiiRedactionRequestFormat::OpenAiChat,
@@ -1497,7 +1417,7 @@ pub(crate) fn try_mask_chat_pii_request_json_with_options(
     format: ChatPiiRedactionRequestFormat,
     config: RedactionSessionConfig,
     options: MaskChatRequestOptions,
-) -> Result<MaskedChatRequest, RedactionLimitError> {
+) -> Result<MaskedChatRequest, Infallible> {
     let mut session = RedactionSession::new(config);
     let Ok(mut value) = serde_json::from_slice::<Value>(body) else {
         return Ok(MaskedChatRequest {
@@ -1508,7 +1428,7 @@ pub(crate) fn try_mask_chat_pii_request_json_with_options(
     };
 
     session.set_collision_corpus(request_collision_corpus(format, &value));
-    let mut scan_state = RedactionScanState::new(options.scan_limits);
+    let mut scan_state = RedactionScanState;
     let redacted = mask_request_value(format, &mut value, &mut session, &mut scan_state, options)?;
 
     if !redacted {
@@ -1544,7 +1464,7 @@ pub(crate) async fn try_mask_chat_pii_request_json_with_cache_options(
     };
 
     session.set_collision_corpus(request_collision_corpus(format, &value));
-    let mut scan_state = RedactionScanState::new(options.scan_limits);
+    let mut scan_state = RedactionScanState;
     let redacted = mask_request_value_async(
         format,
         &mut value,
@@ -1582,7 +1502,7 @@ pub(crate) async fn try_mask_chat_pii_request_value_with_cache_options(
     let mut value = body_json.clone();
 
     session.set_collision_corpus(request_collision_corpus(format, &value));
-    let mut scan_state = RedactionScanState::new(options.scan_limits);
+    let mut scan_state = RedactionScanState;
     let redacted = mask_request_value_async(
         format,
         &mut value,
@@ -1619,7 +1539,7 @@ fn mask_request_value(
     session: &mut RedactionSession,
     scan_state: &mut RedactionScanState,
     options: MaskChatRequestOptions,
-) -> Result<bool, RedactionLimitError> {
+) -> Result<bool, Infallible> {
     match format {
         ChatPiiRedactionRequestFormat::OpenAiChat => {
             mask_openai_chat_request_value(value, session, scan_state, options)
@@ -1665,7 +1585,7 @@ fn mask_openai_chat_request_value(
     session: &mut RedactionSession,
     scan_state: &mut RedactionScanState,
     options: MaskChatRequestOptions,
-) -> Result<bool, RedactionLimitError> {
+) -> Result<bool, Infallible> {
     let Some(messages) = value.get_mut("messages").and_then(Value::as_array_mut) else {
         return Ok(false);
     };
@@ -1912,7 +1832,7 @@ fn mask_chat_message_value(
     message: &mut Value,
     session: &mut RedactionSession,
     scan_state: &mut RedactionScanState,
-) -> Result<bool, RedactionLimitError> {
+) -> Result<bool, Infallible> {
     let Some(message) = message.as_object_mut() else {
         return Ok(false);
     };
@@ -1933,7 +1853,7 @@ fn mask_chat_content_value(
     content: &mut Value,
     session: &mut RedactionSession,
     scan_state: &mut RedactionScanState,
-) -> Result<bool, RedactionLimitError> {
+) -> Result<bool, Infallible> {
     match content {
         Value::String(text) => mask_json_string(text, session, scan_state),
         Value::Array(parts) => {
@@ -1951,7 +1871,7 @@ fn mask_chat_content_part(
     part: &mut Value,
     session: &mut RedactionSession,
     scan_state: &mut RedactionScanState,
-) -> Result<bool, RedactionLimitError> {
+) -> Result<bool, Infallible> {
     let Some(part) = part.as_object_mut() else {
         return Ok(false);
     };
@@ -1968,7 +1888,7 @@ fn mask_tool_call_arguments(
     tool_call: &mut Value,
     session: &mut RedactionSession,
     scan_state: &mut RedactionScanState,
-) -> Result<bool, RedactionLimitError> {
+) -> Result<bool, Infallible> {
     let Some(function) = tool_call.get_mut("function").and_then(Value::as_object_mut) else {
         return Ok(false);
     };
@@ -1982,7 +1902,7 @@ fn mask_claude_messages_request_value(
     value: &mut Value,
     session: &mut RedactionSession,
     scan_state: &mut RedactionScanState,
-) -> Result<bool, RedactionLimitError> {
+) -> Result<bool, Infallible> {
     let mut redacted = false;
     if let Some(system) = value.get_mut("system") {
         redacted |= mask_claude_text_content_value(system, session, scan_state)?;
@@ -2001,7 +1921,7 @@ fn mask_claude_text_content_value(
     value: &mut Value,
     session: &mut RedactionSession,
     scan_state: &mut RedactionScanState,
-) -> Result<bool, RedactionLimitError> {
+) -> Result<bool, Infallible> {
     match value {
         Value::String(text) => mask_json_string(text, session, scan_state),
         Value::Array(parts) => {
@@ -2019,7 +1939,7 @@ fn mask_claude_content_part(
     part: &mut Value,
     session: &mut RedactionSession,
     scan_state: &mut RedactionScanState,
-) -> Result<bool, RedactionLimitError> {
+) -> Result<bool, Infallible> {
     let Some(part) = part.as_object_mut() else {
         return Ok(false);
     };
@@ -2050,7 +1970,7 @@ fn mask_openai_responses_request_value(
     value: &mut Value,
     session: &mut RedactionSession,
     scan_state: &mut RedactionScanState,
-) -> Result<bool, RedactionLimitError> {
+) -> Result<bool, Infallible> {
     let mut redacted = false;
     if let Some(Value::String(instructions)) = value.get_mut("instructions") {
         redacted |= mask_json_string(instructions, session, scan_state)?;
@@ -2065,7 +1985,7 @@ fn mask_openai_search_request_value(
     value: &mut Value,
     session: &mut RedactionSession,
     scan_state: &mut RedactionScanState,
-) -> Result<bool, RedactionLimitError> {
+) -> Result<bool, Infallible> {
     let mut redacted = false;
     if let Some(input) = value.get_mut("input") {
         redacted |= mask_openai_responses_input_value(input, session, scan_state)?;
@@ -2090,7 +2010,7 @@ fn mask_openai_responses_input_value(
     value: &mut Value,
     session: &mut RedactionSession,
     scan_state: &mut RedactionScanState,
-) -> Result<bool, RedactionLimitError> {
+) -> Result<bool, Infallible> {
     match value {
         Value::String(text) => mask_json_string(text, session, scan_state),
         Value::Array(items) => {
@@ -2108,7 +2028,7 @@ fn mask_openai_responses_input_item(
     item: &mut Value,
     session: &mut RedactionSession,
     scan_state: &mut RedactionScanState,
-) -> Result<bool, RedactionLimitError> {
+) -> Result<bool, Infallible> {
     let Some(item) = item.as_object_mut() else {
         return Ok(false);
     };
@@ -2133,7 +2053,7 @@ fn mask_openai_responses_content_value(
     content: &mut Value,
     session: &mut RedactionSession,
     scan_state: &mut RedactionScanState,
-) -> Result<bool, RedactionLimitError> {
+) -> Result<bool, Infallible> {
     match content {
         Value::String(text) => mask_json_string(text, session, scan_state),
         Value::Array(parts) => {
@@ -2151,7 +2071,7 @@ fn mask_openai_responses_content_part(
     part: &mut Value,
     session: &mut RedactionSession,
     scan_state: &mut RedactionScanState,
-) -> Result<bool, RedactionLimitError> {
+) -> Result<bool, Infallible> {
     let Some(part) = part.as_object_mut() else {
         return Ok(false);
     };
@@ -2168,7 +2088,7 @@ fn mask_json_string(
     text: &mut String,
     session: &mut RedactionSession,
     scan_state: &mut RedactionScanState,
-) -> Result<bool, RedactionLimitError> {
+) -> Result<bool, Infallible> {
     let redacted = session.redact_text_checked(text, scan_state)?;
     if redacted.matches.is_empty() {
         return Ok(false);
@@ -4169,9 +4089,9 @@ mod tests {
         try_mask_chat_pii_request_value_with_cache_options,
         try_mask_chat_request_json_with_cache_options, try_mask_chat_request_json_with_options,
         ChatPiiRedactionRequestFormat, ChatPiiRedactionRuntimeConfig, DetectorProbe, MappingKey,
-        MaskChatRequestOptions, RedactionKind, RedactionLimitError, RedactionMapping,
-        RedactionScanLimits, RedactionSession, RedactionSessionConfig, RedactionSessionSlot,
-        RedisRedactionMappingCache, SentinelMatcher, StreamingResponseRestorer,
+        MaskChatRequestOptions, RedactionKind, RedactionMapping, RedactionSession,
+        RedactionSessionConfig, RedactionSessionSlot, RedisRedactionMappingCache, SentinelMatcher,
+        StreamingResponseRestorer,
     };
     use std::collections::BTreeMap;
     use std::time::Duration;
@@ -5624,59 +5544,39 @@ mod tests {
     }
 
     #[test]
-    fn pii_redaction_performance_limits_reject_scanned_text_and_detection_overflow() {
-        assert_eq!(
-            RedactionScanLimits::default(),
-            RedactionScanLimits {
-                max_scanned_text_bytes: 2 * 1024 * 1024,
-                max_detections: 1024,
-            }
-        );
-
+    fn pii_redaction_accepts_text_and_detection_counts_above_previous_caps() {
         let large_request = json!({
             "model": "gpt-5",
-            "messages": [{"role": "user", "content": "x".repeat(2 * 1024 * 1024 + 1)}]
+            "messages": [{
+                "role": "user",
+                "content": format!("alice@example.com {}", "x".repeat(2 * 1024 * 1024 + 1))
+            }]
         });
-        let large_err = try_mask_chat_request_json_with_options(
+        let large_masked = try_mask_chat_request_json_with_options(
             &serde_json::to_vec(&large_request).expect("request should serialize"),
             test_config(),
             MaskChatRequestOptions::runtime(),
         )
-        .expect_err("oversized scan should fail closed");
-        assert_eq!(
-            large_err,
-            RedactionLimitError::ScannedTextTooLarge {
-                limit: 2 * 1024 * 1024,
-            }
-        );
-        assert_eq!(
-            large_err.client_status(),
-            http::StatusCode::PAYLOAD_TOO_LARGE
-        );
-        assert!(!large_err.safe_message().contains("alice@example.com"));
+        .expect("text above the previous scan cap should be redacted");
+        assert!(large_masked.redacted);
+        assert_eq!(large_masked.session.mapping_count(), 1);
 
+        let dense_content = (0..1025)
+            .map(|index| format!("user{index}@example.com"))
+            .collect::<Vec<_>>()
+            .join(" ");
         let dense_request = json!({
             "model": "gpt-5",
-            "messages": [{"role": "user", "content": "alice@example.com bob@example.net"}]
+            "messages": [{"role": "user", "content": dense_content}]
         });
-        let dense_err = try_mask_chat_request_json_with_options(
+        let dense_masked = try_mask_chat_request_json_with_options(
             &serde_json::to_vec(&dense_request).expect("request should serialize"),
             test_config(),
-            MaskChatRequestOptions::runtime().with_scan_limits(RedactionScanLimits {
-                max_scanned_text_bytes: 1024,
-                max_detections: 1,
-            }),
+            MaskChatRequestOptions::runtime(),
         )
-        .expect_err("too many detections should fail closed");
-        assert_eq!(
-            dense_err,
-            RedactionLimitError::TooManyDetections { limit: 1 }
-        );
-        assert_eq!(
-            dense_err.client_status(),
-            http::StatusCode::UNPROCESSABLE_ENTITY
-        );
-        assert!(!dense_err.safe_message().contains("alice@example.com"));
+        .expect("detections above the previous cap should be redacted");
+        assert!(dense_masked.redacted);
+        assert_eq!(dense_masked.session.mapping_count(), 1025);
     }
 
     #[tokio::test]

@@ -27,9 +27,10 @@ pub(crate) use self::attempt::{
 };
 pub(crate) use self::classifier::{
     classify_anthropic_failure_disposition, classify_failure_disposition, classify_local_failover,
-    failure_disposition_from_local_classification, local_failover_error_message,
-    FailureDisposition, FailureRetryAction, FailureScope, FailureTokenAction,
-    LocalFailoverClassification, LocalFailoverInput,
+    classify_local_transport_error, failure_disposition_from_local_classification,
+    local_failover_error_message, FailureDisposition, FailureRetryAction, FailureScope,
+    FailureTokenAction, LocalFailoverClassification, LocalFailoverInput,
+    LocalTransportFailoverClassification,
 };
 pub(crate) use self::effects::{
     apply_local_execution_effect, LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect,
@@ -51,8 +52,9 @@ pub(crate) use self::policy::{
     LocalFailoverRegexRule, CYBER_CONTINUE_FAILOVER_CONFIG_KEY,
 };
 pub(crate) use self::recovery::{
-    analyze_local_failover, apply_provider_failure_disposition, recover_local_failover_decision,
-    LocalFailoverAnalysis, LocalFailoverDecision,
+    analyze_local_failover, analyze_local_transport_error, apply_provider_failure_disposition,
+    recover_local_failover_decision, LocalFailoverAnalysis, LocalFailoverDecision,
+    LocalTransportFailoverAnalysis,
 };
 #[cfg(test)]
 pub(crate) use self::report_effects::clear_local_report_effect_caches_for_tests;
@@ -93,6 +95,15 @@ pub(crate) async fn resolve_local_failover_decision_for_attempt(
     )
     .await
     .decision
+}
+
+pub(crate) async fn resolve_local_transport_failover_analysis_for_attempt(
+    state: &AppState,
+    plan: &ExecutionPlan,
+    report_context: Option<&serde_json::Value>,
+) -> LocalTransportFailoverAnalysis {
+    let policy = resolve_local_failover_policy(state, plan, report_context).await;
+    analyze_local_transport_error(&policy)
 }
 
 pub(crate) fn build_local_error_flow_metadata(

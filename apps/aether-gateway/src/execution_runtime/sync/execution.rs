@@ -82,7 +82,11 @@ use crate::request_candidate_runtime::{
     record_local_request_candidate_status, record_local_request_candidate_status_snapshot,
     snapshot_local_request_candidate_status,
 };
-use crate::request_diagnostics::attach_current_request_diagnostics_to_report_context;
+use crate::request_diagnostics::{
+    attach_current_request_diagnostics_and_candidate_start_timing_to_report_context,
+    attach_request_diagnostics_to_report_context, calibrate_candidate_first_byte_elapsed_ms,
+    current_request_diagnostics, RequestDiagnostics,
+};
 use crate::usage::{spawn_sync_report, submit_sync_report};
 use crate::video_tasks::VideoTaskSyncReportMode;
 use crate::{usage::GatewaySyncReportRequest, AppState, GatewayError};
@@ -107,6 +111,22 @@ const OPENAI_IMAGE_SYNC_JSON_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(
 const OPENAI_IMAGE_SYNC_JSON_HEARTBEAT_BYTES: &[u8] = b"\n";
 const OPENAI_IMAGE_SYNC_PROGRESS_WRITE_INTERVAL: Duration = Duration::from_secs(5);
 const INVALID_GEMINI_PROVIDER_SUCCESS_MESSAGE: &str = "Provider returned HTTP 200 but the Gemini response did not contain visible model output; refusing to finalize it as a successful response.";
+
+fn elapsed_ms_since(started_at: Instant) -> u64 {
+    started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn calibrated_sync_candidate_first_byte_elapsed_ms(
+    candidate_started_at: Instant,
+    result: &ExecutionResult,
+) -> Option<u64> {
+    let telemetry = result.telemetry.as_ref()?;
+    calibrate_candidate_first_byte_elapsed_ms(
+        elapsed_ms_since(candidate_started_at),
+        telemetry.elapsed_ms,
+        telemetry.ttfb_ms,
+    )
+}
 
 #[derive(Debug)]
 struct SyncExecutionFailure {
@@ -143,7 +163,9 @@ struct SyncAttemptTerminalGuard {
     state: AppState,
     plan: ExecutionPlan,
     report_context: Option<Value>,
+    request_diagnostics: Option<Arc<RequestDiagnostics>>,
     candidate_started_unix_ms: u64,
+    candidate_started_at: Instant,
     armed: bool,
 }
 
@@ -153,12 +175,15 @@ impl SyncAttemptTerminalGuard {
         plan: &ExecutionPlan,
         report_context: Option<Value>,
         candidate_started_unix_ms: u64,
+        candidate_started_at: Instant,
     ) -> Self {
         Self {
             state: state.clone(),
             plan: plan.clone(),
             report_context,
+            request_diagnostics: current_request_diagnostics(),
             candidate_started_unix_ms,
+            candidate_started_at,
             armed: true,
         }
     }
@@ -176,7 +201,9 @@ impl SyncAttemptTerminalGuard {
             self.state.clone(),
             self.plan.clone(),
             self.report_context.clone(),
+            self.request_diagnostics.clone(),
             self.candidate_started_unix_ms,
+            self.candidate_started_at,
             UsageEventType::Failed,
             RequestCandidateStatus::Failed,
             StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
@@ -196,14 +223,18 @@ impl Drop for SyncAttemptTerminalGuard {
         let state = self.state.clone();
         let plan = self.plan.clone();
         let report_context = self.report_context.clone();
+        let request_diagnostics = self.request_diagnostics.clone();
         let candidate_started_unix_ms = self.candidate_started_unix_ms;
+        let candidate_started_at = self.candidate_started_at;
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 record_sync_attempt_forced_terminal_state(
                     state,
                     plan,
                     report_context,
+                    request_diagnostics,
                     candidate_started_unix_ms,
+                    candidate_started_at,
                     UsageEventType::Cancelled,
                     RequestCandidateStatus::Cancelled,
                     499,
@@ -229,7 +260,9 @@ async fn record_sync_attempt_forced_terminal_state(
     state: AppState,
     plan: ExecutionPlan,
     report_context: Option<Value>,
+    request_diagnostics: Option<Arc<RequestDiagnostics>>,
     candidate_started_unix_ms: u64,
+    candidate_started_at: Instant,
     usage_event_type: UsageEventType,
     candidate_status: RequestCandidateStatus,
     status_code: u16,
@@ -237,8 +270,10 @@ async fn record_sync_attempt_forced_terminal_state(
     error_message: impl Into<String>,
 ) {
     let error_message = error_message.into();
+    let report_context =
+        attach_request_diagnostics_to_report_context(report_context, request_diagnostics.as_ref());
     let terminal_unix_ms = current_request_candidate_unix_ms();
-    let latency_ms = terminal_unix_ms.saturating_sub(candidate_started_unix_ms);
+    let latency_ms = elapsed_ms_since(candidate_started_at);
     record_local_request_candidate_status(
         &state,
         &plan,
@@ -409,6 +444,41 @@ fn maybe_store_sync_execution_failure_fallback(
     Ok(())
 }
 
+async fn maybe_build_sync_transport_error_stop_response(
+    state: &AppState,
+    plan: &ExecutionPlan,
+    report_context: Option<&Value>,
+    trace_id: &str,
+    decision: &GatewayControlDecision,
+    error_type: &str,
+    error_message: &str,
+    elapsed_ms: u64,
+) -> Result<Option<Response<Body>>, GatewayError> {
+    let analysis = crate::orchestration::resolve_local_transport_failover_analysis_for_attempt(
+        state,
+        plan,
+        report_context,
+    )
+    .await;
+    if !matches!(analysis.decision, LocalFailoverDecision::StopLocalFailover) {
+        return Ok(None);
+    }
+
+    crate::execution_runtime::build_transport_error_stop_response(
+        state,
+        plan,
+        report_context,
+        trace_id,
+        decision,
+        StatusCode::BAD_GATEWAY.as_u16(),
+        error_type,
+        error_message,
+        elapsed_ms,
+    )
+    .await
+    .map(Some)
+}
+
 struct ImplicitSyncFinalizeOutcome {
     payload: GatewaySyncReportRequest,
     outcome: LocalCoreSyncFinalizeOutcome,
@@ -496,9 +566,15 @@ async fn record_sync_terminal_usage(
     plan: &ExecutionPlan,
     report_context: Option<&serde_json::Value>,
     payload: &GatewaySyncReportRequest,
+    candidate_started_at: Instant,
+    candidate_first_byte_elapsed_ms: Option<u64>,
 ) {
     let report_context_with_diagnostics =
-        attach_current_request_diagnostics_to_report_context(report_context);
+        attach_current_request_diagnostics_and_candidate_start_timing_to_report_context(
+            report_context,
+            candidate_started_at,
+            candidate_first_byte_elapsed_ms,
+        );
     let context_seed = build_terminal_usage_context_seed(
         plan,
         report_context_with_diagnostics.as_ref().or(report_context),
@@ -519,9 +595,19 @@ async fn record_sync_terminal_usage_and_disarm_guard(
     plan: &ExecutionPlan,
     report_context: Option<&serde_json::Value>,
     payload: &GatewaySyncReportRequest,
+    candidate_started_at: Instant,
+    candidate_first_byte_elapsed_ms: Option<u64>,
     terminal_guard: &mut SyncAttemptTerminalGuard,
 ) {
-    record_sync_terminal_usage(state, plan, report_context, payload).await;
+    record_sync_terminal_usage(
+        state,
+        plan,
+        report_context,
+        payload,
+        candidate_started_at,
+        candidate_first_byte_elapsed_ms,
+    )
+    .await;
     terminal_guard.disarm();
 }
 
@@ -1850,6 +1936,7 @@ async fn execute_execution_runtime_sync_impl(
         .and_then(|context| context.candidate_index)
         .map(|value| value.to_string())
         .unwrap_or_else(|| "-".to_string());
+    let candidate_started_at = Instant::now();
     let candidate_started_unix_secs = current_request_candidate_unix_ms();
     let lifecycle_seed = build_lifecycle_usage_seed(&plan, report_context.as_ref());
     let usage_data = state.usage_lifecycle_data_state().as_ref().clone();
@@ -1877,6 +1964,7 @@ async fn execute_execution_runtime_sync_impl(
         &plan,
         report_context.clone(),
         candidate_started_unix_secs,
+        candidate_started_at,
     );
     let result = (async {
     let _provider_pool_in_flight_guard = acquire_provider_pool_in_flight_guard(
@@ -1922,6 +2010,11 @@ async fn execute_execution_runtime_sync_impl(
                     {
                         Ok(result) => result,
                         Err(err) => {
+                            let failure_error_type = err.error_type;
+                            let failure_message = err.message.clone();
+                            let failure_latency_ms = err
+                                .latency_ms
+                                .unwrap_or_else(|| elapsed_ms_since(candidate_started_at));
                             maybe_store_sync_execution_failure_fallback(
                                 &err,
                                 &plan,
@@ -1952,19 +2045,34 @@ async fn execute_execution_runtime_sync_impl(
                                 report_context.as_ref(),
                                 SchedulerRequestCandidateStatusUpdate {
                                     status: RequestCandidateStatus::Failed,
-                                    status_code: err.status_code,
-                                    error_type: Some(err.error_type.to_string()),
+                                    status_code: None,
+                                    error_type: Some(failure_error_type.to_string()),
                                     error_message: Some(err.message),
-                                    latency_ms: err.latency_ms,
+                                    latency_ms: Some(failure_latency_ms),
                                     started_at_unix_ms: Some(candidate_started_unix_secs),
                                     finished_at_unix_ms: Some(terminal_unix_secs),
                                 },
                             )
                             .await;
+                            if let Some(response) = maybe_build_sync_transport_error_stop_response(
+                                state,
+                                &plan,
+                                report_context.as_ref(),
+                                trace_id,
+                                decision,
+                                failure_error_type,
+                                failure_message.as_str(),
+                                failure_latency_ms,
+                            )
+                            .await?
+                            {
+                                return Ok(Some(response));
+                            }
                             return Ok(None);
                         }
                     },
                     Err(err) => {
+                        let transport_error_message = err.to_string();
                         warn!(
                             event_name = "chatgpt_web_image_execution_unavailable",
                             log_type = "ops",
@@ -1990,18 +2098,33 @@ async fn execute_execution_runtime_sync_impl(
                                 error_type: Some(
                                     "chatgpt_web_image_execution_unavailable".to_string(),
                                 ),
-                                error_message: Some(err.to_string()),
-                                latency_ms: None,
+                                error_message: Some(transport_error_message.clone()),
+                                latency_ms: Some(elapsed_ms_since(candidate_started_at)),
                                 started_at_unix_ms: Some(candidate_started_unix_secs),
                                 finished_at_unix_ms: Some(terminal_unix_secs),
                             },
                         )
                         .await;
+                        if let Some(response) = maybe_build_sync_transport_error_stop_response(
+                            state,
+                            &plan,
+                            report_context.as_ref(),
+                            trace_id,
+                            decision,
+                            "chatgpt_web_image_execution_unavailable",
+                            transport_error_message.as_str(),
+                            elapsed_ms_since(candidate_started_at),
+                        )
+                        .await?
+                        {
+                            return Ok(Some(response));
+                        }
                         return Ok(None);
                     }
                 }
             }
             Err(err) => {
+                let transport_error_message = err.to_string();
                 warn!(
                     event_name = "grok_execution_unavailable",
                     log_type = "ops",
@@ -2025,13 +2148,27 @@ async fn execute_execution_runtime_sync_impl(
                         status: RequestCandidateStatus::Failed,
                         status_code: None,
                         error_type: Some("grok_execution_unavailable".to_string()),
-                        error_message: Some(err.to_string()),
-                        latency_ms: None,
+                        error_message: Some(transport_error_message.clone()),
+                        latency_ms: Some(elapsed_ms_since(candidate_started_at)),
                         started_at_unix_ms: Some(candidate_started_unix_secs),
                         finished_at_unix_ms: Some(terminal_unix_secs),
                     },
                 )
                 .await;
+                if let Some(response) = maybe_build_sync_transport_error_stop_response(
+                    state,
+                    &plan,
+                    report_context.as_ref(),
+                    trace_id,
+                    decision,
+                    "grok_execution_unavailable",
+                    transport_error_message.as_str(),
+                    elapsed_ms_since(candidate_started_at),
+                )
+                .await?
+                {
+                    return Ok(Some(response));
+                }
                 return Ok(None);
             }
         }
@@ -2042,6 +2179,7 @@ async fn execute_execution_runtime_sync_impl(
             match (override_fn.0)(&plan) {
                 Ok(result) => result,
                 Err(err) => {
+                    let transport_error_message = format!("{err:?}");
                     warn!(
                         event_name = "sync_execution_runtime_test_override_failed",
                         log_type = "ops",
@@ -2065,13 +2203,27 @@ async fn execute_execution_runtime_sync_impl(
                             status: RequestCandidateStatus::Failed,
                             status_code: None,
                             error_type: Some("execution_runtime_unavailable".to_string()),
-                            error_message: Some(format!("{err:?}")),
-                            latency_ms: None,
+                            error_message: Some(transport_error_message.clone()),
+                            latency_ms: Some(elapsed_ms_since(candidate_started_at)),
                             started_at_unix_ms: Some(candidate_started_unix_secs),
                             finished_at_unix_ms: Some(terminal_unix_secs),
                         },
                     )
                     .await;
+                    if let Some(response) = maybe_build_sync_transport_error_stop_response(
+                        state,
+                        &plan,
+                        report_context.as_ref(),
+                        trace_id,
+                        decision,
+                        "execution_runtime_unavailable",
+                        transport_error_message.as_str(),
+                        elapsed_ms_since(candidate_started_at),
+                    )
+                    .await?
+                    {
+                        return Ok(Some(response));
+                    }
                     return Ok(None);
                 }
             }
@@ -2111,6 +2263,11 @@ async fn execute_execution_runtime_sync_impl(
                     {
                         Ok(result) => result,
                         Err(err) => {
+                            let failure_error_type = err.error_type;
+                            let failure_message = err.message.clone();
+                            let failure_latency_ms = err
+                                .latency_ms
+                                .unwrap_or_else(|| elapsed_ms_since(candidate_started_at));
                             maybe_store_sync_execution_failure_fallback(
                                 &err,
                                 &plan,
@@ -2141,19 +2298,34 @@ async fn execute_execution_runtime_sync_impl(
                                 report_context.as_ref(),
                                 SchedulerRequestCandidateStatusUpdate {
                                     status: RequestCandidateStatus::Failed,
-                                    status_code: err.status_code,
-                                    error_type: Some(err.error_type.to_string()),
+                                    status_code: None,
+                                    error_type: Some(failure_error_type.to_string()),
                                     error_message: Some(err.message),
-                                    latency_ms: err.latency_ms,
+                                    latency_ms: Some(failure_latency_ms),
                                     started_at_unix_ms: Some(candidate_started_unix_secs),
                                     finished_at_unix_ms: Some(terminal_unix_secs),
                                 },
                             )
                             .await;
+                            if let Some(response) = maybe_build_sync_transport_error_stop_response(
+                                state,
+                                &plan,
+                                report_context.as_ref(),
+                                trace_id,
+                                decision,
+                                failure_error_type,
+                                failure_message.as_str(),
+                                failure_latency_ms,
+                            )
+                            .await?
+                            {
+                                return Ok(Some(response));
+                            }
                             return Ok(None);
                         }
                     },
                     Err(err) => {
+                        let transport_error_message = err.to_string();
                         warn!(
                             event_name = "chatgpt_web_image_execution_unavailable",
                             log_type = "ops",
@@ -2179,17 +2351,32 @@ async fn execute_execution_runtime_sync_impl(
                                 error_type: Some(
                                     "chatgpt_web_image_execution_unavailable".to_string(),
                                 ),
-                                error_message: Some(err.to_string()),
-                                latency_ms: None,
+                                error_message: Some(transport_error_message.clone()),
+                                latency_ms: Some(elapsed_ms_since(candidate_started_at)),
                                 started_at_unix_ms: Some(candidate_started_unix_secs),
                                 finished_at_unix_ms: Some(terminal_unix_secs),
                             },
                         )
                         .await;
+                        if let Some(response) = maybe_build_sync_transport_error_stop_response(
+                            state,
+                            &plan,
+                            report_context.as_ref(),
+                            trace_id,
+                            decision,
+                            "chatgpt_web_image_execution_unavailable",
+                            transport_error_message.as_str(),
+                            elapsed_ms_since(candidate_started_at),
+                        )
+                        .await?
+                        {
+                            return Ok(Some(response));
+                        }
                         return Ok(None);
                     }
                 },
                 Err(err) => {
+                    let transport_error_message = err.to_string();
                     warn!(
                         event_name = "grok_execution_unavailable",
                         log_type = "ops",
@@ -2213,13 +2400,27 @@ async fn execute_execution_runtime_sync_impl(
                             status: RequestCandidateStatus::Failed,
                             status_code: None,
                             error_type: Some("grok_execution_unavailable".to_string()),
-                            error_message: Some(err.to_string()),
-                            latency_ms: None,
+                            error_message: Some(transport_error_message.clone()),
+                            latency_ms: Some(elapsed_ms_since(candidate_started_at)),
                             started_at_unix_ms: Some(candidate_started_unix_secs),
                             finished_at_unix_ms: Some(terminal_unix_secs),
                         },
                     )
                     .await;
+                    if let Some(response) = maybe_build_sync_transport_error_stop_response(
+                        state,
+                        &plan,
+                        report_context.as_ref(),
+                        trace_id,
+                        decision,
+                        "grok_execution_unavailable",
+                        transport_error_message.as_str(),
+                        elapsed_ms_since(candidate_started_at),
+                    )
+                    .await?
+                    {
+                        return Ok(Some(response));
+                    }
                     return Ok(None);
                 }
             }
@@ -2237,6 +2438,7 @@ async fn execute_execution_runtime_sync_impl(
                 plan_candidate_id.as_deref(),
                 report_context.as_ref(),
                 candidate_started_unix_secs,
+                candidate_started_at,
             )
             .await?;
             match remote_outcome {
@@ -2246,6 +2448,8 @@ async fn execute_execution_runtime_sync_impl(
             }
         }
     };
+    let mut candidate_first_byte_elapsed_ms =
+        calibrated_sync_candidate_first_byte_elapsed_ms(candidate_started_at, &result);
     let mut oauth_retry_attempted = false;
     let (
         result_error_type,
@@ -2331,6 +2535,11 @@ async fn execute_execution_runtime_sync_impl(
             .await
             {
                 Ok(retry_result) => {
+                    candidate_first_byte_elapsed_ms =
+                        calibrated_sync_candidate_first_byte_elapsed_ms(
+                            candidate_started_at,
+                            &retry_result,
+                        );
                     result = retry_result;
                     continue;
                 }
@@ -2657,6 +2866,8 @@ async fn execute_execution_runtime_sync_impl(
             &plan,
             implicit_finalize.payload.report_context.as_ref(),
             usage_payload,
+            candidate_started_at,
+            candidate_first_byte_elapsed_ms,
             &mut terminal_guard,
         )
         .await;
@@ -2711,6 +2922,8 @@ async fn execute_execution_runtime_sync_impl(
                 &plan,
                 payload.report_context.as_ref(),
                 usage_payload,
+                candidate_started_at,
+                candidate_first_byte_elapsed_ms,
                 &mut terminal_guard,
             )
             .await;
@@ -2758,6 +2971,8 @@ async fn execute_execution_runtime_sync_impl(
                     &plan,
                     original_report_context.as_ref(),
                     &report_payload,
+                    candidate_started_at,
+                    candidate_first_byte_elapsed_ms,
                     &mut terminal_guard,
                 )
                 .await;
@@ -2793,6 +3008,8 @@ async fn execute_execution_runtime_sync_impl(
                 &plan,
                 payload.report_context.as_ref(),
                 &payload,
+                candidate_started_at,
+                candidate_first_byte_elapsed_ms,
                 &mut terminal_guard,
             )
             .await;
@@ -2840,6 +3057,8 @@ async fn execute_execution_runtime_sync_impl(
                 &plan,
                 payload.report_context.as_ref(),
                 &payload,
+                candidate_started_at,
+                candidate_first_byte_elapsed_ms,
                 &mut terminal_guard,
             )
             .await;
@@ -2867,6 +3086,8 @@ async fn execute_execution_runtime_sync_impl(
             &plan,
             payload.report_context.as_ref(),
             &payload,
+            candidate_started_at,
+            candidate_first_byte_elapsed_ms,
             &mut terminal_guard,
         )
         .await;
@@ -2903,6 +3124,8 @@ async fn execute_execution_runtime_sync_impl(
         &plan,
         usage_payload.report_context.as_ref(),
         &usage_payload,
+        candidate_started_at,
+        candidate_first_byte_elapsed_ms,
         &mut terminal_guard,
     )
     .await;
@@ -2995,6 +3218,7 @@ async fn execute_sync_via_remote_execution_runtime(
     plan_candidate_id: Option<&str>,
     report_context: Option<&serde_json::Value>,
     candidate_started_unix_secs: u64,
+    candidate_started_at: Instant,
 ) -> Result<RemoteSyncFallbackOutcome, GatewayError> {
     let response = match post_sync_plan_to_remote_execution_runtime(
         state,
@@ -3025,7 +3249,7 @@ async fn execute_sync_via_remote_execution_runtime(
                     status_code: None,
                     error_type: Some("execution_runtime_unavailable".to_string()),
                     error_message: Some(format!("{err:?}")),
-                    latency_ms: None,
+                    latency_ms: Some(elapsed_ms_since(candidate_started_at)),
                     started_at_unix_ms: Some(candidate_started_unix_secs),
                     finished_at_unix_ms: Some(terminal_unix_secs),
                 },
@@ -3049,7 +3273,7 @@ async fn execute_sync_via_remote_execution_runtime(
                     "execution runtime returned HTTP {}",
                     response.status()
                 )),
-                latency_ms: None,
+                latency_ms: Some(elapsed_ms_since(candidate_started_at)),
                 started_at_unix_ms: Some(candidate_started_unix_secs),
                 finished_at_unix_ms: Some(terminal_unix_secs),
             },
@@ -3373,6 +3597,7 @@ mod tests {
         }));
 
         ensure_execution_request_candidate_slot(&state, &mut plan, &mut report_context).await;
+        let candidate_started_at = Instant::now();
         let started_at = current_request_candidate_unix_ms();
         state.usage_runtime.record_pending(
             state.usage_lifecycle_data_state().as_ref(),
@@ -3394,10 +3619,19 @@ mod tests {
         )
         .await;
 
-        {
-            let _guard =
-                SyncAttemptTerminalGuard::new(&state, &plan, report_context.clone(), started_at);
-        }
+        crate::request_diagnostics::scope_request_diagnostics(async {
+            crate::request_diagnostics::record_request_accepted_at(
+                Instant::now() - Duration::from_millis(25),
+            );
+            let _guard = SyncAttemptTerminalGuard::new(
+                &state,
+                &plan,
+                report_context.clone(),
+                started_at,
+                candidate_started_at,
+            );
+        })
+        .await;
 
         let mut stored_usage = None;
         for _ in 0..50 {
@@ -3418,6 +3652,17 @@ mod tests {
         assert_eq!(stored_usage.billing_status, "void");
         assert_eq!(stored_usage.status_code, Some(499));
         assert_eq!(stored_usage.error_category.as_deref(), Some("cancelled"));
+        let request_metadata = stored_usage
+            .request_metadata
+            .as_ref()
+            .expect("cancelled usage should retain request diagnostics");
+        assert!(request_metadata
+            .get("end_to_end_time_ms")
+            .and_then(Value::as_u64)
+            .is_some());
+        assert!(request_metadata
+            .get("end_to_end_first_byte_time_ms")
+            .is_none());
 
         let stored_candidates = request_candidate_repository
             .list_by_request_id("sync-cancel-guard-request")

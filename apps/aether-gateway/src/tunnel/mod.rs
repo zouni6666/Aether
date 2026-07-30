@@ -3,13 +3,13 @@ mod embedded;
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use aether_contracts::tunnel::{
     resolve_tunnel_request_timeouts, try_decode_tunnel_relay_request_meta, RequestMeta,
-    TUNNEL_RELAY_FORWARDED_BY_HEADER, TUNNEL_RELAY_OWNER_INSTANCE_HEADER,
+    MAX_TUNNEL_RELAY_META_LEN, TUNNEL_RELAY_FORWARDED_BY_HEADER,
+    TUNNEL_RELAY_OWNER_INSTANCE_HEADER,
 };
 use aether_data::repository::proxy_nodes::{
     ProxyNodeHeartbeatMutation, ProxyNodeTunnelStatusMutation, StoredProxyNode,
@@ -39,8 +39,8 @@ use super::AppState;
 
 pub(crate) use aether_gateway_tunnel::{
     is_tunnel_heartbeat_path, is_tunnel_node_status_path, TunnelAttachmentRecord,
-    DEFAULT_OWNER_RELAY_BODY_LIMIT_BYTES, DEFAULT_TUNNEL_PROBE_BODY_LIMIT_BYTES, PROXY_TUNNEL_PATH,
-    TUNNEL_HEARTBEAT_PATH, TUNNEL_NODE_STATUS_PATH, TUNNEL_RELAY_PATH_PATTERN, TUNNEL_ROUTE_FAMILY,
+    DEFAULT_TUNNEL_PROBE_BODY_LIMIT_BYTES, PROXY_TUNNEL_PATH, TUNNEL_HEARTBEAT_PATH,
+    TUNNEL_NODE_STATUS_PATH, TUNNEL_RELAY_PATH_PATTERN, TUNNEL_ROUTE_FAMILY,
 };
 pub(crate) use embedded::DirectRelayResponse;
 pub(crate) use embedded::ProxyConn as TunnelProxyConn;
@@ -827,37 +827,17 @@ async fn forward_relay_request_to_owner(
 ) -> Result<axum::http::Response<Body>, GatewayError> {
     let owner_url = build_owner_relay_url(&owner.relay_base_url, node_id)?;
     let (parts, body) = request.into_parts();
-    let body_limit = owner_relay_body_limit_bytes(state.data.as_ref()).await;
-    if request_content_length_exceeds_limit(&parts.headers, body_limit) {
-        return build_local_http_error_response(
-            trace_id,
-            None,
-            StatusCode::PAYLOAD_TOO_LARGE,
-            &format!("tunnel relay body exceeds {body_limit} bytes"),
-        );
-    }
-    let limit_exceeded = Arc::new(AtomicBool::new(false));
-    let prepared_body =
-        match prepare_owner_relay_request_body(body, body_limit, Arc::clone(&limit_exceeded)).await
-        {
-            Ok(prepared_body) => prepared_body,
-            Err(_) if limit_exceeded.load(Ordering::SeqCst) => {
-                return build_local_http_error_response(
-                    trace_id,
-                    None,
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    &format!("tunnel relay body exceeds {body_limit} bytes"),
-                );
-            }
-            Err(error) => {
-                return build_local_http_error_response(
-                    trace_id,
-                    None,
-                    StatusCode::BAD_REQUEST,
-                    &error,
-                );
-            }
-        };
+    let prepared_body = match prepare_owner_relay_request_body(body).await {
+        Ok(prepared_body) => prepared_body,
+        Err(error) => {
+            return build_local_http_error_response(
+                trace_id,
+                None,
+                StatusCode::BAD_REQUEST,
+                &error,
+            );
+        }
+    };
 
     let mut upstream_request = state.owner_forward_client.post(owner_url);
     for (name, value) in &parts.headers {
@@ -894,14 +874,6 @@ async fn forward_relay_request_to_owner(
     .await
     {
         Ok(response) => response,
-        Err(err) if limit_exceeded.load(Ordering::SeqCst) => {
-            return build_local_http_error_response(
-                trace_id,
-                None,
-                StatusCode::PAYLOAD_TOO_LARGE,
-                &format!("tunnel relay body exceeds {body_limit} bytes"),
-            );
-        }
         Err(err) => {
             return Err(GatewayError::Internal(format!(
                 "owner tunnel relay failed: {err}"
@@ -929,26 +901,6 @@ fn build_owner_relay_url(relay_base_url: &str, node_id: &str) -> Result<String, 
     Ok(url.to_string())
 }
 
-async fn owner_relay_body_limit_bytes(data: &GatewayDataState) -> usize {
-    data.find_system_config_value("max_request_body_size")
-        .await
-        .ok()
-        .flatten()
-        .and_then(|value| value.as_u64())
-        .and_then(|value| usize::try_from(value).ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_OWNER_RELAY_BODY_LIMIT_BYTES)
-}
-
-fn request_content_length_exceeds_limit(headers: &HeaderMap, body_limit: usize) -> bool {
-    headers
-        .get(http::header::CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
-        .and_then(|value| usize::try_from(value).ok())
-        .is_some_and(|value| value > body_limit)
-}
-
 struct PreparedOwnerRelayRequestBody {
     body: reqwest::Body,
     meta: RequestMeta,
@@ -956,13 +908,10 @@ struct PreparedOwnerRelayRequestBody {
 
 async fn prepare_owner_relay_request_body(
     body: Body,
-    body_limit: usize,
-    limit_exceeded: Arc<AtomicBool>,
 ) -> Result<PreparedOwnerRelayRequestBody, String> {
     let mut body_stream = body.into_data_stream();
     let mut buffered_chunks = Vec::new();
     let mut meta_buffer = BytesMut::new();
-    let mut forwarded = 0usize;
     let mut meta = None;
 
     while meta.is_none() {
@@ -971,17 +920,16 @@ async fn prepare_owner_relay_request_body(
         };
         match next_chunk {
             Ok(chunk) => {
-                let next_forwarded = forwarded.saturating_add(chunk.len());
-                if next_forwarded > body_limit {
-                    limit_exceeded.store(true, Ordering::SeqCst);
-                    return Err(format!("tunnel relay body exceeds {body_limit} bytes"));
+                let meta_buffer_limit = 4usize.saturating_add(MAX_TUNNEL_RELAY_META_LEN);
+                let remaining = meta_buffer_limit.saturating_sub(meta_buffer.len());
+                if remaining > 0 {
+                    meta_buffer.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
                 }
-                forwarded = next_forwarded;
-                meta_buffer.extend_from_slice(&chunk);
                 buffered_chunks.push(chunk);
                 match try_decode_tunnel_relay_request_meta(&meta_buffer) {
                     Ok(Some((parsed, _))) => meta = Some(parsed),
-                    Ok(None) => {}
+                    Ok(None) if meta_buffer.len() < meta_buffer_limit => {}
+                    Ok(None) => return Err("incomplete tunnel relay metadata".to_string()),
                     Err(error) => return Err(error),
                 }
             }
@@ -999,15 +947,6 @@ async fn prepare_owner_relay_request_body(
         while let Some(next_chunk) = body_stream.next().await {
             match next_chunk {
                 Ok(chunk) => {
-                    forwarded = forwarded.saturating_add(chunk.len());
-                    if forwarded > body_limit {
-                        limit_exceeded.store(true, Ordering::SeqCst);
-                        yield Err::<Bytes, io::Error>(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("tunnel relay body exceeds {body_limit} bytes"),
-                        ));
-                        break;
-                    }
                     yield Ok::<Bytes, io::Error>(chunk);
                 }
                 Err(error) => {
@@ -1194,7 +1133,6 @@ mod tests {
     use axum::routing::post;
     use axum::Router;
     use serde_json::json;
-    use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
 
     fn sample_proxy_node(node_id: &str) -> StoredProxyNode {
@@ -1333,14 +1271,10 @@ mod tests {
         envelope.extend_from_slice(&1u32.to_be_bytes());
         envelope.push(b'{');
 
-        let error = prepare_owner_relay_request_body(
-            Body::from(envelope),
-            1024,
-            Arc::new(AtomicBool::new(false)),
-        )
-        .await
-        .err()
-        .expect("invalid metadata should fail");
+        let error = prepare_owner_relay_request_body(Body::from(envelope))
+            .await
+            .err()
+            .expect("invalid metadata should fail");
 
         assert!(error.contains("invalid relay metadata"));
     }

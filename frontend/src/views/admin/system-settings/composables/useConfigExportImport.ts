@@ -14,12 +14,7 @@ import { parseApiError } from '@/utils/errorParser'
 import { log } from '@/utils/logger'
 import type { SystemConfig } from './useSystemConfig'
 
-// 文件大小限制：导出文件可能包含大量 Provider Key、模型和用户数据。
 const BYTES_PER_MB = 1024 * 1024
-const MAX_FILE_SIZE_MB = 500
-const MAX_AGGREGATE_FILE_SIZE_MB = 500
-const MAX_FILE_SIZE = MAX_FILE_SIZE_MB * BYTES_PER_MB
-const MAX_AGGREGATE_FILE_SIZE = MAX_AGGREGATE_FILE_SIZE_MB * BYTES_PER_MB
 
 type JsonObject = Record<string, unknown>
 
@@ -56,10 +51,6 @@ function looksLikeUsersExport(value: JsonObject): boolean {
 function looksLikeAggregateExport(value: JsonObject): boolean {
   return asJsonObject(value.config_data) != null
     && asJsonObject(value.user_data) != null
-}
-
-function fileSizeLimitMessage(limitMb: number): string {
-  return `文件大小不能超过 ${limitMb}MB`
 }
 
 function formatBytes(bytes: number): string {
@@ -182,12 +173,6 @@ export function useConfigExportImport(systemConfig: { value: SystemConfig }) {
     const file = input.files?.[0]
     if (!file) return
 
-    if (file.size > MAX_FILE_SIZE) {
-      error(fileSizeLimitMessage(MAX_FILE_SIZE_MB))
-      input.value = ''
-      return
-    }
-
     const reader = new FileReader()
     reader.onload = (e) => {
       try {
@@ -284,12 +269,6 @@ export function useConfigExportImport(systemConfig: { value: SystemConfig }) {
     const input = event.target as HTMLInputElement
     const file = input.files?.[0]
     if (!file) return
-
-    if (file.size > MAX_FILE_SIZE) {
-      error(fileSizeLimitMessage(MAX_FILE_SIZE_MB))
-      input.value = ''
-      return
-    }
 
     const reader = new FileReader()
     reader.onload = (e) => {
@@ -392,12 +371,6 @@ export function useConfigExportImport(systemConfig: { value: SystemConfig }) {
     const input = event.target as HTMLInputElement
     const file = input.files?.[0]
     if (!file) return
-
-    if (file.size > MAX_AGGREGATE_FILE_SIZE) {
-      error(fileSizeLimitMessage(MAX_AGGREGATE_FILE_SIZE_MB))
-      input.value = ''
-      return
-    }
 
     const reader = new FileReader()
     reader.onload = (e) => {

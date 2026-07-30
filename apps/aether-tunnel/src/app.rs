@@ -1005,9 +1005,7 @@ mod tests {
     use axum::Router;
     use serde_json::json;
 
-    use crate::config::{
-        TunnelLogDestinationArg, TunnelLogRotationArg, DEFAULT_REDIRECT_REPLAY_BUDGET_BYTES,
-    };
+    use crate::config::{TunnelLogDestinationArg, TunnelLogRotationArg};
     use crate::hardware::HardwareInfo;
     use crate::state::AppState as TunnelAppState;
     use crate::target_filter::DnsCache;
@@ -1397,7 +1395,7 @@ mod tests {
             upstream_tcp_keepalive_secs: 60,
             upstream_tcp_nodelay: true,
             upstream_proxy_url: None,
-            redirect_replay_budget_bytes: DEFAULT_REDIRECT_REPLAY_BUDGET_BYTES,
+            legacy_redirect_replay_budget_bytes_ignored: None,
             emit_proxy_timing_header: true,
             log_level: "info".to_string(),
             log_destination: TunnelLogDestinationArg::Stdout,

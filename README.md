@@ -146,11 +146,11 @@ Aether Tunnel 是配套的正向代理节点，部署在海外 VPS 上，为墙�
 - `AETHER_GATEWAY_MAX_IN_FLIGHT_REQUESTS`：单实例请求并发上限；未配置时按 CPU 自动推导（基础范围 `512-65536`），低文件描述符预算时会进一步下调
 - `AETHER_GATEWAY_REQUEST_BODY_BUFFER_BUDGET_MB`：单实例同时读取和解压请求体的加权内存预算，默认 `256MB`
 - `AETHER_GATEWAY_REQUEST_BODY_READ_TIMEOUT_MS`：请求体完整读取超时，默认 `120000ms`
-- `AETHER_MAX_REQUEST_BODY_MB`：单请求解压后的最大请求体，默认 `64MB`
-- `AETHER_MAX_INTERNAL_BUFFERED_BODY_MB`：heartbeat、管理探测等内部必须整包读取的响应体上限，默认 `128MB`
+- `AETHER_MAX_REQUEST_BODY_MB`：可选的单请求解压后请求体上限；未配置或设为 `0` 时不限制
+- `AETHER_MAX_INTERNAL_BUFFERED_BODY_MB`：可选的 heartbeat、管理探测等内部整包响应体上限；未配置或设为 `0` 时不限制
 - `AETHER_TUNNEL_NODE_STATUS_QUEUE_CAPACITY`：隧道节点状态上报队列容量，默认 `1024`；满载时拒绝新事件，避免控制面故障导致无界内存增长
 - `AETHER_GATEWAY_SECURITY_CACHE_TTL_MS`：IP 黑白名单本地缓存时间，默认 `1000ms`，写操作会主动失效相关缓存
-- `AETHER_MAX_REDACTED_SYNC_RESPONSE_BODY_MB`：启用 PII 恢复时同步响应允许缓冲的最大大小，默认 `64MB`
+- `AETHER_MAX_REDACTED_SYNC_RESPONSE_BODY_MB`：可选的 PII 恢复同步响应缓冲上限；未配置或设为 `0` 时不限制
 - `REDIS_URL`：Redis 连接串；仅 Postgres + Redis 的 Docker Compose 部署需要配置
 - `AETHER_RUNTIME_BACKEND=memory|redis`：运行时缓存/协调后端。SQLite 默认用 `memory`，不会连接 Redis
 - `AETHER_GATEWAY_AUTO_PREPARE_DATABASE`：常规启动前自动执行挂起的 schema migration 和 backfill；仓库自带的 `docker-compose.yml` 默认开启

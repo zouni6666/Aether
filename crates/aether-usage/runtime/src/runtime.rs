@@ -44,22 +44,18 @@ pub enum UsageRequestRecordLevel {
     Full,
 }
 
-pub const DEFAULT_USAGE_REQUEST_BODY_CAPTURE_LIMIT_BYTES: usize = 5 * 1024 * 1024;
-pub const DEFAULT_USAGE_RESPONSE_BODY_CAPTURE_LIMIT_BYTES: usize = 5 * 1024 * 1024;
+pub const DEFAULT_USAGE_REQUEST_BODY_CAPTURE_LIMIT_BYTES: usize = usize::MAX;
+pub const DEFAULT_USAGE_RESPONSE_BODY_CAPTURE_LIMIT_BYTES: usize = usize::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UsageBodyCapturePolicy {
     pub record_level: UsageRequestRecordLevel,
-    pub max_request_body_bytes: Option<usize>,
-    pub max_response_body_bytes: Option<usize>,
 }
 
 impl Default for UsageBodyCapturePolicy {
     fn default() -> Self {
         Self {
             record_level: UsageRequestRecordLevel::Full,
-            max_request_body_bytes: Some(DEFAULT_USAGE_REQUEST_BODY_CAPTURE_LIMIT_BYTES),
-            max_response_body_bytes: Some(DEFAULT_USAGE_RESPONSE_BODY_CAPTURE_LIMIT_BYTES),
         }
     }
 }
@@ -12696,7 +12692,6 @@ mod tests {
         apply_usage_body_capture_policy_to_event(
             UsageBodyCapturePolicy {
                 record_level: UsageRequestRecordLevel::Basic,
-                ..UsageBodyCapturePolicy::default()
             },
             &mut event,
         );

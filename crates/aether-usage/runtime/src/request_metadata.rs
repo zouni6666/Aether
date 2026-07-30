@@ -360,6 +360,10 @@ fn copy_allowed_metadata_fields(source: &Map<String, Value>, target: &mut Map<St
     copy_number(source, target, "client_response_body_base64_bytes");
     copy_non_null_value(source, target, "body_size");
     copy_number(source, target, "client_response_status_code");
+    copy_number(source, target, "end_to_end_time_ms");
+    copy_number(source, target, "end_to_end_first_byte_time_ms");
+    copy_bool(source, target, "transport_error");
+    copy_non_empty_string(source, target, "transport_error_type");
     copy_non_null_value(source, target, "billing_snapshot");
     copy_non_empty_string(source, target, "billing_snapshot_schema_version");
     copy_non_empty_string(source, target, "billing_snapshot_status");
@@ -412,6 +416,10 @@ fn move_allowed_metadata_fields(mut source: Map<String, Value>, target: &mut Map
     remove_number(&mut source, target, "client_response_body_base64_bytes");
     remove_non_null_value(&mut source, target, "body_size");
     remove_number(&mut source, target, "client_response_status_code");
+    remove_number(&mut source, target, "end_to_end_time_ms");
+    remove_number(&mut source, target, "end_to_end_first_byte_time_ms");
+    remove_bool(&mut source, target, "transport_error");
+    remove_non_empty_string(&mut source, target, "transport_error_type");
     remove_non_null_value(&mut source, target, "billing_snapshot");
     remove_non_empty_string(&mut source, target, "billing_snapshot_schema_version");
     remove_non_empty_string(&mut source, target, "billing_snapshot_status");
@@ -776,6 +784,10 @@ mod tests {
             "provider_request_body_base64_bytes": 512,
             "provider_response_body_base64_bytes": 1024,
             "client_response_body_base64_bytes": 2048,
+            "end_to_end_time_ms": 10626,
+            "end_to_end_first_byte_time_ms": 10120,
+            "transport_error": true,
+            "transport_error_type": "connect_timeout",
             "body_size": {
                 "client_request_body": "1 KB",
                 "provider_request_body": "4 KB",
@@ -816,6 +828,10 @@ mod tests {
                 "provider_request_body_base64_bytes": 512,
                 "provider_response_body_base64_bytes": 1024,
                 "client_response_body_base64_bytes": 2048,
+                "end_to_end_time_ms": 10626,
+                "end_to_end_first_byte_time_ms": 10120,
+                "transport_error": true,
+                "transport_error_type": "connect_timeout",
                 "body_size": {
                     "client_request_body": "1 KB",
                     "provider_request_body": "4 KB",
@@ -965,6 +981,10 @@ mod tests {
                     "client_requested_stream": false,
                     "upstream_is_stream": true,
                     "api_key_is_standalone": true,
+                    "end_to_end_time_ms": 10626,
+                    "end_to_end_first_byte_time_ms": 10120,
+                    "transport_error": true,
+                    "transport_error_type": "connect_timeout",
                     "provider_id": "provider-1",
                     "model_id": "model-1",
                     "global_model_id": "global-model-1",
@@ -998,6 +1018,10 @@ mod tests {
                 "client_requested_stream": false,
                 "upstream_is_stream": true,
                 "api_key_is_standalone": true,
+                "end_to_end_time_ms": 10626,
+                "end_to_end_first_byte_time_ms": 10120,
+                "transport_error": true,
+                "transport_error_type": "connect_timeout",
                 "model_id": "model-1",
                 "global_model_id": "global-model-1",
                 "global_model_name": "gpt-5",
@@ -1142,8 +1166,6 @@ mod tests {
         apply_usage_body_capture_policy_to_event(
             UsageBodyCapturePolicy {
                 record_level: UsageRequestRecordLevel::Basic,
-                max_request_body_bytes: Some(1024),
-                max_response_body_bytes: Some(1024),
             },
             &mut event,
         );

@@ -20,8 +20,6 @@ use aether_runtime_state::RuntimeQueueStore;
 use aether_usage_runtime::{
     UsageBillingEventEnricher, UsageBodyCapturePolicy, UsageEvent, UsageRecordWriter,
     UsageRequestRecordLevel, UsageRuntimeAccess, UsageSettlementWriter,
-    DEFAULT_USAGE_REQUEST_BODY_CAPTURE_LIMIT_BYTES,
-    DEFAULT_USAGE_RESPONSE_BODY_CAPTURE_LIMIT_BYTES,
 };
 use aether_video_tasks_core::StoredVideoTaskReadSide;
 use async_trait::async_trait;
@@ -33,8 +31,6 @@ use crate::provider_transport::ProviderTransportSnapshotSource;
 
 const REQUEST_RECORD_LEVEL_KEY: &str = "request_record_level";
 const LEGACY_REQUEST_LOG_LEVEL_KEY: &str = "request_log_level";
-const MAX_REQUEST_BODY_SIZE_KEY: &str = "max_request_body_size";
-const MAX_RESPONSE_BODY_SIZE_KEY: &str = "max_response_body_size";
 
 fn usage_request_record_level_from_value(value: Option<&Value>) -> UsageRequestRecordLevel {
     let Some(value) = value.and_then(Value::as_str).map(str::trim) else {
@@ -50,14 +46,6 @@ fn usage_request_record_level_from_value(value: Option<&Value>) -> UsageRequestR
         UsageRequestRecordLevel::Basic
     } else {
         UsageRequestRecordLevel::Full
-    }
-}
-
-fn usage_body_capture_limit_from_value(value: Option<&Value>, default: usize) -> Option<usize> {
-    match value.and_then(Value::as_u64) {
-        Some(0) => None,
-        Some(limit) => usize::try_from(limit).ok().filter(|limit| *limit > 0),
-        None => Some(default),
     }
 }
 
@@ -282,20 +270,8 @@ impl UsageRuntimeAccess for GatewayDataState {
                     .await?
             }
         };
-        let max_request_body_size =
-            GatewayDataState::find_system_config_value(self, MAX_REQUEST_BODY_SIZE_KEY).await?;
-        let max_response_body_size =
-            GatewayDataState::find_system_config_value(self, MAX_RESPONSE_BODY_SIZE_KEY).await?;
         Ok(UsageBodyCapturePolicy {
             record_level: usage_request_record_level_from_value(value.as_ref()),
-            max_request_body_bytes: usage_body_capture_limit_from_value(
-                max_request_body_size.as_ref(),
-                DEFAULT_USAGE_REQUEST_BODY_CAPTURE_LIMIT_BYTES,
-            ),
-            max_response_body_bytes: usage_body_capture_limit_from_value(
-                max_response_body_size.as_ref(),
-                DEFAULT_USAGE_RESPONSE_BODY_CAPTURE_LIMIT_BYTES,
-            ),
         })
     }
 }
@@ -502,7 +478,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn usage_runtime_access_reads_body_capture_limits_from_system_config() {
+    async fn usage_runtime_access_ignores_legacy_body_capture_limits() {
         let state = GatewayDataState::disabled().with_system_config_values_for_tests([
             ("max_request_body_size".to_string(), json!(1234)),
             ("max_response_body_size".to_string(), json!(5678)),
@@ -513,22 +489,5 @@ mod tests {
             .expect("body capture policy should read");
 
         assert_eq!(policy.record_level, UsageRequestRecordLevel::Full);
-        assert_eq!(policy.max_request_body_bytes, Some(1234));
-        assert_eq!(policy.max_response_body_bytes, Some(5678));
-    }
-
-    #[tokio::test]
-    async fn usage_runtime_access_treats_zero_body_capture_limit_as_unbounded() {
-        let state = GatewayDataState::disabled().with_system_config_values_for_tests([
-            ("max_request_body_size".to_string(), json!(0)),
-            ("max_response_body_size".to_string(), json!(0)),
-        ]);
-
-        let policy = UsageRuntimeAccess::body_capture_policy(&state)
-            .await
-            .expect("body capture policy should read");
-
-        assert_eq!(policy.max_request_body_bytes, None);
-        assert_eq!(policy.max_response_body_bytes, None);
     }
 }

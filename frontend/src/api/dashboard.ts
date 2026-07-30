@@ -266,6 +266,8 @@ export interface RequestDetail {
   scheduling_failure?: RequestSchedulingFailure | null
   response_time_ms: number
   first_byte_time_ms?: number | null
+  end_to_end_time_ms?: number | null
+  end_to_end_first_byte_time_ms?: number | null
   created_at: string
   updated_at?: string | null
   request_headers?: Record<string, unknown>

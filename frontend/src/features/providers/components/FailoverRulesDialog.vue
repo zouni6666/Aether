@@ -8,6 +8,33 @@
     @update:model-value="handleClose"
   >
     <div class="space-y-5 max-h-[60vh] overflow-y-auto px-0.5 py-0.5 -mx-0.5">
+      <!-- 传输错误规则 -->
+      <div class="space-y-3">
+        <div>
+          <h3 class="text-sm font-medium">
+            传输错误
+          </h3>
+          <p class="text-xs text-muted-foreground mt-0.5">
+            这类错误没有可用于故障转移判断的上游 HTTP 状态码，因此不会命中下方的状态码规则
+          </p>
+        </div>
+
+        <div class="flex items-center justify-between gap-4 rounded-lg border bg-muted/50 p-3">
+          <div class="min-w-0 space-y-0.5">
+            <span class="text-sm font-medium">继续尝试下一候选</span>
+            <p class="text-xs leading-relaxed text-muted-foreground">
+              适用于 DNS 解析、TCP 连接、TLS 握手、代理/WARP 连接，以及响应提交前的连接重置或超时。默认开启；关闭后会立即返回网关错误。响应开始发送后无法切换候选。
+            </p>
+          </div>
+          <Switch
+            aria-label="传输错误时继续尝试下一候选"
+            class="shrink-0"
+            :model-value="continueOnTransportErrors"
+            @update:model-value="(value: boolean) => continueOnTransportErrors = value"
+          />
+        </div>
+      </div>
+
       <!-- 成功转移规则 -->
       <div class="space-y-3">
         <div class="flex items-start justify-between gap-3">
@@ -243,6 +270,7 @@ import {
   Dialog,
   Button,
   Input,
+  Switch,
   Textarea,
 } from '@/components/ui'
 import { AlignLeft, Code2, GitBranch, Plus, Trash2 } from 'lucide-vue-next'
@@ -263,6 +291,7 @@ const emit = defineEmits<{
 
 const { success, error: showError } = useToast()
 const saving = ref(false)
+const continueOnTransportErrors = ref(true)
 
 const successPatterns = ref<FailoverRuleItem[]>([])
 const errorPatterns = ref<FailoverRuleItem[]>([])
@@ -284,6 +313,7 @@ const TOP_LEVEL_STOP_STATUS_CODE_KEYS = [
 ] as const
 
 const MANAGED_FAILOVER_RULE_KEYS = [
+  'stop_on_transport_errors',
   'success_failover_patterns',
   'error_stop_patterns',
   ...TOP_LEVEL_STOP_STATUS_CODE_KEYS,
@@ -334,6 +364,9 @@ function buildNextFailoverRules(
   if (filteredError.length > 0) {
     nextRules.error_stop_patterns = filteredError
   }
+  if (!continueOnTransportErrors.value) {
+    nextRules.stop_on_transport_errors = true
+  }
 
   return Object.values(nextRules).some(hasPersistableFailoverValue)
     ? nextRules as FailoverRulesConfig
@@ -343,6 +376,7 @@ function buildNextFailoverRules(
 watch(() => [props.open, props.provider], () => {
   if (props.open && props.provider) {
     const rules = props.provider.failover_rules
+    continueOnTransportErrors.value = rules?.stop_on_transport_errors !== true
     successPatterns.value = (rules?.success_failover_patterns || []).map(r => ({
       ...r,
       pattern: r.pattern || '',

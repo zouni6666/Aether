@@ -1,6 +1,4 @@
-use super::{
-    AdminAppState, ADMIN_SYSTEM_DATA_EXPORT_VERSION, ADMIN_SYSTEM_DATA_IMPORT_MAX_SIZE_BYTES,
-};
+use super::{AdminAppState, ADMIN_SYSTEM_DATA_EXPORT_VERSION};
 use crate::ai_serving::build_provider_key_pool_score_upsert;
 use crate::api::ai::admin_endpoint_signature_parts;
 use crate::handlers::admin::admin_provider_pool_config;
@@ -55,8 +53,6 @@ use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
-
-const ADMIN_SYSTEM_IMPORT_MAX_SIZE_BYTES: usize = 500 * 1024 * 1024;
 
 fn invalid_request(detail: impl Into<String>) -> (http::StatusCode, Value) {
     (
@@ -1183,10 +1179,6 @@ impl<'a> AdminAppState<'a> {
             )));
         }
 
-        if request_body.len() > ADMIN_SYSTEM_DATA_IMPORT_MAX_SIZE_BYTES {
-            return Ok(Err(invalid_request("请求体大小不能超过 500MB")));
-        }
-
         let root = match serde_json::from_slice::<Value>(request_body) {
             Ok(Value::Object(map)) => map,
             _ => return Ok(Err(invalid_request("请求数据验证失败"))),
@@ -1280,10 +1272,6 @@ impl<'a> AdminAppState<'a> {
                 json!({ "detail": "Admin system data unavailable" }),
             )));
         }
-        if request_body.len() > ADMIN_SYSTEM_IMPORT_MAX_SIZE_BYTES {
-            return Ok(Err(invalid_request("请求体大小不能超过 500MB")));
-        }
-
         let parsed = routed!(parse_admin_system_config_import_request(request_body));
         let root = parsed.root;
         let merge_mode = parsed.request.merge_mode;
@@ -2307,10 +2295,6 @@ impl<'a> AdminAppState<'a> {
                 json!({ "detail": "Admin system data unavailable" }),
             )));
         }
-        if request_body.len() > ADMIN_SYSTEM_IMPORT_MAX_SIZE_BYTES {
-            return Ok(Err(invalid_request("请求体大小不能超过 500MB")));
-        }
-
         let root = match serde_json::from_slice::<Value>(request_body) {
             Ok(Value::Object(map)) => map,
             _ => return Ok(Err(invalid_request("请求数据验证失败"))),

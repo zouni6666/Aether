@@ -1188,6 +1188,7 @@ const hasFailoverRules = computed(() => {
   if (!rules) return false
   return FAILOVER_RULE_ARRAY_KEYS.some(key => (rules[key]?.length || 0) > 0)
     || typeof rules.max_retries === 'number'
+    || rules.stop_on_transport_errors === true
 })
 
 // Provider 级别代理配置状态

@@ -8,7 +8,7 @@ use super::super::state::{
     build_admin_provider_oauth_backend_unavailable_response,
 };
 use super::batch::build_admin_provider_oauth_batch_task_state;
-use super::cookie::{normalize_claude_session_key, MAX_CLAUDE_SESSION_KEY_BYTES};
+use super::cookie::normalize_claude_session_key;
 use crate::handlers::admin::provider::shared::paths::admin_provider_oauth_cookie_task_provider_id;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::task_runtime::{
@@ -35,7 +35,6 @@ use uuid::Uuid;
 const CLAUDE_COOKIE_TASK_IMPORT_KIND: &str = "cookie_authorize";
 const CLAUDE_COOKIE_TASK_ID_PREFIX: &str = "claude-cookie-";
 const MAX_CLAUDE_COOKIE_TASK_ENTRIES: usize = 20;
-const MAX_CLAUDE_COOKIE_TASK_BODY_BYTES: usize = 768 * 1024;
 const CLAUDE_COOKIE_AUTHORIZATION_CONCURRENCY: usize = 3;
 const MAX_SAFE_ERROR_DETAIL_BYTES: usize = 512;
 
@@ -476,9 +475,6 @@ fn parse_claude_cookie_task_request(
     let Some(request_body) = request_body else {
         return Err(bad_cookie_task_request("请求体必须是合法的 JSON 对象"));
     };
-    if request_body.len() > MAX_CLAUDE_COOKIE_TASK_BODY_BYTES {
-        return Err(bad_cookie_task_request("Cookie 授权请求体过大"));
-    }
     let payload = serde_json::from_slice::<Value>(request_body)
         .ok()
         .and_then(|value| value.as_object().cloned())
@@ -571,8 +567,7 @@ fn current_unix_secs_or(fallback: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_claude_cookie_task_request, safe_error_detail, MAX_CLAUDE_COOKIE_TASK_BODY_BYTES,
-        MAX_CLAUDE_COOKIE_TASK_ENTRIES, MAX_CLAUDE_SESSION_KEY_BYTES,
+        parse_claude_cookie_task_request, safe_error_detail, MAX_CLAUDE_COOKIE_TASK_ENTRIES,
     };
     use axum::body::{to_bytes, Bytes};
     use serde_json::json;
@@ -625,26 +620,23 @@ mod tests {
     }
 
     #[test]
-    fn accepts_twenty_maximum_length_session_keys_within_batch_body_limit() {
+    fn accepts_twenty_long_session_keys_above_previous_body_cap() {
         let cookies = (0..MAX_CLAUDE_COOKIE_TASK_ENTRIES)
             .map(|index| {
                 let prefix = format!("{index:02}-");
-                format!(
-                    "{prefix}{}",
-                    "x".repeat(MAX_CLAUDE_SESSION_KEY_BYTES - prefix.len())
-                )
+                format!("{prefix}{}", "x".repeat(40 * 1024))
             })
             .collect::<Vec<_>>();
         let body = Bytes::from(json!({"cookies": cookies}).to_string());
-        assert!(body.len() < MAX_CLAUDE_COOKIE_TASK_BODY_BYTES);
-        let parsed = parse_claude_cookie_task_request(Some(&body))
-            .expect("maximum valid batch should parse");
+        assert!(body.len() > 768 * 1024);
+        let parsed =
+            parse_claude_cookie_task_request(Some(&body)).expect("large valid batch should parse");
         assert_eq!(parsed.entries.len(), MAX_CLAUDE_COOKIE_TASK_ENTRIES);
         assert!(parsed.entries.iter().all(Result::is_ok));
     }
 
     #[tokio::test]
-    async fn rejects_ambiguous_or_oversized_cookie_batches_without_echoing_secrets() {
+    async fn rejects_ambiguous_cookie_batches_without_echoing_secrets() {
         let too_many = vec!["sessionKey=value"; MAX_CLAUDE_COOKIE_TASK_ENTRIES + 1];
         for payload in [
             json!({"cookie": "sessionKey=secret", "cookies": ["sessionKey=other"]}),
@@ -663,13 +655,6 @@ mod tests {
             assert!(!text.contains("secret"));
             assert!(!text.contains("other"));
         }
-
-        let oversized_body = Bytes::from(vec![b'x'; MAX_CLAUDE_COOKIE_TASK_BODY_BYTES + 1]);
-        let response = match parse_claude_cookie_task_request(Some(&oversized_body)) {
-            Ok(_) => panic!("oversized request should fail"),
-            Err(response) => response,
-        };
-        assert_eq!(response.status(), http::StatusCode::BAD_REQUEST);
     }
 
     #[test]

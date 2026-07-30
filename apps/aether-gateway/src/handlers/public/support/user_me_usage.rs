@@ -338,6 +338,14 @@ fn users_me_usage_metadata_string<'a>(
         .filter(|value| !value.is_empty())
 }
 
+fn users_me_usage_metadata_u64(item: &StoredRequestUsageAudit, key: &str) -> Option<u64> {
+    item.request_metadata
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .and_then(|metadata| metadata.get(key))
+        .and_then(serde_json::Value::as_u64)
+}
+
 fn infer_client_family_from_user_agent(user_agent: &str) -> Option<&'static str> {
     let normalized = user_agent.trim().to_ascii_lowercase();
     if normalized.is_empty() {
@@ -499,6 +507,11 @@ fn build_users_me_usage_record_payload(
             auth_api_key_reader_available,
         ),
     });
+    payload["end_to_end_time_ms"] = json!(users_me_usage_metadata_u64(item, "end_to_end_time_ms"));
+    payload["end_to_end_first_byte_time_ms"] = json!(users_me_usage_metadata_u64(
+        item,
+        "end_to_end_first_byte_time_ms"
+    ));
 
     if item.target_model.is_some() {
         payload["target_model"] = json!(item.target_model.clone());
@@ -559,6 +572,11 @@ fn build_users_me_usage_active_payload(item: &StoredRequestUsageAudit) -> serde_
         "target_model": item.target_model,
         "has_fallback": item.has_fallback(),
     });
+    payload["end_to_end_time_ms"] = json!(users_me_usage_metadata_u64(item, "end_to_end_time_ms"));
+    payload["end_to_end_first_byte_time_ms"] = json!(users_me_usage_metadata_u64(
+        item,
+        "end_to_end_first_byte_time_ms"
+    ));
     if item.api_format.is_none() {
         payload
             .as_object_mut()
@@ -1659,6 +1677,29 @@ mod tests {
         assert_eq!(payload["cache_creation_input_tokens"], 10);
         assert_eq!(payload["cache_creation_ephemeral_5m_input_tokens"], 4);
         assert_eq!(payload["cache_creation_ephemeral_1h_input_tokens"], 6);
+    }
+
+    #[test]
+    fn user_usage_payloads_project_end_to_end_timings_from_metadata() {
+        let item = StoredRequestUsageAudit {
+            response_time_ms: Some(626),
+            first_byte_time_ms: Some(120),
+            request_metadata: Some(json!({
+                "end_to_end_time_ms": 10_626,
+                "end_to_end_first_byte_time_ms": 10_120,
+            })),
+            ..sample_usage("completed")
+        };
+
+        let record = build_users_me_usage_record_payload(&item, false, &BTreeMap::new(), false);
+        let active = build_users_me_usage_active_payload(&item);
+
+        for payload in [&record, &active] {
+            assert_eq!(payload["response_time_ms"], 626);
+            assert_eq!(payload["first_byte_time_ms"], 120);
+            assert_eq!(payload["end_to_end_time_ms"], 10_626);
+            assert_eq!(payload["end_to_end_first_byte_time_ms"], 10_120);
+        }
     }
 
     #[test]

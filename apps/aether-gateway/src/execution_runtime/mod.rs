@@ -20,6 +20,7 @@ mod stream_pump;
 pub(crate) mod submission;
 pub(crate) mod sync;
 pub(crate) mod transport;
+mod transport_failure;
 mod windsurf;
 
 pub(crate) use self::chatgpt_web_image::maybe_execute_chatgpt_web_image_sync;
@@ -132,6 +133,10 @@ pub(crate) use transport::execute_sync_plan_with_report_context as execute_execu
 pub(crate) use transport::{
     execute_sync_plan as execute_execution_runtime_sync_plan, DirectSyncExecutionRuntime,
     DirectUpstreamStreamExecution, ExecutionRuntimeTransportError,
+};
+pub(crate) use transport_failure::{
+    build_transport_error_stop_response, mark_stream_candidate_watchdog_terminal_started,
+    StreamCandidateWatchdogProgress,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -13,43 +13,35 @@ use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
-const DEFAULT_MAX_REQUEST_BODY_MB: u64 = 64;
 const MAX_REQUEST_BODY_MB_ENV: &str = "AETHER_MAX_REQUEST_BODY_MB";
-const DEFAULT_MAX_REDACTED_SYNC_RESPONSE_BODY_MB: u64 = 64;
 const MAX_REDACTED_SYNC_RESPONSE_BODY_MB_ENV: &str = "AETHER_MAX_REDACTED_SYNC_RESPONSE_BODY_MB";
-const DEFAULT_MAX_INTERNAL_BUFFERED_BODY_MB: u64 = 128;
 const MAX_INTERNAL_BUFFERED_BODY_MB_ENV: &str = "AETHER_MAX_INTERNAL_BUFFERED_BODY_MB";
 const TRUSTED_PROXY_CIDRS_ENV: &str = "AETHER_TRUSTED_PROXY_CIDRS";
 
-/// Upper bound applied to a request body after Content-Encoding decoding, and to
-/// uncompressed bodies as-is. Guards against decompression bombs and oversized
-/// request allocations. Overridable via `AETHER_MAX_REQUEST_BODY_MB`.
-static MAX_REQUEST_BODY_BYTES: LazyLock<u64> = LazyLock::new(|| {
-    std::env::var(MAX_REQUEST_BODY_MB_ENV)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_MAX_REQUEST_BODY_MB)
-        .saturating_mul(1024 * 1024)
-});
+/// Optional operator cap applied after Content-Encoding decoding, and to
+/// uncompressed bodies as-is. Unset, zero, or invalid values disable the cap.
+static MAX_REQUEST_BODY_BYTES: LazyLock<u64> =
+    LazyLock::new(|| body_limit_bytes_from_env(MAX_REQUEST_BODY_MB_ENV));
 
-static MAX_REDACTED_SYNC_RESPONSE_BODY_BYTES: LazyLock<u64> = LazyLock::new(|| {
-    std::env::var(MAX_REDACTED_SYNC_RESPONSE_BODY_MB_ENV)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_MAX_REDACTED_SYNC_RESPONSE_BODY_MB)
-        .saturating_mul(1024 * 1024)
-});
+static MAX_REDACTED_SYNC_RESPONSE_BODY_BYTES: LazyLock<u64> =
+    LazyLock::new(|| body_limit_bytes_from_env(MAX_REDACTED_SYNC_RESPONSE_BODY_MB_ENV));
 
-static MAX_INTERNAL_BUFFERED_BODY_BYTES: LazyLock<u64> = LazyLock::new(|| {
-    std::env::var(MAX_INTERNAL_BUFFERED_BODY_MB_ENV)
-        .ok()
+static MAX_INTERNAL_BUFFERED_BODY_BYTES: LazyLock<u64> =
+    LazyLock::new(|| body_limit_bytes_from_env(MAX_INTERNAL_BUFFERED_BODY_MB_ENV));
+
+fn body_limit_bytes_from_env(name: &str) -> u64 {
+    let value = std::env::var(name).ok();
+    body_limit_bytes(value.as_deref())
+}
+
+fn body_limit_bytes(value: Option<&str>) -> u64 {
+    value
+        .map(str::trim)
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_MAX_INTERNAL_BUFFERED_BODY_MB)
-        .saturating_mul(1024 * 1024)
-});
+        .map(|value| value.saturating_mul(1024 * 1024))
+        .unwrap_or(u64::MAX)
+}
 
 static TRUSTED_PROXY_CIDRS: LazyLock<Vec<String>> = LazyLock::new(|| {
     std::env::var(TRUSTED_PROXY_CIDRS_ENV)
@@ -836,13 +828,14 @@ mod tests {
     }
 
     #[test]
-    fn decoded_request_body_bytes_rejects_oversized_uncompressed_body() {
-        let limit = *super::MAX_REQUEST_BODY_BYTES;
+    fn explicit_limit_rejects_oversized_uncompressed_body() {
+        let limit = 4;
         let oversized = vec![b'a'; limit as usize + 1];
         let headers = HeaderMap::new();
 
-        let err = decoded_request_body_bytes(&headers, oversized.as_slice())
-            .expect_err("oversized uncompressed body should fail");
+        let err =
+            super::decoded_request_body_bytes_with_limit(&headers, oversized.as_slice(), limit)
+                .expect_err("oversized uncompressed body should fail");
 
         assert_eq!(
             err,
@@ -851,21 +844,50 @@ mod tests {
     }
 
     #[test]
-    fn check_request_content_length_rejects_oversized_declared_length() {
-        let limit = *super::MAX_REQUEST_BODY_BYTES;
+    fn explicit_limit_rejects_oversized_declared_length() {
+        let limit = 4;
         let mut headers = HeaderMap::new();
         headers.insert(
             http::header::CONTENT_LENGTH,
             HeaderValue::from_str(&(limit + 1).to_string()).expect("length header should build"),
         );
 
-        let err = super::check_request_content_length(&headers)
+        let err = super::check_request_content_length_with_limit(&headers, limit)
             .expect_err("oversized declared length should fail");
 
         assert_eq!(
             err,
             RequestBodyNormalizationError::RequestBodyTooLarge { limit_bytes: limit }
         );
+    }
+
+    #[test]
+    fn body_limits_default_to_unlimited() {
+        assert_eq!(super::body_limit_bytes(None), u64::MAX);
+        assert_eq!(super::body_limit_bytes(Some("0")), u64::MAX);
+        assert_eq!(super::body_limit_bytes(Some("invalid")), u64::MAX);
+    }
+
+    #[test]
+    fn positive_body_limit_is_converted_from_mibibytes() {
+        assert_eq!(super::body_limit_bytes(Some(" 8 ")), 8 * 1024 * 1024);
+    }
+
+    #[test]
+    fn unlimited_limit_accepts_declared_and_buffered_body() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_LENGTH,
+            HeaderValue::from_static("18446744073709551615"),
+        );
+        super::check_request_content_length_with_limit(&headers, u64::MAX)
+            .expect("unlimited mode should accept every representable content length");
+
+        let body = b"body larger than the former default is admitted by the unlimited sentinel";
+        let decoded =
+            super::decoded_request_body_bytes_with_limit(&HeaderMap::new(), body, u64::MAX)
+                .expect("unlimited mode should accept buffered bytes");
+        assert_eq!(decoded.as_ref(), body);
     }
 
     #[test]

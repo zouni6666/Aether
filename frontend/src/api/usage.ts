@@ -29,6 +29,10 @@ export interface UsageRecord {
   total_tokens: number
   cost?: number
   response_time?: number
+  response_time_ms?: number | null
+  first_byte_time_ms?: number | null
+  end_to_end_time_ms?: number | null
+  end_to_end_first_byte_time_ms?: number | null
   created_at: string
   updated_at?: string | null
   response_time_updated_at?: string | null
@@ -554,6 +558,8 @@ export const usageApi = {
       rate_multiplier?: number | null
       response_time_ms: number | null
       first_byte_time_ms: number | null
+      end_to_end_time_ms?: number | null
+      end_to_end_first_byte_time_ms?: number | null
       updated_at?: string | null
       response_time_updated_at?: string | null
       status_code?: number | null

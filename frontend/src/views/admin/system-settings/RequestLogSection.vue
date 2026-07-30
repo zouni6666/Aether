@@ -38,52 +38,12 @@
               HEADERS - 含请求头 (~2-3KB/条)
             </SelectItem>
             <SelectItem value="full">
-              FULL - 完整请求响应 (~50KB/条)
+              FULL - 完整请求响应
             </SelectItem>
           </SelectContent>
         </Select>
         <p class="mt-1 text-xs text-muted-foreground">
           敏感信息会自动脱敏
-        </p>
-      </div>
-
-      <div>
-        <Label
-          for="max-request-body-size"
-          class="block text-sm font-medium"
-        >
-          最大请求体大小 (KB)
-        </Label>
-        <Input
-          id="max-request-body-size"
-          :model-value="maxRequestBodySizeKB"
-          type="number"
-          placeholder="512"
-          class="mt-1"
-          @update:model-value="$emit('update:maxRequestBodySizeKB', Number($event))"
-        />
-        <p class="mt-1 text-xs text-muted-foreground">
-          超过此大小的请求体将被截断记录
-        </p>
-      </div>
-
-      <div>
-        <Label
-          for="max-response-body-size"
-          class="block text-sm font-medium"
-        >
-          最大响应体大小 (KB)
-        </Label>
-        <Input
-          id="max-response-body-size"
-          :model-value="maxResponseBodySizeKB"
-          type="number"
-          placeholder="512"
-          class="mt-1"
-          @update:model-value="$emit('update:maxResponseBodySizeKB', Number($event))"
-        />
-        <p class="mt-1 text-xs text-muted-foreground">
-          超过此大小的响应体将被截断记录
         </p>
       </div>
 
@@ -122,8 +82,6 @@ import { CardSection } from '@/components/layout'
 
 defineProps<{
   requestRecordLevel: string
-  maxRequestBodySizeKB: number
-  maxResponseBodySizeKB: number
   sensitiveHeadersStr: string
   loading: boolean
   hasChanges: boolean
@@ -132,8 +90,6 @@ defineProps<{
 defineEmits<{
   save: []
   'update:requestRecordLevel': [value: string]
-  'update:maxRequestBodySizeKB': [value: number]
-  'update:maxResponseBodySizeKB': [value: number]
   'update:sensitiveHeadersStr': [value: string]
 }>()
 </script>

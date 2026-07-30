@@ -782,82 +782,30 @@ async fn ai_execute_pii_redaction_restores_executed_candidate_session_after_late
 }
 
 large_stack_async_test!(
-    pii_redaction_performance_limits_do_not_forward_unredacted_body_upstream,
-    pii_redaction_performance_limits_do_not_forward_unredacted_body_upstream_impl
+    pii_redaction_forwards_text_above_previous_scan_cap_only_after_masking,
+    pii_redaction_forwards_text_above_previous_scan_cap_only_after_masking_impl
 );
 
-async fn pii_redaction_performance_limits_do_not_forward_unredacted_body_upstream_impl() {
-    let provider_hits = Arc::new(AtomicUsize::new(0));
-    let provider_hits_clone = Arc::clone(&provider_hits);
-    let provider_app = Router::new().route(
-        "/v1/chat/completions",
-        any(move |_request: Request| {
-            let provider_hits_inner = Arc::clone(&provider_hits_clone);
-            async move {
-                provider_hits_inner.fetch_add(1, Ordering::SeqCst);
-                Json(json!({
-                    "id": "unexpected",
-                    "choices": [{"message": {"role": "assistant", "content": "unexpected"}}]
-                }))
-            }
-        }),
+async fn pii_redaction_forwards_text_above_previous_scan_cap_only_after_masking_impl() {
+    let mut request = rich_pii_request();
+    request["messages"]
+        .as_array_mut()
+        .expect("messages should be an array")
+        .push(json!({
+            "role": "user",
+            "content": "x".repeat(2 * 1024 * 1024 + 1),
+        }));
+
+    let (response_json, seen) =
+        run_sync_redaction_case("pii-redaction-large-request", true, true, "known", request).await;
+
+    let provider_body_text = serde_json::to_string(&seen.body).expect("body should serialize");
+    assert!(!provider_body_text.contains("alice@example.com"));
+    assert!(provider_body_text.contains("<AETHER:EMAIL:"));
+    assert_eq!(
+        response_json["choices"][0]["message"]["content"],
+        "restored alice@example.com access_token=accessValueABCDEF1234567890abcdef secret_key=secretValueABCDEF1234567890abcdef"
     );
-    let (provider_url, provider_handle) = start_server(provider_app).await;
-    let auth_repository =
-        auth_repository_with_redaction_feature_settings("pii-redaction-limit", true);
-    let candidate_selection_repository =
-        Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
-            candidate_row("pii-redaction-limit"),
-        ]));
-    let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
-    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
-        vec![provider("pii-redaction-limit", true)],
-        vec![endpoint("pii-redaction-limit", provider_url)],
-        vec![key("pii-redaction-limit")],
-    ));
-    let data_state = crate::data::GatewayDataState::with_auth_candidate_selection_provider_catalog_and_request_candidate_repository_for_tests(
-        auth_repository,
-        candidate_selection_repository,
-        provider_catalog_repository,
-        Arc::clone(&request_candidate_repository),
-        DEVELOPMENT_ENCRYPTION_KEY,
-    )
-    .with_system_config_values_for_tests(redaction_config(true));
-    let gateway_state = AppState::new()
-        .expect("gateway state should build")
-        .with_data_state_for_tests(data_state);
-    let gateway = build_router_with_state(gateway_state);
-    let (gateway_url, gateway_handle) = start_server(gateway).await;
-    let original = format!("alice@example.com {}", "x".repeat(2 * 1024 * 1024));
-
-    let response = reqwest::Client::new()
-        .post(format!("{gateway_url}/v1/chat/completions"))
-        .header(http::header::CONTENT_TYPE, "application/json")
-        .header(
-            http::header::AUTHORIZATION,
-            "Bearer sk-client-pii-redaction-limit",
-        )
-        .header(TRACE_ID_HEADER, "trace-pii-redaction-limit")
-        .body(
-            json!({
-                "model": "gpt-5",
-                "messages": [{"role": "user", "content": original}]
-            })
-            .to_string(),
-        )
-        .send()
-        .await
-        .expect("request should complete");
-
-    let status = response.status();
-    let response_text = response.text().await.expect("body should read");
-    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{response_text}");
-    assert!(response_text.contains("scanned text limit exceeded"));
-    assert!(!response_text.contains("alice@example.com"));
-    assert_eq!(provider_hits.load(Ordering::SeqCst), 0);
-
-    gateway_handle.abort();
-    provider_handle.abort();
 }
 
 large_stack_async_test!(

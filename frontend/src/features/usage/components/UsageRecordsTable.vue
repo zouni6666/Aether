@@ -358,7 +358,7 @@
               <span>{{ formatOutputRate(getRecordDisplayOutputRate(record)) }}</span>
             </template>
             <span
-              v-else-if="record.response_time_ms != null || record.first_byte_time_ms != null"
+              v-else-if="hasRecordDisplayLatency(record)"
               class="ml-1"
             >{{ formatRecordLatencyPair(record) }} / {{ formatOutputRate(getRecordDisplayOutputRate(record)) }}</span>
             <span
@@ -611,7 +611,8 @@
             v-if="isColumnVisible('performance')"
             class="h-12 font-semibold w-[9%] text-right"
           >
-            <div class="flex flex-col items-end text-xs gap-0.5">
+            <div class="flex flex-col items-end text-[11px] leading-3">
+              <span class="whitespace-nowrap">端到端</span>
               <span class="whitespace-nowrap">首字/总耗时</span>
               <span class="text-muted-foreground font-normal">输出速度</span>
             </div>
@@ -925,7 +926,7 @@
             </div>
             <!-- 已完成状态：首字 + 总耗时 -->
             <div
-              v-else-if="record.response_time_ms != null || record.first_byte_time_ms != null"
+              v-else-if="hasRecordDisplayLatency(record)"
               class="flex flex-col items-end text-xs gap-0.5"
               :title="getRecordPerformanceTitle(record)"
             >
@@ -1445,14 +1446,23 @@ function getRecordCacheTokensTitle(record: UsageRecord): string {
 }
 
 function formatRecordLatencyPair(record: UsageRecord): string {
-  const firstByte = formatRecordDurationSeconds(record.first_byte_time_ms)
-  const total = formatRecordDurationSeconds(record.response_time_ms)
+  const firstByte = formatRecordDurationSeconds(
+    record.end_to_end_first_byte_time_ms ?? record.first_byte_time_ms,
+  )
+  const total = formatRecordDurationSeconds(record.end_to_end_time_ms ?? record.response_time_ms)
   return `${firstByte} / ${total}`
 }
 
 function formatRecordDurationSeconds(ms: number | null | undefined): string {
   if (ms == null || !Number.isFinite(ms)) return '-'
   return `${(ms / 1000).toFixed(2)}s`
+}
+
+function hasRecordDisplayLatency(record: UsageRecord): boolean {
+  return record.end_to_end_time_ms != null
+    || record.end_to_end_first_byte_time_ms != null
+    || record.response_time_ms != null
+    || record.first_byte_time_ms != null
 }
 
 function getRecordDisplayOutputRate(record: UsageRecord): number | null {
@@ -1468,8 +1478,10 @@ function getRecordDisplayOutputRate(record: UsageRecord): number | null {
 function getRecordPerformanceTitle(record: UsageRecord): string {
   const outputRate = getRecordDisplayOutputRate(record)
   return [
-    `首字: ${formatRecordDurationSeconds(record.first_byte_time_ms)}`,
-    `总耗时: ${formatRecordDurationSeconds(record.response_time_ms)}`,
+    `端到端首字: ${formatRecordDurationSeconds(record.end_to_end_first_byte_time_ms ?? record.first_byte_time_ms)}`,
+    `端到端总耗时: ${formatRecordDurationSeconds(record.end_to_end_time_ms ?? record.response_time_ms)}`,
+    `成功候选首字: ${formatRecordDurationSeconds(record.first_byte_time_ms)}`,
+    `成功候选耗时: ${formatRecordDurationSeconds(record.response_time_ms)}`,
     `生成耗时: ${formatRecordDurationSeconds(getGenerationTimeMs(record))}`,
     `输出速度: ${formatOutputRateTokensPerSecond(outputRate)}`,
   ].join('\n')

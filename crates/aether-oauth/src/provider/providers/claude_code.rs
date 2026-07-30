@@ -35,7 +35,6 @@ pub const CLAUDE_CODE_OAUTH_SCOPES: &[&str] = &[
 pub const CLAUDE_CODE_COOKIE_SCOPE: &str =
     "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 
-const MAX_CLAUDE_SESSION_KEY_BYTES: usize = 16 * 1024;
 const CLAUDE_CODE_BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
 
 #[derive(Debug, Clone)]
@@ -85,7 +84,6 @@ impl ClaudeCodeProviderOAuthAdapter {
     fn session_cookie(session_key: &str) -> Result<String, OAuthError> {
         let session_key = session_key.trim();
         if session_key.is_empty()
-            || session_key.len() > MAX_CLAUDE_SESSION_KEY_BYTES
             || session_key.contains(['\r', '\n', ';'])
             || http::HeaderValue::from_str(session_key).is_err()
         {
@@ -667,6 +665,14 @@ mod tests {
         assert_eq!(token_body["redirect_uri"], CLAUDE_CODE_REDIRECT_URI);
         assert_eq!(token_body["code"], "authorization-code");
         assert!(token_body.get("code_verifier").is_some());
+    }
+
+    #[test]
+    fn session_cookie_accepts_values_above_previous_length_cap() {
+        let session_key = "x".repeat(20 * 1024);
+        let cookie = ClaudeCodeProviderOAuthAdapter::session_cookie(&session_key)
+            .expect("long sessionKey should remain valid");
+        assert_eq!(cookie.len(), "sessionKey=".len() + session_key.len());
     }
 
     #[tokio::test]

@@ -1023,25 +1023,26 @@ const conversionBoundaryIndex = computed(() => {
   return idx
 })
 
-// 计算链路总耗时（使用成功候选的 latency_ms 字段）
-// 优先使用 latency_ms，因为它与 Usage.response_time_ms 使用相同的时间基准
-// 避免 finished_at - started_at 带来的额外延迟（数据库操作时间）
+// The trace aggregate includes every attempted candidate, including failed
+// failover attempts. Per-candidate latency remains provider-scoped.
 const totalTraceLatency = computed(() => {
   if (!rawTimeline.value || rawTimeline.value.length === 0) return 0
 
-  // 查找成功的候选，使用其 latency_ms
-  const successCandidate = rawTimeline.value.find(c => c.status === 'success')
-  if (successCandidate?.latency_ms != null) {
-    return successCandidate.latency_ms
+  const aggregateLatency = trace.value?.total_latency_ms
+  if (typeof aggregateLatency === 'number' && Number.isFinite(aggregateLatency) && aggregateLatency > 0) {
+    return aggregateLatency
   }
 
-  // 如果没有成功的候选，查找失败但有 latency_ms 的候选
-  const failedWithLatency = rawTimeline.value.find(c => c.status === 'failed' && c.latency_ms != null)
-  if (failedWithLatency?.latency_ms != null) {
-    return failedWithLatency.latency_ms
+  const attemptedLatency = rawTimeline.value.reduce((sum, candidate) => {
+    const latency = normalizeLatencyMs(candidate.latency_ms)
+    return sum + (latency ?? 0)
+  }, 0)
+  if (attemptedLatency > 0) {
+    return attemptedLatency
   }
 
-  // 回退：使用 finished_at - started_at 计算
+  // Historical transport failures may not have latency_ms. Recover the wall
+  // clock span from candidate timestamps for those records.
   let earliestStart: number | null = null
   let latestEnd: number | null = null
 

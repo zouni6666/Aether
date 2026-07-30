@@ -163,7 +163,7 @@ pub(crate) fn build_direct_execution_frame_stream(
                     let error_frame = if let Some(timeout) = first_byte_timeout {
                         encode_first_byte_timeout_frame(timeout)
                     } else {
-                        encode_error_frame(status_code, message)
+                        encode_error_frame(message)
                     };
                     match error_frame {
                         Ok(frame) => yield Ok(frame),
@@ -245,7 +245,7 @@ pub(crate) fn build_direct_execution_frame_stream(
                         error = %message,
                         "upstream body stream read error"
                     );
-                    match encode_error_frame(status_code, message) {
+                    match encode_error_frame(message) {
                         Ok(frame) => yield Ok(frame),
                         Err(encode_err) => {
                             yield Err(encode_err);
@@ -329,7 +329,7 @@ pub(crate) fn build_direct_execution_frame_stream(
                                 error = %message,
                                 "upstream body stream read error"
                             );
-                            match encode_error_frame(status_code, message) {
+                            match encode_error_frame(message) {
                                 Ok(frame) => yield Ok(frame),
                                 Err(encode_err) => {
                                     yield Err(encode_err);
@@ -411,7 +411,7 @@ pub(crate) fn build_direct_execution_frame_stream(
                                 error = %message,
                                 "upstream body stream read error"
                             );
-                            match encode_error_frame(status_code, message) {
+                            match encode_error_frame(message) {
                                 Ok(frame) => yield Ok(frame),
                                 Err(encode_err) => {
                                     yield Err(encode_err);
@@ -493,7 +493,7 @@ pub(crate) fn build_direct_execution_frame_stream(
                                 error = %message,
                                 "upstream body stream read error"
                             );
-                            match encode_error_frame(status_code, message) {
+                            match encode_error_frame(message) {
                                 Ok(frame) => yield Ok(frame),
                                 Err(encode_err) => {
                                     yield Err(encode_err);
@@ -570,7 +570,7 @@ pub(crate) fn build_direct_execution_frame_stream(
                             error = %message,
                             "upstream body stream read error"
                         );
-                        match encode_error_frame(status_code, message) {
+                        match encode_error_frame(message) {
                             Ok(frame) => yield Ok(frame),
                             Err(encode_err) => {
                                 yield Err(encode_err);
@@ -648,17 +648,17 @@ fn encode_data_frame(chunk: &Bytes) -> Result<Bytes, IoError> {
     })
 }
 
-fn encode_error_frame(status_code: u16, message: String) -> Result<Bytes, IoError> {
+fn encode_error_frame(message: String) -> Result<Bytes, IoError> {
     encode_stream_frame_ndjson(&StreamFrame {
         frame_type: StreamFrameType::Error,
         payload: StreamFramePayload::Error {
             error: ExecutionError {
-                kind: ExecutionErrorKind::Internal,
+                kind: ExecutionErrorKind::ProtocolError,
                 phase: ExecutionPhase::StreamRead,
                 message,
-                upstream_status: Some(status_code),
-                retryable: false,
-                failover_recommended: false,
+                upstream_status: None,
+                retryable: true,
+                failover_recommended: true,
             },
         },
     })
@@ -672,7 +672,7 @@ fn encode_first_byte_timeout_frame(timeout: Duration) -> Result<Bytes, IoError> 
                 kind: ExecutionErrorKind::FirstByteTimeout,
                 phase: ExecutionPhase::FirstByte,
                 message: stream_first_byte_timeout_message(timeout),
-                upstream_status: Some(504),
+                upstream_status: None,
                 retryable: true,
                 failover_recommended: true,
             },
@@ -1490,6 +1490,13 @@ mod tests {
             .is_some_and(
                 |message| message.contains("provider stream first byte timeout after 50 ms")
             ));
+        let error = error_frame
+            .get("payload")
+            .and_then(|payload| payload.get("error"))
+            .expect("timeout error should exist");
+        assert_eq!(error.get("upstream_status"), None);
+        assert_eq!(error.get("retryable"), Some(&Value::Bool(true)));
+        assert_eq!(error.get("failover_recommended"), Some(&Value::Bool(true)));
     }
 
     #[tokio::test]

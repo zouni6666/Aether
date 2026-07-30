@@ -177,15 +177,20 @@ describe('ProviderFormDialog transfer limits', () => {
     )
   })
 
-  it('defaults missing legacy values to explicit zero', async () => {
+  it('shows zero limits as unlimited placeholders while submitting explicit zero', async () => {
     mountDialog(makeProvider({
       max_transfer_count: undefined,
       max_transfer_timeout_seconds: undefined,
     }))
     await settle()
 
-    expect(document.body.querySelector<HTMLInputElement>('#max-transfer-count')?.value).toBe('0')
-    expect(document.body.querySelector<HTMLInputElement>('#max-transfer-timeout-seconds')?.value).toBe('0')
+    const countInput = document.body.querySelector<HTMLInputElement>('#max-transfer-count')
+    const timeoutInput = document.body.querySelector<HTMLInputElement>('#max-transfer-timeout-seconds')
+
+    expect(countInput?.value).toBe('')
+    expect(countInput?.placeholder).toBe('0 (不限制)')
+    expect(timeoutInput?.value).toBe('')
+    expect(timeoutInput?.placeholder).toBe('0 (不限制)')
 
     clickButton('保存')
     await settle()

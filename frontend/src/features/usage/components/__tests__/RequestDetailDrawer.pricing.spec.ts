@@ -113,6 +113,48 @@ function buildFastTierDetail(): RequestDetail {
 }
 
 describe('RequestDetailDrawer settlement pricing', () => {
+  it('shows end-to-end latency while keeping output TPS scoped to candidate timing', async () => {
+    apiMocks.getRequestDetail.mockResolvedValue({
+      ...buildEmbeddingDetail(),
+      tokens: { input: 100, output: 50, total: 150 },
+      input_tokens: 100,
+      output_tokens: 50,
+      total_tokens: 150,
+      is_stream: true,
+      upstream_is_stream: true,
+      response_time_ms: 626,
+      first_byte_time_ms: 100,
+      end_to_end_time_ms: 10_626,
+      end_to_end_first_byte_time_ms: 10_120,
+    } satisfies RequestDetail)
+
+    let isOpen!: Ref<boolean>
+    const Host = defineComponent({
+      setup() {
+        isOpen = ref(false)
+        return () => h(RequestDetailDrawer, {
+          isOpen: isOpen.value,
+          requestId: 'usage-embedding-1',
+        })
+      },
+    })
+
+    const root = document.createElement('div')
+    document.body.appendChild(root)
+    const app = createApp(Host)
+    app.mount(root)
+    mountedApps.push({ app, root })
+
+    isOpen.value = true
+    await nextTick()
+
+    await vi.waitFor(() => {
+      expect(document.body.textContent).toContain('10.12s / 10.63s')
+      expect(document.body.textContent).toContain('95.1tps')
+      expect(document.body.textContent).not.toContain('98.8tps')
+    })
+  })
+
   it('renders an input-only embedding tier without treating the missing output price as zero', async () => {
     apiMocks.getRequestDetail.mockResolvedValue(buildEmbeddingDetail())
 

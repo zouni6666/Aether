@@ -21,9 +21,8 @@ use ratatui::Frame;
 use ratatui::Terminal;
 
 use crate::config::{
-    format_byte_size_human, parse_byte_size, ConfigFile, ServerEntry, TunnelLogDestinationArg,
-    TunnelLogRotationArg, DEFAULT_HEARTBEAT_INTERVAL_SECS, DEFAULT_LOG_MAX_FILES,
-    DEFAULT_LOG_RETENTION_DAYS, DEFAULT_REDIRECT_REPLAY_BUDGET_HUMAN,
+    ConfigFile, ServerEntry, TunnelLogDestinationArg, TunnelLogRotationArg,
+    DEFAULT_HEARTBEAT_INTERVAL_SECS, DEFAULT_LOG_MAX_FILES, DEFAULT_LOG_RETENTION_DAYS,
 };
 use crate::egress_proxy::UpstreamProxyConfig;
 
@@ -215,15 +214,6 @@ impl App {
                     required: false,
                     help: "Heartbeat interval in seconds; default is 5",
                 },
-                Field {
-                    label: "Redirect Replay Budget",
-                    key: "redirect_replay_budget_bytes",
-                    value: DEFAULT_REDIRECT_REPLAY_BUDGET_HUMAN.to_string(),
-                    kind: FieldKind::Text,
-                    required: false,
-                    help:
-                        "Prebuffer budget for 307/308 replay, e.g. 5M; set 0 to disable buffering",
-                },
             ],
             selected: 0,
             mode: Mode::Normal,
@@ -297,7 +287,6 @@ impl App {
                 }),
                 "allow_private_targets" => cfg.allow_private_targets.map(|v| v.to_string()),
                 "heartbeat_interval" => cfg.heartbeat_interval.map(|v| v.to_string()),
-                "redirect_replay_budget_bytes" => cfg.redirect_replay_budget_bytes.clone(),
                 "upstream_proxy_url" => cfg.upstream_proxy_url.clone(),
                 _ => None,
             };
@@ -369,15 +358,6 @@ impl App {
         Ok(Some(value))
     }
 
-    fn parse_optional_redirect_replay_budget(&self) -> anyhow::Result<Option<String>> {
-        let Some(raw) = self.get_global("redirect_replay_budget_bytes") else {
-            return Ok(None);
-        };
-        let bytes = parse_byte_size(raw.trim())
-            .map_err(|err| anyhow::anyhow!("redirect replay budget invalid: {err}"))?;
-        Ok(Some(format_byte_size_human(bytes)))
-    }
-
     fn parse_optional_upstream_proxy_url(&self) -> anyhow::Result<Option<String>> {
         let Some(raw) = self.get_global("upstream_proxy_url") else {
             return Ok(None);
@@ -420,7 +400,6 @@ impl App {
             log_level: get_global("log_level"),
             allow_private_targets: Some(self.toggle_enabled("allow_private_targets")),
             heartbeat_interval: self.parse_optional_heartbeat_interval()?,
-            redirect_replay_budget_bytes: self.parse_optional_redirect_replay_budget()?,
             upstream_proxy_url: self.parse_optional_upstream_proxy_url()?,
             log_destination: Some(if save_logs_to_file {
                 TunnelLogDestinationArg::Both
@@ -744,12 +723,6 @@ impl App {
                     Ok(value) => (1..=3600).contains(&value),
                     Err(_) => false,
                 }
-            }
-            "redirect_replay_budget_bytes" => {
-                if trimmed.is_empty() {
-                    return true;
-                }
-                parse_byte_size(trimmed).is_ok()
             }
             "upstream_proxy_url" => {
                 if trimmed.is_empty() {
@@ -1229,13 +1202,11 @@ mod tests {
         let mut app = sample_app();
         set_global_field(&mut app, "allow_private_targets", "true");
         set_global_field(&mut app, "heartbeat_interval", "45");
-        set_global_field(&mut app, "redirect_replay_budget_bytes", "6m");
         set_global_field(&mut app, "upstream_proxy_url", "socks5h://127.0.0.1:1080");
 
         let cfg = app.to_config().expect("config should serialize");
         assert_eq!(cfg.allow_private_targets, Some(true));
         assert_eq!(cfg.heartbeat_interval, Some(45));
-        assert_eq!(cfg.redirect_replay_budget_bytes.as_deref(), Some("6M"));
         assert_eq!(
             cfg.upstream_proxy_url.as_deref(),
             Some("socks5h://127.0.0.1:1080")

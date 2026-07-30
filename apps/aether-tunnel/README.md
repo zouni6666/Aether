@@ -159,7 +159,8 @@ sudo aether-tunnel uninstall
 | `--upstream-tcp-keepalive-secs` | `AETHER_TUNNEL_UPSTREAM_TCP_KEEPALIVE_SECS` | `60` | TCP keepalive（秒，0 关闭） |
 | `--upstream-tcp-nodelay` | `AETHER_TUNNEL_UPSTREAM_TCP_NODELAY` | `true` | 启用 TCP_NODELAY |
 | `--upstream-proxy-url` | `AETHER_TUNNEL_UPSTREAM_PROXY_URL` | 空 | 仅 provider 上游请求使用的出口代理 |
-| `--redirect-replay-budget-bytes` | `AETHER_TUNNEL_REDIRECT_REPLAY_BUDGET_BYTES` | `5M` | 307/308 请求体重放的预读预算，支持 `K/M/G`，`0` 表示禁用 body replay buffering |
+
+启用 `follow_redirects` 后，307/308 请求体重放不设置累计大小上限。
 
 出口代理支持 `http://`、`socks5://`、`socks5h://`。配合 WARP sidecar 时可填写：
 

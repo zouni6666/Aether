@@ -171,6 +171,7 @@ async fn gateway_handles_local_openai_chat_sync_report_with_local_reporting_when
                     }
                 },
                 "telemetry": {
+                    "ttfb_ms": 10,
                     "elapsed_ms": 25
                 }
             }))
@@ -241,6 +242,19 @@ async fn gateway_handles_local_openai_chat_sync_report_with_local_reporting_when
     assert_eq!(stored_usage.status, "completed");
     assert_eq!(stored_usage.total_tokens, 5);
     assert_eq!(stored_usage.response_time_ms, Some(25));
+    let end_to_end_time_ms = stored_usage
+        .request_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("end_to_end_time_ms"))
+        .and_then(serde_json::Value::as_u64)
+        .expect("end-to-end latency should be persisted separately");
+    let end_to_end_first_byte_time_ms = stored_usage
+        .request_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("end_to_end_first_byte_time_ms"))
+        .and_then(serde_json::Value::as_u64)
+        .expect("end-to-end first-byte latency should be persisted separately");
+    assert!(end_to_end_first_byte_time_ms <= end_to_end_time_ms);
 
     let stored_candidates = request_candidate_repository
         .list_by_request_id("trace-openai-chat-local-report-sync-123")
@@ -422,14 +436,14 @@ async fn gateway_truncates_deep_request_echo_for_local_openai_chat_sync_usage_im
 }
 
 #[test]
-fn gateway_applies_system_max_request_body_size_to_local_openai_chat_sync_usage() {
+fn gateway_ignores_legacy_max_request_body_size_for_local_openai_chat_sync_usage() {
     run_async_test_on_large_stack(
-        "gateway_applies_system_max_request_body_size_to_local_openai_chat_sync_usage",
-        gateway_applies_system_max_request_body_size_to_local_openai_chat_sync_usage_impl(),
+        "gateway_ignores_legacy_max_request_body_size_for_local_openai_chat_sync_usage",
+        gateway_ignores_legacy_max_request_body_size_for_local_openai_chat_sync_usage_impl(),
     );
 }
 
-async fn gateway_applies_system_max_request_body_size_to_local_openai_chat_sync_usage_impl() {
+async fn gateway_ignores_legacy_max_request_body_size_for_local_openai_chat_sync_usage_impl() {
     let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
     let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
 
@@ -546,13 +560,13 @@ async fn gateway_applies_system_max_request_body_size_to_local_openai_chat_sync_
     assert_eq!(stored_usage.total_tokens, 5);
     assert_eq!(
         stored_usage.request_body_state,
-        Some(UsageBodyCaptureState::Truncated)
+        Some(UsageBodyCaptureState::Inline)
     );
     assert_eq!(
         stored_usage.provider_request_body_state,
-        Some(UsageBodyCaptureState::Truncated)
+        Some(UsageBodyCaptureState::Inline)
     );
-    assert_eq!(
+    assert_ne!(
         stored_usage
             .request_body
             .as_ref()
@@ -905,6 +919,7 @@ async fn gateway_records_failed_usage_when_sync_runtime_transport_is_unavailable
         .expect("gateway should build")
         .with_execution_runtime_sync_override_for_tests(move |_plan| {
             *execution_hits_clone.lock().expect("mutex should lock") += 1;
+            std::thread::sleep(std::time::Duration::from_millis(5));
             Err(crate::GatewayError::Internal(
                 "simulated transport unavailable".to_string(),
             ))
@@ -968,10 +983,146 @@ async fn gateway_records_failed_usage_when_sync_runtime_transport_is_unavailable
         .expect("request candidate trace should read");
     assert_eq!(stored_candidates.len(), 1);
     assert_eq!(stored_candidates[0].status, RequestCandidateStatus::Failed);
+    assert!(stored_candidates[0]
+        .latency_ms
+        .is_some_and(|value| value >= 5));
     assert_eq!(
         stored_candidates[0].error_type.as_deref(),
         Some("execution_runtime_unavailable")
     );
+}
+
+#[test]
+fn sync_transport_error_policy_stops_or_retries_candidates_end_to_end() {
+    run_async_test_on_large_stack(
+        "sync_transport_error_policy_stops_or_retries_candidates_end_to_end",
+        sync_transport_error_policy_stops_or_retries_candidates_end_to_end_impl(),
+    );
+}
+
+async fn sync_transport_error_policy_stops_or_retries_candidates_end_to_end_impl() {
+    async fn run_case(stop_on_transport_errors: bool) -> (StatusCode, usize, Vec<Option<u16>>) {
+        let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
+        let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+        let execution_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let execution_hits_for_override = Arc::clone(&execution_hits);
+
+        let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+            Some(hash_api_key("sk-client-transport-policy")),
+            sample_local_openai_auth_snapshot("api-key-transport-policy", "user-transport-policy"),
+        )]));
+        let mut second_candidate = sample_local_openai_candidate_row();
+        second_candidate.key_id = "key-openai-usage-local-2".to_string();
+        second_candidate.key_name = "secondary".to_string();
+        second_candidate.key_internal_priority = second_candidate.key_internal_priority - 1;
+        let candidate_selection_repository =
+            Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+                sample_local_openai_candidate_row(),
+                second_candidate,
+            ]));
+
+        let mut provider = sample_local_openai_provider();
+        provider.config = stop_on_transport_errors.then(|| {
+            json!({
+                "failover_rules": {
+                    "stop_on_transport_errors": true,
+                }
+            })
+        });
+        let mut second_key = sample_local_openai_key();
+        second_key.id = "key-openai-usage-local-2".to_string();
+        second_key.name = "secondary".to_string();
+        let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![provider],
+            vec![sample_local_openai_endpoint()],
+            vec![sample_local_openai_key(), second_key],
+        ));
+
+        let gateway_state = crate::AppState::new()
+            .expect("gateway should build")
+            .with_execution_runtime_sync_override_for_tests(move |plan| {
+                let hit = execution_hits_for_override
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if hit == 0 {
+                    return Err(crate::GatewayError::Internal(
+                        "simulated transport unavailable".to_string(),
+                    ));
+                }
+                Ok(aether_contracts::ExecutionResult {
+                    request_id: plan.request_id.clone(),
+                    candidate_id: plan.candidate_id.clone(),
+                    status_code: 200,
+                    headers: std::collections::BTreeMap::from([(
+                        "content-type".to_string(),
+                        "application/json".to_string(),
+                    )]),
+                    body: Some(aether_contracts::ResponseBody {
+                        json_body: Some(json!({
+                            "id": "chatcmpl-transport-policy",
+                            "choices": [{"message": {"role": "assistant", "content": "ok"}}]
+                        })),
+                        body_bytes_b64: None,
+                    }),
+                    telemetry: Some(aether_contracts::ExecutionTelemetry {
+                        ttfb_ms: Some(1),
+                        elapsed_ms: Some(1),
+                        upstream_bytes: None,
+                    }),
+                    error: None,
+                })
+            })
+            .with_data_state_for_tests(
+                GatewayDataState::with_auth_candidate_selection_provider_catalog_request_candidates_and_usage_for_tests(
+                    auth_repository,
+                    candidate_selection_repository,
+                    provider_catalog_repository,
+                    Arc::clone(&request_candidate_repository),
+                    usage_repository,
+                    DEVELOPMENT_ENCRYPTION_KEY,
+                ),
+            );
+        let gateway = build_router_with_state(gateway_state);
+        let trace_id = if stop_on_transport_errors {
+            "trace-transport-policy-stop"
+        } else {
+            "trace-transport-policy-retry"
+        };
+        let request = Request::builder()
+            .method(http::Method::POST)
+            .uri("/v1/chat/completions")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .header(
+                http::header::AUTHORIZATION,
+                "Bearer sk-client-transport-policy",
+            )
+            .header(TRACE_ID_HEADER, trace_id)
+            .body(Body::from("{\"model\":\"gpt-5\",\"messages\":[]}"))
+            .expect("request should build");
+        let response = send_request(gateway, request).await;
+        let candidates = request_candidate_repository
+            .list_by_request_id(trace_id)
+            .await
+            .expect("request candidates should read");
+        (
+            response.status(),
+            execution_hits.load(std::sync::atomic::Ordering::SeqCst),
+            candidates
+                .into_iter()
+                .filter(|candidate| candidate.status == RequestCandidateStatus::Failed)
+                .map(|candidate| candidate.status_code)
+                .collect(),
+        )
+    }
+
+    let (retry_status, retry_hits, retry_failure_statuses) = run_case(false).await;
+    assert_eq!(retry_status, StatusCode::OK);
+    assert!(retry_hits >= 2);
+    assert_eq!(retry_failure_statuses.first(), Some(&None));
+
+    let (stop_status, stop_hits, stop_failure_statuses) = run_case(true).await;
+    assert_eq!(stop_status, StatusCode::BAD_GATEWAY);
+    assert_eq!(stop_hits, 1);
+    assert_eq!(stop_failure_statuses, vec![None]);
 }
 
 #[test]
@@ -1365,14 +1516,14 @@ async fn gateway_handles_local_openai_chat_stream_report_with_local_reporting_wh
 }
 
 #[test]
-fn gateway_preserves_stream_usage_when_max_response_body_size_truncates_capture() {
+fn gateway_ignores_legacy_max_response_body_size_for_stream_usage() {
     run_async_test_on_large_stack(
-        "gateway_preserves_stream_usage_when_max_response_body_size_truncates_capture",
-        gateway_preserves_stream_usage_when_max_response_body_size_truncates_capture_impl(),
+        "gateway_ignores_legacy_max_response_body_size_for_stream_usage",
+        gateway_ignores_legacy_max_response_body_size_for_stream_usage_impl(),
     );
 }
 
-async fn gateway_preserves_stream_usage_when_max_response_body_size_truncates_capture_impl() {
+async fn gateway_ignores_legacy_max_response_body_size_for_stream_usage_impl() {
     let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
     let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
 
@@ -1524,13 +1675,13 @@ async fn gateway_preserves_stream_usage_when_max_response_body_size_truncates_ca
     assert_eq!(stored_usage.total_tokens, 6);
     assert_eq!(
         stored_usage.response_body_state,
-        Some(UsageBodyCaptureState::Truncated)
+        Some(UsageBodyCaptureState::Inline)
     );
     assert_eq!(
         stored_usage.client_response_body_state,
-        Some(UsageBodyCaptureState::Truncated)
+        Some(UsageBodyCaptureState::Inline)
     );
-    assert_eq!(
+    assert_ne!(
         stored_usage
             .response_body
             .as_ref()

@@ -846,6 +846,7 @@ export interface FailoverRuleItem {
 
 export interface FailoverRulesConfig {
   max_retries?: number
+  stop_on_transport_errors?: boolean
   stop_status_codes?: number[]
   stop_on_status_codes?: number[]
   early_stop_status_codes?: number[]

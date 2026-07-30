@@ -1076,6 +1076,14 @@ fn admin_usage_metadata_string<'a>(
         .filter(|value| !value.is_empty())
 }
 
+fn admin_usage_metadata_u64(item: &StoredRequestUsageAudit, key: &str) -> Option<u64> {
+    item.request_metadata
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get(key))
+        .and_then(Value::as_u64)
+}
+
 fn infer_client_family_from_user_agent(user_agent: &str) -> Option<&'static str> {
     let normalized = user_agent.trim().to_ascii_lowercase();
     if normalized.is_empty() {
@@ -1218,6 +1226,11 @@ fn admin_usage_active_request_json(
         "request_path_and_query": admin_usage_metadata_string(item, "request_path_and_query"),
         "has_fallback": admin_usage_has_fallback(item),
     });
+    value["end_to_end_time_ms"] = json!(admin_usage_metadata_u64(item, "end_to_end_time_ms"));
+    value["end_to_end_first_byte_time_ms"] = json!(admin_usage_metadata_u64(
+        item,
+        "end_to_end_first_byte_time_ms"
+    ));
     if let Some(api_format) = item.api_format.as_ref() {
         value["api_format"] = json!(api_format);
     }
@@ -1324,6 +1337,17 @@ pub fn admin_usage_record_json(
     let object = payload
         .as_object_mut()
         .expect("admin usage record payload should be an object");
+    object.insert(
+        "end_to_end_time_ms".to_string(),
+        json!(admin_usage_metadata_u64(item, "end_to_end_time_ms")),
+    );
+    object.insert(
+        "end_to_end_first_byte_time_ms".to_string(),
+        json!(admin_usage_metadata_u64(
+            item,
+            "end_to_end_first_byte_time_ms"
+        )),
+    );
     object.insert("is_stream".to_string(), json!(item.is_stream));
     object.insert(
         UPSTREAM_IS_STREAM_KEY.to_string(),
@@ -2641,6 +2665,36 @@ mod tests {
         assert_eq!(record["upstream_is_stream"], true);
         assert_eq!(record["client_requested_stream"], false);
         assert_eq!(record["client_is_stream"], false);
+    }
+
+    #[test]
+    fn admin_usage_payloads_project_end_to_end_timings_from_metadata() {
+        let item = StoredRequestUsageAudit {
+            response_time_ms: Some(626),
+            first_byte_time_ms: Some(120),
+            request_metadata: Some(json!({
+                "end_to_end_time_ms": 10_626,
+                "end_to_end_first_byte_time_ms": 10_120,
+            })),
+            ..sample_usage("completed", Some(200), None)
+        };
+
+        let record = admin_usage_record_json(
+            &item,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            false,
+            false,
+            None,
+        );
+        let active = admin_usage_active_request_json(&item, None, None, None);
+
+        for payload in [&record, &active] {
+            assert_eq!(payload["response_time_ms"], 626);
+            assert_eq!(payload["first_byte_time_ms"], 120);
+            assert_eq!(payload["end_to_end_time_ms"], 10_626);
+            assert_eq!(payload["end_to_end_first_byte_time_ms"], 10_120);
+        }
     }
 
     #[test]

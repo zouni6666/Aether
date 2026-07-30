@@ -1,5 +1,7 @@
 use aether_ai_serving::AiAttemptRetryScope;
-use aether_contracts::{ExecutionError, ExecutionPlan, ExecutionTelemetry};
+use aether_contracts::{
+    ExecutionError, ExecutionErrorKind, ExecutionPhase, ExecutionPlan, ExecutionTelemetry,
+};
 use aether_data_contracts::repository::candidates::RequestCandidateStatus;
 use aether_scheduler_core::SchedulerRequestCandidateStatusUpdate;
 use aether_usage_runtime::{
@@ -22,13 +24,14 @@ use crate::execution_runtime::submission::{
 use crate::log_ids::short_request_id;
 use crate::orchestration::{
     apply_local_execution_effect, classify_failure_disposition,
-    resolve_local_failover_analysis_for_attempt, with_upstream_response_report_context,
+    resolve_local_failover_analysis_for_attempt,
+    resolve_local_transport_failover_analysis_for_attempt, with_upstream_response_report_context,
     LocalAdaptiveRateLimitEffect, LocalAttemptFailureEffect, LocalExecutionEffect,
     LocalExecutionEffectContext, LocalFailoverAnalysis, LocalFailoverDecision,
     LocalHealthFailureEffect, LocalOAuthInvalidationEffect, LocalPoolErrorEffect,
 };
 use crate::request_candidate_runtime::record_report_request_candidate_status;
-use crate::request_diagnostics::attach_current_request_diagnostics_to_report_context;
+use crate::request_diagnostics::attach_current_request_diagnostics_and_candidate_timing_to_report_context;
 use crate::usage::submit_sync_report;
 use crate::{usage::GatewaySyncReportRequest, AppState, GatewayError};
 
@@ -37,6 +40,9 @@ pub(super) struct StreamFailureReport {
     pub(super) status_code: u16,
     pub(super) error_type: String,
     pub(super) error_message: String,
+    upstream_status_code: Option<u16>,
+    transport_error: bool,
+    honor_http_failover: bool,
     extra_error_fields: Map<String, Value>,
     provider_body_json: Option<Value>,
 }
@@ -68,6 +74,9 @@ impl StreamFailureReport {
             status_code,
             error_type,
             error_message,
+            upstream_status_code: _,
+            transport_error: _,
+            honor_http_failover: _,
             mut extra_error_fields,
             provider_body_json,
         } = self;
@@ -110,6 +119,26 @@ pub(super) fn build_stream_failure_report(
         status_code,
         error_type,
         error_message,
+        upstream_status_code: Some(status_code),
+        transport_error: false,
+        honor_http_failover: false,
+        extra_error_fields: Map::new(),
+        provider_body_json: None,
+    }
+}
+
+pub(super) fn build_stream_transport_failure_report(
+    error_type: impl Into<String>,
+    error_message: impl Into<String>,
+    status_code: u16,
+) -> StreamFailureReport {
+    StreamFailureReport {
+        status_code,
+        error_type: error_type.into(),
+        error_message: error_message.into(),
+        upstream_status_code: None,
+        transport_error: true,
+        honor_http_failover: false,
         extra_error_fields: Map::new(),
         provider_body_json: None,
     }
@@ -118,7 +147,18 @@ pub(super) fn build_stream_failure_report(
 pub(super) fn build_stream_failure_from_execution_error(
     error: &ExecutionError,
 ) -> StreamFailureReport {
-    let status_code = error.upstream_status.unwrap_or(502);
+    let transport_error = execution_error_is_transport(error);
+    let fallback_status_code = if matches!(
+        error.kind,
+        ExecutionErrorKind::ConnectTimeout
+            | ExecutionErrorKind::FirstByteTimeout
+            | ExecutionErrorKind::ReadTimeout
+    ) {
+        504
+    } else {
+        502
+    };
+    let status_code = error.upstream_status.unwrap_or(fallback_status_code);
     let error_type = serde_json::to_value(&error.kind)
         .ok()
         .and_then(|value| value.as_str().map(ToOwned::to_owned))
@@ -141,6 +181,9 @@ pub(super) fn build_stream_failure_from_execution_error(
         status_code,
         error_type,
         error_message,
+        upstream_status_code: error.upstream_status,
+        transport_error,
+        honor_http_failover: error.upstream_status.is_some(),
         extra_error_fields: error_object,
         provider_body_json: None,
     }
@@ -168,9 +211,38 @@ pub(super) fn build_stream_failure_from_provider_error_body(
         status_code,
         error_type,
         error_message,
+        upstream_status_code: Some(status_code),
+        transport_error: false,
+        honor_http_failover: true,
         extra_error_fields: Map::new(),
         provider_body_json: Some(body_json.clone()),
     }
+}
+
+fn execution_error_is_transport(error: &ExecutionError) -> bool {
+    if error.upstream_status.is_some() {
+        return false;
+    }
+    let explicit_transport_kind = matches!(
+        error.kind,
+        ExecutionErrorKind::ConnectTimeout
+            | ExecutionErrorKind::FirstByteTimeout
+            | ExecutionErrorKind::ReadTimeout
+            | ExecutionErrorKind::TlsError
+            | ExecutionErrorKind::ProxyError
+            | ExecutionErrorKind::ProtocolError
+    );
+    let retryable_internal_transport_phase = matches!(error.kind, ExecutionErrorKind::Internal)
+        && (error.retryable || error.failover_recommended)
+        && matches!(
+            error.phase,
+            ExecutionPhase::Connect
+                | ExecutionPhase::Handshake
+                | ExecutionPhase::Write
+                | ExecutionPhase::FirstByte
+                | ExecutionPhase::StreamRead
+        );
+    explicit_transport_kind || retryable_internal_transport_phase
 }
 
 fn first_non_empty_error_text(
@@ -205,6 +277,8 @@ fn build_stream_failure_sync_payload(
     failure: StreamFailureReport,
 ) -> GatewaySyncReportRequest {
     let status_code = failure.status_code;
+    let upstream_status_code = failure.upstream_status_code;
+    let transport_error = failure.transport_error;
     let (body, client_body) = failure.into_body_jsons();
     headers.retain(|name, _| {
         !name.eq_ignore_ascii_case("content-encoding")
@@ -212,23 +286,31 @@ fn build_stream_failure_sync_payload(
             && !name.eq_ignore_ascii_case("content-type")
     });
     headers.insert("content-type".to_string(), "application/json".to_string());
-    let report_context = with_upstream_response_report_context(
-        report_context.as_ref(),
-        status_code,
-        Some(&headers),
-        Some(&body),
-        None,
-        None,
-    )
-    .or(report_context);
+    let report_context = upstream_status_code
+        .and_then(|upstream_status_code| {
+            with_upstream_response_report_context(
+                report_context.as_ref(),
+                upstream_status_code,
+                Some(&headers),
+                Some(&body),
+                None,
+                None,
+            )
+        })
+        .or(report_context);
     let report_context = report_context.map(|mut context| {
         if let Some(object) = context.as_object_mut() {
             let response_headers = serde_json::to_value(&headers).unwrap_or(Value::Null);
-            object.insert(
-                "provider_response_headers".to_string(),
-                response_headers.clone(),
-            );
+            if upstream_status_code.is_some() {
+                object.insert(
+                    "provider_response_headers".to_string(),
+                    response_headers.clone(),
+                );
+            }
             object.insert("client_response_headers".to_string(), response_headers);
+            if transport_error {
+                object.insert("transport_error".to_string(), Value::Bool(true));
+            }
         }
         context
     });
@@ -265,6 +347,7 @@ async fn record_stream_sync_failure(
     plan: &ExecutionPlan,
     report_context: Option<&Value>,
     payload: &GatewaySyncReportRequest,
+    candidate_status_code: Option<u16>,
     started_at_unix_ms: Option<u64>,
     handling: StreamFailureHandling,
 ) -> LocalFailoverAnalysis {
@@ -361,8 +444,19 @@ async fn record_stream_sync_failure(
         LocalFailoverDecision::RetryNextCandidate
     );
     if !matches!(handling, StreamFailureHandling::HonorLocalFailover) || !retrying_next_candidate {
+        crate::execution_runtime::mark_stream_candidate_watchdog_terminal_started();
         let report_context_with_diagnostics =
-            attach_current_request_diagnostics_to_report_context(report_context);
+            attach_current_request_diagnostics_and_candidate_timing_to_report_context(
+                report_context,
+                payload
+                    .telemetry
+                    .as_ref()
+                    .and_then(|telemetry| telemetry.elapsed_ms),
+                payload
+                    .telemetry
+                    .as_ref()
+                    .and_then(|telemetry| telemetry.ttfb_ms),
+            );
         let context_seed = build_terminal_usage_context_seed(
             plan,
             report_context_with_diagnostics.as_ref().or(report_context),
@@ -383,7 +477,7 @@ async fn record_stream_sync_failure(
         report_context,
         SchedulerRequestCandidateStatusUpdate {
             status: RequestCandidateStatus::Failed,
-            status_code: Some(payload.status_code),
+            status_code: candidate_status_code,
             error_type: Some(error_type.to_string()),
             error_message: Some(error_message.to_string()),
             latency_ms: payload
@@ -439,6 +533,7 @@ pub(super) async fn handle_prefetch_provider_private_stream_error(
         plan,
         payload.report_context.as_ref(),
         &payload,
+        Some(status_code),
         None,
         StreamFailureHandling::HonorLocalFailover,
     )
@@ -505,9 +600,15 @@ pub(super) async fn handle_prefetch_stream_failure(
     headers: std::collections::BTreeMap<String, String>,
     telemetry: Option<ExecutionTelemetry>,
     buffered_body: &[u8],
+    candidate_started_unix_ms: u64,
+    candidate_elapsed_ms: u64,
     failure: StreamFailureReport,
+    retry_scope_out: Option<&mut AiAttemptRetryScope>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let payload = build_stream_failure_sync_payload(
+    let transport_error = failure.transport_error;
+    let candidate_status_code = failure.upstream_status_code;
+    let honor_http_failover = failure.honor_http_failover;
+    let mut payload = build_stream_failure_sync_payload(
         trace_id,
         report_kind.to_string(),
         report_context,
@@ -516,15 +617,180 @@ pub(super) async fn handle_prefetch_stream_failure(
         buffered_body,
         failure,
     );
-    record_stream_sync_failure(
+    if transport_error {
+        let telemetry = payload.telemetry.get_or_insert(ExecutionTelemetry {
+            ttfb_ms: None,
+            elapsed_ms: None,
+            upstream_bytes: None,
+        });
+        telemetry.elapsed_ms.get_or_insert(candidate_elapsed_ms);
+        return handle_prefetch_transport_stream_failure(
+            state,
+            trace_id,
+            decision,
+            plan,
+            request_id,
+            candidate_id,
+            payload,
+            candidate_started_unix_ms,
+            candidate_elapsed_ms,
+            retry_scope_out,
+        )
+        .await;
+    }
+    let honor_local_failover = honor_http_failover && retry_scope_out.is_some();
+    let failure_analysis = record_stream_sync_failure(
         state,
         plan,
         payload.report_context.as_ref(),
         &payload,
+        candidate_status_code,
         None,
-        StreamFailureHandling::Terminal,
+        if honor_local_failover {
+            StreamFailureHandling::HonorLocalFailover
+        } else {
+            StreamFailureHandling::Terminal
+        },
     )
     .await;
+    if honor_local_failover
+        && matches!(
+            failure_analysis.decision,
+            LocalFailoverDecision::RetryNextCandidate
+        )
+    {
+        let failure_disposition = classify_failure_disposition(
+            &plan.provider_api_format,
+            failure_analysis.classification,
+            payload.status_code,
+        );
+        if let Some(retry_scope) = retry_scope_out {
+            *retry_scope = ai_attempt_retry_scope_from_failure_disposition(failure_disposition);
+        }
+        warn!(
+            event_name = "local_stream_candidate_retry_scheduled",
+            log_type = "event",
+            trace_id = %trace_id,
+            request_id = %request_id,
+            candidate_id = ?candidate_id,
+            status_code = payload.status_code,
+            failover_classification = failure_analysis.classification.as_str(),
+            "gateway local stream decision retrying next candidate after prefetched execution error"
+        );
+        return Ok(None);
+    }
+
+    let response =
+        submit_local_core_error_or_sync_finalize(state, trace_id, decision, payload).await?;
+    Ok(Some(attach_control_metadata_headers(
+        response,
+        Some(request_id),
+        candidate_id,
+    )?))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_prefetch_transport_stream_failure(
+    state: &AppState,
+    trace_id: &str,
+    decision: &GatewayControlDecision,
+    plan: &ExecutionPlan,
+    request_id: &str,
+    candidate_id: Option<&str>,
+    payload: GatewaySyncReportRequest,
+    candidate_started_unix_ms: u64,
+    candidate_elapsed_ms: u64,
+    retry_scope_out: Option<&mut AiAttemptRetryScope>,
+) -> Result<Option<Response<Body>>, GatewayError> {
+    let error_type = stream_failure_body_field(&payload, "type").unwrap_or("internal");
+    let error_message = stream_failure_body_field(&payload, "message").unwrap_or_default();
+    if matches!(error_type, "first_byte_timeout" | "read_timeout") {
+        apply_local_execution_effect(
+            state,
+            LocalExecutionEffectContext {
+                plan,
+                report_context: payload.report_context.as_ref(),
+            },
+            LocalExecutionEffect::PoolStreamTimeout,
+        )
+        .await;
+    }
+
+    let analysis = resolve_local_transport_failover_analysis_for_attempt(
+        state,
+        plan,
+        payload.report_context.as_ref(),
+    )
+    .await;
+    let retrying_next_candidate = retry_scope_out.is_some()
+        && matches!(analysis.decision, LocalFailoverDecision::RetryNextCandidate);
+    if !retrying_next_candidate {
+        crate::execution_runtime::mark_stream_candidate_watchdog_terminal_started();
+        let report_context_with_diagnostics =
+            attach_current_request_diagnostics_and_candidate_timing_to_report_context(
+                payload.report_context.as_ref(),
+                payload
+                    .telemetry
+                    .as_ref()
+                    .and_then(|telemetry| telemetry.elapsed_ms)
+                    .or(Some(candidate_elapsed_ms)),
+                payload
+                    .telemetry
+                    .as_ref()
+                    .and_then(|telemetry| telemetry.ttfb_ms),
+            );
+        let context_seed = build_terminal_usage_context_seed(
+            plan,
+            report_context_with_diagnostics
+                .as_ref()
+                .or(payload.report_context.as_ref()),
+        );
+        let payload_seed = build_sync_terminal_usage_payload_seed(&payload);
+        state
+            .usage_runtime
+            .record_sync_terminal(
+                state.usage_lifecycle_data_state().as_ref(),
+                context_seed,
+                payload_seed,
+            )
+            .await;
+    }
+
+    let terminal_unix_ms = current_request_candidate_unix_ms();
+    record_report_request_candidate_status(
+        state,
+        payload.report_context.as_ref(),
+        SchedulerRequestCandidateStatusUpdate {
+            status: RequestCandidateStatus::Failed,
+            status_code: None,
+            error_type: Some(error_type.to_string()),
+            error_message: Some(error_message.to_string()),
+            latency_ms: payload
+                .telemetry
+                .as_ref()
+                .and_then(|telemetry| telemetry.elapsed_ms)
+                .or(Some(candidate_elapsed_ms)),
+            started_at_unix_ms: Some(candidate_started_unix_ms),
+            finished_at_unix_ms: Some(terminal_unix_ms),
+        },
+    )
+    .await;
+
+    if retrying_next_candidate {
+        if let Some(retry_scope) = retry_scope_out {
+            *retry_scope = AiAttemptRetryScope::Candidate;
+        }
+        warn!(
+            event_name = "local_stream_transport_retry_scheduled",
+            log_type = "event",
+            trace_id = %trace_id,
+            request_id = %request_id,
+            candidate_id = ?candidate_id,
+            transport_classification = analysis.classification.as_str(),
+            "gateway retrying next candidate after precommit transport failure"
+        );
+        return Ok(None);
+    }
 
     let response =
         submit_local_core_error_or_sync_finalize(state, trace_id, decision, payload).await?;
@@ -553,6 +819,7 @@ pub(super) async fn submit_midstream_stream_failure(
         return;
     };
 
+    let candidate_status_code = failure.upstream_status_code;
     let payload = build_stream_failure_sync_payload(
         trace_id,
         report_kind,
@@ -567,6 +834,7 @@ pub(super) async fn submit_midstream_stream_failure(
         plan,
         payload.report_context.as_ref(),
         &payload,
+        candidate_status_code,
         Some(started_at_unix_ms),
         StreamFailureHandling::Terminal,
     )
@@ -590,10 +858,60 @@ pub(super) async fn submit_midstream_stream_failure(
 mod tests {
     use std::collections::BTreeMap;
 
+    use aether_contracts::{ExecutionError, ExecutionErrorKind, ExecutionPhase};
     use base64::Engine as _;
     use serde_json::json;
 
-    use super::{build_stream_failure_from_provider_error_body, build_stream_failure_sync_payload};
+    use super::{
+        build_stream_failure_from_execution_error, build_stream_failure_from_provider_error_body,
+        build_stream_failure_sync_payload, build_stream_transport_failure_report,
+    };
+
+    #[test]
+    fn committed_transport_failure_has_no_upstream_status() {
+        for status_code in [502, 504] {
+            let failure = build_stream_transport_failure_report(
+                "execution_runtime_stream_read_error",
+                "upstream disconnected",
+                status_code,
+            );
+
+            assert_eq!(failure.status_code, status_code);
+            assert_eq!(failure.upstream_status_code, None);
+            assert!(failure.transport_error);
+            assert!(!failure.honor_http_failover);
+        }
+    }
+
+    #[test]
+    fn precommit_protocol_error_is_transport_without_upstream_status() {
+        let failure = build_stream_failure_from_execution_error(&ExecutionError {
+            kind: ExecutionErrorKind::ProtocolError,
+            phase: ExecutionPhase::StreamRead,
+            message: "connection reset".to_string(),
+            upstream_status: None,
+            retryable: true,
+            failover_recommended: true,
+        });
+
+        assert!(failure.transport_error);
+        assert_eq!(failure.upstream_status_code, None);
+        assert_eq!(failure.status_code, 502);
+    }
+
+    #[test]
+    fn cancelled_stream_is_not_reclassified_as_transport_retry() {
+        let failure = build_stream_failure_from_execution_error(&ExecutionError {
+            kind: ExecutionErrorKind::Cancelled,
+            phase: ExecutionPhase::StreamRead,
+            message: "downstream cancelled".to_string(),
+            upstream_status: None,
+            retryable: true,
+            failover_recommended: true,
+        });
+
+        assert!(!failure.transport_error);
+    }
 
     #[test]
     fn midstream_failure_trace_uses_terminal_error_instead_of_buffered_sse() {

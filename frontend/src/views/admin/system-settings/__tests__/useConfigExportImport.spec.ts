@@ -34,7 +34,7 @@ function makeSizedFile(content: string, size: number): File {
   return file
 }
 
-describe('useConfigExportImport file size limits', () => {
+describe('useConfigExportImport file selection', () => {
   beforeEach(() => {
     errorMock.mockReset()
     successMock.mockReset()
@@ -65,12 +65,52 @@ describe('useConfigExportImport file size limits', () => {
     expect(state.importDialogOpen.value).toBe(true)
   })
 
-  it('shows the updated config import limit when the file is too large', () => {
+  it('accepts config import files larger than the previous 500MB limit', async () => {
     const state = useConfigExportImport(ref({ site_name: 'Aether' }))
-    const file = makeSizedFile('{}', 501 * 1024 * 1024)
+    const file = makeSizedFile(
+      JSON.stringify({
+        version: '1',
+        global_models: [],
+      }),
+      501 * 1024 * 1024
+    )
 
     state.handleConfigFileSelect(buildFileInputEvent(file))
+    await vi.waitFor(() => expect(state.importDialogOpen.value).toBe(true))
 
-    expect(errorMock).toHaveBeenCalledWith('文件大小不能超过 500MB')
+    expect(errorMock).not.toHaveBeenCalled()
+    expect(state.importPreview.value).toEqual({
+      version: '1',
+      global_models: [],
+    })
+  })
+
+  it('accepts user and aggregate imports larger than the previous 500MB limit', async () => {
+    const usersState = useConfigExportImport(ref({ site_name: 'Aether' }))
+    const usersFile = makeSizedFile(
+      JSON.stringify({
+        version: '1.0',
+        users: [],
+      }),
+      501 * 1024 * 1024
+    )
+
+    usersState.handleUsersFileSelect(buildFileInputEvent(usersFile))
+    await vi.waitFor(() => expect(usersState.importUsersDialogOpen.value).toBe(true))
+
+    const aggregateState = useConfigExportImport(ref({ site_name: 'Aether' }))
+    const aggregateFile = makeSizedFile(
+      JSON.stringify({
+        version: '1.0',
+        config_data: { version: '1.0', global_models: [] },
+        user_data: { version: '1.0', users: [] },
+      }),
+      501 * 1024 * 1024
+    )
+
+    aggregateState.handleAggregateFileSelect(buildFileInputEvent(aggregateFile))
+    await vi.waitFor(() => expect(aggregateState.aggregateImportDialogOpen.value).toBe(true))
+
+    expect(errorMock).not.toHaveBeenCalled()
   })
 })

@@ -43,7 +43,6 @@ const GROK_MEDIA_POST_PATH: &str = "/rest/media/post/create";
 const GROK_IMAGINE_WS_URL: &str = "wss://grok.com/ws/imagine/listen";
 const GROK_STANDARD_PROVIDER_API_FORMAT: &str = "openai:responses";
 const GROK_PROMPT_OVERHEAD_TOKENS: u64 = 4;
-const GROK_MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 const GROK_MAX_ATTACHMENT_REDIRECTS: usize = 5;
 const GROK_IMAGINE_STREAM_TIMEOUT_MS: u64 = 10_000;
 const GROK_IMAGINE_ROUND_TIMEOUT_MS: u64 = 120_000;
@@ -642,7 +641,7 @@ fn grok_success_frame_stream(
             let chunk = match item {
                 Ok(chunk) => chunk,
                 Err(message) => {
-                    match encode_grok_error_frame(status_code, message) {
+                    match encode_grok_error_frame(message) {
                         Ok(frame) => yield Ok(frame),
                         Err(err) => {
                             yield Err(err);
@@ -872,17 +871,17 @@ fn encode_grok_telemetry_frame(
     })
 }
 
-fn encode_grok_error_frame(status_code: u16, message: String) -> Result<Bytes, IoError> {
+fn encode_grok_error_frame(message: String) -> Result<Bytes, IoError> {
     encode_stream_frame_ndjson(&StreamFrame {
         frame_type: StreamFrameType::Error,
         payload: StreamFramePayload::Error {
             error: aether_contracts::ExecutionError {
-                kind: aether_contracts::ExecutionErrorKind::Internal,
+                kind: aether_contracts::ExecutionErrorKind::ProtocolError,
                 phase: aether_contracts::ExecutionPhase::StreamRead,
                 message,
-                upstream_status: Some(status_code),
-                retryable: false,
-                failover_recommended: false,
+                upstream_status: None,
+                retryable: true,
+                failover_recommended: true,
             },
         },
     })
@@ -896,7 +895,7 @@ fn encode_grok_first_byte_timeout_frame(timeout: Duration) -> Result<Bytes, IoEr
                 kind: aether_contracts::ExecutionErrorKind::FirstByteTimeout,
                 phase: aether_contracts::ExecutionPhase::FirstByte,
                 message: stream_first_byte_timeout_message(timeout),
-                upstream_status: Some(504),
+                upstream_status: None,
                 retryable: true,
                 failover_recommended: true,
             },
@@ -1422,20 +1421,15 @@ fn grok_attachment_payload_from_data_uri(
         })
         .unwrap_or_else(|| "application/octet-stream".to_string());
     let normalized_b64 = content_b64.split_whitespace().collect::<String>();
-    let decoded_len = base64::engine::general_purpose::STANDARD
-        .decode(&normalized_b64)
-        .map_err(|err| {
-            ExecutionRuntimeTransportError::UpstreamRequest(format!(
-                "Grok attachment data URI base64 is invalid: {err}"
-            ))
-        })?
-        .len();
-    if decoded_len > GROK_MAX_ATTACHMENT_BYTES {
-        return Err(ExecutionRuntimeTransportError::UpstreamRequest(format!(
-            "Grok attachment exceeds {} byte limit",
-            GROK_MAX_ATTACHMENT_BYTES
-        )));
-    }
+    drop(
+        base64::engine::general_purpose::STANDARD
+            .decode(&normalized_b64)
+            .map_err(|err| {
+                ExecutionRuntimeTransportError::UpstreamRequest(format!(
+                    "Grok attachment data URI base64 is invalid: {err}"
+                ))
+            })?,
+    );
     Ok(GrokAttachmentPayload {
         filename: input
             .filename
@@ -1635,12 +1629,6 @@ async fn collect_grok_attachment_url_bytes(
         let chunk = chunk.map_err(|err| {
             ExecutionRuntimeTransportError::UpstreamRequest(format_upstream_request_error(&err))
         })?;
-        if bytes.len().saturating_add(chunk.len()) > GROK_MAX_ATTACHMENT_BYTES {
-            return Err(ExecutionRuntimeTransportError::UpstreamRequest(format!(
-                "Grok attachment exceeds {} byte limit",
-                GROK_MAX_ATTACHMENT_BYTES
-            )));
-        }
         bytes.extend_from_slice(&chunk);
     }
     Ok(bytes)
@@ -3073,12 +3061,6 @@ async fn grok_download_image_asset(
     if bytes.is_empty() {
         return Ok(None);
     }
-    if bytes.len() > GROK_MAX_ATTACHMENT_BYTES {
-        return Err(ExecutionRuntimeTransportError::UpstreamRequest(format!(
-            "Grok image asset exceeds {} byte limit",
-            GROK_MAX_ATTACHMENT_BYTES
-        )));
-    }
     Ok(Some(format!(
         "data:{content_type};base64,{}",
         base64::engine::general_purpose::STANDARD.encode(bytes)
@@ -3236,7 +3218,10 @@ fn push_sse_event(body: &mut String, event: &str, data: &Value) {
 mod tests {
     use std::collections::BTreeMap;
 
-    use aether_contracts::{ExecutionPlan, RequestBody, StreamFrame, StreamFramePayload};
+    use aether_contracts::{
+        ExecutionErrorKind, ExecutionPhase, ExecutionPlan, RequestBody, StreamFrame,
+        StreamFramePayload,
+    };
     use axum::body::{Body, Bytes};
     use axum::extract::Request;
     use axum::routing::any;
@@ -3246,16 +3231,18 @@ mod tests {
     use http::{Method, StatusCode};
 
     use super::{
+        encode_grok_error_frame, encode_grok_first_byte_timeout_frame,
         extract_grok_attachment_inputs, grok_aspect_ratio_from_provider_body, grok_asset_url,
-        grok_attachment_ip_is_public, grok_client_json_body, grok_client_stream_body,
-        grok_handle_imagine_ws_message, grok_image_count_from_provider_body,
-        grok_image_prompt_from_provider_body, grok_imagine_request_message,
-        grok_imagine_reset_message, grok_media_post_url,
+        grok_attachment_ip_is_public, grok_attachment_payload_from_data_uri, grok_client_json_body,
+        grok_client_stream_body, grok_handle_imagine_ws_message,
+        grok_image_count_from_provider_body, grok_image_prompt_from_provider_body,
+        grok_imagine_request_message, grok_imagine_reset_message, grok_media_post_url,
         grok_plan_uses_structured_image_generation, grok_should_collect_image_stream,
         grok_should_use_imagine_websocket, grok_success_frame_stream, grok_upload_url,
         grok_upstream_model_name, grok_usage_estimate, grok_user_id_from_cookie_header,
         materialize_grok_image_assets, openai_chat_body, openai_image_body, openai_responses_body,
-        set_grok_image_edit_config, GrokCollected, GrokImagineImage, GrokStreamAdapter,
+        set_grok_image_edit_config, GrokAttachmentInput, GrokCollected, GrokImagineImage,
+        GrokStreamAdapter,
     };
 
     fn sample_plan(body: serde_json::Value, client_api_format: &str) -> ExecutionPlan {
@@ -3324,6 +3311,45 @@ mod tests {
             }
         }
         out
+    }
+
+    fn decode_encoded_frame(encoded: Bytes) -> StreamFrame {
+        let line = String::from_utf8(encoded.to_vec()).expect("frame should be utf8");
+        serde_json::from_str(line.trim()).expect("frame should deserialize")
+    }
+
+    #[test]
+    fn grok_stream_read_error_is_retryable_transport_without_upstream_status() {
+        let frame = decode_encoded_frame(
+            encode_grok_error_frame("connection reset while reading response body".to_string())
+                .expect("error frame should encode"),
+        );
+        let StreamFramePayload::Error { error } = frame.payload else {
+            panic!("encoded frame should contain an execution error");
+        };
+
+        assert_eq!(error.kind, ExecutionErrorKind::ProtocolError);
+        assert_eq!(error.phase, ExecutionPhase::StreamRead);
+        assert_eq!(error.upstream_status, None);
+        assert!(error.retryable);
+        assert!(error.failover_recommended);
+    }
+
+    #[test]
+    fn grok_first_byte_timeout_is_retryable_transport_without_upstream_status() {
+        let frame = decode_encoded_frame(
+            encode_grok_first_byte_timeout_frame(std::time::Duration::from_millis(250))
+                .expect("timeout frame should encode"),
+        );
+        let StreamFramePayload::Error { error } = frame.payload else {
+            panic!("encoded frame should contain an execution error");
+        };
+
+        assert_eq!(error.kind, ExecutionErrorKind::FirstByteTimeout);
+        assert_eq!(error.phase, ExecutionPhase::FirstByte);
+        assert_eq!(error.upstream_status, None);
+        assert!(error.retryable);
+        assert!(error.failover_recommended);
     }
 
     #[tokio::test]
@@ -4060,6 +4086,26 @@ mod tests {
         assert_eq!(inputs[0].source.as_str(), "data:image/png;base64,aGVsbG8=");
         assert_eq!(inputs[1].filename.as_deref(), Some("notes.txt"));
         assert_eq!(inputs[1].source.as_str(), "data:text/plain;base64,bm90ZXM=");
+    }
+
+    #[test]
+    fn grok_data_uri_attachment_accepts_content_above_previous_size_cap() {
+        const PREVIOUS_CAP_BYTES: usize = 25 * 1024 * 1024;
+        let base64_blocks = PREVIOUS_CAP_BYTES / 3 + 1;
+        let mut source = String::from("data:application/octet-stream;base64,");
+        source.extend(std::iter::repeat_n('A', base64_blocks * 4));
+        let input = GrokAttachmentInput {
+            source,
+            filename: Some("large.bin".to_string()),
+            mime_type: None,
+        };
+
+        let payload = grok_attachment_payload_from_data_uri(&input, 0)
+            .expect("attachment above the previous size cap should be accepted");
+
+        assert_eq!(payload.filename, "large.bin");
+        assert_eq!(payload.mime_type, "application/octet-stream");
+        assert_eq!(payload.content_b64.len(), base64_blocks * 4);
     }
 
     #[test]

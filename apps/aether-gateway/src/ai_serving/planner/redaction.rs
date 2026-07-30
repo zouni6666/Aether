@@ -216,12 +216,7 @@ async fn resolve_chat_pii_redaction_feature_settings(
 }
 
 fn redaction_mask_error_to_gateway_error(error: RedactionMaskError) -> GatewayError {
-    match error {
-        RedactionMaskError::Limit(limit) => GatewayError::Client {
-            status: limit.client_status(),
-            message: limit.safe_message().to_string(),
-        },
-    }
+    match error {}
 }
 
 #[cfg(test)]

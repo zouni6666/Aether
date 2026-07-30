@@ -55,6 +55,31 @@ impl LocalFailoverClassification {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LocalTransportFailoverClassification {
+    StopTransportError,
+    RetryTransportError,
+}
+
+impl LocalTransportFailoverClassification {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::StopTransportError => "stop_transport_error",
+            Self::RetryTransportError => "retry_transport_error",
+        }
+    }
+}
+
+pub(crate) const fn classify_local_transport_error(
+    policy: &LocalFailoverPolicy,
+) -> LocalTransportFailoverClassification {
+    if policy.stop_on_transport_errors {
+        LocalTransportFailoverClassification::StopTransportError
+    } else {
+        LocalTransportFailoverClassification::RetryTransportError
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FailureRetryAction {
     Stop,
     SameCredential,
@@ -486,8 +511,9 @@ mod tests {
 
     use super::{
         classify_anthropic_failure_disposition, classify_local_failover,
-        failure_disposition_from_local_classification, FailureDisposition, FailureRetryAction,
-        FailureScope, FailureTokenAction, LocalFailoverClassification, LocalFailoverInput,
+        classify_local_transport_error, failure_disposition_from_local_classification,
+        FailureDisposition, FailureRetryAction, FailureScope, FailureTokenAction,
+        LocalFailoverClassification, LocalFailoverInput, LocalTransportFailoverClassification,
     };
     use crate::orchestration::{LocalFailoverPolicy, LocalFailoverRegexRule};
 
@@ -501,6 +527,27 @@ mod tests {
         assert_eq!(
             classify_local_failover(&policy, LocalFailoverInput::new(503, None)),
             LocalFailoverClassification::StopStatusCode
+        );
+    }
+
+    #[test]
+    fn classifier_retries_transport_errors_by_default_and_honors_explicit_stop() {
+        assert_eq!(
+            classify_local_transport_error(&LocalFailoverPolicy::default()),
+            LocalTransportFailoverClassification::RetryTransportError
+        );
+
+        let stop_policy = LocalFailoverPolicy {
+            stop_on_transport_errors: true,
+            ..LocalFailoverPolicy::default()
+        };
+        assert_eq!(
+            classify_local_transport_error(&stop_policy),
+            LocalTransportFailoverClassification::StopTransportError
+        );
+        assert_eq!(
+            classify_local_transport_error(&stop_policy).as_str(),
+            "stop_transport_error"
         );
     }
 

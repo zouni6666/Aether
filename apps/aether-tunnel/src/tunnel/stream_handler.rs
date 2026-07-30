@@ -190,7 +190,6 @@ struct RequestTimeouts {
 
 #[derive(Debug)]
 struct RequestBodyReplayState {
-    budget_bytes: usize,
     state: Mutex<RequestBodyReplayStatus>,
     ready: Notify,
 }
@@ -203,7 +202,6 @@ enum RequestBodyReplayStatus {
     },
     Ready(Bytes),
     Empty,
-    NonReplayable,
     Error(String),
 }
 
@@ -211,7 +209,6 @@ enum RequestBodyReplayStatus {
 enum ReplayBodyResolution {
     Empty,
     Replayable(Bytes),
-    NonReplayable,
 }
 
 #[derive(Debug)]
@@ -400,7 +397,6 @@ async fn prepare_redirect_request_body(
                 match state.wait_for_resolution(deadline).await? {
                     ReplayBodyResolution::Empty => Ok(Some(empty_request_body())),
                     ReplayBodyResolution::Replayable(body) => Ok(Some(buffered_request_body(body))),
-                    ReplayBodyResolution::NonReplayable => Ok(None),
                 }
             }
             ReplayableRequestBody::NonReplayable => Ok(None),
@@ -409,9 +405,8 @@ async fn prepare_redirect_request_body(
 }
 
 impl RequestBodyReplayState {
-    fn new(budget_bytes: usize) -> Self {
+    fn new() -> Self {
         Self {
-            budget_bytes,
             state: Mutex::new(RequestBodyReplayStatus::Collecting {
                 chunks: Vec::new(),
                 buffered_len: 0,
@@ -421,27 +416,14 @@ impl RequestBodyReplayState {
     }
 
     fn push_chunk(&self, payload: Bytes) {
-        let mut notify = false;
+        let mut state = self.state.lock().expect("request body replay state lock");
+        if let RequestBodyReplayStatus::Collecting {
+            chunks,
+            buffered_len,
+        } = &mut *state
         {
-            let mut state = self.state.lock().expect("request body replay state lock");
-            if let RequestBodyReplayStatus::Collecting {
-                chunks,
-                buffered_len,
-            } = &mut *state
-            {
-                let next_len = buffered_len.saturating_add(payload.len());
-                if next_len > self.budget_bytes {
-                    chunks.clear();
-                    *state = RequestBodyReplayStatus::NonReplayable;
-                    notify = true;
-                } else {
-                    *buffered_len = next_len;
-                    chunks.push(payload);
-                }
-            }
-        }
-        if notify {
-            self.ready.notify_waiters();
+            *buffered_len = buffered_len.saturating_add(payload.len());
+            chunks.push(payload);
         }
     }
 
@@ -492,9 +474,6 @@ impl RequestBodyReplayState {
                         Some(Ok(ReplayBodyResolution::Replayable(body.clone())))
                     }
                     RequestBodyReplayStatus::Empty => Some(Ok(ReplayBodyResolution::Empty)),
-                    RequestBodyReplayStatus::NonReplayable => {
-                        Some(Ok(ReplayBodyResolution::NonReplayable))
-                    }
                     RequestBodyReplayStatus::Error(message) => Some(Err(message.clone())),
                 }
             };
@@ -575,22 +554,18 @@ fn buffered_request_body(body: Bytes) -> upstream_client::UpstreamRequestBody {
 }
 
 // Drain tunnel body frames on a detached task so the shared dispatcher is no
-// longer coupled to upstream body polling. Redirect replay still reuses a full
-// in-memory copy when the request body completes within budget.
+// longer coupled to upstream body polling. When requested, redirect replay
+// retains a complete in-memory copy without a cumulative payload limit.
 fn prepare_request_body(
     stream_id: u32,
     body_rx: mpsc::Receiver<TunnelFrame>,
     body_size: Arc<AtomicUsize>,
     deadline: Instant,
-    replay_budget_bytes: usize,
+    capture_for_redirects: bool,
     frame_tx: FrameSender,
 ) -> PreparedRequestBody {
     let (spool_tx, spool_rx) = mpsc::channel(REQUEST_BODY_SPOOL_QUEUE_CAPACITY);
-    let replay_state = if replay_budget_bytes == 0 {
-        None
-    } else {
-        Some(Arc::new(RequestBodyReplayState::new(replay_budget_bytes)))
-    };
+    let replay_state = capture_for_redirects.then(|| Arc::new(RequestBodyReplayState::new()));
     let replay_body = match replay_state.as_ref() {
         Some(state) => ReplayableRequestBody::Pending(Arc::clone(state)),
         None => ReplayableRequestBody::NonReplayable,
@@ -632,7 +607,6 @@ async fn collect_request_body_for_replay(
     mut body_rx: mpsc::Receiver<TunnelFrame>,
     body_size: Arc<AtomicUsize>,
     deadline: Instant,
-    replay_budget_bytes: usize,
     frame_tx: &FrameSender,
 ) -> Result<Bytes, String> {
     let mut body = BytesMut::new();
@@ -650,13 +624,6 @@ async fn collect_request_body_for_replay(
                     .map_err(|error| format!("gzip decompress failed: {error}"))?;
 
                 if !payload.is_empty() {
-                    if body.len().saturating_add(payload.len()) > replay_budget_bytes {
-                        return Err(format!(
-                            "request body exceeds redirect replay budget: {} > {}",
-                            body.len().saturating_add(payload.len()),
-                            replay_budget_bytes
-                        ));
-                    }
                     body_size.fetch_add(payload.len(), Ordering::Relaxed);
                     try_send_window_update(frame_tx, stream_id, payload.len());
                     body.extend_from_slice(&payload);
@@ -675,10 +642,8 @@ async fn collect_request_body_for_replay(
     }
 }
 
-fn replay_body_from_buffered(body: Bytes, replay_budget_bytes: usize) -> ReplayableRequestBody {
-    let state = Arc::new(RequestBodyReplayState::new(
-        replay_budget_bytes.max(body.len()).max(1),
-    ));
+fn replay_body_from_buffered(body: Bytes) -> ReplayableRequestBody {
+    let state = Arc::new(RequestBodyReplayState::new());
     if !body.is_empty() {
         state.push_chunk(body);
     }
@@ -1484,8 +1449,7 @@ async fn handle_stream_inner(
     let first_byte_timeout = request_timeouts.first_byte_timeout;
     let request_body_size = Arc::new(AtomicUsize::new(0));
     let request_has_body = request_likely_has_body(&current_method, &meta.headers);
-    let replay_budget_bytes = state.config.redirect_replay_budget_bytes;
-    let can_buffer_redirect_body = request_has_body && follow_redirects && replay_budget_bytes > 0;
+    let can_buffer_redirect_body = request_has_body && follow_redirects;
     let request_body_mode = if can_buffer_redirect_body {
         "buffered_fixed"
     } else if request_has_body {
@@ -1499,7 +1463,6 @@ async fn handle_stream_inner(
             body_rx,
             Arc::clone(&request_body_size),
             first_byte_deadline,
-            replay_budget_bytes,
             frame_tx,
         )
         .await
@@ -1524,7 +1487,7 @@ async fn handle_stream_inner(
         };
         PreparedRequestBody {
             first_request_body: Some(buffered_request_body(buffered_body.clone())),
-            replay_body: replay_body_from_buffered(buffered_body, replay_budget_bytes),
+            replay_body: replay_body_from_buffered(buffered_body),
         }
     } else if request_has_body {
         prepare_request_body(
@@ -1532,7 +1495,7 @@ async fn handle_stream_inner(
             body_rx,
             Arc::clone(&request_body_size),
             first_byte_deadline,
-            0,
+            false,
             frame_tx.clone(),
         )
     } else {
@@ -1878,7 +1841,7 @@ mod tests {
     use crate::tunnel::client::build_tls_config;
 
     fn completed_replay_body(body: Bytes) -> ReplayableRequestBody {
-        let state = Arc::new(RequestBodyReplayState::new(body.len().max(1)));
+        let state = Arc::new(RequestBodyReplayState::new());
         if !body.is_empty() {
             state.push_chunk(body);
         }
@@ -1983,7 +1946,7 @@ mod tests {
             rx,
             Arc::clone(&body_size),
             Instant::now() + Duration::from_secs(1),
-            1024,
+            true,
             frame_tx.clone(),
         );
         let mut body = prepared
@@ -2608,7 +2571,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preserves_redirect_response_when_replay_budget_is_zero() {
+    async fn follows_307_redirect_for_fragmented_body_larger_than_legacy_replay_budget() {
+        const BODY_LEN: usize = 5 * 1024 * 1024 + 1;
+        const REQUEST_FRAME_BYTES: usize = 32 * 1024;
+
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener");
@@ -2617,7 +2583,8 @@ mod tests {
             .route(
                 "/start",
                 post(|body: Bytes| async move {
-                    assert_eq!(body, Bytes::from_static(b"hello"));
+                    assert_eq!(body.len(), BODY_LEN);
+                    assert!(body.iter().all(|byte| *byte == b'x'));
                     Response::builder()
                         .status(StatusCode::TEMPORARY_REDIRECT)
                         .header(header::LOCATION, "/final")
@@ -2627,35 +2594,51 @@ mod tests {
             )
             .route(
                 "/final",
-                post(|| async {
+                post(|body: Bytes| async move {
+                    assert_eq!(body.len(), BODY_LEN);
+                    assert!(body.iter().all(|byte| *byte == b'x'));
                     Response::builder()
                         .status(StatusCode::OK)
-                        .body(Body::from("unexpected"))
+                        .body(Body::from("redirected"))
                         .expect("final response")
                 }),
-            );
+            )
+            .layer(axum::extract::DefaultBodyLimit::disable());
         let server = tokio::spawn(async move {
             axum::serve(listener, app)
                 .await
                 .expect("test server should run");
         });
 
-        let host = "redirect-budget-zero.test";
-        let state = sample_state_for_budget(addr.port(), 0);
+        let host = "redirect-unlimited.test";
+        let mut config = sample_config();
+        config.allowed_ports.push(addr.port());
+        config.legacy_redirect_replay_budget_bytes_ignored = Some("1".to_string());
+        let state = sample_state_with_config(config);
         cache_test_host(&state, host, addr).await;
         let server_ctx = sample_server(&state);
         let (frame_tx, sent, writer_handle) = spawn_test_writer();
         let (body_tx, body_rx) = mpsc::channel(4);
-        body_tx
-            .send(TunnelFrame::new(
-                1,
-                MsgType::RequestBody,
-                flags::END_STREAM,
-                Bytes::from_static(b"hello"),
-            ))
-            .await
-            .expect("send body");
-        drop(body_tx);
+        let body_sender = tokio::spawn(async move {
+            let body = vec![b'x'; BODY_LEN];
+            let chunk_count = body.len().div_ceil(REQUEST_FRAME_BYTES);
+            for (index, chunk) in body.chunks(REQUEST_FRAME_BYTES).enumerate() {
+                let frame_flags = if index + 1 == chunk_count {
+                    flags::END_STREAM
+                } else {
+                    0
+                };
+                body_tx
+                    .send(TunnelFrame::new(
+                        1,
+                        MsgType::RequestBody,
+                        frame_flags,
+                        Bytes::copy_from_slice(chunk),
+                    ))
+                    .await
+                    .expect("send request body chunk");
+            }
+        });
 
         let mut meta = sample_request_meta();
         meta.method = "POST".to_string();
@@ -2672,6 +2655,7 @@ mod tests {
             test_response_window(),
         )
         .await;
+        body_sender.await.expect("request body sender task");
         let result = collect_stream_result(frame_tx, sent, writer_handle).await;
         server.abort();
 
@@ -2681,15 +2665,8 @@ mod tests {
             result.error
         );
         let response = result.response.expect("response metadata");
-        assert_eq!(response.status, 307);
-        assert_eq!(
-            response
-                .headers
-                .iter()
-                .find(|(name, _)| name.eq_ignore_ascii_case("location"))
-                .map(|(_, value)| value.as_str()),
-            Some("/final")
-        );
+        assert_eq!(response.status, 200);
+        assert_eq!(result.body, Bytes::from_static(b"redirected"));
     }
 
     #[tokio::test]
@@ -2825,14 +2802,6 @@ mod tests {
         sample_state_with_config(config)
     }
 
-    fn sample_state_for_budget(port: u16, redirect_replay_budget_bytes: usize) -> Arc<AppState> {
-        ensure_rustls_provider();
-        let mut config = sample_config();
-        config.allowed_ports.push(port);
-        config.redirect_replay_budget_bytes = redirect_replay_budget_bytes;
-        sample_state_with_config(config)
-    }
-
     fn sample_state_with_config(config: Config) -> Arc<AppState> {
         let config = Arc::new(config);
         let dns_cache = Arc::new(DnsCache::new(Duration::from_secs(60), 128));
@@ -2912,7 +2881,7 @@ mod tests {
             upstream_tcp_keepalive_secs: 60,
             upstream_tcp_nodelay: true,
             upstream_proxy_url: None,
-            redirect_replay_budget_bytes: crate::config::DEFAULT_REDIRECT_REPLAY_BUDGET_BYTES,
+            legacy_redirect_replay_budget_bytes_ignored: None,
             emit_proxy_timing_header: true,
             log_level: "info".to_string(),
             log_destination: crate::config::TunnelLogDestinationArg::Stdout,

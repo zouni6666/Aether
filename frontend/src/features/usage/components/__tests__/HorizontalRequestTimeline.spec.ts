@@ -181,6 +181,46 @@ afterEach(() => {
 })
 
 describe('HorizontalRequestTimeline', () => {
+  it('uses the trace aggregate latency instead of the successful candidate latency', async () => {
+    const trace = buildTrace([
+      buildCandidate({
+        id: 'cand-transport-timeout',
+        provider_id: 'provider-timeout',
+        provider_name: 'Provider Timeout',
+        key_id: 'key-timeout',
+        key_name: 'Timeout Key',
+        candidate_index: 0,
+        status: 'failed',
+        latency_ms: 10_000,
+        started_at: '2026-05-06T12:00:00.000Z',
+        finished_at: '2026-05-06T12:00:10.000Z',
+      }),
+      buildCandidate({
+        id: 'cand-success-after-failover',
+        provider_id: 'provider-success',
+        provider_name: 'Provider Success',
+        key_id: 'key-success',
+        key_name: 'Success Key',
+        candidate_index: 1,
+        status: 'success',
+        latency_ms: 626,
+        started_at: '2026-05-06T12:00:10.000Z',
+        finished_at: '2026-05-06T12:00:10.626Z',
+      }),
+    ])
+    trace.total_latency_ms = 10_626
+
+    const root = mountTimeline(trace)
+    await nextTick()
+
+    const heading = [...root.querySelectorAll('h4')]
+      .find(element => element.textContent?.trim() === '请求链路追踪')
+    const overview = heading?.parentElement?.parentElement
+    const displayedLatency = overview?.lastElementChild?.textContent?.trim()
+    expect(displayedLatency).toBe('10.63s')
+    expect(displayedLatency).not.toBe('626ms')
+  })
+
   it('keeps attempted keys visible for ordinary provider groups that are not selected', async () => {
     const trace = buildTrace([
       buildCandidate({

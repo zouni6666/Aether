@@ -940,6 +940,7 @@ mod tests {
                 max_transfer_timeout_seconds: 0,
                 stop_status_codes: [503].into_iter().collect(),
                 continue_status_codes: [409, 429].into_iter().collect(),
+                stop_on_transport_errors: false,
                 success_failover_patterns: Vec::new(),
                 error_stop_patterns: Vec::new(),
                 stop_cyber_policy_errors: true,

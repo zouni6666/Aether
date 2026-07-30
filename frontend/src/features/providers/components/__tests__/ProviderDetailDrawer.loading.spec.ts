@@ -54,4 +54,8 @@ describe('ProviderDetailDrawer loading priorities', () => {
     expect(source).toContain('v-if="open && batchAssignDialogOpen && provider"')
     expect(source).toContain('v-if="open && failoverRulesDialogOpen"')
   })
+
+  it('marks a transport-error stop policy as a configured failover rule', () => {
+    expect(source).toContain('rules.stop_on_transport_errors === true')
+  })
 })

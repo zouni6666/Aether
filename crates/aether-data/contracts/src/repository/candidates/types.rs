@@ -238,10 +238,18 @@ impl RequestCandidateTrace {
                     RequestCandidateStatus::Success
                         | RequestCandidateStatus::Failed
                         | RequestCandidateStatus::Cancelled
-                ) && candidate.latency_ms.is_some()
+                )
             })
-            .map(|candidate| candidate.latency_ms.unwrap_or(0))
-            .sum();
+            .map(|candidate| {
+                candidate.latency_ms.unwrap_or_else(|| {
+                    candidate
+                        .finished_at_unix_ms
+                        .zip(candidate.started_at_unix_ms)
+                        .map(|(finished_at, started_at)| finished_at.saturating_sub(started_at))
+                        .unwrap_or(0)
+                })
+            })
+            .fold(0_u64, u64::saturating_add);
         let final_status_source = if attempted_only && candidates.is_empty() {
             &all_candidates
         } else {

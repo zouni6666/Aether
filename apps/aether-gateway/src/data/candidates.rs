@@ -127,4 +127,38 @@ mod tests {
         assert_eq!(trace.final_status, RequestCandidateFinalStatus::Failed);
         assert_eq!(trace.total_latency_ms, 33);
     }
+
+    #[tokio::test]
+    async fn request_candidate_trace_recovers_missing_transport_latency_from_timestamps() {
+        let repository = Arc::new(InMemoryRequestCandidateRepository::seed(vec![
+            sample_candidate(
+                "cand-timeout",
+                "req-failover",
+                0,
+                RequestCandidateStatus::Failed,
+                Some(100),
+                None,
+                None,
+            ),
+            sample_candidate(
+                "cand-success",
+                "req-failover",
+                1,
+                RequestCandidateStatus::Success,
+                Some(101),
+                Some(626),
+                Some(200),
+            ),
+        ]));
+        let state = GatewayDataState::with_request_candidate_reader_for_tests(repository);
+
+        let trace = read_request_candidate_trace(&state, "req-failover", true)
+            .await
+            .expect("trace should succeed")
+            .expect("trace should exist");
+
+        assert_eq!(trace.total_candidates, 2);
+        assert_eq!(trace.final_status, RequestCandidateFinalStatus::Success);
+        assert_eq!(trace.total_latency_ms, 1_626);
+    }
 }

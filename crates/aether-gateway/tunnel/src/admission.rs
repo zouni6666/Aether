@@ -3,7 +3,7 @@ use aether_admission_core::{
     DefaultAdmissionPolicy, ResourceClass,
 };
 
-use crate::{DEFAULT_OWNER_RELAY_BODY_LIMIT_BYTES, DEFAULT_TUNNEL_PROBE_BODY_LIMIT_BYTES};
+use crate::DEFAULT_TUNNEL_PROBE_BODY_LIMIT_BYTES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TunnelAdmissionClass {
@@ -27,7 +27,7 @@ pub struct TunnelAdmissionPolicy {
 impl TunnelAdmissionPolicy {
     pub fn decide(&self, request: TunnelAdmissionRequest<'_>) -> AdmissionDecision {
         let body_limit = body_limit(request.class);
-        if request.body_bytes > body_limit {
+        if body_limit.is_some_and(|limit| request.body_bytes > limit) {
             return AdmissionDecision::Reject(AdmissionRejectReason::BodyTooLarge);
         }
 
@@ -37,7 +37,7 @@ impl TunnelAdmissionPolicy {
             body_bytes: request.body_bytes,
         }) {
             AdmissionDecision::Admit(mut budget) => {
-                budget.body_bytes = body_limit;
+                budget.body_bytes = body_limit.unwrap_or(0);
                 AdmissionDecision::Admit(budget)
             }
             rejected => rejected,
@@ -45,11 +45,11 @@ impl TunnelAdmissionPolicy {
     }
 }
 
-const fn body_limit(class: TunnelAdmissionClass) -> usize {
+const fn body_limit(class: TunnelAdmissionClass) -> Option<usize> {
     match class {
-        TunnelAdmissionClass::Connection => 0,
-        TunnelAdmissionClass::Relay { .. } => DEFAULT_OWNER_RELAY_BODY_LIMIT_BYTES,
-        TunnelAdmissionClass::Probe => DEFAULT_TUNNEL_PROBE_BODY_LIMIT_BYTES,
+        TunnelAdmissionClass::Connection => Some(0),
+        TunnelAdmissionClass::Relay { .. } => None,
+        TunnelAdmissionClass::Probe => Some(DEFAULT_TUNNEL_PROBE_BODY_LIMIT_BYTES),
     }
 }
 
@@ -68,7 +68,7 @@ mod tests {
     use super::{TunnelAdmissionClass, TunnelAdmissionPolicy, TunnelAdmissionRequest};
     use aether_admission_core::{AdmissionDecision, AdmissionRejectReason, DbClass};
 
-    use crate::DEFAULT_OWNER_RELAY_BODY_LIMIT_BYTES;
+    use crate::DEFAULT_TUNNEL_PROBE_BODY_LIMIT_BYTES;
 
     #[test]
     fn stream_connection_reserves_stream_and_upstream_permits() {
@@ -86,23 +86,27 @@ mod tests {
     }
 
     #[test]
-    fn relay_budget_exposes_and_enforces_body_limit() {
+    fn relay_budget_has_no_body_limit() {
         let policy = TunnelAdmissionPolicy::default();
         let decision = policy.decide(TunnelAdmissionRequest {
             trace_id: "trace-2",
             class: TunnelAdmissionClass::Relay { streaming: false },
-            body_bytes: DEFAULT_OWNER_RELAY_BODY_LIMIT_BYTES,
+            body_bytes: usize::MAX,
         });
         let AdmissionDecision::Admit(budget) = decision else {
-            panic!("relay at the limit should be admitted");
+            panic!("relay body should be admitted without a size limit");
         };
-        assert_eq!(budget.body_bytes, DEFAULT_OWNER_RELAY_BODY_LIMIT_BYTES);
+        assert_eq!(budget.body_bytes, 0);
+    }
 
+    #[test]
+    fn probe_budget_still_enforces_body_limit() {
+        let policy = TunnelAdmissionPolicy::default();
         assert_eq!(
             policy.decide(TunnelAdmissionRequest {
                 trace_id: "trace-3",
-                class: TunnelAdmissionClass::Relay { streaming: false },
-                body_bytes: DEFAULT_OWNER_RELAY_BODY_LIMIT_BYTES + 1,
+                class: TunnelAdmissionClass::Probe,
+                body_bytes: DEFAULT_TUNNEL_PROBE_BODY_LIMIT_BYTES + 1,
             }),
             AdmissionDecision::Reject(AdmissionRejectReason::BodyTooLarge)
         );

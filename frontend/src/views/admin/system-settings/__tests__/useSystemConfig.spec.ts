@@ -122,7 +122,7 @@ describe('useSystemConfig', () => {
     await state.loadSystemConfig()
 
     expect(state.systemConfig.value.request_record_level).toBe('full')
-    expect(state.systemConfig.value.max_request_body_size).toBe(5_242_880)
-    expect(state.systemConfig.value.max_response_body_size).toBe(5_242_880)
+    expect(state.systemConfig.value).not.toHaveProperty('max_request_body_size')
+    expect(state.systemConfig.value).not.toHaveProperty('max_response_body_size')
   })
 })

@@ -115,7 +115,16 @@ pub(crate) async fn maybe_execute_chatgpt_web_image_sync(
         let result = match execute_chatgpt_web_image(state, plan, report_context, started_at).await
         {
             Ok(result) => result,
-            Err(err) => chatgpt_web_transport_error_execution_result(plan, started_at, &err),
+            Err(ExecutionRuntimeTransportError::UpstreamHttpStatus {
+                status_code,
+                message,
+            }) => chatgpt_web_http_error_execution_result(
+                plan,
+                started_at,
+                status_code,
+                message.as_str(),
+            ),
+            Err(error) => return Err(error),
         };
         Ok(Some(result))
     })
@@ -133,7 +142,13 @@ pub(crate) async fn maybe_execute_chatgpt_web_image_stream(
     let started_at = Instant::now();
     let result = match execute_chatgpt_web_image(state, plan, report_context, started_at).await {
         Ok(result) => result,
-        Err(err) => chatgpt_web_transport_error_execution_result(plan, started_at, &err),
+        Err(ExecutionRuntimeTransportError::UpstreamHttpStatus {
+            status_code,
+            message,
+        }) => {
+            chatgpt_web_http_error_execution_result(plan, started_at, status_code, message.as_str())
+        }
+        Err(error) => return Err(error),
     };
     Ok(Some(ChatGptWebImageStream {
         frame_stream: execution_result_frame_stream(plan, &result, report_context),
@@ -2567,19 +2582,20 @@ fn json_execution_result(
     }
 }
 
-fn chatgpt_web_transport_error_execution_result(
+fn chatgpt_web_http_error_execution_result(
     plan: &ExecutionPlan,
     started_at: Instant,
-    error: &ExecutionRuntimeTransportError,
+    status_code: u16,
+    message: &str,
 ) -> ExecutionResult {
     json_execution_result(
         plan,
-        503,
+        status_code,
         json!({
             "error": {
                 "type": "upstream_error",
                 "code": "chatgpt_web_image_execution_unavailable",
-                "message": error.to_string()
+                "message": message
             }
         }),
         started_at,
@@ -2798,11 +2814,14 @@ fn ensure_success(
         return Ok(());
     }
     let body = String::from_utf8_lossy(&execution_result_body_bytes_lossy(result)).to_string();
-    Err(ExecutionRuntimeTransportError::UpstreamRequest(format!(
-        "{stage} returned {}: {}",
-        result.status_code,
-        body.chars().take(320).collect::<String>()
-    )))
+    Err(ExecutionRuntimeTransportError::UpstreamHttpStatus {
+        status_code: result.status_code,
+        message: format!(
+            "{stage} returned {}: {}",
+            result.status_code,
+            body.chars().take(320).collect::<String>()
+        ),
+    })
 }
 
 fn chatgpt_web_base_url_from_plan(plan: &ExecutionPlan) -> String {
@@ -3992,10 +4011,14 @@ data: [DONE]
             Some(&json!({"chatgpt_web_image": true})),
         )
         .await
-        .expect("executor should run")
+        .expect("executor should preserve the upstream HTTP response")
         .expect("plan should be intercepted");
 
-        assert_ne!(result.status_code, 200);
+        assert_eq!(result.status_code, 500);
+        assert_eq!(
+            execution_result_json(&result).expect("error response should be json")["error"]["code"],
+            json!("chatgpt_web_image_execution_unavailable")
+        );
         let metadata = reloaded_chatgpt_web_metadata(repository.as_ref()).await;
         assert_eq!(metadata["image_quota_remaining"], json!(25.0));
         assert_eq!(metadata["image_quota_used"], json!(0.0));
@@ -4003,6 +4026,71 @@ data: [DONE]
         assert_eq!(metadata.get("image_quota_last_local_request_key"), None);
 
         handle.abort();
+    }
+
+    #[tokio::test]
+    async fn chatgpt_web_image_sync_propagates_network_failure_without_synthetic_503() {
+        let listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("listener should bind");
+        let base_url = format!(
+            "http://{}",
+            listener.local_addr().expect("local addr should resolve")
+        );
+        drop(listener);
+        let state = crate::AppState::new().expect("state should build");
+        let plan = sample_plan(
+            base_url.as_str(),
+            json!({"prompt": "draw a small test image"}),
+            false,
+        );
+
+        let error = maybe_execute_chatgpt_web_image_sync(
+            &state,
+            &plan,
+            Some(&json!({"chatgpt_web_image": true})),
+        )
+        .await
+        .expect_err("connection failure should propagate to the candidate loop");
+
+        assert!(matches!(
+            error,
+            ExecutionRuntimeTransportError::UpstreamRequest(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn chatgpt_web_image_stream_propagates_network_failure_without_synthetic_503() {
+        let listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("listener should bind");
+        let base_url = format!(
+            "http://{}",
+            listener.local_addr().expect("local addr should resolve")
+        );
+        drop(listener);
+        let state = crate::AppState::new().expect("state should build");
+        let plan = sample_plan(
+            base_url.as_str(),
+            json!({"prompt": "draw a small test image"}),
+            true,
+        );
+
+        let error = match maybe_execute_chatgpt_web_image_stream(
+            &state,
+            &plan,
+            Some(&json!({"chatgpt_web_image": true})),
+        )
+        .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("connection failure should propagate to the candidate loop"),
+        };
+
+        assert!(matches!(
+            error,
+            ExecutionRuntimeTransportError::UpstreamRequest(_)
+        ));
     }
 
     #[tokio::test]
