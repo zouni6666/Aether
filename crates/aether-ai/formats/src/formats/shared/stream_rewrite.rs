@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use serde_json::{json, Map, Value};
 
 use crate::formats::openai::image::stream::{OpenAiImageChatStreamState, OpenAiImageStreamState};
+use crate::formats::openai::responses::history::ResponseHistoryRecord;
 use crate::formats::openai::responses::response::ensure_modern_openai_responses_response_fields;
 use crate::formats::shared::model_directives::model_directive_display_model_from_report_context;
 use crate::formats::shared::response::{
@@ -342,6 +343,16 @@ impl AiSurfaceStreamRewriter<'_> {
                 }
                 Ok(output)
             }
+        }
+    }
+
+    pub fn take_response_history_record(&mut self) -> Option<ResponseHistoryRecord> {
+        match &mut self.state {
+            AiSurfaceStreamRewriteState::Standard(state) => state.take_response_history_record(),
+            AiSurfaceStreamRewriteState::KiroToClaudeCliThenStandard { standard, .. } => {
+                standard.take_response_history_record()
+            }
+            _ => None,
         }
     }
 

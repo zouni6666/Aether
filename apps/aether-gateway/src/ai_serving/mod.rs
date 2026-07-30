@@ -3,6 +3,7 @@ pub(crate) mod api;
 mod finalize;
 mod planner;
 mod pure;
+mod response_history;
 pub(crate) mod transport;
 
 use axum::body::Body;
@@ -64,6 +65,10 @@ pub(crate) use self::planner::{
     SkippedLocalExecutionCandidate,
 };
 pub(crate) use self::pure::*;
+pub(crate) use self::response_history::{
+    hydrate_openai_response_history, persist_converted_response_history,
+    persist_response_history_record,
+};
 pub(crate) use self::transport::{
     append_transport_diagnostics_to_value, build_request_trace_proxy_value,
     candidate_common_transport_skip_reason, candidate_transport_pair_skip_reason,

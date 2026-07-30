@@ -59,13 +59,18 @@ pub fn convert_openai_chat_request_to_openai_responses_request(
 pub fn normalize_openai_responses_request_to_openai_chat_request(
     body_json: &Value,
 ) -> Option<Value> {
-    registry::convert_request(
-        "openai:responses",
-        "openai:chat",
-        body_json,
-        &FormatContext::default(),
-    )
-    .ok()
+    normalize_openai_responses_request_to_openai_chat_request_with_history_scope(body_json, None)
+}
+
+pub fn normalize_openai_responses_request_to_openai_chat_request_with_history_scope(
+    body_json: &Value,
+    history_scope: Option<&str>,
+) -> Option<Value> {
+    let mut context = FormatContext::default();
+    if let Some(history_scope) = history_scope {
+        context = context.with_history_scope(history_scope);
+    }
+    registry::convert_request("openai:responses", "openai:chat", body_json, &context).ok()
 }
 
 pub fn normalize_claude_request_to_openai_chat_request(body_json: &Value) -> Option<Value> {

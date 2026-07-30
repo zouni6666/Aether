@@ -8,7 +8,11 @@ use serde_json::{json, Value};
 
 use crate::formats::{
     context::FormatContext,
-    openai::responses::response::ensure_modern_openai_responses_response_fields, registry,
+    openai::responses::{
+        openai_responses_synthetic_reasoning_item_id,
+        response::ensure_modern_openai_responses_response_fields,
+    },
+    registry,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,7 +207,7 @@ pub fn build_openai_responses_response_with_content(
         }
         output.push(json!({
             "type": "reasoning",
-            "id": format!("{response_id}_rs_{index}"),
+            "id": openai_responses_synthetic_reasoning_item_id(response_id, index),
             "status": "completed",
             "summary": [{
                 "type": "summary_text",

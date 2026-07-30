@@ -6366,6 +6366,13 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                                 report_context.as_ref(),
                             ) {
                                 Ok(Some(outcome)) => {
+                                    if let Some(record) = outcome.response_history_record {
+                                        crate::ai_serving::persist_response_history_record(
+                                            state.runtime_state(),
+                                            record,
+                                        )
+                                        .await;
+                                    }
                                     headers.remove("content-encoding");
                                     headers.remove("content-length");
                                     headers.insert(
@@ -6570,6 +6577,15 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
     if stream_commit_gate.is_uncommitted() {
         stream_commit_gate.commit();
     }
+    let prefetched_response_history_persisted = if let Some(record) = local_stream_rewriter
+        .as_mut()
+        .and_then(|rewriter| rewriter.take_response_history_record())
+    {
+        crate::ai_serving::persist_response_history_record(state.runtime_state(), record).await;
+        true
+    } else {
+        false
+    };
     drop(private_stream_normalizer);
     drop(local_stream_rewriter);
 
@@ -6906,6 +6922,11 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                     }
                 }
             }
+            if prefetched_response_history_persisted {
+                if let Some(rewriter) = local_stream_rewriter.as_mut() {
+                    let _ = rewriter.take_response_history_record();
+                }
+            }
         }
 
         if terminal_failure.is_none() && !reached_eof {
@@ -7159,6 +7180,19 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                             normalized_chunk
                         };
 
+                        if provider_private_error_body_json.is_none() {
+                            if let Some(record) = local_stream_rewriter
+                                .as_mut()
+                                .and_then(|rewriter| rewriter.take_response_history_record())
+                            {
+                                crate::ai_serving::persist_response_history_record(
+                                    state_for_report.runtime_state(),
+                                    record,
+                                )
+                                .await;
+                            }
+                        }
+
                         if rewritten_chunk.is_empty() {
                             if let Some(error_body_json) = provider_private_error_body_json {
                                 let error_status_code = resolve_provider_stream_error_status_code(
@@ -7350,6 +7384,18 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                         } else {
                             normalized_chunk
                         };
+                        if provider_private_error_body_json.is_none() {
+                            if let Some(record) = local_stream_rewriter
+                                .as_mut()
+                                .and_then(|rewriter| rewriter.take_response_history_record())
+                            {
+                                crate::ai_serving::persist_response_history_record(
+                                    state_for_report.runtime_state(),
+                                    record,
+                                )
+                                .await;
+                            }
+                        }
                         if !rewritten_chunk.is_empty() {
                             append_stream_capture_bytes(
                                 &mut buffered_body,
@@ -7423,7 +7469,15 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
         }
         if !downstream_dropped && terminal_failure.is_none() {
             if let Some(rewriter) = local_stream_rewriter.as_mut() {
-                match rewriter.finish() {
+                let finish_result = rewriter.finish();
+                if let Some(record) = rewriter.take_response_history_record() {
+                    crate::ai_serving::persist_response_history_record(
+                        state_for_report.runtime_state(),
+                        record,
+                    )
+                    .await;
+                }
+                match finish_result {
                     Ok(flushed_chunk) if !flushed_chunk.is_empty() => {
                         append_stream_capture_bytes(
                             &mut buffered_body,
@@ -7478,6 +7532,19 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                         });
                     }
                 }
+            }
+        }
+
+        if terminal_failure.is_none() {
+            if let Some(record) = local_stream_rewriter
+                .as_mut()
+                .and_then(|rewriter| rewriter.take_response_history_record())
+            {
+                crate::ai_serving::persist_response_history_record(
+                    state_for_report.runtime_state(),
+                    record,
+                )
+                .await;
             }
         }
 

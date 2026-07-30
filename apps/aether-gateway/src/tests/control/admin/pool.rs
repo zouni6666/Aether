@@ -3615,19 +3615,26 @@ async fn gateway_batch_updates_shared_pool_key_configuration() {
         Vec::new(),
         vec![first_key, second_key],
     ));
-    let state = AppState::new()
-        .expect("gateway should build")
-        .with_data_state_for_tests(
-            GatewayDataState::with_provider_catalog_repository_for_tests(Arc::clone(
-                &provider_catalog_repository,
-            )),
-        );
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(Arc::clone(
+                    &provider_catalog_repository,
+                )),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
 
-    let response = local_admin_pool_response(
-        &state,
-        http::Method::PATCH,
-        "/api/admin/pool/provider-openai/keys/batch-update",
-        Some(json!({
+    let response = reqwest::Client::new()
+        .patch(format!(
+            "{gateway_url}/api/admin/pool/provider-openai/keys/batch-update"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
             "key_ids": ["key-openai-b", "key-openai-a", "key-openai-a"],
             "patch": {
                 "api_formats": ["openai:responses"],
@@ -3638,17 +3645,13 @@ async fn gateway_batch_updates_shared_pool_key_configuration() {
                 "locked_models": [],
                 "note": null
             }
-        })),
-    )
-    .await;
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
 
     assert_eq!(response.status(), StatusCode::OK);
-    let payload: serde_json::Value = serde_json::from_slice(
-        &to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body should read"),
-    )
-    .expect("json body should parse");
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["affected"], json!(2));
     assert_eq!(payload["model_sync"], serde_json::Value::Null);
 
@@ -3670,6 +3673,8 @@ async fn gateway_batch_updates_shared_pool_key_configuration() {
         assert_eq!(key.locked_models, None);
         assert_eq!(key.note, None);
     }
+
+    gateway_handle.abort();
 }
 
 #[tokio::test]

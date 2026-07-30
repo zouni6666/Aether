@@ -2,7 +2,7 @@ use serde_json::Value;
 
 use aether_ai_formats::api::{
     is_claude_messages_shaped_body_on_openai_chat_endpoint, is_openai_responses_family_format,
-    normalize_api_format_alias,
+    normalize_api_format_alias, OpenAiProviderRequestContractViolation,
 };
 use aether_ai_formats::{convert_request_pure_with_context, FormatContext, FormatError};
 
@@ -49,6 +49,42 @@ pub fn request_conversion_failure_extra_data(
             .source(source)
             .to_extra_data(),
     )
+}
+
+pub fn openai_provider_request_contract_failure_extra_data(
+    violation: &OpenAiProviderRequestContractViolation,
+    client_api_format: &str,
+    provider_api_format: &str,
+    source: impl Into<String>,
+) -> Value {
+    let (field, reason) = openai_provider_request_contract_violation_parts(violation);
+    CandidateFailureDiagnostic::new(
+        CandidateFailureDiagnosticKind::RequestBodyBuild,
+        field_to_json_path(field),
+        format!("上游请求体语义校验失败：{reason}"),
+    )
+    .formats(client_api_format, provider_api_format)
+    .source(source)
+    .to_extra_data()
+}
+
+fn openai_provider_request_contract_violation_parts(
+    violation: &OpenAiProviderRequestContractViolation,
+) -> (&str, &str) {
+    match violation {
+        OpenAiProviderRequestContractViolation::CodexCompact(violation) => {
+            (violation.field, violation.reason)
+        }
+        OpenAiProviderRequestContractViolation::Responses(violation) => {
+            (violation.field, violation.reason)
+        }
+        OpenAiProviderRequestContractViolation::PromptCache(violation) => {
+            (violation.field.as_str(), violation.reason.as_str())
+        }
+        OpenAiProviderRequestContractViolation::Reasoning(violation) => {
+            (violation.field.as_str(), violation.reason.as_str())
+        }
+    }
 }
 
 pub fn same_format_provider_request_body_failure_extra_data(
@@ -798,7 +834,10 @@ fn request_body_build_source(client_api_format: &str, provider_api_format: &str)
 mod tests {
     use serde_json::json;
 
-    use super::{request_body_build_failure_extra_data, request_conversion_failure_extra_data};
+    use super::{
+        openai_provider_request_contract_failure_extra_data, request_body_build_failure_extra_data,
+        request_conversion_failure_extra_data,
+    };
 
     #[test]
     fn openai_chat_to_claude_recognizes_compatible_claude_native_tool_shape() {
@@ -948,6 +987,40 @@ mod tests {
             .as_str()
             .expect("message")
             .contains("字段 n"));
+    }
+
+    #[test]
+    fn provider_contract_failure_preserves_finalization_field_and_reason() {
+        let violation = aether_ai_formats::OpenAiProviderRequestContractViolation::Responses(
+            aether_ai_formats::OpenAiResponsesRequestContractViolation {
+                field: "reasoning.summary",
+                reason: "OpenAI multi-agent requests do not support reasoning summaries",
+            },
+        );
+
+        let diagnostic = openai_provider_request_contract_failure_extra_data(
+            &violation,
+            "openai:responses",
+            "openai:responses",
+            "openai_responses_request_finalization",
+        );
+
+        assert_eq!(
+            diagnostic["failure_diagnostic"]["kind"],
+            "request_body_build"
+        );
+        assert_eq!(
+            diagnostic["failure_diagnostic"]["path"],
+            "$.reasoning.summary"
+        );
+        assert_eq!(
+            diagnostic["failure_diagnostic"]["source"],
+            "openai_responses_request_finalization"
+        );
+        assert!(diagnostic["request_body_build_error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("do not support reasoning summaries"));
     }
 
     #[test]

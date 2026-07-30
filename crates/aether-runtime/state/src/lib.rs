@@ -1808,6 +1808,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn redis_runtime_instances_share_ttl_kv_across_reinitialization() {
+        let external_redis_url = std::env::var("AETHER_TEST_REDIS_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let redis = if external_redis_url.is_none() {
+            TestRedisServer::start().await
+        } else {
+            None
+        };
+        let Some(redis_url) =
+            external_redis_url.or_else(|| redis.as_ref().map(|redis| redis.redis_url.clone()))
+        else {
+            return;
+        };
+        let key_prefix = format!("aether-history-test-{}", std::process::id());
+        let runtime_config = || RedisClientConfig {
+            url: redis_url.clone(),
+            key_prefix: Some(key_prefix.clone()),
+        };
+        let writer = RuntimeState::redis(runtime_config(), Some(1_000))
+            .await
+            .expect("writer runtime should connect");
+        let reader = RuntimeState::redis(runtime_config(), Some(1_000))
+            .await
+            .expect("reader runtime should connect");
+        let history_key = "ai:responses:history:v1:shared-record";
+
+        writer
+            .kv_set(
+                history_key,
+                "persisted-history",
+                Some(Duration::from_secs(30)),
+            )
+            .await
+            .expect("writer should persist history");
+        assert_eq!(
+            reader
+                .kv_get(history_key)
+                .await
+                .expect("reader get")
+                .as_deref(),
+            Some("persisted-history")
+        );
+
+        drop(writer);
+        drop(reader);
+        let restarted = RuntimeState::redis(runtime_config(), Some(1_000))
+            .await
+            .expect("restarted runtime should connect");
+        assert_eq!(
+            restarted
+                .kv_get(history_key)
+                .await
+                .expect("restarted get")
+                .as_deref(),
+            Some("persisted-history")
+        );
+        assert!(matches!(
+            restarted
+                .kv_ttl_seconds(history_key)
+                .await
+                .expect("history ttl"),
+            Some(1..=30)
+        ));
+    }
+
+    #[tokio::test]
     async fn redis_lock_fencing_tokens_increase_and_expired_lease_cannot_renew() {
         let Some((_redis, runtime)) = redis_runtime_for_test("lock-fencing").await else {
             return;

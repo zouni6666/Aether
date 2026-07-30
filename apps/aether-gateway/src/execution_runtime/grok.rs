@@ -26,6 +26,7 @@ use crate::ai_serving::api::{
     CanonicalContentPart, CanonicalStreamEvent, CanonicalStreamFrame, ClaudeClientEmitter,
     OpenAIChatClientEmitter, OpenAIResponsesClientEmitter, StreamingCanonicalUsage,
 };
+use crate::ai_serving::openai_responses_synthetic_reasoning_item_id;
 use crate::clock::current_unix_secs;
 use crate::execution_runtime::ndjson::encode_stream_frame_ndjson;
 use crate::execution_runtime::transport::{
@@ -2705,7 +2706,7 @@ fn openai_responses_body(
     let mut output = Vec::new();
     if !collected.thinking.trim().is_empty() {
         output.push(json!({
-            "id": format!("{response_id}_rs_0"),
+            "id": openai_responses_synthetic_reasoning_item_id(&response_id, 0),
             "type": "reasoning",
             "status": "completed",
             "summary": [{

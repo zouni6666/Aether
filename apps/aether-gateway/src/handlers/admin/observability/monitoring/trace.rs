@@ -203,7 +203,7 @@ fn build_admin_monitoring_usage_routing_snapshot_trace(
         endpoint_id: usage.provider_endpoint_id.clone(),
         key_id: usage.provider_api_key_id.clone(),
         status,
-        skip_reason: None,
+        skip_reason: usage.routing_candidate_skip_reason().map(ToOwned::to_owned),
         is_cached: false,
         status_code: usage.status_code,
         error_type: usage
@@ -355,6 +355,9 @@ fn build_admin_monitoring_usage_routing_snapshot_extra_data(
     insert_optional_string(&mut object, "candidate_id", usage.routing_candidate_id());
     if let Some(candidate_index) = usage.routing_candidate_index() {
         object.insert("candidate_index".to_string(), json!(candidate_index));
+    }
+    if let Some(diagnostic) = usage.routing_failure_diagnostic() {
+        object.insert("failure_diagnostic".to_string(), diagnostic.clone());
     }
     Some(Value::Object(object))
 }

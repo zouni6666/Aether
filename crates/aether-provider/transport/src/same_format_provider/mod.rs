@@ -436,6 +436,21 @@ fn build_same_format_provider_request_body_inner(
             ),
         );
     }
+    let stripped_reasoning_items =
+        aether_ai_formats::strip_incompatible_openai_responses_reasoning_items(
+            &mut provider_request_body,
+            input.provider_api_format,
+        );
+    if stripped_reasoning_items > 0 {
+        record_compatibility_edit(
+            &mut compatibility_edits,
+            "input[].id",
+            SameFormatProviderCompatibilityEditAction::ProviderCompatibilityRewrite,
+            format!(
+                "stripped {stripped_reasoning_items} non-replayable OpenAI Responses reasoning item(s)"
+            ),
+        );
+    }
     let provider_model = provider_request_body
         .get("model")
         .and_then(Value::as_str)
@@ -2000,6 +2015,50 @@ mod tests {
                 && edit.action
                     == SameFormatProviderCompatibilityEditAction::ProviderCompatibilityRewrite
                 && edit.detail.contains("2")
+        }));
+    }
+
+    #[test]
+    fn same_format_responses_body_strips_foreign_reasoning_ids_and_reports_the_edit() {
+        let request_body = json!({
+            "model": "gpt-5.4",
+            "input": [
+                {"type": "reasoning", "id": "rs_provider_123", "summary": []},
+                {
+                    "type": "reasoning",
+                    "id": "item_72d3bd8d367d01977ace23f1",
+                    "summary": []
+                },
+                {"type": "message", "role": "user", "content": "continue"}
+            ]
+        });
+        let output = build_same_format_provider_request_body_with_compatibility_report(
+            SameFormatProviderRequestBodyInput {
+                body_json: &request_body,
+                mapped_model: "gpt-5.4",
+                client_api_format: "openai:responses",
+                provider_api_format: "openai:responses",
+                source_model: Some("gpt-5.4"),
+                family: SameFormatProviderFamily::Standard,
+                body_rules: None,
+                request_headers: None,
+                upstream_is_stream: false,
+                force_body_stream_field: false,
+                kiro_auth_config: None,
+                is_claude_code: false,
+                enable_model_directives: false,
+            },
+        )
+        .expect("same-format Responses body should build");
+
+        let input = output.body["input"].as_array().expect("input array");
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["id"], "rs_provider_123");
+        assert_eq!(input[1]["type"], "message");
+        assert!(output.compatibility_edits.iter().any(|edit| {
+            edit.field == "input[].id"
+                && edit.action
+                    == SameFormatProviderCompatibilityEditAction::ProviderCompatibilityRewrite
         }));
     }
 

@@ -29,7 +29,8 @@ use crate::ai_serving::planner::standard::{
     apply_deepseek_tool_call_thinking_compat, build_cross_format_openai_chat_request_body,
     build_cross_format_openai_chat_upstream_url, build_local_openai_chat_request_body,
     build_local_openai_chat_upstream_url, codex_model_capabilities_for_transport,
-    request_body_build_failure_extra_data, request_conversion_failure_extra_data,
+    openai_provider_request_contract_failure_extra_data, request_body_build_failure_extra_data,
+    request_conversion_failure_extra_data,
 };
 use crate::ai_serving::transport::antigravity::is_antigravity_provider_transport;
 use crate::ai_serving::transport::auth::resolve_local_openai_bearer_auth;
@@ -109,7 +110,7 @@ fn finalize_openai_chat_provider_request_body(
     original_body: &Value,
     transport: &GatewayProviderTransportSnapshot,
     mapped_model: &str,
-) -> bool {
+) -> Option<Value> {
     if let Some(mapping) = custom_directive_mapping {
         crate::ai_serving::apply_model_directive_mapping_patch(provider_request_body, mapping);
     }
@@ -156,7 +157,15 @@ fn finalize_openai_chat_provider_request_body(
         },
         codex_model_capabilities.as_ref(),
     )
-    .is_ok()
+    .err()
+    .map(|violation| {
+        openai_provider_request_contract_failure_extra_data(
+            &violation,
+            "openai:chat",
+            provider_api_format,
+            "openai_chat_request_finalization",
+        )
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -288,7 +297,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
             .await;
             return Ok(None);
         };
-        if !finalize_openai_chat_provider_request_body(
+        if let Some(extra_data) = finalize_openai_chat_provider_request_body(
             &mut provider_request_body,
             model_directive_mapping.as_ref(),
             provider_api_format,
@@ -306,11 +315,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
                 candidate_index,
                 candidate_id,
                 "provider_request_body_build_failed",
-                request_body_build_failure_extra_data(
-                    body_json,
-                    "openai:chat",
-                    provider_api_format,
-                ),
+                Some(extra_data),
             )
             .await;
             return Ok(None);
@@ -501,7 +506,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
             "openai_chat_payload_body_build",
             body_build_started_at.elapsed().as_millis() as u64,
         );
-        if !finalize_openai_chat_provider_request_body(
+        if let Some(extra_data) = finalize_openai_chat_provider_request_body(
             &mut provider_request_body,
             model_directive_mapping.as_ref(),
             "openai:chat",
@@ -519,11 +524,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
                 candidate_index,
                 candidate_id,
                 "provider_request_body_build_failed",
-                request_body_build_failure_extra_data(
-                    body_json,
-                    "openai:chat",
-                    provider_api_format,
-                ),
+                Some(extra_data),
             )
             .await;
             return Ok(None);
@@ -813,7 +814,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
         .await;
         return Ok(None);
     };
-    if !finalize_openai_chat_provider_request_body(
+    if let Some(extra_data) = finalize_openai_chat_provider_request_body(
         &mut provider_request_body,
         model_directive_mapping.as_ref(),
         provider_api_format.as_str(),
@@ -831,15 +832,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
             candidate_index,
             candidate_id,
             "provider_request_body_build_failed",
-            request_conversion_failure_extra_data(
-                body_json,
-                "openai:chat",
-                provider_api_format.as_str(),
-                Some(prepared_candidate.mapped_model.as_str()),
-                Some(parts.uri.path()),
-                upstream_is_stream,
-                "openai_chat_request_conversion",
-            ),
+            Some(extra_data),
         )
         .await;
         return Ok(None);

@@ -32,7 +32,8 @@ use crate::ai_serving::planner::standard::{
     build_cross_format_openai_responses_upstream_url,
     build_local_openai_responses_request_body_with_codex_model_capabilities,
     build_local_openai_responses_upstream_url, codex_model_capabilities_for_transport,
-    request_body_build_failure_extra_data, request_conversion_failure_extra_data,
+    openai_provider_request_contract_failure_extra_data, request_body_build_failure_extra_data,
+    request_conversion_failure_extra_data,
 };
 use crate::ai_serving::transport::antigravity::is_antigravity_provider_transport;
 use crate::ai_serving::transport::auth::{
@@ -80,6 +81,96 @@ fn is_grok_text_provider_api_format(provider_api_format: &str) -> bool {
         crate::ai_serving::normalize_api_format_alias(provider_api_format).as_str(),
         "openai:chat" | "openai:responses" | "openai:responses:compact" | "claude:messages"
     )
+}
+
+fn response_function_tool_names(body: &Value) -> Vec<String> {
+    body.get("tools")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|tool| tool.get("type").and_then(Value::as_str) == Some("function"))
+        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn chat_function_tool_names(body: &Value) -> Vec<String> {
+    body.get("tools")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| {
+            tool.get("function")
+                .and_then(|function| function.get("name"))
+                .and_then(Value::as_str)
+        })
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn response_input_call_ids(body: &Value) -> Vec<String> {
+    body.get("input")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|item| {
+            matches!(
+                item.get("type").and_then(Value::as_str),
+                Some("function_call" | "function_call_output")
+            )
+        })
+        .filter_map(|item| item.get("call_id").and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn chat_message_call_ids(body: &Value) -> Vec<String> {
+    let mut call_ids = Vec::new();
+    for message in body
+        .get("messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
+            call_ids.extend(
+                tool_calls
+                    .iter()
+                    .filter_map(|tool_call| tool_call.get("id").and_then(Value::as_str))
+                    .map(ToOwned::to_owned),
+            );
+        }
+        if let Some(tool_call_id) = message.get("tool_call_id").and_then(Value::as_str) {
+            call_ids.push(tool_call_id.to_string());
+        }
+    }
+    call_ids
+}
+
+fn log_responses_to_chat_tool_conversion(trace_id: &str, inbound: &Value, outbound: &Value) {
+    let inbound_tool_names = response_function_tool_names(inbound);
+    let outbound_tool_names = chat_function_tool_names(outbound);
+    let inbound_call_ids = response_input_call_ids(inbound);
+    let outbound_call_ids = chat_message_call_ids(outbound);
+    let previous_response_id = inbound
+        .get("previous_response_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    debug!(
+        event_name = "openai_responses_to_chat_tool_conversion",
+        log_type = "debug",
+        trace_id = %trace_id,
+        inbound_tool_count = inbound_tool_names.len(),
+        outbound_tool_count = outbound_tool_names.len(),
+        inbound_tool_names = ?inbound_tool_names,
+        outbound_tool_names = ?outbound_tool_names,
+        previous_response_id = %previous_response_id,
+        inbound_call_ids = ?inbound_call_ids,
+        outbound_call_ids = ?outbound_call_ids,
+        history_recovered = !previous_response_id.is_empty()
+            && outbound_call_ids.iter().any(|call_id| inbound_call_ids.contains(call_id)),
+        "converted OpenAI Responses tools and continuation context to OpenAI Chat"
+    );
 }
 
 pub(crate) struct LocalOpenAiResponsesCandidatePayloadParts {
@@ -306,6 +397,14 @@ pub(crate) async fn resolve_local_openai_responses_candidate_payload_parts(
                 return Ok(None);
             }
         };
+    crate::ai_serving::hydrate_openai_response_history(
+        state.runtime_state(),
+        body_json,
+        spec_metadata.api_format,
+        provider_api_format,
+        input.auth_context.api_key_id.as_str(),
+    )
+    .await?;
     let redaction = resolve_provider_chat_pii_redaction(
         state,
         parts,
@@ -367,6 +466,7 @@ pub(crate) async fn resolve_local_openai_responses_candidate_payload_parts(
                     transport.endpoint.body_rules.as_ref()
                 },
                 effective_headers,
+                Some(input.auth_context.api_key_id.as_str()),
                 codex_model_capabilities.as_ref(),
                 false,
             )
@@ -431,24 +531,24 @@ pub(crate) async fn resolve_local_openai_responses_candidate_payload_parts(
         provider_api_format,
         Some(body_json),
     );
-    if crate::ai_serving::finalize_openai_provider_request_with_codex_model_capabilities(
-        &mut base_provider_request_body,
-        crate::ai_serving::OpenAiProviderRequestFinalization {
-            source_api_format: spec_metadata.api_format,
-            provider_api_format,
-            provider_type: transport.provider.provider_type.as_str(),
-            provider_model: mapped_model.as_str(),
-            source_model,
-            body_rules: transport.endpoint.body_rules.as_ref(),
-            upstream_is_stream,
-            require_body_stream_field: request_requires_body_stream_field(
-                body_json,
-                force_body_stream_field,
-            ),
-        },
-        codex_model_capabilities.as_ref(),
-    )
-    .is_err()
+    if let Err(violation) =
+        crate::ai_serving::finalize_openai_provider_request_with_codex_model_capabilities(
+            &mut base_provider_request_body,
+            crate::ai_serving::OpenAiProviderRequestFinalization {
+                source_api_format: spec_metadata.api_format,
+                provider_api_format,
+                provider_type: transport.provider.provider_type.as_str(),
+                provider_model: mapped_model.as_str(),
+                source_model,
+                body_rules: transport.endpoint.body_rules.as_ref(),
+                upstream_is_stream,
+                require_body_stream_field: request_requires_body_stream_field(
+                    body_json,
+                    force_body_stream_field,
+                ),
+            },
+            codex_model_capabilities.as_ref(),
+        )
     {
         mark_skipped_local_openai_responses_candidate_with_extra_data(
             state,
@@ -458,18 +558,20 @@ pub(crate) async fn resolve_local_openai_responses_candidate_payload_parts(
             candidate_index,
             candidate_id,
             "provider_request_body_build_failed",
-            request_conversion_failure_extra_data(
-                body_json,
+            Some(openai_provider_request_contract_failure_extra_data(
+                &violation,
                 spec_metadata.api_format,
                 provider_api_format,
-                Some(mapped_model.as_str()),
-                Some(parts.uri.path()),
-                upstream_is_stream,
-                "openai_responses_request_conversion",
-            ),
+                "openai_responses_request_finalization",
+            )),
         )
         .await;
         return Ok(None);
+    }
+    if needs_bidirectional_conversion
+        && crate::ai_serving::api_format_alias_matches(provider_api_format, "openai:chat")
+    {
+        log_responses_to_chat_tool_conversion(trace_id, body_json, &base_provider_request_body);
     }
     let provider_request_body = base_provider_request_body;
 

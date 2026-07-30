@@ -236,6 +236,15 @@ async fn admin_monitoring_trace_request_falls_back_to_usage_routing_snapshot() {
     usage.provider_api_key_id = Some("provider-key-1".to_string());
     usage.error_message = Some("no local stream plans".to_string());
     usage.response_time_ms = Some(45);
+    usage.request_metadata = Some(json!({
+        "routing_candidate_skip_reason": "provider_request_body_build_failed",
+        "routing_failure_diagnostic": {
+            "kind": "request_body_build",
+            "path": "$.reasoning.summary",
+            "message": "上游请求体语义校验失败",
+            "safe_to_show": true
+        }
+    }));
 
     let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![usage]));
     let data_state =
@@ -268,6 +277,10 @@ async fn admin_monitoring_trace_request_falls_back_to_usage_routing_snapshot() {
     assert_eq!(payload["candidates"][0]["id"], json!("routing-cand-1"));
     assert_eq!(payload["candidates"][0]["status"], json!("failed"));
     assert_eq!(
+        payload["candidates"][0]["skip_reason"],
+        json!("provider_request_body_build_failed")
+    );
+    assert_eq!(
         payload["candidates"][0]["error_type"],
         json!("no_local_stream_plans")
     );
@@ -278,6 +291,10 @@ async fn admin_monitoring_trace_request_falls_back_to_usage_routing_snapshot() {
     assert_eq!(
         payload["candidates"][0]["extra_data"]["execution_path"],
         json!("local_execution_runtime_miss")
+    );
+    assert_eq!(
+        payload["candidates"][0]["extra_data"]["failure_diagnostic"]["path"],
+        json!("$.reasoning.summary")
     );
 }
 

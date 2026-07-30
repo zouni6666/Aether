@@ -7,6 +7,7 @@ use aether_ai_formats::formats::conversion::response::{
     convert_openai_chat_response_to_openai_responses,
     convert_openai_responses_response_to_openai_chat,
 };
+use aether_ai_formats::formats::openai::responses::openai_responses_synthetic_reasoning_item_id;
 use aether_ai_formats::formats::openai::responses::response::ensure_modern_openai_responses_response_fields;
 use aether_ai_formats::formats::registry::{convert_response, FormatContext, FormatError};
 use aether_ai_formats::{
@@ -3185,8 +3186,9 @@ fn materialize_openai_responses_reasoning_item(
     let mut item = state.item;
     item.entry("type".to_string())
         .or_insert_with(|| Value::String("reasoning".to_string()));
-    item.entry("id".to_string())
-        .or_insert_with(|| Value::String(format!("{response_id}_rs_0")));
+    item.entry("id".to_string()).or_insert_with(|| {
+        Value::String(openai_responses_synthetic_reasoning_item_id(response_id, 0))
+    });
     item.entry("status".to_string())
         .or_insert_with(|| Value::String("completed".to_string()));
     if !state.summary_text.is_empty() {

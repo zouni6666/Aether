@@ -9,6 +9,9 @@ use crate::formats::openai::chat::stream::{
     OpenAIResponsesProviderState,
 };
 use crate::formats::openai::image::stream::OpenAiImageStreamTerminalState;
+use crate::formats::openai::responses::history::{
+    record_converted_response_history, ResponseHistoryRecord,
+};
 use crate::formats::shared::error_body::{
     build_core_error_body_for_client_format, LocalCoreSyncErrorKind,
 };
@@ -25,6 +28,8 @@ pub struct StreamingStandardFormatMatrix {
     client: Option<ClientStreamEmitter>,
     propagated_actual_service_tier: Option<String>,
     terminated: bool,
+    history_recorded: bool,
+    pending_history_record: Option<ResponseHistoryRecord>,
 }
 
 impl StreamingStandardFormatMatrix {
@@ -56,7 +61,7 @@ impl StreamingStandardFormatMatrix {
                 client.set_actual_service_tier(propagated_actual_service_tier.as_deref());
             }
         }
-        self.emit_frames(frames)
+        self.emit_frames(report_context, frames)
     }
 
     pub fn finish(&mut self, report_context: &Value) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
@@ -79,10 +84,11 @@ impl StreamingStandardFormatMatrix {
                 client.set_actual_service_tier(propagated_actual_service_tier.as_deref());
             }
         }
-        let mut out = self.emit_frames(frames)?;
+        let mut out = self.emit_frames(report_context, frames)?;
         if let Some(client) = self.client.as_mut() {
             out.extend(client.finish()?);
         }
+        self.record_response_history(report_context);
         Ok(out)
     }
 
@@ -100,6 +106,7 @@ impl StreamingStandardFormatMatrix {
 
     fn emit_frames(
         &mut self,
+        report_context: &Value,
         frames: Vec<CanonicalStreamFrame>,
     ) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
         let Some(client) = self.client.as_mut() else {
@@ -133,7 +140,28 @@ impl StreamingStandardFormatMatrix {
             }
             out.extend(client.emit(frame)?);
         }
+        self.record_response_history(report_context);
         Ok(out)
+    }
+
+    fn record_response_history(&mut self, report_context: &Value) {
+        if self.history_recorded {
+            return;
+        }
+        let Some(response) = self.client.as_ref().and_then(|client| match client {
+            ClientStreamEmitter::OpenAIResponses(emitter) => {
+                emitter.completed_response_for_history()
+            }
+            _ => None,
+        }) else {
+            return;
+        };
+        self.pending_history_record = record_converted_response_history(report_context, response);
+        self.history_recorded = true;
+    }
+
+    pub fn take_response_history_record(&mut self) -> Option<ResponseHistoryRecord> {
+        self.pending_history_record.take()
     }
 
     fn emit_error(&mut self, error_body: Value) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
@@ -619,6 +647,7 @@ fn parse_gemini_error(payload: &Value) -> Option<(String, Option<String>, LocalC
 #[cfg(test)]
 mod tests {
     use super::{StreamingStandardFormatMatrix, StreamingStandardTerminalObserver};
+    use crate::formats::{context::FormatContext, registry::convert_request};
     use serde_json::{json, Value};
 
     fn report_context(provider_api_format: &str, client_api_format: &str) -> Value {
@@ -640,6 +669,121 @@ mod tests {
             .filter(|payload| *payload != "[DONE]")
             .filter_map(|payload| serde_json::from_str(payload).ok())
             .collect()
+    }
+
+    #[test]
+    fn streamed_chat_tool_call_records_responses_continuation_history() {
+        let report_context = json!({
+            "provider_api_format": "openai:chat",
+            "client_api_format": "openai:responses",
+            "mapped_model": "deepseek-v4-flash",
+            "needs_conversion": true,
+            "original_request_body": {
+                "model": "deepseek-v4-flash",
+                "input": [{"role": "user", "content": "perform a deep scan"}]
+            }
+        });
+        let mut matrix = StreamingStandardFormatMatrix::default();
+        matrix
+            .transform_line(
+                &report_context,
+                data_line(json!({
+                    "id": "chatcmpl_history_stream_test_1",
+                    "model": "deepseek-v4-flash",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [{
+                                "index": 0,
+                                "id": "call_history_stream_test_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "create_discovery_manifest",
+                                    "arguments": "{\"root\":"
+                                }
+                            }]
+                        },
+                        "finish_reason": Value::Null
+                    }]
+                })),
+            )
+            .expect("tool start should convert");
+        matrix
+            .transform_line(
+                &report_context,
+                data_line(json!({
+                    "id": "chatcmpl_history_stream_test_1",
+                    "model": "deepseek-v4-flash",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [{
+                                "index": 0,
+                                "function": {"arguments": "\"src\"}"}
+                            }]
+                        },
+                        "finish_reason": Value::Null
+                    }]
+                })),
+            )
+            .expect("tool arguments should convert");
+        let terminal = matrix
+            .transform_line(
+                &report_context,
+                data_line(json!({
+                    "id": "chatcmpl_history_stream_test_1",
+                    "model": "deepseek-v4-flash",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "tool_calls"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 4,
+                        "total_tokens": 14
+                    }
+                })),
+            )
+            .expect("tool finish should convert");
+        let terminal_sse = String::from_utf8(terminal).expect("SSE should be utf8");
+        assert!(terminal_sse.contains("event: response.function_call_arguments.done"));
+        assert!(terminal_sse.contains("event: response.output_item.done"));
+        assert!(terminal_sse.contains("event: response.completed"));
+        let persisted = matrix
+            .take_response_history_record()
+            .expect("completed stream should expose one persistence record");
+        assert!(persisted
+            .storage_key
+            .starts_with("ai:responses:history:v1:"));
+        assert!(persisted.payload.contains("resp_history_stream_test_1"));
+        assert!(matrix.take_response_history_record().is_none());
+
+        let continuation = convert_request(
+            "openai:responses",
+            "openai:chat",
+            &json!({
+                "model": "deepseek-v4-flash",
+                "previous_response_id": "resp_history_stream_test_1",
+                "input": [{
+                    "type": "function_call_output",
+                    "call_id": "call_history_stream_test_1",
+                    "output": "manifest-created"
+                }]
+            }),
+            &FormatContext::default(),
+        )
+        .expect("streamed response history should restore the next Chat request");
+        assert_eq!(continuation["messages"][1]["role"], "assistant");
+        assert_eq!(
+            continuation["messages"][1]["tool_calls"][0]["id"],
+            "call_history_stream_test_1"
+        );
+        assert_eq!(continuation["messages"][2]["role"], "tool");
+        assert_eq!(
+            continuation["messages"][2]["tool_call_id"],
+            "call_history_stream_test_1"
+        );
     }
 
     #[test]

@@ -9,7 +9,8 @@ use aether_data_contracts::repository::usage::{
     normalize_provider_service_tier, resolve_provider_cache_ttl_minutes, UsageBodyCaptureState,
     PROVIDER_ACTUAL_SERVICE_TIER_METADATA_KEY, PROVIDER_CACHE_TTL_MINUTES_METADATA_KEY,
     PROVIDER_REASONING_EFFORT_METADATA_KEY, PROVIDER_SERVICE_TIER_METADATA_KEY,
-    REQUESTED_REASONING_EFFORT_METADATA_KEY,
+    REQUESTED_REASONING_EFFORT_METADATA_KEY, ROUTING_CANDIDATE_SKIP_REASON_METADATA_KEY,
+    ROUTING_FAILURE_DIAGNOSTIC_METADATA_KEY,
 };
 use serde_json::{json, Map, Value};
 
@@ -376,6 +377,8 @@ fn copy_allowed_metadata_fields(source: &Map<String, Value>, target: &mut Map<St
     copy_non_null_value(source, target, "dimensions");
     copy_non_null_value(source, target, "billing_rule_snapshot");
     copy_non_null_value(source, target, "scheduling_audit");
+    copy_non_empty_string(source, target, ROUTING_CANDIDATE_SKIP_REASON_METADATA_KEY);
+    copy_non_null_value(source, target, ROUTING_FAILURE_DIAGNOSTIC_METADATA_KEY);
     copy_non_null_value(source, target, "tls_fingerprint");
     copy_number(source, target, "rate_multiplier");
     copy_bool(source, target, "is_free_tier");
@@ -432,6 +435,12 @@ fn move_allowed_metadata_fields(mut source: Map<String, Value>, target: &mut Map
     remove_non_null_value(&mut source, target, "dimensions");
     remove_non_null_value(&mut source, target, "billing_rule_snapshot");
     remove_non_null_value(&mut source, target, "scheduling_audit");
+    remove_non_empty_string(
+        &mut source,
+        target,
+        ROUTING_CANDIDATE_SKIP_REASON_METADATA_KEY,
+    );
+    remove_non_null_value(&mut source, target, ROUTING_FAILURE_DIAGNOSTIC_METADATA_KEY);
     remove_non_null_value(&mut source, target, "tls_fingerprint");
     remove_number(&mut source, target, "rate_multiplier");
     remove_bool(&mut source, target, "is_free_tier");
@@ -800,6 +809,13 @@ mod tests {
             "global_model_id": "global-model-1",
             "global_model_name": "gpt-5",
             "dimensions": {"total_input_context": 10},
+            "routing_candidate_skip_reason": "provider_request_body_build_failed",
+            "routing_failure_diagnostic": {
+                "kind": "request_body_build",
+                "path": "$.reasoning.summary",
+                "message": "invalid reasoning summary",
+                "safe_to_show": true
+            },
             "rate_multiplier": 1.25,
             "is_free_tier": false,
             "input_price_per_1m": 3.0,
@@ -844,6 +860,13 @@ mod tests {
                 "global_model_id": "global-model-1",
                 "global_model_name": "gpt-5",
                 "dimensions": {"total_input_context": 10},
+                "routing_candidate_skip_reason": "provider_request_body_build_failed",
+                "routing_failure_diagnostic": {
+                    "kind": "request_body_build",
+                    "path": "$.reasoning.summary",
+                    "message": "invalid reasoning summary",
+                    "safe_to_show": true
+                },
                 "rate_multiplier": 1.25,
                 "is_free_tier": false,
                 "input_price_per_1m": 3.0,

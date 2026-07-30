@@ -135,6 +135,22 @@ pub fn convert_request(
 ) -> Result<Value, FormatError> {
     let source = parse_format(source_format)?;
     let target = parse_format(target_format)?;
+    let expanded_body = if source == FormatId::OpenAiResponses && target == FormatId::OpenAiChat {
+        Some(
+            openai_responses::history::expand_previous_response_for_chat(
+                body,
+                ctx.history_scope.as_deref(),
+            )
+            .map_err(|reason| FormatError::UnsupportedField {
+                format: source.as_str().to_string(),
+                field: "previous_response_id".to_string(),
+                reason,
+            })?,
+        )
+    } else {
+        None
+    };
+    let body = expanded_body.as_ref().unwrap_or(body);
     validate_openai_responses_target_contract(target_format, body)?;
     let mut request = parse_request(source_format, body, ctx)?;
     validate_runtime_request_conversion(
@@ -3181,7 +3197,7 @@ mod tests {
 
     use super::{
         convert_request, convert_request_pure, convert_request_pure_with_context,
-        convert_response_pure, FormatContext,
+        convert_response_pure, FormatContext, FormatError,
     };
     use crate::formats::id::FormatId;
 
@@ -5487,7 +5503,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_openai_responses_to_chat_does_not_leak_responses_only_extensions() {
+    fn runtime_openai_responses_to_chat_rejects_missing_previous_response_history() {
         let body = json!({
             "model": "gpt-source",
             "input": [{"role": "user", "content": "hello"}],
@@ -5496,17 +5512,19 @@ mod tests {
             "stream": true
         });
 
-        let converted = convert_request(
+        let error = convert_request(
             "openai:responses",
             "openai:chat",
             &body,
             &FormatContext::default(),
         )
-        .expect("legacy conversion should still emit a chat body");
+        .expect_err("missing previous response history must fail closed");
 
-        assert!(converted.get("stream").is_none());
-        assert!(converted.get("include").is_none());
-        assert!(converted.get("previous_response_id").is_none());
+        assert!(matches!(
+            error,
+            FormatError::UnsupportedField { ref field, .. }
+                if field == "previous_response_id"
+        ));
     }
 
     #[test]

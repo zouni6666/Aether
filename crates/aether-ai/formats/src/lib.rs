@@ -52,7 +52,8 @@ pub use formats::openai::responses::request::{
     validate_openai_responses_request_contract, OpenAiResponsesRequestContractViolation,
 };
 pub use formats::openai::responses::{
-    openai_responses_request_operation, OPENAI_RESPONSES_OPERATION_COMPACT,
+    openai_responses_request_operation, openai_responses_synthetic_reasoning_item_id,
+    strip_incompatible_openai_responses_reasoning_items, OPENAI_RESPONSES_OPERATION_COMPACT,
 };
 pub use formats::registry::{
     build_stream_transcoder, convert_request, convert_request_pure,

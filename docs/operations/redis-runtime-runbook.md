@@ -31,6 +31,27 @@ crash should restore persistence in the Redis command:
 Expect higher tail latency when Redis persistence shares disks with Postgres or
 application logs.
 
+### OpenAI Responses continuation history
+
+When an OpenAI Responses request is converted to an OpenAI Chat provider,
+Aether stores the completed continuation transcript in `RuntimeState` under the
+`ai:responses:history:v1` namespace. Records are immutable, scoped by a hashed
+API key identity, limited to 8 MiB, and expire after six hours. Redis `SET` with
+TTL makes completion writes atomic and idempotent.
+
+All gateway instances must use the same Redis URL and key prefix. This allows a
+continuation request to land on another instance and allows gateway processes
+to restart without losing history. `AETHER_RUNTIME_BACKEND=memory` remains a
+single-process development mode and cannot provide either guarantee; multi-node
+startup rejects it.
+
+The bundled non-persistent Redis policy survives gateway restarts but not a
+Redis container or host restart. Deployments that require continuation history
+to survive Redis restarts must enable the AOF/RDB policy above and mount `/data`,
+or use an externally managed persistent Redis service. Monitor
+`openai_response_history_read_failed`, `openai_response_history_write_failed`,
+and `openai_response_history_invalid` events for backend or payload failures.
+
 ## Latency Triage
 
 Redis `INFO commandstats` reports `latency_percentiles_usec_*` values in

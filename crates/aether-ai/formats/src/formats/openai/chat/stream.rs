@@ -2,8 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{json, Map, Value};
 
-use crate::formats::openai::responses::response::{
-    ensure_modern_openai_responses_response_fields, openai_responses_current_timestamp,
+use crate::formats::openai::responses::{
+    openai_responses_synthetic_reasoning_item_id,
+    response::{
+        ensure_modern_openai_responses_response_fields, openai_responses_current_timestamp,
+    },
 };
 use crate::formats::shared::response::build_generated_tool_call_id;
 use crate::formats::shared::sse::{encode_done_sse, encode_json_sse};
@@ -21,6 +24,7 @@ fn normalize_openai_service_tier(value: Option<&str>) -> Option<String> {
 struct OpenAIChatProviderToolState {
     id: Option<String>,
     name: Option<String>,
+    pending_arguments: String,
     started_emitted: bool,
 }
 
@@ -279,59 +283,54 @@ impl OpenAIChatProviderState {
                     if let Some(call_id) = tool_call_object.get("id").and_then(Value::as_str) {
                         state.id = Some(call_id.to_string());
                     }
+                    let mut arguments = None;
                     if let Some(function) =
                         tool_call_object.get("function").and_then(Value::as_object)
                     {
                         if let Some(name) = function.get("name").and_then(Value::as_str) {
                             state.name = Some(name.to_string());
                         }
-                        if !state.started_emitted && (state.id.is_some() || state.name.is_some()) {
+                        arguments = function
+                            .get("arguments")
+                            .and_then(Value::as_str)
+                            .filter(|arguments| !arguments.is_empty());
+                    }
+                    if !state.started_emitted {
+                        if let Some(arguments) = arguments {
+                            state.pending_arguments.push_str(arguments);
+                        }
+                        if let (Some(call_id), Some(name)) = (state.id.clone(), state.name.clone())
+                        {
                             out.push(CanonicalStreamFrame {
                                 id: id.clone(),
                                 model: model.clone(),
                                 event: CanonicalStreamEvent::ToolCallStart {
                                     index,
-                                    call_id: state
-                                        .id
-                                        .clone()
-                                        .unwrap_or_else(|| build_generated_tool_call_id(index)),
-                                    name: state
-                                        .name
-                                        .clone()
-                                        .unwrap_or_else(|| "unknown".to_string()),
+                                    call_id,
+                                    name,
                                 },
                             });
                             state.started_emitted = true;
-                        }
-                        if let Some(arguments) = function.get("arguments").and_then(Value::as_str) {
-                            if !arguments.is_empty() {
-                                if !state.started_emitted {
-                                    out.push(CanonicalStreamFrame {
-                                        id: id.clone(),
-                                        model: model.clone(),
-                                        event: CanonicalStreamEvent::ToolCallStart {
-                                            index,
-                                            call_id: state.id.clone().unwrap_or_else(|| {
-                                                build_generated_tool_call_id(index)
-                                            }),
-                                            name: state
-                                                .name
-                                                .clone()
-                                                .unwrap_or_else(|| "unknown".to_string()),
-                                        },
-                                    });
-                                    state.started_emitted = true;
-                                }
+                            if !state.pending_arguments.is_empty() {
                                 out.push(CanonicalStreamFrame {
                                     id: id.clone(),
                                     model: model.clone(),
                                     event: CanonicalStreamEvent::ToolCallArgumentsDelta {
                                         index,
-                                        arguments: arguments.to_string(),
+                                        arguments: std::mem::take(&mut state.pending_arguments),
                                     },
                                 });
                             }
                         }
+                    } else if let Some(arguments) = arguments {
+                        out.push(CanonicalStreamFrame {
+                            id: id.clone(),
+                            model: model.clone(),
+                            event: CanonicalStreamEvent::ToolCallArgumentsDelta {
+                                index,
+                                arguments: arguments.to_string(),
+                            },
+                        });
                     }
                 }
             } else if delta.contains_key("tool_calls") {
@@ -651,6 +650,22 @@ impl OpenAIResponsesProviderState {
         });
     }
 
+    fn emit_ready_function_call(
+        &mut self,
+        report_context: &Value,
+        out: &mut Vec<CanonicalStreamFrame>,
+        index: usize,
+    ) {
+        if self
+            .tool_calls
+            .get(&index)
+            .is_none_or(|state| state.call_id.trim().is_empty())
+        {
+            return;
+        }
+        self.emit_ready_tool_call(report_context, out, index);
+    }
+
     fn merge_tool_call_arguments(state: &mut OpenAIResponsesProviderToolState, arguments: &str) {
         if arguments.is_empty() {
             return;
@@ -715,7 +730,6 @@ impl OpenAIResponsesProviderState {
         let state = self.tool_calls.entry(index).or_default();
         state.call_id = item
             .get("call_id")
-            .or_else(|| item.get("id"))
             .and_then(Value::as_str)
             .unwrap_or(state.call_id.as_str())
             .to_string();
@@ -730,7 +744,7 @@ impl OpenAIResponsesProviderState {
             .unwrap_or_default()
             .to_string();
         Self::merge_tool_call_arguments(state, &completed_arguments);
-        self.emit_ready_tool_call(report_context, out, index);
+        self.emit_ready_function_call(report_context, out, index);
     }
 
     fn emit_custom_tool_call_item(
@@ -1553,21 +1567,11 @@ impl OpenAIResponsesProviderState {
                     .map(|value| value as usize);
                 let index = self.tool_index_for_key(key, output_index);
                 let state = self.tool_calls.entry(index).or_default();
-                if let Some(call_id) = value
-                    .get("call_id")
-                    .or_else(|| value.get("id"))
-                    .and_then(Value::as_str)
-                {
+                if let Some(call_id) = value.get("call_id").and_then(Value::as_str) {
                     state.call_id = call_id.to_string();
-                } else if state.call_id.is_empty() {
-                    state.call_id = value
-                        .get("item_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
                 }
                 state.arguments.push_str(delta);
-                self.emit_ready_tool_call(report_context, &mut out, index);
+                self.emit_ready_function_call(report_context, &mut out, index);
             }
             "response.function_call_arguments.done" => {
                 let arguments = value
@@ -1604,16 +1608,14 @@ impl OpenAIResponsesProviderState {
                 let state = self.tool_calls.entry(index).or_default();
                 state.call_id = value
                     .get("call_id")
-                    .or_else(|| value.get("id"))
                     .and_then(Value::as_str)
                     .or_else(|| {
                         value
                             .get("item")
                             .and_then(Value::as_object)
-                            .and_then(|item| item.get("call_id").or_else(|| item.get("id")))
+                            .and_then(|item| item.get("call_id"))
                             .and_then(Value::as_str)
                     })
-                    .or_else(|| value.get("item_id").and_then(Value::as_str))
                     .unwrap_or(state.call_id.as_str())
                     .to_string();
                 state.name = value
@@ -1629,7 +1631,7 @@ impl OpenAIResponsesProviderState {
                     .unwrap_or(state.name.as_str())
                     .to_string();
                 Self::merge_tool_call_arguments(state, arguments);
-                self.emit_ready_tool_call(report_context, &mut out, index);
+                self.emit_ready_function_call(report_context, &mut out, index);
             }
             "response.function_call_output.delta" | "response.function_call_output.done" => {
                 let tool_use_id = value
@@ -1896,6 +1898,7 @@ pub struct OpenAIResponsesClientEmitter {
     image_generation_items: BTreeMap<usize, Value>,
     opaque_output_items: BTreeMap<usize, Value>,
     opaque_output_indexes: BTreeMap<String, usize>,
+    completed_history_response: Option<Value>,
 }
 
 impl OpenAIChatClientEmitter {
@@ -2210,6 +2213,10 @@ impl OpenAIResponsesClientEmitter {
         self.response_id.as_deref().unwrap_or("resp-local-stream")
     }
 
+    pub(crate) fn completed_response_for_history(&self) -> Option<&Value> {
+        self.completed_history_response.as_ref()
+    }
+
     fn model(&self) -> &str {
         self.model.as_deref().unwrap_or("unknown")
     }
@@ -2223,7 +2230,15 @@ impl OpenAIResponsesClientEmitter {
     fn reasoning_item_id(&self) -> String {
         self.reasoning_item_id
             .clone()
-            .unwrap_or_else(|| format!("{}_rs_0", self.response_id()))
+            .unwrap_or_else(|| openai_responses_synthetic_reasoning_item_id(self.response_id(), 0))
+    }
+
+    fn tool_call_item_id(&self, index: usize) -> String {
+        format!(
+            "fc_{}_{}",
+            self.response_id().trim_start_matches("resp_"),
+            index
+        )
     }
 
     fn ensure_message_item_id(&mut self) -> String {
@@ -2235,7 +2250,10 @@ impl OpenAIResponsesClientEmitter {
 
     fn ensure_reasoning_item_id(&mut self) -> String {
         if self.reasoning_item_id.is_none() {
-            self.reasoning_item_id = Some(format!("{}_rs_0", self.response_id()));
+            self.reasoning_item_id = Some(openai_responses_synthetic_reasoning_item_id(
+                self.response_id(),
+                0,
+            ));
         }
         self.reasoning_item_id()
     }
@@ -2601,11 +2619,12 @@ impl OpenAIResponsesClientEmitter {
         for index in indices {
             let output_index = self.ensure_tool_output_index(index);
             let state = self.tool_calls.get(&index).cloned().unwrap_or_default();
-            let item_id = if state.call_id.is_empty() {
+            let call_id = if state.call_id.is_empty() {
                 build_generated_tool_call_id(index)
             } else {
                 state.call_id.clone()
             };
+            let item_id = self.tool_call_item_id(index);
             let name = if state.name.is_empty() {
                 "unknown".to_string()
             } else {
@@ -2638,7 +2657,7 @@ impl OpenAIResponsesClientEmitter {
                     "response_id": self.response_id(),
                     "output_index": output_index,
                     "item_id": item_id.clone(),
-                    "call_id": item_id.clone(),
+                    "call_id": call_id.clone(),
                     "name": name,
                     "arguments": state.arguments.as_str(),
                 }),
@@ -2652,7 +2671,7 @@ impl OpenAIResponsesClientEmitter {
                     "item": {
                         "type": "function_call",
                         "id": item_id.clone(),
-                        "call_id": item_id,
+                        "call_id": call_id,
                         "name": name,
                         "arguments": state.arguments.as_str(),
                         "status": "completed",
@@ -2795,11 +2814,12 @@ impl OpenAIResponsesClientEmitter {
         }
         for (index, state) in &self.tool_calls {
             if let Some(output_index) = state.output_index {
-                let item_id = if state.call_id.is_empty() {
+                let call_id = if state.call_id.is_empty() {
                     build_generated_tool_call_id(*index)
                 } else {
                     state.call_id.clone()
                 };
+                let item_id = self.tool_call_item_id(*index);
                 if state.web_search {
                     ordered_output.push((
                         output_index,
@@ -2820,7 +2840,7 @@ impl OpenAIResponsesClientEmitter {
                     json!({
                         "type": "function_call",
                         "id": item_id.clone(),
-                        "call_id": item_id,
+                        "call_id": call_id,
                         "name": if state.name.is_empty() {
                             "unknown".to_string()
                         } else {
@@ -2948,6 +2968,9 @@ impl OpenAIResponsesClientEmitter {
         out.extend(self.finish_text_item()?);
         out.extend(self.finish_tool_items()?);
         out.extend(self.finish_tool_result_items()?);
+        if event_type == "response.completed" {
+            self.completed_history_response = Some(response.clone());
+        }
         out.extend(self.encode_response_event(
             event_type,
             json!({
@@ -3110,6 +3133,7 @@ impl OpenAIResponsesClientEmitter {
                 let mut out = self.ensure_started()?;
                 let output_index = self.ensure_tool_output_index(index);
                 let response_id = self.response_id().to_string();
+                let item_id = self.tool_call_item_id(index);
                 let state = self.tool_calls.entry(index).or_default();
                 state.call_id = call_id.clone();
                 state.name = name.clone();
@@ -3119,7 +3143,7 @@ impl OpenAIResponsesClientEmitter {
                 let item = if state.web_search {
                     json!({
                         "type": "web_search_call",
-                        "id": emitted_call_id,
+                        "id": item_id,
                         "status": "in_progress",
                         "action": {
                             "type": "search",
@@ -3129,7 +3153,7 @@ impl OpenAIResponsesClientEmitter {
                 } else {
                     json!({
                         "type": "function_call",
-                        "id": call_id,
+                        "id": item_id,
                         "call_id": emitted_call_id,
                         "name": emitted_name,
                         "arguments": "",
@@ -3156,19 +3180,20 @@ impl OpenAIResponsesClientEmitter {
                 if state.web_search {
                     return Ok(out);
                 }
-                let item_id = if state.call_id.is_empty() {
+                let call_id = if state.call_id.is_empty() {
                     build_generated_tool_call_id(index)
                 } else {
                     state.call_id.clone()
                 };
+                let item_id = self.tool_call_item_id(index);
                 out.extend(self.encode_response_event(
                     "response.function_call_arguments.delta",
                     json!({
                         "type": "response.function_call_arguments.delta",
                         "response_id": response_id,
                         "output_index": output_index,
-                        "item_id": item_id.clone(),
-                        "call_id": item_id,
+                        "item_id": item_id,
+                        "call_id": call_id,
                         "delta": arguments,
                     }),
                 )?);
@@ -3297,6 +3322,9 @@ impl OpenAIResponsesClientEmitter {
                     ),
                     _ => ("response.completed", self.completed_response(usage)),
                 };
+                if event_type == "response.completed" {
+                    self.completed_history_response = Some(response.clone());
+                }
                 out.extend(self.encode_response_event(
                     event_type,
                     json!({
@@ -3621,6 +3649,81 @@ mod tests {
                     .and_then(|delta| delta.get("future_delta_type"))
                     .is_some()
         )));
+    }
+
+    #[test]
+    fn openai_chat_provider_state_waits_for_real_tool_call_identity() {
+        let mut state = OpenAIChatProviderState::default();
+        let report_context = json!({});
+        let mut frames = state
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "id": "chatcmpl_tool_123",
+                    "model": "deepseek-v4-flash",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [{
+                                "index": 0,
+                                "function": {"arguments": "{\"path\":"}
+                            }]
+                        }
+                    }]
+                })),
+            )
+            .expect("arguments-first delta should parse");
+        frames.extend(
+            state
+                .push_line(
+                    &report_context,
+                    data_line(json!({
+                        "id": "chatcmpl_tool_123",
+                        "model": "deepseek-v4-flash",
+                        "choices": [{
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [{
+                                    "index": 0,
+                                    "function": {"name": "security_scan", "arguments": "\"src\"}"}
+                                }]
+                            }
+                        }]
+                    })),
+                )
+                .expect("name delta should parse"),
+        );
+
+        assert!(!frames.iter().any(|frame| matches!(
+            frame.event,
+            CanonicalStreamEvent::ToolCallStart { .. }
+                | CanonicalStreamEvent::ToolCallArgumentsDelta { .. }
+        )));
+
+        let identified = state
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "id": "chatcmpl_tool_123",
+                    "model": "deepseek-v4-flash",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"tool_calls": [{"index": 0, "id": "call_security_123"}]}
+                    }]
+                })),
+            )
+            .expect("id delta should parse");
+
+        assert!(matches!(
+            identified.first().map(|frame| &frame.event),
+            Some(CanonicalStreamEvent::ToolCallStart { call_id, name, .. })
+                if call_id == "call_security_123" && name == "security_scan"
+        ));
+        assert!(matches!(
+            identified.get(1).map(|frame| &frame.event),
+            Some(CanonicalStreamEvent::ToolCallArgumentsDelta { arguments, .. })
+                if arguments == "{\"path\":\"src\"}"
+        ));
     }
 
     #[test]
@@ -4544,6 +4647,91 @@ mod tests {
     }
 
     #[test]
+    fn openai_responses_provider_state_waits_for_call_id_distinct_from_item_id() {
+        let mut state = OpenAIResponsesProviderState::default();
+        let report_context = json!({});
+
+        let item_frames = state
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "type": "response.output_item.added",
+                    "response_id": "resp_delayed_call_id",
+                    "output_index": 0,
+                    "item": {
+                        "type": "function_call",
+                        "id": "fc_delayed_call_id",
+                        "name": "Read",
+                        "arguments": ""
+                    }
+                })),
+            )
+            .expect("function-call item should parse");
+        assert!(!item_frames.iter().any(|frame| matches!(
+            frame.event,
+            CanonicalStreamEvent::ToolCallStart { .. }
+                | CanonicalStreamEvent::ToolCallArgumentsDelta { .. }
+        )));
+
+        let delta_frames = state
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "type": "response.function_call_arguments.delta",
+                    "response_id": "resp_delayed_call_id",
+                    "output_index": 0,
+                    "item_id": "fc_delayed_call_id",
+                    "delta": "{\"path\":"
+                })),
+            )
+            .expect("arguments delta should be buffered");
+        assert!(!delta_frames.iter().any(|frame| matches!(
+            frame.event,
+            CanonicalStreamEvent::ToolCallStart { .. }
+                | CanonicalStreamEvent::ToolCallArgumentsDelta { .. }
+        )));
+
+        let identity_frames = state
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "type": "response.function_call_arguments.done",
+                    "response_id": "resp_delayed_call_id",
+                    "output_index": 0,
+                    "item_id": "fc_delayed_call_id",
+                    "item": {
+                        "type": "function_call",
+                        "id": "fc_delayed_call_id",
+                        "call_id": "call_delayed_call_id",
+                        "name": "Read",
+                        "arguments": "{\"path\":\"src/lib.rs\"}"
+                    },
+                    "arguments": "{\"path\":\"src/lib.rs\"}"
+                })),
+            )
+            .expect("real call identity should flush buffered arguments");
+
+        assert!(identity_frames.iter().any(|frame| matches!(
+            frame.event,
+            CanonicalStreamEvent::ToolCallStart {
+                ref call_id,
+                ref name,
+                ..
+            } if call_id == "call_delayed_call_id" && name == "Read"
+        )));
+        assert!(!identity_frames.iter().any(|frame| matches!(
+            frame.event,
+            CanonicalStreamEvent::ToolCallStart { ref call_id, .. }
+                if call_id == "fc_delayed_call_id"
+        )));
+        assert!(identity_frames.iter().any(|frame| matches!(
+            frame.event,
+            CanonicalStreamEvent::ToolCallArgumentsDelta { ref arguments, .. }
+                if arguments == "{\"path\":\"src/lib.rs\"}"
+        )));
+    }
+
+    #[test]
     fn openai_responses_provider_state_parses_function_call_output_as_tool_result() {
         let mut state = OpenAIResponsesProviderState::default();
         let report_context = json!({});
@@ -4823,6 +5011,68 @@ mod tests {
         assert!(sse.contains("\"type\":\"function_call_output\""));
         assert!(sse.contains("\"call_id\":\"call_123\""));
         assert!(sse.contains("\"output\":\"{\\\"ok\\\":true}\""));
+    }
+
+    #[test]
+    fn openai_responses_client_emitter_keeps_call_id_distinct_and_stable() {
+        let mut emitter = OpenAIResponsesClientEmitter::default();
+        let mut bytes = emitter
+            .emit(CanonicalStreamFrame {
+                id: "resp_tool_identity_123".to_string(),
+                model: "deepseek-v4-flash".to_string(),
+                event: CanonicalStreamEvent::ToolCallStart {
+                    index: 0,
+                    call_id: "call_security_123".to_string(),
+                    name: "security_scan".to_string(),
+                },
+            })
+            .expect("tool start should encode");
+        bytes.extend(
+            emitter
+                .emit(CanonicalStreamFrame {
+                    id: "resp_tool_identity_123".to_string(),
+                    model: "deepseek-v4-flash".to_string(),
+                    event: CanonicalStreamEvent::ToolCallArgumentsDelta {
+                        index: 0,
+                        arguments: "{\"depth\":\"deep\"}".to_string(),
+                    },
+                })
+                .expect("tool arguments should encode"),
+        );
+        bytes.extend(
+            emitter
+                .emit(CanonicalStreamFrame {
+                    id: "resp_tool_identity_123".to_string(),
+                    model: "deepseek-v4-flash".to_string(),
+                    event: CanonicalStreamEvent::Finish {
+                        finish_reason: Some("tool_calls".to_string()),
+                        usage: None,
+                    },
+                })
+                .expect("tool finish should encode"),
+        );
+
+        let sse = String::from_utf8(bytes).expect("sse should be utf8");
+        let item_id = "fc_tool_identity_123_0";
+        assert!(sse.contains(&format!("\"id\":\"{item_id}\"")));
+        assert!(sse.contains(&format!("\"item_id\":\"{item_id}\"")));
+        assert!(sse.contains("\"call_id\":\"call_security_123\""));
+        assert!(!sse.contains("\"id\":\"call_security_123\""));
+        assert!(
+            sse.find("event: response.output_item.added")
+                < sse.find("event: response.function_call_arguments.delta")
+        );
+        assert!(
+            sse.find("event: response.function_call_arguments.delta")
+                < sse.find("event: response.function_call_arguments.done")
+        );
+        assert!(
+            sse.find("event: response.function_call_arguments.done")
+                < sse.find("event: response.output_item.done")
+        );
+        assert!(
+            sse.find("event: response.output_item.done") < sse.find("event: response.completed")
+        );
     }
 
     #[test]
@@ -5216,7 +5466,8 @@ mod tests {
         assert!(sse.contains("event: response.reasoning_summary_text.delta\n"));
         assert!(sse.contains("event: response.reasoning_summary_text.done\n"));
         assert!(sse.contains("event: response.reasoning_summary_part.done\n"));
-        assert!(sse.contains("\"item_id\":\"resp_456_rs_0\""));
+        let reasoning_item_id = openai_responses_synthetic_reasoning_item_id("resp_456", 0);
+        assert!(sse.contains(&format!("\"item_id\":\"{reasoning_item_id}\"")));
         assert!(sse.contains("\"type\":\"reasoning\""));
         assert_eq!(response_sequence_numbers(&sse), (1..=9).collect::<Vec<_>>());
     }

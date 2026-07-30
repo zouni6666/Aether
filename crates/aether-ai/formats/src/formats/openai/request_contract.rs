@@ -85,6 +85,10 @@ pub fn finalize_openai_provider_request_with_codex_model_capabilities(
         body,
         finalization.provider_api_format,
     );
+    super::responses::strip_incompatible_openai_responses_reasoning_items(
+        body,
+        finalization.provider_api_format,
+    );
     crate::enforce_request_body_stream_field(
         body,
         finalization.provider_api_format,
@@ -294,6 +298,42 @@ mod tests {
         ] {
             assert!(body.get(field).is_none(), "{field} must not reach Compact");
         }
+    }
+
+    #[test]
+    fn finalization_strips_non_replayable_responses_reasoning_history() {
+        let mut body = json!({
+            "model": "gpt-5.4",
+            "input": [
+                {"type": "reasoning", "id": "rs_provider_123", "summary": []},
+                {
+                    "type": "reasoning",
+                    "id": "item_72d3bd8d367d01977ace23f1",
+                    "summary": []
+                },
+                {"type": "message", "role": "user", "content": "continue"}
+            ]
+        });
+
+        finalize_openai_provider_request(
+            &mut body,
+            OpenAiProviderRequestFinalization {
+                source_api_format: "openai:responses",
+                provider_api_format: "openai:responses",
+                provider_type: "openai",
+                provider_model: "gpt-5.4",
+                source_model: "gpt-5.4",
+                body_rules: None,
+                upstream_is_stream: false,
+                require_body_stream_field: false,
+            },
+        )
+        .expect("foreign reasoning history should be sanitized before validation");
+
+        let input = body["input"].as_array().expect("input array");
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["id"], "rs_provider_123");
+        assert_eq!(input[1]["type"], "message");
     }
 
     #[test]

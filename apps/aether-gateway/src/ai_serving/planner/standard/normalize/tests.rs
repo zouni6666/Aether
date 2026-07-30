@@ -153,6 +153,43 @@ fn local_openai_responses_wrapper_preserves_body_order_after_edits() {
 }
 
 #[test]
+fn local_openai_responses_wrapper_strips_foreign_reasoning_item_ids() {
+    let body_json = json!({
+        "model": "gpt-5.4",
+        "input": [
+            {"type": "reasoning", "id": "rs_provider_123", "summary": []},
+            {
+                "type": "reasoning",
+                "id": "item_72d3bd8d367d01977ace23f1",
+                "summary": []
+            },
+            {"type": "message", "role": "user", "content": "continue"}
+        ]
+    });
+
+    let provider_request_body = build_local_openai_responses_request_body(
+        &body_json,
+        "gpt-5.4",
+        false,
+        false,
+        "codex",
+        "openai:responses",
+        None,
+        None,
+        &http::HeaderMap::new(),
+        false,
+    )
+    .expect("local OpenAI Responses body should build");
+
+    let input = provider_request_body["input"]
+        .as_array()
+        .expect("input array");
+    assert_eq!(input.len(), 2);
+    assert_eq!(input[0]["id"], "rs_provider_123");
+    assert_eq!(input[1]["type"], "message");
+}
+
+#[test]
 fn local_openai_responses_compact_wrapper_strips_store_for_same_format_requests() {
     let body_json = json!({
         "model": "gpt-5.4",

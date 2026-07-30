@@ -12,6 +12,9 @@ use crate::formats::gemini::generate_content::stream::GeminiClientEmitter;
 use crate::formats::openai::chat::stream::{
     OpenAIChatClientEmitter, OpenAIResponsesClientEmitter, OpenAIResponsesProviderState,
 };
+use crate::formats::openai::responses::history::{
+    record_converted_response_history, ResponseHistoryRecord,
+};
 use crate::formats::shared::sse::{encode_done_sse, encode_json_sse};
 use crate::formats::shared::stream_core::common::{
     build_openai_chat_chunk, build_openai_chat_finish_chunk,
@@ -27,6 +30,7 @@ use crate::formats::shared::AiSurfaceFinalizeError;
 pub struct SyncToStreamBridgeOutcome {
     pub sse_body: Vec<u8>,
     pub terminal_summary: Option<ExecutionStreamTerminalSummary>,
+    pub response_history_record: Option<ResponseHistoryRecord>,
 }
 
 pub fn maybe_bridge_standard_sync_json_to_stream(
@@ -101,6 +105,8 @@ pub fn maybe_bridge_standard_sync_json_to_stream(
         &openai_responses_response,
         provider_actual_service_tier.clone(),
     );
+    let response_history_record =
+        record_converted_response_history(&bridge_context, &openai_responses_response);
     let canonical_frames = build_canonical_frames_from_openai_responses_response(
         &openai_responses_response,
         &bridge_context,
@@ -124,6 +130,7 @@ pub fn maybe_bridge_standard_sync_json_to_stream(
     Ok(Some(SyncToStreamBridgeOutcome {
         sse_body,
         terminal_summary,
+        response_history_record,
     }))
 }
 
@@ -168,6 +175,7 @@ fn bridge_openai_responses_same_family_sync_json_to_stream(
             response,
             provider_actual_service_tier_from_sync_response(response, provider_api_format),
         ),
+        response_history_record: None,
     }))
 }
 
@@ -206,6 +214,7 @@ fn maybe_bridge_openai_image_sync_json_to_stream(
             report_context,
             image_count,
         )),
+        response_history_record: None,
     }))
 }
 
@@ -277,6 +286,7 @@ fn maybe_bridge_openai_image_sync_json_to_chat_stream(
     Ok(Some(SyncToStreamBridgeOutcome {
         sse_body,
         terminal_summary: Some(summary),
+        response_history_record: None,
     }))
 }
 
@@ -344,6 +354,7 @@ fn maybe_bridge_openai_image_sync_json_to_responses_stream(
             report_context,
             image_count,
         )),
+        response_history_record: None,
     }))
 }
 
@@ -769,6 +780,7 @@ fn maybe_bridge_aether_sse_response_capture_to_stream(
     Ok(Some(SyncToStreamBridgeOutcome {
         sse_body,
         terminal_summary,
+        response_history_record: None,
     }))
 }
 
@@ -1327,6 +1339,45 @@ mod tests {
             sequence_numbers.windows(2).all(|pair| pair[0] < pair[1]),
             "sequence numbers must be strictly increasing: {sequence_numbers:?}"
         );
+    }
+
+    #[test]
+    fn chat_sync_bridge_exposes_responses_history_record() {
+        let report_context = json!({
+            "provider_api_format": "openai:chat",
+            "client_api_format": "openai:responses",
+            "needs_conversion": true,
+            "api_key_id": "sync-bridge-history-key",
+            "original_request_body": {
+                "model": "deepseek-v4-flash",
+                "input": [{"role": "user", "content": "inspect the repository"}]
+            }
+        });
+        let outcome = maybe_bridge_standard_sync_json_to_stream(
+            &json!({
+                "id": "chatcmpl_sync_history_1",
+                "object": "chat.completion",
+                "model": "deepseek-v4-flash",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "done"},
+                    "finish_reason": "stop"
+                }]
+            }),
+            "openai:chat",
+            "openai:responses",
+            Some(&report_context),
+        )
+        .expect("bridge should succeed")
+        .expect("bridge should produce sse");
+
+        let history_record = outcome
+            .response_history_record
+            .expect("completed bridge should expose shared history");
+        assert!(history_record
+            .storage_key
+            .starts_with("ai:responses:history:v1:"));
+        assert!(history_record.payload.contains("resp_sync_history_1"));
     }
 
     #[test]

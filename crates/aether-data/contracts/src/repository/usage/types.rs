@@ -7,6 +7,8 @@ pub const REQUESTED_REASONING_EFFORT_METADATA_KEY: &str = "requested_reasoning_e
 pub const PROVIDER_SERVICE_TIER_METADATA_KEY: &str = "provider_service_tier";
 pub const PROVIDER_ACTUAL_SERVICE_TIER_METADATA_KEY: &str = "provider_actual_service_tier";
 pub const PROVIDER_CACHE_TTL_MINUTES_METADATA_KEY: &str = "provider_cache_ttl_minutes";
+pub const ROUTING_CANDIDATE_SKIP_REASON_METADATA_KEY: &str = "routing_candidate_skip_reason";
+pub const ROUTING_FAILURE_DIAGNOSTIC_METADATA_KEY: &str = "routing_failure_diagnostic";
 
 pub fn extract_provider_reasoning_effort_from_body(value: Option<&Value>) -> Option<String> {
     let object = value.and_then(Value::as_object)?;
@@ -826,6 +828,16 @@ impl StoredRequestUsageAudit {
         self.local_execution_runtime_miss_reason
             .as_deref()
             .or_else(|| self.request_metadata_string("local_execution_runtime_miss_reason"))
+    }
+
+    pub fn routing_candidate_skip_reason(&self) -> Option<&str> {
+        self.request_metadata_string(ROUTING_CANDIDATE_SKIP_REASON_METADATA_KEY)
+    }
+
+    pub fn routing_failure_diagnostic(&self) -> Option<&Value> {
+        self.request_metadata_object()
+            .and_then(|metadata| metadata.get(ROUTING_FAILURE_DIAGNOSTIC_METADATA_KEY))
+            .filter(|value| value.is_object())
     }
 }
 
@@ -2695,7 +2707,12 @@ mod tests {
             "response_body_ref": "blob://legacy-response",
             "client_response_body_ref": "blob://legacy-client-response",
             "candidate_id": "cand-legacy",
-            "key_name": "primary-legacy"
+            "key_name": "primary-legacy",
+            "routing_candidate_skip_reason": "provider_request_body_build_failed",
+            "routing_failure_diagnostic": {
+                "path": "$.reasoning.summary",
+                "message": "invalid reasoning summary"
+            }
         }));
 
         assert_eq!(
@@ -2726,6 +2743,16 @@ mod tests {
         assert_eq!(
             usage.routing_local_execution_runtime_miss_reason(),
             Some("all_candidates_skipped")
+        );
+        assert_eq!(
+            usage.routing_candidate_skip_reason(),
+            Some("provider_request_body_build_failed")
+        );
+        assert_eq!(
+            usage
+                .routing_failure_diagnostic()
+                .and_then(|diagnostic| diagnostic.get("path")),
+            Some(&json!("$.reasoning.summary"))
         );
     }
 

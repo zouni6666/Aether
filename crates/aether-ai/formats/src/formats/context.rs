@@ -9,6 +9,7 @@ pub struct FormatContext {
     pub request_path: Option<String>,
     pub upstream_is_stream: bool,
     pub report_context: Option<Value>,
+    pub history_scope: Option<String>,
 }
 
 impl FormatContext {
@@ -32,12 +33,18 @@ impl FormatContext {
         self
     }
 
+    pub fn with_history_scope(mut self, history_scope: impl Into<String>) -> Self {
+        self.history_scope = Some(history_scope.into());
+        self
+    }
+
     pub fn without_runtime_request_edits(&self) -> Self {
         Self {
             mapped_model: None,
             request_path: self.request_path.clone(),
             upstream_is_stream: false,
             report_context: self.report_context.clone(),
+            history_scope: self.history_scope.clone(),
         }
     }
 

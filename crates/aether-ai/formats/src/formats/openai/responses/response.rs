@@ -5,7 +5,10 @@ use std::{
 
 use serde_json::{json, Map, Value};
 
-use super::encode_tool_result_error;
+use super::{
+    encode_tool_result_error, history::record_converted_response_history,
+    openai_responses_synthetic_reasoning_item_id,
+};
 
 use crate::{
     formats::context::FormatContext,
@@ -28,7 +31,10 @@ pub fn from(body: &Value, _ctx: &FormatContext) -> Option<CanonicalResponse> {
 }
 
 pub fn to(response: &CanonicalResponse, ctx: &FormatContext) -> Option<Value> {
-    Some(to_raw(response, &ctx.report_context_value(), false))
+    let report_context = ctx.report_context_value();
+    let response = to_raw(response, &report_context, false);
+    record_converted_response_history(&report_context, &response);
+    Some(response)
 }
 
 pub fn to_compact(response: &CanonicalResponse, ctx: &FormatContext) -> Option<Value> {
@@ -198,7 +204,10 @@ pub fn to_raw(canonical: &CanonicalResponse, report_context: &Value, compact: bo
                 item.insert("type".to_string(), Value::String("reasoning".to_string()));
                 item.insert(
                     "id".to_string(),
-                    Value::String(format!("{}_rs_{}", response_id, output.len())),
+                    Value::String(openai_responses_synthetic_reasoning_item_id(
+                        &response_id,
+                        output.len(),
+                    )),
                 );
                 item.insert("status".to_string(), Value::String("completed".to_string()));
                 if let Some(encrypted_content) = encrypted_content {
@@ -712,6 +721,9 @@ mod tests {
 
         let rebuilt = to_raw(&canonical, &json!({}), false);
         assert_eq!(rebuilt["output"][0]["type"], "reasoning");
+        assert!(rebuilt["output"][0]["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("rs")));
         assert_eq!(
             rebuilt["output"][0]["encrypted_content"],
             json!("openai-opaque")

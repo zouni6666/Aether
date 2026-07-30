@@ -41,7 +41,8 @@ use super::{
     LocalSameFormatProviderSpec,
 };
 use crate::ai_serving::planner::standard::{
-    codex_model_capabilities_for_transport, same_format_provider_request_body_failure_extra_data,
+    codex_model_capabilities_for_transport, openai_provider_request_contract_failure_extra_data,
+    same_format_provider_request_body_failure_extra_data,
 };
 
 pub(crate) fn resolve_same_format_provider_transport_unsupported_reason_for_trace(
@@ -267,33 +268,39 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
         prepared.mapped_model.as_str(),
         source_model,
     );
-    if crate::ai_serving::finalize_openai_provider_request_with_codex_model_capabilities(
-        &mut base_provider_request_body,
-        crate::ai_serving::OpenAiProviderRequestFinalization {
-            source_api_format: spec.api_format,
-            provider_api_format: prepared.provider_api_format.as_str(),
-            provider_type: transport.provider.provider_type.as_str(),
-            provider_model: prepared.mapped_model.as_str(),
-            source_model,
-            body_rules: transport.endpoint.body_rules.as_ref(),
-            upstream_is_stream: prepared.upstream_is_stream,
-            require_body_stream_field: request_requires_body_stream_field(
-                body_json,
-                prepared.force_body_stream_field,
-            ),
-        },
-        codex_model_capabilities.as_ref(),
-    )
-    .is_err()
+    if let Err(violation) =
+        crate::ai_serving::finalize_openai_provider_request_with_codex_model_capabilities(
+            &mut base_provider_request_body,
+            crate::ai_serving::OpenAiProviderRequestFinalization {
+                source_api_format: spec.api_format,
+                provider_api_format: prepared.provider_api_format.as_str(),
+                provider_type: transport.provider.provider_type.as_str(),
+                provider_model: prepared.mapped_model.as_str(),
+                source_model,
+                body_rules: transport.endpoint.body_rules.as_ref(),
+                upstream_is_stream: prepared.upstream_is_stream,
+                require_body_stream_field: request_requires_body_stream_field(
+                    body_json,
+                    prepared.force_body_stream_field,
+                ),
+            },
+            codex_model_capabilities.as_ref(),
+        )
     {
-        mark_skipped_local_same_format_provider_candidate(
+        mark_skipped_local_same_format_provider_candidate_with_extra_data(
             state,
             input,
             trace_id,
             candidate,
             attempt.candidate_index,
             &attempt.candidate_id,
-            "provider_request_body_missing",
+            "provider_request_body_build_failed",
+            Some(openai_provider_request_contract_failure_extra_data(
+                &violation,
+                spec.api_format,
+                prepared.provider_api_format.as_str(),
+                "same_format_provider_request_finalization",
+            )),
         )
         .await;
         return Ok(None);

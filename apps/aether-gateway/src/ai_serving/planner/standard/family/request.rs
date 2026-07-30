@@ -23,7 +23,8 @@ use crate::ai_serving::planner::spec_metadata::local_standard_spec_metadata;
 use crate::ai_serving::planner::standard::{
     apply_codex_openai_special_headers, apply_deepseek_tool_call_thinking_compat,
     codex_model_capabilities_for_transport, is_deepseek_provider,
-    request_body_build_failure_extra_data, request_conversion_failure_extra_data,
+    openai_provider_request_contract_failure_extra_data, request_body_build_failure_extra_data,
+    request_conversion_failure_extra_data,
 };
 use crate::ai_serving::transport::kiro::{
     build_kiro_provider_headers, build_kiro_provider_request_body,
@@ -584,6 +585,14 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
             return Ok(None);
         }
     };
+    crate::ai_serving::hydrate_openai_response_history(
+        state.runtime_state(),
+        body_json,
+        spec_metadata.api_format,
+        provider_api_format,
+        input.auth_context.api_key_id.as_str(),
+    )
+    .await?;
     let redaction = resolve_provider_chat_pii_redaction(
         state,
         parts,
@@ -740,24 +749,24 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
             prepared_candidate.mapped_model.as_str(),
             source_model,
         );
-        if crate::ai_serving::finalize_openai_provider_request_with_codex_model_capabilities(
-            &mut provider_request_body,
-            crate::ai_serving::OpenAiProviderRequestFinalization {
-                source_api_format: spec_metadata.api_format,
-                provider_api_format,
-                provider_type: transport.provider.provider_type.as_str(),
-                provider_model: prepared_candidate.mapped_model.as_str(),
-                source_model,
-                body_rules: transport.endpoint.body_rules.as_ref(),
-                upstream_is_stream,
-                require_body_stream_field: request_requires_body_stream_field(
-                    body_json,
-                    force_body_stream_field,
-                ),
-            },
-            codex_model_capabilities.as_ref(),
-        )
-        .is_err()
+        if let Err(violation) =
+            crate::ai_serving::finalize_openai_provider_request_with_codex_model_capabilities(
+                &mut provider_request_body,
+                crate::ai_serving::OpenAiProviderRequestFinalization {
+                    source_api_format: spec_metadata.api_format,
+                    provider_api_format,
+                    provider_type: transport.provider.provider_type.as_str(),
+                    provider_model: prepared_candidate.mapped_model.as_str(),
+                    source_model,
+                    body_rules: transport.endpoint.body_rules.as_ref(),
+                    upstream_is_stream,
+                    require_body_stream_field: request_requires_body_stream_field(
+                        body_json,
+                        force_body_stream_field,
+                    ),
+                },
+                codex_model_capabilities.as_ref(),
+            )
         {
             mark_skipped_local_standard_candidate_with_extra_data(
                 state,
@@ -767,15 +776,12 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
                 attempt.candidate_index,
                 &attempt.candidate_id,
                 "provider_request_body_build_failed",
-                request_conversion_failure_extra_data(
-                    body_json,
+                Some(openai_provider_request_contract_failure_extra_data(
+                    &violation,
                     spec_metadata.api_format,
                     provider_api_format,
-                    Some(prepared_candidate.mapped_model.as_str()),
-                    Some(parts.uri.path()),
-                    upstream_is_stream,
                     "standard_family_request_finalization",
-                ),
+                )),
             )
             .await;
             return Ok(None);

@@ -6,6 +6,7 @@ use aether_ai_formats::formats::conversion::request::{
     normalize_claude_request_to_openai_chat_request,
     normalize_gemini_request_to_openai_chat_request,
     normalize_openai_responses_request_to_openai_chat_request,
+    normalize_openai_responses_request_to_openai_chat_request_with_history_scope,
 };
 use aether_ai_formats::{request_conversion_kind, FormatContext, RequestConversionKind};
 use serde_json::{json, Value};
@@ -67,11 +68,16 @@ fn chat_compatible_body_for_openai_chat_endpoint(body_json: &Value) -> Option<Co
 fn chat_compatible_body_for_standard_source<'a>(
     body_json: &'a Value,
     client_api_format: &str,
+    history_scope: Option<&str>,
 ) -> Option<Cow<'a, Value>> {
     match aether_ai_formats::normalize_api_format_alias(client_api_format).as_str() {
         "openai:chat" => chat_compatible_body_for_openai_chat_endpoint(body_json),
         "openai:responses" | "openai:responses:compact" => {
-            normalize_openai_responses_request_to_openai_chat_request(body_json).map(Cow::Owned)
+            normalize_openai_responses_request_to_openai_chat_request_with_history_scope(
+                body_json,
+                history_scope,
+            )
+            .map(Cow::Owned)
         }
         "claude:messages" => {
             normalize_claude_request_to_openai_chat_request(body_json).map(Cow::Owned)
@@ -297,6 +303,10 @@ pub fn build_local_openai_responses_request_body_with_model_directives(
         require_streaming,
         require_body_stream_field,
     );
+    crate::formats::openai::responses::strip_incompatible_openai_responses_reasoning_items(
+        &mut provider_request_body,
+        "openai:responses",
+    );
     Some(provider_request_body)
 }
 
@@ -325,7 +335,28 @@ pub fn build_cross_format_openai_responses_request_body_with_model_directives(
     upstream_is_stream: bool,
     enable_model_directives: bool,
 ) -> Option<Value> {
-    let chat_like_request = chat_compatible_body_for_standard_source(body_json, client_api_format)?;
+    build_cross_format_openai_responses_request_body_with_model_directives_and_history_scope(
+        body_json,
+        mapped_model,
+        client_api_format,
+        provider_api_format,
+        upstream_is_stream,
+        enable_model_directives,
+        None,
+    )
+}
+
+pub fn build_cross_format_openai_responses_request_body_with_model_directives_and_history_scope(
+    body_json: &Value,
+    mapped_model: &str,
+    client_api_format: &str,
+    provider_api_format: &str,
+    upstream_is_stream: bool,
+    enable_model_directives: bool,
+    history_scope: Option<&str>,
+) -> Option<Value> {
+    let chat_like_request =
+        chat_compatible_body_for_standard_source(body_json, client_api_format, history_scope)?;
     let conversion_kind = request_conversion_kind(client_api_format, provider_api_format)?;
     let provider_request_body = match conversion_kind {
         RequestConversionKind::ToOpenAIChat => {
