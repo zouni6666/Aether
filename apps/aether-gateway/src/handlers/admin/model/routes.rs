@@ -7,6 +7,7 @@ pub(crate) async fn maybe_build_local_admin_model_response(
     if let Some(response) = catalog_routes::maybe_build_local_admin_model_catalog_response(
         &request.state(),
         &request.request_context(),
+        request.request_body(),
     )
     .await?
     {

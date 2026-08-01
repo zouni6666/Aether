@@ -2,10 +2,13 @@
   <div class="space-y-1.5">
     <Select
       :model-value="modelValue"
-      :disabled="proxyNodesStore.loading || nodeOptions.length === 0"
+      :disabled="disabled || proxyNodesStore.loading || nodeOptions.length === 0"
       @update:model-value="(v: string) => $emit('update:modelValue', v)"
     >
-      <SelectTrigger :class="triggerClass">
+      <SelectTrigger
+        :class="triggerClass"
+        :aria-label="triggerAriaLabel"
+      >
         <SelectValue
           :placeholder="proxyNodesStore.loading
             ? legacyT('加载节点列表中...')
@@ -40,10 +43,16 @@ import { useProxyNodesStore } from '@/stores/proxy-nodes'
 import { useI18n } from '@/i18n'
 import { formatRegion } from '@/utils/region'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   modelValue: string
   triggerClass?: string
-}>()
+  triggerAriaLabel?: string
+  disabled?: boolean
+}>(), {
+  triggerClass: '',
+  triggerAriaLabel: undefined,
+  disabled: false,
+})
 
 defineEmits<{
   'update:modelValue': [value: string]

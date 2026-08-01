@@ -3606,9 +3606,12 @@ async fn gateway_batch_updates_shared_pool_key_configuration() {
     first_key.name = "alpha".to_string();
     first_key.auto_fetch_models = true;
     first_key.allowed_models = Some(json!(["legacy-model"]));
+    first_key.allow_auth_channel_mismatch_formats = Some(json!(["openai:embedding"]));
     first_key.learned_rpm_limit = Some(18);
     let mut second_key = sample_key("key-openai-b", "provider-openai", "openai:chat", "sk-b");
     second_key.name = "beta".to_string();
+    second_key.allow_auth_channel_mismatch_formats =
+        Some(json!(["openai:chat", "openai:embedding"]));
     second_key.learned_rpm_limit = Some(24);
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![provider],
@@ -3662,6 +3665,7 @@ async fn gateway_batch_updates_shared_pool_key_configuration() {
     assert_eq!(stored.len(), 2);
     for key in stored {
         assert_eq!(key.api_formats, Some(json!(["openai:responses"])));
+        assert_eq!(key.allow_auth_channel_mismatch_formats, Some(json!([])));
         assert_eq!(key.internal_priority, 7);
         assert_eq!(key.rpm_limit, None);
         assert_eq!(key.learned_rpm_limit, None);
@@ -3675,6 +3679,117 @@ async fn gateway_batch_updates_shared_pool_key_configuration() {
     }
 
     gateway_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_preserves_inherited_fixed_oauth_mismatch_formats_on_batch_update() {
+    let mut provider = sample_provider("provider-gemini-cli", "gemini_cli", 10);
+    provider.provider_type = "gemini_cli".to_string();
+    let mut key = sample_key(
+        "key-gemini-cli-a",
+        "provider-gemini-cli",
+        "gemini:generate_content",
+        "oauth-placeholder",
+    );
+    key.auth_type = "oauth".to_string();
+    key.internal_priority = 3;
+    key.allow_auth_channel_mismatch_formats = Some(json!(["gemini:generate_content"]));
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![key],
+    ));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_provider_catalog_repository_for_tests(Arc::clone(
+                &provider_catalog_repository,
+            )),
+        );
+
+    let response = local_admin_pool_response(
+        &state,
+        http::Method::PATCH,
+        "/api/admin/pool/provider-gemini-cli/keys/batch-update",
+        Some(json!({
+            "key_ids": ["key-gemini-cli-a"],
+            "patch": {
+                "api_formats": ["openai:responses"],
+                "internal_priority": 9
+            }
+        })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let stored = provider_catalog_repository
+        .list_keys_by_ids(&["key-gemini-cli-a".to_string()])
+        .await
+        .expect("key should load");
+    assert_eq!(stored[0].api_formats, None);
+    assert_eq!(
+        stored[0].allow_auth_channel_mismatch_formats,
+        Some(json!(["gemini:generate_content"]))
+    );
+    assert_eq!(stored[0].internal_priority, 9);
+}
+
+#[tokio::test]
+async fn gateway_rejects_explicit_invalid_mismatch_format_without_writing_any_key() {
+    let provider = sample_provider("provider-openai", "openai", 10);
+    let mut first_key = sample_key("key-openai-a", "provider-openai", "openai:chat", "sk-a");
+    first_key.name = "alpha".to_string();
+    first_key.internal_priority = 3;
+    first_key.allow_auth_channel_mismatch_formats = Some(json!(["openai:chat"]));
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![first_key],
+    ));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_provider_catalog_repository_for_tests(Arc::clone(
+                &provider_catalog_repository,
+            )),
+        );
+
+    let response = local_admin_pool_response(
+        &state,
+        http::Method::PATCH,
+        "/api/admin/pool/provider-openai/keys/batch-update",
+        Some(json!({
+            "key_ids": ["key-openai-a"],
+            "patch": {
+                "api_formats": ["openai:responses"],
+                "allow_auth_channel_mismatch_formats": ["openai:embedding"],
+                "internal_priority": 9
+            }
+        })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body should load");
+    let payload: serde_json::Value =
+        serde_json::from_slice(&body).expect("response body should be json");
+    assert_eq!(
+        payload["detail"],
+        json!("密钥 alpha 配置无效: allow_auth_channel_mismatch_formats 包含未选择的 API 格式: openai:embedding")
+    );
+
+    let stored = provider_catalog_repository
+        .list_keys_by_ids(&["key-openai-a".to_string()])
+        .await
+        .expect("key should load");
+    assert_eq!(stored[0].api_formats, Some(json!(["openai:chat"])));
+    assert_eq!(
+        stored[0].allow_auth_channel_mismatch_formats,
+        Some(json!(["openai:chat"]))
+    );
+    assert_eq!(stored[0].internal_priority, 3);
 }
 
 #[tokio::test]

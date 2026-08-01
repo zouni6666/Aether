@@ -36,6 +36,7 @@
               >
                 <ListChecks class="w-3.5 h-3.5" />
               </Button>
+              <ExternalModelsAccessControl />
               <Button
                 variant="ghost"
                 size="icon"
@@ -691,6 +692,7 @@ import {
 } from 'lucide-vue-next'
 import ModelDetailDrawer from '@/features/models/components/ModelDetailDrawer.vue'
 import GlobalModelFormDialog from '@/features/models/components/GlobalModelFormDialog.vue'
+import ExternalModelsAccessControl from '@/features/models/components/ExternalModelsAccessControl.vue'
 import ProviderModelFormDialog from '@/features/providers/components/ProviderModelFormDialog.vue'
 import type { Model } from '@/api/endpoints'
 import { useToast } from '@/composables/useToast'

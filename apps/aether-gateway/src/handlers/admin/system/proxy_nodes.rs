@@ -1,6 +1,11 @@
+use std::future::Future;
 use std::time::{Duration, Instant};
 
 use crate::execution_runtime::transport::format_upstream_request_error;
+use crate::handlers::admin::model::{
+    acquire_admin_external_models_config_mutation_lock,
+    release_admin_external_models_config_mutation_lock,
+};
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::query_param_value;
 use crate::maintenance::{
@@ -31,6 +36,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::handlers::public::build_proxy_node_install_session_response;
@@ -526,27 +532,43 @@ pub(crate) async fn maybe_build_local_admin_proxy_nodes_response(
     if decision.route_kind.as_deref() == Some("delete_node")
         && request_context.method() == http::Method::DELETE
     {
-        if !state.has_proxy_node_writer() {
+        if !state.has_proxy_node_reader() || !state.has_proxy_node_writer() {
             return Ok(Some(build_admin_proxy_nodes_data_unavailable_response()));
         }
         let Some(node_id) = admin_proxy_node_node_id_from_path(request_context.path()) else {
             return Ok(Some(build_admin_proxy_nodes_not_found_response()));
         };
-        let Some(_deleted_node) = state.delete_proxy_node(&node_id).await? else {
-            return Ok(Some(build_admin_proxy_nodes_not_found_response()));
+        let lock = match acquire_admin_external_models_config_mutation_lock(state).await {
+            Ok(lock) => lock,
+            Err((status, payload)) => {
+                return Ok(Some((status, Json(payload)).into_response()));
+            }
         };
-        let cleanup = clear_deleted_proxy_node_references(state, &node_id).await?;
-        return Ok(Some(
-            Json(json!({
+        let delete_result: Result<Response<Body>, GatewayError> = async {
+            if state.find_proxy_node(&node_id).await?.is_none() {
+                return Ok(build_admin_proxy_nodes_not_found_response());
+            }
+
+            // Persistent references are cleared before the node itself. If a durable cleanup
+            // fails, the node remains available and the operation can be retried safely.
+            let cleanup = clear_proxy_node_references_before_delete(state, &node_id).await?;
+            let Some(_deleted_node) = state.delete_proxy_node(&node_id).await? else {
+                return Ok(build_admin_proxy_nodes_not_found_response());
+            };
+            Ok(Json(json!({
                 "message": build_delete_proxy_node_message(&cleanup),
                 "node_id": node_id,
                 "cleared_system_proxy": cleanup.cleared_system_proxy,
+                "cleared_external_models_proxy": cleanup.cleared_external_models_proxy,
                 "cleared_providers": cleanup.cleared_providers,
                 "cleared_endpoints": cleanup.cleared_endpoints,
                 "cleared_keys": cleanup.cleared_keys,
             }))
-            .into_response(),
-        ));
+            .into_response())
+        }
+        .await;
+        release_admin_external_models_config_mutation_lock(state, &lock).await;
+        return delete_result.map(Some);
     }
 
     if decision.route_kind.as_deref() == Some("test_node")
@@ -869,6 +891,8 @@ pub(crate) async fn maybe_build_local_admin_proxy_nodes_response(
 #[derive(Debug, Default)]
 struct DeletedProxyNodeCleanup {
     cleared_system_proxy: bool,
+    cleared_external_models_proxy: bool,
+    external_models_cache_clear_succeeded: Option<bool>,
     cleared_providers: usize,
     cleared_endpoints: usize,
     cleared_keys: usize,
@@ -895,15 +919,32 @@ struct NormalizedManualProxyEndpoint {
     node_port: i32,
 }
 
-async fn clear_deleted_proxy_node_references(
+async fn clear_proxy_node_references_before_delete(
     state: &AdminAppState<'_>,
     node_id: &str,
 ) -> Result<DeletedProxyNodeCleanup, GatewayError> {
+    let external_models_cache_clear = state.clear_admin_external_models_cache();
+    clear_proxy_node_references_before_delete_with_cache(
+        state,
+        node_id,
+        external_models_cache_clear,
+    )
+    .await
+}
+
+async fn clear_proxy_node_references_before_delete_with_cache<F>(
+    state: &AdminAppState<'_>,
+    node_id: &str,
+    external_models_cache_clear: F,
+) -> Result<DeletedProxyNodeCleanup, GatewayError>
+where
+    F: Future<Output = Result<Value, GatewayError>>,
+{
     let mut cleanup = DeletedProxyNodeCleanup::default();
 
     if state.app().data.has_system_config_store() {
         let is_system_proxy = state
-            .read_system_config_json_value("system_proxy_node_id")
+            .read_system_config_json_value_strong("system_proxy_node_id")
             .await?
             .and_then(|value| value.as_str().map(str::trim).map(ToOwned::to_owned))
             .is_some_and(|value| value == node_id);
@@ -916,6 +957,36 @@ async fn clear_deleted_proxy_node_references(
                 )
                 .await?;
             cleanup.cleared_system_proxy = true;
+        }
+
+        let is_external_models_proxy = state
+            .read_system_config_json_value_strong("external_models_proxy_node_id")
+            .await?
+            .and_then(|value| value.as_str().map(str::trim).map(ToOwned::to_owned))
+            .is_some_and(|value| value == node_id);
+        if is_external_models_proxy {
+            state
+                .upsert_system_config_json_value(
+                    "external_models_proxy_node_id",
+                    &serde_json::Value::Null,
+                    None,
+                )
+                .await?;
+            cleanup.external_models_cache_clear_succeeded =
+                Some(match external_models_cache_clear.await {
+                    Ok(_) => true,
+                    Err(_) => {
+                        // The selector is already persisted as null, and v2 cache entries carry
+                        // their selector. A failed DEL therefore cannot route through this node.
+                        warn!(
+                            runtime_backend = state.app().runtime_state_backend(),
+                            proxy_node_id = %node_id,
+                            "failed to clear external models cache while deleting proxy node"
+                        );
+                        false
+                    }
+                });
+            cleanup.cleared_external_models_proxy = true;
         }
     }
 
@@ -978,10 +1049,38 @@ async fn clear_deleted_proxy_node_references(
     Ok(cleanup)
 }
 
+#[cfg(test)]
+pub(crate) async fn clear_proxy_node_references_with_cache_failure_for_tests(
+    app: &crate::AppState,
+    node_id: &str,
+) -> Result<Value, GatewayError> {
+    let state = AdminAppState::new(app);
+    let cleanup = clear_proxy_node_references_before_delete_with_cache(&state, node_id, async {
+        Err(GatewayError::Internal(
+            "injected cache delete failure".to_string(),
+        ))
+    })
+    .await?;
+    Ok(json!({
+        "cleared_system_proxy": cleanup.cleared_system_proxy,
+        "cleared_external_models_proxy": cleanup.cleared_external_models_proxy,
+        "external_models_cache_clear_succeeded": cleanup.external_models_cache_clear_succeeded,
+        "cleared_providers": cleanup.cleared_providers,
+        "cleared_endpoints": cleanup.cleared_endpoints,
+        "cleared_keys": cleanup.cleared_keys,
+    }))
+}
+
 fn build_delete_proxy_node_message(cleanup: &DeletedProxyNodeCleanup) -> String {
     let mut parts = vec!["deleted".to_string()];
     if cleanup.cleared_system_proxy {
         parts.push("system default proxy cleared".to_string());
+    }
+    if cleanup.cleared_external_models_proxy {
+        parts.push("external models proxy cleared".to_string());
+    }
+    if cleanup.external_models_cache_clear_succeeded == Some(false) {
+        parts.push("external models cache invalidation deferred".to_string());
     }
     if cleanup.cleared_providers > 0 || cleanup.cleared_endpoints > 0 || cleanup.cleared_keys > 0 {
         parts.push(format!(

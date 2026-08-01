@@ -731,6 +731,16 @@ impl AppState {
         .await
     }
 
+    pub(crate) async fn read_system_config_json_value_strong(
+        &self,
+        key: &str,
+    ) -> Result<Option<serde_json::Value>, GatewayError> {
+        self.data
+            .find_system_config_value_strong(key)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     async fn read_system_config_json_value_with_cache_windows(
         &self,
         key: &str,

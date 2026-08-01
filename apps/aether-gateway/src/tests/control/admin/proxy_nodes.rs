@@ -1361,10 +1361,13 @@ async fn gateway_deletes_proxy_nodes_and_clears_proxy_refs_locally() {
     let data_state =
         GatewayDataState::with_proxy_node_repository_for_tests(Arc::clone(&proxy_node_repository))
             .attach_provider_catalog_repository_for_tests(Arc::clone(&provider_catalog_repository))
-            .with_system_config_values_for_tests(vec![(
-                "system_proxy_node_id".to_string(),
-                json!("manual-node-1"),
-            )]);
+            .with_system_config_values_for_tests(vec![
+                ("system_proxy_node_id".to_string(), json!("manual-node-1")),
+                (
+                    "external_models_proxy_node_id".to_string(),
+                    json!("manual-node-1"),
+                ),
+            ]);
     let gateway = build_router_with_state(
         AppState::new()
             .expect("gateway should build")
@@ -1384,6 +1387,7 @@ async fn gateway_deletes_proxy_nodes_and_clears_proxy_refs_locally() {
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["cleared_system_proxy"], true);
+    assert_eq!(payload["cleared_external_models_proxy"], true);
     assert_eq!(payload["cleared_providers"], 1);
     assert_eq!(payload["cleared_endpoints"], 1);
     assert_eq!(payload["cleared_keys"], 1);
@@ -1398,6 +1402,13 @@ async fn gateway_deletes_proxy_nodes_and_clears_proxy_refs_locally() {
             .find_system_config_value("system_proxy_node_id")
             .await
             .expect("system config lookup should succeed"),
+        Some(serde_json::Value::Null)
+    );
+    assert_eq!(
+        data_state
+            .find_system_config_value("external_models_proxy_node_id")
+            .await
+            .expect("external models proxy config lookup should succeed"),
         Some(serde_json::Value::Null)
     );
 
@@ -1419,6 +1430,101 @@ async fn gateway_deletes_proxy_nodes_and_clears_proxy_refs_locally() {
     assert!(keys.iter().all(|key| key.proxy.is_none()));
 
     gateway_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_continues_proxy_reference_cleanup_when_external_models_cache_delete_fails() {
+    let mut manual_node = sample_proxy_node("manual-node-cache-failure");
+    manual_node.status = "online".to_string();
+    manual_node.is_manual = true;
+    manual_node.tunnel_mode = false;
+    manual_node.tunnel_connected = false;
+    manual_node.proxy_url = Some("http://127.0.0.1:8899".to_string());
+    manual_node.last_heartbeat_at_unix_secs = None;
+    manual_node.tunnel_connected_at_unix_secs = None;
+
+    let proxy_node_repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![manual_node]));
+    let mut provider = sample_provider("provider-cache-failure", "OpenAI", 10);
+    provider.proxy = Some(json!({
+        "node_id": "manual-node-cache-failure",
+        "enabled": true
+    }));
+    let mut endpoint = sample_endpoint(
+        "endpoint-cache-failure",
+        "provider-cache-failure",
+        "openai:chat",
+        "https://example.com/v1",
+    );
+    endpoint.proxy = Some(json!({
+        "node_id": "manual-node-cache-failure",
+        "enabled": true
+    }));
+    let mut key = sample_key(
+        "key-cache-failure",
+        "provider-cache-failure",
+        "openai:chat",
+        "sk-test",
+    );
+    key.proxy = Some(json!({
+        "node_id": "manual-node-cache-failure",
+        "enabled": true
+    }));
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![endpoint],
+        vec![key],
+    ));
+    let data_state =
+        GatewayDataState::with_proxy_node_repository_for_tests(Arc::clone(&proxy_node_repository))
+            .attach_provider_catalog_repository_for_tests(Arc::clone(&provider_catalog_repository))
+            .with_system_config_values_for_tests([(
+                "external_models_proxy_node_id".to_string(),
+                json!("manual-node-cache-failure"),
+            )]);
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(data_state.clone());
+
+    let cleanup = crate::handlers::admin::clear_proxy_node_references_with_cache_failure_for_tests(
+        &state,
+        "manual-node-cache-failure",
+    )
+    .await
+    .expect("cache failure should not abort persistent reference cleanup");
+    assert_eq!(cleanup["cleared_external_models_proxy"], true);
+    assert_eq!(cleanup["external_models_cache_clear_succeeded"], false);
+    assert_eq!(cleanup["cleared_providers"], 1);
+    assert_eq!(cleanup["cleared_endpoints"], 1);
+    assert_eq!(cleanup["cleared_keys"], 1);
+    assert_eq!(
+        data_state
+            .find_system_config_value("external_models_proxy_node_id")
+            .await
+            .expect("external models proxy config lookup should succeed"),
+        Some(serde_json::Value::Null)
+    );
+    assert!(data_state
+        .find_proxy_node("manual-node-cache-failure")
+        .await
+        .expect("node lookup should succeed")
+        .is_some());
+
+    let provider_ids = vec!["provider-cache-failure".to_string()];
+    let providers = data_state
+        .list_provider_catalog_providers(false)
+        .await
+        .expect("provider list should succeed");
+    assert!(providers.iter().all(|provider| provider.proxy.is_none()));
+    let endpoints = data_state
+        .list_provider_catalog_endpoints_by_provider_ids(&provider_ids)
+        .await
+        .expect("endpoint list should succeed");
+    assert!(endpoints.iter().all(|endpoint| endpoint.proxy.is_none()));
+    let keys = data_state
+        .list_provider_catalog_keys_by_provider_ids(&provider_ids)
+        .await
+        .expect("key list should succeed");
+    assert!(keys.iter().all(|key| key.proxy.is_none()));
 }
 
 #[tokio::test]

@@ -29,6 +29,13 @@ impl<'a> AdminAppState<'a> {
         self.app.read_system_config_json_value(key).await
     }
 
+    pub(crate) async fn read_system_config_json_value_strong(
+        &self,
+        key: &str,
+    ) -> Result<Option<serde_json::Value>, GatewayError> {
+        self.app.read_system_config_json_value_strong(key).await
+    }
+
     pub(crate) async fn list_system_config_entries(
         &self,
     ) -> Result<Vec<crate::data::state::StoredSystemConfigEntry>, GatewayError> {

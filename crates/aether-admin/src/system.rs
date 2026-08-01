@@ -1749,6 +1749,7 @@ pub fn admin_system_config_default_value(key: &str) -> Option<serde_json::Value>
         "audit_log_retention_days" => Some(json!(30)),
         "enable_db_maintenance" => Some(json!(true)),
         "system_proxy_node_id" => Some(serde_json::Value::Null),
+        "external_models_proxy_node_id" => Some(serde_json::Value::Null),
         "smtp_host" => Some(serde_json::Value::Null),
         "smtp_port" => Some(json!(587)),
         "smtp_user" => Some(serde_json::Value::Null),

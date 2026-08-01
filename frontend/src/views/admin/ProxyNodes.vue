@@ -103,6 +103,7 @@ import { useToast } from '@/composables/useToast'
 import { useConfirm } from '@/composables/useConfirm'
 import { useClipboard } from '@/composables/useClipboard'
 import { useI18n } from '@/i18n'
+import { clearModelsDevCache } from '@/api/models-dev'
 import {
   proxyNodesApi,
   type ProxyNode,
@@ -117,6 +118,7 @@ import {
 import { Card } from '@/components/ui'
 import { parseApiError } from '@/utils/errorParser'
 import { parseBatchProxyNodeInput } from './proxy-node-batch'
+import { proxyNodeDeleteSuccessMessage } from './proxy-node-delete-feedback'
 import ProxyNodeBatchUpgradeDialog from './components/ProxyNodeBatchUpgradeDialog.vue'
 import ProxyNodeEventsDialog from './components/ProxyNodeEventsDialog.vue'
 import ProxyNodeFormDialog from './components/ProxyNodeFormDialog.vue'
@@ -597,12 +599,14 @@ async function handleDelete(node: ProxyNode) {
 
   try {
     const result = await proxyNodesApi.deleteProxyNode(node.id)
-    await store.fetchNodes()
-    if (result.cleared_system_proxy) {
-      success(legacyT('代理节点已删除，系统默认代理已自动清除'))
-    } else {
-      success(legacyT('代理节点已删除'))
+    if (result.cleared_external_models_proxy) {
+      clearModelsDevCache()
     }
+    await store.fetchNodes()
+    success(legacyT(proxyNodeDeleteSuccessMessage(
+      result.cleared_system_proxy,
+      result.cleared_external_models_proxy,
+    )))
   } catch (err: unknown) {
     toastError(parseApiError(err, legacyT('删除失败')))
   }

@@ -11,6 +11,7 @@ use aether_admin::provider::{
 use aether_data_contracts::repository::global_models::{
     AdminProviderModelListQuery, StoredAdminProviderModel, UpsertAdminProviderModelRecord,
 };
+use axum::http;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
@@ -488,8 +489,24 @@ impl<'a> AdminAppState<'a> {
 
     pub(crate) async fn read_admin_external_models_cache(
         &self,
+        request_id: &str,
     ) -> Result<Option<serde_json::Value>, GatewayError> {
-        crate::handlers::admin::model::read_admin_external_models_cache(self).await
+        crate::handlers::admin::model::read_admin_external_models_cache(self, request_id).await
+    }
+
+    pub(crate) async fn build_admin_external_models_config_payload(
+        &self,
+    ) -> Result<serde_json::Value, GatewayError> {
+        crate::handlers::admin::model::build_admin_external_models_config_payload(self).await
+    }
+
+    pub(crate) async fn apply_admin_external_models_config_update(
+        &self,
+        request_body: &axum::body::Bytes,
+    ) -> Result<Result<serde_json::Value, (http::StatusCode, serde_json::Value)>, GatewayError>
+    {
+        crate::handlers::admin::model::apply_admin_external_models_config_update(self, request_body)
+            .await
     }
 
     pub(crate) async fn clear_admin_external_models_cache(

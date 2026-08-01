@@ -22,6 +22,24 @@ pub(super) fn classify_admin_model_provider_family_route(
             "admin:models",
             false,
         ))
+    } else if method == http::Method::GET && normalized_path == "/api/admin/models/external/config"
+    {
+        Some(classified(
+            "admin_proxy",
+            "model_external_manage",
+            "external_config_get",
+            "admin:models",
+            false,
+        ))
+    } else if method == http::Method::PUT && normalized_path == "/api/admin/models/external/config"
+    {
+        Some(classified(
+            "admin_proxy",
+            "model_external_manage",
+            "external_config_set",
+            "admin:models",
+            false,
+        ))
     } else if method == http::Method::DELETE
         && normalized_path == "/api/admin/models/external/cache"
     {

@@ -539,6 +539,146 @@ WHERE request_id = ?
     }
 
     #[tokio::test]
+    async fn worker_boot_cleanup_removes_only_legacy_instance_rows_and_events() {
+        const CLEANUP_VERSION: i64 = 20260731000000;
+        const HASHED_LEGACY_ID: &str =
+            "boot:maintenance.request.candidate.cleanup:~0123456789abcdef0123";
+        const OVERLONG_LEGACY_ID: &str =
+            "boot:maintenance.proxy.node.metrics.cleanup:gateway-instance-with-an-overlong-id";
+
+        assert_eq!(HASHED_LEGACY_ID.len(), 64);
+        assert!(OVERLONG_LEGACY_ID.len() > 64);
+
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite pool");
+
+        for migration in MIGRATOR
+            .iter()
+            .filter(|migration| migration.version < CLEANUP_VERSION)
+        {
+            sqlx::raw_sql(migration.sql.as_ref())
+                .execute(&pool)
+                .await
+                .unwrap_or_else(|err| panic!("migration {} should run: {err}", migration.version));
+        }
+
+        sqlx::query(
+            r#"
+INSERT INTO background_task_runs (
+  id, task_key, kind, "trigger", status, owner_instance,
+  progress_message, created_by, created_at_unix_secs, updated_at_unix_secs
+) VALUES
+  ('boot:usage.queue.worker:gateway-a', 'usage.queue.worker', 'daemon', 'daemon',
+   'running', 'gateway-a', 'worker booted', 'system', 1, 1),
+  ('boot:usage.queue.worker:gateway-b', 'usage.queue.worker', 'daemon', 'daemon',
+   'running', 'gateway-b', 'worker booted', 'system', 2, 2),
+  ('boot:maintenance.request.candidate.cleanup:~0123456789abcdef0123',
+   'maintenance.request.candidate.cleanup', 'scheduled', 'interval',
+   'running', 'gateway-hash', 'worker booted', 'system', 3, 3),
+  ('boot:maintenance.proxy.node.metrics.cleanup:gateway-instance-with-an-overlong-id',
+   'maintenance.proxy.node.metrics.cleanup', 'scheduled', 'interval',
+   'running', 'gateway-overlong', 'worker booted', 'system', 4, 4),
+  ('boot:model.fetch.worker', 'model.fetch.worker', 'scheduled', 'interval',
+   'running', 'gateway-early-fix', 'worker booted', 'system', 5, 5),
+  ('boot:usage.queue.worker', 'usage.queue.worker', 'daemon', 'daemon',
+   'running', NULL, 'worker registered', 'system', 6, 6),
+  ('boot:ownerless-worker', 'ownerless.worker', 'daemon', 'daemon',
+   'running', NULL, 'worker booted', 'system', 7, 7),
+  ('boot:custom-progress', 'custom.progress', 'daemon', 'daemon',
+   'running', 'gateway-custom', 'worker healthy', 'system', 8, 8),
+  ('boot:user-request', 'user.request', 'on_demand', 'manual',
+   'running', 'gateway-user', 'worker booted', 'admin', 9, 9);
+
+INSERT INTO background_task_events (
+  id, run_id, event_type, message, created_at_unix_secs
+) VALUES
+  ('legacy-event-a', 'boot:usage.queue.worker:gateway-a', 'worker_boot', 'legacy', 1),
+  ('legacy-event-b', 'boot:usage.queue.worker:gateway-b', 'worker_boot', 'legacy', 2),
+  ('legacy-event-hash', 'boot:maintenance.request.candidate.cleanup:~0123456789abcdef0123',
+   'worker_boot', 'legacy hash', 3),
+  ('legacy-event-overlong',
+   'boot:maintenance.proxy.node.metrics.cleanup:gateway-instance-with-an-overlong-id',
+   'worker_boot', 'legacy overlong', 4),
+  ('early-fix-event', 'boot:model.fetch.worker', 'worker_boot', 'early fix', 5),
+  ('logical-event', 'boot:usage.queue.worker', 'worker_boot', 'logical', 6),
+  ('ownerless-event', 'boot:ownerless-worker', 'worker_boot', 'ownerless', 7),
+  ('custom-progress-event', 'boot:custom-progress', 'worker_boot', 'custom progress', 8),
+  ('manual-event', 'boot:user-request', 'manual', 'manual', 9);
+"#,
+        )
+        .execute(&pool)
+        .await
+        .expect("worker boot cleanup fixtures should insert");
+
+        let migration = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == CLEANUP_VERSION)
+            .expect("worker boot cleanup migration should be embedded");
+        sqlx::raw_sql(migration.sql.as_ref())
+            .execute(&pool)
+            .await
+            .expect("worker boot cleanup migration should run");
+        sqlx::raw_sql(migration.sql.as_ref())
+            .execute(&pool)
+            .await
+            .expect("worker boot cleanup migration should be idempotent");
+
+        let remaining_runs = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+            r#"
+SELECT id, owner_instance, created_by
+FROM background_task_runs
+ORDER BY id
+"#,
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("remaining worker task rows should load");
+        assert_eq!(
+            remaining_runs,
+            vec![
+                (
+                    "boot:custom-progress".to_string(),
+                    Some("gateway-custom".to_string()),
+                    Some("system".to_string()),
+                ),
+                (
+                    "boot:ownerless-worker".to_string(),
+                    None,
+                    Some("system".to_string()),
+                ),
+                (
+                    "boot:usage.queue.worker".to_string(),
+                    None,
+                    Some("system".to_string()),
+                ),
+                (
+                    "boot:user-request".to_string(),
+                    Some("gateway-user".to_string()),
+                    Some("admin".to_string()),
+                ),
+            ]
+        );
+
+        let remaining_events =
+            sqlx::query_scalar::<_, String>("SELECT id FROM background_task_events ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .expect("remaining worker task events should load");
+        assert_eq!(
+            remaining_events,
+            vec![
+                "custom-progress-event".to_string(),
+                "logical-event".to_string(),
+                "manual-event".to_string(),
+                "ownerless-event".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn pending_and_startup_preparation_reject_dirty_migration_state() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)

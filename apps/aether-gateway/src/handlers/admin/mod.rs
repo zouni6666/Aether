@@ -18,6 +18,10 @@ mod shared;
 pub(crate) use self::auth::maybe_build_local_admin_security_response;
 pub(crate) use self::endpoint::build_admin_endpoint_health_status_payload;
 pub(crate) use self::features::maybe_build_local_admin_video_tasks_response;
+#[cfg(test)]
+pub(crate) use self::model::{
+    set_admin_external_models_source_url_for_tests, ADMIN_EXTERNAL_MODELS_CONFIG_MUTATION_LOCK_KEY,
+};
 pub(crate) use self::observability::{
     admin_stats_bad_request_response, maybe_build_local_admin_usage_response, parse_bounded_u32,
     round_to, AdminStatsTimeRange, AdminStatsUsageFilter,
@@ -53,4 +57,7 @@ pub(crate) use self::request::{
 };
 pub(crate) use self::routes::maybe_build_local_admin_response;
 #[cfg(test)]
-pub(crate) use self::system::override_proxy_connectivity_probe_url_for_tests;
+pub(crate) use self::system::{
+    clear_proxy_node_references_with_cache_failure_for_tests,
+    override_proxy_connectivity_probe_url_for_tests,
+};

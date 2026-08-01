@@ -84,6 +84,7 @@ pub(crate) async fn maybe_build_local_admin_core_response(
         crate::handlers::admin::model::maybe_build_local_admin_model_catalog_response(
             state,
             request_context,
+            request_body,
         )
         .await?
     {

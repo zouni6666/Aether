@@ -202,11 +202,8 @@
           </div>
         </div>
 
-        <!-- 提供商内转移限制（仅编辑模式） -->
-        <div
-          v-if="isEditMode"
-          class="grid grid-cols-2 gap-2 sm:gap-4"
-        >
+        <!-- 提供商内转移限制 -->
+        <div class="grid grid-cols-2 gap-2 sm:gap-4">
           <div class="min-w-0 space-y-1.5">
             <Label
               for="max-transfer-count"

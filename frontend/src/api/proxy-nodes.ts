@@ -269,8 +269,18 @@ export const proxyNodesApi = {
     return response.data
   },
 
-  async deleteProxyNode(nodeId: string): Promise<{ message: string; node_id: string; cleared_system_proxy: boolean }> {
-    const response = await apiClient.delete<{ message: string; node_id: string; cleared_system_proxy: boolean }>(`/api/admin/proxy-nodes/${nodeId}`)
+  async deleteProxyNode(nodeId: string): Promise<{
+    message: string
+    node_id: string
+    cleared_system_proxy: boolean
+    cleared_external_models_proxy: boolean
+  }> {
+    const response = await apiClient.delete<{
+      message: string
+      node_id: string
+      cleared_system_proxy: boolean
+      cleared_external_models_proxy: boolean
+    }>(`/api/admin/proxy-nodes/${nodeId}`)
     return response.data
   },
 

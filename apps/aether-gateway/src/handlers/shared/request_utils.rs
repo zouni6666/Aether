@@ -295,6 +295,7 @@ pub(crate) fn admin_proxy_local_requires_buffered_body(
                     http::Method::POST,
                     Some("import_from_upstream"),
                 )
+                | (Some("model_external_manage"), http::Method::PUT, Some("external_config_set"))
                 | (
                     Some("provider_ops_manage"),
                     http::Method::POST,

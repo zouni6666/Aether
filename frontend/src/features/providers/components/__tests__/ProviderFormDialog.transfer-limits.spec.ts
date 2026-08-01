@@ -204,21 +204,23 @@ describe('ProviderFormDialog transfer limits', () => {
     )
   })
 
-  it('hides the controls when creating while still sending zero defaults', async () => {
+  it('allows configuring transfer limits when creating', async () => {
     mountDialog(null)
     await settle()
 
-    expect(document.body.querySelector('#max-transfer-count')).toBeNull()
-    expect(document.body.querySelector('#max-transfer-timeout-seconds')).toBeNull()
+    expect(document.body.querySelector<HTMLInputElement>('#max-transfer-count')?.value).toBe('')
+    expect(document.body.querySelector<HTMLInputElement>('#max-transfer-timeout-seconds')?.value).toBe('')
 
     await setInput('#name', 'New Provider')
+    await setInput('#max-transfer-count', '8')
+    await setInput('#max-transfer-timeout-seconds', '30')
     clickButton('创建')
     await settle()
 
     expect(endpointMocks.createProvider).toHaveBeenCalledWith(
       expect.objectContaining({
-        max_transfer_count: 0,
-        max_transfer_timeout_seconds: 0,
+        max_transfer_count: 8,
+        max_transfer_timeout_seconds: 30,
       }),
     )
   })

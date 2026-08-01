@@ -8,7 +8,7 @@ use aether_data_contracts::repository::background_tasks::{
 use aether_runtime::task::spawn_named;
 use aether_task_runtime::{RetryPolicy, TaskDefinition, TaskKind};
 pub(crate) use aether_task_runtime::{TaskSupervisor, TaskSupervisorMetrics};
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::task::JoinHandle;
 use tracing::warn;
@@ -57,8 +57,8 @@ const RETRY_THREE: RetryPolicy = RetryPolicy { max_attempts: 3 };
 const BACKGROUND_TASK_RUN_ID_MAX_BYTES: usize = 64;
 const WORKER_BOOT_RUN_ID_HASH_HEX_BYTES: usize = 20;
 
-fn build_worker_boot_run_id(task_key: &str, instance_id: &str) -> String {
-    let full_run_id = format!("boot:{task_key}:{instance_id}");
+fn build_worker_boot_run_id(task_key: &str) -> String {
+    let full_run_id = format!("boot:{task_key}");
     if full_run_id.len() <= BACKGROUND_TASK_RUN_ID_MAX_BYTES {
         return full_run_id;
     }
@@ -71,6 +71,41 @@ fn build_worker_boot_run_id(task_key: &str, instance_id: &str) -> String {
     }
 
     format!("{}~{suffix}", &full_run_id[..prefix_bytes])
+}
+
+fn build_worker_boot_run(
+    task_key: &str,
+    kind: BackgroundTaskKind,
+    trigger: &str,
+    now: u64,
+) -> UpsertBackgroundTaskRun {
+    UpsertBackgroundTaskRun {
+        id: build_worker_boot_run_id(task_key),
+        task_key: task_key.to_string(),
+        kind,
+        trigger: trigger.to_string(),
+        status: BackgroundTaskStatus::Running,
+        attempt: 1,
+        max_attempts: 1,
+        // This row represents the logical worker registration shared by every gateway.
+        // A supervisor starting does not mean that instance owns the singleton lease.
+        owner_instance: None,
+        progress_percent: 0,
+        progress_message: Some("worker registered".to_string()),
+        payload_json: None,
+        result_json: None,
+        error_message: None,
+        cancel_requested: false,
+        created_by: Some("system".to_string()),
+        created_at_unix_secs: now,
+        started_at_unix_secs: Some(now),
+        finished_at_unix_secs: None,
+        updated_at_unix_secs: now,
+    }
+}
+
+fn worker_boot_event_payload(gateway_instance_id: &str) -> Value {
+    json!({ "gateway_instance_id": gateway_instance_id })
 }
 
 pub(crate) fn spawn_singleton_worker<F, Fut>(
@@ -510,35 +545,18 @@ pub(crate) fn spawn_record_worker_boot(
 ) -> JoinHandle<()> {
     spawn_named("task-runtime-record-worker-boot", async move {
         let now = now_unix_secs();
-        let run_id = build_worker_boot_run_id(task_key, app.tunnel.local_instance_id());
-        let run = UpsertBackgroundTaskRun {
-            id: run_id.clone(),
-            task_key: task_key.to_string(),
-            kind,
-            trigger: trigger.to_string(),
-            status: BackgroundTaskStatus::Running,
-            attempt: 1,
-            max_attempts: 1,
-            owner_instance: Some(app.tunnel.local_instance_id().to_string()),
-            progress_percent: 0,
-            progress_message: Some("worker booted".to_string()),
-            payload_json: None,
-            result_json: None,
-            error_message: None,
-            cancel_requested: false,
-            created_by: Some("system".to_string()),
-            created_at_unix_secs: now,
-            started_at_unix_secs: Some(now),
-            finished_at_unix_secs: None,
-            updated_at_unix_secs: now,
-        };
-        let _ = upsert_run_with_logging(&app, run).await;
+        let gateway_instance_id = app.tunnel.local_instance_id().to_string();
+        let run = build_worker_boot_run(task_key, kind, trigger, now);
+        let run_id = run.id.clone();
+        if upsert_run_with_logging(&app, run).await.is_none() {
+            return;
+        }
         append_event_with_logging(
             &app,
             &run_id,
             "worker_boot",
-            "background worker started",
-            None,
+            "background worker supervisor started",
+            Some(worker_boot_event_payload(&gateway_instance_id)),
         )
         .await;
     })
@@ -784,53 +802,161 @@ pub(crate) async fn submit_provider_delete_task(
 
 #[cfg(test)]
 mod worker_boot_run_id_tests {
-    use super::{build_worker_boot_run_id, BACKGROUND_TASK_RUN_ID_MAX_BYTES};
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    use super::{
+        build_worker_boot_run, build_worker_boot_run_id, spawn_record_worker_boot,
+        worker_boot_event_payload, BACKGROUND_TASK_RUN_ID_MAX_BYTES,
+    };
+    use aether_data::repository::background_tasks::InMemoryBackgroundTaskRepository;
+    use aether_data_contracts::repository::background_tasks::{
+        BackgroundTaskKind, BackgroundTaskListQuery, BackgroundTaskReadRepository,
+        BackgroundTaskStatus,
+    };
+    use serde_json::json;
+
+    use crate::{data::GatewayDataState, AppState};
 
     #[test]
-    fn worker_boot_run_id_preserves_short_legacy_format() {
+    fn worker_boot_run_id_is_keyed_only_by_task() {
         assert_eq!(
-            build_worker_boot_run_id("usage.queue.worker", "gateway-1"),
-            "boot:usage.queue.worker:gateway-1"
+            build_worker_boot_run_id("usage.queue.worker"),
+            "boot:usage.queue.worker"
         );
     }
 
     #[test]
     fn worker_boot_run_id_preserves_exact_database_limit() {
-        let task_key = "task";
-        let instance_id = "i".repeat(BACKGROUND_TASK_RUN_ID_MAX_BYTES - "boot:task:".len());
-        let run_id = build_worker_boot_run_id(task_key, &instance_id);
+        let task_key = "t".repeat(BACKGROUND_TASK_RUN_ID_MAX_BYTES - "boot:".len());
+        let run_id = build_worker_boot_run_id(&task_key);
 
         assert_eq!(run_id.len(), BACKGROUND_TASK_RUN_ID_MAX_BYTES);
-        assert_eq!(run_id, format!("boot:{task_key}:{instance_id}"));
+        assert_eq!(run_id, format!("boot:{task_key}"));
     }
 
     #[test]
     fn worker_boot_run_id_compacts_oversized_values_deterministically() {
-        let instance_id = "gateway-instance-".repeat(8);
-        let first = build_worker_boot_run_id("usage.queue.worker", &instance_id);
-        let second = build_worker_boot_run_id("usage.queue.worker", &instance_id);
+        let task_key = "worker-task-".repeat(8);
+        let first = build_worker_boot_run_id(&task_key);
+        let second = build_worker_boot_run_id(&task_key);
 
         assert!(first.len() <= BACKGROUND_TASK_RUN_ID_MAX_BYTES);
         assert_eq!(first, second);
-        assert!(first.starts_with("boot:usage.queue.worker:"));
+        assert!(first.starts_with("boot:worker-task-"));
         assert!(first.contains('~'));
     }
 
     #[test]
     fn worker_boot_run_id_hash_distinguishes_shared_long_prefixes() {
-        let shared_prefix = "gateway-instance-with-a-very-long-shared-prefix-".repeat(2);
-        let first = build_worker_boot_run_id("usage.queue.worker", &format!("{shared_prefix}a"));
-        let second = build_worker_boot_run_id("usage.queue.worker", &format!("{shared_prefix}b"));
+        let shared_prefix = "worker-task-with-a-very-long-shared-prefix-".repeat(2);
+        let first = build_worker_boot_run_id(&format!("{shared_prefix}a"));
+        let second = build_worker_boot_run_id(&format!("{shared_prefix}b"));
 
         assert_ne!(first, second);
     }
 
     #[test]
     fn worker_boot_run_id_handles_unicode_at_truncation_boundary() {
-        let run_id = build_worker_boot_run_id("usage.queue.worker", &"网关实例".repeat(16));
+        let run_id = build_worker_boot_run_id(&"后台任务".repeat(16));
 
         assert!(run_id.len() <= BACKGROUND_TASK_RUN_ID_MAX_BYTES);
         assert!(run_id.is_char_boundary(run_id.len()));
-        assert!(run_id.starts_with("boot:usage.queue.worker:"));
+        assert!(run_id.starts_with("boot:后台任务"));
+    }
+
+    #[test]
+    fn worker_boot_run_is_a_gateway_neutral_logical_registration() {
+        let run = build_worker_boot_run(
+            "usage.queue.worker",
+            BackgroundTaskKind::Daemon,
+            "daemon",
+            123,
+        );
+
+        assert_eq!(run.id, "boot:usage.queue.worker");
+        assert_eq!(run.status, BackgroundTaskStatus::Running);
+        assert_eq!(run.owner_instance, None);
+        assert_eq!(run.progress_message.as_deref(), Some("worker registered"));
+        assert_eq!(run.created_at_unix_secs, 123);
+        assert_eq!(run.started_at_unix_secs, Some(123));
+        assert_eq!(run.updated_at_unix_secs, 123);
+    }
+
+    #[test]
+    fn worker_boot_event_keeps_the_observing_gateway_instance() {
+        assert_eq!(
+            worker_boot_event_payload("gateway-a"),
+            json!({ "gateway_instance_id": "gateway-a" })
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_boot_registration_is_shared_but_events_keep_each_gateway() {
+        let repository = Arc::new(InMemoryBackgroundTaskRepository::default());
+        let state_for = |gateway_instance_id: &str| {
+            AppState::new()
+                .expect("gateway state should build")
+                .with_data_state_for_tests(
+                    GatewayDataState::disabled()
+                        .with_background_task_repository_for_tests(repository.clone()),
+                )
+                .with_tunnel_identity_for_tests(gateway_instance_id, None)
+        };
+
+        spawn_record_worker_boot(
+            state_for("gateway-a"),
+            "usage.queue.worker",
+            BackgroundTaskKind::Daemon,
+            "daemon",
+        )
+        .await
+        .expect("gateway-a worker boot recorder should finish");
+        spawn_record_worker_boot(
+            state_for("gateway-b"),
+            "usage.queue.worker",
+            BackgroundTaskKind::Daemon,
+            "daemon",
+        )
+        .await
+        .expect("gateway-b worker boot recorder should finish");
+
+        let page = repository
+            .list_runs(&BackgroundTaskListQuery {
+                task_key_substring: Some("usage.queue.worker".to_string()),
+                kind: None,
+                status: None,
+                trigger: None,
+                offset: 0,
+                limit: 10,
+            })
+            .await
+            .expect("worker boot runs should load");
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].id, "boot:usage.queue.worker");
+        assert_eq!(page.items[0].owner_instance, None);
+
+        let events = repository
+            .list_events("boot:usage.queue.worker", 0, 10)
+            .await
+            .expect("worker boot events should load");
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|event| event.event_type == "worker_boot"));
+        let gateway_instances = events
+            .iter()
+            .filter_map(|event| {
+                event
+                    .payload_json
+                    .as_ref()
+                    .and_then(|payload| payload.get("gateway_instance_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            gateway_instances,
+            BTreeSet::from(["gateway-a".to_string(), "gateway-b".to_string()])
+        );
     }
 }

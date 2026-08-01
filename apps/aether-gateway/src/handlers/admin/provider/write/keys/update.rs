@@ -2,7 +2,8 @@ use crate::handlers::admin::provider::shared::payloads::AdminProviderKeyUpdatePa
 use crate::handlers::admin::provider::write::normalize::{
     normalize_allow_auth_channel_mismatch_formats, normalize_api_format_json_object_keys,
     normalize_api_format_list, normalize_auth_type, normalize_auth_type_by_format,
-    normalize_max_probe_interval_minutes, normalize_rate_multipliers, validate_vertex_api_formats,
+    normalize_max_probe_interval_minutes, normalize_rate_multipliers,
+    reconcile_allow_auth_channel_mismatch_formats, validate_vertex_api_formats,
 };
 use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::{
@@ -256,7 +257,7 @@ pub(crate) fn build_admin_update_provider_key_record_with_existing_keys(
                 "allow_auth_channel_mismatch_formats",
                 &effective_api_formats,
             )?;
-    } else if fields.contains("api_formats") {
+    } else if fields.contains("api_formats") && !managed_fixed_oauth_key {
         let existing = updated
             .allow_auth_channel_mismatch_formats
             .as_ref()
@@ -269,11 +270,7 @@ pub(crate) fn build_admin_update_provider_key_record_with_existing_keys(
                     .collect::<Vec<_>>()
             });
         updated.allow_auth_channel_mismatch_formats =
-            normalize_allow_auth_channel_mismatch_formats(
-                existing,
-                "allow_auth_channel_mismatch_formats",
-                &effective_api_formats,
-            )?;
+            reconcile_allow_auth_channel_mismatch_formats(existing, &effective_api_formats);
     }
 
     updated.auth_type = target_auth_type;
