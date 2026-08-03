@@ -458,6 +458,14 @@ fn build_same_format_provider_request_body_inner(
         .filter(|value| !value.is_empty())
         .unwrap_or(input.mapped_model)
         .to_string();
+    if !same_format_reasoning_effort_supported(
+        &provider_request_body,
+        input.provider_api_format,
+        &provider_model,
+        input.source_model.unwrap_or(input.mapped_model),
+    ) {
+        return None;
+    }
     if aether_ai_formats::finalize_openai_provider_request(
         &mut provider_request_body,
         aether_ai_formats::OpenAiProviderRequestFinalization {
@@ -476,6 +484,35 @@ fn build_same_format_provider_request_body_inner(
         return None;
     }
     Some(provider_request_body)
+}
+
+fn same_format_reasoning_effort_supported(
+    body: &Value,
+    provider_api_format: &str,
+    provider_model: &str,
+    source_model: &str,
+) -> bool {
+    let provider_api_format = aether_ai_formats::normalize_api_format_alias(provider_api_format);
+    let effort = match provider_api_format.as_str() {
+        "openai:chat" => body.get("reasoning_effort"),
+        "openai:responses" | "openai:responses:compact" | "openai:search" => body
+            .get("reasoning")
+            .and_then(Value::as_object)
+            .and_then(|reasoning| reasoning.get("effort")),
+        _ => return true,
+    };
+    let Some(effort) = effort.and_then(Value::as_str) else {
+        return true;
+    };
+    let Some(effort) = aether_ai_formats::ReasoningEffort::parse(effort) else {
+        return true;
+    };
+    aether_ai_formats::reasoning_effort_supported_for_model(
+        provider_api_format.as_str(),
+        provider_model,
+        source_model,
+        effort,
+    )
 }
 
 fn record_compatibility_edit(

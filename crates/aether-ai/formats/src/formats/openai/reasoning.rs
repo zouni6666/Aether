@@ -1,7 +1,5 @@
 use serde_json::Value;
 
-use crate::formats::shared::model_directives::ReasoningEffort;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenAiReasoningViolationKind {
     InvalidType,
@@ -50,17 +48,15 @@ pub(crate) fn validate_openai_reasoning_request_with_source_model(
         source_model,
         body,
         None,
-        None,
     )
 }
 
 pub(crate) fn validate_openai_reasoning_request_with_model_profile(
     source_api_format: &str,
-    provider_api_format: &str,
+    _provider_api_format: &str,
     provider_model: &str,
     source_model: &str,
     body: &Value,
-    model_card_reasoning_efforts: Option<&[String]>,
     supports_reasoning_mode: Option<bool>,
 ) -> Result<(), OpenAiReasoningContractViolation> {
     let Some(object) = body.as_object() else {
@@ -102,14 +98,7 @@ pub(crate) fn validate_openai_reasoning_request_with_model_profile(
         _ => None,
     };
     if let Some(value) = effort.filter(|value| !value.is_null()) {
-        validate_reasoning_effort(
-            value,
-            source_api_format.as_str(),
-            provider_api_format,
-            provider_model,
-            source_model,
-            model_card_reasoning_efforts,
-        )?;
+        validate_reasoning_effort(value, source_api_format.as_str())?;
     }
 
     if source_api_format != "openai:search" {
@@ -139,10 +128,6 @@ pub(crate) fn validate_openai_reasoning_request_with_model_profile(
 fn validate_reasoning_effort(
     value: &Value,
     source_api_format: &str,
-    provider_api_format: &str,
-    provider_model: &str,
-    source_model: &str,
-    model_card_reasoning_efforts: Option<&[String]>,
 ) -> Result<(), OpenAiReasoningContractViolation> {
     let field = if source_api_format == "openai:chat" {
         "reasoning_effort"
@@ -165,48 +150,7 @@ fn validate_reasoning_effort(
             reason: "reasoning effort must not be empty".to_string(),
         });
     }
-    if raw.trim() == "ultra" {
-        return Err(OpenAiReasoningContractViolation {
-            kind: OpenAiReasoningViolationKind::InvalidEnum,
-            field: field.to_string(),
-            value: Some(raw.to_string()),
-            reason: "ultra is a Codex client preset, not an OpenAI wire effort".to_string(),
-        });
-    }
-    if let Some(supported_efforts) =
-        model_card_reasoning_efforts.filter(|values| !values.is_empty())
-    {
-        if supported_efforts
-            .iter()
-            .any(|effort| effort == raw.trim() || (raw.trim() == "max" && effort == "ultra"))
-        {
-            return Ok(());
-        }
-        return Err(OpenAiReasoningContractViolation {
-            kind: OpenAiReasoningViolationKind::UnsupportedForModel,
-            field: field.to_string(),
-            value: Some(raw.to_string()),
-            reason: "provider model card does not support the requested reasoning effort"
-                .to_string(),
-        });
-    }
-    let Some(effort) = ReasoningEffort::parse(raw) else {
-        return Ok(());
-    };
-    if crate::reasoning_effort_supported_for_model(
-        provider_api_format,
-        provider_model,
-        source_model,
-        effort,
-    ) {
-        return Ok(());
-    }
-    Err(OpenAiReasoningContractViolation {
-        kind: OpenAiReasoningViolationKind::UnsupportedForModel,
-        field: field.to_string(),
-        value: Some(raw.to_string()),
-        reason: "provider model does not support the requested reasoning effort".to_string(),
-    })
+    Ok(())
 }
 
 fn validate_reasoning_mode(
@@ -303,69 +247,32 @@ mod tests {
     use super::{validate_openai_reasoning_request, OpenAiReasoningViolationKind};
 
     #[test]
-    fn mapped_model_is_authoritative_for_openai_reasoning_effort() {
-        let alias = json!({
-            "model": "deployment-alias",
-            "reasoning": {"effort": "max"}
-        });
-        validate_openai_reasoning_request(
-            "openai:responses",
-            "openai:responses",
-            "gpt-5.6-sol",
-            &alias,
-        )
-        .expect("GPT-5.6 should accept max");
-
-        let error = validate_openai_reasoning_request(
-            "openai:responses",
-            "openai:responses",
-            "gpt-5.4",
-            &alias,
-        )
-        .expect_err("GPT-5.4 should reject max");
-        assert_eq!(
-            error.kind,
-            OpenAiReasoningViolationKind::UnsupportedForModel
-        );
-    }
-
-    #[test]
-    fn gpt_5_6_rejects_known_unsupported_effort_and_preserves_custom_effort() {
-        let unsupported = json!({
-            "model": "gpt-5.6-terra",
-            "reasoning_effort": "minimal"
-        });
-        let error = validate_openai_reasoning_request(
-            "openai:chat",
-            "openai:chat",
-            "gpt-5.6-terra",
-            &unsupported,
-        )
-        .expect_err("known unsupported effort should be rejected");
-        assert_eq!(
-            error.kind,
-            OpenAiReasoningViolationKind::UnsupportedForModel
-        );
-
-        validate_openai_reasoning_request(
-            "openai:responses",
-            "openai:responses",
-            "gpt-5.6-terra",
-            &json!({
-                "model": "gpt-5.6-terra",
-                "reasoning": {"effort": "future"}
-            }),
-        )
-        .expect("model-advertised custom effort should pass through");
-
-        let ultra = validate_openai_reasoning_request(
-            "openai:responses",
-            "openai:responses",
-            "gpt-5.6-terra",
-            &json!({"reasoning": {"effort": "ultra"}}),
-        )
-        .expect_err("Codex local ultra preset should not enter the OpenAI wire contract");
-        assert_eq!(ultra.kind, OpenAiReasoningViolationKind::InvalidEnum);
+    fn reasoning_effort_support_is_deferred_to_upstream() {
+        for (format, body, provider_model) in [
+            (
+                "openai:responses",
+                json!({"reasoning": {"effort": "max"}}),
+                "gpt-5.4",
+            ),
+            (
+                "openai:chat",
+                json!({"reasoning_effort": "minimal"}),
+                "gpt-5.6-terra",
+            ),
+            (
+                "openai:responses",
+                json!({"reasoning": {"effort": "future"}}),
+                "gpt-5.6-terra",
+            ),
+            (
+                "openai:responses",
+                json!({"reasoning": {"effort": "ultra"}}),
+                "gpt-5.6-terra",
+            ),
+        ] {
+            validate_openai_reasoning_request(format, format, provider_model, &body)
+                .expect("well-formed reasoning efforts should be validated by the upstream");
+        }
 
         let empty = validate_openai_reasoning_request(
             "openai:responses",

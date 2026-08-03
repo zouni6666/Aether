@@ -2540,4 +2540,146 @@ mod tests {
             vec!["provider-openai-responses-regular"]
         );
     }
+
+    #[tokio::test]
+    async fn fixed_order_prefers_codex_responses_when_conversion_keeps_priority() {
+        let mut codex = standard_candidate_row("provider-codex", "openai:responses", 0);
+        codex.provider_type = "codex".to_string();
+        codex.key_auth_type = "oauth".to_string();
+        codex.global_model_name = "gpt-5.4-mini".to_string();
+        codex.model_provider_model_name = "gpt-5.4-mini".to_string();
+        let mut custom_chat = standard_candidate_row("provider-custom", "openai:chat", 10);
+        custom_chat.global_model_name = "gpt-5.4-mini".to_string();
+        custom_chat.model_provider_model_name = "gpt-5.4-mini".to_string();
+
+        let candidate_repository: Arc<dyn MinimalCandidateSelectionReadRepository> =
+            Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed([
+                codex.clone(),
+                custom_chat.clone(),
+            ]));
+        let catalog_items = [
+            provider_catalog_for_standard_row(&codex, false),
+            provider_catalog_for_standard_row(&custom_chat, false),
+        ];
+        let provider_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            catalog_items
+                .iter()
+                .map(|(provider, _, _)| provider.clone())
+                .collect(),
+            catalog_items
+                .iter()
+                .map(|(_, endpoint, _)| endpoint.clone())
+                .collect(),
+            catalog_items
+                .iter()
+                .map(|(_, _, key)| key.clone())
+                .collect(),
+        ));
+        let data_state =
+            GatewayDataState::with_provider_catalog_and_minimal_candidate_selection_for_tests(
+                provider_repository,
+                candidate_repository,
+            )
+            .with_encryption_key_for_tests("development-key")
+            .with_system_config_values_for_tests([
+                (
+                    "scheduling_mode".to_string(),
+                    serde_json::json!("fixed_order"),
+                ),
+                (
+                    "keep_priority_on_conversion".to_string(),
+                    serde_json::json!(true),
+                ),
+            ]);
+        let app = AppState::new()
+            .expect("gateway state should build")
+            .with_data_state_for_tests(data_state);
+        let auth_snapshot = unrestricted_auth_snapshot();
+        let model_directive_policy =
+            crate::system_features::ModelDirectivePolicySnapshot::load(&app).await;
+        let routing_policy = ResolvedRoutingPolicy {
+            group_id: Some("routing-group-codex-first".to_string()),
+            group_version: Some(1),
+            selection_source: "test".to_string(),
+            requested_model: "gpt-5.4-mini".to_string(),
+            resolved_model: "gpt-5.4-mini".to_string(),
+            priority_mode: aether_routing_core::RoutingSetPriorityMode::Provider,
+            scheduling_mode: aether_routing_core::RoutingSchedulingMode::FixedOrder,
+            keep_priority_on_conversion: false,
+            ranking_overlay: Default::default(),
+            mutation_plan: Default::default(),
+            pool_policy_overrides: Default::default(),
+            matched_rules: Vec::new(),
+        };
+        let mut cursor = LocalCandidatePreselectionPageCursor::new(
+            PlannerAppState::new(&app),
+            &model_directive_policy,
+            "openai:chat",
+            "gpt-5.4-mini",
+            None,
+            false,
+            None,
+            &auth_snapshot,
+            Some(&routing_policy),
+            None,
+            None,
+            true,
+            LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModelAndApiFormat,
+            false,
+            None,
+        )
+        .await;
+
+        let first_page = cursor
+            .next_page()
+            .await
+            .expect("preselection should succeed")
+            .expect("Codex and custom candidates should share the priority page");
+        assert!(
+            first_page.skipped_candidates.is_empty(),
+            "priority page unexpectedly skipped candidates: {:?}",
+            first_page
+                .skipped_candidates
+                .iter()
+                .map(|candidate| {
+                    (
+                        candidate.candidate.provider_id.as_str(),
+                        candidate.skip_reason,
+                    )
+                })
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            first_page
+                .candidates
+                .iter()
+                .map(|candidate| candidate.provider_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["provider-custom", "provider-codex"]
+        );
+        let (ranked, skipped) =
+            super::super::candidate_resolution::resolve_and_rank_logical_local_execution_candidates(
+                PlannerAppState::new(&app),
+                first_page.candidates,
+                "openai:chat",
+                Some("gpt-5.4-mini"),
+                Some(&auth_snapshot),
+                None,
+                None,
+                Some(&routing_policy),
+                None,
+                None,
+                aether_ai_serving::AiCandidateResolutionMode::Standard,
+            )
+            .await;
+
+        assert!(skipped.is_empty());
+        assert_eq!(
+            ranked
+                .iter()
+                .map(|candidate| candidate.candidate.provider_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["provider-codex", "provider-custom"]
+        );
+    }
 }

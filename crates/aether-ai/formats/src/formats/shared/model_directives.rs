@@ -8,12 +8,11 @@ pub const MODEL_DIRECTIVE_API_FORMATS: [&str; 6] = [
     "claude:messages",
     "gemini:generate_content",
 ];
-pub const OPENAI_MODEL_DIRECTIVE_SUFFIXES: [&str; 9] = [
-    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "fast",
+pub const OPENAI_MODEL_DIRECTIVE_SUFFIXES: [&str; 8] = [
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "fast",
 ];
-const OPENAI_SEARCH_MODEL_DIRECTIVE_SUFFIXES: [&str; 8] = [
-    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
-];
+const OPENAI_SEARCH_MODEL_DIRECTIVE_SUFFIXES: [&str; 7] =
+    ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 pub const CROSS_PROVIDER_MODEL_DIRECTIVE_SUFFIXES: [&str; 5] =
     ["low", "medium", "high", "xhigh", "max"];
 
@@ -32,7 +31,6 @@ pub struct ModelDirectiveSuffixResolution {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelOverride {
     ReasoningEffort(ReasoningEffort),
-    CodexReasoningPreset(CodexReasoningPreset),
     ServiceTier(ServiceTier),
 }
 
@@ -40,7 +38,6 @@ impl ModelOverride {
     pub fn suffix(&self) -> &'static str {
         match self {
             Self::ReasoningEffort(effort) => effort.as_str(),
-            Self::CodexReasoningPreset(preset) => preset.as_str(),
             Self::ServiceTier(tier) => tier.as_directive_suffix(),
         }
     }
@@ -132,19 +129,6 @@ impl ReasoningEffort {
             Self::Medium => 2048,
             Self::High => 4096,
             Self::XHigh | Self::Max => 8192,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CodexReasoningPreset {
-    Ultra,
-}
-
-impl CodexReasoningPreset {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Ultra => "ultra",
         }
     }
 }
@@ -288,16 +272,12 @@ fn parse_model_override(suffix: &str) -> Option<ModelOverride> {
 }
 
 fn parse_model_override_for_model(suffix: &str, model: &str) -> Option<ModelOverride> {
-    if suffix.eq_ignore_ascii_case("ultra") && codex_ultra_preset_supported_for_model(model) {
-        return Some(ModelOverride::CodexReasoningPreset(
-            CodexReasoningPreset::Ultra,
-        ));
-    }
+    let _ = model;
     parse_model_override(suffix)
 }
 
 pub fn model_directive_suffix_has_builtin_mapping(suffix: &str) -> bool {
-    parse_model_override(suffix).is_some() || suffix.eq_ignore_ascii_case("ultra")
+    parse_model_override(suffix).is_some()
 }
 
 pub fn model_directive_builtin_suffix_supported_for_source_model(
@@ -308,14 +288,7 @@ pub fn model_directive_builtin_suffix_supported_for_source_model(
 }
 
 fn model_directive_suffix_is_reasoning(suffix: &str) -> bool {
-    ReasoningEffort::parse(suffix).is_some() || suffix.eq_ignore_ascii_case("ultra")
-}
-
-fn codex_ultra_preset_supported_for_model(model: &str) -> bool {
-    crate::formats::openai::responses::codex::resolve_codex_responses_model_capabilities(
-        model, model, None,
-    )
-    .supports_reasoning_effort("ultra")
+    ReasoningEffort::parse(suffix).is_some()
 }
 
 pub fn model_directive_base_model(model: &str) -> Option<String> {
@@ -389,14 +362,6 @@ pub fn apply_model_directive_overrides_from_model(
                 )?;
                 applied_override = true;
             }
-            ModelOverride::CodexReasoningPreset(preset) => {
-                apply_codex_reasoning_preset_override(
-                    &mut patched_body,
-                    provider_api_format,
-                    *preset,
-                )?;
-                applied_override = true;
-            }
             ModelOverride::ServiceTier(tier) => {
                 if is_openai_search {
                     continue;
@@ -437,9 +402,6 @@ pub fn default_model_directive_mapping_patch(
             source_model,
             effort,
         )?,
-        ModelOverride::CodexReasoningPreset(preset) => {
-            apply_codex_reasoning_preset_override(&mut patch, provider_api_format, preset)?
-        }
         ModelOverride::ServiceTier(tier) => {
             apply_service_tier_override(&mut patch, provider_api_format, tier)?
         }
@@ -528,29 +490,6 @@ fn apply_reasoning_effort_override(
         }
         "gemini:generate_content" => {
             set_gemini_reasoning_effort(provider_request_body, effort, provider_model)
-        }
-        _ => None,
-    }
-}
-
-fn apply_codex_reasoning_preset_override(
-    provider_request_body: &mut Value,
-    provider_api_format: &str,
-    preset: CodexReasoningPreset,
-) -> Option<()> {
-    match crate::normalize_api_format_alias(provider_api_format).as_str() {
-        "openai:chat" => {
-            set_object_string(provider_request_body, "reasoning_effort", preset.as_str())
-        }
-        "openai:responses" | "openai:responses:compact" | "openai:search" => {
-            let object = provider_request_body.as_object_mut()?;
-            let reasoning = object
-                .entry("reasoning".to_string())
-                .or_insert_with(|| json!({}));
-            reasoning
-                .as_object_mut()?
-                .insert("effort".to_string(), json!(preset.as_str()));
-            Some(())
         }
         _ => None,
     }
@@ -877,9 +816,8 @@ mod tests {
     use super::{
         apply_model_directive_overrides_from_model, default_model_directive_suffixes,
         default_model_directives_config, parse_model_directive,
-        parse_model_directive_with_suffixes, CodexReasoningPreset, ModelDirective,
-        ModelDirectiveSuffixResolution, ModelOverride, ReasoningEffort, ServiceTier,
-        MODEL_DIRECTIVE_API_FORMATS,
+        parse_model_directive_with_suffixes, ModelDirective, ModelDirectiveSuffixResolution,
+        ModelOverride, ReasoningEffort, ServiceTier, MODEL_DIRECTIVE_API_FORMATS,
     };
 
     #[test]
@@ -1023,18 +961,9 @@ mod tests {
     }
 
     #[test]
-    fn parses_gpt_5_6_ultra_as_an_internal_reasoning_preset() {
-        assert_eq!(
-            parse_model_directive("gpt-5.6-sol-ultra"),
-            Some(ModelDirective {
-                base_model: "gpt-5.6-sol".to_string(),
-                overrides: vec![ModelOverride::CodexReasoningPreset(
-                    CodexReasoningPreset::Ultra,
-                )],
-            })
-        );
-
+    fn does_not_treat_ultra_as_a_builtin_model_directive() {
         for model in [
+            "gpt-5.6-sol-ultra",
             "gpt-5.6-ultra",
             "gpt-5.6-luna-ultra",
             "gpt-5.4-ultra",
@@ -1042,15 +971,6 @@ mod tests {
         ] {
             assert_eq!(parse_model_directive(model), None);
         }
-
-        let mut unsupported = json!({"model": "gpt-5.4"});
-        assert!(apply_model_directive_overrides_from_model(
-            &mut unsupported,
-            "openai:responses",
-            "gpt-5.4",
-            "gpt-5.4-ultra",
-        )
-        .is_none());
     }
 
     #[test]

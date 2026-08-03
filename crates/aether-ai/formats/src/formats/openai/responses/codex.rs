@@ -176,6 +176,16 @@ pub fn codex_responses_model_capabilities_from_card(
             })
             .collect();
     }
+    if model_id == "gpt-5.4-mini" {
+        capabilities.default_reasoning_effort = Some("none".to_string());
+        if !capabilities.supported_reasoning_efforts.is_empty()
+            && !capabilities.supports_reasoning_effort("none")
+        {
+            capabilities
+                .supported_reasoning_efforts
+                .insert(0, "none".to_string());
+        }
+    }
     if let Some(value) = card
         .get("supports_parallel_tool_calls")
         .and_then(Value::as_bool)
@@ -501,10 +511,10 @@ pub fn bundled_codex_model_cards() -> &'static [Value] {
                 model_id: "gpt-5.4-mini",
                 display_name: "GPT-5.4 Mini",
                 description: "Small, fast, and cost-efficient model for simpler coding tasks.",
-                default_reasoning_level: "medium",
+                default_reasoning_level: "none",
                 default_reasoning_summary: "none",
                 use_responses_lite: false,
-                efforts: &["low", "medium", "high", "xhigh"],
+                efforts: &["none", "low", "medium", "high", "xhigh"],
                 default_verbosity: "medium",
                 supports_priority_tier: false,
             }),
@@ -1207,39 +1217,6 @@ fn remove_codex_reasoning_summary_delivery(body_object: &mut serde_json::Map<Str
     }
 }
 
-fn normalize_codex_reasoning_effort(body_object: &mut serde_json::Map<String, Value>) {
-    let Some(reasoning) = body_object
-        .get_mut("reasoning")
-        .and_then(Value::as_object_mut)
-    else {
-        return;
-    };
-    let is_ultra = reasoning
-        .get("effort")
-        .and_then(Value::as_str)
-        .is_some_and(|effort| effort == "ultra");
-    if is_ultra {
-        reasoning.insert("effort".to_string(), json!("max"));
-    }
-}
-
-pub fn normalize_codex_openai_reasoning_wire_effort(
-    provider_request_body: &mut Value,
-    provider_type: &str,
-    provider_api_format: &str,
-) {
-    if !provider_type.trim().eq_ignore_ascii_case("codex")
-        || !(aether_ai_formats::is_openai_responses_family_format(provider_api_format)
-            || aether_ai_formats::api_format_alias_matches(provider_api_format, "openai:search"))
-    {
-        return;
-    }
-    let Some(body_object) = provider_request_body.as_object_mut() else {
-        return;
-    };
-    normalize_codex_reasoning_effort(body_object);
-}
-
 fn is_codex_responses_lite_additional_tools_item(value: &Value) -> bool {
     value
         .get("type")
@@ -1777,7 +1754,6 @@ pub fn apply_codex_openai_responses_special_body_edits_with_source_model_and_cap
         supports_reasoning_mode,
         body_rules,
     );
-    normalize_codex_reasoning_effort(body_object);
     apply_codex_model_request_capabilities(
         body_object,
         provider_api_format,
@@ -2071,7 +2047,7 @@ mod tests {
             "instructions": "Use the tools.",
             "input": [{"id": "msg-1", "type": "message", "role": "user", "content": []}],
             "tools": [{"type": "function", "name": "lookup"}],
-            "reasoning": {"effort": "ultra"},
+            "reasoning": {"effort": "max"},
             "parallel_tool_calls": true,
             "service_tier": "priority",
             "text": {"format": {"type": "json_schema"}},
@@ -2254,7 +2230,7 @@ mod tests {
     }
 
     #[test]
-    fn ultra_reasoning_always_uses_max_on_the_provider_wire() {
+    fn special_body_edits_do_not_rewrite_explicit_ultra_effort() {
         for provider_api_format in ["openai:responses", "openai:responses:compact"] {
             let mut body = json!({
                 "model": "gpt-5.6-luna",
@@ -2270,7 +2246,7 @@ mod tests {
                 None,
                 None,
             );
-            assert_eq!(body["reasoning"]["effort"], "max");
+            assert_eq!(body["reasoning"]["effort"], "ultra");
         }
 
         let mut custom = json!({
@@ -2470,6 +2446,46 @@ mod tests {
                 resolve_codex_responses_model_capabilities(provider_model, "gpt-5.6-sol", None);
             assert!(!capabilities.use_responses_lite, "model: {provider_model}");
         }
+    }
+
+    #[test]
+    fn bundled_gpt_5_4_mini_supports_official_reasoning_efforts() {
+        let capabilities =
+            resolve_codex_responses_model_capabilities("gpt-5.4-mini", "gpt-5.4-mini", None);
+
+        assert_eq!(
+            capabilities.default_reasoning_effort.as_deref(),
+            Some("none")
+        );
+        assert_eq!(
+            capabilities.supported_reasoning_efforts,
+            vec!["none", "low", "medium", "high", "xhigh"]
+        );
+        assert!(capabilities.supports_reasoning_effort("none"));
+
+        let metadata = build_codex_model_catalog_metadata(&[json!({
+            "slug": "gpt-5.4-mini",
+            "default_reasoning_level": "medium",
+            "supported_reasoning_levels": [
+                {"effort": "low"},
+                {"effort": "medium"},
+                {"effort": "high"},
+                {"effort": "xhigh"}
+            ]
+        })]);
+        let cached_capabilities = resolve_codex_responses_model_capabilities(
+            "gpt-5.4-mini",
+            "gpt-5.4-mini",
+            Some(&metadata),
+        );
+        assert_eq!(
+            cached_capabilities.default_reasoning_effort.as_deref(),
+            Some("none")
+        );
+        assert_eq!(
+            cached_capabilities.supported_reasoning_efforts,
+            vec!["none", "low", "medium", "high", "xhigh"]
+        );
     }
 
     #[test]
@@ -2804,6 +2820,56 @@ mod tests {
                 }]
             }])
         );
+    }
+
+    #[test]
+    fn codex_responses_body_edits_preserve_explicit_system_messages() {
+        let explicit_system_message = json!({
+            "type": "message",
+            "role": "system",
+            "content": [{
+                "type": "input_text",
+                "text": "Keep this caller-supplied role."
+            }]
+        });
+
+        let mut standard_body = json!({
+            "model": "gpt-5.4",
+            "instructions": "Standard base instructions.",
+            "input": [explicit_system_message.clone()]
+        });
+        apply_codex_openai_responses_special_body_edits(
+            &mut standard_body,
+            "codex",
+            "openai:responses",
+            None,
+            None,
+        );
+
+        assert_eq!(standard_body["instructions"], "Standard base instructions.");
+        assert_eq!(standard_body["input"], json!([explicit_system_message]));
+
+        let mut lite_body = json!({
+            "model": "gpt-5.6-sol",
+            "instructions": "Lite base instructions.",
+            "input": [explicit_system_message.clone()]
+        });
+        apply_codex_openai_responses_special_body_edits(
+            &mut lite_body,
+            "codex",
+            "openai:responses",
+            None,
+            None,
+        );
+
+        assert!(lite_body.get("instructions").is_none());
+        assert_eq!(lite_body["input"][0]["type"], "additional_tools");
+        assert_eq!(lite_body["input"][1]["role"], "developer");
+        assert_eq!(
+            lite_body["input"][1]["content"][0]["text"],
+            "Lite base instructions."
+        );
+        assert_eq!(lite_body["input"][2], explicit_system_message);
     }
 
     #[test]

@@ -188,9 +188,14 @@ pub(crate) async fn scheduler_ordering_config_for_routing_policy(
     state: PlannerAppState<'_>,
     routing_policy: Option<&ResolvedRoutingPolicy>,
 ) -> SchedulerOrderingConfig {
+    let system_config = read_scheduler_ordering_config_or_default(state).await;
     match routing_policy {
-        Some(policy) => scheduler_ordering_config_from_routing_policy(policy),
-        None => read_scheduler_ordering_config_or_default(state).await,
+        Some(policy) => {
+            let mut config = scheduler_ordering_config_from_routing_policy(policy);
+            config.keep_priority_on_conversion |= system_config.keep_priority_on_conversion;
+            config
+        }
+        None => system_config,
     }
 }
 
@@ -388,6 +393,43 @@ mod tests {
         assert_eq!(overlaid.provider_priority, 7);
         assert_eq!(overlaid.key_internal_priority, 3);
         assert_eq!(overlaid.key_global_priority_for_format, Some(2));
+    }
+
+    #[tokio::test]
+    async fn routing_policy_inherits_global_conversion_priority_override() {
+        let data_state = GatewayDataState::default().with_system_config_values_for_tests([(
+            "keep_priority_on_conversion".to_string(),
+            json!(true),
+        )]);
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data_state);
+        let policy = aether_routing_core::ResolvedRoutingPolicy {
+            group_id: Some("group-1".to_string()),
+            group_version: Some(1),
+            selection_source: "system_default".to_string(),
+            requested_model: "gpt-5.4-mini".to_string(),
+            resolved_model: "gpt-5.4-mini".to_string(),
+            priority_mode: aether_routing_core::RoutingSetPriorityMode::Provider,
+            scheduling_mode: aether_routing_core::RoutingSchedulingMode::FixedOrder,
+            keep_priority_on_conversion: false,
+            ranking_overlay: Default::default(),
+            mutation_plan: Default::default(),
+            pool_policy_overrides: Default::default(),
+            matched_rules: Vec::new(),
+        };
+
+        let ordering = super::scheduler_ordering_config_for_routing_policy(
+            PlannerAppState::new(&state),
+            Some(&policy),
+        )
+        .await;
+
+        assert_eq!(
+            ordering.scheduling_mode,
+            crate::scheduler::config::SchedulerSchedulingMode::FixedOrder
+        );
+        assert!(ordering.keep_priority_on_conversion);
     }
 
     #[test]

@@ -352,7 +352,7 @@ fn final_openai_provider_contract_uses_the_mapped_model_for_reasoning() {
         false,
     )
     .is_some());
-    assert!(build_local_openai_responses_request_body(
+    let remapped = build_local_openai_responses_request_body(
         &alias,
         "gpt-5.4",
         false,
@@ -364,14 +364,15 @@ fn final_openai_provider_contract_uses_the_mapped_model_for_reasoning() {
         &http::HeaderMap::new(),
         false,
     )
-    .is_none());
+    .expect("explicit reasoning effort should pass through to the mapped model");
+    assert_eq!(remapped["reasoning"]["effort"], "max");
 
     let minimal = json!({
         "model": "deployment-alias",
         "messages": [{"role": "user", "content": "hello"}],
         "reasoning_effort": "minimal"
     });
-    assert!(build_local_openai_chat_request_body(
+    let minimal = build_local_openai_chat_request_body(
         &minimal,
         "gpt-5.6-terra",
         false,
@@ -380,7 +381,8 @@ fn final_openai_provider_contract_uses_the_mapped_model_for_reasoning() {
         &http::HeaderMap::new(),
         false,
     )
-    .is_none());
+    .expect("explicit chat reasoning effort should be validated by the upstream");
+    assert_eq!(minimal["reasoning_effort"], "minimal");
 
     let opaque_mapping = json!({
         "model": "gpt-5.6-sol-max",
@@ -426,7 +428,7 @@ fn final_openai_provider_contract_validates_body_rule_output() {
     let model_override = json!([
         {"action":"set","path":"model","value":"gpt-5.4"}
     ]);
-    assert!(build_local_openai_responses_request_body(
+    let provider_request = build_local_openai_responses_request_body(
         &body,
         "gpt-5.6-sol",
         false,
@@ -438,7 +440,9 @@ fn final_openai_provider_contract_validates_body_rule_output() {
         &http::HeaderMap::new(),
         false,
     )
-    .is_none());
+    .expect("body rule output should preserve explicit reasoning effort");
+    assert_eq!(provider_request["model"], "gpt-5.4");
+    assert_eq!(provider_request["reasoning"]["effort"], "max");
 
     let cache_override = json!([
         {"action":"set","path":"prompt_cache_options.ttl","value":"1h"}

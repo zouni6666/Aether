@@ -804,7 +804,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_ultra_uses_the_builtin_policy_path_for_default_and_explicit_settings() {
+    fn codex_ultra_is_not_a_gateway_model_directive() {
         let snapshots = [
             ModelDirectivePolicySnapshot::from_config_values(Some(&json!(true)), None),
             ModelDirectivePolicySnapshot::from_config_values(
@@ -825,18 +825,9 @@ mod tests {
         ];
 
         for snapshot in snapshots {
-            for model in ["gpt-5.6-sol", "gpt-5.6-terra"] {
-                let requested_model = format!("{model}-ultra");
-                let resolution =
-                    snapshot.resolve_reasoning("openai:responses", Some(&requested_model));
-                assert_eq!(resolution.base_model(), Some(model));
-                assert_eq!(
-                    resolution.mapping_patch_for_mapped_model(model),
-                    Ok(Some(json!({ "reasoning": { "effort": "ultra" } })))
-                );
-            }
-
             for requested_model in [
+                "gpt-5.6-sol-ultra",
+                "gpt-5.6-terra-ultra",
                 "gpt-5.6-ultra",
                 "gpt-5.6-luna-ultra",
                 "gpt-5.4-ultra",

@@ -27,6 +27,7 @@ pub struct StreamingStandardFormatMatrix {
     provider: Option<ProviderStreamParser>,
     client: Option<ClientStreamEmitter>,
     propagated_actual_service_tier: Option<String>,
+    pending_sse_event: Option<String>,
     terminated: bool,
     history_recorded: bool,
     pending_history_record: Option<ResponseHistoryRecord>,
@@ -42,6 +43,7 @@ impl StreamingStandardFormatMatrix {
             return Ok(Vec::new());
         }
         self.ensure_initialized(report_context);
+        let line = self.apply_sse_event_type(line);
         if let Some(error_body) = build_client_error_body_for_line(report_context, &line) {
             self.terminated = true;
             return self.emit_error(error_body);
@@ -62,6 +64,10 @@ impl StreamingStandardFormatMatrix {
             }
         }
         self.emit_frames(report_context, frames)
+    }
+
+    fn apply_sse_event_type(&mut self, line: Vec<u8>) -> Vec<u8> {
+        apply_sse_event_type(&mut self.pending_sse_event, line)
     }
 
     pub fn finish(&mut self, report_context: &Value) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
@@ -172,10 +178,46 @@ impl StreamingStandardFormatMatrix {
     }
 }
 
+fn apply_sse_event_type(pending_sse_event: &mut Option<String>, line: Vec<u8>) -> Vec<u8> {
+    let Ok(text) = std::str::from_utf8(&line) else {
+        return line;
+    };
+    let trimmed = text.trim_matches('\r').trim();
+    if let Some(event) = trimmed.strip_prefix("event:").map(str::trim) {
+        *pending_sse_event = (!event.is_empty()).then(|| event.to_string());
+        return line;
+    }
+    if trimmed.is_empty() {
+        *pending_sse_event = None;
+        return line;
+    }
+    if !trimmed.starts_with("data:") {
+        return line;
+    }
+    let Some(event) = pending_sse_event.take() else {
+        return line;
+    };
+    let Some(mut payload) = decode_json_data_line(&line) else {
+        return line;
+    };
+    let Some(payload) = payload.as_object_mut() else {
+        return line;
+    };
+    if payload.contains_key("type") {
+        return line;
+    }
+    payload.insert("type".to_string(), Value::String(event));
+    let mut normalized = b"data: ".to_vec();
+    normalized.extend(serde_json::to_vec(&payload).expect("JSON value serialization cannot fail"));
+    normalized.push(b'\n');
+    normalized
+}
+
 #[derive(Default)]
 pub struct StreamingStandardTerminalObserver {
     provider: Option<TerminalStreamParser>,
     latest_summary: Option<ExecutionStreamTerminalSummary>,
+    pending_sse_event: Option<String>,
 }
 
 impl StreamingStandardTerminalObserver {
@@ -185,6 +227,7 @@ impl StreamingStandardTerminalObserver {
         line: Vec<u8>,
     ) -> Result<(), AiSurfaceFinalizeError> {
         self.ensure_initialized(report_context);
+        let line = apply_sse_event_type(&mut self.pending_sse_event, line);
         let Some(provider) = self.provider.as_mut() else {
             return Ok(());
         };
@@ -669,6 +712,72 @@ mod tests {
             .filter(|payload| *payload != "[DONE]")
             .filter_map(|payload| serde_json::from_str(payload).ok())
             .collect()
+    }
+
+    fn event_only_line(event: &str) -> Vec<u8> {
+        format!("event: {event}\n").into_bytes()
+    }
+
+    #[test]
+    fn event_only_stream_types_convert_across_standard_formats() {
+        let responses_payload = json!({
+            "response": {
+                "id": "resp_event_only_123",
+                "model": "gpt-5.4",
+                "status": "in_progress",
+                "output": [],
+            },
+        });
+
+        let mut claude_matrix = StreamingStandardFormatMatrix::default();
+        let claude_context = report_context("openai:responses", "claude:messages");
+        assert!(claude_matrix
+            .transform_line(&claude_context, event_only_line("response.created"))
+            .expect("event should parse")
+            .is_empty());
+        let claude_output = claude_matrix
+            .transform_line(&claude_context, data_line(responses_payload))
+            .expect("response.created should convert to Claude");
+        assert!(String::from_utf8_lossy(&claude_output).contains("event: message_start"));
+
+        let mut gemini_matrix = StreamingStandardFormatMatrix::default();
+        let gemini_context = report_context("openai:responses", "gemini:generate_content");
+        gemini_matrix
+            .transform_line(
+                &gemini_context,
+                event_only_line("response.output_text.delta"),
+            )
+            .expect("event should parse");
+        let gemini_output = gemini_matrix
+            .transform_line(
+                &gemini_context,
+                data_line(json!({
+                    "response_id": "resp_event_only_123",
+                    "delta": "hello",
+                })),
+            )
+            .expect("text delta should convert to Gemini");
+        assert!(String::from_utf8_lossy(&gemini_output).contains("\"text\":\"hello\""));
+
+        let mut chat_matrix = StreamingStandardFormatMatrix::default();
+        let chat_context = report_context("claude:messages", "openai:chat");
+        chat_matrix
+            .transform_line(&chat_context, event_only_line("message_start"))
+            .expect("event should parse");
+        let chat_output = chat_matrix
+            .transform_line(
+                &chat_context,
+                data_line(json!({
+                    "message": {
+                        "id": "msg_event_only_123",
+                        "model": "claude-sonnet-4-5",
+                    },
+                })),
+            )
+            .expect("message_start should convert to Chat");
+        assert!(
+            String::from_utf8_lossy(&chat_output).contains("\"delta\":{\"role\":\"assistant\"}")
+        );
     }
 
     #[test]
@@ -1981,6 +2090,48 @@ mod tests {
         assert_eq!(usage.output_tokens, 137);
         assert_eq!(usage.reasoning_tokens, 10);
         assert_eq!(usage.cache_read_tokens, 0);
+    }
+
+    #[test]
+    fn terminal_observer_uses_event_type_when_data_omits_type() {
+        let report_context = report_context("openai:responses", "openai:chat");
+        let mut observer = StreamingStandardTerminalObserver::default();
+
+        observer
+            .push_line(&report_context, event_only_line("response.completed"))
+            .expect("event should parse");
+        observer
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "response": {
+                        "id": "resp_terminal_event_only_123",
+                        "model": "gpt-5.4",
+                        "status": "completed",
+                        "output": [],
+                        "usage": {
+                            "input_tokens": 2,
+                            "output_tokens": 3,
+                            "total_tokens": 5,
+                        },
+                    },
+                })),
+            )
+            .expect("response.completed should parse");
+
+        let summary = observer.latest_summary().expect("summary should exist");
+        assert!(summary.observed_finish);
+        assert_eq!(
+            summary.response_id.as_deref(),
+            Some("resp_terminal_event_only_123")
+        );
+        assert_eq!(
+            summary
+                .standardized_usage
+                .as_ref()
+                .map(|usage| usage.input_tokens),
+            Some(2)
+        );
     }
 
     #[test]

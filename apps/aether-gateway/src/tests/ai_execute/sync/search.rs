@@ -383,7 +383,7 @@ async fn gateway_executes_codex_search_with_responses_permission_and_search_cont
         .header(TRACE_ID_HEADER, "trace-search-1")
         .json(&json!({
             "id": "session-search-1",
-            "model": "gpt-5.6-sol-ultra",
+            "model": "gpt-5.6-sol-max",
             "reasoning": {"effort": "low", "summary": "auto"},
             "input": "find current OpenAI documentation",
             "commands": {
