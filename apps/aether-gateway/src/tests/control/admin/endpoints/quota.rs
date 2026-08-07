@@ -1601,7 +1601,7 @@ async fn gateway_refresh_quota_reconciles_unsupported_fixed_provider_endpoints_b
             "claude_code",
             1usize,
             "claude:messages",
-            "https://api.anthropic.com",
+            "https://api.anthropic.com/v1",
             "Claude Code 暂不支持自动刷新额度",
         ),
         (

@@ -1530,7 +1530,7 @@ async function deleteApiKey() {
 
 async function toggleApiKey(apiKey: ApiKey) {
   try {
-    const updated = await meApi.toggleApiKey(apiKey.id)
+    const updated = await meApi.toggleApiKey(apiKey.id, !apiKey.is_active)
     const index = apiKeys.value.findIndex(k => k.id === apiKey.id)
     if (index !== -1) {
       apiKeys.value[index].is_active = updated.is_active

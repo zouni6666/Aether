@@ -8,6 +8,7 @@ use crate::antigravity::is_antigravity_provider_transport;
 use crate::auth::{
     resolve_local_gemini_auth, resolve_local_openai_bearer_auth, resolve_local_standard_auth,
 };
+use crate::claude_code::local_claude_code_transport_unsupported_reason_with_network;
 use crate::kiro::{
     is_kiro_claude_messages_transport, local_kiro_request_transport_unsupported_reason_with_network,
 };
@@ -125,6 +126,18 @@ pub fn request_conversion_transport_unsupported_reason(
     transport: &GatewayProviderTransportSnapshot,
     _kind: RequestConversionKind,
 ) -> Option<&'static str> {
+    if transport
+        .provider
+        .provider_type
+        .trim()
+        .eq_ignore_ascii_case("claude_code")
+        && normalize_api_format_alias(&transport.endpoint.api_format) == "claude:messages"
+    {
+        return local_claude_code_transport_unsupported_reason_with_network(
+            transport,
+            "claude:messages",
+        );
+    }
     if is_kiro_claude_messages_transport(transport, &transport.endpoint.api_format) {
         return local_kiro_request_transport_unsupported_reason_with_network(transport);
     }
@@ -714,6 +727,27 @@ mod tests {
             "openai:chat",
             "claude:messages"
         ));
+        assert!(request_conversion_transport_supported(
+            &transport,
+            RequestConversionKind::ToClaudeStandard
+        ));
+    }
+
+    #[test]
+    fn claude_code_messages_transport_supports_openai_conversions() {
+        let transport = transport_snapshot("claude_code", "claude:messages", "oauth", true, None);
+
+        for client_api_format in ["openai:chat", "openai:responses"] {
+            assert!(request_pair_allowed_for_transport(
+                &transport,
+                client_api_format,
+                "claude:messages"
+            ));
+            assert_eq!(
+                candidate_transport_pair_skip_reason(&transport, client_api_format),
+                None
+            );
+        }
         assert!(request_conversion_transport_supported(
             &transport,
             RequestConversionKind::ToClaudeStandard

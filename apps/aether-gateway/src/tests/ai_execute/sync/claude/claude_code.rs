@@ -48,6 +48,8 @@ async fn gateway_executes_claude_code_cli_sync_via_local_decision_gate_with_loca
         trace_id: String,
         url: String,
         model: String,
+        client_api_format: String,
+        provider_api_format: String,
         authorization: String,
         accept: String,
         anthropic_version: String,
@@ -173,7 +175,7 @@ async fn gateway_executes_claude_code_cli_sync_via_local_decision_gate_with_loca
         )
         .expect("endpoint should build")
         .with_transport_fields(
-            "https://api.anthropic.example/v1/messages".to_string(),
+            "https://api.anthropic.com/v1".to_string(),
             Some(serde_json::json!([
                 {"action":"set","key":"x-endpoint-tag","value":"claude-code-cli-local"}
             ])),
@@ -312,6 +314,16 @@ async fn gateway_executes_claude_code_cli_sync_via_local_decision_gate_with_loca
                         .get("body")
                         .and_then(|value| value.get("json_body"))
                         .and_then(|value| value.get("model"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    client_api_format: payload
+                        .get("client_api_format")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    provider_api_format: payload
+                        .get("provider_api_format")
                         .and_then(|value| value.as_str())
                         .unwrap_or_default()
                         .to_string(),
@@ -522,9 +534,17 @@ async fn gateway_executes_claude_code_cli_sync_via_local_decision_gate_with_loca
     );
     assert_eq!(
         seen_execution_runtime_request.url,
-        "https://api.anthropic.example/v1/messages"
+        "https://api.anthropic.com/v1/messages"
     );
     assert_eq!(seen_execution_runtime_request.model, "claude-code-upstream");
+    assert_eq!(
+        seen_execution_runtime_request.client_api_format,
+        "claude:messages"
+    );
+    assert_eq!(
+        seen_execution_runtime_request.provider_api_format,
+        "claude:messages"
+    );
     assert_eq!(
         seen_execution_runtime_request.authorization,
         "Bearer sk-upstream-claude-code-oauth"

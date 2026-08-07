@@ -300,8 +300,10 @@ export const meApi = {
     return response.data
   },
 
-  async toggleApiKey(keyId: string): Promise<ApiKey> {
-    const response = await apiClient.patch<ApiKey>(`/api/users/me/api-keys/${keyId}`)
+  async toggleApiKey(keyId: string, isActive: boolean): Promise<ApiKey> {
+    const response = await apiClient.patch<ApiKey>(`/api/users/me/api-keys/${keyId}`, {
+      is_active: isActive,
+    })
     return response.data
   },
 

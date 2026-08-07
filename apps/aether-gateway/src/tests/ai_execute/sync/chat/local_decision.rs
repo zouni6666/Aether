@@ -1633,10 +1633,12 @@ async fn gateway_returns_openai_chat_error_for_local_cross_format_claude_cli_syn
     struct SeenExecutionRuntimeSyncRequest {
         trace_id: String,
         url: String,
-        model: String,
+        body: serde_json::Value,
+        client_api_format: String,
+        provider_api_format: String,
         auth_header_value: String,
+        anthropic_version: String,
         endpoint_tag: String,
-        has_messages: bool,
     }
 
     fn hash_api_key(value: &str) -> String {
@@ -1654,7 +1656,7 @@ async fn gateway_returns_openai_chat_error_for_local_cross_format_claude_cli_syn
             "local".to_string(),
             true,
             false,
-            Some(serde_json::json!(["openai", "claude"])),
+            Some(serde_json::json!(["openai", "claude", "claude_code"])),
             Some(serde_json::json!(["openai:chat"])),
             Some(serde_json::json!(["gpt-5"])),
             api_key_id.to_string(),
@@ -1665,7 +1667,7 @@ async fn gateway_returns_openai_chat_error_for_local_cross_format_claude_cli_syn
             Some(60),
             Some(5),
             Some(4_102_444_800),
-            Some(serde_json::json!(["openai", "claude"])),
+            Some(serde_json::json!(["openai", "claude", "claude_code"])),
             Some(serde_json::json!(["openai:chat"])),
             Some(serde_json::json!(["gpt-5"])),
         )
@@ -1675,8 +1677,8 @@ async fn gateway_returns_openai_chat_error_for_local_cross_format_claude_cli_syn
     fn sample_candidate_row() -> StoredMinimalCandidateSelectionRow {
         StoredMinimalCandidateSelectionRow {
             provider_id: "provider-openai-chat-claude-cli-local-1".to_string(),
-            provider_name: "claude".to_string(),
-            provider_type: "custom".to_string(),
+            provider_name: "claude_code".to_string(),
+            provider_type: "claude_code".to_string(),
             provider_priority: 10,
             provider_is_active: true,
             endpoint_id: "endpoint-openai-chat-claude-cli-local-1".to_string(),
@@ -1686,7 +1688,7 @@ async fn gateway_returns_openai_chat_error_for_local_cross_format_claude_cli_syn
             endpoint_is_active: true,
             key_id: "key-openai-chat-claude-cli-local-1".to_string(),
             key_name: "prod".to_string(),
-            key_auth_type: "bearer".to_string(),
+            key_auth_type: "oauth".to_string(),
             key_is_active: true,
             key_api_formats: Some(vec!["claude:messages".to_string()]),
             key_allowed_models: None,
@@ -1715,9 +1717,9 @@ async fn gateway_returns_openai_chat_error_for_local_cross_format_claude_cli_syn
     fn sample_provider_catalog_provider() -> StoredProviderCatalogProvider {
         StoredProviderCatalogProvider::new(
             "provider-openai-chat-claude-cli-local-1".to_string(),
-            "claude".to_string(),
+            "claude_code".to_string(),
             Some("https://example.com".to_string()),
-            "custom".to_string(),
+            "claude_code".to_string(),
         )
         .expect("provider should build")
         .with_transport_fields(
@@ -1729,7 +1731,11 @@ async fn gateway_returns_openai_chat_error_for_local_cross_format_claude_cli_syn
             None,
             Some(20.0),
             None,
-            None,
+            Some(serde_json::json!({
+                "claude_code_advanced": {
+                    "cli_only_enabled": false
+                }
+            })),
         )
     }
 
@@ -1744,13 +1750,13 @@ async fn gateway_returns_openai_chat_error_for_local_cross_format_claude_cli_syn
         )
         .expect("endpoint should build")
         .with_transport_fields(
-            "https://api.anthropic.example".to_string(),
+            "https://api.anthropic.com/v1".to_string(),
             Some(serde_json::json!([
                 {"action":"set","key":"x-endpoint-tag","value":"openai-chat-claude-cli-cross-format"}
             ])),
             None,
             Some(2),
-            Some("/custom/v1/messages".to_string()),
+            None,
             None,
             None,
             None,
@@ -1763,7 +1769,7 @@ async fn gateway_returns_openai_chat_error_for_local_cross_format_claude_cli_syn
             "key-openai-chat-claude-cli-local-1".to_string(),
             "provider-openai-chat-claude-cli-local-1".to_string(),
             "prod".to_string(),
-            "bearer".to_string(),
+            "oauth".to_string(),
             None,
             true,
         )
@@ -1865,10 +1871,18 @@ async fn gateway_returns_openai_chat_error_for_local_cross_format_claude_cli_syn
                         .and_then(|value| value.as_str())
                         .unwrap_or_default()
                         .to_string(),
-                    model: payload
+                    body: payload
                         .get("body")
                         .and_then(|value| value.get("json_body"))
-                        .and_then(|value| value.get("model"))
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                    client_api_format: payload
+                        .get("client_api_format")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    provider_api_format: payload
+                        .get("provider_api_format")
                         .and_then(|value| value.as_str())
                         .unwrap_or_default()
                         .to_string(),
@@ -1878,17 +1892,18 @@ async fn gateway_returns_openai_chat_error_for_local_cross_format_claude_cli_syn
                         .and_then(|value| value.as_str())
                         .unwrap_or_default()
                         .to_string(),
+                    anthropic_version: payload
+                        .get("headers")
+                        .and_then(|value| value.get("anthropic-version"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
                     endpoint_tag: payload
                         .get("headers")
                         .and_then(|value| value.get("x-endpoint-tag"))
                         .and_then(|value| value.as_str())
                         .unwrap_or_default()
                         .to_string(),
-                    has_messages: payload
-                        .get("body")
-                        .and_then(|value| value.get("json_body"))
-                        .and_then(|value| value.get("messages"))
-                        .is_some(),
                 });
                 Json(json!({
                     "request_id": "trace-openai-chat-claude-cli-local-error-123",
@@ -1961,15 +1976,22 @@ async fn gateway_returns_openai_chat_error_for_local_cross_format_claude_cli_syn
         .await
         .expect("request should succeed");
 
-    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let status = response.status();
+    let execution_path = response
+        .headers()
+        .get(EXECUTION_PATH_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned);
+    let response_json: serde_json::Value = response.json().await.expect("body should parse");
     assert_eq!(
-        response
-            .headers()
-            .get(EXECUTION_PATH_HEADER)
-            .and_then(|value| value.to_str().ok()),
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "unexpected status={status} body={response_json}"
+    );
+    assert_eq!(
+        execution_path.as_deref(),
         Some(EXECUTION_PATH_EXECUTION_RUNTIME_SYNC)
     );
-    let response_json: serde_json::Value = response.json().await.expect("body should parse");
     assert_eq!(
         response_json,
         json!({
@@ -1991,18 +2013,41 @@ async fn gateway_returns_openai_chat_error_for_local_cross_format_claude_cli_syn
     );
     assert_eq!(
         seen_execution_runtime_request.url,
-        "https://api.anthropic.example/custom/v1/messages"
+        "https://api.anthropic.com/v1/messages"
     );
-    assert_eq!(seen_execution_runtime_request.model, "claude-code-upstream");
+    assert_eq!(
+        seen_execution_runtime_request.body["model"],
+        "claude-code-upstream"
+    );
+    assert_eq!(seen_execution_runtime_request.body["max_tokens"], 64);
+    assert_eq!(
+        seen_execution_runtime_request.body["system"],
+        "You are terse."
+    );
+    assert_eq!(
+        seen_execution_runtime_request.body["messages"],
+        json!([{"role":"user","content":"Say hello"}])
+    );
+    assert_eq!(
+        seen_execution_runtime_request.client_api_format,
+        "openai:chat"
+    );
+    assert_eq!(
+        seen_execution_runtime_request.provider_api_format,
+        "claude:messages"
+    );
     assert_eq!(
         seen_execution_runtime_request.auth_header_value,
         "Bearer sk-upstream-openai-chat-claude-cli"
     );
     assert_eq!(
+        seen_execution_runtime_request.anthropic_version,
+        "2023-06-01"
+    );
+    assert_eq!(
         seen_execution_runtime_request.endpoint_tag,
         "openai-chat-claude-cli-cross-format"
     );
-    assert!(seen_execution_runtime_request.has_messages);
 
     let stored_candidates = request_candidate_repository
         .list_by_request_id("trace-openai-chat-claude-cli-local-error-123")
@@ -2010,6 +2055,12 @@ async fn gateway_returns_openai_chat_error_for_local_cross_format_claude_cli_syn
         .expect("request candidate trace should read");
     assert_eq!(stored_candidates.len(), 1);
     assert_eq!(stored_candidates[0].status, RequestCandidateStatus::Failed);
+    let extra_data = stored_candidates[0]
+        .extra_data
+        .as_ref()
+        .expect("request candidate extra_data should exist");
+    assert_eq!(extra_data["client_api_format"], "openai:chat");
+    assert_eq!(extra_data["provider_api_format"], "claude:messages");
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert!(

@@ -167,20 +167,21 @@ pub(crate) async fn materialize_local_same_format_provider_candidate_attempts(
             .collect(),
         LocalCandidateResolutionMode::Standard,
         |eligible| {
+            let provider_api_format = eligible.provider_api_format.clone();
             let (execution_strategy, conversion_mode) = ai_local_execution_contract_for_formats(
                 spec_metadata.api_format,
-                spec_metadata.api_format,
+                &provider_api_format,
             );
             Some(build_local_execution_candidate_contract_metadata(
                 LocalExecutionCandidateMetadataParts {
                     eligible,
-                    provider_api_format: spec_metadata.api_format,
+                    provider_api_format: provider_api_format.as_str(),
                     client_api_format: spec_metadata.api_format,
                     extra_fields: serde_json::Map::new(),
                 },
                 execution_strategy,
                 conversion_mode,
-                spec_metadata.api_format,
+                provider_api_format.as_str(),
             ))
         },
         |mut skipped_candidate| {
@@ -273,20 +274,21 @@ pub(crate) async fn build_local_same_format_provider_candidate_attempt_source<'a
             .collect(),
         LocalCandidateResolutionMode::Standard,
         |eligible| {
+            let provider_api_format = eligible.provider_api_format.clone();
             let (execution_strategy, conversion_mode) = ai_local_execution_contract_for_formats(
                 spec_metadata.api_format,
-                spec_metadata.api_format,
+                &provider_api_format,
             );
             Some(build_local_execution_candidate_contract_metadata(
                 LocalExecutionCandidateMetadataParts {
                     eligible,
-                    provider_api_format: spec_metadata.api_format,
+                    provider_api_format: provider_api_format.as_str(),
                     client_api_format: spec_metadata.api_format,
                     extra_fields: serde_json::Map::new(),
                 },
                 execution_strategy,
                 conversion_mode,
-                spec_metadata.api_format,
+                provider_api_format.as_str(),
             ))
         },
         |mut skipped_candidate| {

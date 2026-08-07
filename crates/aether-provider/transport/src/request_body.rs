@@ -1,5 +1,6 @@
 use serde_json::{Map, Value};
 
+use crate::claude_code::sanitize_claude_code_request_body;
 use crate::snapshot::GatewayProviderTransportSnapshot;
 use crate::vertex::is_vertex_transport_context;
 
@@ -32,6 +33,15 @@ pub fn apply_transport_request_body_semantics(
     provider_api_format: &str,
 ) -> Result<(), TransportRequestBodySemanticsError> {
     let provider_api_format = aether_ai_formats::normalize_api_format_alias(provider_api_format);
+    if provider_api_format == "claude:messages"
+        && transport
+            .provider
+            .provider_type
+            .trim()
+            .eq_ignore_ascii_case("claude_code")
+    {
+        sanitize_claude_code_request_body(provider_request_body);
+    }
     if provider_api_format == "gemini:embedding" && is_vertex_transport_context(transport) {
         apply_vertex_gemini_embedding_body_semantics(provider_request_body)?;
     }
@@ -332,6 +342,29 @@ mod tests {
             .expect("developer API body should pass through");
 
         assert_eq!(body["model"], "gemini-embedding-2");
+    }
+
+    #[test]
+    fn claude_code_messages_body_applies_provider_sanitizer_after_conversion() {
+        let transport = sample_transport("claude_code", "https://api.anthropic.com/v1");
+        let mut body = json!({
+            "model": "claude-opus-4-6",
+            "messages": [{
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "unsigned"},
+                    {"type": "text", "text": "answer"}
+                ]
+            }]
+        });
+
+        apply_transport_request_body_semantics(&mut body, &transport, "claude:messages")
+            .expect("Claude Code body semantics should apply");
+
+        assert_eq!(
+            body["messages"][0]["content"],
+            json!([{"type": "text", "text": "answer"}])
+        );
     }
 
     #[test]

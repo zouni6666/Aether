@@ -278,8 +278,8 @@ const WINDSURF_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
 
 const CLAUDE_CODE_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplate {
     provider_type: "claude_code",
-    version: 1,
-    base_url: "https://api.anthropic.com",
+    version: 2,
+    base_url: "https://api.anthropic.com/v1",
     endpoints: &[FixedProviderEndpointTemplate {
         item_key: "claude:messages",
         api_format: "claude:messages",
@@ -637,6 +637,20 @@ mod tests {
         provider_type_supports_local_same_format_transport, FixedProviderEndpointConfigValue,
         ADMIN_PROVIDER_OAUTH_TEMPLATE_TYPES,
     };
+
+    #[test]
+    fn claude_code_fixed_provider_uses_messages_api_root_and_conversion_default() {
+        let template =
+            fixed_provider_template("claude_code").expect("claude code template should exist");
+
+        assert_eq!(template.base_url, "https://api.anthropic.com/v1");
+        assert_eq!(template.version, 2);
+        assert!(template.runtime_policy.enable_format_conversion_by_default);
+        assert!(!template.runtime_policy.supports_local_same_format_transport);
+        assert!(!provider_type_supports_local_same_format_transport(
+            "claude_code"
+        ));
+    }
 
     #[test]
     fn codex_fixed_provider_template_includes_codex_companion_endpoints() {

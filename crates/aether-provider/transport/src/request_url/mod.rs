@@ -1457,6 +1457,46 @@ mod tests {
     }
 
     #[test]
+    fn claude_code_official_api_root_builds_documented_messages_urls() {
+        let mut transport = sample_transport(
+            "claude_code",
+            "claude:messages",
+            "https://api.anthropic.com/v1",
+            None,
+        );
+        transport.endpoint.config = Some(json!({
+            "anthropic": {"supported_operations": ["messages", "count_tokens"]}
+        }));
+
+        for (operation, expected_url) in [
+            (
+                ApiOperation::ClaudeMessagesCreate,
+                "https://api.anthropic.com/v1/messages",
+            ),
+            (
+                ApiOperation::ClaudeCountTokens,
+                "https://api.anthropic.com/v1/messages/count_tokens",
+            ),
+        ] {
+            assert_eq!(
+                build_transport_request_url(
+                    &transport,
+                    TransportRequestUrlParams {
+                        provider_api_format: "claude:messages",
+                        mapped_model: Some("claude-opus-4-6"),
+                        upstream_is_stream: false,
+                        request_query: None,
+                        kiro_api_region: None,
+                        api_operation: Some(operation),
+                    },
+                )
+                .as_deref(),
+                Some(expected_url)
+            );
+        }
+    }
+
+    #[test]
     fn count_tokens_config_fields_fall_back_from_endpoint_to_provider() {
         let mut transport = sample_transport(
             "custom",

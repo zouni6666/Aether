@@ -224,4 +224,19 @@ describe('MyApiKeys CC Switch import', () => {
     expect(meApiMock.getFullApiKey).not.toHaveBeenCalled()
     expect(document.body.textContent).toContain('导入到 CC Switch')
   })
+
+  it('sends the desired inactive state when disabling an active key', async () => {
+    meApiMock.getApiKeys.mockResolvedValue([apiKey()])
+    meApiMock.toggleApiKey.mockResolvedValue({
+      id: 'user-key-1',
+      is_active: false,
+    })
+
+    await mountMyApiKeys()
+    document.querySelector<HTMLButtonElement>('[title="禁用"]')?.click()
+    await flushPromises()
+
+    expect(meApiMock.toggleApiKey).toHaveBeenCalledWith('user-key-1', false)
+    expect(toastMock.success).toHaveBeenCalledWith('密钥已禁用')
+  })
 })
