@@ -196,6 +196,35 @@ mod tests {
     }
 
     #[test]
+    fn runtime_pool_split_gives_default_small_server_more_foreground_capacity() {
+        let config = GatewayDataConfig::from_database_config(
+            SqlDatabaseConfig::new(
+                DatabaseDriver::Postgres,
+                "postgres://localhost/aether",
+                SqlPoolConfig {
+                    min_connections: 4,
+                    max_connections: 32,
+                    ..SqlPoolConfig::default()
+                },
+            )
+            .expect("database config should be valid"),
+        );
+
+        let (foreground, background) = config.split_runtime_pools_with_background_max(None);
+        let foreground = foreground.database().expect("foreground database");
+        let background = background
+            .expect("background database config")
+            .database()
+            .expect("background database")
+            .clone();
+
+        assert_eq!(foreground.pool.max_connections, 26);
+        assert_eq!(background.pool.max_connections, 6);
+        assert_eq!(foreground.pool.min_connections, 4);
+        assert_eq!(background.pool.min_connections, 1);
+    }
+
+    #[test]
     fn runtime_pool_split_can_be_disabled_or_degrade_for_single_connection() {
         let mut database = SqlDatabaseConfig::sqlite_default();
         database.pool.max_connections = 1;

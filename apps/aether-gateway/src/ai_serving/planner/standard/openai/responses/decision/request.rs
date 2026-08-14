@@ -1395,7 +1395,10 @@ async fn resolve_openai_responses_to_openai_image_payload_parts(
         return None;
     };
     let operation = openai_image_operation_from_summary(&image_request_summary)?;
-    if !is_chatgpt_web {
+    if is_codex {
+        provider_request_body =
+            project_codex_openai_image_api_request_body(&provider_request_body, operation)?;
+    } else if !is_chatgpt_web {
         provider_request_body = project_openai_image_api_request_body(
             &provider_request_body,
             &prepared_candidate.mapped_model,
@@ -1405,10 +1408,6 @@ async fn resolve_openai_responses_to_openai_image_payload_parts(
                 Some(prepared_candidate.mapped_model.as_str()),
             ),
         )?;
-    }
-    if is_codex {
-        provider_request_body =
-            project_codex_openai_image_api_request_body(&provider_request_body, operation)?;
     }
 
     let upstream_url = if is_chatgpt_web {

@@ -657,6 +657,7 @@ fn embedding_execution_result(plan: &ExecutionPlan) -> ExecutionResult {
         candidate_id: plan.candidate_id.clone(),
         status_code: 200,
         headers: BTreeMap::from([("content-type".to_string(), "application/json".to_string())]),
+        response_observation: None,
         body: Some(ResponseBody {
             json_body: Some(json!({
                 "object": "list",
@@ -679,6 +680,7 @@ fn gemini_embedding_execution_result(plan: &ExecutionPlan) -> ExecutionResult {
         candidate_id: plan.candidate_id.clone(),
         status_code: 200,
         headers: BTreeMap::from([("content-type".to_string(), "application/json".to_string())]),
+        response_observation: None,
         body: Some(ResponseBody {
             json_body: Some(json!({
                 "model": "gemini-embedding-2-preview",
@@ -703,6 +705,7 @@ fn vertex_gemini_embedding_execution_result(plan: &ExecutionPlan) -> ExecutionRe
         candidate_id: plan.candidate_id.clone(),
         status_code: 200,
         headers: BTreeMap::from([("content-type".to_string(), "application/json".to_string())]),
+        response_observation: None,
         body: Some(ResponseBody {
             json_body: Some(json!({
                 "predictions": [
@@ -727,6 +730,7 @@ fn gemini_batch_embedding_execution_result(plan: &ExecutionPlan) -> ExecutionRes
         candidate_id: plan.candidate_id.clone(),
         status_code: 200,
         headers: BTreeMap::from([("content-type".to_string(), "application/json".to_string())]),
+        response_observation: None,
         body: Some(ResponseBody {
             json_body: Some(json!({
                 "model": "gemini-embedding-2-preview",
@@ -752,6 +756,7 @@ fn aliyun_embedding_execution_result(plan: &ExecutionPlan) -> ExecutionResult {
         candidate_id: plan.candidate_id.clone(),
         status_code: 200,
         headers: BTreeMap::from([("content-type".to_string(), "application/json".to_string())]),
+        response_observation: None,
         body: Some(ResponseBody {
             json_body: Some(json!({
                 "output": {

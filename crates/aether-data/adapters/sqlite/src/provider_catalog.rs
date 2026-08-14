@@ -8,8 +8,8 @@ use sqlx::{
 };
 
 use aether_data_contracts::repository::provider_catalog::{
-    ProviderCatalogKeyAdaptiveStateUpdate, ProviderCatalogKeyHealthStateUpdate,
-    ProviderCatalogKeyListOrder, ProviderCatalogKeyListQuery,
+    ProviderCatalogKeyAdaptiveStateUpdate, ProviderCatalogKeyAdminCasUpdate,
+    ProviderCatalogKeyHealthStateUpdate, ProviderCatalogKeyListOrder, ProviderCatalogKeyListQuery,
     ProviderCatalogKeyOAuthCredentialCasDelete, ProviderCatalogKeyOAuthRuntimeStateCasUpdate,
     ProviderCatalogKeyRuntimeMetadataUpdate, ProviderCatalogKeyStatusSnapshotUpdate,
     ProviderCatalogReadRepository, ProviderCatalogUpstreamMetadataNamespaceUpdate,
@@ -1117,6 +1117,85 @@ WHERE id = ?
         self.reload_key(&key.id, "updated").await
     }
 
+    pub async fn compare_and_update_key_admin_state(
+        &self,
+        update: &ProviderCatalogKeyAdminCasUpdate,
+    ) -> Result<bool, DataLayerError> {
+        validate_admin_key_cas_update(update)?;
+        let key = &update.key;
+        let updated_at = key.updated_at_unix_secs.unwrap_or_else(current_unix_secs) as i64;
+        let rotation_json = update
+            .codex_rotation
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|err| {
+                DataLayerError::UnexpectedValue(format!(
+                    "provider_api_keys Codex rotation is not serializable: {err}"
+                ))
+            })?;
+        let mut builder =
+            QueryBuilder::<Sqlite>::new("UPDATE provider_api_keys SET provider_id = ");
+        push_admin_key_assignments(&mut builder, key, updated_at)?;
+        if update.reset_oauth_runtime {
+            builder.push(", oauth_invalid_at = NULL, oauth_invalid_reason = NULL, error_count = 0");
+        }
+        if let Some(rotation_json) = rotation_json.as_deref() {
+            builder
+                .push(", upstream_metadata = json_set(COALESCE(upstream_metadata, '{}'), '$.codex', json(")
+                .push_bind(rotation_json)
+                .push("))");
+        }
+        if update.codex_rotation.is_some() || update.reset_oauth_runtime {
+            builder.push(", status_snapshot = ");
+            match (update.codex_rotation.is_some(), update.reset_oauth_runtime) {
+                (true, true) => builder.push("json_set(COALESCE(status_snapshot, '{}'), '$.quota', json('null'), '$.oauth', json('null'))"),
+                (true, false) => builder.push("json_set(COALESCE(status_snapshot, '{}'), '$.quota', json('null'))"),
+                (false, true) => builder.push("json_set(COALESCE(status_snapshot, '{}'), '$.oauth', json('null'))"),
+                (false, false) => unreachable!(),
+            };
+        }
+        builder
+            .push(" WHERE id = ")
+            .push_bind(&key.id)
+            .push(" AND api_key IS ")
+            .push_bind(update.expected_credential.encrypted_api_key.as_deref())
+            .push(" AND auth_config IS ")
+            .push_bind(update.expected_encrypted_auth_config.as_deref())
+            .push(" AND auth_type = ")
+            .push_bind(&update.expected_credential.auth_type)
+            .push(" AND provider_id = ")
+            .push_bind(&update.expected_credential.provider_id)
+            .push(
+                " AND EXISTS (SELECT 1 FROM providers WHERE providers.id = provider_api_keys.provider_id AND providers.provider_type = ",
+            )
+            .push_bind(&update.expected_credential.provider_type)
+            .push(")");
+        if update.codex_rotation.is_some() {
+            builder
+                .push(" AND CASE WHEN upstream_metadata IS NULL THEN 1 WHEN json_valid(upstream_metadata) THEN json_type(upstream_metadata) = 'object' ELSE 0 END")
+                .push(" AND NOT (api_key IS ")
+                .push_bind(key.encrypted_api_key.as_deref())
+                .push(" AND auth_config IS ")
+                .push_bind(key.encrypted_auth_config.as_deref())
+                .push(" AND auth_type = ")
+                .push_bind(&key.auth_type)
+                .push(" AND provider_id = ")
+                .push_bind(&key.provider_id)
+                .push(")");
+        }
+        if update.codex_rotation.is_some() || update.reset_oauth_runtime {
+            builder.push(" AND CASE WHEN status_snapshot IS NULL THEN 1 WHEN json_valid(status_snapshot) THEN json_type(status_snapshot) = 'object' ELSE 0 END");
+        }
+        let rows_affected = builder
+            .build()
+            .execute(&self.pool)
+            .await
+            .map_sql_err()?
+            .rows_affected();
+        Ok(rows_affected > 0)
+    }
+
     pub async fn update_keys(
         &self,
         keys: &[StoredProviderCatalogKey],
@@ -1188,37 +1267,73 @@ WHERE id = ?
             || expected.auth_type.trim().is_empty()
             || expected.provider_id.trim().is_empty()
             || expected.provider_type.trim().is_empty()
+            || delete
+                .expected_upstream_metadata_namespace
+                .as_ref()
+                .is_some_and(|expected| expected.namespace.trim().is_empty())
         {
             return Err(DataLayerError::InvalidInput(
                 "provider catalog OAuth credential CAS delete contains empty fields".to_string(),
             ));
         }
-        let rows_affected = sqlx::query(
-            r#"
-DELETE FROM provider_api_keys
-WHERE id = ?
-  AND auth_config IS ?
-  AND api_key IS ?
-  AND auth_type = ?
-  AND provider_id = ?
-  AND EXISTS (
-    SELECT 1
-    FROM providers
-    WHERE providers.id = provider_api_keys.provider_id
-      AND providers.provider_type = ?
-  )
-"#,
-        )
-        .bind(&delete.key_id)
-        .bind(delete.expected_encrypted_auth_config.as_deref())
-        .bind(expected.encrypted_api_key.as_deref())
-        .bind(&expected.auth_type)
-        .bind(&expected.provider_id)
-        .bind(&expected.provider_type)
-        .execute(&self.pool)
-        .await
-        .map_sql_err()?
-        .rows_affected();
+        let mut builder = QueryBuilder::<Sqlite>::new("DELETE FROM provider_api_keys WHERE id = ");
+        builder
+            .push_bind(&delete.key_id)
+            .push(" AND auth_config IS ")
+            .push_bind(delete.expected_encrypted_auth_config.as_deref())
+            .push(" AND api_key IS ")
+            .push_bind(expected.encrypted_api_key.as_deref())
+            .push(" AND auth_type = ")
+            .push_bind(&expected.auth_type)
+            .push(" AND provider_id = ")
+            .push_bind(&expected.provider_id)
+            .push(
+                " AND EXISTS (SELECT 1 FROM providers WHERE \
+                 providers.id = provider_api_keys.provider_id \
+                 AND providers.provider_type = ",
+            )
+            .push_bind(&expected.provider_type)
+            .push(")");
+        if let Some(expected) = delete.expected_upstream_metadata_namespace.as_ref() {
+            let namespace_path = format!(
+                "$.{}",
+                serde_json::to_string(&expected.namespace).map_err(|err| {
+                    DataLayerError::UnexpectedValue(format!(
+                        "provider_api_keys.upstream_metadata namespace is not serializable: {err}"
+                    ))
+                })?
+            );
+            builder
+                .push(" AND json_type(COALESCE(NULLIF(upstream_metadata, ''), '{}')) = 'object'");
+            if let Some(expected_value) = expected.expected_value.as_ref() {
+                let expected_value = serde_json::to_string(expected_value).map_err(|err| {
+                    DataLayerError::UnexpectedValue(format!(
+                        "provider_api_keys.upstream_metadata expected value is not serializable: {err}"
+                    ))
+                })?;
+                builder
+                    .push(" AND json_type(COALESCE(NULLIF(upstream_metadata, ''), '{}'), ")
+                    .push_bind(namespace_path.clone())
+                    .push(") = json_type(json(")
+                    .push_bind(expected_value.clone())
+                    .push(")) AND json_extract(COALESCE(NULLIF(upstream_metadata, ''), '{}'), ")
+                    .push_bind(namespace_path)
+                    .push(") IS json_extract(json_object('value', json(")
+                    .push_bind(expected_value)
+                    .push(")), '$.value')");
+            } else {
+                builder
+                    .push(" AND json_type(COALESCE(NULLIF(upstream_metadata, ''), '{}'), ")
+                    .push_bind(namespace_path)
+                    .push(") IS NULL");
+            }
+        }
+        let rows_affected = builder
+            .build()
+            .execute(&self.pool)
+            .await
+            .map_sql_err()?
+            .rows_affected();
         Ok(rows_affected > 0)
     }
 
@@ -1522,6 +1637,25 @@ WHERE id = ?
                 "provider catalog OAuth credential fence must not contain empty fields".to_string(),
             ));
         }
+        if update
+            .expected_upstream_metadata_namespace
+            .as_ref()
+            .is_some_and(|expected| expected.namespace.trim().is_empty())
+        {
+            return Err(DataLayerError::InvalidInput(
+                "provider catalog OAuth runtime metadata namespace must not be empty".to_string(),
+            ));
+        }
+        if update
+            .upstream_metadata_namespace_to_remove
+            .as_deref()
+            .is_some_and(|namespace| namespace.trim().is_empty())
+        {
+            return Err(DataLayerError::InvalidInput(
+                "provider catalog OAuth runtime metadata namespace to remove must not be empty"
+                    .to_string(),
+            ));
+        }
         if !update.status_snapshot_patch.is_object() {
             return Err(DataLayerError::InvalidInput(
                 "provider catalog status snapshot patch must be an object".to_string(),
@@ -1534,6 +1668,22 @@ WHERE id = ?
         {
             return Err(DataLayerError::InvalidInput(
                 "provider catalog upstream metadata patch must be an object".to_string(),
+            ));
+        }
+        if update
+            .upstream_metadata_namespace_to_remove
+            .as_ref()
+            .is_some_and(|namespace| {
+                update
+                    .upstream_metadata_patch
+                    .as_ref()
+                    .and_then(serde_json::Value::as_object)
+                    .is_some_and(|patch| patch.contains_key(namespace))
+            })
+        {
+            return Err(DataLayerError::InvalidInput(
+                "provider catalog OAuth runtime metadata namespace cannot be patched and removed in the same update"
+                    .to_string(),
             ));
         }
         let mut builder =
@@ -1558,9 +1708,29 @@ WHERE id = ?
                     "provider_api_keys.expires_at",
                 )?);
         }
-        if let Some(metadata_patch) = update.upstream_metadata_patch.as_ref() {
+        if update.upstream_metadata_patch.is_some()
+            || update.upstream_metadata_namespace_to_remove.is_some()
+        {
             builder.push(", upstream_metadata = ");
-            push_upstream_metadata_shallow_patch(&mut builder, metadata_patch)?;
+            if update.upstream_metadata_namespace_to_remove.is_some() {
+                builder.push("json_remove(");
+            }
+            if let Some(metadata_patch) = update.upstream_metadata_patch.as_ref() {
+                push_upstream_metadata_shallow_patch(&mut builder, metadata_patch)?;
+            } else {
+                builder.push("COALESCE(NULLIF(upstream_metadata, ''), '{}')");
+            }
+            if let Some(namespace) = update.upstream_metadata_namespace_to_remove.as_ref() {
+                let namespace_path = format!(
+                    "$.{}",
+                    serde_json::to_string(namespace).map_err(|err| {
+                        DataLayerError::UnexpectedValue(format!(
+                            "provider_api_keys.upstream_metadata namespace is not serializable: {err}"
+                        ))
+                    })?
+                );
+                builder.push(", ").push_bind(namespace_path).push(")");
+            }
         }
         builder.push(", status_snapshot = ");
         push_status_snapshot_shallow_patch(&mut builder, &update.status_snapshot_patch)?;
@@ -1593,6 +1763,45 @@ WHERE id = ?
                 )
                 .push_bind(&expected.provider_type)
                 .push(")");
+        }
+        if update.expected_upstream_metadata_namespace.is_some()
+            || update.upstream_metadata_patch.is_some()
+            || update.upstream_metadata_namespace_to_remove.is_some()
+        {
+            builder
+                .push(" AND json_type(COALESCE(NULLIF(upstream_metadata, ''), '{}')) = 'object'");
+        }
+        if let Some(expected) = update.expected_upstream_metadata_namespace.as_ref() {
+            let namespace_path = format!(
+                "$.{}",
+                serde_json::to_string(&expected.namespace).map_err(|err| {
+                    DataLayerError::UnexpectedValue(format!(
+                        "provider_api_keys.upstream_metadata namespace is not serializable: {err}"
+                    ))
+                })?
+            );
+            if let Some(expected_value) = expected.expected_value.as_ref() {
+                let expected_value = serde_json::to_string(expected_value).map_err(|err| {
+                    DataLayerError::UnexpectedValue(format!(
+                        "provider_api_keys.upstream_metadata expected value is not serializable: {err}"
+                    ))
+                })?;
+                builder
+                    .push(" AND json_type(COALESCE(NULLIF(upstream_metadata, ''), '{}'), ")
+                    .push_bind(namespace_path.clone())
+                    .push(") = json_type(json(")
+                    .push_bind(expected_value.clone())
+                    .push(")) AND json_extract(COALESCE(NULLIF(upstream_metadata, ''), '{}'), ")
+                    .push_bind(namespace_path)
+                    .push(") IS json_extract(json_object('value', json(")
+                    .push_bind(expected_value)
+                    .push(")), '$.value')");
+            } else {
+                builder
+                    .push(" AND json_type(COALESCE(NULLIF(upstream_metadata, ''), '{}'), ")
+                    .push_bind(namespace_path)
+                    .push(") IS NULL");
+            }
         }
         let rows_affected = builder
             .build()
@@ -1800,7 +2009,8 @@ WHERE id = ?
                     .unwrap_or_else(current_unix_secs) as i64,
             )
             .push(" WHERE id = ")
-            .push_bind(&update.key_id);
+            .push_bind(&update.key_id)
+            .push(" AND json_type(COALESCE(NULLIF(upstream_metadata, ''), '{}')) = 'object'");
         if let Some(expected_metadata_value) = expected_metadata_value {
             builder
                 .push(" AND json_type(COALESCE(NULLIF(upstream_metadata, ''), '{}'), ")
@@ -2090,6 +2300,13 @@ impl ProviderCatalogWriteRepository for SqliteProviderCatalogReadRepository {
         key: &StoredProviderCatalogKey,
     ) -> Result<StoredProviderCatalogKey, DataLayerError> {
         Self::update_key(self, key).await
+    }
+
+    async fn compare_and_update_key_admin_state(
+        &self,
+        update: &ProviderCatalogKeyAdminCasUpdate,
+    ) -> Result<bool, DataLayerError> {
+        Self::compare_and_update_key_admin_state(self, update).await
     }
 
     async fn update_keys(
@@ -2593,6 +2810,10 @@ SET
   model_exclude_patterns = ?,
   updated_at = ?
 WHERE id = ?
+  AND provider_id = ?
+  AND auth_type = ?
+  AND api_key IS ?
+  AND auth_config IS ?
 "#
 }
 
@@ -2667,7 +2888,152 @@ fn key_update_query(
             "provider_api_keys.model_exclude_patterns",
         )?)
         .bind(updated_at)
-        .bind(&key.id))
+        .bind(&key.id)
+        .bind(&key.provider_id)
+        .bind(&key.auth_type)
+        .bind(&key.encrypted_api_key)
+        .bind(&key.encrypted_auth_config))
+}
+
+fn push_admin_key_assignments<'args>(
+    builder: &mut QueryBuilder<'args, Sqlite>,
+    key: &'args StoredProviderCatalogKey,
+    updated_at: i64,
+) -> Result<(), DataLayerError> {
+    builder
+        .push_bind(&key.provider_id)
+        .push(", name = ")
+        .push_bind(&key.name)
+        .push(", api_key = ")
+        .push_bind(&key.encrypted_api_key)
+        .push(", auth_type = ")
+        .push_bind(&key.auth_type)
+        .push(", capabilities = ")
+        .push_bind(optional_json_to_string(
+            &key.capabilities,
+            "provider_api_keys.capabilities",
+        )?)
+        .push(", is_active = ")
+        .push_bind(key.is_active)
+        .push(", api_formats = ")
+        .push_bind(optional_json_to_string(
+            &key.api_formats,
+            "provider_api_keys.api_formats",
+        )?)
+        .push(", auth_type_by_format = ")
+        .push_bind(optional_json_to_string(
+            &key.auth_type_by_format,
+            "provider_api_keys.auth_type_by_format",
+        )?)
+        .push(", allow_auth_channel_mismatch_formats = ")
+        .push_bind(optional_json_to_string(
+            &key.allow_auth_channel_mismatch_formats,
+            "provider_api_keys.allow_auth_channel_mismatch_formats",
+        )?)
+        .push(", auth_config = ")
+        .push_bind(&key.encrypted_auth_config)
+        .push(", note = ")
+        .push_bind(&key.note)
+        .push(", internal_priority = ")
+        .push_bind(key.internal_priority)
+        .push(", rate_multipliers = ")
+        .push_bind(optional_json_to_string(
+            &key.rate_multipliers,
+            "provider_api_keys.rate_multipliers",
+        )?)
+        .push(", global_priority_by_format = ")
+        .push_bind(optional_json_to_string(
+            &key.global_priority_by_format,
+            "provider_api_keys.global_priority_by_format",
+        )?)
+        .push(", allowed_models = ")
+        .push_bind(optional_json_to_string(
+            &key.allowed_models,
+            "provider_api_keys.allowed_models",
+        )?)
+        .push(", expires_at = ")
+        .push_bind(optional_i64_from_u64(
+            key.expires_at_unix_secs,
+            "provider_api_keys.expires_at",
+        )?)
+        .push(", cache_ttl_minutes = ")
+        .push_bind(key.cache_ttl_minutes)
+        .push(", max_probe_interval_minutes = ")
+        .push_bind(key.max_probe_interval_minutes)
+        .push(", proxy = ")
+        .push_bind(optional_json_to_string(
+            &key.proxy,
+            "provider_api_keys.proxy",
+        )?)
+        .push(", fingerprint = ")
+        .push_bind(optional_json_to_string(
+            &key.fingerprint,
+            "provider_api_keys.fingerprint",
+        )?)
+        .push(", rpm_limit = ")
+        .push_bind(optional_i64_from_u32(key.rpm_limit))
+        .push(", concurrent_limit = ")
+        .push_bind(key.concurrent_limit)
+        .push(", auto_fetch_models = ")
+        .push_bind(key.auto_fetch_models)
+        .push(", locked_models = ")
+        .push_bind(optional_json_to_string(
+            &key.locked_models,
+            "provider_api_keys.locked_models",
+        )?)
+        .push(", model_include_patterns = ")
+        .push_bind(optional_json_to_string(
+            &key.model_include_patterns,
+            "provider_api_keys.model_include_patterns",
+        )?)
+        .push(", model_exclude_patterns = ")
+        .push_bind(optional_json_to_string(
+            &key.model_exclude_patterns,
+            "provider_api_keys.model_exclude_patterns",
+        )?)
+        .push(", updated_at = ")
+        .push_bind(updated_at);
+    Ok(())
+}
+
+fn validate_admin_key_cas_update(
+    update: &ProviderCatalogKeyAdminCasUpdate,
+) -> Result<(), DataLayerError> {
+    validate_key(&update.key)?;
+    let expected = &update.expected_credential;
+    if expected.auth_type.trim().is_empty()
+        || expected.provider_id.trim().is_empty()
+        || expected.provider_type.trim().is_empty()
+        || expected
+            .encrypted_api_key
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        || update
+            .expected_encrypted_auth_config
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+    {
+        return Err(DataLayerError::InvalidInput(
+            "provider catalog admin credential fence contains empty fields".to_string(),
+        ));
+    }
+    let Some(rotation) = update.codex_rotation.as_ref() else {
+        return Ok(());
+    };
+    let valid_rotation = expected.provider_type.eq_ignore_ascii_case("codex")
+        && rotation.as_object().is_some_and(|object| {
+            object.len() == 1
+                && object
+                    .get("credential_generation")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|generation| !generation.trim().is_empty())
+        });
+    if !valid_rotation {
+        return Err(DataLayerError::InvalidInput(
+            "provider catalog Codex rotation must contain only credential_generation".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn optional_json_from_string(
@@ -3020,13 +3386,264 @@ mod tests {
     use crate::run_migrations;
     use aether_data_contracts::repository::provider_catalog::{
         ProviderCatalogKeyAdaptiveState, ProviderCatalogKeyAdaptiveStateUpdate,
-        ProviderCatalogKeyHealthStateUpdate, ProviderCatalogKeyListOrder,
-        ProviderCatalogKeyListQuery, ProviderCatalogKeyOAuthCredentialCasDelete,
-        ProviderCatalogKeyOAuthCredentialFence, ProviderCatalogKeyOAuthRuntimeStateCasUpdate,
-        ProviderCatalogKeyRuntimeMetadataUpdate, ProviderCatalogUpstreamMetadataNamespaceUpdate,
-        StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
+        ProviderCatalogKeyAdminCasUpdate, ProviderCatalogKeyHealthStateUpdate,
+        ProviderCatalogKeyListOrder, ProviderCatalogKeyListQuery,
+        ProviderCatalogKeyOAuthCredentialCasDelete, ProviderCatalogKeyOAuthCredentialFence,
+        ProviderCatalogKeyOAuthRuntimeStateCasUpdate, ProviderCatalogKeyRuntimeMetadataUpdate,
+        ProviderCatalogUpstreamMetadataNamespaceExpectation,
+        ProviderCatalogUpstreamMetadataNamespaceUpdate, StoredProviderCatalogEndpoint,
+        StoredProviderCatalogKey, StoredProviderCatalogProvider,
     };
     use serde_json::json;
+
+    #[tokio::test]
+    async fn sqlite_admin_credential_cas_rotates_codex_namespace_atomically() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool should connect");
+        run_migrations(&pool)
+            .await
+            .expect("sqlite migrations should run");
+        let repository = SqliteProviderCatalogReadRepository::new(pool);
+        repository
+            .create_provider(
+                &StoredProviderCatalogProvider::new(
+                    "admin-cas-provider".to_string(),
+                    "Admin CAS Provider".to_string(),
+                    None,
+                    "codex".to_string(),
+                )
+                .expect("provider should build"),
+                None,
+            )
+            .await
+            .expect("provider should create");
+
+        let mut original = StoredProviderCatalogKey::new(
+            "admin-cas-key".to_string(),
+            "admin-cas-provider".to_string(),
+            "Before".to_string(),
+            "oauth".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build");
+        original.encrypted_api_key = Some("api-v1".to_string());
+        original.encrypted_auth_config = Some("auth-v1".to_string());
+        original.learned_rpm_limit = Some(17);
+        original.error_count = Some(9);
+        original.oauth_invalid_at_unix_secs = Some(123);
+        original.oauth_invalid_reason = Some("old credential invalid".to_string());
+        original.upstream_metadata = Some(json!({
+            "codex": {"credential_generation":"generation-v1","used_percent":90},
+            "other": {"preserved":true}
+        }));
+        original.status_snapshot = Some(json!({
+            "quota":{"used_ratio":0.9},
+            "oauth":{"status":"valid"}
+        }));
+        repository
+            .create_key(&original)
+            .await
+            .expect("key should create");
+
+        let mut replacement = original.clone();
+        replacement.name = "After".to_string();
+        replacement.auth_type = "api_key".to_string();
+        replacement.encrypted_api_key = Some("api-v2".to_string());
+        replacement.encrypted_auth_config = None;
+        replacement.updated_at_unix_secs = Some(200);
+        let update = ProviderCatalogKeyAdminCasUpdate {
+            expected_encrypted_auth_config: Some("auth-v1".to_string()),
+            expected_credential: ProviderCatalogKeyOAuthCredentialFence {
+                encrypted_api_key: Some("api-v1".to_string()),
+                auth_type: "oauth".to_string(),
+                provider_id: "admin-cas-provider".to_string(),
+                provider_type: "codex".to_string(),
+            },
+            key: replacement,
+            codex_rotation: Some(json!({"credential_generation":"generation-v2"})),
+            reset_oauth_runtime: true,
+        };
+        assert!(repository
+            .compare_and_update_key_admin_state(&update)
+            .await
+            .expect("credential rotation should run"));
+        assert!(!repository
+            .compare_and_update_key_admin_state(&update)
+            .await
+            .expect("stale credential fence should be a CAS miss"));
+
+        let stored = repository
+            .list_keys_by_ids(&["admin-cas-key".to_string()])
+            .await
+            .expect("key should reload")
+            .pop()
+            .expect("key should exist");
+        assert_eq!(stored.name, "After");
+        assert_eq!(stored.auth_type, "api_key");
+        assert_eq!(stored.encrypted_api_key.as_deref(), Some("api-v2"));
+        assert_eq!(stored.encrypted_auth_config, None);
+        assert_eq!(stored.learned_rpm_limit, Some(17));
+        assert_eq!(stored.error_count, Some(0));
+        assert_eq!(stored.oauth_invalid_at_unix_secs, None);
+        assert_eq!(stored.oauth_invalid_reason, None);
+        assert_eq!(
+            stored
+                .upstream_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("codex")),
+            Some(&json!({"credential_generation":"generation-v2"}))
+        );
+        assert_eq!(
+            stored
+                .upstream_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.pointer("/other/preserved")),
+            Some(&json!(true))
+        );
+        assert_eq!(
+            stored
+                .status_snapshot
+                .as_ref()
+                .and_then(|status| status.get("quota")),
+            Some(&serde_json::Value::Null)
+        );
+        assert_eq!(
+            stored
+                .status_snapshot
+                .as_ref()
+                .and_then(|status| status.get("oauth")),
+            Some(&serde_json::Value::Null)
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_admin_credential_rotation_rejects_non_object_runtime_roots() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool should connect");
+        run_migrations(&pool)
+            .await
+            .expect("sqlite migrations should run");
+        let repository = SqliteProviderCatalogReadRepository::new(pool);
+        repository
+            .create_provider(
+                &StoredProviderCatalogProvider::new(
+                    "admin-invalid-provider".to_string(),
+                    "Admin Invalid Provider".to_string(),
+                    None,
+                    "codex".to_string(),
+                )
+                .expect("provider should build"),
+                None,
+            )
+            .await
+            .expect("provider should create");
+        let mut original = StoredProviderCatalogKey::new(
+            "admin-invalid-key".to_string(),
+            "admin-invalid-provider".to_string(),
+            "Before".to_string(),
+            "oauth".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build");
+        original.encrypted_api_key = Some("api-v1".to_string());
+        original.encrypted_auth_config = Some("auth-v1".to_string());
+        original.upstream_metadata = Some(json!(null));
+        original.status_snapshot = Some(json!({"quota":{"used_ratio":0.9}}));
+        repository
+            .create_key(&original)
+            .await
+            .expect("key should create");
+        let mut replacement = original.clone();
+        replacement.encrypted_api_key = Some("api-v2".to_string());
+        let update = ProviderCatalogKeyAdminCasUpdate {
+            expected_encrypted_auth_config: Some("auth-v1".to_string()),
+            expected_credential: ProviderCatalogKeyOAuthCredentialFence {
+                encrypted_api_key: Some("api-v1".to_string()),
+                auth_type: "oauth".to_string(),
+                provider_id: "admin-invalid-provider".to_string(),
+                provider_type: "codex".to_string(),
+            },
+            key: replacement,
+            codex_rotation: Some(json!({"credential_generation":"generation-v2"})),
+            reset_oauth_runtime: true,
+        };
+        assert!(!repository
+            .compare_and_update_key_admin_state(&update)
+            .await
+            .expect("invalid metadata root should be a CAS miss"));
+        let stored = repository
+            .list_keys_by_ids(&["admin-invalid-key".to_string()])
+            .await
+            .expect("key should reload")
+            .pop()
+            .expect("key should exist");
+        assert_eq!(stored.encrypted_api_key.as_deref(), Some("api-v1"));
+        assert_eq!(stored.upstream_metadata, Some(json!(null)));
+    }
+
+    #[tokio::test]
+    async fn sqlite_ordinary_admin_update_cannot_replace_credentials() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool should connect");
+        run_migrations(&pool)
+            .await
+            .expect("sqlite migrations should run");
+        let repository = SqliteProviderCatalogReadRepository::new(pool);
+        repository
+            .create_provider(
+                &StoredProviderCatalogProvider::new(
+                    "ordinary-cas-provider".to_string(),
+                    "Ordinary CAS Provider".to_string(),
+                    None,
+                    "codex".to_string(),
+                )
+                .expect("provider should build"),
+                None,
+            )
+            .await
+            .expect("provider should create");
+        let mut original = StoredProviderCatalogKey::new(
+            "ordinary-cas-key".to_string(),
+            "ordinary-cas-provider".to_string(),
+            "Before".to_string(),
+            "oauth".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build");
+        original.encrypted_api_key = Some("api-v1".to_string());
+        original.encrypted_auth_config = Some("auth-v1".to_string());
+        repository
+            .create_key(&original)
+            .await
+            .expect("key should create");
+
+        let mut forbidden = original.clone();
+        forbidden.name = "Must Not Persist".to_string();
+        forbidden.encrypted_api_key = Some("api-v2".to_string());
+        assert!(repository.update_key(&forbidden).await.is_err());
+
+        let stored = repository
+            .list_keys_by_ids(&["ordinary-cas-key".to_string()])
+            .await
+            .expect("key should reload")
+            .pop()
+            .expect("key should exist");
+        assert_eq!(stored.name, "Before");
+        assert_eq!(stored.encrypted_api_key.as_deref(), Some("api-v1"));
+        assert_eq!(stored.encrypted_auth_config.as_deref(), Some("auth-v1"));
+    }
 
     #[tokio::test]
     async fn sqlite_repository_reads_provider_catalog_contract_views() {
@@ -3270,6 +3887,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_runtime_metadata_cas_rejects_non_object_metadata_roots() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool should connect");
+        run_migrations(&pool)
+            .await
+            .expect("sqlite migrations should run");
+        let repository = SqliteProviderCatalogReadRepository::new(pool);
+        repository
+            .create_provider(
+                &StoredProviderCatalogProvider::new(
+                    "invalid-root-provider".to_string(),
+                    "Invalid Root Provider".to_string(),
+                    None,
+                    "codex".to_string(),
+                )
+                .expect("provider should build"),
+                None,
+            )
+            .await
+            .expect("provider should create");
+
+        for (index, invalid_root) in [json!(null), json!([]), json!("invalid"), json!(1)]
+            .into_iter()
+            .enumerate()
+        {
+            let key_id = format!("invalid-root-{index}");
+            let mut key = StoredProviderCatalogKey::new(
+                key_id.clone(),
+                "invalid-root-provider".to_string(),
+                format!("Invalid Root {index}"),
+                "oauth".to_string(),
+                None,
+                true,
+            )
+            .expect("key should build");
+            key.upstream_metadata = Some(invalid_root.clone());
+            key.status_snapshot = Some(json!({"quota":{"remaining":9}}));
+            key.updated_at_unix_secs = Some(10);
+            repository
+                .create_key(&key)
+                .await
+                .expect("key should create");
+
+            assert!(!repository
+                .update_key_runtime_metadata(&ProviderCatalogKeyRuntimeMetadataUpdate {
+                    key_id: key_id.clone(),
+                    namespace: "codex".to_string(),
+                    expected_upstream_metadata_value: None,
+                    upstream_metadata_value: json!({"remaining":1}),
+                    status_snapshot_patch: json!({"quota":{"remaining":1}}),
+                    updated_at_unix_secs: Some(20),
+                })
+                .await
+                .expect("non-object root should be a CAS miss"));
+            assert!(!repository
+                .compare_and_update_key_oauth_runtime_state(
+                    &ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
+                        key_id: key_id.clone(),
+                        expected_encrypted_auth_config: None,
+                        expected_credential: None,
+                        expected_upstream_metadata_namespace: Some(
+                            ProviderCatalogUpstreamMetadataNamespaceExpectation {
+                                namespace: "codex".to_string(),
+                                expected_value: None,
+                            },
+                        ),
+                        encrypted_auth_config: "next-auth".to_string(),
+                        encrypted_api_key_update: None,
+                        expires_at_unix_secs_update: None,
+                        oauth_invalid_at_unix_secs: None,
+                        oauth_invalid_reason: None,
+                        upstream_metadata_patch: Some(json!({"codex":{"remaining":1}})),
+                        upstream_metadata_namespace_to_remove: None,
+                        status_snapshot_patch: json!({"quota":{"remaining":1}}),
+                        reset_error_count: false,
+                        updated_at_unix_secs: Some(20),
+                    },
+                )
+                .await
+                .expect("OAuth metadata update should be a CAS miss"));
+            assert!(!repository
+                .compare_and_delete_key_oauth_credential(
+                    &ProviderCatalogKeyOAuthCredentialCasDelete {
+                        key_id: key_id.clone(),
+                        expected_encrypted_auth_config: None,
+                        expected_credential: ProviderCatalogKeyOAuthCredentialFence {
+                            encrypted_api_key: None,
+                            auth_type: "oauth".to_string(),
+                            provider_id: "invalid-root-provider".to_string(),
+                            provider_type: "codex".to_string(),
+                        },
+                        expected_upstream_metadata_namespace: Some(
+                            ProviderCatalogUpstreamMetadataNamespaceExpectation {
+                                namespace: "codex".to_string(),
+                                expected_value: None,
+                            },
+                        ),
+                    },
+                )
+                .await
+                .expect("OAuth credential delete should be a CAS miss"));
+
+            let stored = repository
+                .list_keys_by_ids(&[key_id])
+                .await
+                .expect("key should reload")
+                .pop()
+                .expect("key should exist");
+            assert_eq!(stored.upstream_metadata, Some(invalid_root));
+            assert_eq!(
+                stored.status_snapshot,
+                Some(json!({"quota":{"remaining":9}}))
+            );
+            assert_eq!(stored.encrypted_auth_config, None);
+            assert_eq!(stored.updated_at_unix_secs, Some(10));
+        }
+    }
+
+    #[tokio::test]
     async fn sqlite_oauth_runtime_cas_fences_auth_config_and_preserves_admin_fields() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
@@ -3322,6 +4061,10 @@ mod tests {
             "quota": {"remaining": 7},
             "admin": {"label": "keep"}
         }));
+        key.upstream_metadata = Some(json!({
+            "codex": {"remaining": 5},
+            "admin": {"keep": true}
+        }));
         repository
             .create_key(&key)
             .await
@@ -3336,12 +4079,19 @@ mod tests {
                 provider_id: "oauth-cas-provider".to_string(),
                 provider_type: "codex".to_string(),
             }),
+            expected_upstream_metadata_namespace: Some(
+                ProviderCatalogUpstreamMetadataNamespaceExpectation {
+                    namespace: "codex".to_string(),
+                    expected_value: Some(json!({"remaining": 5})),
+                },
+            ),
             encrypted_auth_config: "encrypted-auth-v2".to_string(),
             encrypted_api_key_update: Some("encrypted-api-v2".to_string()),
             expires_at_unix_secs_update: Some(Some(4_102_555_900)),
             oauth_invalid_at_unix_secs: None,
             oauth_invalid_reason: None,
             upstream_metadata_patch: Some(json!({"codex": {"remaining": 3}})),
+            upstream_metadata_namespace_to_remove: None,
             status_snapshot_patch: json!({
                 "oauth": {"invalid": false, "task_id": "task-v2"},
                 "runtime": {"generation": 2}
@@ -3393,6 +4143,160 @@ mod tests {
         assert_eq!(status["quota"], json!({"remaining": 7}));
         assert_eq!(status["admin"], json!({"label": "keep"}));
         assert_eq!(status["runtime"], json!({"generation": 2}));
+
+        let stale_metadata_update = ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
+            expected_encrypted_auth_config: Some("encrypted-auth-v2".to_string()),
+            expected_credential: None,
+            expected_upstream_metadata_namespace: Some(
+                ProviderCatalogUpstreamMetadataNamespaceExpectation {
+                    namespace: "codex".to_string(),
+                    expected_value: Some(json!({"remaining": 5})),
+                },
+            ),
+            encrypted_auth_config: "encrypted-auth-v3".to_string(),
+            encrypted_api_key_update: None,
+            expires_at_unix_secs_update: None,
+            upstream_metadata_patch: Some(json!({"codex": {"remaining": 0}})),
+            status_snapshot_patch: json!({"quota": {"remaining": 0}}),
+            updated_at_unix_secs: Some(201),
+            ..update.clone()
+        };
+        assert!(!repository
+            .compare_and_update_key_oauth_runtime_state(&stale_metadata_update)
+            .await
+            .expect("stale metadata namespace should conflict"));
+        let stored_after_metadata_conflict = repository
+            .list_keys_by_ids(&[key.id.clone()])
+            .await
+            .expect("key should reload after metadata conflict")
+            .pop()
+            .expect("key should exist");
+        assert_eq!(
+            stored_after_metadata_conflict
+                .encrypted_auth_config
+                .as_deref(),
+            Some("encrypted-auth-v2")
+        );
+        assert_eq!(
+            stored_after_metadata_conflict
+                .upstream_metadata
+                .as_ref()
+                .unwrap()["codex"],
+            json!({"remaining": 3})
+        );
+        assert_eq!(
+            stored_after_metadata_conflict
+                .status_snapshot
+                .as_ref()
+                .unwrap()["quota"],
+            json!({"remaining": 7})
+        );
+
+        let mut absent_key = StoredProviderCatalogKey::new(
+            "oauth-cas-absent-key".to_string(),
+            "oauth-cas-provider".to_string(),
+            "Absent Namespace".to_string(),
+            "oauth".to_string(),
+            None,
+            true,
+        )
+        .expect("absent namespace key should build")
+        .with_transport_fields(
+            None,
+            Some("encrypted-api-absent".to_string()),
+            Some("encrypted-auth-absent".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("absent namespace key transport should build");
+        absent_key.upstream_metadata = Some(json!({"admin": {"keep": true}}));
+        repository
+            .create_key(&absent_key)
+            .await
+            .expect("absent namespace key should create");
+        let absent_update = ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
+            key_id: absent_key.id.clone(),
+            expected_encrypted_auth_config: Some("encrypted-auth-absent".to_string()),
+            expected_credential: None,
+            expected_upstream_metadata_namespace: Some(
+                ProviderCatalogUpstreamMetadataNamespaceExpectation {
+                    namespace: "codex".to_string(),
+                    expected_value: None,
+                },
+            ),
+            encrypted_auth_config: "encrypted-auth-absent".to_string(),
+            encrypted_api_key_update: None,
+            expires_at_unix_secs_update: None,
+            oauth_invalid_at_unix_secs: None,
+            oauth_invalid_reason: None,
+            upstream_metadata_patch: Some(json!({"codex": {"remaining": 1}})),
+            upstream_metadata_namespace_to_remove: None,
+            status_snapshot_patch: json!({}),
+            reset_error_count: false,
+            updated_at_unix_secs: Some(202),
+        };
+        assert!(repository
+            .compare_and_update_key_oauth_runtime_state(&absent_update)
+            .await
+            .expect("absent metadata namespace should match"));
+        let stored_absent = repository
+            .list_keys_by_ids(&[absent_key.id])
+            .await
+            .expect("absent namespace key should reload")
+            .pop()
+            .expect("absent namespace key should exist");
+        assert_eq!(
+            stored_absent.upstream_metadata.as_ref().unwrap()["codex"],
+            json!({"remaining": 1})
+        );
+        assert_eq!(
+            stored_absent.upstream_metadata.as_ref().unwrap()["admin"],
+            json!({"keep": true})
+        );
+
+        let remove_update = ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
+            expected_upstream_metadata_namespace: Some(
+                ProviderCatalogUpstreamMetadataNamespaceExpectation {
+                    namespace: "codex".to_string(),
+                    expected_value: Some(json!({"remaining": 1})),
+                },
+            ),
+            upstream_metadata_patch: Some(json!({"runtime": {"generation": 2}})),
+            upstream_metadata_namespace_to_remove: Some("codex".to_string()),
+            status_snapshot_patch: json!({"quota": null}),
+            updated_at_unix_secs: Some(203),
+            ..absent_update
+        };
+        assert!(repository
+            .compare_and_update_key_oauth_runtime_state(&remove_update)
+            .await
+            .expect("matching metadata namespace removal should succeed"));
+        assert!(!repository
+            .compare_and_update_key_oauth_runtime_state(&remove_update)
+            .await
+            .expect("stale metadata namespace removal should be a CAS miss"));
+        let stored_after_remove = repository
+            .list_keys_by_ids(&[stored_absent.id])
+            .await
+            .expect("removed namespace key should reload")
+            .pop()
+            .expect("removed namespace key should exist");
+        let metadata = stored_after_remove
+            .upstream_metadata
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .expect("metadata should remain an object");
+        assert!(!metadata.contains_key("codex"));
+        assert_eq!(metadata["admin"], json!({"keep": true}));
+        assert_eq!(metadata["runtime"], json!({"generation": 2}));
+        assert_eq!(
+            stored_after_remove.status_snapshot.as_ref().unwrap()["quota"],
+            serde_json::Value::Null
+        );
 
         let stale_api_key_update = ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
             expected_encrypted_auth_config: Some("encrypted-auth-v2".to_string()),
@@ -3455,13 +4359,14 @@ mod tests {
                 provider_id: "oauth-cas-provider".to_string(),
                 provider_type: "codex".to_string(),
             },
+            expected_upstream_metadata_namespace: None,
         };
         assert!(!repository
             .compare_and_delete_key_oauth_credential(&stale_delete)
             .await
             .expect("stale credential delete should conflict"));
 
-        let current_delete = ProviderCatalogKeyOAuthCredentialCasDelete {
+        let stale_namespace_delete = ProviderCatalogKeyOAuthCredentialCasDelete {
             key_id: stored_after_stale.id.clone(),
             expected_encrypted_auth_config: stored_after_stale.encrypted_auth_config.clone(),
             expected_credential: ProviderCatalogKeyOAuthCredentialFence {
@@ -3470,6 +4375,35 @@ mod tests {
                 provider_id: stored_after_stale.provider_id.clone(),
                 provider_type: "codex".to_string(),
             },
+            expected_upstream_metadata_namespace: Some(
+                ProviderCatalogUpstreamMetadataNamespaceExpectation {
+                    namespace: "codex".to_string(),
+                    expected_value: Some(json!({"remaining": 3})),
+                },
+            ),
+        };
+        let current_codex = json!({"remaining": 2, "request": "newer"});
+        assert!(repository
+            .upsert_key_upstream_metadata_namespace(
+                &stored_after_stale.id,
+                "codex",
+                &current_codex,
+                Some(202),
+            )
+            .await
+            .expect("newer codex namespace should persist"));
+        assert!(!repository
+            .compare_and_delete_key_oauth_credential(&stale_namespace_delete)
+            .await
+            .expect("stale namespace delete should conflict"));
+        let current_delete = ProviderCatalogKeyOAuthCredentialCasDelete {
+            expected_upstream_metadata_namespace: Some(
+                ProviderCatalogUpstreamMetadataNamespaceExpectation {
+                    namespace: "codex".to_string(),
+                    expected_value: Some(current_codex),
+                },
+            ),
+            ..stale_namespace_delete
         };
         assert!(repository
             .compare_and_delete_key_oauth_credential(&current_delete)

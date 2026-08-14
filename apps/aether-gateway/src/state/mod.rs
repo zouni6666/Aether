@@ -38,7 +38,10 @@ pub(crate) use self::cache::{
     PROVIDER_TRANSPORT_SNAPSHOT_CACHE_STALE_TTL, PROVIDER_TRANSPORT_SNAPSHOT_CACHE_TTL,
 };
 pub use self::cors::FrontdoorCorsConfig;
-pub(crate) use self::oauth::AgentIdentityAuthConfigFence;
+pub(crate) use self::oauth::{
+    provider_transport_context_allows_credential_rotation, AgentIdentityAuthConfigFence,
+    CodexRuntimeOAuthObservation, ProviderTransportCredentialFence,
+};
 pub(crate) use self::types::{
     AdminWalletMutationOutcome, GatewayAdminPaymentCallbackView, GatewayUserPreferenceView,
     GatewayUserSessionView, LocalExecutionRuntimeMissDiagnostic, LocalMutationOutcome,

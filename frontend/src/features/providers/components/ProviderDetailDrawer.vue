@@ -292,7 +292,7 @@
                         </div>
                       </div>
                       <div
-                        v-if="getCodexResetCreditAvailableCount(key) !== null"
+                        v-if="getCodexResetCreditAvailableCount(key) !== null || hasPendingCodexResetCredit(key)"
                         class="mt-3 border-t border-border/60 pt-2"
                       >
                         <div class="flex flex-wrap items-center gap-x-1 gap-y-1 text-[10px] leading-4 text-muted-foreground">
@@ -303,7 +303,9 @@
                             :disabled="consumingCodexResetCreditKeyId === key.id"
                             @click="handleConsumeCodexResetCredit(key)"
                           >
-                            {{ consumingCodexResetCreditKeyId === key.id ? legacyT('重置中...') : legacyT('点击以进行重置') }}
+                            {{ consumingCodexResetCreditKeyId === key.id
+                              ? legacyT('重置中...')
+                              : legacyT(hasPendingCodexResetCredit(key) ? '继续确认重置' : '点击以进行重置') }}
                           </button>
                           <span
                             v-else
@@ -1044,12 +1046,16 @@ import {
 } from '@/utils/providerKeyStatus'
 import { getGeminiCliAccountCreditsText } from '@/utils/providerKeyQuota'
 import {
+  clearPendingCodexResetCreditIdempotencyKeyForOutcome,
   createCodexResetCreditIdempotencyKey,
   formatCodexResetCreditCount as formatCodexResetCreditCountLabel,
   formatCodexResetCreditExpiresAt,
   getCodexResetCreditAvailableCount as getCodexResetCreditAvailableCountFromSnapshot,
+  getCodexResetCreditReservationIdempotencyKey,
   getVisibleCodexResetCreditItems as getVisibleCodexResetCreditItemsFromSnapshot,
   mergeCodexQuotaDisplays,
+  readPendingCodexResetCreditIdempotencyKey,
+  rememberPendingCodexResetCreditIdempotencyKey,
 } from './codex-reset-credit-display'
 
 // 扩展端点类型,包含密钥列表
@@ -1741,16 +1747,36 @@ function codexResetCreditOutcomeFeedback(
   }
 }
 
+function codexResetCreditActiveIdempotencyKeyFromError(error: unknown): string | null {
+  if (typeof error !== 'object' || error === null || !('response' in error)) return null
+  const response = (error as { response?: { data?: unknown } }).response
+  if (typeof response?.data !== 'object' || response.data === null) return null
+  const activeKey = (response.data as Record<string, unknown>).active_idempotency_key
+  return typeof activeKey === 'string' && activeKey.trim() ? activeKey.trim() : null
+}
+
+function codexResetCreditCredentialChangedFromError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null || !('response' in error)) return false
+  const response = (error as { response?: { data?: unknown } }).response
+  if (typeof response?.data !== 'object' || response.data === null) return false
+  return (response.data as Record<string, unknown>).outcome === 'credential_changed'
+}
+
 async function handleConsumeCodexResetCredit(key: EndpointAPIKey) {
   if (!canConsumeCodexResetCredit(key)) return
 
+  const credentialGeneration = getCodexCredentialGeneration(key)
+  if (credentialGeneration === undefined) return
+  const pendingIdempotencyKey = getPendingCodexResetCreditIdempotencyKey(key)
   const earliest = getVisibleCodexResetCreditItems(key)[0]
   const detailMessage = earliest
     ? `\n当前最早过期项：${earliest.displayKey}，${formatCodexResetCreditExpiresAt(earliest.expiresAt)} 过期。`
     : ''
   const confirmed = await confirm({
     title: legacyT('确认使用 Codex 重置机会'),
-    message: `${legacyT('将消耗 1 次 Codex 重置机会。操作完成后会重新刷新账号配额状态。')}${detailMessage}`,
+    message: pendingIdempotencyKey
+      ? legacyT('将继续确认上次尚未完成的 Codex 重置请求。')
+      : `${legacyT('将消耗 1 次 Codex 重置机会。操作完成后会重新刷新账号配额状态。')}${detailMessage}`,
     confirmText: legacyT('确认重置'),
     cancelText: legacyT('取消'),
     variant: 'warning',
@@ -1759,10 +1785,15 @@ async function handleConsumeCodexResetCredit(key: EndpointAPIKey) {
 
   consumingCodexResetCreditKeyId.value = key.id
   try {
-    const idempotencyKey = createCodexResetCreditIdempotencyKey()
+    const idempotencyKey = pendingIdempotencyKey
+      || readPendingCodexResetCreditIdempotencyKey(key.id, credentialGeneration)
+      || createCodexResetCreditIdempotencyKey()
+    rememberPendingCodexResetCreditIdempotencyKey(key.id, idempotencyKey, credentialGeneration)
     const result = await consumeCodexResetCredit(key.id, {
       idempotency_key: idempotencyKey,
+      expected_credential_generation: credentialGeneration,
     })
+    clearPendingCodexResetCreditIdempotencyKeyForOutcome(key.id, result.outcome)
     applyQuotaResults([{
       key_id: result.key_id,
       status: result.refresh_status === 'success' ? 'success' : result.status,
@@ -1781,6 +1812,16 @@ async function handleConsumeCodexResetCredit(key: EndpointAPIKey) {
     }
     emit('refresh')
   } catch (err: unknown) {
+    const activeIdempotencyKey = codexResetCreditActiveIdempotencyKeyFromError(err)
+    if (codexResetCreditCredentialChangedFromError(err)) {
+      clearPendingCodexResetCreditIdempotencyKey(key.id)
+    } else if (activeIdempotencyKey) {
+      rememberPendingCodexResetCreditIdempotencyKey(
+        key.id,
+        activeIdempotencyKey,
+        credentialGeneration,
+      )
+    }
     showError(localizedApiError(err, 'Codex 重置机会使用失败'), legacyT('错误'))
     await Promise.all([loadProvider(), loadEndpoints()])
     emit('refresh')
@@ -1909,6 +1950,9 @@ function getCodexQuotaDisplayFromMetadata(metadata: CodexUpstreamMetadata | null
   if (!metadata) return null
 
   const display: CodexUpstreamMetadata = {}
+  if (metadata.credential_generation?.trim()) {
+    display.credential_generation = metadata.credential_generation.trim()
+  }
   if (metadata.plan_type) display.plan_type = metadata.plan_type
 
   const numberFields: (keyof CodexUpstreamMetadata)[] = [
@@ -1938,6 +1982,9 @@ function getCodexQuotaDisplayFromMetadata(metadata: CodexUpstreamMetadata | null
   numberFields.forEach(field => copyCodexNumberField(display, metadata, field))
   if (metadata.has_credits !== undefined) display.has_credits = metadata.has_credits
   if (metadata.reset_credits) display.reset_credits = metadata.reset_credits
+  if (metadata.account_quota_reset_reservation) {
+    display.account_quota_reset_reservation = metadata.account_quota_reset_reservation
+  }
 
   return Object.keys(display).length > 0 ? display : null
 }
@@ -2025,6 +2072,7 @@ function hasCodexQuotaDisplayData(key: EndpointAPIKey): boolean {
     || codex.spark_primary_used_percent !== undefined
     || codex.spark_secondary_used_percent !== undefined
     || codexDisplayHasResetCredits(codex)
+    || hasPendingCodexResetCredit(key)
   )
 }
 
@@ -2052,10 +2100,29 @@ function getVisibleCodexResetCreditItems(key: EndpointAPIKey) {
   return getVisibleCodexResetCreditItemsFromSnapshot(getCodexResetCreditsDisplay(key))
 }
 
+function getPendingCodexResetCreditIdempotencyKey(key: EndpointAPIKey): string | null {
+  const serverReservation = getCodexResetCreditReservationIdempotencyKey(getCodexQuotaDisplay(key))
+  if (serverReservation) return serverReservation
+  const credentialGeneration = getCodexCredentialGeneration(key)
+  return credentialGeneration === undefined
+    ? null
+    : readPendingCodexResetCreditIdempotencyKey(key.id, credentialGeneration)
+}
+
+function getCodexCredentialGeneration(key: EndpointAPIKey): string | null | undefined {
+  const codex = key.upstream_metadata?.codex
+  if (!codex || typeof codex !== 'object') return undefined
+  return codex.credential_generation?.trim() || null
+}
+
+function hasPendingCodexResetCredit(key: EndpointAPIKey): boolean {
+  return getPendingCodexResetCreditIdempotencyKey(key) !== null
+}
+
 function canConsumeCodexResetCredit(key: EndpointAPIKey): boolean {
   return provider.value?.provider_type === 'codex'
-    && getCodexResetCreditAvailableCount(key) !== null
-    && (getCodexResetCreditAvailableCount(key) ?? 0) > 0
+    && getCodexCredentialGeneration(key) !== undefined
+    && (hasPendingCodexResetCredit(key) || (getCodexResetCreditAvailableCount(key) ?? 0) > 0)
     && !consumingCodexResetCreditKeyId.value
 }
 

@@ -333,6 +333,30 @@
           />
         </div>
 
+        <div
+          v-if="form.provider_type === 'codex'"
+          class="flex items-center justify-between gap-4 p-3 border rounded-lg bg-muted/50"
+          data-testid="codex-fingerprint-convergence-setting"
+        >
+          <div class="space-y-0.5">
+            <Label
+              for="codex-fingerprint-convergence"
+              class="text-sm font-medium"
+            >
+              {{ legacyT('Codex OAuth 指纹收敛') }}
+            </Label>
+            <p class="text-xs text-muted-foreground leading-relaxed">
+              {{ legacyT('统一同一 OAuth 账号的设备与会话标识；关闭时保持现有透传行为。') }}
+            </p>
+          </div>
+          <Switch
+            id="codex-fingerprint-convergence"
+            :model-value="form.codex_fingerprint_convergence_enabled"
+            :aria-label="legacyT('Codex OAuth 指纹收敛')"
+            @update:model-value="(v: boolean) => form.codex_fingerprint_convergence_enabled = v"
+          />
+        </div>
+
         <div class="flex items-center justify-between gap-4 p-3 border rounded-lg bg-muted/50">
           <div class="space-y-0.5">
             <span class="text-sm font-medium">{{ legacyT('敏感信息保护') }}</span>
@@ -453,6 +477,8 @@ const form = ref({
   request_timeout: undefined as number | undefined,
   // 号池模式
   pool_mode_enabled: false,
+  // Codex 专属配置
+  codex_fingerprint_convergence_enabled: false,
   // Kiro 专属配置
   kiro_simulated_cache_enabled: false,
 })
@@ -483,6 +509,8 @@ function resetForm() {
     request_timeout: undefined,
     // 号池模式
     pool_mode_enabled: false,
+    // Codex 专属配置
+    codex_fingerprint_convergence_enabled: false,
     // Kiro 专属配置
     kiro_simulated_cache_enabled: false,
   }
@@ -517,6 +545,8 @@ function loadProviderData() {
     request_timeout: props.provider.request_timeout ?? undefined,
     // 号池模式
     pool_mode_enabled: poolAdvanced !== null,
+    // Codex 专属配置
+    codex_fingerprint_convergence_enabled: props.provider.codex_fingerprint_convergence_enabled ?? false,
     // Kiro 专属配置
     kiro_simulated_cache_enabled: props.provider.kiro_simulated_cache_enabled ?? false,
   }
@@ -539,6 +569,9 @@ watch(() => form.value.provider_type, () => {
   }
   if (form.value.provider_type !== 'kiro') {
     form.value.kiro_simulated_cache_enabled = false
+  }
+  if (form.value.provider_type !== 'codex') {
+    form.value.codex_fingerprint_convergence_enabled = false
   }
 })
 
@@ -586,6 +619,11 @@ const handleSubmit = async () => {
       pool_advanced: form.value.pool_mode_enabled
         ? (currentPoolAdvanced ?? {})
         : null,
+      ...(form.value.provider_type === 'codex'
+        ? {
+            codex_fingerprint_convergence_enabled: form.value.codex_fingerprint_convergence_enabled,
+          }
+        : {}),
       ...(form.value.provider_type === 'kiro'
         ? {
             config: {

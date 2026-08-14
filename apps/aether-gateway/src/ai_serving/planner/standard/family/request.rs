@@ -1314,21 +1314,19 @@ async fn resolve_local_gemini_image_to_openai_image_candidate_payload_parts(
             .as_object_mut()?
             .insert("stream".to_string(), Value::Bool(true));
     }
-    provider_request_body = project_openai_image_api_request_body(
-        &provider_request_body,
-        &prepared_candidate.mapped_model,
-        converted.operation,
-        crate::image_capabilities::openai_image_provider_max_generation_count_for_model(
-            transport.provider.provider_type.as_str(),
-            Some(prepared_candidate.mapped_model.as_str()),
-        ),
-    )?;
-    if is_codex {
-        provider_request_body = project_codex_openai_image_api_request_body(
+    provider_request_body = if is_codex {
+        project_codex_openai_image_api_request_body(&provider_request_body, converted.operation)?
+    } else {
+        project_openai_image_api_request_body(
             &provider_request_body,
+            &prepared_candidate.mapped_model,
             converted.operation,
-        )?;
-    }
+            crate::image_capabilities::openai_image_provider_max_generation_count_for_model(
+                transport.provider.provider_type.as_str(),
+                Some(prepared_candidate.mapped_model.as_str()),
+            ),
+        )?
+    };
     let request_path = match converted.operation {
         OpenAiImageOperation::Generate => "/v1/images/generations",
         OpenAiImageOperation::Edit => "/v1/images/edits",

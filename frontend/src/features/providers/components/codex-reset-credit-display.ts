@@ -66,6 +66,84 @@ interface CodexResetCreditCrypto {
   getRandomValues: (array: Uint8Array) => Uint8Array
 }
 
+interface CodexResetCreditPendingStorage {
+  getItem(key: string): string | null
+  setItem(key: string, value: string): void
+  removeItem(key: string): void
+}
+
+const CODEX_RESET_CREDIT_PENDING_STORAGE_PREFIX = 'aether:codex-reset-credit-pending:v2:'
+const CODEX_RESET_CREDIT_LEGACY_PENDING_STORAGE_PREFIX = 'aether:codex-reset-credit-pending:v1:'
+
+interface CodexResetCreditPendingAttempt {
+  idempotencyKey: string
+  credentialGeneration: string | null
+}
+
+const pendingCodexResetCreditAttempts = new Map<string, CodexResetCreditPendingAttempt | null>()
+
+const CODEX_RESET_CREDIT_TERMINAL_OUTCOMES = new Set([
+  'reset',
+  'already_redeemed',
+  'nothing_to_reset',
+  'no_credit',
+  'historical_replay',
+])
+
+function codexResetCreditPendingStorageKey(keyId: string): string {
+  return `${CODEX_RESET_CREDIT_PENDING_STORAGE_PREFIX}${keyId.trim()}`
+}
+
+function codexResetCreditLegacyPendingStorageKey(keyId: string): string {
+  return `${CODEX_RESET_CREDIT_LEGACY_PENDING_STORAGE_PREFIX}${keyId.trim()}`
+}
+
+function normalizeCodexCredentialGeneration(value: string | null | undefined): string | null {
+  const normalized = value?.trim()
+  return normalized ? normalized : null
+}
+
+function parseCodexResetCreditPendingAttempt(value: string): CodexResetCreditPendingAttempt | null {
+  try {
+    const parsed = JSON.parse(value) as unknown
+    if (typeof parsed !== 'object' || parsed === null) return null
+    const record = parsed as Record<string, unknown>
+    const idempotencyKey = typeof record.idempotencyKey === 'string'
+      ? record.idempotencyKey.trim()
+      : ''
+    const generation = record.credentialGeneration
+    if (!idempotencyKey || idempotencyKey.length > 256) return null
+    if (generation !== null && typeof generation !== 'string') return null
+    const credentialGeneration = normalizeCodexCredentialGeneration(generation)
+    if (typeof generation === 'string' && credentialGeneration === null) return null
+    return { idempotencyKey, credentialGeneration }
+  } catch {
+    return null
+  }
+}
+
+function resolveCodexResetCreditPendingStorage(
+  storage: CodexResetCreditPendingStorage | undefined,
+): CodexResetCreditPendingStorage | undefined {
+  if (storage) return storage
+  try {
+    return globalThis.sessionStorage
+  } catch {
+    return undefined
+  }
+}
+
+export function isCodexResetCreditTerminalOutcome(outcome: string): boolean {
+  return CODEX_RESET_CREDIT_TERMINAL_OUTCOMES.has(outcome)
+}
+
+export function getCodexResetCreditReservationIdempotencyKey(
+  display: CodexUpstreamMetadata | null | undefined,
+): string | null {
+  const value = display?.account_quota_reset_reservation?.idempotency_key?.trim()
+  return value && value.length <= 256 ? value : null
+}
+
 export function createCodexResetCreditIdempotencyKey(
   cryptoSource: CodexResetCreditCrypto | undefined = globalThis.crypto,
 ): string {
@@ -80,6 +158,91 @@ export function createCodexResetCreditIdempotencyKey(
   bytes[8] = (bytes[8] & 0x3f) | 0x80
   const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
+export function readPendingCodexResetCreditIdempotencyKey(
+  keyId: string,
+  expectedCredentialGeneration: string | null,
+  storage?: CodexResetCreditPendingStorage,
+): string | null {
+  const storageKey = codexResetCreditPendingStorageKey(keyId)
+  const expectedGeneration = normalizeCodexCredentialGeneration(expectedCredentialGeneration)
+  const resolvedStorage = resolveCodexResetCreditPendingStorage(storage)
+  try {
+    resolvedStorage?.removeItem(codexResetCreditLegacyPendingStorageKey(keyId))
+  } catch {
+    // Legacy values are never read, so failed cleanup cannot replay them.
+  }
+  if (pendingCodexResetCreditAttempts.has(storageKey)) {
+    const attempt = pendingCodexResetCreditAttempts.get(storageKey)
+    if (attempt?.credentialGeneration === expectedGeneration) return attempt.idempotencyKey
+    pendingCodexResetCreditAttempts.set(storageKey, null)
+    try {
+      resolvedStorage?.removeItem(storageKey)
+    } catch {
+      // The in-memory tombstone still prevents a stale generation from replaying.
+    }
+    return null
+  }
+  try {
+    const value = resolvedStorage?.getItem(storageKey)?.trim()
+    const attempt = value ? parseCodexResetCreditPendingAttempt(value) : null
+    if (attempt?.credentialGeneration === expectedGeneration) {
+      pendingCodexResetCreditAttempts.set(storageKey, attempt)
+      return attempt.idempotencyKey
+    }
+    pendingCodexResetCreditAttempts.set(storageKey, null)
+    if (value) resolvedStorage?.removeItem(storageKey)
+  } catch {
+    // Fall through to the in-memory copy when browser storage is unavailable.
+  }
+  return null
+}
+
+export function rememberPendingCodexResetCreditIdempotencyKey(
+  keyId: string,
+  idempotencyKey: string,
+  credentialGeneration: string | null,
+  storage?: CodexResetCreditPendingStorage,
+): void {
+  const normalized = idempotencyKey.trim()
+  if (!normalized || normalized.length > 256) return
+  const storageKey = codexResetCreditPendingStorageKey(keyId)
+  const attempt: CodexResetCreditPendingAttempt = {
+    idempotencyKey: normalized,
+    credentialGeneration: normalizeCodexCredentialGeneration(credentialGeneration),
+  }
+  pendingCodexResetCreditAttempts.set(storageKey, attempt)
+  try {
+    resolveCodexResetCreditPendingStorage(storage)?.setItem(storageKey, JSON.stringify(attempt))
+  } catch {
+    // The in-memory copy still permits retrying the same request in this page session.
+  }
+}
+
+export function clearPendingCodexResetCreditIdempotencyKey(
+  keyId: string,
+  storage?: CodexResetCreditPendingStorage,
+): void {
+  const storageKey = codexResetCreditPendingStorageKey(keyId)
+  pendingCodexResetCreditAttempts.set(storageKey, null)
+  try {
+    const resolvedStorage = resolveCodexResetCreditPendingStorage(storage)
+    resolvedStorage?.removeItem(storageKey)
+    resolvedStorage?.removeItem(codexResetCreditLegacyPendingStorageKey(keyId))
+  } catch {
+    // Ignore unavailable browser storage after a terminal server response.
+  }
+}
+
+export function clearPendingCodexResetCreditIdempotencyKeyForOutcome(
+  keyId: string,
+  outcome: string,
+  storage?: CodexResetCreditPendingStorage,
+): boolean {
+  if (!isCodexResetCreditTerminalOutcome(outcome)) return false
+  clearPendingCodexResetCreditIdempotencyKey(keyId, storage)
+  return true
 }
 
 function codexResetCreditRemainingSeconds(

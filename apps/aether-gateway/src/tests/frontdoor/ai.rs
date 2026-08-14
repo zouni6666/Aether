@@ -7,11 +7,16 @@ use super::{
 use crate::image_capabilities::openai_image_gateway_max_generation_count;
 use crate::tests::{
     any, build_router_with_state, build_state_with_execution_runtime_override, json, start_server,
-    to_bytes, AppState, Arc, Body, Json, Mutex, Request, Router, StatusCode, EXECUTION_PATH_HEADER,
-    EXECUTION_PATH_LOCAL_AI_PUBLIC, EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS,
+    to_bytes, wait_until, AppState, Arc, Body, Json, Mutex, Request, Router, StatusCode,
+    EXECUTION_PATH_HEADER, EXECUTION_PATH_LOCAL_AI_PUBLIC,
+    EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS,
 };
+use aether_contracts::{ExecutionResult, ExecutionTelemetry, ResponseBody};
+use aether_crypto::encrypt_python_fernet_plaintext;
 use aether_data::repository::global_models::InMemoryGlobalModelReadRepository;
+use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use aether_data::DataLayerError;
+use aether_data_contracts::repository::auth::AuthApiKeyWriteRepository;
 use aether_data_contracts::repository::candidate_selection::{
     MinimalCandidateSelectionReadRepository, StoredMinimalCandidateSelectionRow,
     StoredPoolKeyCandidateRowsByKeyIdsQuery, StoredPoolKeyCandidateRowsQuery,
@@ -20,13 +25,21 @@ use aether_data_contracts::repository::candidate_selection::{
 use aether_data_contracts::repository::global_models::{
     StoredAdminGlobalModel, UpdateAdminGlobalModelRecord,
 };
+use aether_data_contracts::repository::provider_catalog::{
+    ProviderCatalogReadRepository, StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
+    StoredProviderCatalogProvider,
+};
 use async_trait::async_trait;
 use axum::response::IntoResponse;
 use std::collections::HashMap;
 use std::future::pending;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-fn codex_models_snapshot(api_key_id: &str, user_id: &str) -> StoredAuthApiKeySnapshot {
+fn codex_models_snapshot(
+    api_key_id: &str,
+    user_id: &str,
+    allowed_models: &[&str],
+) -> StoredAuthApiKeySnapshot {
     StoredAuthApiKeySnapshot::new(
         user_id.to_string(),
         "alice".to_string(),
@@ -37,7 +50,7 @@ fn codex_models_snapshot(api_key_id: &str, user_id: &str) -> StoredAuthApiKeySna
         false,
         Some(json!(["codex"])),
         Some(json!(["openai:responses"])),
-        Some(json!(["frontier-sol", "broken-luna"])),
+        Some(json!(allowed_models)),
         api_key_id.to_string(),
         Some("codex-models".to_string()),
         true,
@@ -48,7 +61,7 @@ fn codex_models_snapshot(api_key_id: &str, user_id: &str) -> StoredAuthApiKeySna
         Some(4_102_444_800),
         Some(json!(["codex"])),
         Some(json!(["openai:responses"])),
-        Some(json!(["frontier-sol", "broken-luna"])),
+        Some(json!(allowed_models)),
     )
     .expect("Codex models auth snapshot should build")
 }
@@ -104,6 +117,7 @@ fn complete_codex_model_card(source_model_name: &str) -> serde_json::Value {
         "upgrade": null,
         "base_instructions": "Use the current Codex instructions.",
         "model_messages": null,
+        "available_in_plans": ["plus", "pro"],
         "support_verbosity": true,
         "default_verbosity": "low",
         "apply_patch_tool_type": "freeform",
@@ -113,6 +127,105 @@ fn complete_codex_model_card(source_model_name: &str) -> serde_json::Value {
         "minimal_client_version": "0.144.0",
         "future_capability": {"enabled": true}
     })
+}
+
+fn codex_catalog_provider(provider_id: &str) -> StoredProviderCatalogProvider {
+    StoredProviderCatalogProvider::new(
+        provider_id.to_string(),
+        "codex".to_string(),
+        Some("https://chatgpt.com".to_string()),
+        "codex".to_string(),
+    )
+    .expect("Codex provider should build")
+}
+
+fn codex_catalog_endpoint(provider_id: &str, endpoint_id: &str) -> StoredProviderCatalogEndpoint {
+    StoredProviderCatalogEndpoint::new(
+        endpoint_id.to_string(),
+        provider_id.to_string(),
+        "openai:responses".to_string(),
+        Some("openai".to_string()),
+        Some("responses".to_string()),
+        true,
+    )
+    .expect("Codex endpoint should build")
+    .with_transport_fields(
+        "https://chatgpt.example/backend-api/codex".to_string(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("Codex endpoint transport should build")
+}
+
+fn codex_catalog_key(
+    provider_id: &str,
+    key_id: &str,
+    allowed_models: &[&str],
+) -> StoredProviderCatalogKey {
+    let mut key = StoredProviderCatalogKey::new(
+        key_id.to_string(),
+        provider_id.to_string(),
+        "manual".to_string(),
+        "bearer".to_string(),
+        None,
+        true,
+    )
+    .expect("Codex key should build")
+    .with_transport_fields(
+        Some(json!(["openai:responses"])),
+        encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "oauth-upstream-secret")
+            .expect("Codex test token should encrypt"),
+        None,
+        None,
+        None,
+        Some(json!(allowed_models)),
+        None,
+        None,
+        None,
+    )
+    .expect("Codex key transport should build");
+    key.auto_fetch_models = false;
+    key.locked_models = Some(json!(["manual-locked-model"]));
+    key.model_include_patterns = Some(json!(["gpt-future-*"]));
+    key.model_exclude_patterns = Some(json!(["gpt-future-denied"]));
+    key
+}
+
+fn codex_catalog_execution_result(
+    plan: &aether_contracts::ExecutionPlan,
+    status_code: u16,
+    body: serde_json::Value,
+    etag: Option<&str>,
+) -> ExecutionResult {
+    let mut headers = std::collections::BTreeMap::from([(
+        "content-type".to_string(),
+        "application/json".to_string(),
+    )]);
+    if let Some(etag) = etag {
+        headers.insert("ETag".to_string(), etag.to_string());
+    }
+    ExecutionResult {
+        request_id: plan.request_id.clone(),
+        candidate_id: plan.candidate_id.clone(),
+        status_code,
+        headers,
+        response_observation: None,
+        body: Some(ResponseBody {
+            json_body: Some(body),
+            body_bytes_b64: None,
+        }),
+        telemetry: Some(ExecutionTelemetry {
+            ttfb_ms: Some(1),
+            elapsed_ms: Some(2),
+            upstream_bytes: None,
+        }),
+        error: None,
+    }
 }
 
 fn gemini_operation_status_label(status: VideoTaskStatus) -> &'static str {
@@ -449,102 +562,618 @@ async fn gateway_handles_public_openai_models_without_hitting_fallback_probe() {
     fallback_probe_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_serves_codex_model_cards_for_versioned_models_requests() {
-    let codex_row =
-        sample_codex_models_candidate_row("provider-codex-models", "frontier-sol", "gpt-5.6-sol");
-    let incomplete_codex_row = sample_codex_models_candidate_row(
-        "provider-codex-incomplete",
-        "broken-luna",
-        "gpt-5.6-luna",
-    );
-    let candidate_repository =
-        Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
-            codex_row.clone(),
-            incomplete_codex_row.clone(),
-            sample_models_candidate_row(
-                "provider-openai-responses",
-                "openai",
-                "openai:responses",
-                "custom-responses-model",
-                20,
+#[test]
+fn gateway_versioned_models_fail_closed_when_cached_auth_becomes_unusable_or_missing() {
+    std::thread::Builder::new()
+        .name("codex-model-catalog-auth-race".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Codex auth race test runtime should build")
+                .block_on(run_versioned_models_auth_race_scenario());
+        })
+        .expect("Codex auth race test thread should spawn")
+        .join()
+        .expect("Codex auth race test thread should finish");
+}
+
+async fn run_versioned_models_auth_race_scenario() {
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-codex-models-auth-race")),
+        codex_models_snapshot(
+            "key-codex-models-auth-race",
+            "user-codex-models-auth-race",
+            &["future-alias"],
+        ),
+    )]));
+    let candidate_repository = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(
+        Vec::new(),
+    ));
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_minimal_candidate_selection_and_auth_for_tests(
+                    candidate_repository,
+                    auth_repository.clone(),
+                ),
             ),
-        ]));
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+    let models_url = format!("{gateway_url}/v1/models?client_version=0.145.2");
+
+    let warm_response = client
+        .get(&models_url)
+        .header("authorization", "Bearer sk-codex-models-auth-race")
+        .send()
+        .await
+        .expect("initial versioned models request should succeed");
+    assert_eq!(warm_response.status(), StatusCode::OK);
+
+    assert!(auth_repository
+        .set_user_api_key_locked(
+            "user-codex-models-auth-race",
+            "key-codex-models-auth-race",
+            true,
+        )
+        .await
+        .expect("locking the API key should succeed"));
+    let locked_response = client
+        .get(&models_url)
+        .header("authorization", "Bearer sk-codex-models-auth-race")
+        .send()
+        .await
+        .expect("locked versioned models request should complete");
+    assert_eq!(locked_response.status(), StatusCode::UNAUTHORIZED);
+
+    assert!(auth_repository
+        .delete_user_api_key("user-codex-models-auth-race", "key-codex-models-auth-race",)
+        .await
+        .expect("deleting the API key should succeed"));
+    let missing_response = client
+        .get(&models_url)
+        .header("authorization", "Bearer sk-codex-models-auth-race")
+        .send()
+        .await
+        .expect("missing versioned models request should complete");
+    assert_eq!(missing_response.status(), StatusCode::UNAUTHORIZED);
+
+    gateway_handle.abort();
+}
+
+#[test]
+fn gateway_serves_codex_model_cards_for_versioned_models_requests() {
+    std::thread::Builder::new()
+        .name("codex-model-catalog-frontdoor".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Codex frontdoor test runtime should build")
+                .block_on(run_versioned_codex_model_cards_frontdoor_scenario());
+        })
+        .expect("Codex frontdoor test thread should spawn")
+        .join()
+        .expect("Codex frontdoor test thread should finish");
+}
+
+async fn run_versioned_codex_model_cards_frontdoor_scenario() {
+    const PROVIDER_ID: &str = "provider-codex-models";
+    const CATALOG_KEY_ID: &str = "key-provider-codex-models";
+    const CATALOG_ENDPOINT_ID: &str = "endpoint-provider-codex-models";
+    const SOURCE_MODELS: &[&str] = &[
+        "gpt-future-dynamic",
+        "gpt-future-legacy",
+        "gpt-future-second",
+        "gpt-hidden-direct",
+    ];
+    const GLOBAL_MODELS: &[&str] = &["future-alias", "legacy-alias"];
+
+    let mut codex_rows = vec![
+        sample_codex_models_candidate_row(PROVIDER_ID, "future-alias", "gpt-future-dynamic"),
+        sample_codex_models_candidate_row(PROVIDER_ID, "legacy-alias", "gpt-future-legacy"),
+        sample_codex_models_candidate_row(PROVIDER_ID, "second-alias", "gpt-future-second"),
+        sample_codex_models_candidate_row(PROVIDER_ID, "hidden-alias", "gpt-hidden-direct"),
+    ];
+    for row in &mut codex_rows {
+        row.key_allowed_models = Some(
+            SOURCE_MODELS
+                .iter()
+                .map(|value| value.to_string())
+                .collect(),
+        );
+    }
+    let mut all_candidate_rows = codex_rows.clone();
+    all_candidate_rows.push(sample_models_candidate_row(
+        "provider-openai-responses",
+        "openai",
+        "openai:responses",
+        "custom-responses-model",
+        20,
+    ));
+    let candidate_repository = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(
+        all_candidate_rows,
+    ));
     let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![
         (
             Some(hash_api_key("sk-codex-models")),
-            codex_models_snapshot("key-codex-models", "user-codex-models"),
+            codex_models_snapshot("key-codex-models", "user-codex-models", GLOBAL_MODELS),
         ),
         (
             Some(hash_api_key("sk-standard-models")),
             unrestricted_models_snapshot("key-standard-models", "user-standard-models"),
         ),
+        (
+            Some(hash_api_key("sk-codex-legacy-only")),
+            codex_models_snapshot(
+                "key-codex-legacy-only",
+                "user-codex-legacy-only",
+                &["legacy-alias"],
+            ),
+        ),
+        (
+            Some(hash_api_key("sk-codex-hidden-mixed")),
+            codex_models_snapshot(
+                "key-codex-hidden-mixed",
+                "user-codex-hidden-mixed",
+                &["future-alias", "hidden-alias"],
+            ),
+        ),
+        (
+            Some(hash_api_key("sk-codex-second-mixed")),
+            codex_models_snapshot(
+                "key-codex-second-mixed",
+                "user-codex-second-mixed",
+                &["future-alias", "second-alias"],
+            ),
+        ),
     ]));
-    let state = AppState::new()
-        .expect("gateway should build")
+    let original_catalog_key = codex_catalog_key(PROVIDER_ID, CATALOG_KEY_ID, SOURCE_MODELS);
+    assert!(!original_catalog_key.auto_fetch_models);
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![codex_catalog_provider(PROVIDER_ID)],
+        vec![codex_catalog_endpoint(PROVIDER_ID, CATALOG_ENDPOINT_ID)],
+        vec![original_catalog_key.clone()],
+    ));
+    let rows_before = candidate_repository
+        .list_for_exact_api_format("openai:responses")
+        .await
+        .expect("candidate rows should load before request");
+
+    let catalog_generation = Arc::new(AtomicUsize::new(0));
+    let catalog_hits = Arc::new(AtomicUsize::new(0));
+    let captured_plans = Arc::new(Mutex::new(Vec::<(String, Option<String>)>::new()));
+    let generation_for_runtime = Arc::clone(&catalog_generation);
+    let hits_for_runtime = Arc::clone(&catalog_hits);
+    let plans_for_runtime = Arc::clone(&captured_plans);
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |request: Request| {
+            let generation_for_request = Arc::clone(&generation_for_runtime);
+            let hits_for_request = Arc::clone(&hits_for_runtime);
+            let plans_for_request = Arc::clone(&plans_for_runtime);
+            async move {
+                let (_parts, body) = request.into_parts();
+                let raw_body = to_bytes(body, usize::MAX)
+                    .await
+                    .expect("execution runtime request body should read");
+                let plan: aether_contracts::ExecutionPlan =
+                    serde_json::from_slice(&raw_body).expect("execution runtime plan should parse");
+                plans_for_request
+                    .lock()
+                    .expect("plans mutex")
+                    .push((plan.url.clone(), plan.headers.get("user-agent").cloned()));
+                if plan.url.contains("/models?") {
+                    hits_for_request.fetch_add(1, Ordering::SeqCst);
+                    let generation = generation_for_request.load(Ordering::SeqCst);
+                    if generation == 1 {
+                        return Json(codex_catalog_execution_result(
+                            &plan,
+                            503,
+                            json!({"error":{"message":"temporary catalog outage"}}),
+                            None,
+                        ));
+                    }
+
+                    let mut current = complete_codex_model_card("gpt-future-dynamic");
+                    let current_object = current.as_object_mut().expect("current card object");
+                    current_object.remove("base_instructions");
+                    current_object.insert(
+                        "model_messages".to_string(),
+                        json!({"instructions_template":"Use future dynamic instructions."}),
+                    );
+                    current_object.insert(
+                        "future_capability".to_string(),
+                        json!({"mode":"opaque-current"}),
+                    );
+
+                    let mut legacy = complete_codex_model_card("gpt-future-legacy");
+                    legacy["base_instructions"] = json!("Use legacy future instructions.");
+                    legacy["future_capability"] = json!({"mode":"opaque-legacy"});
+
+                    let mut models = vec![current, legacy];
+                    if generation >= 2 {
+                        let mut second = complete_codex_model_card("gpt-future-second");
+                        second
+                            .as_object_mut()
+                            .expect("second card object")
+                            .remove("base_instructions");
+                        second["model_messages"] =
+                            json!({"instructions_template":"Use second future instructions."});
+                        second["future_capability"] = json!({"mode":"added-without-code-change"});
+                        models.push(second);
+                        models.push(complete_codex_model_card("gpt-future-unmapped"));
+                    }
+                    let etag = if generation >= 2 {
+                        "\"catalog-etag-v2\""
+                    } else {
+                        "\"catalog-etag-v1\""
+                    };
+                    return Json(codex_catalog_execution_result(
+                        &plan,
+                        200,
+                        json!({"models": models, "future_top_level": true}),
+                        Some(etag),
+                    ));
+                }
+
+                Json(codex_catalog_execution_result(
+                    &plan,
+                    200,
+                    json!({
+                        "id": "resp-future-dynamic",
+                        "object": "response",
+                        "model": "gpt-future-dynamic",
+                        "output": [],
+                        "usage": {
+                            "input_tokens": 1,
+                            "output_tokens": 2,
+                            "total_tokens": 3
+                        }
+                    }),
+                    Some("\"catalog-etag-v2\""),
+                ))
+            }
+        }),
+    );
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let state = build_state_with_execution_runtime_override(execution_runtime_url)
         .with_data_state_for_tests(
             crate::data::GatewayDataState::with_minimal_candidate_selection_and_auth_for_tests(
-                candidate_repository,
+                candidate_repository.clone(),
                 auth_repository,
-            ),
+            )
+            .attach_provider_catalog_repository_for_tests(provider_catalog_repository.clone())
+            .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
         );
-    state
-        .runtime_kv_setex(
-            &format!(
-                "upstream_models:{}:{}",
-                codex_row.provider_id, codex_row.key_id
-            ),
-            &serde_json::to_string(&vec![complete_codex_model_card("gpt-5.6-sol")])
-                .expect("model cache should serialize"),
-            60,
+
+    let configured_rows = state
+        .list_minimal_candidate_selection_rows_for_api_format("openai:responses")
+        .await
+        .expect("configured Codex candidate rows should be readable");
+    assert_eq!(
+        configured_rows
+            .iter()
+            .filter(|row| row.provider_type == "codex")
+            .count(),
+        codex_rows.len()
+    );
+    let resolved_auth =
+        aether_data_contracts::repository::auth::ResolvedAuthApiKeySnapshot::from_stored(
+            codex_models_snapshot("key-codex-models", "user-codex-models", GLOBAL_MODELS),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        );
+    let eligible_rows = crate::handlers::public::filter_eligible_model_rows(
+        configured_rows.clone(),
+        Some(&resolved_auth),
+        "openai:responses",
+    );
+    assert_eq!(
+        eligible_rows
+            .iter()
+            .filter(|row| row.provider_type == "codex")
+            .count(),
+        GLOBAL_MODELS.len(),
+        "Codex fixture rows must survive the same provider/model/key authorization filters as the route"
+    );
+    let actual_auth = state
+        .data
+        .read_auth_api_key_snapshot(
+            "user-codex-models",
+            "key-codex-models",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
         )
         .await
-        .expect("model cache should seed");
-    state
-        .runtime_kv_setex(
-            &format!(
-                "upstream_models:{}:{}",
-                incomplete_codex_row.provider_id, incomplete_codex_row.key_id
-            ),
-            &serde_json::to_string(&vec![json!({
-                "id": "gpt-5.6-luna",
-                "slug": "gpt-5.6-luna",
-                "display_name": "GPT-5.6-Luna"
-            })])
-            .expect("incomplete model cache should serialize"),
-            60,
+        .expect("Codex auth snapshot read should succeed")
+        .expect("Codex auth snapshot should exist");
+    assert_eq!(
+        crate::handlers::public::filter_eligible_model_rows(
+            configured_rows.clone(),
+            Some(&actual_auth),
+            "openai:responses",
+        )
+        .iter()
+        .filter(|row| row.provider_type == "codex")
+        .count(),
+        GLOBAL_MODELS.len(),
+        "stored Codex auth snapshot must preserve every authorized manual mapping"
+    );
+    assert!(
+        <AppState as crate::model_fetch::CodexCatalogRuntime>::read_codex_catalog_transport_snapshot(
+            &state,
+            PROVIDER_ID,
+            CATALOG_ENDPOINT_ID,
+            CATALOG_KEY_ID,
         )
         .await
-        .expect("incomplete model cache should seed");
+        .expect("Codex catalog transport lookup should succeed")
+        .is_some(),
+        "Codex catalog transport must be available even when auto_fetch_models is disabled"
+    );
 
     let gateway = build_router_with_state(state);
     let (gateway_url, gateway_handle) = start_server(gateway).await;
     let client = reqwest::Client::new();
 
     let codex_response = client
-        .get(format!("{gateway_url}/v1/models?client_version=0.144.1"))
+        .get(format!(
+            "{gateway_url}/v1/models?client_version=0.145.2-beta.7%2Bdesktop.9"
+        ))
         .header("authorization", "Bearer sk-codex-models")
         .send()
         .await
         .expect("Codex models request should succeed");
     assert_eq!(codex_response.status(), StatusCode::OK);
+    let codex_etag = codex_response
+        .headers()
+        .get(http::header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned);
     let codex_payload: serde_json::Value = codex_response
         .json()
         .await
         .expect("Codex models body should parse");
-    assert_eq!(codex_payload["models"].as_array().map(Vec::len), Some(1));
-    assert_eq!(codex_payload["models"][0]["slug"], "frontier-sol");
     assert_eq!(
-        codex_payload["models"][0]["supported_reasoning_levels"][5]["effort"],
-        "ultra"
+        catalog_hits.load(Ordering::SeqCst),
+        1,
+        "cold Codex request must reach the upstream catalog once; payload={codex_payload}"
+    );
+    assert_eq!(codex_etag.as_deref(), Some("\"catalog-etag-v1\""));
+    assert_eq!(codex_payload["models"].as_array().map(Vec::len), Some(2));
+    let current_card = codex_payload["models"]
+        .as_array()
+        .and_then(|models| models.iter().find(|model| model["slug"] == "future-alias"))
+        .expect("current model card should be projected");
+    assert_eq!(
+        current_card["model_messages"]["instructions_template"],
+        "Use future dynamic instructions."
     );
     assert_eq!(
-        codex_payload["models"][0]["future_capability"],
-        json!({"enabled": true})
+        current_card["future_capability"],
+        json!({"mode":"opaque-current"})
     );
-    assert!(codex_payload["models"][0].get("id").is_none());
-    assert!(codex_payload["models"][0].get("api_formats").is_none());
+    assert_eq!(current_card["available_in_plans"], json!(["plus", "pro"]));
+    assert!(current_card.get("base_instructions").is_none());
+    assert!(current_card.get("id").is_none());
+    assert!(current_card.get("api_formats").is_none());
+    let legacy_card = codex_payload["models"]
+        .as_array()
+        .and_then(|models| models.iter().find(|model| model["slug"] == "legacy-alias"))
+        .expect("legacy model card should be projected");
+    assert_eq!(
+        legacy_card["base_instructions"],
+        "Use legacy future instructions."
+    );
+    assert_eq!(
+        legacy_card["future_capability"],
+        json!({"mode":"opaque-legacy"})
+    );
+    assert!(codex_payload["models"]
+        .as_array()
+        .is_some_and(
+            |models| models.iter().all(|model| model["slug"] != "hidden-alias"
+                && model["slug"] != "second-alias"
+                && model["slug"] != "gpt-future-unmapped")
+        ));
     assert!(codex_payload.get("object").is_none());
+    assert_eq!(catalog_hits.load(Ordering::SeqCst), 1);
+
+    let restricted_response = client
+        .get(format!("{gateway_url}/v1/models?client_version=0.145.2"))
+        .header("authorization", "Bearer sk-codex-legacy-only")
+        .send()
+        .await
+        .expect("restricted Codex models request should succeed");
+    assert_eq!(restricted_response.status(), StatusCode::OK);
+    let restricted_payload: serde_json::Value = restricted_response
+        .json()
+        .await
+        .expect("restricted Codex models body should parse");
+    assert_eq!(
+        restricted_payload["models"].as_array().map(|models| models
+            .iter()
+            .map(|model| model["slug"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>()),
+        Some(vec!["legacy-alias"])
+    );
+    assert_eq!(catalog_hits.load(Ordering::SeqCst), 1);
+
+    let incomplete_authorized_response = client
+        .get(format!("{gateway_url}/v1/models?client_version=0.145.2"))
+        .header("authorization", "Bearer sk-codex-hidden-mixed")
+        .send()
+        .await
+        .expect("incomplete authorized Codex catalog request should succeed");
+    assert_eq!(incomplete_authorized_response.status(), StatusCode::OK);
+    assert!(incomplete_authorized_response
+        .headers()
+        .get(http::header::ETAG)
+        .is_none());
+    let incomplete_authorized_payload: serde_json::Value = incomplete_authorized_response
+        .json()
+        .await
+        .expect("incomplete authorized Codex body should parse");
+    assert_eq!(
+        incomplete_authorized_payload["models"]
+            .as_array()
+            .map(Vec::len),
+        Some(0),
+        "a partial non-empty remote catalog would hide the client's bundled fallback models"
+    );
+    assert_eq!(catalog_hits.load(Ordering::SeqCst), 1);
+
+    let pending_second_response = client
+        .get(format!("{gateway_url}/v1/models?client_version=0.145.2"))
+        .header("authorization", "Bearer sk-codex-second-mixed")
+        .send()
+        .await
+        .expect("not-yet-published authorized model request should succeed");
+    assert_eq!(pending_second_response.status(), StatusCode::OK);
+    let pending_second_payload: serde_json::Value = pending_second_response
+        .json()
+        .await
+        .expect("not-yet-published authorized model body should parse");
+    assert_eq!(
+        pending_second_payload["models"].as_array().map(Vec::len),
+        Some(0)
+    );
+    assert_eq!(catalog_hits.load(Ordering::SeqCst), 1);
+
+    let captured_catalog_plan = captured_plans
+        .lock()
+        .expect("plans mutex")
+        .iter()
+        .find(|(url, _)| url.contains("/models?"))
+        .cloned()
+        .expect("catalog execution plan should be captured");
+    assert_eq!(
+        captured_catalog_plan.0,
+        "https://chatgpt.example/backend-api/codex/models?client_version=0.145.2"
+    );
+    assert_eq!(
+        captured_catalog_plan.1.as_deref(),
+        Some("codex_cli_rs/0.145.2")
+    );
+
+    let fresh_response = client
+        .get(format!("{gateway_url}/v1/models?client_version=0.145.2"))
+        .header("authorization", "Bearer sk-codex-models")
+        .send()
+        .await
+        .expect("fresh Codex models request should succeed");
+    assert_eq!(fresh_response.status(), StatusCode::OK);
+    assert_eq!(catalog_hits.load(Ordering::SeqCst), 1);
+
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    catalog_generation.store(1, Ordering::SeqCst);
+    let stale_started = std::time::Instant::now();
+    let stale_response = client
+        .get(format!("{gateway_url}/v1/models?client_version=0.145.2"))
+        .header("authorization", "Bearer sk-codex-models")
+        .send()
+        .await
+        .expect("stale Codex models request should succeed");
+    assert_eq!(stale_response.status(), StatusCode::OK);
+    assert!(stale_started.elapsed() < std::time::Duration::from_millis(400));
+    let stale_payload: serde_json::Value = stale_response
+        .json()
+        .await
+        .expect("stale body should parse");
+    assert!(stale_payload["models"]
+        .as_array()
+        .is_some_and(|models| models.iter().any(|model| model["slug"] == "future-alias")));
+    wait_until(1_000, || catalog_hits.load(Ordering::SeqCst) >= 2).await;
+
+    let failed_refresh_lkg_response = client
+        .get(format!("{gateway_url}/v1/models?client_version=0.145.2"))
+        .header("authorization", "Bearer sk-codex-models")
+        .send()
+        .await
+        .expect("failed refresh should keep serving LKG");
+    let failed_refresh_lkg_payload: serde_json::Value = failed_refresh_lkg_response
+        .json()
+        .await
+        .expect("failed refresh LKG body should parse");
+    assert!(failed_refresh_lkg_payload["models"]
+        .as_array()
+        .is_some_and(|models| models.iter().any(|model| model["slug"] == "future-alias")));
+    assert_eq!(catalog_hits.load(Ordering::SeqCst), 2);
+
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    catalog_generation.store(2, Ordering::SeqCst);
+    let refresh_trigger = client
+        .get(format!("{gateway_url}/v1/models?client_version=0.145.2"))
+        .header("authorization", "Bearer sk-codex-models")
+        .send()
+        .await
+        .expect("recovered refresh trigger should succeed");
+    assert_eq!(refresh_trigger.status(), StatusCode::OK);
+    wait_until(1_000, || catalog_hits.load(Ordering::SeqCst) >= 3).await;
+
+    let updated_response = client
+        .get(format!("{gateway_url}/v1/models?client_version=0.145.2"))
+        .header("authorization", "Bearer sk-codex-second-mixed")
+        .send()
+        .await
+        .expect("updated catalog request should succeed");
+    assert_eq!(
+        updated_response
+            .headers()
+            .get(http::header::ETAG)
+            .and_then(|value| value.to_str().ok()),
+        Some("\"catalog-etag-v2\"")
+    );
+    let updated_payload: serde_json::Value = updated_response
+        .json()
+        .await
+        .expect("updated body should parse");
+    assert!(updated_payload["models"]
+        .as_array()
+        .is_some_and(|models| models.iter().any(|model| {
+            model["slug"] == "second-alias"
+                && model["future_capability"] == json!({"mode":"added-without-code-change"})
+        })));
+    assert!(updated_payload["models"]
+        .as_array()
+        .is_some_and(|models| models.iter().all(|model| {
+            model["slug"] != "hidden-alias" && model["slug"] != "gpt-future-unmapped"
+        })));
+
+    let stored_keys = provider_catalog_repository
+        .list_keys_by_ids(&[CATALOG_KEY_ID.to_string()])
+        .await
+        .expect("catalog key should remain readable");
+    assert_eq!(stored_keys.as_slice(), &[original_catalog_key]);
+    let rows_after = candidate_repository
+        .list_for_exact_api_format("openai:responses")
+        .await
+        .expect("candidate rows should load after request");
+    assert_eq!(rows_after, rows_before);
+
+    let inference_response = client
+        .post(format!("{gateway_url}/v1/responses"))
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .header("authorization", "Bearer sk-codex-models")
+        .body(r#"{"model":"future-alias","input":"hello","store":false}"#)
+        .send()
+        .await
+        .expect("manual alias inference should succeed");
+    assert_eq!(inference_response.status(), StatusCode::OK);
+    let inference_payload: serde_json::Value = inference_response
+        .json()
+        .await
+        .expect("inference body should parse");
+    assert_eq!(inference_payload["model"], "gpt-future-dynamic");
 
     let standard_response = client
         .get(format!("{gateway_url}/v1/models"))
@@ -562,6 +1191,7 @@ async fn gateway_serves_codex_model_cards_for_versioned_models_requests() {
     assert!(standard_payload.get("models").is_none());
 
     gateway_handle.abort();
+    execution_runtime_handle.abort();
 }
 
 #[tokio::test]
@@ -695,7 +1325,7 @@ async fn gateway_returns_empty_openai_models_when_candidate_rows_stall() {
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
     let response = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(500))
+        .timeout(std::time::Duration::from_secs(3))
         .build()
         .expect("client should build")
         .get(format!("{gateway_url}/v1/models"))
@@ -755,7 +1385,7 @@ async fn gateway_returns_not_found_for_openai_model_detail_when_candidate_rows_s
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
     let response = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(500))
+        .timeout(std::time::Duration::from_secs(3))
         .build()
         .expect("client should build")
         .get(format!("{gateway_url}/v1/models/gpt-stalled"))

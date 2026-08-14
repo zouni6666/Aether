@@ -5,6 +5,7 @@ pub mod auth;
 mod auth_config;
 mod cache;
 pub mod claude_code;
+mod codex_fingerprint;
 pub mod conversion;
 mod diagnostics;
 pub mod gemini_cli;
@@ -55,6 +56,10 @@ pub use anthropic_compat::{
 pub use auth::{build_passthrough_headers, ensure_upstream_auth_header};
 pub use auth_config::apply_local_auth_config_header_overrides;
 pub use cache::{provider_transport_snapshot_looks_refreshed, ProviderTransportSnapshotCacheKey};
+pub use codex_fingerprint::{
+    apply_codex_oauth_fingerprint_convergence, codex_fingerprint_convergence_enabled,
+    CODEX_FINGERPRINT_CONFIG_NAMESPACE, CODEX_FINGERPRINT_ENABLED_CONFIG_KEY,
+};
 pub use conversion::{
     candidate_common_transport_skip_reason, candidate_transport_pair_skip_reason,
     request_conversion_direct_auth, request_conversion_enabled_for_transport,

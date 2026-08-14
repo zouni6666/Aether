@@ -79,13 +79,50 @@ pub struct ProviderCatalogKeyOAuthCredentialFence {
     pub provider_type: String,
 }
 
+/// Administrator-owned key replacement fenced by the exact credential state
+/// observed while the edit was prepared. This prevents an older admin request
+/// from restoring credentials that a concurrent request already replaced.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ProviderCatalogKeyAdminCasUpdate {
+    pub expected_encrypted_auth_config: Option<String>,
+    pub expected_credential: ProviderCatalogKeyOAuthCredentialFence,
+    /// Full requested key. Repositories merge its administrator-owned fields
+    /// while preserving the currently stored runtime-owned fields.
+    pub key: StoredProviderCatalogKey,
+    /// Optional replacement for the complete Codex metadata namespace. When
+    /// present it must be an object containing only a non-empty string
+    /// `credential_generation`; repositories also clear the quota snapshot in
+    /// the same atomic write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_rotation: Option<serde_json::Value>,
+    /// Clear OAuth invalid markers in the same credential replacement write.
+    /// This must be true whenever new credential material supersedes the old
+    /// credential, so a post-CAS unfenced cleanup is never required.
+    #[serde(default)]
+    pub reset_oauth_runtime: bool,
+}
+
 /// Atomic key deletion fenced by the exact OAuth credential generation that
-/// produced the terminal failure.
+/// produced the terminal failure and, when supplied, one metadata namespace.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderCatalogKeyOAuthCredentialCasDelete {
     pub key_id: String,
     pub expected_encrypted_auth_config: Option<String>,
     pub expected_credential: ProviderCatalogKeyOAuthCredentialFence,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_upstream_metadata_namespace:
+        Option<ProviderCatalogUpstreamMetadataNamespaceExpectation>,
+}
+
+/// Optional single-namespace metadata fence for an OAuth runtime CAS.
+///
+/// The outer option on the owning update controls whether the namespace is
+/// compared. Within an expectation, `None` requires the namespace to be absent.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ProviderCatalogUpstreamMetadataNamespaceExpectation {
+    pub namespace: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_value: Option<serde_json::Value>,
 }
 
 /// Agent/runtime-owned OAuth state update fenced by the exact encrypted
@@ -98,6 +135,11 @@ pub struct ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
     pub expected_encrypted_auth_config: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_credential: Option<ProviderCatalogKeyOAuthCredentialFence>,
+    /// Optional metadata namespace value compared atomically with the OAuth
+    /// credential fence. `expected_value: None` means the namespace must be absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_upstream_metadata_namespace:
+        Option<ProviderCatalogUpstreamMetadataNamespaceExpectation>,
     pub encrypted_auth_config: String,
     /// Optional access-token ciphertext replacement owned by refresh success.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -110,6 +152,10 @@ pub struct ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
     /// Top-level runtime metadata namespaces to merge in the same fenced write.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_metadata_patch: Option<serde_json::Value>,
+    /// Optional top-level runtime metadata namespace to remove in the same
+    /// fenced write. It must not also appear in `upstream_metadata_patch`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_metadata_namespace_to_remove: Option<String>,
     pub status_snapshot_patch: serde_json::Value,
     #[serde(default)]
     pub reset_error_count: bool,
@@ -751,6 +797,18 @@ pub trait ProviderCatalogReadRepository: Send + Sync {
         key_ids: &[String],
     ) -> Result<Vec<StoredProviderCatalogKey>, crate::DataLayerError>;
 
+    /// Reads credential-bearing key records without an intervening repository cache.
+    ///
+    /// Callers use this only for security-sensitive generation fences where a short-lived cached
+    /// key record could bind data to credentials that an administrator has already replaced.
+    /// Repository implementations that do not add a read cache can use the default behavior.
+    async fn list_keys_by_ids_strong(
+        &self,
+        key_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogKey>, crate::DataLayerError> {
+        self.list_keys_by_ids(key_ids).await
+    }
+
     async fn list_keys_by_provider_ids(
         &self,
         provider_ids: &[String],
@@ -821,6 +879,18 @@ pub trait ProviderCatalogWriteRepository: Send + Sync {
         &self,
         key: &StoredProviderCatalogKey,
     ) -> Result<StoredProviderCatalogKey, crate::DataLayerError>;
+
+    /// Compare-and-swap administrator-owned key configuration. Credential
+    /// rotation, Codex namespace replacement, and quota invalidation must be
+    /// committed atomically with the configuration update.
+    async fn compare_and_update_key_admin_state(
+        &self,
+        _update: &ProviderCatalogKeyAdminCasUpdate,
+    ) -> Result<bool, crate::DataLayerError> {
+        Err(crate::DataLayerError::InvalidConfiguration(
+            "provider catalog admin CAS updates are not supported by this repository".to_string(),
+        ))
+    }
 
     async fn update_keys(
         &self,

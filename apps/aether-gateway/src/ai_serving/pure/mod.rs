@@ -82,10 +82,10 @@ pub(crate) use aether_ai_formats::api::{
     parse_codex_auth_identity, parse_direct_request_body, parse_model_directive,
     parse_model_directive_with_suffixes, parse_openai_stop_sequences,
     parse_openai_tool_result_content, prepare_local_success_response_parts,
-    prepare_local_success_response_parts_owned, project_codex_openai_image_api_request_body,
-    project_openai_image_api_request_body, provider_adaptation_allows_sync_finalize_envelope,
-    provider_adaptation_anchor_api_format, provider_adaptation_descriptor_for_envelope,
-    provider_adaptation_descriptor_for_provider_type,
+    prepare_local_success_response_parts_owned, project_codex_catalog_model_card,
+    project_codex_openai_image_api_request_body, project_openai_image_api_request_body,
+    provider_adaptation_allows_sync_finalize_envelope, provider_adaptation_anchor_api_format,
+    provider_adaptation_descriptor_for_envelope, provider_adaptation_descriptor_for_provider_type,
     provider_adaptation_requires_eventstream_accept,
     provider_adaptation_should_unwrap_stream_envelope,
     provider_private_response_allows_sync_finalize, record_converted_response_history,
@@ -175,6 +175,7 @@ pub(crate) use aether_ai_formats::{
     is_rerank_api_format, openai_responses_request_operation,
     openai_responses_synthetic_reasoning_item_id,
     strip_incompatible_openai_responses_reasoning_items, ApiOperation, ClientSurface,
+    CODEX_CLIENT_VERSION,
 };
 
 pub(crate) fn plan_kind_matches_api_operation(

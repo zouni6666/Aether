@@ -1,6 +1,7 @@
 export type RoutingPriorityMode = 'provider' | 'global_key'
 export type RoutingSchedulingMode = 'fixed_order' | 'cache_affinity' | 'load_balance'
 export type RoutingRulePhase = 'client_request' | 'provider_request'
+export type RoutingSortingScope = 'unified' | 'per_model'
 
 export interface RoutingDefaultPolicy {
   priority_mode: RoutingPriorityMode
@@ -108,6 +109,74 @@ export function normalizeRoutingGroupConfig(value: Partial<RoutingGroupConfig> |
       : base.model_policies,
     rules: Array.isArray(value?.rules) ? value.rules.map(rule => ({ ...rule })) : base.rules,
   }
+}
+
+export function parseAllowedModelsInput(value: string): string[] {
+  const seen = new Set<string>()
+  return value
+    .split(/\r\n?|\n/u)
+    .map(item => item.trim())
+    .filter(Boolean)
+    .filter((model) => {
+      if (seen.has(model)) return false
+      seen.add(model)
+      return true
+    })
+}
+
+export function formatAllowedModelsInput(models: string[]): string {
+  return models.join('\n')
+}
+
+export function updateAllowedModelsFromInput(
+  config: RoutingGroupConfig,
+  value: string,
+): RoutingGroupConfig {
+  const next = normalizeRoutingGroupConfig(config)
+  // Preserve the historical "empty selector" form until the user explicitly
+  // chooses the unrestricted scope. It is distinct from an empty allowlist in
+  // the routing core, where it matches no normal model.
+  const hasHistoricalEmptySelector = next.allowed_models.length > 0
+    && next.allowed_models.every(model => model.trim() === '')
+  if (value.trim() === '' && hasHistoricalEmptySelector) {
+    return next
+  }
+  next.allowed_models = parseAllowedModelsInput(value)
+  return next
+}
+
+export function clearAllowedModels(config: RoutingGroupConfig): RoutingGroupConfig {
+  const next = normalizeRoutingGroupConfig(config)
+  next.allowed_models = []
+  return next
+}
+
+export function routingModelScopeLabel(config: RoutingGroupConfig): string {
+  const models = normalizeRoutingGroupConfig(config).allowed_models
+  if (models.length === 0 || models.some(model => model.trim() === '*')) {
+    return '全部模型'
+  }
+  return `${models.length} 个模型`
+}
+
+export function allowedModelsMirrorPerModelPolicies(config: RoutingGroupConfig): boolean {
+  const normalized = normalizeRoutingGroupConfig(config)
+  const allowedModels = normalized.allowed_models
+    .map(model => model.trim())
+    .filter(Boolean)
+  const perModelNames = normalized.model_policies
+    .map(policy => policy.model)
+    .map(model => model.trim())
+    .filter(Boolean)
+    .filter(model => model !== DEFAULT_ROUTING_POLICY_MODEL)
+
+  if (allowedModels.length === 0 || perModelNames.length === 0) return false
+  if (allowedModels.some(model => model.includes('*'))) return false
+
+  const allowedSet = new Set(allowedModels)
+  const perModelSet = new Set(perModelNames)
+  return allowedSet.size === perModelSet.size
+    && [...allowedSet].every(model => perModelSet.has(model))
 }
 
 export function upsertModelPolicy(config: RoutingGroupConfig, policy: RoutingModelPolicy): RoutingGroupConfig {
@@ -330,6 +399,58 @@ export function removeGeneratedModelSchedulingRules(config: RoutingGroupConfig):
   const next = normalizeRoutingGroupConfig(config)
   next.rules = next.rules.filter(rule => !isGeneratedModelSchedulingRule(rule))
   return next
+}
+
+export function setRoutingSortingScope(
+  config: RoutingGroupConfig,
+  scope: RoutingSortingScope,
+): RoutingGroupConfig {
+  if (scope === 'per_model') return normalizeRoutingGroupConfig(config)
+
+  const next = removeGeneratedModelSchedulingRules(config)
+  next.model_policies = next.model_policies
+    .filter(policy => policy.model === DEFAULT_ROUTING_POLICY_MODEL)
+  return next
+}
+
+export function removePerModelRoutingConfig(
+  config: RoutingGroupConfig,
+  model: string,
+): RoutingGroupConfig {
+  return removeModelSchedulingRule(removeModelPolicy(config, model), model)
+}
+
+export function copyPerModelRoutingConfig(
+  config: RoutingGroupConfig,
+  sourceConfig: RoutingGroupConfig,
+  sourceModel: string,
+  targetModel: string,
+): RoutingGroupConfig {
+  const source = sourceModel.trim()
+  const target = targetModel.trim()
+  if (!source || !target || source === target) return normalizeRoutingGroupConfig(config)
+
+  const sourcePolicy = getModelPolicy(sourceConfig, source)
+  const sourceScheduling = getModelScheduling(sourceConfig, source)
+  const next = upsertModelPolicy(config, {
+    ...sourcePolicy,
+    model: target,
+  })
+  return upsertModelSchedulingRule(next, target, {
+    priority_mode: sourceScheduling.priority_mode,
+    scheduling_mode: sourceScheduling.scheduling_mode,
+  })
+}
+
+export function savePerModelRoutingConfig(
+  config: RoutingGroupConfig,
+  model: string,
+): RoutingGroupConfig {
+  const normalizedModel = model.trim()
+  const next = normalizeRoutingGroupConfig(config)
+  if (!normalizedModel || normalizedModel === DEFAULT_ROUTING_POLICY_MODEL) return next
+  if (next.model_policies.some(policy => policy.model === normalizedModel)) return next
+  return upsertModelPolicy(next, createEmptyModelPolicy(normalizedModel))
 }
 
 export function normalizePriorityOverrides(overrides: Record<string, number>): Record<string, number> {

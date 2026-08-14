@@ -279,6 +279,7 @@ fn raw_response_frame_stream(
             payload: StreamFramePayload::Headers {
                 status_code,
                 headers,
+                response_observation: None,
             },
         },
         StreamFrame {
@@ -1449,6 +1450,7 @@ mod tests {
             candidate_id: None,
             status_code: 200,
             headers: BTreeMap::new(),
+            response_observation: None,
             body: Some(aether_contracts::ResponseBody {
                 json_body: Some(json!({
                     "jsonrpc": "2.0",

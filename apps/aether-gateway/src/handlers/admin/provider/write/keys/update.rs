@@ -1,3 +1,4 @@
+use crate::handlers::admin::provider::oauth::provisioning::rotate_codex_credential_generation;
 use crate::handlers::admin::provider::shared::payloads::AdminProviderKeyUpdatePatch;
 use crate::handlers::admin::provider::write::normalize::{
     normalize_allow_auth_channel_mismatch_formats, normalize_api_format_json_object_keys,
@@ -13,6 +14,7 @@ use crate::handlers::admin::shared::{
 use crate::handlers::shared::normalize_optional_api_key_concurrent_limit;
 use crate::provider_key_auth::provider_key_is_oauth_managed;
 use aether_data_contracts::repository::provider_catalog::{
+    ProviderCatalogKeyAdminCasUpdate, ProviderCatalogKeyOAuthCredentialFence,
     StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
 use aether_provider_transport::provider_types::provider_type_is_fixed;
@@ -368,6 +370,12 @@ pub(crate) fn build_admin_update_provider_key_record_with_existing_keys(
         .duration_since(UNIX_EPOCH)
         .ok()
         .map(|duration| duration.as_secs());
+    let credential_identity_changed = !updated.auth_type.eq_ignore_ascii_case(&existing.auth_type)
+        || updated.encrypted_api_key != existing.encrypted_api_key
+        || updated.encrypted_auth_config != existing.encrypted_auth_config;
+    if credential_identity_changed {
+        rotate_codex_credential_generation(&mut updated, &provider.provider_type);
+    }
     Ok(updated)
 }
 
@@ -380,6 +388,49 @@ pub(crate) fn admin_provider_key_update_requires_immediate_model_fetch(
     let locked_models_changed = existing.locked_models != updated.locked_models;
     updated.auto_fetch_models
         && (!existing.auto_fetch_models || filters_changed || locked_models_changed)
+}
+
+pub(crate) fn build_provider_catalog_key_admin_cas_update(
+    existing: &StoredProviderCatalogKey,
+    updated: StoredProviderCatalogKey,
+    provider_type: &str,
+) -> ProviderCatalogKeyAdminCasUpdate {
+    let previous_generation = existing
+        .upstream_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.pointer("/codex/credential_generation"))
+        .and_then(serde_json::Value::as_str);
+    let next_generation = updated
+        .upstream_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.pointer("/codex/credential_generation"))
+        .and_then(serde_json::Value::as_str);
+    let credential_changed = existing.auth_type != updated.auth_type
+        || existing.encrypted_api_key != updated.encrypted_api_key
+        || existing.encrypted_auth_config != updated.encrypted_auth_config;
+    let codex_rotation = provider_type
+        .trim()
+        .eq_ignore_ascii_case("codex")
+        .then(|| next_generation.filter(|next| Some(*next) != previous_generation))
+        .flatten()
+        .map(|generation| {
+            json!({
+                aether_admin::provider::quota::CODEX_CREDENTIAL_GENERATION_KEY: generation,
+            })
+        });
+
+    ProviderCatalogKeyAdminCasUpdate {
+        expected_encrypted_auth_config: existing.encrypted_auth_config.clone(),
+        expected_credential: ProviderCatalogKeyOAuthCredentialFence {
+            encrypted_api_key: existing.encrypted_api_key.clone(),
+            auth_type: existing.auth_type.clone(),
+            provider_id: existing.provider_id.clone(),
+            provider_type: provider_type.to_string(),
+        },
+        key: updated,
+        codex_rotation,
+        reset_oauth_runtime: credential_changed,
+    }
 }
 
 fn raw_secret_auth_type(value: &str) -> bool {

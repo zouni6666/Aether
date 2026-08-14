@@ -9,8 +9,8 @@ use sqlx::{
 };
 
 use aether_data_contracts::repository::provider_catalog::{
-    ProviderCatalogKeyAdaptiveStateUpdate, ProviderCatalogKeyHealthStateUpdate,
-    ProviderCatalogKeyListOrder, ProviderCatalogKeyListQuery,
+    ProviderCatalogKeyAdaptiveStateUpdate, ProviderCatalogKeyAdminCasUpdate,
+    ProviderCatalogKeyHealthStateUpdate, ProviderCatalogKeyListOrder, ProviderCatalogKeyListQuery,
     ProviderCatalogKeyOAuthCredentialCasDelete, ProviderCatalogKeyOAuthRuntimeStateCasUpdate,
     ProviderCatalogKeyRuntimeMetadataUpdate, ProviderCatalogKeyStatusSnapshotUpdate,
     ProviderCatalogReadRepository, ProviderCatalogUpstreamMetadataNamespaceUpdate,
@@ -380,6 +380,10 @@ SET
   auth_type_by_format = $27,
   allow_auth_channel_mismatch_formats = $28
 WHERE id = $1
+  AND provider_id = $2
+  AND auth_type = $4
+  AND api_key IS NOT DISTINCT FROM $5
+  AND auth_config IS NOT DISTINCT FROM $6
 "#;
 
 const KEY_RUNTIME_HEALTH_CAS_SQL: &str = r#"
@@ -405,6 +409,7 @@ SET
     ELSE TO_TIMESTAMP($5::double precision)
   END
 WHERE id = $1
+  AND jsonb_typeof(COALESCE(upstream_metadata, '{}'::jsonb)) = 'object'
   AND (COALESCE(upstream_metadata, '{}'::jsonb) -> $2)
       IS NOT DISTINCT FROM $6::jsonb
 "#;
@@ -498,6 +503,112 @@ fn key_update_query(key: &StoredProviderCatalogKey) -> Query<'_, Postgres, PgArg
         .bind(key.updated_at_unix_secs.map(|value| value as f64))
         .bind(&key.auth_type_by_format)
         .bind(&key.allow_auth_channel_mismatch_formats)
+}
+
+fn push_admin_key_assignments<'args>(
+    builder: &mut QueryBuilder<'args, Postgres>,
+    key: &'args StoredProviderCatalogKey,
+) {
+    builder
+        .push_bind(&key.provider_id)
+        .push(", api_formats = ")
+        .push_bind(&key.api_formats)
+        .push(", auth_type = ")
+        .push_bind(&key.auth_type)
+        .push(", api_key = ")
+        .push_bind(&key.encrypted_api_key)
+        .push(", auth_config = ")
+        .push_bind(&key.encrypted_auth_config)
+        .push(", name = ")
+        .push_bind(&key.name)
+        .push(", note = ")
+        .push_bind(&key.note)
+        .push(", rate_multipliers = ")
+        .push_bind(&key.rate_multipliers)
+        .push(", internal_priority = ")
+        .push_bind(key.internal_priority)
+        .push(", global_priority_by_format = ")
+        .push_bind(&key.global_priority_by_format)
+        .push(", rpm_limit = ")
+        .push_bind(key.rpm_limit.map(|value| value as i32))
+        .push(", concurrent_limit = ")
+        .push_bind(key.concurrent_limit)
+        .push(", allowed_models = ")
+        .push_bind(&key.allowed_models)
+        .push(", capabilities = ")
+        .push_bind(&key.capabilities)
+        .push(", cache_ttl_minutes = ")
+        .push_bind(key.cache_ttl_minutes)
+        .push(", max_probe_interval_minutes = ")
+        .push_bind(key.max_probe_interval_minutes)
+        .push(", auto_fetch_models = ")
+        .push_bind(key.auto_fetch_models)
+        .push(", locked_models = ")
+        .push_bind(&key.locked_models)
+        .push(", model_include_patterns = ")
+        .push_bind(&key.model_include_patterns)
+        .push(", model_exclude_patterns = ")
+        .push_bind(&key.model_exclude_patterns)
+        .push(", proxy = ")
+        .push_bind(&key.proxy)
+        .push(", fingerprint = ")
+        .push_bind(&key.fingerprint)
+        .push(", expires_at = CASE WHEN ")
+        .push_bind(key.expires_at_unix_secs.map(|value| value as f64))
+        .push("::double precision IS NULL THEN NULL ELSE TO_TIMESTAMP(")
+        .push_bind(key.expires_at_unix_secs.map(|value| value as f64))
+        .push("::double precision) END, is_active = ")
+        .push_bind(key.is_active)
+        .push(", updated_at = CASE WHEN ")
+        .push_bind(key.updated_at_unix_secs.map(|value| value as f64))
+        .push("::double precision IS NULL THEN NOW() ELSE TO_TIMESTAMP(")
+        .push_bind(key.updated_at_unix_secs.map(|value| value as f64))
+        .push("::double precision) END, auth_type_by_format = ")
+        .push_bind(&key.auth_type_by_format)
+        .push(", allow_auth_channel_mismatch_formats = ")
+        .push_bind(&key.allow_auth_channel_mismatch_formats);
+}
+
+fn validate_admin_key_cas_update(
+    update: &ProviderCatalogKeyAdminCasUpdate,
+) -> Result<(), DataLayerError> {
+    validate_key_for_update(&update.key)?;
+    let expected = &update.expected_credential;
+    if update.key.name.trim().is_empty()
+        || update.key.auth_type.trim().is_empty()
+        || expected.auth_type.trim().is_empty()
+        || expected.provider_id.trim().is_empty()
+        || expected.provider_type.trim().is_empty()
+        || expected
+            .encrypted_api_key
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        || update
+            .expected_encrypted_auth_config
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+    {
+        return Err(DataLayerError::InvalidInput(
+            "provider catalog admin credential fence contains empty fields".to_string(),
+        ));
+    }
+    let Some(rotation) = update.codex_rotation.as_ref() else {
+        return Ok(());
+    };
+    let valid_rotation = expected.provider_type.eq_ignore_ascii_case("codex")
+        && rotation.as_object().is_some_and(|object| {
+            object.len() == 1
+                && object
+                    .get("credential_generation")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|generation| !generation.trim().is_empty())
+        });
+    if !valid_rotation {
+        return Err(DataLayerError::InvalidInput(
+            "provider catalog Codex rotation must contain only credential_generation".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -901,11 +1012,29 @@ WHERE id = $1
                     || expected.provider_id.trim().is_empty()
                     || expected.provider_type.trim().is_empty()
             })
+            || update
+                .expected_upstream_metadata_namespace
+                .as_ref()
+                .is_some_and(|expected| expected.namespace.trim().is_empty())
+            || update
+                .upstream_metadata_namespace_to_remove
+                .as_deref()
+                .is_some_and(|namespace| namespace.trim().is_empty())
             || !update.status_snapshot_patch.is_object()
             || update
                 .upstream_metadata_patch
                 .as_ref()
                 .is_some_and(|patch| !patch.is_object())
+            || update
+                .upstream_metadata_namespace_to_remove
+                .as_ref()
+                .is_some_and(|namespace| {
+                    update
+                        .upstream_metadata_patch
+                        .as_ref()
+                        .and_then(serde_json::Value::as_object)
+                        .is_some_and(|patch| patch.contains_key(namespace))
+                })
         {
             return Err(DataLayerError::InvalidInput(
                 "provider catalog OAuth runtime CAS requires key_id, auth_config, and object status patch"
@@ -932,27 +1061,40 @@ SET
     ELSE TO_TIMESTAMP($7::double precision)
   END,
   upstream_metadata = CASE
-    WHEN $8::jsonb IS NULL THEN upstream_metadata
-    ELSE COALESCE(upstream_metadata, '{}'::jsonb) || $8::jsonb
+    WHEN $8::jsonb IS NULL AND $9::text IS NULL THEN upstream_metadata
+    WHEN $9::text IS NULL THEN COALESCE(upstream_metadata, '{}'::jsonb) || $8::jsonb
+    ELSE (COALESCE(upstream_metadata, '{}'::jsonb) || COALESCE($8::jsonb, '{}'::jsonb)) - $9
   END,
-  status_snapshot = (COALESCE(status_snapshot::jsonb, '{}'::jsonb) || $9::jsonb)::json,
-  error_count = CASE WHEN $10::boolean THEN 0 ELSE error_count END,
+  status_snapshot = (COALESCE(status_snapshot::jsonb, '{}'::jsonb) || $10::jsonb)::json,
+  error_count = CASE WHEN $11::boolean THEN 0 ELSE error_count END,
   updated_at = CASE
-    WHEN $11::double precision IS NULL THEN NOW()
-    ELSE TO_TIMESTAMP($11::double precision)
+    WHEN $12::double precision IS NULL THEN NOW()
+    ELSE TO_TIMESTAMP($12::double precision)
   END
 WHERE id = $1
-  AND auth_config IS NOT DISTINCT FROM $12
-  AND ($13::boolean IS FALSE OR api_key IS NOT DISTINCT FROM $14)
-  AND ($15::text IS NULL OR auth_type = $15)
-  AND ($16::text IS NULL OR provider_id = $16)
+  AND auth_config IS NOT DISTINCT FROM $13
   AND (
-    $17::text IS NULL
+    ($8::jsonb IS NULL AND $9::text IS NULL)
+    OR jsonb_typeof(COALESCE(upstream_metadata, '{}'::jsonb)) = 'object'
+  )
+  AND ($14::boolean IS FALSE OR api_key IS NOT DISTINCT FROM $15)
+  AND ($16::text IS NULL OR auth_type = $16)
+  AND ($17::text IS NULL OR provider_id = $17)
+  AND (
+    $18::text IS NULL
     OR EXISTS (
       SELECT 1
       FROM providers
       WHERE providers.id = provider_api_keys.provider_id
-        AND providers.provider_type = $17
+        AND providers.provider_type = $18
+    )
+  )
+  AND (
+    $19::boolean IS FALSE
+    OR (
+      jsonb_typeof(COALESCE(upstream_metadata, '{}'::jsonb)) = 'object'
+      AND (COALESCE(upstream_metadata, '{}'::jsonb) -> $20)
+        IS NOT DISTINCT FROM $21::jsonb
     )
   )
 "#,
@@ -970,6 +1112,7 @@ WHERE id = $1
                 .map(|value| value as f64),
         )
         .bind(update.upstream_metadata_patch.as_ref())
+        .bind(update.upstream_metadata_namespace_to_remove.as_deref())
         .bind(&update.status_snapshot_patch)
         .bind(update.reset_error_count)
         .bind(update.updated_at_unix_secs.map(|value| value as f64))
@@ -998,6 +1141,19 @@ WHERE id = $1
                 .expected_credential
                 .as_ref()
                 .map(|expected| expected.provider_type.as_str()),
+        )
+        .bind(update.expected_upstream_metadata_namespace.is_some())
+        .bind(
+            update
+                .expected_upstream_metadata_namespace
+                .as_ref()
+                .map(|expected| expected.namespace.as_str()),
+        )
+        .bind(
+            update
+                .expected_upstream_metadata_namespace
+                .as_ref()
+                .and_then(|expected| expected.expected_value.as_ref()),
         )
         .execute(&self.pool)
         .await
@@ -2008,6 +2164,76 @@ WHERE id = $1
             })
     }
 
+    pub async fn compare_and_update_key_admin_state(
+        &self,
+        update: &ProviderCatalogKeyAdminCasUpdate,
+    ) -> Result<bool, DataLayerError> {
+        validate_admin_key_cas_update(update)?;
+        let key = &update.key;
+        let mut builder =
+            QueryBuilder::<Postgres>::new("UPDATE provider_api_keys SET provider_id = ");
+        push_admin_key_assignments(&mut builder, key);
+        if update.reset_oauth_runtime {
+            builder.push(", oauth_invalid_at = NULL, oauth_invalid_reason = NULL, error_count = 0");
+        }
+        if let Some(rotation) = update.codex_rotation.as_ref() {
+            builder
+                .push(", upstream_metadata = jsonb_set(COALESCE(upstream_metadata, '{}'::jsonb), '{codex}', ")
+                .push_bind(rotation)
+                .push("::jsonb, true)");
+        }
+        if update.codex_rotation.is_some() || update.reset_oauth_runtime {
+            builder.push(", status_snapshot = ");
+            match (update.codex_rotation.is_some(), update.reset_oauth_runtime) {
+                (true, true) => builder.push("jsonb_set(jsonb_set(COALESCE(status_snapshot::jsonb, '{}'::jsonb), '{quota}', 'null'::jsonb, true), '{oauth}', 'null'::jsonb, true)::json"),
+                (true, false) => builder.push("jsonb_set(COALESCE(status_snapshot::jsonb, '{}'::jsonb), '{quota}', 'null'::jsonb, true)::json"),
+                (false, true) => builder.push("jsonb_set(COALESCE(status_snapshot::jsonb, '{}'::jsonb), '{oauth}', 'null'::jsonb, true)::json"),
+                (false, false) => unreachable!(),
+            };
+        }
+        builder
+            .push(" WHERE id = ")
+            .push_bind(&key.id)
+            .push(" AND api_key IS NOT DISTINCT FROM ")
+            .push_bind(update.expected_credential.encrypted_api_key.as_deref())
+            .push(" AND auth_config IS NOT DISTINCT FROM ")
+            .push_bind(update.expected_encrypted_auth_config.as_deref())
+            .push(" AND auth_type = ")
+            .push_bind(&update.expected_credential.auth_type)
+            .push(" AND provider_id = ")
+            .push_bind(&update.expected_credential.provider_id)
+            .push(
+                " AND EXISTS (SELECT 1 FROM providers WHERE providers.id = provider_api_keys.provider_id AND providers.provider_type = ",
+            )
+            .push_bind(&update.expected_credential.provider_type)
+            .push(")");
+        if update.codex_rotation.is_some() {
+            builder
+                .push(" AND jsonb_typeof(COALESCE(upstream_metadata, '{}'::jsonb)) = 'object'")
+                .push(" AND NOT (api_key IS NOT DISTINCT FROM ")
+                .push_bind(key.encrypted_api_key.as_deref())
+                .push(" AND auth_config IS NOT DISTINCT FROM ")
+                .push_bind(key.encrypted_auth_config.as_deref())
+                .push(" AND auth_type = ")
+                .push_bind(&key.auth_type)
+                .push(" AND provider_id = ")
+                .push_bind(&key.provider_id)
+                .push(")");
+        }
+        if update.codex_rotation.is_some() || update.reset_oauth_runtime {
+            builder.push(
+                " AND jsonb_typeof(COALESCE(status_snapshot::jsonb, '{}'::jsonb)) = 'object'",
+            );
+        }
+        let rows_affected = builder
+            .build()
+            .execute(&self.pool)
+            .await
+            .map_postgres_err()?
+            .rows_affected();
+        Ok(rows_affected > 0)
+    }
+
     pub async fn update_keys(
         &self,
         keys: &[StoredProviderCatalogKey],
@@ -2088,6 +2314,10 @@ WHERE id = $1
             || expected.auth_type.trim().is_empty()
             || expected.provider_id.trim().is_empty()
             || expected.provider_type.trim().is_empty()
+            || delete
+                .expected_upstream_metadata_namespace
+                .as_ref()
+                .is_some_and(|expected| expected.namespace.trim().is_empty())
         {
             return Err(DataLayerError::InvalidInput(
                 "provider catalog OAuth credential CAS delete contains empty fields".to_string(),
@@ -2107,6 +2337,14 @@ WHERE id = $1
     WHERE providers.id = provider_api_keys.provider_id
       AND providers.provider_type = $6
   )
+  AND (
+    $7::boolean IS FALSE
+    OR (
+      jsonb_typeof(COALESCE(upstream_metadata, '{}'::jsonb)) = 'object'
+      AND (COALESCE(upstream_metadata, '{}'::jsonb) -> $8)
+        IS NOT DISTINCT FROM $9::jsonb
+    )
+  )
 "#,
         )
         .bind(&delete.key_id)
@@ -2115,6 +2353,19 @@ WHERE id = $1
         .bind(&expected.auth_type)
         .bind(&expected.provider_id)
         .bind(&expected.provider_type)
+        .bind(delete.expected_upstream_metadata_namespace.is_some())
+        .bind(
+            delete
+                .expected_upstream_metadata_namespace
+                .as_ref()
+                .map(|expected| expected.namespace.as_str()),
+        )
+        .bind(
+            delete
+                .expected_upstream_metadata_namespace
+                .as_ref()
+                .and_then(|expected| expected.expected_value.as_ref()),
+        )
         .execute(&self.pool)
         .await
         .map_postgres_err()?
@@ -2661,6 +2912,13 @@ impl ProviderCatalogWriteRepository for SqlxProviderCatalogReadRepository {
         key: &StoredProviderCatalogKey,
     ) -> Result<StoredProviderCatalogKey, DataLayerError> {
         Self::update_key(self, key).await
+    }
+
+    async fn compare_and_update_key_admin_state(
+        &self,
+        update: &ProviderCatalogKeyAdminCasUpdate,
+    ) -> Result<bool, DataLayerError> {
+        Self::compare_and_update_key_admin_state(self, update).await
     }
 
     async fn update_keys(
@@ -3407,6 +3665,7 @@ mod tests {
     fn runtime_metadata_cas_compares_only_the_requested_namespace() {
         let sql = super::KEY_RUNTIME_METADATA_CAS_SQL.to_ascii_lowercase();
         assert!(sql.contains("upstream_metadata, '{}'::jsonb) -> $2"));
+        assert!(sql.contains("jsonb_typeof(coalesce(upstream_metadata, '{}'::jsonb)) = 'object'"));
         assert!(sql.contains("is not distinct from $6::jsonb"));
         assert!(sql.contains("status_snapshot::jsonb"));
         assert!(!sql.contains("is_active"));
@@ -3436,5 +3695,26 @@ mod tests {
         }
         assert!(sql.contains("is_active = $25"));
         assert!(sql.contains("rpm_limit = $12"));
+        assert!(sql.contains("api_key is not distinct from $5"));
+        assert!(sql.contains("auth_config is not distinct from $6"));
+    }
+
+    #[test]
+    fn admin_credential_cas_has_atomic_rotation_guards() {
+        let source = include_str!("provider_catalog.rs");
+        for predicate in [
+            "api_key IS NOT DISTINCT FROM ",
+            "auth_config IS NOT DISTINCT FROM ",
+            "jsonb_typeof(COALESCE(upstream_metadata, '{}'::jsonb)) = 'object'",
+            "jsonb_typeof(COALESCE(status_snapshot::jsonb, '{}'::jsonb)) = 'object'",
+            "jsonb_set(COALESCE(upstream_metadata, '{}'::jsonb), '{codex}'",
+            "jsonb_set(COALESCE(status_snapshot::jsonb, '{}'::jsonb), '{quota}', 'null'::jsonb, true)::json",
+            "oauth_invalid_at = NULL, oauth_invalid_reason = NULL, error_count = 0",
+        ] {
+            assert!(
+                source.contains(predicate),
+                "missing admin CAS guard: {predicate}"
+            );
+        }
     }
 }

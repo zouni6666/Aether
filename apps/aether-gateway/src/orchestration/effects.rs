@@ -238,6 +238,13 @@ pub(crate) struct LocalOAuthInvalidationEffect<'a> {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub(crate) struct LocalOAuthSuccessEffect<'a> {
+    pub(crate) status_code: u16,
+    pub(crate) request_started_at_unix_ms: Option<u64>,
+    pub(crate) request_order_id: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy)]
 pub(crate) enum LocalExecutionEffect<'a> {
     AttemptFailure(LocalAttemptFailureEffect),
     AdaptiveRateLimit(LocalAdaptiveRateLimitEffect<'a>),
@@ -245,6 +252,7 @@ pub(crate) enum LocalExecutionEffect<'a> {
     HealthSuccess(LocalHealthSuccessEffect),
     AdaptiveSuccess(LocalAdaptiveSuccessEffect),
     OauthInvalidation(LocalOAuthInvalidationEffect<'a>),
+    OauthSuccess(LocalOAuthSuccessEffect<'a>),
     PoolSuccessSync {
         payload: &'a GatewaySyncReportRequest,
     },
@@ -253,6 +261,68 @@ pub(crate) enum LocalExecutionEffect<'a> {
     },
     PoolError(LocalPoolErrorEffect<'a>),
     PoolStreamTimeout,
+}
+
+#[derive(Debug)]
+struct OwnedLocalOAuthSuccessEffect {
+    status_code: u16,
+    provider_id: String,
+    endpoint_id: String,
+    key_id: String,
+    authorization: String,
+    request_started_at_unix_ms: u64,
+    request_order_id: String,
+    observed_credential_generation: Option<String>,
+}
+
+fn owned_local_oauth_success_effect(
+    plan: &ExecutionPlan,
+    report_context: Option<&Value>,
+    effect: LocalOAuthSuccessEffect<'_>,
+) -> Option<OwnedLocalOAuthSuccessEffect> {
+    if !(200..300).contains(&effect.status_code) {
+        return None;
+    }
+    let request_started_at_unix_ms = effect.request_started_at_unix_ms?;
+    let request_order_id = effect
+        .request_order_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let authorization = execution_plan_authorization(plan)?.trim().to_string();
+    if authorization.is_empty() || bearer_access_token(&authorization).is_none() {
+        return None;
+    }
+    Some(OwnedLocalOAuthSuccessEffect {
+        status_code: effect.status_code,
+        provider_id: plan.provider_id.clone(),
+        endpoint_id: plan.endpoint_id.clone(),
+        key_id: plan.key_id.clone(),
+        authorization,
+        request_started_at_unix_ms,
+        request_order_id: request_order_id.to_string(),
+        observed_credential_generation: report_context_string_field(
+            report_context,
+            "codex_credential_generation",
+        )
+        .map(ToOwned::to_owned),
+    })
+}
+
+/// Schedule a fenced Codex OAuth-success observation after provider headers are available.
+/// Only the small identity/observation tuple is moved into the task; request bodies and plans
+/// remain owned by the caller.
+pub(crate) fn spawn_local_oauth_success_effect(
+    state: AppState,
+    plan: &ExecutionPlan,
+    report_context: Option<&Value>,
+    effect: LocalOAuthSuccessEffect<'_>,
+) {
+    let Some(effect) = owned_local_oauth_success_effect(plan, report_context, effect) else {
+        return;
+    };
+    tokio::spawn(async move {
+        record_oauth_success_effect_owned(&state, effect).await;
+    });
 }
 
 struct PoolFeedbackContext {
@@ -302,6 +372,9 @@ pub(crate) async fn apply_local_execution_effect(
         LocalExecutionEffect::OauthInvalidation(effect) => {
             record_oauth_invalidation_effect(state, context, effect).await;
         }
+        LocalExecutionEffect::OauthSuccess(effect) => {
+            record_oauth_success_effect(state, context, effect).await;
+        }
         LocalExecutionEffect::PoolSuccessSync { payload } => {
             record_sync_pool_success_effect(state, context, payload).await;
             release_pool_key_lease_effect(state, context).await;
@@ -347,6 +420,16 @@ fn report_context_string_field<'a>(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
+}
+
+fn report_context_u64_field(report_context: Option<&Value>, field: &str) -> Option<u64> {
+    report_context
+        .and_then(|context| context.get(field))
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str().and_then(|value| value.parse::<u64>().ok()))
+        })
 }
 
 fn local_scheduler_affinity_cache_key(report_context: Option<&Value>) -> Option<String> {
@@ -1463,14 +1546,92 @@ async fn record_oauth_invalidation_effect(
     ) else {
         return;
     };
+    let request_started_at_unix_ms = report_context_u64_field(
+        context.report_context,
+        "provider_request_started_at_unix_ms",
+    );
+    let request_order_id =
+        report_context_string_field(context.report_context, "provider_request_order_id");
+    let observed_credential_generation =
+        report_context_string_field(context.report_context, "codex_credential_generation");
 
     if let Err(err) = state
-        .mark_provider_transport_oauth_invalid_fenced(&transport, invalid_reason.as_str())
+        .mark_provider_transport_oauth_invalid_fenced(
+            &transport,
+            invalid_reason.as_str(),
+            request_started_at_unix_ms,
+            request_order_id,
+            observed_credential_generation,
+        )
         .await
     {
         warn!(
             "gateway orchestration effects: failed to persist oauth invalidation for provider {} endpoint {} key {}: {:?}",
             plan.provider_id, plan.endpoint_id, plan.key_id, err
+        );
+    }
+}
+
+async fn record_oauth_success_effect(
+    state: &AppState,
+    context: LocalExecutionEffectContext<'_>,
+    effect: LocalOAuthSuccessEffect<'_>,
+) {
+    let Some(effect) =
+        owned_local_oauth_success_effect(context.plan, context.report_context, effect)
+    else {
+        return;
+    };
+    record_oauth_success_effect_owned(state, effect).await;
+}
+
+async fn record_oauth_success_effect_owned(state: &AppState, effect: OwnedLocalOAuthSuccessEffect) {
+    if !(200..300).contains(&effect.status_code) {
+        return;
+    }
+    let transport = match state
+        .read_provider_transport_snapshot(&effect.provider_id, &effect.endpoint_id, &effect.key_id)
+        .await
+    {
+        Ok(Some(transport)) => transport,
+        Ok(None) => return,
+        Err(err) => {
+            warn!(
+                "gateway orchestration effects: failed to read transport snapshot for oauth success provider {} endpoint {} key {}: {:?}",
+                effect.provider_id, effect.endpoint_id, effect.key_id, err
+            );
+            return;
+        }
+    };
+    if !transport
+        .provider
+        .provider_type
+        .trim()
+        .eq_ignore_ascii_case("codex")
+        || crate::provider_transport::is_codex_agent_identity_transport(&transport)
+        || !transport.key.auth_type.trim().eq_ignore_ascii_case("oauth")
+        || crate::provider_transport::resolve_local_generic_oauth_transport_authorization(
+            &transport,
+        )
+        .as_deref()
+        .and_then(bearer_access_token)
+            != bearer_access_token(effect.authorization.as_str())
+    {
+        return;
+    }
+
+    if let Err(err) = state
+        .mark_provider_transport_oauth_success_fenced(
+            &transport,
+            Some(effect.request_started_at_unix_ms),
+            Some(effect.request_order_id.as_str()),
+            effect.observed_credential_generation.as_deref(),
+        )
+        .await
+    {
+        warn!(
+            "gateway orchestration effects: failed to persist oauth success for provider {} endpoint {} key {}: {:?}",
+            effect.provider_id, effect.endpoint_id, effect.key_id, err
         );
     }
 }
@@ -1802,6 +1963,7 @@ mod tests {
         StoredProviderCatalogProvider,
     };
     use aether_test_support::ManagedRedisServer;
+    use aether_usage_runtime::GatewaySyncReportRequest;
     use serde_json::{json, Value};
 
     use super::{
@@ -1811,11 +1973,13 @@ mod tests {
         pool_score_hard_state_for_status, resolve_pool_feedback_context,
         LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect,
         LocalExecutionEffect, LocalExecutionEffectContext, LocalHealthFailureEffect,
-        LocalHealthSuccessEffect, LocalOAuthInvalidationEffect, LocalPoolErrorEffect,
-        ProviderKeyEffectLockPool,
+        LocalHealthSuccessEffect, LocalOAuthInvalidationEffect, LocalOAuthSuccessEffect,
+        LocalPoolErrorEffect, ProviderKeyEffectLockPool,
     };
     use crate::data::{GatewayDataConfig, GatewayDataState};
-    use crate::orchestration::LocalFailoverClassification;
+    use crate::orchestration::{
+        apply_local_report_effect, LocalFailoverClassification, LocalReportEffect,
+    };
     use crate::scheduler::affinity::SCHEDULER_AFFINITY_TTL;
     use crate::AppState;
     use aether_scheduler_core::{
@@ -3497,6 +3661,277 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oauth_success_clears_recoverable_codex_invalid_state() {
+        let mut key = sample_codex_key();
+        key.oauth_invalid_at_unix_secs = Some(100);
+        key.oauth_invalid_reason = Some("[OAUTH_EXPIRED] session expired".to_string());
+        key.upstream_metadata = Some(json!({
+            "codex": {
+                "credential_generation": "credential-generation-current",
+                "oauth_state_request_started_at_unix_ms": 100_000u64,
+                "oauth_state_request_id": "00000001-86a0-7000-8000-000000000001"
+            }
+        }));
+        let state = codex_state_with_provider_and_key(sample_codex_provider(), key);
+        let plan = sample_codex_plan();
+        let report_context = json!({
+            "codex_credential_generation": "credential-generation-current",
+            "provider_request_started_at_unix_ms": 200_000u64,
+            "provider_request_order_id": "00000003-0d40-7000-8000-000000000001"
+        });
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: Some(&report_context),
+            },
+            LocalExecutionEffect::OauthSuccess(LocalOAuthSuccessEffect {
+                status_code: 200,
+                request_started_at_unix_ms: Some(200_000),
+                request_order_id: Some("00000003-0d40-7000-8000-000000000001"),
+            }),
+        )
+        .await;
+
+        let stored_key = state
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
+            .await
+            .expect("provider catalog keys should load")
+            .into_iter()
+            .next()
+            .expect("stored key should exist");
+        assert_eq!(stored_key.oauth_invalid_at_unix_secs, None);
+        assert_eq!(stored_key.oauth_invalid_reason, None);
+        assert_eq!(
+            stored_key.upstream_metadata.as_ref().and_then(
+                |metadata| metadata.pointer("/codex/oauth_state_request_started_at_unix_ms")
+            ),
+            Some(&json!(200_000u64))
+        );
+        assert_eq!(
+            stored_key
+                .upstream_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.pointer("/codex/oauth_state_request_id")),
+            Some(&json!("00000003-0d40-7000-8000-000000000001"))
+        );
+    }
+
+    #[tokio::test]
+    async fn same_millisecond_older_oauth_success_does_not_clear_newer_codex_invalidation() {
+        let mut key = sample_codex_key();
+        key.oauth_invalid_at_unix_secs = Some(300);
+        key.oauth_invalid_reason = Some("[OAUTH_EXPIRED] session expired".to_string());
+        key.upstream_metadata = Some(json!({
+            "codex": {
+                "credential_generation": "credential-generation-current",
+                "oauth_state_request_started_at_unix_ms": 300_000u64,
+                "oauth_state_request_id": "00000004-93e0-7000-8000-000000000002"
+            }
+        }));
+        let state = codex_state_with_provider_and_key(sample_codex_provider(), key);
+        let plan = sample_codex_plan();
+        let report_context = json!({
+            "codex_credential_generation": "credential-generation-current",
+            "provider_request_started_at_unix_ms": 300_000u64,
+            "provider_request_order_id": "00000004-93e0-7000-8000-000000000001"
+        });
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: Some(&report_context),
+            },
+            LocalExecutionEffect::OauthSuccess(LocalOAuthSuccessEffect {
+                status_code: 200,
+                request_started_at_unix_ms: Some(300_000),
+                request_order_id: Some("00000004-93e0-7000-8000-000000000001"),
+            }),
+        )
+        .await;
+
+        let stored_key = state
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
+            .await
+            .expect("provider catalog keys should load")
+            .into_iter()
+            .next()
+            .expect("stored key should exist");
+        assert_eq!(stored_key.oauth_invalid_at_unix_secs, Some(300));
+        assert_eq!(
+            stored_key.oauth_invalid_reason.as_deref(),
+            Some("[OAUTH_EXPIRED] session expired")
+        );
+        assert_eq!(
+            stored_key
+                .upstream_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.pointer("/codex/oauth_state_request_id")),
+            Some(&json!("00000004-93e0-7000-8000-000000000002"))
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth_success_preserves_codex_account_block() {
+        let mut key = sample_codex_key();
+        key.oauth_invalid_at_unix_secs = Some(100);
+        key.oauth_invalid_reason = Some("[ACCOUNT_BLOCK] account deactivated".to_string());
+        key.upstream_metadata = Some(json!({
+            "codex": {
+                "credential_generation": "credential-generation-current"
+            }
+        }));
+        let state = codex_state_with_provider_and_key(sample_codex_provider(), key);
+        let plan = sample_codex_plan();
+        let report_context = json!({
+            "codex_credential_generation": "credential-generation-current",
+            "provider_request_started_at_unix_ms": 200_000u64,
+            "provider_request_order_id": "00000003-0d40-7000-8000-000000000001"
+        });
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: Some(&report_context),
+            },
+            LocalExecutionEffect::OauthSuccess(LocalOAuthSuccessEffect {
+                status_code: 200,
+                request_started_at_unix_ms: Some(200_000),
+                request_order_id: Some("00000003-0d40-7000-8000-000000000001"),
+            }),
+        )
+        .await;
+
+        let stored_key = state
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
+            .await
+            .expect("provider catalog keys should load")
+            .into_iter()
+            .next()
+            .expect("stored key should exist");
+        assert_eq!(stored_key.oauth_invalid_at_unix_secs, Some(100));
+        assert_eq!(
+            stored_key.oauth_invalid_reason.as_deref(),
+            Some("[ACCOUNT_BLOCK] account deactivated")
+        );
+        assert_eq!(
+            stored_key.upstream_metadata.as_ref().and_then(
+                |metadata| metadata.pointer("/codex/oauth_state_request_started_at_unix_ms")
+            ),
+            Some(&json!(200_000u64))
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth_success_does_not_clear_codex_invalid_state_for_replaced_bearer() {
+        let mut key = sample_codex_key();
+        key.oauth_invalid_at_unix_secs = Some(100);
+        key.oauth_invalid_reason = Some("[OAUTH_EXPIRED] session expired".to_string());
+        key.upstream_metadata = Some(json!({
+            "codex": {
+                "credential_generation": "credential-generation-current"
+            }
+        }));
+        let state = codex_state_with_provider_and_key(sample_codex_provider(), key);
+        let mut plan = sample_codex_plan();
+        plan.headers.insert(
+            "authorization".to_string(),
+            "Bearer replaced-access-token".to_string(),
+        );
+        let report_context = json!({
+            "codex_credential_generation": "credential-generation-current",
+            "provider_request_started_at_unix_ms": 200_000u64,
+            "provider_request_order_id": "00000003-0d40-7000-8000-000000000001"
+        });
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: Some(&report_context),
+            },
+            LocalExecutionEffect::OauthSuccess(LocalOAuthSuccessEffect {
+                status_code: 200,
+                request_started_at_unix_ms: Some(200_000),
+                request_order_id: Some("00000003-0d40-7000-8000-000000000001"),
+            }),
+        )
+        .await;
+
+        let stored_key = state
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
+            .await
+            .expect("provider catalog keys should load")
+            .into_iter()
+            .next()
+            .expect("stored key should exist");
+        assert_eq!(stored_key.oauth_invalid_at_unix_secs, Some(100));
+        assert_eq!(
+            stored_key.oauth_invalid_reason.as_deref(),
+            Some("[OAUTH_EXPIRED] session expired")
+        );
+        assert!(stored_key
+            .upstream_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.pointer("/codex/oauth_state_request_started_at_unix_ms"))
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn oauth_success_effect_ignores_non_success_status() {
+        let mut key = sample_codex_key();
+        key.oauth_invalid_at_unix_secs = Some(100);
+        key.oauth_invalid_reason = Some("[OAUTH_EXPIRED] session expired".to_string());
+        key.upstream_metadata = Some(json!({
+            "codex": {
+                "credential_generation": "credential-generation-current"
+            }
+        }));
+        let state = codex_state_with_provider_and_key(sample_codex_provider(), key);
+        let plan = sample_codex_plan();
+        let report_context = json!({
+            "codex_credential_generation": "credential-generation-current",
+            "provider_request_started_at_unix_ms": 200_000u64,
+            "provider_request_order_id": "00000003-0d40-7000-8000-000000000001"
+        });
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: Some(&report_context),
+            },
+            LocalExecutionEffect::OauthSuccess(LocalOAuthSuccessEffect {
+                status_code: 304,
+                request_started_at_unix_ms: Some(200_000),
+                request_order_id: Some("00000003-0d40-7000-8000-000000000001"),
+            }),
+        )
+        .await;
+
+        let stored_key = state
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
+            .await
+            .expect("provider catalog keys should load")
+            .into_iter()
+            .next()
+            .expect("stored key should exist");
+        assert_eq!(stored_key.oauth_invalid_at_unix_secs, Some(100));
+        assert_eq!(
+            stored_key.oauth_invalid_reason.as_deref(),
+            Some("[OAUTH_EXPIRED] session expired")
+        );
+        assert!(stored_key
+            .upstream_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.pointer("/codex/oauth_state_request_started_at_unix_ms"))
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn oauth_invalidation_marks_generic_codex_403_as_token_invalid() {
         let state = codex_state();
         let plan = sample_codex_plan();
@@ -3581,7 +4016,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oauth_invalidation_auto_removes_inactive_pat_owner() {
+    async fn oauth_invalidation_auto_remove_keeps_inactive_pat_owner() {
         let state = codex_state_with_auto_remove();
         let plan = sample_codex_plan();
 
@@ -3595,6 +4030,39 @@ mod tests {
                 status_code: 403,
                 response_text: Some(
                     r#"{"error":{"code":"biscuit_baker_service_auth_credential_error_status","message":"Personal access token owner is inactive."},"status":403}"#,
+                ),
+            }),
+        )
+        .await;
+
+        let stored_key = state
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
+            .await
+            .expect("provider catalog keys should load")
+            .into_iter()
+            .next()
+            .expect("recoverable token invalidation should retain the key");
+        assert_eq!(
+            stored_key.oauth_invalid_reason.as_deref(),
+            Some("[OAUTH_EXPIRED] Personal access token owner is inactive.")
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth_invalidation_auto_removes_account_block() {
+        let state = codex_state_with_auto_remove();
+        let plan = sample_codex_plan();
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: None,
+            },
+            LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
+                status_code: 403,
+                response_text: Some(
+                    r#"{"error":{"message":"account has been deactivated"},"status":403}"#,
                 ),
             }),
         )
@@ -3707,6 +4175,155 @@ mod tests {
             .expect("Agent Identity replacement should not be removed");
         assert_eq!(stored_key.oauth_invalid_at_unix_secs, None);
         assert_eq!(stored_key.oauth_invalid_reason, None);
+    }
+
+    #[tokio::test]
+    async fn oauth_invalidation_rejects_stale_codex_credential_generation() {
+        let mut key = sample_codex_key();
+        key.upstream_metadata = Some(json!({
+            "codex": {
+                "credential_generation": "credential-generation-current"
+            }
+        }));
+        let state = codex_state_with_provider_and_key(sample_codex_provider(), key);
+        let plan = sample_codex_plan();
+        let report_context = json!({
+            "codex_credential_generation": "credential-generation-stale",
+            "provider_request_started_at_unix_ms": 100_000u64,
+            "provider_request_order_id": "00000001-86a0-7000-8000-000000000001"
+        });
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: Some(&report_context),
+            },
+            LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
+                status_code: 401,
+                response_text: Some(r#"{"error":{"message":"session expired"}}"#),
+            }),
+        )
+        .await;
+
+        let stored_key = state
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
+            .await
+            .expect("provider catalog keys should load")
+            .into_iter()
+            .next()
+            .expect("stored key should exist");
+        assert_eq!(stored_key.oauth_invalid_at_unix_secs, None);
+        assert_eq!(stored_key.oauth_invalid_reason, None);
+        assert!(stored_key
+            .upstream_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.pointer("/codex/oauth_state_request_started_at_unix_ms"))
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn delayed_codex_quota_report_does_not_clear_newer_oauth_invalidation() {
+        let mut key = sample_codex_key();
+        key.upstream_metadata = Some(json!({
+            "codex": {
+                "credential_generation": "credential-generation-current",
+                "account_quota_reset_generation": 0
+            }
+        }));
+        let state = codex_state_with_provider_and_key(sample_codex_provider(), key);
+        let plan = sample_codex_plan();
+        let older_request_id = "00000001-86a0-7000-8000-000000000001";
+        let newer_request_id = "00000001-86a0-7000-8000-000000000002";
+        let older_uuid = uuid::Uuid::parse_str(older_request_id).expect("older id should parse");
+        let newer_uuid = uuid::Uuid::parse_str(newer_request_id).expect("newer id should parse");
+        assert_eq!(older_uuid.get_version_num(), 7);
+        assert_eq!(newer_uuid.get_version_num(), 7);
+        assert!(older_uuid < newer_uuid);
+
+        let invalidation_context = json!({
+            "codex_credential_generation": "credential-generation-current",
+            "provider_request_started_at_unix_ms": 100_000u64,
+            "provider_request_order_id": newer_request_id
+        });
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: Some(&invalidation_context),
+            },
+            LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
+                status_code: 401,
+                response_text: Some(r#"{"error":{"message":"session expired"}}"#),
+            }),
+        )
+        .await;
+
+        let delayed_report_context = json!({
+            "key_id": plan.key_id,
+            "codex_credential_generation": "credential-generation-current",
+            "codex_quota_reset_generation": 0,
+            "provider_request_started_at_unix_ms": 100_000u64,
+            "provider_response_headers_observed_at_unix_ms": 110_000u64,
+            "provider_request_order_id": older_request_id
+        });
+        let delayed_headers = BTreeMap::from([
+            ("x-codex-plan-type".to_string(), "free".to_string()),
+            ("x-codex-primary-used-percent".to_string(), "25".to_string()),
+            (
+                "x-codex-primary-reset-at".to_string(),
+                "2000000000".to_string(),
+            ),
+            (
+                "x-codex-primary-window-minutes".to_string(),
+                "300".to_string(),
+            ),
+        ]);
+        let delayed_report = GatewaySyncReportRequest {
+            trace_id: "trace-delayed-codex-quota".to_string(),
+            report_kind: "openai_responses_sync_success".to_string(),
+            report_context: Some(delayed_report_context),
+            status_code: 200,
+            headers: delayed_headers,
+            body_json: None,
+            client_body_json: None,
+            body_base64: None,
+            telemetry: None,
+        };
+        apply_local_report_effect(
+            &state,
+            LocalReportEffect::Sync {
+                payload: &delayed_report,
+            },
+        )
+        .await;
+
+        let stored_key = state
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
+            .await
+            .expect("provider catalog keys should load")
+            .into_iter()
+            .next()
+            .expect("stored key should exist");
+        assert_eq!(
+            stored_key.oauth_invalid_reason.as_deref(),
+            Some("[OAUTH_EXPIRED] session expired")
+        );
+        assert!(stored_key.oauth_invalid_at_unix_secs.is_some());
+        assert_eq!(
+            stored_key
+                .upstream_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.pointer("/codex/oauth_state_request_id")),
+            Some(&json!(newer_request_id))
+        );
+        assert_eq!(
+            stored_key
+                .status_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.pointer("/oauth/code")),
+            Some(&json!("expired"))
+        );
     }
 
     #[tokio::test]

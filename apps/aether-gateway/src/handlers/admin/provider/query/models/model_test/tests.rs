@@ -178,6 +178,7 @@ fn provider_query_execution_json_body_decodes_stream_encoded_json_response() {
             "content-type".to_string(),
             "application/json".to_string(),
         )]),
+        response_observation: None,
         body: Some(aether_contracts::ResponseBody {
             json_body: None,
             body_bytes_b64: Some(encoded_body),
@@ -240,6 +241,26 @@ fn provider_query_default_test_request_body_does_not_set_max_tokens() {
         body.get("max_tokens").is_none(),
         "admin model test must not silently force a low max_tokens value"
     );
+}
+
+#[test]
+fn provider_query_default_test_request_bodies_do_not_set_temperature() {
+    let payload = json!({});
+    let default_body = provider_query_build_test_request_body(&payload, "fallback-model");
+    assert!(default_body.get("temperature").is_none());
+
+    for api_format in ["openai:chat", "openai:responses", "claude:messages"] {
+        let body = provider_query_build_test_request_body_for_api_format(
+            &payload,
+            "fallback-model",
+            "/api/admin/provider-query/test-model",
+            api_format,
+        );
+        assert!(
+            body.get("temperature").is_none(),
+            "admin model test must not set temperature for {api_format}"
+        );
+    }
 }
 
 #[test]
@@ -416,6 +437,7 @@ fn provider_query_standard_test_aggregates_responses_stream_body() {
         candidate_id: Some("candidate-0".to_string()),
         status_code: 200,
         headers: BTreeMap::new(),
+        response_observation: None,
         body: Some(aether_contracts::ResponseBody {
             json_body: None,
             body_bytes_b64: Some(
@@ -448,6 +470,7 @@ fn provider_query_standard_test_aggregates_responses_image_generation_call() {
         candidate_id: Some("candidate-0".to_string()),
         status_code: 200,
         headers: BTreeMap::new(),
+        response_observation: None,
         body: Some(aether_contracts::ResponseBody {
             json_body: None,
             body_bytes_b64: Some(
@@ -581,6 +604,7 @@ fn provider_query_search_success_requires_non_empty_output() {
             candidate_id: Some("candidate-0".to_string()),
             status_code: 200,
             headers: BTreeMap::new(),
+            response_observation: None,
             body: Some(aether_contracts::ResponseBody {
                 json_body: Some(body),
                 body_bytes_b64: None,
@@ -731,6 +755,7 @@ fn provider_query_standard_test_rejects_gemini_success_without_visible_output() 
         candidate_id: Some("candidate-0".to_string()),
         status_code: 200,
         headers: BTreeMap::new(),
+        response_observation: None,
         body: Some(aether_contracts::ResponseBody {
             json_body: Some(json!({
                 "candidates": [{

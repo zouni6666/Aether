@@ -33,10 +33,10 @@ pub(crate) use self::classifier::{
     LocalTransportFailoverClassification,
 };
 pub(crate) use self::effects::{
-    apply_local_execution_effect, LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect,
-    LocalAttemptFailureEffect, LocalExecutionEffect, LocalExecutionEffectContext,
-    LocalHealthFailureEffect, LocalHealthSuccessEffect, LocalOAuthInvalidationEffect,
-    LocalPoolErrorEffect,
+    apply_local_execution_effect, spawn_local_oauth_success_effect, LocalAdaptiveRateLimitEffect,
+    LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect, LocalExecutionEffect,
+    LocalExecutionEffectContext, LocalHealthFailureEffect, LocalHealthSuccessEffect,
+    LocalOAuthInvalidationEffect, LocalOAuthSuccessEffect, LocalPoolErrorEffect,
 };
 pub(crate) use self::health::{
     project_local_failure_health, project_local_key_circuit_closed,

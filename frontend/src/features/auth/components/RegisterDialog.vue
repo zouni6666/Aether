@@ -683,7 +683,7 @@ watch(
         cooldownTimer.value = null
       }
       codeDigits.value = ['', '', '', '', '', '']
-      resetTurnstile()
+      // Turnstile validates the action, not the email value. Keep its challenge stable while typing.
     }
 
     // 清除之前的定时器

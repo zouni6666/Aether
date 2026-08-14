@@ -2,10 +2,10 @@ use aether_contracts::ExecutionPlan;
 use tracing::warn;
 
 use crate::orchestration::{
-    oauth_status_may_be_invalid as status_may_be_oauth_invalid,
+    local_failover_error_message, oauth_status_may_be_invalid as status_may_be_oauth_invalid,
     oauth_status_proves_access_token_invalid as status_proves_access_token_invalid,
 };
-use crate::state::AgentIdentityAuthConfigFence;
+use crate::state::{AgentIdentityAuthConfigFence, CodexRuntimeOAuthObservation};
 use crate::{provider_transport::LocalOAuthRefreshError, AppState};
 
 pub(crate) async fn refresh_oauth_plan_auth_for_retry(
@@ -14,6 +14,9 @@ pub(crate) async fn refresh_oauth_plan_auth_for_retry(
     status_code: u16,
     response_text: Option<&str>,
     trace_id: &str,
+    report_context: Option<&serde_json::Value>,
+    request_started_at_unix_ms: Option<u64>,
+    request_order_id: Option<&str>,
 ) -> bool {
     if !status_may_be_oauth_invalid(status_code, response_text) {
         return false;
@@ -109,15 +112,49 @@ pub(crate) async fn refresh_oauth_plan_auth_for_retry(
             body_excerpt,
             ..
         }) if matches!(refresh_status_code, 400 | 401 | 403) => {
-            if let Err(err) = state
-                .persist_local_oauth_refresh_failure_state(
-                    &transport,
-                    refresh_status_code,
-                    body_excerpt.as_str(),
-                    access_token_invalid_proven,
-                )
-                .await
-            {
+            let observed_credential_generation =
+                report_context_string(report_context, "codex_credential_generation");
+            let runtime_invalid_message = local_failover_error_message(response_text);
+            let runtime_invalid_reason =
+                aether_admin::provider::quota::codex_runtime_invalid_reason(
+                    status_code,
+                    runtime_invalid_message.as_deref(),
+                );
+            let persist_result = match (request_started_at_unix_ms, request_order_id) {
+                (Some(request_started_at_unix_ms), Some(request_order_id))
+                    if transport
+                        .provider
+                        .provider_type
+                        .trim()
+                        .eq_ignore_ascii_case("codex") =>
+                {
+                    state
+                        .persist_local_oauth_refresh_failure_state_observed(
+                            &transport,
+                            refresh_status_code,
+                            body_excerpt.as_str(),
+                            access_token_invalid_proven,
+                            CodexRuntimeOAuthObservation {
+                                request_started_at_unix_ms,
+                                request_order_id,
+                                observed_credential_generation,
+                                runtime_invalid_reason: runtime_invalid_reason.as_deref(),
+                            },
+                        )
+                        .await
+                }
+                _ => {
+                    state
+                        .persist_local_oauth_refresh_failure_state(
+                            &transport,
+                            refresh_status_code,
+                            body_excerpt.as_str(),
+                            access_token_invalid_proven,
+                        )
+                        .await
+                }
+            };
+            if let Err(err) = persist_result {
                 warn!(
                     event_name = "local_oauth_retry_refresh_failure_persist_failed",
                     log_type = "ops",
@@ -159,6 +196,17 @@ pub(crate) async fn refresh_oauth_plan_auth_for_retry(
             false
         }
     }
+}
+
+fn report_context_string<'a>(
+    report_context: Option<&'a serde_json::Value>,
+    field: &str,
+) -> Option<&'a str> {
+    report_context
+        .and_then(|context| context.get(field))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 fn execution_plan_authorization(plan: &ExecutionPlan) -> Option<&str> {
@@ -209,6 +257,7 @@ mod tests {
     use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
     use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
     use aether_data_contracts::repository::provider_catalog::{
+        ProviderCatalogKeyAdminCasUpdate, ProviderCatalogKeyOAuthCredentialFence,
         ProviderCatalogReadRepository, ProviderCatalogWriteRepository,
         StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
     };
@@ -312,7 +361,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_removes_codex_key_after_request_proven_terminal_refresh_failure() {
+    async fn retains_codex_key_after_request_proven_terminal_refresh_failure() {
         let token_hits = Arc::new(Mutex::new(0usize));
         let token_hits_clone = Arc::clone(&token_hits);
         let token_server = Router::new().route(
@@ -458,16 +507,34 @@ mod tests {
             401,
             Some(r#"{"error":"oauth_token_invalid"}"#),
             "trace-oauth-retry",
+            None,
+            Some(1_000),
+            Some("01900000-0000-7000-8000-000000000010"),
         )
         .await;
 
         assert!(!retried);
         assert_eq!(*token_hits.lock().expect("mutex should lock"), 1);
-        let keys = provider_catalog_repository
+        let stored_key = provider_catalog_repository
             .list_keys_by_ids(&["key-codex-oauth-retry".to_string()])
             .await
-            .expect("keys should read");
-        assert!(keys.is_empty());
+            .expect("keys should read")
+            .into_iter()
+            .next()
+            .expect("request-scoped refresh failure should retain the key");
+        let invalid_reason = stored_key
+            .oauth_invalid_reason
+            .as_deref()
+            .expect("combined invalid reason should persist");
+        assert!(invalid_reason.contains("[OAUTH_EXPIRED]"));
+        assert!(invalid_reason.contains("[REFRESH_FAILED]"));
+        assert_eq!(
+            stored_key
+                .upstream_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.pointer("/codex/oauth_state_request_id")),
+            Some(&json!("01900000-0000-7000-8000-000000000010"))
+        );
 
         token_handle.abort();
     }
@@ -619,6 +686,9 @@ mod tests {
                 401,
                 Some(r#"{"error":"invalid_token"}"#),
                 "trace-claude-oauth-fence-first",
+                None,
+                None,
+                None,
             )
             .await
         );
@@ -647,6 +717,9 @@ mod tests {
                 401,
                 Some(r#"{"error":"invalid_token"}"#),
                 "trace-claude-oauth-fence-stale",
+                None,
+                None,
+                None,
             )
             .await
         );
@@ -665,6 +738,7 @@ mod tests {
             .expect("Claude key should load")
             .pop()
             .expect("Claude key should exist");
+        let expected_admin_replacement = admin_replacement.clone();
         admin_replacement.encrypted_api_key = Some(
             encrypt_python_fernet_plaintext(
                 DEVELOPMENT_ENCRYPTION_KEY,
@@ -673,10 +747,23 @@ mod tests {
             .expect("admin access token should encrypt"),
         );
         admin_replacement.expires_at_unix_secs = Some(4_102_444_800);
-        provider_catalog_repository
-            .update_key(&admin_replacement)
+        assert!(provider_catalog_repository
+            .compare_and_update_key_admin_state(&ProviderCatalogKeyAdminCasUpdate {
+                expected_encrypted_auth_config: expected_admin_replacement
+                    .encrypted_auth_config
+                    .clone(),
+                expected_credential: ProviderCatalogKeyOAuthCredentialFence {
+                    encrypted_api_key: expected_admin_replacement.encrypted_api_key.clone(),
+                    auth_type: expected_admin_replacement.auth_type.clone(),
+                    provider_id: expected_admin_replacement.provider_id.clone(),
+                    provider_type: "claude_code".to_string(),
+                },
+                key: admin_replacement,
+                codex_rotation: None,
+                reset_oauth_runtime: true,
+            })
             .await
-            .expect("admin replacement should persist");
+            .expect("admin replacement CAS should run"));
 
         let admin_result = state
             .force_local_oauth_refresh_entry(&stale_transport)

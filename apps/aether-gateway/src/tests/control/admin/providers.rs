@@ -1073,7 +1073,11 @@ async fn gateway_creates_admin_provider_locally_with_trusted_admin_principal() {
             "max_transfer_count": 12,
             "max_transfer_timeout_seconds": 90,
             "request_timeout": aether_contracts::MAX_EXECUTION_REQUEST_TIMEOUT_SECS,
-            "config": {"chat_pii_redaction": {"enabled": true}},
+            "config": {
+                "chat_pii_redaction": {"enabled": true},
+                "codex": {"pass_through_cyber_flag_interrupt": true}
+            },
+            "codex_fingerprint_convergence_enabled": true,
             "pool_advanced": {},
             "failover_rules": {"strategy": "ordered"},
             "proxy": {"url": "https://proxy.example"}
@@ -1151,6 +1155,17 @@ async fn gateway_creates_admin_provider_locally_with_trusted_admin_principal() {
             .and_then(|value| value.get("failover_rules"))
             .cloned(),
         Some(json!({"strategy": "ordered"}))
+    );
+    assert_eq!(
+        created
+            .config
+            .as_ref()
+            .and_then(|value| value.get("codex"))
+            .cloned(),
+        Some(json!({
+            "fingerprint_convergence_enabled": true,
+            "pass_through_cyber_flag_interrupt": true
+        }))
     );
 
     let invalid_response = reqwest::Client::new()
@@ -1268,7 +1283,9 @@ async fn gateway_updates_fixed_provider_and_reconciles_template_managed_endpoint
         None,
         None,
         None,
-        None,
+        Some(json!({
+            "codex": {"pass_through_cyber_flag_interrupt": true}
+        })),
     );
     provider.provider_type = "codex".to_string();
     let mut cli_endpoint = sample_endpoint(
@@ -1313,7 +1330,8 @@ async fn gateway_updates_fixed_provider_and_reconciles_template_managed_endpoint
         .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
         .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
         .json(&json!({
-            "max_retries": 9
+            "max_retries": 9,
+            "codex_fingerprint_convergence_enabled": true
         }))
         .send()
         .await
@@ -1322,6 +1340,28 @@ async fn gateway_updates_fixed_provider_and_reconciles_template_managed_endpoint
     let status = response.status();
     let body = response.text().await.expect("body should read");
     assert_eq!(status, StatusCode::OK, "body={body}");
+    let payload: serde_json::Value = serde_json::from_str(&body).expect("json body should parse");
+    assert_eq!(payload["codex_fingerprint_convergence_enabled"], true);
+
+    let providers = provider_catalog_repository
+        .list_providers(false)
+        .await
+        .expect("providers should list");
+    let updated_provider = providers
+        .iter()
+        .find(|provider| provider.id == "provider-codex")
+        .expect("updated provider should exist");
+    assert_eq!(
+        updated_provider
+            .config
+            .as_ref()
+            .and_then(|value| value.get("codex"))
+            .cloned(),
+        Some(json!({
+            "fingerprint_convergence_enabled": true,
+            "pass_through_cyber_flag_interrupt": true
+        }))
+    );
 
     let endpoints = provider_catalog_repository
         .list_endpoints_by_provider_ids(&["provider-codex".to_string()])

@@ -148,6 +148,7 @@ async fn gateway_executes_gemini_files_download_via_local_decision_gate_with_loc
                                 "content-type".to_string(),
                                 "application/octet-stream".to_string(),
                             )]),
+                            response_observation: None,
                         },
                     },
                     StreamFrame {

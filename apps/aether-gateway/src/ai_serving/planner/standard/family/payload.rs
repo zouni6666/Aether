@@ -377,6 +377,7 @@ mod tests {
             client_surface: None,
             gateway_credential_carrier: None,
             client_session_affinity: None,
+            original_client_session_id: None,
             routing_policy: None,
             routing_trace_seed: None,
             routing_context: None,

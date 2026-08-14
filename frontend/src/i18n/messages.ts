@@ -1440,6 +1440,8 @@ const legacyExactEnglishMessages: Record<string, string> = {
   '启用后该提供商的密钥将由号池统一调度': 'When enabled, this provider’s keys are scheduled by the pool.',
   '模拟缓存模式': 'Simulated cache mode',
   '启用后仅对 Kiro 请求模拟 prompt cache 读写计量。': 'When enabled, only Kiro requests simulate prompt cache read/write accounting.',
+  'Codex OAuth 指纹收敛': 'Codex OAuth fingerprint convergence',
+  '统一同一 OAuth 账号的设备与会话标识；关闭时保持现有透传行为。': 'Use consistent device and session identifiers for the same OAuth account. When disabled, preserve the existing pass-through behavior.',
   '请前往模块管理-敏感信息保护中配置详细规则。': 'Configure detailed rules in Modules - Sensitive information protection.',
   '验证失败': 'Validation failed',
   '月卡类型必须设置周期开始时间': 'Monthly quota billing requires a cycle start time',

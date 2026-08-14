@@ -266,6 +266,7 @@ pub(crate) async fn maybe_execute_windsurf_sync(
             candidate_id: prepared.candidate_id,
             status_code: 200,
             headers: BTreeMap::from([("content-type".to_string(), "application/json".to_string())]),
+            response_observation: None,
             body: Some(ResponseBody {
                 json_body: Some(body_json),
                 body_bytes_b64: None,
@@ -527,6 +528,7 @@ fn build_windsurf_stream_frame_stream(
                     ("cache-control".to_string(), "no-cache".to_string()),
                     ("content-type".to_string(), "text/event-stream".to_string()),
                 ]),
+                response_observation: None,
             },
         });
 

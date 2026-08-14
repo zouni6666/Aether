@@ -55,6 +55,33 @@ pub(super) async fn maybe_handle(
     if idempotency_key.is_empty() {
         return Ok(Some(bad_request_response("idempotency_key 不能为空")));
     }
+    if idempotency_key.len() > 256 {
+        return Ok(Some(bad_request_response(
+            "idempotency_key 不能超过 256 个字节",
+        )));
+    }
+    let expected_credential_generation = match payload.expected_credential_generation {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(value) => {
+            let value = value.trim().to_string();
+            if value.is_empty() {
+                return Ok(Some(bad_request_response(
+                    "expected_credential_generation 不能为空字符串",
+                )));
+            }
+            if value.len() > 256 {
+                return Ok(Some(bad_request_response(
+                    "expected_credential_generation 不能超过 256 个字节",
+                )));
+            }
+            Some(value)
+        }
+        _ => {
+            return Ok(Some(bad_request_response(
+                "expected_credential_generation 必须是字符串或 null",
+            )));
+        }
+    };
 
     let Some(key) = state
         .read_provider_catalog_keys_by_ids(std::slice::from_ref(&key_id))
@@ -93,9 +120,15 @@ pub(super) async fn maybe_handle(
         )));
     };
 
-    let (status, payload) =
-        consume_codex_reset_credit_locally(state, &provider, &endpoint, key, &idempotency_key)
-            .await?;
+    let (status, payload) = consume_codex_reset_credit_locally(
+        state,
+        &provider,
+        &endpoint,
+        key,
+        &idempotency_key,
+        expected_credential_generation.as_deref(),
+    )
+    .await?;
     Ok(Some((status, Json(payload)).into_response()))
 }
 

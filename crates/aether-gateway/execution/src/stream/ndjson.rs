@@ -28,6 +28,11 @@ mod tests {
             payload: StreamFramePayload::Headers {
                 status_code: 200,
                 headers: BTreeMap::from([("content-type".into(), "text/event-stream".into())]),
+                response_observation: Some(aether_contracts::ExecutionResponseObservation {
+                    request_started_at_unix_ms: 100,
+                    response_headers_observed_at_unix_ms: 125,
+                    request_order_id: "0198-order-1".to_string(),
+                }),
             },
         };
 

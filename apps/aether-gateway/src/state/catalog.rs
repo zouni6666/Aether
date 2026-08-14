@@ -480,6 +480,16 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
+    pub(crate) async fn list_provider_catalog_keys_by_ids_strong(
+        &self,
+        key_ids: &[String],
+    ) -> Result<Vec<provider_catalog::StoredProviderCatalogKey>, GatewayError> {
+        self.data
+            .list_provider_catalog_keys_by_ids_strong(key_ids)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn list_provider_catalog_key_page(
         &self,
         query: &provider_catalog::ProviderCatalogKeyListQuery,
@@ -659,6 +669,21 @@ impl AppState {
         if updated.is_some() {
             self.invalidate_provider_routing_caches();
         }
+        Ok(updated)
+    }
+
+    pub(crate) async fn compare_and_update_provider_catalog_key_admin_state(
+        &self,
+        update: &provider_catalog::ProviderCatalogKeyAdminCasUpdate,
+    ) -> Result<bool, GatewayError> {
+        let updated = self
+            .data
+            .compare_and_update_provider_catalog_key_admin_state(update)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        // A conflict means another instance changed credentials. Invalidate on
+        // both outcomes before the caller reloads or reports the conflict.
+        self.invalidate_provider_routing_caches();
         Ok(updated)
     }
 

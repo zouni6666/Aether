@@ -121,13 +121,13 @@ use aether_data_contracts::repository::pool_scores::{
     UpsertPoolMemberScore,
 };
 use aether_data_contracts::repository::provider_catalog::{
-    ProviderCatalogKeyAdaptiveStateUpdate, ProviderCatalogKeyHealthStateUpdate,
-    ProviderCatalogKeyListQuery, ProviderCatalogKeyOAuthCredentialCasDelete,
-    ProviderCatalogKeyOAuthRuntimeStateCasUpdate, ProviderCatalogKeyRuntimeMetadataUpdate,
-    ProviderCatalogKeyStatusSnapshotUpdate, ProviderCatalogReadRepository,
-    ProviderCatalogWriteRepository, StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
-    StoredProviderCatalogKeyMaintenanceSummary, StoredProviderCatalogKeyPage,
-    StoredProviderCatalogKeyStats, StoredProviderCatalogProvider,
+    ProviderCatalogKeyAdaptiveStateUpdate, ProviderCatalogKeyAdminCasUpdate,
+    ProviderCatalogKeyHealthStateUpdate, ProviderCatalogKeyListQuery,
+    ProviderCatalogKeyOAuthCredentialCasDelete, ProviderCatalogKeyOAuthRuntimeStateCasUpdate,
+    ProviderCatalogKeyRuntimeMetadataUpdate, ProviderCatalogKeyStatusSnapshotUpdate,
+    ProviderCatalogReadRepository, ProviderCatalogWriteRepository, StoredProviderCatalogEndpoint,
+    StoredProviderCatalogKey, StoredProviderCatalogKeyMaintenanceSummary,
+    StoredProviderCatalogKeyPage, StoredProviderCatalogKeyStats, StoredProviderCatalogProvider,
 };
 use aether_data_contracts::repository::quota::{
     ProviderQuotaReadRepository, ProviderQuotaWriteRepository, StoredProviderQuotaSnapshot,

@@ -19,7 +19,7 @@ use aether_contracts::{
 use aether_data_contracts::repository::provider_catalog::{
     ProviderCatalogKeyOAuthCredentialCasDelete, ProviderCatalogKeyOAuthCredentialFence,
     ProviderCatalogKeyOAuthRuntimeStateCasUpdate, ProviderCatalogKeyStatusSnapshotUpdate,
-    StoredProviderCatalogKey,
+    ProviderCatalogUpstreamMetadataNamespaceExpectation, StoredProviderCatalogKey,
 };
 use aether_runtime_state::RuntimeLockLease;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -42,11 +42,20 @@ const OAUTH_ACCOUNT_BLOCK_PREFIX: &str = "[ACCOUNT_BLOCK] ";
 const OAUTH_EXPIRED_PREFIX: &str = "[OAUTH_EXPIRED] ";
 const OAUTH_REFRESH_FAILED_PREFIX: &str = "[REFRESH_FAILED] ";
 const OAUTH_REQUEST_FAILED_PREFIX: &str = "[REQUEST_FAILED] ";
+const CODEX_OAUTH_INVALIDATION_CAS_MAX_ATTEMPTS: usize = 16;
 
 #[derive(Debug, Clone, PartialEq)]
-struct ProviderTransportCredentialFence {
-    encrypted_auth_config: String,
-    credential: ProviderCatalogKeyOAuthCredentialFence,
+pub(crate) struct ProviderTransportCredentialFence {
+    pub(crate) encrypted_auth_config: String,
+    pub(crate) credential: ProviderCatalogKeyOAuthCredentialFence,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CodexRuntimeOAuthObservation<'a> {
+    pub(crate) request_started_at_unix_ms: u64,
+    pub(crate) request_order_id: &'a str,
+    pub(crate) observed_credential_generation: Option<&'a str>,
+    pub(crate) runtime_invalid_reason: Option<&'a str>,
 }
 
 struct GatewayLocalOAuthHttpExecutor<'a> {
@@ -181,6 +190,18 @@ fn local_oauth_transport_context_allows_reload(
             );
     }
     true
+}
+
+pub(crate) fn provider_transport_context_allows_credential_rotation(
+    initial: &provider_transport::GatewayProviderTransportSnapshot,
+    current: &provider_transport::GatewayProviderTransportSnapshot,
+) -> bool {
+    initial.provider.id == current.provider.id
+        && initial.endpoint.id == current.endpoint.id
+        && initial.key.id == current.key.id
+        && initial.key.auth_type == current.key.auth_type
+        && initial.provider.provider_type == current.provider.provider_type
+        && local_oauth_transport_context_allows_reload(initial, current)
 }
 
 fn discard_failed_local_oauth_refresh_resolution(
@@ -1757,7 +1778,7 @@ impl AppState {
             .map(|fence| fence.encrypted_auth_config))
     }
 
-    async fn capture_provider_transport_credential_fence(
+    pub(crate) async fn capture_provider_transport_credential_fence(
         &self,
         transport: &provider_transport::GatewayProviderTransportSnapshot,
     ) -> Result<Option<ProviderTransportCredentialFence>, GatewayError> {
@@ -1924,6 +1945,9 @@ impl AppState {
         &self,
         transport: &provider_transport::GatewayProviderTransportSnapshot,
         invalid_reason: &str,
+        request_started_at_unix_ms: Option<u64>,
+        request_order_id: Option<&str>,
+        observed_credential_generation: Option<&str>,
     ) -> Result<bool, GatewayError> {
         let invalid_reason = invalid_reason.trim();
         let key_id = transport.key.id.trim();
@@ -1937,108 +1961,348 @@ impl AppState {
         else {
             return Ok(false);
         };
-
-        let Some(mut latest_key) = self
-            .data
-            .list_provider_catalog_keys_by_ids(&[key_id.to_string()])
-            .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?
-            .into_iter()
-            .next()
-        else {
-            return Ok(false);
-        };
-        if latest_key.encrypted_auth_config.as_deref()
-            != Some(expected_credential_fence.encrypted_auth_config.as_str())
-            || latest_key.encrypted_api_key
-                != expected_credential_fence.credential.encrypted_api_key
-            || latest_key.auth_type != expected_credential_fence.credential.auth_type
-            || latest_key.provider_id != expected_credential_fence.credential.provider_id
-            || !provider_key_is_oauth_managed(&latest_key, provider_type)
-        {
-            return Ok(false);
-        }
-
+        let request_order_id = request_order_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let is_codex = provider_type.trim().eq_ignore_ascii_case("codex");
         let now_unix_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .ok()
             .map(|duration| duration.as_secs())
             .unwrap_or(0);
-        let (oauth_invalid_at_unix_secs, oauth_invalid_reason) = merge_runtime_oauth_invalid_state(
-            provider_type,
-            &latest_key,
-            invalid_reason,
-            now_unix_secs,
-        );
-        if oauth_invalid_at_unix_secs == latest_key.oauth_invalid_at_unix_secs
-            && oauth_invalid_reason == latest_key.oauth_invalid_reason
+        for attempt in 0..CODEX_OAUTH_INVALIDATION_CAS_MAX_ATTEMPTS {
+            let Some(mut latest_key) = self
+                .data
+                .list_provider_catalog_keys_by_ids(&[key_id.to_string()])
+                .await
+                .map_err(|err| GatewayError::Internal(err.to_string()))?
+                .into_iter()
+                .next()
+            else {
+                return Ok(false);
+            };
+            if latest_key.encrypted_auth_config.as_deref()
+                != Some(expected_credential_fence.encrypted_auth_config.as_str())
+                || latest_key.encrypted_api_key
+                    != expected_credential_fence.credential.encrypted_api_key
+                || latest_key.auth_type != expected_credential_fence.credential.auth_type
+                || latest_key.provider_id != expected_credential_fence.credential.provider_id
+                || !provider_key_is_oauth_managed(&latest_key, provider_type)
+            {
+                return Ok(false);
+            }
+
+            let expected_codex = is_codex
+                .then(|| {
+                    latest_key
+                        .upstream_metadata
+                        .as_ref()
+                        .and_then(Value::as_object)
+                        .and_then(|metadata| metadata.get("codex"))
+                        .cloned()
+                })
+                .flatten();
+            let expected_codex_object = expected_codex.as_ref().and_then(Value::as_object);
+            if is_codex
+                && !admin_provider_quota_pure::codex_credential_generation_matches(
+                    expected_codex.as_ref(),
+                    observed_credential_generation,
+                )
+            {
+                return Ok(false);
+            }
+            if is_codex
+                && request_started_at_unix_ms.is_some()
+                && admin_provider_quota_pure::codex_oauth_state_request_order_is_stale(
+                    expected_codex_object,
+                    request_started_at_unix_ms,
+                    request_order_id,
+                )
+            {
+                return Ok(false);
+            }
+
+            let (oauth_invalid_at_unix_secs, oauth_invalid_reason) =
+                merge_runtime_oauth_invalid_state(
+                    provider_type,
+                    &latest_key,
+                    invalid_reason,
+                    now_unix_secs,
+                );
+            let invalid_state_changed = oauth_invalid_at_unix_secs
+                != latest_key.oauth_invalid_at_unix_secs
+                || oauth_invalid_reason != latest_key.oauth_invalid_reason;
+            let next_codex = (is_codex && request_started_at_unix_ms.is_some()).then(|| {
+                let mut codex = expected_codex_object.cloned().unwrap_or_default();
+                codex.insert(
+                    admin_provider_quota_pure::CODEX_OAUTH_STATE_REQUEST_WATERMARK_KEY.to_string(),
+                    json!(request_started_at_unix_ms.unwrap_or_default()),
+                );
+                if let Some(request_order_id) = request_order_id {
+                    codex.insert(
+                        admin_provider_quota_pure::CODEX_OAUTH_STATE_REQUEST_WATERMARK_ID_KEY
+                            .to_string(),
+                        json!(request_order_id),
+                    );
+                } else {
+                    codex.remove(
+                        admin_provider_quota_pure::CODEX_OAUTH_STATE_REQUEST_WATERMARK_ID_KEY,
+                    );
+                }
+                Value::Object(codex)
+            });
+            if !invalid_state_changed && next_codex.is_none() {
+                return Ok(false);
+            }
+
+            latest_key.oauth_invalid_at_unix_secs = oauth_invalid_at_unix_secs;
+            latest_key.oauth_invalid_reason = oauth_invalid_reason;
+            latest_key.updated_at_unix_secs = Some(now_unix_secs);
+            let current_status_snapshot = latest_key.status_snapshot.take();
+            latest_key.status_snapshot =
+                sync_provider_key_oauth_status_snapshot(current_status_snapshot, &latest_key);
+
+            let updated = self
+                .compare_and_update_provider_catalog_key_oauth_runtime_state(
+                    &ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
+                        key_id: key_id.to_string(),
+                        expected_encrypted_auth_config: Some(
+                            expected_credential_fence.encrypted_auth_config.clone(),
+                        ),
+                        expected_credential: Some(expected_credential_fence.credential.clone()),
+                        expected_upstream_metadata_namespace: is_codex.then(|| {
+                            ProviderCatalogUpstreamMetadataNamespaceExpectation {
+                                namespace: "codex".to_string(),
+                                expected_value: expected_codex.clone(),
+                            }
+                        }),
+                        encrypted_auth_config: expected_credential_fence
+                            .encrypted_auth_config
+                            .clone(),
+                        encrypted_api_key_update: None,
+                        expires_at_unix_secs_update: None,
+                        oauth_invalid_at_unix_secs: latest_key.oauth_invalid_at_unix_secs,
+                        oauth_invalid_reason: latest_key.oauth_invalid_reason.clone(),
+                        upstream_metadata_patch: next_codex
+                            .as_ref()
+                            .map(|codex| json!({"codex": codex})),
+                        upstream_metadata_namespace_to_remove: None,
+                        status_snapshot_patch: provider_key_oauth_status_snapshot_update(
+                            &latest_key,
+                        )
+                        .status_snapshot_patch,
+                        reset_error_count: false,
+                        updated_at_unix_secs: latest_key.updated_at_unix_secs,
+                    },
+                )
+                .await?;
+            if !updated {
+                if attempt + 1 < CODEX_OAUTH_INVALIDATION_CAS_MAX_ATTEMPTS {
+                    tokio::task::yield_now().await;
+                }
+                continue;
+            }
+
+            let delete_namespace_expectation =
+                is_codex.then(|| ProviderCatalogUpstreamMetadataNamespaceExpectation {
+                    namespace: "codex".to_string(),
+                    expected_value: next_codex.or(expected_codex),
+                });
+            let auto_removed = if admin_provider_quota_pure::provider_auto_remove_banned_keys(
+                transport.provider.config.as_ref(),
+            ) && (!is_codex
+                || oauth_invalid_reason_is_account_block(
+                    latest_key.oauth_invalid_reason.as_deref(),
+                ))
+                && admin_provider_quota_pure::should_auto_remove_oauth_invalid_key(
+                    &latest_key,
+                    None,
+                    true,
+                    now_unix_secs,
+                ) {
+                self.delete_provider_transport_oauth_credential_fenced(
+                    key_id,
+                    &expected_credential_fence,
+                    delete_namespace_expectation,
+                )
+                .await?
+            } else {
+                false
+            };
+            let _ = self.invalidate_local_oauth_refresh_entry(key_id).await;
+            tracing::info!(
+                key_id,
+                provider_id = %transport.provider.id,
+                provider_type,
+                updated = true,
+                auto_removed,
+                "gateway fenced OAuth invalidation persisted"
+            );
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    pub(crate) async fn mark_provider_transport_oauth_success_fenced(
+        &self,
+        transport: &provider_transport::GatewayProviderTransportSnapshot,
+        request_started_at_unix_ms: Option<u64>,
+        request_order_id: Option<&str>,
+        observed_credential_generation: Option<&str>,
+    ) -> Result<bool, GatewayError> {
+        let key_id = transport.key.id.trim();
+        if key_id.is_empty()
+            || !transport
+                .provider
+                .provider_type
+                .trim()
+                .eq_ignore_ascii_case("codex")
+            || !transport.key.auth_type.trim().eq_ignore_ascii_case("oauth")
+            || provider_transport::is_codex_agent_identity_transport(transport)
         {
             return Ok(false);
         }
-        latest_key.oauth_invalid_at_unix_secs = oauth_invalid_at_unix_secs;
-        latest_key.oauth_invalid_reason = oauth_invalid_reason;
-        latest_key.updated_at_unix_secs = Some(now_unix_secs);
-        let current_status_snapshot = latest_key.status_snapshot.take();
-        latest_key.status_snapshot =
-            sync_provider_key_oauth_status_snapshot(current_status_snapshot, &latest_key);
-
-        let updated = self
-            .compare_and_update_provider_catalog_key_oauth_runtime_state(
-                &ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
-                    key_id: key_id.to_string(),
-                    expected_encrypted_auth_config: Some(
-                        expected_credential_fence.encrypted_auth_config.clone(),
-                    ),
-                    expected_credential: Some(expected_credential_fence.credential.clone()),
-                    encrypted_auth_config: expected_credential_fence.encrypted_auth_config.clone(),
-                    encrypted_api_key_update: None,
-                    expires_at_unix_secs_update: None,
-                    oauth_invalid_at_unix_secs: latest_key.oauth_invalid_at_unix_secs,
-                    oauth_invalid_reason: latest_key.oauth_invalid_reason.clone(),
-                    upstream_metadata_patch: None,
-                    status_snapshot_patch: provider_key_oauth_status_snapshot_update(&latest_key)
-                        .status_snapshot_patch,
-                    reset_error_count: false,
-                    updated_at_unix_secs: latest_key.updated_at_unix_secs,
-                },
-            )
-            .await?;
-        let auto_removed = if updated
-            && admin_provider_quota_pure::provider_auto_remove_banned_keys(
-                transport.provider.config.as_ref(),
-            )
-            && admin_provider_quota_pure::should_auto_remove_oauth_invalid_key(
-                &latest_key,
-                None,
-                true,
-                now_unix_secs,
-            ) {
-            self.delete_provider_transport_oauth_credential_fenced(
-                key_id,
-                &expected_credential_fence,
-            )
-            .await?
-        } else {
-            false
+        let Some(request_started_at_unix_ms) = request_started_at_unix_ms else {
+            // Without an order fence, an older 2xx could clear a newer 401.
+            return Ok(false);
         };
-        if updated {
-            let _ = self.invalidate_local_oauth_refresh_entry(key_id).await;
+        let Some(request_order_id) = request_order_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Ok(false);
+        };
+        let Some(expected_credential_fence) = self
+            .capture_provider_transport_credential_fence(transport)
+            .await?
+        else {
+            return Ok(false);
+        };
+        let now_unix_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+
+        for attempt in 0..CODEX_OAUTH_INVALIDATION_CAS_MAX_ATTEMPTS {
+            let Some(mut latest_key) = self
+                .data
+                .list_provider_catalog_keys_by_ids(&[key_id.to_string()])
+                .await
+                .map_err(|err| GatewayError::Internal(err.to_string()))?
+                .into_iter()
+                .next()
+            else {
+                return Ok(false);
+            };
+            if latest_key.encrypted_auth_config.as_deref()
+                != Some(expected_credential_fence.encrypted_auth_config.as_str())
+                || latest_key.encrypted_api_key
+                    != expected_credential_fence.credential.encrypted_api_key
+                || latest_key.auth_type != expected_credential_fence.credential.auth_type
+                || latest_key.provider_id != expected_credential_fence.credential.provider_id
+                || !provider_key_is_oauth_managed(&latest_key, "codex")
+            {
+                return Ok(false);
+            }
+
+            let expected_codex = match latest_key.upstream_metadata.as_ref() {
+                Some(Value::Object(metadata)) => metadata.get("codex").cloned(),
+                Some(_) => return Ok(false),
+                None => None,
+            };
+            let expected_codex_object = match expected_codex.as_ref() {
+                Some(Value::Object(codex)) => Some(codex),
+                Some(_) => return Ok(false),
+                None => None,
+            };
+            if !admin_provider_quota_pure::codex_credential_generation_matches(
+                expected_codex.as_ref(),
+                observed_credential_generation,
+            ) || admin_provider_quota_pure::codex_oauth_success_request_order_is_stale(
+                expected_codex_object,
+                Some(request_started_at_unix_ms),
+                Some(request_order_id),
+            ) {
+                return Ok(false);
+            }
+
+            let mut next_codex = expected_codex_object.cloned().unwrap_or_default();
+            next_codex.insert(
+                admin_provider_quota_pure::CODEX_OAUTH_STATE_REQUEST_WATERMARK_KEY.to_string(),
+                json!(request_started_at_unix_ms),
+            );
+            next_codex.insert(
+                admin_provider_quota_pure::CODEX_OAUTH_STATE_REQUEST_WATERMARK_ID_KEY.to_string(),
+                json!(request_order_id),
+            );
+            let next_codex = Value::Object(next_codex);
+
+            (
+                latest_key.oauth_invalid_at_unix_secs,
+                latest_key.oauth_invalid_reason,
+            ) = local_oauth_refresh_success_invalid_state(&latest_key);
+            latest_key.updated_at_unix_secs = Some(now_unix_secs);
+            let current_status_snapshot = latest_key.status_snapshot.take();
+            latest_key.status_snapshot =
+                sync_provider_key_oauth_status_snapshot(current_status_snapshot, &latest_key);
+
+            let updated = self
+                .compare_and_update_provider_catalog_key_oauth_runtime_state(
+                    &ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
+                        key_id: key_id.to_string(),
+                        expected_encrypted_auth_config: Some(
+                            expected_credential_fence.encrypted_auth_config.clone(),
+                        ),
+                        expected_credential: Some(expected_credential_fence.credential.clone()),
+                        expected_upstream_metadata_namespace: Some(
+                            ProviderCatalogUpstreamMetadataNamespaceExpectation {
+                                namespace: "codex".to_string(),
+                                expected_value: expected_codex,
+                            },
+                        ),
+                        encrypted_auth_config: expected_credential_fence
+                            .encrypted_auth_config
+                            .clone(),
+                        encrypted_api_key_update: None,
+                        expires_at_unix_secs_update: None,
+                        oauth_invalid_at_unix_secs: latest_key.oauth_invalid_at_unix_secs,
+                        oauth_invalid_reason: latest_key.oauth_invalid_reason.clone(),
+                        upstream_metadata_patch: Some(json!({"codex": next_codex})),
+                        upstream_metadata_namespace_to_remove: None,
+                        status_snapshot_patch: provider_key_oauth_status_snapshot_update(
+                            &latest_key,
+                        )
+                        .status_snapshot_patch,
+                        reset_error_count: false,
+                        updated_at_unix_secs: latest_key.updated_at_unix_secs,
+                    },
+                )
+                .await?;
+            if updated {
+                tracing::info!(
+                    key_id,
+                    provider_id = %transport.provider.id,
+                    request_started_at_unix_ms,
+                    request_order_id,
+                    "gateway fenced OAuth success persisted"
+                );
+                return Ok(true);
+            }
+            if attempt + 1 < CODEX_OAUTH_INVALIDATION_CAS_MAX_ATTEMPTS {
+                tokio::task::yield_now().await;
+            }
         }
-        tracing::info!(
-            key_id,
-            provider_id = %transport.provider.id,
-            provider_type,
-            updated,
-            auto_removed,
-            "gateway fenced OAuth invalidation persisted"
-        );
-        Ok(updated)
+        Ok(false)
     }
 
     async fn delete_provider_transport_oauth_credential_fenced(
         &self,
         key_id: &str,
         expected: &ProviderTransportCredentialFence,
+        expected_upstream_metadata_namespace: Option<
+            ProviderCatalogUpstreamMetadataNamespaceExpectation,
+        >,
     ) -> Result<bool, GatewayError> {
         let deleted = self
             .compare_and_delete_provider_catalog_key_oauth_credential(
@@ -2046,6 +2310,7 @@ impl AppState {
                     key_id: key_id.to_string(),
                     expected_encrypted_auth_config: Some(expected.encrypted_auth_config.clone()),
                     expected_credential: expected.credential.clone(),
+                    expected_upstream_metadata_namespace,
                 },
             )
             .await?;
@@ -2215,12 +2480,14 @@ impl AppState {
                         key_id: key_id.to_string(),
                         expected_encrypted_auth_config: Some(expected_encrypted_auth_config),
                         expected_credential: Some(expected_credential_fence.credential.clone()),
+                        expected_upstream_metadata_namespace: None,
                         encrypted_auth_config,
                         encrypted_api_key_update: None,
                         expires_at_unix_secs_update: None,
                         oauth_invalid_at_unix_secs: latest_key.oauth_invalid_at_unix_secs,
                         oauth_invalid_reason: latest_key.oauth_invalid_reason.clone(),
                         upstream_metadata_patch: None,
+                        upstream_metadata_namespace_to_remove: None,
                         status_snapshot_patch: provider_key_oauth_status_snapshot_update(
                             &latest_key,
                         )
@@ -2329,12 +2596,14 @@ impl AppState {
                             expected_credential_fence.encrypted_auth_config.clone(),
                         ),
                         expected_credential: Some(expected_credential_fence.credential.clone()),
+                        expected_upstream_metadata_namespace: None,
                         encrypted_auth_config: encrypted_auth_config.to_string(),
                         encrypted_api_key_update: Some(encrypted_api_key.clone()),
                         expires_at_unix_secs_update: Some(entry.expires_at_unix_secs),
                         oauth_invalid_at_unix_secs: latest_key.oauth_invalid_at_unix_secs,
                         oauth_invalid_reason: latest_key.oauth_invalid_reason.clone(),
                         upstream_metadata_patch: None,
+                        upstream_metadata_namespace_to_remove: None,
                         status_snapshot_patch: provider_key_oauth_status_snapshot_update(
                             &latest_key,
                         )
@@ -2402,6 +2671,205 @@ impl AppState {
             "gateway local oauth refresh entry persisted"
         );
         Ok(())
+    }
+
+    pub(crate) async fn persist_local_oauth_refresh_failure_state_observed(
+        &self,
+        transport: &provider_transport::GatewayProviderTransportSnapshot,
+        status_code: u16,
+        body_excerpt: &str,
+        access_token_invalid_proven: bool,
+        observation: CodexRuntimeOAuthObservation<'_>,
+    ) -> Result<bool, GatewayError> {
+        let key_id = transport.key.id.trim();
+        let request_order_id = observation.request_order_id.trim();
+        if key_id.is_empty()
+            || request_order_id.is_empty()
+            || !transport
+                .provider
+                .provider_type
+                .trim()
+                .eq_ignore_ascii_case("codex")
+            || !transport.key.auth_type.trim().eq_ignore_ascii_case("oauth")
+            || provider_transport::is_codex_agent_identity_transport(transport)
+        {
+            return Ok(false);
+        }
+        let Some(expected_credential_fence) = self
+            .capture_provider_transport_credential_fence(transport)
+            .await?
+        else {
+            return Ok(false);
+        };
+        let refresh_reason = format!(
+            "{OAUTH_REFRESH_FAILED_PREFIX}Token 续期失败 ({status_code}): {}",
+            normalize_local_oauth_refresh_error_message(Some(status_code), Some(body_excerpt))
+        );
+        let now_unix_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+
+        for attempt in 0..CODEX_OAUTH_INVALIDATION_CAS_MAX_ATTEMPTS {
+            let Some(mut latest_key) = self
+                .data
+                .list_provider_catalog_keys_by_ids(&[key_id.to_string()])
+                .await
+                .map_err(|err| GatewayError::Internal(err.to_string()))?
+                .into_iter()
+                .next()
+            else {
+                return Ok(false);
+            };
+            if latest_key.encrypted_auth_config.as_deref()
+                != Some(expected_credential_fence.encrypted_auth_config.as_str())
+                || latest_key.encrypted_api_key
+                    != expected_credential_fence.credential.encrypted_api_key
+                || latest_key.auth_type != expected_credential_fence.credential.auth_type
+                || latest_key.provider_id != expected_credential_fence.credential.provider_id
+                || !provider_key_is_oauth_managed(&latest_key, "codex")
+            {
+                return Ok(false);
+            }
+
+            let expected_codex = match latest_key.upstream_metadata.as_ref() {
+                Some(Value::Object(metadata)) => metadata.get("codex").cloned(),
+                Some(_) => return Ok(false),
+                None => None,
+            };
+            let expected_codex_object = match expected_codex.as_ref() {
+                Some(Value::Object(codex)) => Some(codex),
+                Some(_) => return Ok(false),
+                None => None,
+            };
+            if !admin_provider_quota_pure::codex_credential_generation_matches(
+                expected_codex.as_ref(),
+                observation.observed_credential_generation,
+            ) || admin_provider_quota_pure::codex_oauth_state_request_order_is_stale(
+                expected_codex_object,
+                Some(observation.request_started_at_unix_ms),
+                Some(request_order_id),
+            ) {
+                return Ok(false);
+            }
+
+            let mut next_codex = expected_codex_object.cloned().unwrap_or_default();
+            next_codex.insert(
+                admin_provider_quota_pure::CODEX_OAUTH_STATE_REQUEST_WATERMARK_KEY.to_string(),
+                json!(observation.request_started_at_unix_ms),
+            );
+            next_codex.insert(
+                admin_provider_quota_pure::CODEX_OAUTH_STATE_REQUEST_WATERMARK_ID_KEY.to_string(),
+                json!(request_order_id),
+            );
+            let next_codex = Value::Object(next_codex);
+
+            if let Some(runtime_invalid_reason) = observation
+                .runtime_invalid_reason
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                (
+                    latest_key.oauth_invalid_at_unix_secs,
+                    latest_key.oauth_invalid_reason,
+                ) = merge_runtime_oauth_invalid_state(
+                    "codex",
+                    &latest_key,
+                    runtime_invalid_reason,
+                    now_unix_secs,
+                );
+            }
+            if let Some(merged_reason) = merge_local_oauth_refresh_failure_reason(
+                latest_key.oauth_invalid_reason.as_deref(),
+                &refresh_reason,
+            ) {
+                latest_key.oauth_invalid_at_unix_secs = latest_key
+                    .oauth_invalid_at_unix_secs
+                    .or(Some(now_unix_secs));
+                latest_key.oauth_invalid_reason = Some(merged_reason);
+            }
+            latest_key.updated_at_unix_secs = Some(now_unix_secs);
+            let current_status_snapshot = latest_key.status_snapshot.take();
+            latest_key.status_snapshot =
+                sync_provider_key_oauth_status_snapshot(current_status_snapshot, &latest_key);
+
+            let updated = self
+                .compare_and_update_provider_catalog_key_oauth_runtime_state(
+                    &ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
+                        key_id: key_id.to_string(),
+                        expected_encrypted_auth_config: Some(
+                            expected_credential_fence.encrypted_auth_config.clone(),
+                        ),
+                        expected_credential: Some(expected_credential_fence.credential.clone()),
+                        expected_upstream_metadata_namespace: Some(
+                            ProviderCatalogUpstreamMetadataNamespaceExpectation {
+                                namespace: "codex".to_string(),
+                                expected_value: expected_codex,
+                            },
+                        ),
+                        encrypted_auth_config: expected_credential_fence
+                            .encrypted_auth_config
+                            .clone(),
+                        encrypted_api_key_update: None,
+                        expires_at_unix_secs_update: None,
+                        oauth_invalid_at_unix_secs: latest_key.oauth_invalid_at_unix_secs,
+                        oauth_invalid_reason: latest_key.oauth_invalid_reason.clone(),
+                        upstream_metadata_patch: Some(json!({"codex": next_codex.clone()})),
+                        upstream_metadata_namespace_to_remove: None,
+                        status_snapshot_patch: provider_key_oauth_status_snapshot_update(
+                            &latest_key,
+                        )
+                        .status_snapshot_patch,
+                        reset_error_count: false,
+                        updated_at_unix_secs: latest_key.updated_at_unix_secs,
+                    },
+                )
+                .await?;
+            if !updated {
+                if attempt + 1 < CODEX_OAUTH_INVALIDATION_CAS_MAX_ATTEMPTS {
+                    tokio::task::yield_now().await;
+                }
+                continue;
+            }
+
+            let auto_removed = if admin_provider_quota_pure::provider_auto_remove_banned_keys(
+                transport.provider.config.as_ref(),
+            ) && oauth_invalid_reason_is_account_block(
+                latest_key.oauth_invalid_reason.as_deref(),
+            )
+                && admin_provider_quota_pure::should_auto_remove_oauth_invalid_key(
+                    &latest_key,
+                    None,
+                    access_token_invalid_proven,
+                    now_unix_secs,
+                ) {
+                self.delete_provider_transport_oauth_credential_fenced(
+                    key_id,
+                    &expected_credential_fence,
+                    Some(ProviderCatalogUpstreamMetadataNamespaceExpectation {
+                        namespace: "codex".to_string(),
+                        expected_value: Some(next_codex),
+                    }),
+                )
+                .await?
+            } else {
+                false
+            };
+            let _ = self.invalidate_local_oauth_refresh_entry(key_id).await;
+            tracing::info!(
+                key_id,
+                provider_id = %transport.provider.id,
+                status_code,
+                request_started_at_unix_ms = observation.request_started_at_unix_ms,
+                request_order_id,
+                updated = true,
+                auto_removed,
+                "gateway observed local OAuth refresh failure state persisted"
+            );
+            return Ok(auto_removed);
+        }
+        Ok(false)
     }
 
     pub(crate) async fn persist_local_oauth_refresh_failure_state(
@@ -2495,6 +2963,7 @@ impl AppState {
                                 expected_credential_fence.encrypted_auth_config.clone(),
                             ),
                             expected_credential: Some(expected_credential_fence.credential.clone()),
+                            expected_upstream_metadata_namespace: None,
                             encrypted_auth_config: expected_credential_fence
                                 .encrypted_auth_config
                                 .clone(),
@@ -2503,6 +2972,7 @@ impl AppState {
                             oauth_invalid_at_unix_secs: latest_key.oauth_invalid_at_unix_secs,
                             oauth_invalid_reason: latest_key.oauth_invalid_reason.clone(),
                             upstream_metadata_patch: None,
+                            upstream_metadata_namespace_to_remove: None,
                             status_snapshot_patch: provider_key_oauth_status_snapshot_update(
                                 &latest_key,
                             )
@@ -2554,6 +3024,7 @@ impl AppState {
             self.delete_provider_transport_oauth_credential_fenced(
                 key_id,
                 &expected_credential_fence,
+                None,
             )
             .await?
         } else if !transport
@@ -2927,8 +3398,9 @@ mod tests {
     use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
     use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
     use aether_data_contracts::repository::provider_catalog::{
-        ProviderCatalogKeyListQuery, ProviderCatalogReadRepository, ProviderCatalogWriteRepository,
-        StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
+        ProviderCatalogKeyAdminCasUpdate, ProviderCatalogKeyListQuery,
+        ProviderCatalogKeyOAuthCredentialFence, ProviderCatalogReadRepository,
+        ProviderCatalogWriteRepository, StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
         StoredProviderCatalogKeyMaintenanceSummary, StoredProviderCatalogKeyPage,
         StoredProviderCatalogKeyStats, StoredProviderCatalogProvider,
     };
@@ -2938,10 +3410,10 @@ mod tests {
     use tokio::sync::Notify;
 
     use super::{
-        AgentIdentityAuthConfigFence, AppState, ProviderTransportSnapshotCacheKey,
-        ProviderTransportSnapshotFlight, ProviderTransportSnapshotFlightResult,
-        ProviderTransportSnapshotInflightRegistration, PROVIDER_TRANSPORT_SNAPSHOT_CACHE_STALE_TTL,
-        PROVIDER_TRANSPORT_SNAPSHOT_CACHE_TTL,
+        AgentIdentityAuthConfigFence, AppState, CodexRuntimeOAuthObservation,
+        ProviderTransportSnapshotCacheKey, ProviderTransportSnapshotFlight,
+        ProviderTransportSnapshotFlightResult, ProviderTransportSnapshotInflightRegistration,
+        PROVIDER_TRANSPORT_SNAPSHOT_CACHE_STALE_TTL, PROVIDER_TRANSPORT_SNAPSHOT_CACHE_TTL,
     };
     use crate::data::GatewayDataState;
 
@@ -3102,6 +3574,40 @@ mod tests {
                     .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
             );
         (state, repository, encrypted_auth_config)
+    }
+
+    async fn replace_key_credential_for_test(
+        repository: &InMemoryProviderCatalogReadRepository,
+        replacement: StoredProviderCatalogKey,
+        provider_type: &str,
+    ) {
+        let current = repository
+            .list_keys_by_ids(std::slice::from_ref(&replacement.id))
+            .await
+            .expect("current key should load before replacement")
+            .into_iter()
+            .next()
+            .expect("current key should exist before replacement");
+        let codex_rotation = provider_type.eq_ignore_ascii_case("codex").then(|| {
+            json!({
+                "credential_generation": "test-admin-replacement-generation"
+            })
+        });
+        assert!(repository
+            .compare_and_update_key_admin_state(&ProviderCatalogKeyAdminCasUpdate {
+                expected_encrypted_auth_config: current.encrypted_auth_config.clone(),
+                expected_credential: ProviderCatalogKeyOAuthCredentialFence {
+                    encrypted_api_key: current.encrypted_api_key.clone(),
+                    auth_type: current.auth_type.clone(),
+                    provider_id: current.provider_id.clone(),
+                    provider_type: provider_type.to_string(),
+                },
+                key: replacement,
+                codex_rotation,
+                reset_oauth_runtime: true,
+            })
+            .await
+            .expect("credential replacement CAS should run"));
     }
 
     fn state_with_global_format_conversion(enabled: bool) -> AppState {
@@ -4006,10 +4512,7 @@ mod tests {
             encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "admin-replacement")
                 .expect("replacement credential should encrypt"),
         );
-        repository
-            .update_key(&replacement)
-            .await
-            .expect("replacement credential should persist");
+        replace_key_credential_for_test(repository.as_ref(), replacement, "vertex_ai").await;
 
         assert!(
             state
@@ -4093,10 +4596,7 @@ mod tests {
             )
             .expect("replacement config should encrypt"),
         );
-        repository
-            .update_key(&replaced)
-            .await
-            .expect("replacement should persist");
+        replace_key_credential_for_test(repository.as_ref(), replaced, "codex").await;
 
         assert!(matches!(
             state
@@ -4152,10 +4652,7 @@ mod tests {
         replaced.encrypted_auth_config = Some(replacement_auth_config.clone());
         replaced.encrypted_api_key = Some(replacement_api_key.clone());
         replaced.expires_at_unix_secs = None;
-        repository
-            .update_key(&replaced)
-            .await
-            .expect("replacement should persist");
+        replace_key_credential_for_test(repository.as_ref(), replaced, "codex").await;
 
         let refreshed_entry = crate::provider_transport::CachedOAuthEntry {
             provider_type: "codex".to_string(),
@@ -4220,10 +4717,7 @@ mod tests {
             .pop()
             .expect("key should exist");
         replaced.encrypted_api_key = Some(replacement_api_key.clone());
-        repository
-            .update_key(&replaced)
-            .await
-            .expect("access token replacement should persist");
+        replace_key_credential_for_test(repository.as_ref(), replaced, "codex").await;
 
         assert!(!state
             .persist_local_oauth_refresh_failure_state(
@@ -4273,15 +4767,15 @@ mod tests {
             .pop()
             .expect("key should exist");
         replaced.encrypted_api_key = Some(replacement_api_key.clone());
-        repository
-            .update_key(&replaced)
-            .await
-            .expect("access token replacement should persist");
+        replace_key_credential_for_test(repository.as_ref(), replaced, "codex").await;
 
         assert!(!state
             .mark_provider_transport_oauth_invalid_fenced(
                 &stale_transport,
                 "[OAUTH_EXPIRED] stale request",
+                None,
+                None,
+                None,
             )
             .await
             .expect("stale invalidation should be ignored"));
@@ -4298,5 +4792,808 @@ mod tests {
         );
         assert!(stored.oauth_invalid_at_unix_secs.is_none());
         assert!(stored.oauth_invalid_reason.is_none());
+    }
+
+    #[tokio::test]
+    async fn newer_runtime_oauth_success_clears_older_invalid_and_advances_watermark() {
+        let initial_config = json!({
+            "provider_type": "codex",
+            "refresh_token": "refresh-stable",
+            "expires_at": 4102444800_u64
+        });
+        let (state, repository, _) = codex_oauth_state(&initial_config, "access-current");
+        let transport = state
+            .read_provider_transport_snapshot("provider-1", "endpoint-1", "key-1")
+            .await
+            .expect("transport should load")
+            .expect("transport should exist");
+
+        assert!(state
+            .mark_provider_transport_oauth_invalid_fenced(
+                &transport,
+                "[OAUTH_EXPIRED] stale request",
+                Some(1_000),
+                Some("01900000-0000-7000-8000-000000000010"),
+                None,
+            )
+            .await
+            .expect("older invalidation should persist"));
+        assert!(state
+            .mark_provider_transport_oauth_success_fenced(
+                &transport,
+                Some(1_001),
+                Some("01900000-0000-7000-8000-000000000011"),
+                None,
+            )
+            .await
+            .expect("newer success should persist"));
+
+        let stored = repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key should reload")
+            .pop()
+            .expect("key should remain");
+        assert!(stored.oauth_invalid_at_unix_secs.is_none());
+        assert!(stored.oauth_invalid_reason.is_none());
+        let codex = stored
+            .upstream_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("codex"))
+            .expect("Codex metadata should exist");
+        assert_eq!(
+            codex["oauth_state_request_started_at_unix_ms"],
+            json!(1_001_u64)
+        );
+        assert_eq!(
+            codex["oauth_state_request_id"],
+            json!("01900000-0000-7000-8000-000000000011")
+        );
+        assert_eq!(
+            stored
+                .status_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.get("oauth"))
+                .and_then(|oauth| oauth.get("requires_reauth")),
+            Some(&json!(false))
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_oauth_success_allows_equal_quota_watermark() {
+        let initial_config = json!({
+            "provider_type": "codex",
+            "refresh_token": "refresh-stable",
+            "expires_at": 4102444800_u64
+        });
+        let (state, repository, _) = codex_oauth_state(&initial_config, "access-current");
+        repository
+            .update_key_oauth_runtime_state(
+                "key-1",
+                Some(1),
+                Some("[OAUTH_EXPIRED] response raced with quota persistence"),
+                None,
+                Some(1),
+            )
+            .await
+            .expect("invalid state should persist");
+        repository
+            .upsert_key_upstream_metadata_namespace(
+                "key-1",
+                "codex",
+                &json!({
+                    "account_quota_request_started_at_unix_ms": 1_000_u64,
+                    "account_quota_request_id": "01900000-0000-7000-8000-000000000010"
+                }),
+                Some(1),
+            )
+            .await
+            .expect("quota watermark should persist");
+        let transport = state
+            .read_provider_transport_snapshot("provider-1", "endpoint-1", "key-1")
+            .await
+            .expect("transport should load")
+            .expect("transport should exist");
+
+        assert!(state
+            .mark_provider_transport_oauth_success_fenced(
+                &transport,
+                Some(1_000),
+                Some("01900000-0000-7000-8000-000000000010"),
+                None,
+            )
+            .await
+            .expect("the same response should be idempotently accepted"));
+
+        let stored = repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key should reload")
+            .pop()
+            .expect("key should remain");
+        assert!(stored.oauth_invalid_at_unix_secs.is_none());
+        assert!(stored.oauth_invalid_reason.is_none());
+        let codex = stored
+            .upstream_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("codex"))
+            .expect("Codex metadata should exist");
+        assert_eq!(
+            codex["oauth_state_request_id"],
+            json!("01900000-0000-7000-8000-000000000010")
+        );
+        assert_eq!(
+            codex["account_quota_request_id"],
+            json!("01900000-0000-7000-8000-000000000010")
+        );
+    }
+
+    #[tokio::test]
+    async fn older_runtime_oauth_success_cannot_clear_newer_invalid() {
+        let initial_config = json!({
+            "provider_type": "codex",
+            "refresh_token": "refresh-stable",
+            "expires_at": 4102444800_u64
+        });
+        let (state, repository, _) = codex_oauth_state(&initial_config, "access-current");
+        let transport = state
+            .read_provider_transport_snapshot("provider-1", "endpoint-1", "key-1")
+            .await
+            .expect("transport should load")
+            .expect("transport should exist");
+
+        assert!(state
+            .mark_provider_transport_oauth_invalid_fenced(
+                &transport,
+                "[OAUTH_EXPIRED] newer request",
+                Some(1_001),
+                Some("01900000-0000-7000-8000-000000000011"),
+                None,
+            )
+            .await
+            .expect("newer invalidation should persist"));
+        assert!(!state
+            .mark_provider_transport_oauth_success_fenced(
+                &transport,
+                Some(1_000),
+                Some("01900000-0000-7000-8000-000000000010"),
+                None,
+            )
+            .await
+            .expect("older success should be ignored"));
+
+        let stored = repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key should reload")
+            .pop()
+            .expect("key should remain");
+        assert_eq!(
+            stored.oauth_invalid_reason.as_deref(),
+            Some("[OAUTH_EXPIRED] newer request")
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_oauth_success_uses_request_id_for_same_millisecond_ordering() {
+        let initial_config = json!({
+            "provider_type": "codex",
+            "refresh_token": "refresh-stable",
+            "expires_at": 4102444800_u64
+        });
+        let (state, repository, _) = codex_oauth_state(&initial_config, "access-current");
+        let transport = state
+            .read_provider_transport_snapshot("provider-1", "endpoint-1", "key-1")
+            .await
+            .expect("transport should load")
+            .expect("transport should exist");
+
+        assert!(state
+            .mark_provider_transport_oauth_invalid_fenced(
+                &transport,
+                "[OAUTH_EXPIRED] same millisecond request",
+                Some(1_000),
+                Some("01900000-0000-7000-8000-000000000010"),
+                None,
+            )
+            .await
+            .expect("invalidation should persist"));
+        assert!(!state
+            .mark_provider_transport_oauth_success_fenced(
+                &transport,
+                Some(1_000),
+                Some("01900000-0000-7000-8000-000000000009"),
+                None,
+            )
+            .await
+            .expect("lower request id should be ignored"));
+        assert!(state
+            .mark_provider_transport_oauth_success_fenced(
+                &transport,
+                Some(1_000),
+                Some("01900000-0000-7000-8000-000000000011"),
+                None,
+            )
+            .await
+            .expect("higher request id should persist"));
+
+        let stored = repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key should reload")
+            .pop()
+            .expect("key should remain");
+        assert!(stored.oauth_invalid_reason.is_none());
+    }
+
+    #[tokio::test]
+    async fn runtime_oauth_success_preserves_account_block() {
+        let initial_config = json!({
+            "provider_type": "codex",
+            "refresh_token": "refresh-stable",
+            "expires_at": 4102444800_u64
+        });
+        let (state, repository, _) = codex_oauth_state(&initial_config, "access-current");
+        repository
+            .update_key_oauth_runtime_state(
+                "key-1",
+                Some(1),
+                Some("[ACCOUNT_BLOCK] account deactivated"),
+                None,
+                Some(1),
+            )
+            .await
+            .expect("account block should persist");
+        let transport = state
+            .read_provider_transport_snapshot("provider-1", "endpoint-1", "key-1")
+            .await
+            .expect("transport should load")
+            .expect("transport should exist");
+
+        assert!(state
+            .mark_provider_transport_oauth_success_fenced(
+                &transport,
+                Some(1_000),
+                Some("01900000-0000-7000-8000-000000000010"),
+                None,
+            )
+            .await
+            .expect("success watermark should persist"));
+
+        let stored = repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key should reload")
+            .pop()
+            .expect("key should remain");
+        assert_eq!(
+            stored.oauth_invalid_reason.as_deref(),
+            Some("[ACCOUNT_BLOCK] account deactivated")
+        );
+        assert_eq!(stored.oauth_invalid_at_unix_secs, Some(1));
+    }
+
+    #[tokio::test]
+    async fn runtime_oauth_success_rejects_credential_generation_mismatch() {
+        let initial_config = json!({
+            "provider_type": "codex",
+            "refresh_token": "refresh-stable",
+            "expires_at": 4102444800_u64
+        });
+        let (state, repository, _) = codex_oauth_state(&initial_config, "access-current");
+        repository
+            .update_key_oauth_runtime_state(
+                "key-1",
+                Some(1),
+                Some("[OAUTH_EXPIRED] current generation invalid"),
+                None,
+                Some(1),
+            )
+            .await
+            .expect("invalid state should persist");
+        repository
+            .upsert_key_upstream_metadata_namespace(
+                "key-1",
+                "codex",
+                &json!({"credential_generation": "credential-v2"}),
+                Some(1),
+            )
+            .await
+            .expect("credential generation should persist");
+        let transport = state
+            .read_provider_transport_snapshot("provider-1", "endpoint-1", "key-1")
+            .await
+            .expect("transport should load")
+            .expect("transport should exist");
+
+        assert!(!state
+            .mark_provider_transport_oauth_success_fenced(
+                &transport,
+                Some(1_000),
+                Some("01900000-0000-7000-8000-000000000010"),
+                Some("credential-v1"),
+            )
+            .await
+            .expect("stale generation should be ignored"));
+
+        let stored = repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key should reload")
+            .pop()
+            .expect("key should remain");
+        assert_eq!(
+            stored.oauth_invalid_reason.as_deref(),
+            Some("[OAUTH_EXPIRED] current generation invalid")
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_oauth_success_rejects_replaced_transport_credential() {
+        let initial_config = json!({
+            "provider_type": "codex",
+            "refresh_token": "refresh-stable",
+            "expires_at": 4102444800_u64
+        });
+        let (state, repository, _) = codex_oauth_state(&initial_config, "access-old");
+        repository
+            .update_key_oauth_runtime_state(
+                "key-1",
+                Some(1),
+                Some("[OAUTH_EXPIRED] replacement generation invalid"),
+                None,
+                Some(1),
+            )
+            .await
+            .expect("invalid state should persist");
+        let stale_transport = state
+            .read_provider_transport_snapshot("provider-1", "endpoint-1", "key-1")
+            .await
+            .expect("transport should load")
+            .expect("transport should exist");
+
+        let replacement_api_key =
+            encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "access-admin")
+                .expect("replacement api key should encrypt");
+        let mut replaced = repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key should load")
+            .pop()
+            .expect("key should exist");
+        replaced.encrypted_api_key = Some(replacement_api_key);
+        replace_key_credential_for_test(repository.as_ref(), replaced, "codex").await;
+        repository
+            .update_key_oauth_runtime_state(
+                "key-1",
+                Some(1),
+                Some("[OAUTH_EXPIRED] replacement generation invalid"),
+                None,
+                Some(1),
+            )
+            .await
+            .expect("replacement invalid state should persist");
+
+        assert!(!state
+            .mark_provider_transport_oauth_success_fenced(
+                &stale_transport,
+                Some(1_000),
+                Some("01900000-0000-7000-8000-000000000010"),
+                None,
+            )
+            .await
+            .expect("stale transport should be ignored"));
+
+        let stored = repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key should reload")
+            .pop()
+            .expect("key should remain");
+        assert_eq!(
+            stored.oauth_invalid_reason.as_deref(),
+            Some("[OAUTH_EXPIRED] replacement generation invalid")
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_oauth_success_requires_complete_request_order() {
+        let initial_config = json!({
+            "provider_type": "codex",
+            "refresh_token": "refresh-stable",
+            "expires_at": 4102444800_u64
+        });
+        let (state, repository, _) = codex_oauth_state(&initial_config, "access-current");
+        repository
+            .update_key_oauth_runtime_state(
+                "key-1",
+                Some(1),
+                Some("[OAUTH_EXPIRED] unordered response"),
+                None,
+                Some(1),
+            )
+            .await
+            .expect("invalid state should persist");
+        let transport = state
+            .read_provider_transport_snapshot("provider-1", "endpoint-1", "key-1")
+            .await
+            .expect("transport should load")
+            .expect("transport should exist");
+
+        assert!(!state
+            .mark_provider_transport_oauth_success_fenced(
+                &transport,
+                None,
+                Some("01900000-0000-7000-8000-000000000010"),
+                None,
+            )
+            .await
+            .expect("missing timestamp should be ignored"));
+        assert!(!state
+            .mark_provider_transport_oauth_success_fenced(&transport, Some(1_000), None, None,)
+            .await
+            .expect("missing request id should be ignored"));
+
+        let stored = repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key should reload")
+            .pop()
+            .expect("key should remain");
+        assert_eq!(
+            stored.oauth_invalid_reason.as_deref(),
+            Some("[OAUTH_EXPIRED] unordered response")
+        );
+    }
+
+    #[tokio::test]
+    async fn older_observed_refresh_failure_cannot_override_newer_success() {
+        let initial_config = json!({
+            "provider_type": "codex",
+            "refresh_token": "refresh-stable",
+            "expires_at": 4102444800_u64
+        });
+        let (state, repository, _) = codex_oauth_state(&initial_config, "access-current");
+        let transport = state
+            .read_provider_transport_snapshot("provider-1", "endpoint-1", "key-1")
+            .await
+            .expect("transport should load")
+            .expect("transport should exist");
+
+        assert!(state
+            .mark_provider_transport_oauth_success_fenced(
+                &transport,
+                Some(1_001),
+                Some("01900000-0000-7000-8000-000000000011"),
+                None,
+            )
+            .await
+            .expect("newer success should persist"));
+        assert!(!state
+            .persist_local_oauth_refresh_failure_state_observed(
+                &transport,
+                401,
+                r#"{"error":"invalid_grant"}"#,
+                true,
+                CodexRuntimeOAuthObservation {
+                    request_started_at_unix_ms: 1_000,
+                    request_order_id: "01900000-0000-7000-8000-000000000010",
+                    observed_credential_generation: None,
+                    runtime_invalid_reason: None,
+                },
+            )
+            .await
+            .expect("older refresh failure should be ignored"));
+
+        let stored = repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key should reload")
+            .pop()
+            .expect("key should remain");
+        assert!(stored.oauth_invalid_reason.is_none());
+        assert_eq!(
+            stored
+                .upstream_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("codex"))
+                .and_then(|codex| codex.get("oauth_state_request_id")),
+            Some(&json!("01900000-0000-7000-8000-000000000011"))
+        );
+    }
+
+    #[tokio::test]
+    async fn newer_success_clears_observed_refresh_failure() {
+        let initial_config = json!({
+            "provider_type": "codex",
+            "refresh_token": "refresh-stable",
+            "expires_at": 4102444800_u64
+        });
+        let (state, repository, _) = codex_oauth_state(&initial_config, "access-current");
+        let transport = state
+            .read_provider_transport_snapshot("provider-1", "endpoint-1", "key-1")
+            .await
+            .expect("transport should load")
+            .expect("transport should exist");
+
+        assert!(!state
+            .persist_local_oauth_refresh_failure_state_observed(
+                &transport,
+                401,
+                r#"{"error":"invalid_grant"}"#,
+                true,
+                CodexRuntimeOAuthObservation {
+                    request_started_at_unix_ms: 1_000,
+                    request_order_id: "01900000-0000-7000-8000-000000000010",
+                    observed_credential_generation: None,
+                    runtime_invalid_reason: None,
+                },
+            )
+            .await
+            .expect("refresh failure should persist without auto-removal"));
+        let failed = repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key should reload")
+            .pop()
+            .expect("key should remain");
+        assert!(failed
+            .oauth_invalid_reason
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with("[REFRESH_FAILED]")));
+
+        assert!(state
+            .mark_provider_transport_oauth_success_fenced(
+                &transport,
+                Some(1_001),
+                Some("01900000-0000-7000-8000-000000000011"),
+                None,
+            )
+            .await
+            .expect("newer success should persist"));
+        let stored = repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key should reload")
+            .pop()
+            .expect("key should remain");
+        assert!(stored.oauth_invalid_at_unix_secs.is_none());
+        assert!(stored.oauth_invalid_reason.is_none());
+    }
+
+    #[tokio::test]
+    async fn observed_refresh_failure_rejects_credential_generation_mismatch() {
+        let initial_config = json!({
+            "provider_type": "codex",
+            "refresh_token": "refresh-stable",
+            "expires_at": 4102444800_u64
+        });
+        let (state, repository, _) = codex_oauth_state(&initial_config, "access-current");
+        repository
+            .upsert_key_upstream_metadata_namespace(
+                "key-1",
+                "codex",
+                &json!({"credential_generation": "credential-v2"}),
+                Some(1),
+            )
+            .await
+            .expect("credential generation should persist");
+        let transport = state
+            .read_provider_transport_snapshot("provider-1", "endpoint-1", "key-1")
+            .await
+            .expect("transport should load")
+            .expect("transport should exist");
+
+        assert!(!state
+            .persist_local_oauth_refresh_failure_state_observed(
+                &transport,
+                401,
+                r#"{"error":"invalid_grant"}"#,
+                true,
+                CodexRuntimeOAuthObservation {
+                    request_started_at_unix_ms: 1_000,
+                    request_order_id: "01900000-0000-7000-8000-000000000010",
+                    observed_credential_generation: Some("credential-v1"),
+                    runtime_invalid_reason: None,
+                },
+            )
+            .await
+            .expect("stale generation should be ignored"));
+
+        let stored = repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key should reload")
+            .pop()
+            .expect("key should remain");
+        assert!(stored.oauth_invalid_reason.is_none());
+        assert!(stored
+            .upstream_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("codex"))
+            .and_then(|codex| codex.get("oauth_state_request_id"))
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn codex_runtime_invalid_is_not_auto_removed_before_newer_success() {
+        let initial_config = json!({
+            "provider_type": "codex",
+            "refresh_token": "refresh-stable",
+            "expires_at": 4102444800_u64
+        });
+        let (state, repository, _) = codex_oauth_state(&initial_config, "access-current");
+        let mut provider = repository
+            .list_providers_by_ids(&["provider-1".to_string()])
+            .await
+            .expect("provider should load")
+            .pop()
+            .expect("provider should exist");
+        provider.config = Some(json!({
+            "pool_advanced": {"auto_remove_banned_keys": true}
+        }));
+        repository
+            .update_provider(&provider)
+            .await
+            .expect("provider config should persist");
+        state.clear_provider_transport_snapshot_cache();
+        let transport = state
+            .read_provider_transport_snapshot("provider-1", "endpoint-1", "key-1")
+            .await
+            .expect("transport should load")
+            .expect("transport should exist");
+
+        assert!(state
+            .mark_provider_transport_oauth_invalid_fenced(
+                &transport,
+                "oauth_token_invalid",
+                Some(1_000),
+                Some("01900000-0000-7000-8000-000000000010"),
+                None,
+            )
+            .await
+            .expect("runtime invalid should persist"));
+        let invalid = repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key lookup should succeed")
+            .into_iter()
+            .next()
+            .expect("recoverable runtime invalid must retain the key");
+        assert_eq!(
+            invalid.oauth_invalid_reason.as_deref(),
+            Some("oauth_token_invalid")
+        );
+        assert!(invalid.oauth_invalid_at_unix_secs.is_some());
+        assert_eq!(
+            invalid
+                .upstream_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("codex"))
+                .and_then(|codex| codex.get("oauth_state_request_id")),
+            Some(&json!("01900000-0000-7000-8000-000000000010"))
+        );
+        assert!(state
+            .mark_provider_transport_oauth_success_fenced(
+                &transport,
+                Some(1_001),
+                Some("01900000-0000-7000-8000-000000000011"),
+                None,
+            )
+            .await
+            .expect("newer success should clear invalid"));
+    }
+
+    #[tokio::test]
+    async fn codex_observed_terminal_refresh_failure_is_persisted_without_auto_removal() {
+        let initial_config = json!({
+            "provider_type": "codex",
+            "refresh_token": "refresh-stable",
+            "expires_at": 4102444800_u64
+        });
+        let (state, repository, _) = codex_oauth_state(&initial_config, "access-current");
+        let mut provider = repository
+            .list_providers_by_ids(&["provider-1".to_string()])
+            .await
+            .expect("provider should load")
+            .pop()
+            .expect("provider should exist");
+        provider.config = Some(json!({
+            "pool_advanced": {"auto_remove_banned_keys": true}
+        }));
+        repository
+            .update_provider(&provider)
+            .await
+            .expect("provider config should persist");
+        state.clear_provider_transport_snapshot_cache();
+        let transport = state
+            .read_provider_transport_snapshot("provider-1", "endpoint-1", "key-1")
+            .await
+            .expect("transport should load")
+            .expect("transport should exist");
+
+        assert!(!state
+            .persist_local_oauth_refresh_failure_state_observed(
+                &transport,
+                401,
+                r#"{"error":{"code":"invalid_grant","message":"refresh token invalid"}}"#,
+                true,
+                CodexRuntimeOAuthObservation {
+                    request_started_at_unix_ms: 1_000,
+                    request_order_id: "01900000-0000-7000-8000-000000000010",
+                    observed_credential_generation: None,
+                    runtime_invalid_reason: Some("[OAUTH_EXPIRED] session expired"),
+                },
+            )
+            .await
+            .expect("terminal refresh failure should persist without auto-removal"));
+
+        let stored = repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key lookup should succeed")
+            .into_iter()
+            .next()
+            .expect("request-scoped terminal refresh failure must retain the key");
+        let reason = stored
+            .oauth_invalid_reason
+            .as_deref()
+            .expect("combined invalid reason should persist");
+        assert!(reason.starts_with("[OAUTH_EXPIRED] session expired"));
+        assert!(reason.contains("[REFRESH_FAILED]"));
+        assert!(stored.oauth_invalid_at_unix_secs.is_some());
+        assert_eq!(
+            stored
+                .upstream_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("codex"))
+                .and_then(|codex| codex.get("oauth_state_request_id")),
+            Some(&json!("01900000-0000-7000-8000-000000000010"))
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_runtime_account_block_is_still_auto_removed() {
+        let initial_config = json!({
+            "provider_type": "codex",
+            "refresh_token": "refresh-stable",
+            "expires_at": 4102444800_u64
+        });
+        let (state, repository, _) = codex_oauth_state(&initial_config, "access-current");
+        let mut provider = repository
+            .list_providers_by_ids(&["provider-1".to_string()])
+            .await
+            .expect("provider should load")
+            .pop()
+            .expect("provider should exist");
+        provider.config = Some(json!({
+            "pool_advanced": {"auto_remove_banned_keys": true}
+        }));
+        repository
+            .update_provider(&provider)
+            .await
+            .expect("provider config should persist");
+        state.clear_provider_transport_snapshot_cache();
+        let transport = state
+            .read_provider_transport_snapshot("provider-1", "endpoint-1", "key-1")
+            .await
+            .expect("transport should load")
+            .expect("transport should exist");
+
+        assert!(state
+            .mark_provider_transport_oauth_invalid_fenced(
+                &transport,
+                "[ACCOUNT_BLOCK] account deactivated",
+                Some(1_000),
+                Some("01900000-0000-7000-8000-000000000010"),
+                None,
+            )
+            .await
+            .expect("account block should persist and auto-remove"));
+        assert!(repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key lookup should succeed")
+            .is_empty());
     }
 }

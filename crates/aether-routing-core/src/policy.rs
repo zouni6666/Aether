@@ -277,7 +277,9 @@ mod tests {
 
     use serde_json::json;
 
-    use crate::actions::{RoutingJsonPatchOperation, RoutingRulePhase};
+    use crate::actions::{
+        RoutingJsonPatchOperation, RoutingRulePhase, RoutingSchedulingMode, RoutingSetPriorityMode,
+    };
     use crate::conditions::{RoutingCondition, RoutingConditionOp};
     use crate::model::{RoutingDefaultPolicy, RoutingRule};
 
@@ -350,6 +352,86 @@ mod tests {
         );
         assert_eq!(policy.matched_rules.len(), 1);
         assert_eq!(policy.mutation_plan.body_patch.len(), 1);
+    }
+
+    #[test]
+    fn empty_allowlist_keeps_default_policy_for_models_without_an_override() {
+        let config = RoutingGroupConfig {
+            allowed_models: vec![],
+            default_policy: RoutingDefaultPolicy {
+                priority_mode: RoutingSetPriorityMode::GlobalKey,
+                scheduling_mode: RoutingSchedulingMode::LoadBalance,
+                keep_priority_on_conversion: true,
+            },
+            model_policies: vec![RoutingModelPolicy {
+                model: "special-model".to_string(),
+                allowed_providers: vec!["provider-special".to_string()],
+                provider_priority_overrides: BTreeMap::from([("provider-special".to_string(), 0)]),
+                ..RoutingModelPolicy::default()
+            }],
+            rules: vec![],
+        };
+
+        let special = resolve_routing_policy(
+            &config,
+            RoutingPolicyInput {
+                group_id: Some("group-1"),
+                group_version: Some(1),
+                selection_source: "test",
+                requested_model: "special-model",
+                resolved_model: "special-model",
+                api_format: "openai:chat",
+                user_id: None,
+                api_key_id: None,
+                headers: &json!({}),
+                body: &json!({}),
+                phase: RoutingRulePhase::ClientRequest,
+            },
+        )
+        .expect("the specially configured model should resolve");
+
+        assert_eq!(special.priority_mode, RoutingSetPriorityMode::GlobalKey);
+        assert_eq!(special.scheduling_mode, RoutingSchedulingMode::LoadBalance);
+        assert!(special.keep_priority_on_conversion);
+        assert_eq!(
+            special.ranking_overlay.allowed_providers,
+            vec!["provider-special"]
+        );
+        assert_eq!(
+            special
+                .ranking_overlay
+                .provider_priority_overrides
+                .get("provider-special"),
+            Some(&0)
+        );
+
+        let ordinary = resolve_routing_policy(
+            &config,
+            RoutingPolicyInput {
+                group_id: Some("group-1"),
+                group_version: Some(1),
+                selection_source: "test",
+                requested_model: "ordinary-model",
+                resolved_model: "ordinary-model",
+                api_format: "openai:chat",
+                user_id: None,
+                api_key_id: None,
+                headers: &json!({}),
+                body: &json!({}),
+                phase: RoutingRulePhase::ClientRequest,
+            },
+        )
+        .expect("an unconfigured model should keep using the default policy");
+
+        assert_eq!(ordinary.priority_mode, RoutingSetPriorityMode::GlobalKey);
+        assert_eq!(ordinary.scheduling_mode, RoutingSchedulingMode::LoadBalance);
+        assert!(ordinary.keep_priority_on_conversion);
+        assert!(ordinary.ranking_overlay.allowed_providers.is_empty());
+        assert!(ordinary.ranking_overlay.allowed_keys.is_empty());
+        assert!(ordinary
+            .ranking_overlay
+            .provider_priority_overrides
+            .is_empty());
     }
 
     #[test]

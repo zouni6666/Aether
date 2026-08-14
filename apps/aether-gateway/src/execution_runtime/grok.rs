@@ -841,6 +841,7 @@ fn encode_grok_headers_frame(
         payload: StreamFramePayload::Headers {
             status_code,
             headers,
+            response_observation: None,
         },
     })
 }
@@ -2157,6 +2158,7 @@ fn grok_execution_result(
         candidate_id: plan.candidate_id.clone(),
         status_code,
         headers: BTreeMap::from([("content-type".to_string(), "application/json".to_string())]),
+        response_observation: None,
         body: Some(ResponseBody {
             json_body: Some(body_json),
             body_bytes_b64: None,
@@ -2220,6 +2222,7 @@ fn grok_collected_frame_stream(
                         "application/json".to_string()
                     },
                 )]),
+                response_observation: None,
             },
         },
         StreamFrame {

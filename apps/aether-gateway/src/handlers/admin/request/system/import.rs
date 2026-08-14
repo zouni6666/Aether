@@ -4,10 +4,12 @@ use crate::api::ai::admin_endpoint_signature_parts;
 use crate::handlers::admin::admin_provider_pool_config;
 use crate::handlers::admin::model::ADMIN_EXTERNAL_MODELS_PROXY_NODE_CONFIG_KEY;
 use crate::handlers::admin::provider::endpoints_admin::payloads::AdminProviderEndpointUpdatePatch;
+use crate::handlers::admin::provider::oauth::provisioning::ensure_codex_credential_generation_rotated;
 use crate::handlers::admin::provider::shared::payloads::{
     AdminProviderCreateRequest, AdminProviderKeyCreateRequest, AdminProviderKeyUpdatePatch,
     AdminProviderUpdatePatch,
 };
+use crate::handlers::admin::provider::write::keys::build_provider_catalog_key_admin_cas_update;
 use crate::handlers::admin::shared::{
     normalize_json_array, normalize_json_object, normalize_string_list,
 };
@@ -377,10 +379,14 @@ fn normalize_import_key_raw_payload(
 
 fn apply_imported_oauth_key_credentials(
     state: &AdminAppState<'_>,
+    provider_type: &str,
+    previous_codex_credential_generation: Option<&str>,
     raw_key: &Map<String, Value>,
     normalized_auth_config: Option<&Value>,
     record: &mut aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey,
 ) -> Result<bool, String> {
+    let previous_encrypted_api_key = record.encrypted_api_key.clone();
+    let previous_encrypted_auth_config = record.encrypted_auth_config.clone();
     let mut credentials_supplied = false;
     let mut api_key_supplied = false;
     if let Some(api_key_value) = raw_key.get("api_key") {
@@ -424,9 +430,18 @@ fn apply_imported_oauth_key_credentials(
         api_key_supplied,
     );
 
+    let credential_material_changed = record.encrypted_api_key != previous_encrypted_api_key
+        || record.encrypted_auth_config != previous_encrypted_auth_config;
     if credentials_supplied {
         record.oauth_invalid_at_unix_secs = None;
         record.oauth_invalid_reason = None;
+    }
+    if credential_material_changed {
+        ensure_codex_credential_generation_rotated(
+            record,
+            provider_type,
+            previous_codex_credential_generation,
+        );
     }
 
     Ok(credentials_supplied)
@@ -1861,6 +1876,15 @@ impl<'a> AdminAppState<'a> {
 
                 if let Some(existing_index) = existing_key_index {
                     let existing_key = existing_keys[existing_index].clone();
+                    let previous_codex_credential_generation = existing_key
+                        .upstream_metadata
+                        .as_ref()
+                        .and_then(Value::as_object)
+                        .and_then(|metadata| metadata.get("codex"))
+                        .and_then(|codex| {
+                            aether_admin::provider::quota::codex_credential_generation(Some(codex))
+                        })
+                        .map(ToOwned::to_owned);
                     match merge_mode {
                         AdminImportMergeMode::Skip => {
                             stats.keys.skipped += 1;
@@ -1890,6 +1914,8 @@ impl<'a> AdminAppState<'a> {
                             let oauth_credentials_supplied = if auth_type == "oauth" {
                                 invalid!(apply_imported_oauth_key_credentials(
                                     self,
+                                    &provider.provider_type,
+                                    previous_codex_credential_generation.as_deref(),
                                     &raw_key,
                                     normalized_auth_config.as_ref(),
                                     &mut updated,
@@ -1903,8 +1929,31 @@ impl<'a> AdminAppState<'a> {
                                 imported_key.fingerprint.clone(),
                                 "fingerprint",
                             ));
-                            let Some(mut persisted) =
-                                self.update_provider_catalog_key(&updated).await?
+                            let admin_update = build_provider_catalog_key_admin_cas_update(
+                                &existing_key,
+                                updated.clone(),
+                                &provider.provider_type,
+                            );
+                            if !self
+                                .compare_and_update_provider_catalog_key_admin_state(&admin_update)
+                                .await?
+                            {
+                                return Ok(Err((
+                                    http::StatusCode::CONFLICT,
+                                    json!({
+                                        "detail": format!(
+                                            "Provider '{provider_name}' 的 Key 已被其他请求更新，请重试"
+                                        )
+                                    }),
+                                )));
+                            }
+                            let Some(mut persisted) = self
+                                .read_provider_catalog_keys_by_ids(std::slice::from_ref(
+                                    &updated.id,
+                                ))
+                                .await?
+                                .into_iter()
+                                .next()
                             else {
                                 return Ok(Err(invalid_request(format!(
                                     "更新 Provider '{provider_name}' 的 Key 失败"
@@ -1926,16 +1975,15 @@ impl<'a> AdminAppState<'a> {
                                 persisted = reloaded;
                             }
                             if oauth_credentials_supplied {
-                                if !self
-                                    .clear_provider_catalog_key_oauth_invalid_marker(&updated.id)
-                                    .await?
-                                {
-                                    return Ok(Err(invalid_request(format!(
-                                        "更新 Provider '{provider_name}' 的 Key 失败"
-                                    ))));
-                                }
                                 let Some(reloaded) = self
-                                    .reset_provider_catalog_key_recovery_state(&updated.id)
+                                    .reset_provider_catalog_key_recovery_state_fenced(
+                                        &updated.id,
+                                        updated.encrypted_auth_config.as_deref().ok_or_else(|| {
+                                            GatewayError::Internal(format!(
+                                                "OAuth Provider '{provider_name}' imported without auth_config"
+                                            ))
+                                        })?,
+                                    )
                                     .await?
                                 else {
                                     return Ok(Err(invalid_request(format!(
@@ -1975,6 +2023,8 @@ impl<'a> AdminAppState<'a> {
                 let oauth_credentials_supplied = if auth_type == "oauth" {
                     invalid!(apply_imported_oauth_key_credentials(
                         self,
+                        &provider.provider_type,
+                        None,
                         &raw_key,
                         normalized_auth_config.as_ref(),
                         &mut record,

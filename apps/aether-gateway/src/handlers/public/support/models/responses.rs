@@ -102,8 +102,15 @@ pub(super) fn build_empty_models_list_response(api_format: &str) -> Response<Bod
     }
 }
 
-pub(super) fn build_codex_models_list_response(models: Vec<serde_json::Value>) -> Response<Body> {
-    Json(json!({ "models": models })).into_response()
+pub(super) fn build_codex_models_list_response(
+    models: Vec<serde_json::Value>,
+    etag: Option<&str>,
+) -> Response<Body> {
+    let mut response = Json(json!({ "models": models })).into_response();
+    if let Some(etag) = etag.and_then(|value| http::HeaderValue::from_str(value).ok()) {
+        response.headers_mut().insert(http::header::ETAG, etag);
+    }
+    response
 }
 
 pub(super) fn build_openai_models_list_response(

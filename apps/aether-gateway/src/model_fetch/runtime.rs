@@ -7,7 +7,7 @@ use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
 use aether_model_fetch::{
-    apply_model_filters, fetch_models_from_transports, json_string_list,
+    apply_model_filters, fetch_models_from_transports_for_client_version, json_string_list,
     model_catalog_upstream_metadata, model_fetch_interval_minutes,
     model_fetch_startup_delay_seconds, model_fetch_startup_enabled, preset_models_for_provider,
     selected_models_fetch_endpoints, sync_provider_model_whitelist_associations,
@@ -315,7 +315,25 @@ async fn fetch_and_persist_key_models(
         return Ok(KeyFetchDisposition::Skipped);
     }
 
-    let result = match fetch_models_from_transports(state, &transports).await {
+    let codex_client_version = if target
+        .provider
+        .provider_type
+        .trim()
+        .eq_ignore_ascii_case("codex")
+    {
+        state
+            .read_recent_codex_catalog_client_version(&target.provider.id, &target.key.id)
+            .await
+    } else {
+        None
+    };
+    let result = match fetch_models_from_transports_for_client_version(
+        state,
+        &transports,
+        codex_client_version.as_deref(),
+    )
+    .await
+    {
         Ok(result) => result,
         Err(err) => {
             persist_key_fetch_failure(state, &target.key, now_unix_secs, err.clone()).await?;
@@ -867,6 +885,7 @@ mod tests {
             candidate_id: None,
             status_code: 200,
             headers: Default::default(),
+            response_observation: None,
             body: Some(aether_contracts::ResponseBody {
                 json_body: Some(body),
                 body_bytes_b64: None,

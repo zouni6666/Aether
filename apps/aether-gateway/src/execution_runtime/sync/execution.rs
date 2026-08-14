@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 
 use aether_ai_serving::{AiAttemptExecutionOutcome, AiAttemptRetryScope, UPSTREAM_IS_STREAM_KEY};
 use aether_contracts::{
-    ExecutionError, ExecutionErrorKind, ExecutionPhase, ExecutionPlan, ExecutionResult,
-    ExecutionTelemetry,
+    ExecutionError, ExecutionErrorKind, ExecutionPhase, ExecutionPlan,
+    ExecutionResponseObservation, ExecutionResult, ExecutionTelemetry,
 };
 use aether_data_contracts::repository::candidates::RequestCandidateStatus;
 use aether_scheduler_core::{
@@ -55,8 +55,9 @@ use crate::execution_runtime::submission::{
     resolve_local_sync_error_status_code, submit_local_core_error_or_sync_finalize,
 };
 use crate::execution_runtime::transport::{
-    append_upstream_response_body_chunk, build_execution_response_body, build_request_body,
-    collect_response_headers, decode_response_body_bytes, execution_response_body_mode,
+    append_upstream_response_body_chunk_with_limit, build_execution_response_body,
+    build_request_body, collect_response_headers, decode_response_body_bytes_with_limit,
+    execution_plan_response_body_limit_bytes, execution_response_body_mode,
     format_hyper_error_chain, format_upstream_request_error, format_wreq_upstream_request_error,
     response_body_is_json, send_request, DirectHttpResponse, DirectSyncExecutionRuntime,
     ExecutionRuntimeTransportError,
@@ -70,11 +71,12 @@ use crate::execution_runtime::{
 };
 use crate::log_ids::short_request_id;
 use crate::orchestration::{
-    apply_local_execution_effect, build_local_error_flow_metadata, trace_upstream_response_body,
-    with_error_flow_report_context, with_upstream_response_report_context,
-    LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect,
-    LocalExecutionEffect, LocalExecutionEffectContext, LocalHealthFailureEffect,
-    LocalHealthSuccessEffect, LocalOAuthInvalidationEffect, LocalPoolErrorEffect,
+    apply_local_execution_effect, build_local_error_flow_metadata,
+    spawn_local_oauth_success_effect, trace_upstream_response_body, with_error_flow_report_context,
+    with_upstream_response_report_context, LocalAdaptiveRateLimitEffect,
+    LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect, LocalExecutionEffect,
+    LocalExecutionEffectContext, LocalHealthFailureEffect, LocalHealthSuccessEffect,
+    LocalOAuthInvalidationEffect, LocalOAuthSuccessEffect, LocalPoolErrorEffect,
 };
 use crate::provider_pool_demand::acquire_provider_pool_in_flight_guard;
 use crate::request_candidate_runtime::{
@@ -1379,7 +1381,19 @@ async fn execute_direct_sync_runtime_candidate(
                     candidate_started_unix_ms,
                     event.status_code,
                     event.ttfb_ms,
-                )
+                );
+                spawn_local_oauth_success_effect(
+                    state_for_response_started.clone(),
+                    plan,
+                    report_context,
+                    LocalOAuthSuccessEffect {
+                        status_code: event.status_code,
+                        request_started_at_unix_ms: Some(
+                            event.response_observation.request_started_at_unix_ms,
+                        ),
+                        request_order_id: Some(&event.response_observation.request_order_id),
+                    },
+                );
             })
             .await
             .map_err(SyncExecutionFailure::from_transport);
@@ -1478,17 +1492,31 @@ async fn execute_openai_image_sync_upstream_sse_candidate(
     progress_snapshot: Option<Arc<Mutex<OpenAiImageSyncProgressSnapshot>>>,
 ) -> Result<ExecutionResult, SyncExecutionFailure> {
     let request_body = build_request_body(plan).map_err(SyncExecutionFailure::from_transport)?;
+    let response_body_limit_bytes = execution_plan_response_body_limit_bytes(plan);
     let started_at = Instant::now();
     let mut progress =
         OpenAiImageSyncProgressRecorder::new(state, plan, report_context, progress_snapshot);
     progress.record_connecting().await;
 
+    let request_started_at_unix_ms = current_request_candidate_unix_ms();
+    let request_order_id = uuid::Uuid::now_v7().to_string();
     let response = send_request(plan, request_body)
         .await
         .map_err(SyncExecutionFailure::from_transport)?;
     let ttfb_ms = started_at.elapsed().as_millis() as u64;
+    let response_headers_observed_at_unix_ms = current_request_candidate_unix_ms();
     let status_code = response.status_code();
     let headers = response.headers();
+    spawn_local_oauth_success_effect(
+        state.clone(),
+        plan,
+        report_context,
+        LocalOAuthSuccessEffect {
+            status_code,
+            request_started_at_unix_ms: Some(request_started_at_unix_ms),
+            request_order_id: Some(&request_order_id),
+        },
+    );
     progress.record_response_started(status_code, ttfb_ms).await;
 
     let mut body_bytes = Vec::new();
@@ -1503,8 +1531,12 @@ async fn execute_openai_image_sync_upstream_sse_candidate(
                         ),
                     )
                 })?;
-                append_upstream_response_body_chunk(&mut body_bytes, &chunk)
-                    .map_err(SyncExecutionFailure::from_transport)?;
+                append_upstream_response_body_chunk_with_limit(
+                    &mut body_bytes,
+                    &chunk,
+                    response_body_limit_bytes,
+                )
+                .map_err(SyncExecutionFailure::from_transport)?;
                 let elapsed_ms = started_at.elapsed().as_millis() as u64;
                 progress
                     .observe_chunk(&chunk, status_code, elapsed_ms)
@@ -1521,8 +1553,12 @@ async fn execute_openai_image_sync_upstream_sse_candidate(
                         )),
                     )
                 })?;
-                append_upstream_response_body_chunk(&mut body_bytes, &chunk)
-                    .map_err(SyncExecutionFailure::from_transport)?;
+                append_upstream_response_body_chunk_with_limit(
+                    &mut body_bytes,
+                    &chunk,
+                    response_body_limit_bytes,
+                )
+                .map_err(SyncExecutionFailure::from_transport)?;
                 let elapsed_ms = started_at.elapsed().as_millis() as u64;
                 progress
                     .observe_chunk(&chunk, status_code, elapsed_ms)
@@ -1539,8 +1575,12 @@ async fn execute_openai_image_sync_upstream_sse_candidate(
                         ),
                     )
                 })?;
-                append_upstream_response_body_chunk(&mut body_bytes, &chunk)
-                    .map_err(SyncExecutionFailure::from_transport)?;
+                append_upstream_response_body_chunk_with_limit(
+                    &mut body_bytes,
+                    &chunk,
+                    response_body_limit_bytes,
+                )
+                .map_err(SyncExecutionFailure::from_transport)?;
                 let elapsed_ms = started_at.elapsed().as_millis() as u64;
                 progress
                     .observe_chunk(&chunk, status_code, elapsed_ms)
@@ -1549,8 +1589,9 @@ async fn execute_openai_image_sync_upstream_sse_candidate(
         }
     }
 
-    let decoded_body_bytes = decode_response_body_bytes(&headers, &body_bytes)
-        .map_err(SyncExecutionFailure::from_transport)?;
+    let decoded_body_bytes =
+        decode_response_body_bytes_with_limit(&headers, &body_bytes, response_body_limit_bytes)
+            .map_err(SyncExecutionFailure::from_transport)?;
     let elapsed_ms = started_at.elapsed().as_millis() as u64;
     let upstream_bytes = body_bytes.len() as u64;
     progress.finish(status_code, elapsed_ms).await;
@@ -1569,6 +1610,11 @@ async fn execute_openai_image_sync_upstream_sse_candidate(
         candidate_id: plan.candidate_id.clone(),
         status_code,
         headers,
+        response_observation: Some(ExecutionResponseObservation {
+            request_started_at_unix_ms,
+            response_headers_observed_at_unix_ms,
+            request_order_id,
+        }),
         body,
         telemetry: Some(ExecutionTelemetry {
             ttfb_ms: Some(ttfb_ms),
@@ -2461,6 +2507,16 @@ async fn execute_execution_runtime_sync_impl(
     };
     let mut candidate_first_byte_elapsed_ms =
         calibrated_sync_candidate_first_byte_elapsed_ms(candidate_started_at, &result);
+    let initial_response_observed_at_unix_ms = current_request_candidate_unix_ms();
+    let mut provider_response_observation =
+        result
+            .response_observation
+            .clone()
+            .unwrap_or(ExecutionResponseObservation {
+                request_started_at_unix_ms: candidate_started_unix_secs,
+                response_headers_observed_at_unix_ms: initial_response_observed_at_unix_ms,
+                request_order_id: uuid::Uuid::now_v7().to_string(),
+            });
     let mut oauth_retry_attempted = false;
     let (
         result_error_type,
@@ -2473,6 +2529,18 @@ async fn execute_execution_runtime_sync_impl(
         local_failover_response_text,
         local_failover_analysis,
     ) = loop {
+        spawn_local_oauth_success_effect(
+            state.clone(),
+            &plan,
+            report_context.as_ref(),
+            LocalOAuthSuccessEffect {
+                status_code: result.status_code,
+                request_started_at_unix_ms: Some(
+                    provider_response_observation.request_started_at_unix_ms,
+                ),
+                request_order_id: Some(&provider_response_observation.request_order_id),
+            },
+        );
         let result_latency_ms = result
             .telemetry
             .as_ref()
@@ -2534,10 +2602,15 @@ async fn execute_execution_runtime_sync_impl(
                 result.status_code,
                 local_failover_response_text.as_deref(),
                 trace_id,
+                report_context.as_ref(),
+                Some(provider_response_observation.request_started_at_unix_ms),
+                Some(&provider_response_observation.request_order_id),
             )
             .await
         {
             oauth_retry_attempted = true;
+            let retry_started_at_unix_ms = current_request_candidate_unix_ms();
+            let retry_request_order_id = uuid::Uuid::now_v7().to_string();
             match crate::execution_runtime::execute_execution_runtime_sync_plan(
                 state,
                 Some(trace_id),
@@ -2546,6 +2619,16 @@ async fn execute_execution_runtime_sync_impl(
             .await
             {
                 Ok(retry_result) => {
+                    let retry_response_observed_at_unix_ms = current_request_candidate_unix_ms();
+                    provider_response_observation = retry_result
+                        .response_observation
+                        .clone()
+                        .unwrap_or(ExecutionResponseObservation {
+                            request_started_at_unix_ms: retry_started_at_unix_ms,
+                            response_headers_observed_at_unix_ms:
+                                retry_response_observed_at_unix_ms,
+                            request_order_id: retry_request_order_id,
+                        });
                     candidate_first_byte_elapsed_ms =
                         calibrated_sync_candidate_first_byte_elapsed_ms(
                             candidate_started_at,
@@ -2594,6 +2677,13 @@ async fn execute_execution_runtime_sync_impl(
             local_failover_analysis,
         );
     };
+    let mut report_context = attach_provider_response_headers_to_report_context(
+        report_context,
+        &headers,
+        provider_response_observation.request_started_at_unix_ms,
+        provider_response_observation.response_headers_observed_at_unix_ms,
+        &provider_response_observation.request_order_id,
+    );
     if result.status_code >= 400 {
         apply_local_execution_effect(
             state,
@@ -2739,8 +2829,6 @@ async fn execute_execution_runtime_sync_impl(
     }
     let status_code = result.status_code;
     let has_body_bytes = body_base64.is_some();
-    let mut report_context =
-        attach_provider_response_headers_to_report_context(report_context, &headers);
     if (200..300).contains(&status_code) {
         seed_kiro_sync_simulated_cache_enabled(state, &plan, &mut report_context).await;
         if kiro_simulated_cache_enabled_from_report_context(report_context.as_ref()) {
@@ -3231,6 +3319,8 @@ async fn execute_sync_via_remote_execution_runtime(
     candidate_started_unix_secs: u64,
     candidate_started_at: Instant,
 ) -> Result<RemoteSyncFallbackOutcome, GatewayError> {
+    let remote_request_started_at_unix_ms = current_request_candidate_unix_ms();
+    let remote_request_order_id = uuid::Uuid::now_v7().to_string();
     let response = match post_sync_plan_to_remote_execution_runtime(
         state,
         remote_execution_runtime_base_url,
@@ -3299,11 +3389,19 @@ async fn execute_sync_via_remote_execution_runtime(
         ));
     }
 
-    response
-        .json()
+    let remote_response_observed_at_unix_ms = current_request_candidate_unix_ms();
+    let mut result = response
+        .json::<ExecutionResult>()
         .await
-        .map(RemoteSyncFallbackOutcome::Executed)
-        .map_err(|err| GatewayError::Internal(err.to_string()))
+        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    result
+        .response_observation
+        .get_or_insert(ExecutionResponseObservation {
+            request_started_at_unix_ms: remote_request_started_at_unix_ms,
+            response_headers_observed_at_unix_ms: remote_response_observed_at_unix_ms,
+            request_order_id: remote_request_order_id,
+        });
+    Ok(RemoteSyncFallbackOutcome::Executed(result))
 }
 
 #[cfg(test)]

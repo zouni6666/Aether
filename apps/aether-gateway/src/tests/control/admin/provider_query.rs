@@ -2825,7 +2825,6 @@ async fn gateway_streams_windsurf_connect_upstream_for_admin_model_test_impl() {
                     "content": "Hello! This is a test message."
                 }],
                 "max_tokens": 30,
-                "temperature": 0.7,
                 "stream": true
             }
         }))

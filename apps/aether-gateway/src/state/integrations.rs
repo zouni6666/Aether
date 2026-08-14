@@ -25,7 +25,7 @@ use tracing::{debug, warn};
 
 use super::{AppState, GatewayError};
 use crate::clock::current_unix_secs;
-use crate::model_fetch::ModelFetchRuntimeState;
+use crate::model_fetch::{CodexCatalogRuntime, ModelFetchRuntimeState};
 use crate::provider_transport::{GatewayProviderTransportSnapshot, LocalResolvedOAuthRequestAuth};
 use crate::request_candidate_runtime::{
     RequestCandidateRuntimeCapabilityReader, RequestCandidateRuntimeReader,
@@ -33,6 +33,8 @@ use crate::request_candidate_runtime::{
 };
 use crate::scheduler::state::SchedulerRuntimeState;
 use crate::{execution_runtime, provider_transport};
+
+const MODEL_FETCH_RESPONSE_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 
 impl AppState {
     pub(crate) async fn hydrate_antigravity_project_metadata_for_transport(
@@ -274,9 +276,87 @@ impl ModelFetchTransportRuntime for AppState {
         &self,
         plan: &ExecutionPlan,
     ) -> Result<ExecutionResult, String> {
-        execution_runtime::execute_execution_runtime_sync_plan(self, None, plan)
+        let bounded_plan = execution_runtime::transport::with_upstream_response_body_limit(
+            plan,
+            MODEL_FETCH_RESPONSE_BODY_LIMIT_BYTES,
+        );
+        execution_runtime::execute_execution_runtime_sync_plan(self, None, &bounded_plan)
             .await
             .map_err(GatewayError::into_message)
+    }
+}
+
+#[async_trait]
+impl CodexCatalogRuntime for AppState {
+    fn codex_catalog_runtime_state(&self) -> &aether_runtime_state::RuntimeState {
+        self.runtime_state.as_ref()
+    }
+
+    async fn read_codex_catalog_transport_snapshot(
+        &self,
+        provider_id: &str,
+        endpoint_id: &str,
+        key_id: &str,
+    ) -> Result<Option<GatewayProviderTransportSnapshot>, String> {
+        self.read_provider_transport_snapshot(provider_id, endpoint_id, key_id)
+            .await
+            .map_err(GatewayError::into_message)
+    }
+
+    async fn read_codex_catalog_credential_scope_strong(
+        &self,
+        provider_id: &str,
+        key_id: &str,
+    ) -> Result<Option<String>, String> {
+        let Some(key) = self
+            .list_provider_catalog_keys_by_ids_strong(&[key_id.to_string()])
+            .await
+            .map_err(GatewayError::into_message)?
+            .into_iter()
+            .find(|key| key.id == key_id && key.provider_id == provider_id && key.is_active)
+        else {
+            return Ok(None);
+        };
+
+        if let Some(scope) =
+            crate::model_fetch::codex_catalog_credential_scope_from_stored_key(&key, None, None)
+        {
+            return Ok(Some(scope));
+        }
+
+        let decrypted_auth_config = match key.encrypted_auth_config.as_deref() {
+            Some(ciphertext) => Some(
+                crate::handlers::shared::decrypt_catalog_secret_with_fallbacks(
+                    self.encryption_key(),
+                    ciphertext,
+                )
+                .ok_or_else(|| {
+                    "Codex catalog auth config could not be verified for credential fencing"
+                        .to_string()
+                })?,
+            ),
+            None => None,
+        };
+        let decrypted_api_key = match key.encrypted_api_key.as_deref() {
+            Some(ciphertext) => Some(
+                crate::handlers::shared::decrypt_catalog_secret_with_fallbacks(
+                    self.encryption_key(),
+                    ciphertext,
+                )
+                .ok_or_else(|| {
+                    "Codex catalog API key could not be verified for credential fencing".to_string()
+                })?,
+            ),
+            None => None,
+        };
+
+        Ok(
+            crate::model_fetch::codex_catalog_credential_scope_from_stored_key(
+                &key,
+                decrypted_auth_config.as_deref(),
+                decrypted_api_key.as_deref(),
+            ),
+        )
     }
 }
 
@@ -318,6 +398,29 @@ impl ModelFetchRuntimeState for AppState {
         plan: &ExecutionPlan,
     ) -> Result<ExecutionResult, GatewayError> {
         execution_runtime::execute_execution_runtime_sync_plan(self, None, plan).await
+    }
+
+    async fn read_recent_codex_catalog_client_version(
+        &self,
+        provider_id: &str,
+        key_id: &str,
+    ) -> Option<String> {
+        let credential_scope =
+            <AppState as CodexCatalogRuntime>::read_codex_catalog_credential_scope_strong(
+                self,
+                provider_id,
+                key_id,
+            )
+            .await
+            .ok()
+            .flatten()?;
+        crate::model_fetch::read_recent_codex_catalog_client_version(
+            self.runtime_state.as_ref(),
+            provider_id,
+            key_id,
+            &credential_scope,
+        )
+        .await
     }
 
     async fn update_provider_catalog_key_model_fetch_state(

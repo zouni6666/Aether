@@ -244,6 +244,32 @@ pub(crate) async fn build_admin_update_provider_record(
         }
     }
 
+    if fields.contains("codex_fingerprint_convergence_enabled") {
+        let Some(enabled) = payload.codex_fingerprint_convergence_enabled else {
+            return Err("codex_fingerprint_convergence_enabled 必须是布尔值".to_string());
+        };
+        if target_provider_type != "codex" && enabled {
+            return Err(
+                "codex_fingerprint_convergence_enabled 仅适用于 provider_type=codex".to_string(),
+            );
+        }
+        if target_provider_type == "codex" {
+            let codex_config = config_map
+                .entry(crate::provider_transport::CODEX_FINGERPRINT_CONFIG_NAMESPACE.to_string())
+                .or_insert_with(|| json!({}));
+            let Some(codex_config) = codex_config.as_object_mut() else {
+                return Err("config.codex 必须是 JSON 对象".to_string());
+            };
+            codex_config.insert(
+                crate::provider_transport::CODEX_FINGERPRINT_ENABLED_CONFIG_KEY.to_string(),
+                json!(enabled),
+            );
+        }
+    }
+    if target_provider_type != "codex" {
+        remove_codex_fingerprint_config(&mut config_map);
+    }
+
     for (field_name, payload_value) in [
         (
             PROVIDER_MAX_TRANSFER_COUNT_CONFIG_KEY,
@@ -321,4 +347,47 @@ pub(crate) async fn build_admin_update_provider_record(
         .ok()
         .map(|duration| duration.as_secs());
     Ok(updated)
+}
+
+fn remove_codex_fingerprint_config(config_map: &mut serde_json::Map<String, serde_json::Value>) {
+    let namespace = crate::provider_transport::CODEX_FINGERPRINT_CONFIG_NAMESPACE;
+    let key = crate::provider_transport::CODEX_FINGERPRINT_ENABLED_CONFIG_KEY;
+    let mut remove_namespace = false;
+    if let Some(codex_config) = config_map
+        .get_mut(namespace)
+        .and_then(|value| value.as_object_mut())
+    {
+        codex_config.remove(key);
+        remove_namespace = codex_config.is_empty();
+    }
+    if remove_namespace {
+        config_map.remove(namespace);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    #[test]
+    fn removing_fingerprint_setting_preserves_other_codex_config() {
+        let mut config = json!({
+            "codex": {
+                "fingerprint_convergence_enabled": true,
+                "pass_through_cyber_flag_interrupt": true
+            },
+            "other": {"kept": true}
+        })
+        .as_object()
+        .expect("config object")
+        .clone();
+
+        super::remove_codex_fingerprint_config(&mut config);
+
+        assert_eq!(
+            config["codex"],
+            json!({"pass_through_cyber_flag_interrupt": true})
+        );
+        assert_eq!(config["other"], json!({"kept": true}));
+    }
 }

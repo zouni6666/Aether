@@ -71,6 +71,7 @@ describe('buildDefaultModelTestRequestBody', () => {
 
     expect(body.messages).toEqual([{ role: 'user', content: 'Hello! This is a test message.' }])
     expect(body.stream).toBe(true)
+    expect(body.temperature).toBeUndefined()
     expect(body.input).toBeUndefined()
   })
 

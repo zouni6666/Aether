@@ -2317,6 +2317,17 @@ async fn gateway_overwrites_oauth_provider_key_credentials_from_admin_system_imp
         )
         .expect("auth config should encrypt"),
     );
+    existing_key.upstream_metadata = Some(json!({
+        "codex": {
+            "credential_generation": "generation-before-import",
+            "primary_used_percent": 90.0,
+        },
+        "unrelated": {"preserved": true},
+    }));
+    existing_key.status_snapshot = Some(json!({
+        "oauth": {"status": "invalid"},
+        "quota": {"used_ratio": 0.9},
+    }));
 
     let score_identity =
         PoolMemberIdentity::provider_api_key("provider-codex-existing", "key-codex-existing");
@@ -2417,6 +2428,31 @@ async fn gateway_overwrites_oauth_provider_key_credentials_from_admin_system_imp
     assert_eq!(key.error_count, Some(0));
     assert_eq!(key.health_by_format, Some(json!({})));
     assert_eq!(key.circuit_breaker_by_format, Some(json!({})));
+    let codex = key
+        .upstream_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("codex"))
+        .and_then(Value::as_object)
+        .expect("Codex metadata should exist");
+    assert_eq!(codex.len(), 1);
+    assert_ne!(
+        codex
+            .get(aether_admin::provider::quota::CODEX_CREDENTIAL_GENERATION_KEY)
+            .and_then(Value::as_str),
+        Some("generation-before-import")
+    );
+    assert_eq!(
+        key.upstream_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.pointer("/unrelated/preserved")),
+        Some(&json!(true))
+    );
+    assert_eq!(
+        key.status_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.get("quota")),
+        Some(&Value::Null)
+    );
     assert_eq!(
         decrypt_python_fernet_ciphertext(
             DEVELOPMENT_ENCRYPTION_KEY,

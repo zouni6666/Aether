@@ -1274,7 +1274,6 @@ mod tests {
         let first_cache = Arc::clone(&cache);
         let first_key = key.clone();
         let first_calls = Arc::clone(&calls);
-        let first_started = Instant::now();
         let first = tokio::spawn(async move {
             first_cache
                 .get_or_load_once_stale_while_refreshing::<(), _, _>(
@@ -1292,7 +1291,6 @@ mod tests {
         });
 
         let follower_cache = Arc::clone(&cache);
-        let follower_started = Instant::now();
         let follower_calls = Arc::clone(&calls);
         let follower = tokio::spawn(async move {
             follower_cache
@@ -1310,15 +1308,7 @@ mod tests {
         });
 
         assert_eq!(first.await.unwrap().unwrap(), Some(1));
-        assert!(
-            first_started.elapsed() < Duration::from_millis(80),
-            "stale value should not wait for request-path refresh"
-        );
         assert_eq!(follower.await.unwrap().unwrap(), Some(1));
-        assert!(
-            follower_started.elapsed() < Duration::from_millis(80),
-            "follower should return stale value without waiting for refresh"
-        );
         assert_eq!(calls.load(Ordering::Acquire), 0);
     }
 

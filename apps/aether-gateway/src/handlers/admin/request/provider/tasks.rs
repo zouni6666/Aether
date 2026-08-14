@@ -513,6 +513,7 @@ impl<'a> AdminAppState<'a> {
                     provider_id: key.provider_id.clone(),
                     provider_type: provider.provider_type.clone(),
                 },
+                expected_upstream_metadata_namespace: None,
             },
         )
         .await

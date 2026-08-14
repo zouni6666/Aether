@@ -1417,38 +1417,20 @@ async fn resolve_openai_chat_to_openai_image_payload_parts(
         return Ok(None);
     };
     if !is_chatgpt_web {
-        let Some(projected) = project_openai_image_api_request_body(
-            &provider_request_body,
-            &prepared_candidate.mapped_model,
-            operation,
-            crate::image_capabilities::openai_image_provider_max_generation_count_for_model(
-                transport.provider.provider_type.as_str(),
-                Some(prepared_candidate.mapped_model.as_str()),
-            ),
-        ) else {
-            mark_skipped_local_openai_chat_candidate_with_extra_data(
-                state,
-                input,
-                trace_id,
-                candidate,
-                candidate_index,
-                candidate_id,
-                "provider_request_body_build_failed",
-                request_body_build_failure_extra_data(
-                    body_json,
-                    "openai:chat",
-                    provider_api_format,
+        let projected = if is_codex {
+            project_codex_openai_image_api_request_body(&provider_request_body, operation)
+        } else {
+            project_openai_image_api_request_body(
+                &provider_request_body,
+                &prepared_candidate.mapped_model,
+                operation,
+                crate::image_capabilities::openai_image_provider_max_generation_count_for_model(
+                    transport.provider.provider_type.as_str(),
+                    Some(prepared_candidate.mapped_model.as_str()),
                 ),
             )
-            .await;
-            return Ok(None);
         };
-        provider_request_body = projected;
-    }
-    if is_codex {
-        let Some(projected) =
-            project_codex_openai_image_api_request_body(&provider_request_body, operation)
-        else {
+        let Some(projected) = projected else {
             mark_skipped_local_openai_chat_candidate_with_extra_data(
                 state,
                 input,
@@ -2195,6 +2177,7 @@ mod tests {
             client_surface: None,
             gateway_credential_carrier: None,
             client_session_affinity: None,
+            original_client_session_id: None,
             routing_policy: None,
             routing_trace_seed: None,
             routing_context: None,

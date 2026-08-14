@@ -212,6 +212,7 @@ async fn gateway_executes_openai_video_content_from_reconstructed_data_task_with
                                 "content-type".to_string(),
                                 "video/mp4".to_string(),
                             )]),
+                            response_observation: None,
                         },
                     },
                     StreamFrame {

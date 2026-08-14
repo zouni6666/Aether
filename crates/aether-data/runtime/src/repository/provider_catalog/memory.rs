@@ -7,10 +7,10 @@ use serde_json::{json, Map, Value};
 
 use super::{
     ProviderCatalogKeyAdaptiveState, ProviderCatalogKeyAdaptiveStateUpdate,
-    ProviderCatalogKeyHealthStateUpdate, ProviderCatalogKeyListQuery,
-    ProviderCatalogKeyOAuthCredentialCasDelete, ProviderCatalogKeyOAuthRuntimeStateCasUpdate,
-    ProviderCatalogKeyRuntimeMetadataUpdate, ProviderCatalogKeyStatusSnapshotUpdate,
-    ProviderCatalogReadRepository, ProviderCatalogSnapshot,
+    ProviderCatalogKeyAdminCasUpdate, ProviderCatalogKeyHealthStateUpdate,
+    ProviderCatalogKeyListQuery, ProviderCatalogKeyOAuthCredentialCasDelete,
+    ProviderCatalogKeyOAuthRuntimeStateCasUpdate, ProviderCatalogKeyRuntimeMetadataUpdate,
+    ProviderCatalogKeyStatusSnapshotUpdate, ProviderCatalogReadRepository, ProviderCatalogSnapshot,
     ProviderCatalogUpstreamMetadataNamespaceUpdate, ProviderCatalogWriteRepository,
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
     StoredProviderCatalogKeyMaintenanceSummary, StoredProviderCatalogKeyPage,
@@ -538,8 +538,104 @@ impl ProviderCatalogWriteRepository for InMemoryProviderCatalogReadRepository {
                 key.id
             )));
         };
+        if !admin_credential_snapshot_matches(stored, key) {
+            return Err(DataLayerError::UnexpectedValue(format!(
+                "provider catalog key {} credential state changed",
+                key.id
+            )));
+        }
         *stored = merge_admin_key_update(stored, key);
         Ok(stored.clone())
+    }
+
+    async fn compare_and_update_key_admin_state(
+        &self,
+        update: &ProviderCatalogKeyAdminCasUpdate,
+    ) -> Result<bool, DataLayerError> {
+        validate_admin_cas_update(update)?;
+
+        let mut index = self
+            .index
+            .write()
+            .expect("provider catalog repository lock");
+        let Some(stored) = index.keys.get(&update.key.id) else {
+            return Ok(false);
+        };
+        let expected = &update.expected_credential;
+        let provider_type_matches = index
+            .providers
+            .get(&stored.provider_id)
+            .is_some_and(|provider| provider.provider_type == expected.provider_type);
+        if stored.encrypted_auth_config != update.expected_encrypted_auth_config
+            || stored.encrypted_api_key != expected.encrypted_api_key
+            || stored.auth_type != expected.auth_type
+            || stored.provider_id != expected.provider_id
+            || !provider_type_matches
+        {
+            return Ok(false);
+        }
+
+        if (update.codex_rotation.is_some()
+            && stored
+                .upstream_metadata
+                .as_ref()
+                .is_some_and(|metadata| !metadata.is_object()))
+            || ((update.codex_rotation.is_some() || update.reset_oauth_runtime)
+                && stored
+                    .status_snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| !snapshot.is_object()))
+        {
+            return Ok(false);
+        }
+
+        // A rotation marker is meaningful only when the requested key really
+        // changes the fenced credential. Rejecting a no-op rotation prevents a
+        // caller from clearing quota or OAuth state without replacing secrets.
+        if update.codex_rotation.is_some()
+            && expected.encrypted_api_key == update.key.encrypted_api_key
+            && update.expected_encrypted_auth_config == update.key.encrypted_auth_config
+            && expected.auth_type == update.key.auth_type
+            && expected.provider_id == update.key.provider_id
+        {
+            return Ok(false);
+        }
+
+        let mut merged = merge_admin_key_update(stored, &update.key);
+        if let Some(codex_rotation) = update.codex_rotation.as_ref() {
+            let mut upstream_metadata = stored
+                .upstream_metadata
+                .as_ref()
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            upstream_metadata.insert("codex".to_string(), codex_rotation.clone());
+            merged.upstream_metadata = Some(Value::Object(upstream_metadata));
+
+            let mut status_snapshot = stored
+                .status_snapshot
+                .as_ref()
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            status_snapshot.insert("quota".to_string(), Value::Null);
+            merged.status_snapshot = Some(Value::Object(status_snapshot));
+        }
+        if update.reset_oauth_runtime {
+            merged.error_count = Some(0);
+            merged.oauth_invalid_at_unix_secs = None;
+            merged.oauth_invalid_reason = None;
+            if let Some(status_snapshot) = merged
+                .status_snapshot
+                .as_mut()
+                .and_then(Value::as_object_mut)
+            {
+                status_snapshot.insert("oauth".to_string(), Value::Null);
+            }
+        }
+
+        index.keys.insert(update.key.id.clone(), merged);
+        Ok(true)
     }
 
     async fn update_keys(
@@ -551,9 +647,15 @@ impl ProviderCatalogWriteRepository for InMemoryProviderCatalogReadRepository {
             .write()
             .expect("provider catalog repository lock");
         for key in keys {
-            if !index.keys.contains_key(&key.id) {
+            let Some(stored) = index.keys.get(&key.id) else {
                 return Err(DataLayerError::UnexpectedValue(format!(
                     "provider catalog key {} not found",
+                    key.id
+                )));
+            };
+            if !admin_credential_snapshot_matches(stored, key) {
+                return Err(DataLayerError::UnexpectedValue(format!(
+                    "provider catalog key {} credential state changed",
                     key.id
                 )));
             }
@@ -716,6 +818,10 @@ impl ProviderCatalogWriteRepository for InMemoryProviderCatalogReadRepository {
             || expected.auth_type.trim().is_empty()
             || expected.provider_id.trim().is_empty()
             || expected.provider_type.trim().is_empty()
+            || delete
+                .expected_upstream_metadata_namespace
+                .as_ref()
+                .is_some_and(|expected| expected.namespace.trim().is_empty())
         {
             return Err(DataLayerError::InvalidInput(
                 "provider catalog OAuth credential CAS delete contains empty fields".to_string(),
@@ -728,6 +834,24 @@ impl ProviderCatalogWriteRepository for InMemoryProviderCatalogReadRepository {
         let Some(key) = index.keys.get(&delete.key_id) else {
             return Ok(false);
         };
+        if let Some(expected) = delete.expected_upstream_metadata_namespace.as_ref() {
+            if key
+                .upstream_metadata
+                .as_ref()
+                .is_some_and(|metadata| !metadata.is_object())
+            {
+                return Ok(false);
+            }
+            let current_namespace = key
+                .upstream_metadata
+                .as_ref()
+                .and_then(Value::as_object)
+                .and_then(|metadata| metadata.get(&expected.namespace))
+                .cloned();
+            if current_namespace != expected.expected_value {
+                return Ok(false);
+            }
+        }
         let provider_type_matches = index
             .providers
             .get(&key.provider_id)
@@ -829,6 +953,24 @@ impl ProviderCatalogWriteRepository for InMemoryProviderCatalogReadRepository {
                     || expected.provider_id.trim().is_empty()
                     || expected.provider_type.trim().is_empty()
             })
+            || update
+                .expected_upstream_metadata_namespace
+                .as_ref()
+                .is_some_and(|expected| expected.namespace.trim().is_empty())
+            || update
+                .upstream_metadata_namespace_to_remove
+                .as_deref()
+                .is_some_and(|namespace| namespace.trim().is_empty())
+            || update
+                .upstream_metadata_namespace_to_remove
+                .as_ref()
+                .is_some_and(|namespace| {
+                    update
+                        .upstream_metadata_patch
+                        .as_ref()
+                        .and_then(Value::as_object)
+                        .is_some_and(|patch| patch.contains_key(namespace))
+                })
             || !update.status_snapshot_patch.is_object()
             || update
                 .upstream_metadata_patch
@@ -856,6 +998,27 @@ impl ProviderCatalogWriteRepository for InMemoryProviderCatalogReadRepository {
         {
             return Ok(false);
         }
+        if (update.expected_upstream_metadata_namespace.is_some()
+            || update.upstream_metadata_patch.is_some()
+            || update.upstream_metadata_namespace_to_remove.is_some())
+            && key
+                .upstream_metadata
+                .as_ref()
+                .is_some_and(|metadata| !metadata.is_object())
+        {
+            return Ok(false);
+        }
+        if let Some(expected) = update.expected_upstream_metadata_namespace.as_ref() {
+            let current_namespace = key
+                .upstream_metadata
+                .as_ref()
+                .and_then(Value::as_object)
+                .and_then(|metadata| metadata.get(&expected.namespace))
+                .cloned();
+            if current_namespace != expected.expected_value {
+                return Ok(false);
+            }
+        }
         if let Some(expected) = update.expected_credential.as_ref() {
             let provider_type_matches = index
                 .providers
@@ -869,6 +1032,32 @@ impl ProviderCatalogWriteRepository for InMemoryProviderCatalogReadRepository {
                 return Ok(false);
             }
         }
+        let upstream_metadata_update = if update.upstream_metadata_patch.is_some()
+            || update.upstream_metadata_namespace_to_remove.is_some()
+        {
+            let upstream_metadata = json_object_for_merge(
+                key.upstream_metadata.as_ref(),
+                "provider catalog upstream metadata",
+            )?;
+            let metadata_patch = update
+                .upstream_metadata_patch
+                .as_ref()
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            let mut upstream_metadata = merge_json_objects(upstream_metadata, metadata_patch);
+            if let Some(namespace) = update.upstream_metadata_namespace_to_remove.as_ref() {
+                upstream_metadata.remove(namespace);
+            }
+            Some(Value::Object(upstream_metadata))
+        } else {
+            None
+        };
+        let status_snapshot = json_object_for_merge(
+            key.status_snapshot.as_ref(),
+            "provider catalog status snapshot",
+        )?;
+        let status_snapshot = Value::Object(merge_json_objects(status_snapshot, patch));
         let key = index
             .keys
             .get_mut(&update.key_id)
@@ -885,26 +1074,10 @@ impl ProviderCatalogWriteRepository for InMemoryProviderCatalogReadRepository {
         if update.reset_error_count {
             key.error_count = Some(0);
         }
-        if let Some(metadata_patch) = update
-            .upstream_metadata_patch
-            .as_ref()
-            .and_then(Value::as_object)
-            .cloned()
-        {
-            let upstream_metadata = json_object_for_merge(
-                key.upstream_metadata.as_ref(),
-                "provider catalog upstream metadata",
-            )?;
-            key.upstream_metadata = Some(Value::Object(merge_json_objects(
-                upstream_metadata,
-                metadata_patch,
-            )));
+        if let Some(upstream_metadata) = upstream_metadata_update {
+            key.upstream_metadata = Some(upstream_metadata);
         }
-        let status_snapshot = json_object_for_merge(
-            key.status_snapshot.as_ref(),
-            "provider catalog status snapshot",
-        )?;
-        key.status_snapshot = Some(Value::Object(merge_json_objects(status_snapshot, patch)));
+        key.status_snapshot = Some(status_snapshot);
         key.updated_at_unix_secs = Some(
             update
                 .updated_at_unix_secs
@@ -1024,6 +1197,13 @@ impl ProviderCatalogWriteRepository for InMemoryProviderCatalogReadRepository {
         let Some(key) = index.keys.get_mut(&update.key_id) else {
             return Ok(false);
         };
+        if key
+            .upstream_metadata
+            .as_ref()
+            .is_some_and(|metadata| !metadata.is_object())
+        {
+            return Ok(false);
+        }
         let current_namespace = key
             .upstream_metadata
             .as_ref()
@@ -1185,6 +1365,55 @@ fn merge_admin_key_update(
     merged
 }
 
+fn admin_credential_snapshot_matches(
+    stored: &StoredProviderCatalogKey,
+    requested: &StoredProviderCatalogKey,
+) -> bool {
+    stored.provider_id == requested.provider_id
+        && stored.auth_type == requested.auth_type
+        && stored.encrypted_api_key == requested.encrypted_api_key
+        && stored.encrypted_auth_config == requested.encrypted_auth_config
+}
+
+fn validate_admin_cas_update(
+    update: &ProviderCatalogKeyAdminCasUpdate,
+) -> Result<(), DataLayerError> {
+    let expected = &update.expected_credential;
+    let invalid_credential = update.key.id.trim().is_empty()
+        || update.key.provider_id.trim().is_empty()
+        || update.key.name.trim().is_empty()
+        || update.key.auth_type.trim().is_empty()
+        || expected.auth_type.trim().is_empty()
+        || expected.provider_id.trim().is_empty()
+        || expected.provider_type.trim().is_empty()
+        || expected
+            .encrypted_api_key
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        || update
+            .expected_encrypted_auth_config
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty());
+    let invalid_rotation = update.codex_rotation.as_ref().is_some_and(|rotation| {
+        let Some(rotation) = rotation.as_object() else {
+            return true;
+        };
+        !expected.provider_type.eq_ignore_ascii_case("codex")
+            || rotation.len() != 1
+            || rotation
+                .get("credential_generation")
+                .and_then(Value::as_str)
+                .is_none_or(|generation| generation.trim().is_empty())
+    });
+    if invalid_credential || invalid_rotation {
+        return Err(DataLayerError::InvalidInput(
+            "provider catalog admin CAS requires an exact credential fence and a valid Codex rotation marker"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn adaptive_status_snapshot_patch(patch: &Value) -> Result<Map<String, Value>, DataLayerError> {
     const OWNED_FIELDS: [&str; 6] = [
         "observation_count",
@@ -1236,14 +1465,16 @@ mod tests {
     use super::InMemoryProviderCatalogReadRepository;
     use crate::repository::provider_catalog::{
         ProviderCatalogKeyAdaptiveState, ProviderCatalogKeyAdaptiveStateUpdate,
-        ProviderCatalogKeyHealthStateUpdate, ProviderCatalogKeyListOrder,
-        ProviderCatalogKeyListQuery, ProviderCatalogKeyOAuthCredentialCasDelete,
-        ProviderCatalogKeyOAuthCredentialFence, ProviderCatalogKeyOAuthRuntimeStateCasUpdate,
-        ProviderCatalogKeyRuntimeMetadataUpdate, ProviderCatalogReadRepository,
+        ProviderCatalogKeyAdminCasUpdate, ProviderCatalogKeyHealthStateUpdate,
+        ProviderCatalogKeyListOrder, ProviderCatalogKeyListQuery,
+        ProviderCatalogKeyOAuthCredentialCasDelete, ProviderCatalogKeyOAuthCredentialFence,
+        ProviderCatalogKeyOAuthRuntimeStateCasUpdate, ProviderCatalogKeyRuntimeMetadataUpdate,
+        ProviderCatalogReadRepository, ProviderCatalogUpstreamMetadataNamespaceExpectation,
         ProviderCatalogWriteRepository, StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
         StoredProviderCatalogProvider,
     };
     use crate::repository::usage::ProviderApiKeyUsageDelta;
+    use crate::DataLayerError;
     use serde_json::{json, Value};
     use std::sync::Arc;
     use tokio::sync::Barrier;
@@ -1421,12 +1652,14 @@ mod tests {
                 provider_id: "provider-1".to_string(),
                 provider_type: "custom".to_string(),
             }),
+            expected_upstream_metadata_namespace: None,
             encrypted_auth_config: "ciphertext-auth-2".to_string(),
             encrypted_api_key_update: Some("ciphertext-api-2".to_string()),
             expires_at_unix_secs_update: Some(Some(456)),
             oauth_invalid_at_unix_secs: None,
             oauth_invalid_reason: None,
             upstream_metadata_patch: Some(json!({"codex":{"remaining":3}})),
+            upstream_metadata_namespace_to_remove: None,
             status_snapshot_patch: json!({"oauth":{"code":"none"}}),
             reset_error_count: false,
             updated_at_unix_secs: Some(123),
@@ -1466,6 +1699,172 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oauth_runtime_cas_fences_metadata_namespace_value_and_absence() {
+        let repository_with_metadata = |metadata: Value| {
+            let mut key = sample_key("key-1", "provider-1")
+                .with_transport_fields(
+                    None,
+                    "ciphertext-api-1".to_string(),
+                    Some("ciphertext-auth-1".to_string()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .expect("key transport should build");
+            key.upstream_metadata = Some(metadata);
+            key.status_snapshot = Some(json!({"oauth":{"generation":1}}));
+            InMemoryProviderCatalogReadRepository::seed(
+                vec![sample_provider("provider-1")],
+                vec![],
+                vec![key],
+            )
+        };
+        let update = |expected_value: Option<Value>, remaining: u64| {
+            ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
+                key_id: "key-1".to_string(),
+                expected_encrypted_auth_config: Some("ciphertext-auth-1".to_string()),
+                expected_credential: None,
+                expected_upstream_metadata_namespace: Some(
+                    ProviderCatalogUpstreamMetadataNamespaceExpectation {
+                        namespace: "codex".to_string(),
+                        expected_value,
+                    },
+                ),
+                encrypted_auth_config: "ciphertext-auth-1".to_string(),
+                encrypted_api_key_update: None,
+                expires_at_unix_secs_update: None,
+                oauth_invalid_at_unix_secs: None,
+                oauth_invalid_reason: None,
+                upstream_metadata_patch: Some(json!({"codex":{"remaining":remaining}})),
+                upstream_metadata_namespace_to_remove: None,
+                status_snapshot_patch: json!({"oauth":{"generation":remaining}}),
+                reset_error_count: false,
+                updated_at_unix_secs: Some(123),
+            }
+        };
+
+        let exact_repository = repository_with_metadata(json!({
+            "codex":{"remaining":5},
+            "other":{"keep":true}
+        }));
+        assert!(exact_repository
+            .compare_and_update_key_oauth_runtime_state(&update(Some(json!({"remaining":5})), 4,))
+            .await
+            .expect("matching metadata namespace CAS should succeed"));
+        assert!(!exact_repository
+            .compare_and_update_key_oauth_runtime_state(&update(Some(json!({"remaining":5})), 0,))
+            .await
+            .expect("stale metadata namespace CAS should conflict"));
+        let stored = exact_repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key should reload")
+            .pop()
+            .expect("key should exist");
+        assert_eq!(
+            stored.upstream_metadata.as_ref().unwrap()["codex"],
+            json!({"remaining":4})
+        );
+        assert_eq!(
+            stored.upstream_metadata.as_ref().unwrap()["other"],
+            json!({"keep":true})
+        );
+        assert_eq!(
+            stored.status_snapshot.as_ref().unwrap()["oauth"],
+            json!({"generation":4})
+        );
+
+        let absent_repository = repository_with_metadata(json!({"other":{"keep":true}}));
+        assert!(absent_repository
+            .compare_and_update_key_oauth_runtime_state(&update(None, 1))
+            .await
+            .expect("absent metadata namespace CAS should succeed"));
+        let stored = absent_repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key should reload")
+            .pop()
+            .expect("key should exist");
+        assert_eq!(
+            stored.upstream_metadata.as_ref().unwrap()["codex"],
+            json!({"remaining":1})
+        );
+
+        let null_repository = repository_with_metadata(json!({"codex":null}));
+        assert!(!null_repository
+            .compare_and_update_key_oauth_runtime_state(&update(None, 1))
+            .await
+            .expect("JSON null must not compare equal to an absent namespace"));
+        let stored = null_repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key should reload")
+            .pop()
+            .expect("key should exist");
+        assert_eq!(
+            stored.upstream_metadata.as_ref().unwrap()["codex"],
+            Value::Null
+        );
+        assert_eq!(
+            stored.status_snapshot.as_ref().unwrap()["oauth"],
+            json!({"generation":1})
+        );
+
+        let removal_repository = repository_with_metadata(json!({
+            "codex":{"remaining":5},
+            "admin":{"keep":true}
+        }));
+        let removal_update = |expected_remaining: u64| {
+            let mut update = update(
+                Some(json!({"remaining":expected_remaining})),
+                expected_remaining,
+            );
+            update.upstream_metadata_patch = Some(json!({"runtime":{"generation":2}}));
+            update.upstream_metadata_namespace_to_remove = Some("codex".to_string());
+            update.status_snapshot_patch = json!({"quota":null});
+            update
+        };
+        assert!(!removal_repository
+            .compare_and_update_key_oauth_runtime_state(&removal_update(4))
+            .await
+            .expect("stale removal fence should be a CAS miss"));
+        assert!(removal_repository
+            .compare_and_update_key_oauth_runtime_state(&removal_update(5))
+            .await
+            .expect("matching removal fence should succeed"));
+        let stored = removal_repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key should reload after namespace removal")
+            .pop()
+            .expect("key should exist");
+        let metadata = stored
+            .upstream_metadata
+            .as_ref()
+            .and_then(Value::as_object)
+            .expect("metadata should remain an object");
+        assert!(!metadata.contains_key("codex"));
+        assert_eq!(metadata["admin"], json!({"keep":true}));
+        assert_eq!(metadata["runtime"], json!({"generation":2}));
+        assert_eq!(
+            stored.status_snapshot.as_ref().unwrap()["quota"],
+            Value::Null
+        );
+
+        let mut ambiguous_update = removal_update(5);
+        ambiguous_update.upstream_metadata_patch = Some(json!({"codex":{"remaining":0}}));
+        assert!(matches!(
+            removal_repository
+                .compare_and_update_key_oauth_runtime_state(&ambiguous_update)
+                .await,
+            Err(DataLayerError::InvalidInput(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn oauth_runtime_cas_rejects_changed_credential_context() {
         let repository = || {
             InMemoryProviderCatalogReadRepository::seed(
@@ -1495,12 +1894,14 @@ mod tests {
                 provider_id: "provider-1".to_string(),
                 provider_type: "custom".to_string(),
             }),
+            expected_upstream_metadata_namespace: None,
             encrypted_auth_config: "ciphertext-auth-2".to_string(),
             encrypted_api_key_update: Some("ciphertext-api-2".to_string()),
             expires_at_unix_secs_update: None,
             oauth_invalid_at_unix_secs: None,
             oauth_invalid_reason: None,
             upstream_metadata_patch: None,
+            upstream_metadata_namespace_to_remove: None,
             status_snapshot_patch: json!({}),
             reset_error_count: false,
             updated_at_unix_secs: Some(123),
@@ -1514,10 +1915,21 @@ mod tests {
             .pop()
             .expect("key should exist");
         key.encrypted_api_key = Some("ciphertext-admin".to_string());
-        api_key_repository
-            .update_key(&key)
+        assert!(api_key_repository
+            .compare_and_update_key_admin_state(&ProviderCatalogKeyAdminCasUpdate {
+                expected_encrypted_auth_config: Some("ciphertext-auth-1".to_string()),
+                expected_credential: ProviderCatalogKeyOAuthCredentialFence {
+                    encrypted_api_key: Some("ciphertext-api-1".to_string()),
+                    auth_type: "api_key".to_string(),
+                    provider_id: "provider-1".to_string(),
+                    provider_type: "custom".to_string(),
+                },
+                key,
+                codex_rotation: None,
+                reset_oauth_runtime: true,
+            })
             .await
-            .expect("api key replacement should persist");
+            .expect("api key replacement should persist"));
         assert!(!api_key_repository
             .compare_and_update_key_oauth_runtime_state(&update())
             .await
@@ -1531,10 +1943,21 @@ mod tests {
             .pop()
             .expect("key should exist");
         key.auth_type = "oauth".to_string();
-        auth_type_repository
-            .update_key(&key)
+        assert!(auth_type_repository
+            .compare_and_update_key_admin_state(&ProviderCatalogKeyAdminCasUpdate {
+                expected_encrypted_auth_config: Some("ciphertext-auth-1".to_string()),
+                expected_credential: ProviderCatalogKeyOAuthCredentialFence {
+                    encrypted_api_key: Some("ciphertext-api-1".to_string()),
+                    auth_type: "api_key".to_string(),
+                    provider_id: "provider-1".to_string(),
+                    provider_type: "custom".to_string(),
+                },
+                key,
+                codex_rotation: None,
+                reset_oauth_runtime: true,
+            })
             .await
-            .expect("auth type replacement should persist");
+            .expect("auth type replacement should persist"));
         assert!(!auth_type_repository
             .compare_and_update_key_oauth_runtime_state(&update())
             .await
@@ -1586,6 +2009,7 @@ mod tests {
                 provider_id: "provider-1".to_string(),
                 provider_type: "custom".to_string(),
             },
+            expected_upstream_metadata_namespace: None,
         };
 
         let mut replacement = repository
@@ -1597,10 +2021,21 @@ mod tests {
         replacement.encrypted_api_key = Some("ciphertext-api-2".to_string());
         replacement.encrypted_auth_config = Some("ciphertext-auth-2".to_string());
         replacement.auth_type = "oauth".to_string();
-        repository
-            .update_key(&replacement)
+        assert!(repository
+            .compare_and_update_key_admin_state(&ProviderCatalogKeyAdminCasUpdate {
+                expected_encrypted_auth_config: Some("ciphertext-auth-1".to_string()),
+                expected_credential: ProviderCatalogKeyOAuthCredentialFence {
+                    encrypted_api_key: Some("ciphertext-api-1".to_string()),
+                    auth_type: "api_key".to_string(),
+                    provider_id: "provider-1".to_string(),
+                    provider_type: "custom".to_string(),
+                },
+                key: replacement,
+                codex_rotation: None,
+                reset_oauth_runtime: true,
+            })
             .await
-            .expect("replacement should persist");
+            .expect("replacement should persist"));
 
         assert!(!repository
             .compare_and_delete_key_oauth_credential(&stale_delete)
@@ -1625,6 +2060,7 @@ mod tests {
                 provider_id: "provider-1".to_string(),
                 provider_type: "custom".to_string(),
             },
+            expected_upstream_metadata_namespace: None,
         };
         assert!(repository
             .compare_and_delete_key_oauth_credential(&current_delete)
@@ -1635,6 +2071,74 @@ mod tests {
             .await
             .expect("deleted key lookup should succeed")
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn oauth_credential_cas_delete_rejects_changed_metadata_namespace() {
+        let mut key = sample_key("key-1", "provider-1")
+            .with_transport_fields(
+                None,
+                "ciphertext-api-1".to_string(),
+                Some("ciphertext-auth-1".to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("key transport should build");
+        key.upstream_metadata = Some(json!({
+            "codex": {"oauth_state_request_started_at_unix_ms": 100},
+            "admin": {"keep": true}
+        }));
+        let repository = InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider("provider-1")],
+            vec![],
+            vec![key],
+        );
+        let delete = |expected_value: Value| ProviderCatalogKeyOAuthCredentialCasDelete {
+            key_id: "key-1".to_string(),
+            expected_encrypted_auth_config: Some("ciphertext-auth-1".to_string()),
+            expected_credential: ProviderCatalogKeyOAuthCredentialFence {
+                encrypted_api_key: Some("ciphertext-api-1".to_string()),
+                auth_type: "api_key".to_string(),
+                provider_id: "provider-1".to_string(),
+                provider_type: "custom".to_string(),
+            },
+            expected_upstream_metadata_namespace: Some(
+                ProviderCatalogUpstreamMetadataNamespaceExpectation {
+                    namespace: "codex".to_string(),
+                    expected_value: Some(expected_value),
+                },
+            ),
+        };
+        let stale_delete = delete(json!({"oauth_state_request_started_at_unix_ms": 100}));
+        let current_codex = json!({"oauth_state_request_started_at_unix_ms": 200});
+        assert!(repository
+            .upsert_key_upstream_metadata_namespace("key-1", "codex", &current_codex, Some(200))
+            .await
+            .expect("newer codex namespace should persist"));
+
+        assert!(!repository
+            .compare_and_delete_key_oauth_credential(&stale_delete)
+            .await
+            .expect("stale namespace delete should be a CAS miss"));
+        assert_eq!(
+            repository
+                .list_keys_by_ids(&["key-1".to_string()])
+                .await
+                .expect("key should remain after stale delete")[0]
+                .upstream_metadata
+                .as_ref()
+                .unwrap()["codex"],
+            current_codex
+        );
+
+        assert!(repository
+            .compare_and_delete_key_oauth_credential(&delete(current_codex))
+            .await
+            .expect("current namespace delete should succeed"));
     }
 
     #[tokio::test]
@@ -2279,6 +2783,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_metadata_namespace_cas_rejects_non_object_metadata_roots() {
+        for invalid_root in [json!(null), json!([]), json!("invalid"), json!(1)] {
+            let mut key = sample_key("key-1", "provider-1");
+            key.upstream_metadata = Some(invalid_root.clone());
+            key.status_snapshot = Some(json!({"quota":{"remaining":9}}));
+            key.updated_at_unix_secs = Some(10);
+            let repository = InMemoryProviderCatalogReadRepository::seed(
+                vec![sample_provider("provider-1")],
+                vec![],
+                vec![key],
+            );
+
+            assert!(!repository
+                .update_key_runtime_metadata(&ProviderCatalogKeyRuntimeMetadataUpdate {
+                    key_id: "key-1".to_string(),
+                    namespace: "codex".to_string(),
+                    expected_upstream_metadata_value: None,
+                    upstream_metadata_value: json!({"remaining":1}),
+                    status_snapshot_patch: json!({"quota":{"remaining":1}}),
+                    updated_at_unix_secs: Some(20),
+                })
+                .await
+                .expect("non-object root should be a CAS miss"));
+            assert!(!repository
+                .compare_and_update_key_oauth_runtime_state(
+                    &ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
+                        key_id: "key-1".to_string(),
+                        expected_encrypted_auth_config: None,
+                        expected_credential: None,
+                        expected_upstream_metadata_namespace: Some(
+                            ProviderCatalogUpstreamMetadataNamespaceExpectation {
+                                namespace: "codex".to_string(),
+                                expected_value: None,
+                            },
+                        ),
+                        encrypted_auth_config: "next-auth".to_string(),
+                        encrypted_api_key_update: None,
+                        expires_at_unix_secs_update: None,
+                        oauth_invalid_at_unix_secs: None,
+                        oauth_invalid_reason: None,
+                        upstream_metadata_patch: Some(json!({"codex":{"remaining":1}})),
+                        upstream_metadata_namespace_to_remove: None,
+                        status_snapshot_patch: json!({"quota":{"remaining":1}}),
+                        reset_error_count: false,
+                        updated_at_unix_secs: Some(20),
+                    },
+                )
+                .await
+                .expect("OAuth metadata update should be a CAS miss"));
+            assert!(!repository
+                .compare_and_delete_key_oauth_credential(
+                    &ProviderCatalogKeyOAuthCredentialCasDelete {
+                        key_id: "key-1".to_string(),
+                        expected_encrypted_auth_config: None,
+                        expected_credential: ProviderCatalogKeyOAuthCredentialFence {
+                            encrypted_api_key: None,
+                            auth_type: "api_key".to_string(),
+                            provider_id: "provider-1".to_string(),
+                            provider_type: "custom".to_string(),
+                        },
+                        expected_upstream_metadata_namespace: Some(
+                            ProviderCatalogUpstreamMetadataNamespaceExpectation {
+                                namespace: "codex".to_string(),
+                                expected_value: None,
+                            },
+                        ),
+                    },
+                )
+                .await
+                .expect("OAuth credential delete should be a CAS miss"));
+
+            let stored = repository
+                .list_keys_by_ids(&["key-1".to_string()])
+                .await
+                .expect("key should reload")
+                .pop()
+                .expect("key should exist");
+            assert_eq!(stored.upstream_metadata, Some(invalid_root));
+            assert_eq!(
+                stored.status_snapshot,
+                Some(json!({"quota":{"remaining":9}}))
+            );
+            assert_eq!(stored.encrypted_auth_config, None);
+            assert_eq!(stored.updated_at_unix_secs, Some(10));
+        }
+    }
+
+    #[tokio::test]
     async fn stale_admin_update_preserves_concurrent_runtime_owned_fields() {
         let mut key = sample_key("key-1", "provider-1");
         key.learned_rpm_limit = Some(10);
@@ -2363,6 +2955,273 @@ mod tests {
             stored.status_snapshot,
             Some(json!({"quota":{"remaining":3},"observation_count":2}))
         );
+    }
+
+    #[tokio::test]
+    async fn admin_cas_rotates_codex_namespace_and_rejects_stale_credentials() {
+        let mut key = sample_key("key-1", "provider-1")
+            .with_transport_fields(
+                None,
+                "api-old".to_string(),
+                Some("auth-old".to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("key transport should build");
+        key.auth_type = "oauth".to_string();
+        key.upstream_metadata = Some(json!({
+            "codex": {"credential_generation":"generation-old","used_percent":80},
+            "runtime": {"keep":true}
+        }));
+        key.status_snapshot = Some(json!({
+            "quota":{"used_ratio":0.8},
+            "oauth":{"invalid":true}
+        }));
+        key.oauth_invalid_at_unix_secs = Some(123);
+        key.oauth_invalid_reason = Some("expired".to_string());
+        key.error_count = Some(9);
+        key.health_by_format = Some(json!({"openai:chat":{"failures":2}}));
+        let mut provider = sample_provider("provider-1");
+        provider.provider_type = "codex".to_string();
+        let repository =
+            InMemoryProviderCatalogReadRepository::seed(vec![provider], vec![], vec![key.clone()]);
+
+        let mut requested = key.clone();
+        requested.name = "rotated".to_string();
+        requested.encrypted_api_key = Some("api-new".to_string());
+        requested.encrypted_auth_config = Some("auth-new".to_string());
+        requested.upstream_metadata = Some(json!({"caller":"must-not-replace-runtime"}));
+        requested.status_snapshot = Some(json!({"caller":"must-not-replace-runtime"}));
+        let update = ProviderCatalogKeyAdminCasUpdate {
+            expected_encrypted_auth_config: Some("auth-old".to_string()),
+            expected_credential: ProviderCatalogKeyOAuthCredentialFence {
+                encrypted_api_key: Some("api-old".to_string()),
+                auth_type: "oauth".to_string(),
+                provider_id: "provider-1".to_string(),
+                provider_type: "codex".to_string(),
+            },
+            key: requested,
+            codex_rotation: Some(json!({"credential_generation":"generation-new"})),
+            reset_oauth_runtime: true,
+        };
+        assert!(repository
+            .compare_and_update_key_admin_state(&update)
+            .await
+            .expect("matching admin CAS should succeed"));
+        assert!(!repository
+            .compare_and_update_key_admin_state(&update)
+            .await
+            .expect("stale admin CAS should miss"));
+
+        let stored = repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key should reload")
+            .pop()
+            .expect("key should exist");
+        assert_eq!(stored.name, "rotated");
+        assert_eq!(
+            stored.upstream_metadata,
+            Some(json!({
+                "codex":{"credential_generation":"generation-new"},
+                "runtime":{"keep":true}
+            }))
+        );
+        assert_eq!(
+            stored.status_snapshot,
+            Some(json!({"quota":null,"oauth":null}))
+        );
+        assert_eq!(stored.oauth_invalid_at_unix_secs, None);
+        assert_eq!(stored.oauth_invalid_reason, None);
+        assert_eq!(stored.error_count, Some(0));
+        assert_eq!(
+            stored.health_by_format,
+            Some(json!({"openai:chat":{"failures":2}}))
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_rotation_fails_closed_for_malformed_runtime_roots() {
+        for malformed_field in ["upstream_metadata", "status_snapshot"] {
+            let mut key = sample_key("key-1", "provider-1");
+            key.auth_type = "oauth".to_string();
+            key.encrypted_api_key = Some("api-old".to_string());
+            key.encrypted_auth_config = Some("auth-old".to_string());
+            key.upstream_metadata = Some(json!({"runtime":{"keep":true}}));
+            key.status_snapshot = Some(json!({"oauth":{"keep":true}}));
+            if malformed_field == "upstream_metadata" {
+                key.upstream_metadata = Some(json!([]));
+            } else {
+                key.status_snapshot = Some(json!(null));
+            }
+            let original = key.clone();
+            let mut requested = key.clone();
+            requested.name = "must-not-persist".to_string();
+            requested.encrypted_api_key = Some("api-new".to_string());
+            requested.encrypted_auth_config = Some("auth-new".to_string());
+            let mut provider = sample_provider("provider-1");
+            provider.provider_type = "codex".to_string();
+            let repository =
+                InMemoryProviderCatalogReadRepository::seed(vec![provider], vec![], vec![key]);
+
+            assert!(!repository
+                .compare_and_update_key_admin_state(&ProviderCatalogKeyAdminCasUpdate {
+                    expected_encrypted_auth_config: Some("auth-old".to_string()),
+                    expected_credential: ProviderCatalogKeyOAuthCredentialFence {
+                        encrypted_api_key: Some("api-old".to_string()),
+                        auth_type: "oauth".to_string(),
+                        provider_id: "provider-1".to_string(),
+                        provider_type: "codex".to_string(),
+                    },
+                    key: requested,
+                    codex_rotation: Some(json!({
+                        "credential_generation":"generation-new"
+                    })),
+                    reset_oauth_runtime: true,
+                })
+                .await
+                .expect("malformed runtime root should be a CAS miss"));
+            let stored = repository
+                .list_keys_by_ids(&["key-1".to_string()])
+                .await
+                .expect("key should reload")
+                .pop()
+                .expect("key should exist");
+            assert_eq!(stored, original);
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_admin_update_rejects_stale_credential_snapshot() {
+        let mut key = sample_key("key-1", "provider-1");
+        key.encrypted_api_key = Some("api-old".to_string());
+        key.encrypted_auth_config = Some("auth-old".to_string());
+        let mut stale = key.clone();
+        stale.name = "stale-name".to_string();
+        let repository = InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider("provider-1")],
+            vec![],
+            vec![key],
+        );
+
+        let mut replacement = stale.clone();
+        replacement.encrypted_api_key = Some("api-new".to_string());
+        replacement.encrypted_auth_config = Some("auth-new".to_string());
+        assert!(repository
+            .compare_and_update_key_admin_state(&ProviderCatalogKeyAdminCasUpdate {
+                expected_encrypted_auth_config: Some("auth-old".to_string()),
+                expected_credential: ProviderCatalogKeyOAuthCredentialFence {
+                    encrypted_api_key: Some("api-old".to_string()),
+                    auth_type: "api_key".to_string(),
+                    provider_id: "provider-1".to_string(),
+                    provider_type: "custom".to_string(),
+                },
+                key: replacement,
+                codex_rotation: None,
+                reset_oauth_runtime: true,
+            })
+            .await
+            .expect("credential replacement should succeed"));
+
+        assert!(matches!(
+            repository.update_key(&stale).await,
+            Err(DataLayerError::UnexpectedValue(_))
+        ));
+        let stored = repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key should reload")
+            .pop()
+            .expect("key should exist");
+        assert_eq!(stored.name, "stale-name");
+        assert_eq!(stored.encrypted_api_key.as_deref(), Some("api-new"));
+        assert_eq!(stored.encrypted_auth_config.as_deref(), Some("auth-new"));
+    }
+
+    #[tokio::test]
+    async fn admin_rotation_rejects_noop_credential_and_reset_rejects_bad_status_root() {
+        let mut key = sample_key("key-1", "provider-1");
+        key.auth_type = "oauth".to_string();
+        key.encrypted_api_key = Some("api-old".to_string());
+        key.encrypted_auth_config = Some("auth-old".to_string());
+        key.error_count = Some(7);
+        key.upstream_metadata = Some(json!({"codex":{"credential_generation":"old"}}));
+        key.status_snapshot = Some(json!({"quota":{"used_ratio":0.4}}));
+        let mut provider = sample_provider("provider-1");
+        provider.provider_type = "codex".to_string();
+        let repository =
+            InMemoryProviderCatalogReadRepository::seed(vec![provider], vec![], vec![key.clone()]);
+        let no_op = ProviderCatalogKeyAdminCasUpdate {
+            expected_encrypted_auth_config: Some("auth-old".to_string()),
+            expected_credential: ProviderCatalogKeyOAuthCredentialFence {
+                encrypted_api_key: Some("api-old".to_string()),
+                auth_type: "oauth".to_string(),
+                provider_id: "provider-1".to_string(),
+                provider_type: "codex".to_string(),
+            },
+            key: key.clone(),
+            codex_rotation: Some(json!({"credential_generation":"new"})),
+            reset_oauth_runtime: true,
+        };
+        assert!(!repository
+            .compare_and_update_key_admin_state(&no_op)
+            .await
+            .expect("no-op rotation should be a CAS miss"));
+
+        let reset_valid = ProviderCatalogKeyAdminCasUpdate {
+            expected_encrypted_auth_config: Some("auth-old".to_string()),
+            expected_credential: no_op.expected_credential.clone(),
+            key: key.clone(),
+            codex_rotation: None,
+            reset_oauth_runtime: true,
+        };
+        assert!(repository
+            .compare_and_update_key_admin_state(&reset_valid)
+            .await
+            .expect("valid OAuth runtime reset should succeed"));
+        let stored = repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key should reload")
+            .pop()
+            .expect("key should exist");
+        assert_eq!(stored.error_count, Some(0));
+
+        let mut malformed = key.clone();
+        malformed.status_snapshot = Some(json!("invalid"));
+        let reset_only = ProviderCatalogKeyAdminCasUpdate {
+            expected_encrypted_auth_config: Some("auth-old".to_string()),
+            expected_credential: ProviderCatalogKeyOAuthCredentialFence {
+                encrypted_api_key: Some("api-old".to_string()),
+                auth_type: "oauth".to_string(),
+                provider_id: "provider-1".to_string(),
+                provider_type: "codex".to_string(),
+            },
+            key: malformed.clone(),
+            codex_rotation: None,
+            reset_oauth_runtime: true,
+        };
+        let malformed_repository = InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider("provider-1")],
+            vec![],
+            vec![malformed],
+        );
+        assert!(!malformed_repository
+            .compare_and_update_key_admin_state(&reset_only)
+            .await
+            .expect("reset with malformed status root should be a CAS miss"));
+
+        let stored = malformed_repository
+            .list_keys_by_ids(&["key-1".to_string()])
+            .await
+            .expect("key should reload")
+            .pop()
+            .expect("key should exist");
+        assert_eq!(stored.error_count, Some(7));
     }
 
     #[tokio::test]

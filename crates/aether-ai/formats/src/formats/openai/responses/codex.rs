@@ -236,6 +236,40 @@ pub fn build_codex_model_catalog_metadata(cards: &[Value]) -> Value {
     })
 }
 
+/// Projects an upstream Codex catalog card onto an authorized Aether model name.
+///
+/// Catalog cards are versioned by Codex and may gain fields that Aether does not know about. Keep
+/// the matching card opaque: only the Aether-internal identity fields are removed and `slug` is
+/// replaced with the downstream model name. A non-empty, exact `id` or `slug` match is the only
+/// schema requirement.
+pub fn project_codex_catalog_model_card(
+    catalog_models: &[Value],
+    source_model: &str,
+    global_model: &str,
+) -> Option<Value> {
+    if source_model.trim().is_empty() || global_model.trim().is_empty() {
+        return None;
+    }
+
+    let mut card = catalog_models
+        .iter()
+        .filter_map(Value::as_object)
+        .find(|card| {
+            ["id", "slug"].iter().any(|field| {
+                card.get(*field)
+                    .and_then(Value::as_str)
+                    .filter(|identity| !identity.trim().is_empty())
+                    .is_some_and(|identity| identity == source_model)
+            })
+        })?
+        .clone();
+
+    card.remove("id");
+    card.remove("api_formats");
+    card.insert("slug".to_string(), Value::String(global_model.to_string()));
+    Some(Value::Object(card))
+}
+
 fn codex_execution_model_card(card: &Value) -> Value {
     const EXCLUDED_FIELDS: [&str; 3] =
         ["base_instructions", "model_messages", "available_in_plans"];
@@ -1989,7 +2023,7 @@ mod tests {
         apply_codex_openai_responses_special_body_edits_with_source_model_and_capabilities,
         apply_codex_openai_special_headers, apply_openai_responses_compact_special_body_edits,
         build_codex_model_catalog_metadata, bundled_codex_model_cards, effective_codex_model_cards,
-        resolve_codex_responses_model_capabilities,
+        project_codex_catalog_model_card, resolve_codex_responses_model_capabilities,
         validate_codex_openai_responses_compact_request_contract, CODEX_CLIENT_ORIGINATOR,
         CODEX_CLIENT_USER_AGENT, CODEX_OPENAI_IMAGE_INTERNAL_MODEL,
         CODEX_OPENAI_RESPONSES_UNSUPPORTED_BODY_FIELDS, CODEX_RESPONSES_LITE_HEADER,
@@ -2089,6 +2123,105 @@ mod tests {
             headers.get("x-openai-internal-codex-responses-lite"),
             Some(&"true".to_string())
         );
+    }
+
+    #[test]
+    fn projects_current_codex_catalog_card_as_opaque_json() {
+        let card = json!({
+            "id": "upstream-internal-id",
+            "slug": "gpt-future-dynamic",
+            "api_formats": ["openai:responses"],
+            "model_messages": {
+                "instructions_template": "Current instructions for {{ personality }}"
+            },
+            "available_in_plans": ["plus", "pro"],
+            "future_capability": {
+                "mode": "native",
+                "unknown_nested_field": [1, 2, 3]
+            }
+        });
+
+        let projected =
+            project_codex_catalog_model_card(&[card], "gpt-future-dynamic", "future-model-alias")
+                .expect("current Codex card should project");
+
+        assert_eq!(projected["slug"], "future-model-alias");
+        assert!(projected.get("id").is_none());
+        assert!(projected.get("api_formats").is_none());
+        assert_eq!(
+            projected["model_messages"]["instructions_template"],
+            "Current instructions for {{ personality }}"
+        );
+        assert_eq!(projected["available_in_plans"], json!(["plus", "pro"]));
+        assert_eq!(
+            projected["future_capability"],
+            json!({
+                "mode": "native",
+                "unknown_nested_field": [1, 2, 3]
+            })
+        );
+    }
+
+    #[test]
+    fn projects_legacy_codex_catalog_card_by_id_without_known_schema_fields() {
+        let card = json!({
+            "id": "gpt-future-dynamic",
+            "base_instructions": "Legacy instructions",
+            "available_in_plans": ["team"],
+            "future_capability": true
+        });
+
+        let projected = project_codex_catalog_model_card(
+            &[json!("not an object"), card],
+            "gpt-future-dynamic",
+            "legacy-model-alias",
+        )
+        .expect("legacy Codex card should project by id");
+
+        assert_eq!(
+            projected,
+            json!({
+                "slug": "legacy-model-alias",
+                "base_instructions": "Legacy instructions",
+                "available_in_plans": ["team"],
+                "future_capability": true
+            })
+        );
+    }
+
+    #[test]
+    fn codex_catalog_projection_requires_a_non_empty_exact_identity() {
+        let cards = [
+            json!(null),
+            json!({}),
+            json!({"id": "", "slug": "   "}),
+            json!({"slug": "gpt-future-dynamic-preview"}),
+        ];
+
+        assert!(project_codex_catalog_model_card(
+            &cards,
+            "gpt-future-dynamic",
+            "future-model-alias"
+        )
+        .is_none());
+        assert!(project_codex_catalog_model_card(
+            &[json!({"slug": "gpt-future-dynamic"})],
+            "",
+            "future-model-alias"
+        )
+        .is_none());
+        assert!(project_codex_catalog_model_card(
+            &[json!({"slug": "gpt-future-dynamic"})],
+            " gpt-future-dynamic ",
+            "future-model-alias"
+        )
+        .is_none());
+        assert!(project_codex_catalog_model_card(
+            &[json!({"slug": "gpt-future-dynamic"})],
+            "gpt-future-dynamic",
+            "   "
+        )
+        .is_none());
     }
 
     #[test]

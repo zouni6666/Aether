@@ -22,6 +22,8 @@ pub(crate) use self::system_modules_helpers::{
     serialize_public_capability, supported_capability_names, PUBLIC_CAPABILITY_DEFINITIONS,
 };
 
+#[cfg(test)]
+pub(crate) use self::support::filter_eligible_model_rows;
 pub(crate) use self::support::{
     build_api_key_install_session_response, build_proxy_node_install_session_response,
     build_unhandled_public_support_response, matches_model_mapping_for_models,

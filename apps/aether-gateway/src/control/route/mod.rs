@@ -247,8 +247,7 @@ pub(super) fn detect_public_models_auth_signature(uri: &Uri, headers: &http::Hea
 
     let has_codex_client_version = uri.path() == "/v1/models"
         && uri.query().is_some_and(|query| {
-            url::form_urlencoded::parse(query.as_bytes())
-                .any(|(key, value)| key == "client_version" && !value.trim().is_empty())
+            url::form_urlencoded::parse(query.as_bytes()).any(|(key, _)| key == "client_version")
         });
     if has_codex_client_version {
         return "openai:responses".to_string();

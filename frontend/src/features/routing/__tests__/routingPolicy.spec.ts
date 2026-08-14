@@ -2,14 +2,24 @@ import { describe, expect, it } from 'vitest'
 
 import {
   DEFAULT_ROUTING_POLICY_MODEL,
+  allowedModelsMirrorPerModelPolicies,
+  clearAllowedModels,
+  copyPerModelRoutingConfig,
   createEmptyModelPolicy,
   createEmptyRoutingGroupConfig,
+  formatAllowedModelsInput,
   getDefaultModelPolicy,
   getModelScheduling,
   modelSchedulingRuleId,
   normalizeRoutingGroupConfig,
+  parseAllowedModelsInput,
+  removePerModelRoutingConfig,
+  routingModelScopeLabel,
+  savePerModelRoutingConfig,
   setDefaultPoolPriorityOverrides,
   setDefaultProviderPriorityOverrides,
+  setRoutingSortingScope,
+  updateAllowedModelsFromInput,
   upsertModelSchedulingRule,
   upsertModelPolicy,
 } from '../utils/routingPolicy'
@@ -82,6 +92,115 @@ describe('routingPolicy', () => {
       priority_mode: 'global_key',
       scheduling_mode: 'fixed_order',
     })
+  })
+
+  it('updates the model allowlist only through explicit scope controls', () => {
+    const config = normalizeRoutingGroupConfig({
+      allowed_models: ['legacy-model'],
+    })
+
+    expect(parseAllowedModelsInput(' gpt-5\nclaude-*\nlegacy-model\ngpt-5 ')).toEqual([
+      'gpt-5',
+      'claude-*',
+      'legacy-model',
+    ])
+
+    const restricted = updateAllowedModelsFromInput(
+      config,
+      'gpt-5\nclaude-*\nlegacy-model\ngpt-5',
+    )
+    expect(restricted.allowed_models).toEqual(['gpt-5', 'claude-*', 'legacy-model'])
+    expect(formatAllowedModelsInput(restricted.allowed_models)).toBe('gpt-5\nclaude-*\nlegacy-model')
+    expect(routingModelScopeLabel(restricted)).toBe('3 个模型')
+
+    const unrestricted = clearAllowedModels(restricted)
+    expect(unrestricted.allowed_models).toEqual([])
+    expect(routingModelScopeLabel(unrestricted)).toBe('全部模型')
+  })
+
+  it('round-trips selectors containing commas and labels wildcard scope as unrestricted', () => {
+    const selectors = ['vendor,model', 'gpt-*']
+    expect(parseAllowedModelsInput(formatAllowedModelsInput(selectors))).toEqual(selectors)
+
+    const wildcard = normalizeRoutingGroupConfig({ allowed_models: ['gpt-*', '*'] })
+    expect(routingModelScopeLabel(wildcard)).toBe('全部模型')
+  })
+
+  it('preserves historical empty selectors until unrestricted scope is explicit', () => {
+    const legacy = normalizeRoutingGroupConfig({ allowed_models: ['', '  '] })
+
+    expect(updateAllowedModelsFromInput(legacy, '  \n')).toMatchObject({
+      allowed_models: ['', '  '],
+    })
+    expect(clearAllowedModels(legacy).allowed_models).toEqual([])
+  })
+
+  it('preserves an explicit model allowlist across per-model editing actions', () => {
+    const allowlist = ['gpt-*', 'legacy-model']
+    let config = normalizeRoutingGroupConfig({
+      allowed_models: allowlist,
+      model_policies: [{
+        ...createEmptyModelPolicy('special-model'),
+        allowed_providers: ['provider-special'],
+      }],
+    })
+    config = upsertModelSchedulingRule(config, 'special-model', {
+      priority_mode: 'global_key',
+      scheduling_mode: 'fixed_order',
+    })
+
+    const perModel = setRoutingSortingScope(config, 'per_model')
+    expect(perModel.allowed_models).toEqual(allowlist)
+    expect(getModelScheduling(perModel, 'special-model')).toMatchObject({
+      priority_mode: 'global_key',
+      scheduling_mode: 'fixed_order',
+    })
+
+    const saved = savePerModelRoutingConfig(perModel, 'new-special-model')
+    expect(saved.allowed_models).toEqual(allowlist)
+    expect(saved.model_policies.map(policy => policy.model)).toContain('new-special-model')
+
+    const copied = copyPerModelRoutingConfig(
+      saved,
+      saved,
+      'special-model',
+      'copied-special-model',
+    )
+    expect(copied.allowed_models).toEqual(allowlist)
+    expect(copied.model_policies.find(policy => policy.model === 'copied-special-model'))
+      .toMatchObject({ allowed_providers: ['provider-special'] })
+    expect(getModelScheduling(copied, 'copied-special-model')).toMatchObject({
+      priority_mode: 'global_key',
+      scheduling_mode: 'fixed_order',
+    })
+
+    const removed = removePerModelRoutingConfig(copied, 'special-model')
+    expect(removed.allowed_models).toEqual(allowlist)
+    expect(removed.model_policies.map(policy => policy.model)).not.toContain('special-model')
+    expect(removed.rules.map(rule => rule.id)).not.toContain(modelSchedulingRuleId('special-model'))
+
+    const unified = setRoutingSortingScope(removed, 'unified')
+    expect(unified.allowed_models).toEqual(allowlist)
+    expect(unified.model_policies.filter(policy => policy.model !== DEFAULT_ROUTING_POLICY_MODEL))
+      .toEqual([])
+    expect(unified.rules.some(rule => rule.id.startsWith('ui_model_scheduling:'))).toBe(false)
+  })
+
+  it('recognizes legacy allowlist mirrors without mutating historical values', () => {
+    const config = normalizeRoutingGroupConfig({
+      allowed_models: [' model-b ', 'model-a', 'model-a'],
+      model_policies: [
+        createEmptyModelPolicy('model-a'),
+        createEmptyModelPolicy('model-b'),
+      ],
+    })
+
+    expect(allowedModelsMirrorPerModelPolicies(config)).toBe(true)
+    expect(config.allowed_models).toEqual([' model-b ', 'model-a', 'model-a'])
+    expect(allowedModelsMirrorPerModelPolicies({
+      ...config,
+      allowed_models: ['model-*'],
+    })).toBe(false)
   })
 })
 

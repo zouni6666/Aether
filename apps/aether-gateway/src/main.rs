@@ -261,7 +261,7 @@ const DEFAULT_SQLITE_POOL_MAX_CONNECTIONS: u32 = 1;
 const AUTO_SERVER_SQL_POOL_CONNECTIONS_PER_CPU: u32 = 4;
 const AUTO_SERVER_SQL_POOL_MIN_CONNECTIONS_FLOOR: u32 = 4;
 const AUTO_SERVER_SQL_POOL_MIN_CONNECTIONS_CAP: u32 = 16;
-const AUTO_SERVER_SQL_POOL_MAX_CONNECTIONS_FLOOR: u32 = 20;
+const AUTO_SERVER_SQL_POOL_MAX_CONNECTIONS_FLOOR: u32 = 32;
 const AUTO_SERVER_SQL_POOL_MAX_CONNECTIONS_CAP: u32 = 100;
 const DEFAULT_USAGE_QUEUE_WORKERS_CAP: usize = 8;
 const AUTO_USAGE_QUEUE_WORKERS_MIN: usize = 2;
@@ -2837,7 +2837,11 @@ mod tests {
     fn gateway_data_pool_cpu_sizing_examples() {
         let two_cpu = automatic_sql_pool_config_for_parallelism(DatabaseDriver::Postgres, 2);
         assert_eq!(two_cpu.min_connections, 4);
-        assert_eq!(two_cpu.max_connections, 20);
+        assert_eq!(two_cpu.max_connections, 32);
+
+        let four_cpu = automatic_sql_pool_config_for_parallelism(DatabaseDriver::Postgres, 4);
+        assert_eq!(four_cpu.min_connections, 4);
+        assert_eq!(four_cpu.max_connections, 32);
 
         let eight_cpu = automatic_sql_pool_config_for_parallelism(DatabaseDriver::Postgres, 8);
         assert_eq!(eight_cpu.min_connections, 8);

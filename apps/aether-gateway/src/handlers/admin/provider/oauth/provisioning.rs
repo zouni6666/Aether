@@ -12,6 +12,7 @@ use crate::ai_serving::{
     build_provider_key_pool_score_upsert, provider_key_pool_score_id, provider_key_pool_score_scope,
 };
 use crate::handlers::admin::admin_provider_pool_config;
+use crate::handlers::admin::provider::write::keys::build_provider_catalog_key_admin_cas_update;
 use crate::handlers::admin::request::AdminAppState;
 use crate::provider_key_auth::provider_active_api_formats;
 use crate::GatewayError;
@@ -286,6 +287,61 @@ fn grok_oauth_catalog_key_fingerprint(
     grok_browser_transport_fingerprint_from_auth_config(auth_config)
 }
 
+pub(crate) fn rotate_codex_credential_generation(
+    key: &mut StoredProviderCatalogKey,
+    provider_type: &str,
+) {
+    if !provider_type.trim().eq_ignore_ascii_case("codex") {
+        return;
+    }
+
+    let mut upstream_metadata = key
+        .upstream_metadata
+        .as_ref()
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    upstream_metadata.insert(
+        "codex".to_string(),
+        json!({
+            aether_admin::provider::quota::CODEX_CREDENTIAL_GENERATION_KEY:
+                Uuid::now_v7().to_string(),
+        }),
+    );
+    key.upstream_metadata = Some(Value::Object(upstream_metadata));
+
+    if let Some(mut status_snapshot) = key
+        .status_snapshot
+        .as_ref()
+        .and_then(Value::as_object)
+        .cloned()
+    {
+        status_snapshot.insert("quota".to_string(), Value::Null);
+        key.status_snapshot = Some(Value::Object(status_snapshot));
+    }
+}
+
+pub(crate) fn ensure_codex_credential_generation_rotated(
+    key: &mut StoredProviderCatalogKey,
+    provider_type: &str,
+    previous_generation: Option<&str>,
+) {
+    if !provider_type.trim().eq_ignore_ascii_case("codex") {
+        return;
+    }
+
+    let current_generation = key
+        .upstream_metadata
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get("codex"))
+        .and_then(|codex| aether_admin::provider::quota::codex_credential_generation(Some(codex)));
+    let already_rotated = current_generation.is_some() && current_generation != previous_generation;
+    if !already_rotated {
+        rotate_codex_credential_generation(key, provider_type);
+    }
+}
+
 pub(crate) async fn create_provider_oauth_catalog_key(
     state: &AdminAppState<'_>,
     provider_id: &str,
@@ -344,6 +400,7 @@ pub(crate) async fn create_provider_oauth_catalog_key(
     record.circuit_breaker_by_format = Some(json!({}));
     record.created_at_unix_ms = Some(now_unix_secs);
     record.updated_at_unix_secs = Some(now_unix_secs);
+    rotate_codex_credential_generation(&mut record, provider_type);
     let created = state.create_provider_catalog_key(&record).await?;
     if let Some(key) = created.as_ref() {
         let _ = state
@@ -395,17 +452,23 @@ pub(crate) async fn update_existing_provider_oauth_catalog_key(
         updated.proxy = Some(proxy);
     }
     updated.updated_at_unix_secs = Some(now_unix_secs);
-    if state.update_provider_catalog_key(&updated).await?.is_none() {
-        return Ok(None);
-    }
+    rotate_codex_credential_generation(&mut updated, provider_type);
+    let admin_update =
+        build_provider_catalog_key_admin_cas_update(existing_key, updated.clone(), provider_type);
     if !state
-        .clear_provider_catalog_key_oauth_invalid_marker(&updated.id)
+        .compare_and_update_provider_catalog_key_admin_state(&admin_update)
         .await?
     {
         return Ok(None);
     }
     let persisted = state
-        .reset_provider_catalog_key_recovery_state(&updated.id)
+        .reset_provider_catalog_key_recovery_state_fenced(
+            &updated.id,
+            updated
+                .encrypted_auth_config
+                .as_deref()
+                .expect("OAuth update always supplies encrypted auth_config"),
+        )
         .await?;
     if let Some(key) = persisted.as_ref() {
         let _ = state
@@ -502,10 +565,12 @@ fn provider_oauth_catalog_key_api_formats(
 #[cfg(test)]
 mod tests {
     use super::{
-        grok_oauth_catalog_key_fingerprint, provider_oauth_token_payload_expires_at_unix_secs,
+        ensure_codex_credential_generation_rotated, grok_oauth_catalog_key_fingerprint,
+        provider_oauth_token_payload_expires_at_unix_secs, rotate_codex_credential_generation,
     };
+    use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     fn sample_unsigned_jwt(payload: serde_json::Value) -> String {
         let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"none","typ":"JWT"}"#);
@@ -608,5 +673,102 @@ mod tests {
         let auth_config = auth_config.as_object().expect("object");
 
         assert!(grok_oauth_catalog_key_fingerprint("openai", auth_config).is_none());
+    }
+
+    #[test]
+    fn codex_credential_rotation_replaces_quota_namespace_and_preserves_unrelated_state() {
+        let mut key = StoredProviderCatalogKey::new(
+            "key".to_string(),
+            "provider".to_string(),
+            "Codex".to_string(),
+            "oauth".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build");
+        key.upstream_metadata = Some(json!({
+            "codex": {
+                "credential_generation": "old-generation",
+                "primary_used_percent": 75.0,
+            },
+            "unrelated": {"preserved": true},
+        }));
+        key.status_snapshot = Some(json!({
+            "oauth": {"status": "valid"},
+            "quota": {"used_ratio": 0.75},
+        }));
+
+        rotate_codex_credential_generation(&mut key, "codex");
+
+        let codex = key
+            .upstream_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("codex"))
+            .and_then(Value::as_object)
+            .expect("codex namespace should exist");
+        assert_eq!(codex.len(), 1);
+        assert_ne!(
+            codex
+                .get(aether_admin::provider::quota::CODEX_CREDENTIAL_GENERATION_KEY)
+                .and_then(Value::as_str),
+            Some("old-generation")
+        );
+        assert_eq!(
+            key.upstream_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.pointer("/unrelated/preserved")),
+            Some(&json!(true))
+        );
+        assert_eq!(
+            key.status_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.get("quota")),
+            Some(&Value::Null)
+        );
+        assert_eq!(
+            key.status_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.pointer("/oauth/status")),
+            Some(&json!("valid"))
+        );
+    }
+
+    #[test]
+    fn codex_credential_rotation_ensure_does_not_rotate_twice_in_one_write() {
+        let mut key = StoredProviderCatalogKey::new(
+            "key".to_string(),
+            "provider".to_string(),
+            "Codex".to_string(),
+            "oauth".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build");
+        key.upstream_metadata = Some(json!({
+            "codex": {"credential_generation": "generation-before-write"}
+        }));
+
+        rotate_codex_credential_generation(&mut key, "codex");
+        let builder_generation = key
+            .upstream_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.pointer("/codex/credential_generation"))
+            .and_then(Value::as_str)
+            .expect("builder should rotate the generation")
+            .to_string();
+
+        ensure_codex_credential_generation_rotated(
+            &mut key,
+            "codex",
+            Some("generation-before-write"),
+        );
+
+        assert_eq!(
+            key.upstream_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.pointer("/codex/credential_generation"))
+                .and_then(Value::as_str),
+            Some(builder_generation.as_str())
+        );
     }
 }

@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use aether_ai_serving::{AiAttemptExecutionOutcome, AiAttemptRetryScope};
 use aether_contracts::{
-    ExecutionPlan, ExecutionStreamTerminalSummary, ExecutionTelemetry, StandardizedUsage,
-    StreamFrame, StreamFramePayload,
+    ExecutionPlan, ExecutionResponseObservation, ExecutionStreamTerminalSummary,
+    ExecutionTelemetry, StandardizedUsage, StreamFrame, StreamFramePayload,
 };
 use aether_data_contracts::repository::candidates::{
     RequestCandidateStatus, UpsertRequestCandidateRecord,
@@ -112,12 +112,13 @@ use crate::execution_runtime::{
 use crate::log_ids::short_request_id;
 use crate::orchestration::{
     apply_local_execution_effect, build_local_error_flow_metadata, classify_failure_disposition,
-    cyber_continue_failover_enabled, trace_upstream_response_body, with_error_flow_report_context,
+    cyber_continue_failover_enabled, spawn_local_oauth_success_effect,
+    trace_upstream_response_body, with_error_flow_report_context,
     with_upstream_response_report_context, FailureDisposition, FailureTokenAction,
     LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect,
     LocalExecutionEffect, LocalExecutionEffectContext, LocalFailoverAnalysis,
     LocalHealthFailureEffect, LocalHealthSuccessEffect, LocalOAuthInvalidationEffect,
-    LocalPoolErrorEffect,
+    LocalOAuthSuccessEffect, LocalPoolErrorEffect,
 };
 use crate::provider_pool_demand::{
     acquire_provider_pool_in_flight_guard, ProviderPoolInFlightGuard,
@@ -1249,6 +1250,9 @@ async fn execute_in_process_stream_with_oauth_retry(
             retry_status_code,
             response_text.as_deref(),
             trace_id,
+            report_context,
+            Some(execution.response_observation.request_started_at_unix_ms),
+            Some(&execution.response_observation.request_order_id),
         )
         .await
     {
@@ -2818,6 +2822,7 @@ async fn execute_stream_from_direct_passthrough(
         stream_precommit_committed: _,
         response,
         started_at: upstream_started_at,
+        response_observation,
         stream_first_byte_timeout,
         upstream_target_permit,
     } = execution;
@@ -2834,8 +2839,23 @@ async fn execute_stream_from_direct_passthrough(
     let request_id = plan.request_id.clone();
     let candidate_id = plan.candidate_id.clone();
     let request_id_for_log = short_request_id(request_id.as_str());
-    let mut report_context =
-        attach_provider_response_headers_to_report_context(report_context, &headers);
+    let mut report_context = attach_provider_response_headers_to_report_context(
+        report_context,
+        &headers,
+        response_observation.request_started_at_unix_ms,
+        response_observation.response_headers_observed_at_unix_ms,
+        &response_observation.request_order_id,
+    );
+    spawn_local_oauth_success_effect(
+        state.clone(),
+        &plan,
+        report_context.as_ref(),
+        LocalOAuthSuccessEffect {
+            status_code,
+            request_started_at_unix_ms: Some(response_observation.request_started_at_unix_ms),
+            request_order_id: Some(&response_observation.request_order_id),
+        },
+    );
     if status_code == 200 {
         seed_kiro_simulated_cache_enabled(state, &plan, &mut report_context).await;
         if kiro_simulated_cache_enabled_from_report_context(report_context.as_ref()) {
@@ -3819,6 +3839,7 @@ async fn execute_execution_runtime_stream_inner(
                 provider_pool_in_flight_guard.take(),
                 retry_scope_out.as_deref_mut(),
                 retry_fallback_out.as_deref_mut(),
+                None,
             )
             .await;
         }
@@ -3891,6 +3912,7 @@ async fn execute_execution_runtime_stream_inner(
                 provider_pool_in_flight_guard.take(),
                 retry_scope_out.as_deref_mut(),
                 retry_fallback_out.as_deref_mut(),
+                None,
             )
             .await;
         }
@@ -3963,6 +3985,7 @@ async fn execute_execution_runtime_stream_inner(
                 provider_pool_in_flight_guard.take(),
                 retry_scope_out.as_deref_mut(),
                 retry_fallback_out.as_deref_mut(),
+                None,
             )
             .await;
         }
@@ -4035,6 +4058,7 @@ async fn execute_execution_runtime_stream_inner(
                 provider_pool_in_flight_guard.take(),
                 retry_scope_out.as_deref_mut(),
                 retry_fallback_out.as_deref_mut(),
+                None,
             )
             .await;
         }
@@ -4192,6 +4216,15 @@ async fn execute_execution_runtime_stream_inner(
             record_stream_pending_lifecycle(state, seed, &mut stage_trace).await;
             lifecycle_pending_recorded = true;
         }
+        let report_context = attach_provider_response_headers_to_report_context(
+            report_context,
+            &execution.headers,
+            execution.response_observation.request_started_at_unix_ms,
+            execution
+                .response_observation
+                .response_headers_observed_at_unix_ms,
+            &execution.response_observation.request_order_id,
+        );
         let stream_precommit_committed = execution.stream_precommit_committed;
         let frame_stream = build_direct_execution_frame_stream(execution).boxed();
         return execute_stream_from_frame_stream_with_retry_scope(
@@ -4211,6 +4244,7 @@ async fn execute_execution_runtime_stream_inner(
             provider_pool_in_flight_guard.take(),
             retry_scope_out,
             retry_fallback_out,
+            None,
         )
         .await;
     }
@@ -4327,6 +4361,15 @@ async fn execute_execution_runtime_stream_inner(
                 record_stream_pending_lifecycle(state, seed, &mut stage_trace).await;
                 lifecycle_pending_recorded = true;
             }
+            let report_context = attach_provider_response_headers_to_report_context(
+                report_context,
+                &execution.headers,
+                execution.response_observation.request_started_at_unix_ms,
+                execution
+                    .response_observation
+                    .response_headers_observed_at_unix_ms,
+                &execution.response_observation.request_order_id,
+            );
             let stream_precommit_committed = execution.stream_precommit_committed;
             let frame_stream = build_direct_execution_frame_stream(execution).boxed();
             return execute_stream_from_frame_stream_with_retry_scope(
@@ -4346,10 +4389,13 @@ async fn execute_execution_runtime_stream_inner(
                 provider_pool_in_flight_guard.take(),
                 retry_scope_out.as_deref_mut(),
                 retry_fallback_out.as_deref_mut(),
+                None,
             )
             .await;
         }
 
+        let remote_request_started_at_unix_ms = current_request_candidate_unix_ms();
+        let remote_request_order_id = uuid::Uuid::now_v7().to_string();
         let response = match post_stream_plan_to_remote_execution_runtime(
             state,
             remote_execution_runtime_base_url,
@@ -4431,6 +4477,12 @@ async fn execute_execution_runtime_stream_inner(
             )?));
         }
 
+        let remote_response_observed_at_unix_ms = current_request_candidate_unix_ms();
+        let remote_fallback_observation = ExecutionResponseObservation {
+            request_started_at_unix_ms: remote_request_started_at_unix_ms,
+            response_headers_observed_at_unix_ms: remote_response_observed_at_unix_ms,
+            request_order_id: remote_request_order_id,
+        };
         let frame_stream = response
             .bytes_stream()
             .map_err(|err| IoError::other(err.to_string()))
@@ -4452,6 +4504,7 @@ async fn execute_execution_runtime_stream_inner(
             provider_pool_in_flight_guard.take(),
             retry_scope_out.as_deref_mut(),
             retry_fallback_out.as_deref_mut(),
+            Some(remote_fallback_observation),
         )
         .await;
     }
@@ -5481,6 +5534,7 @@ async fn execute_stream_from_frame_stream(
         in_flight_guard,
         None,
         None,
+        None,
     )
     .await
 }
@@ -5503,6 +5557,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
     in_flight_guard: Option<ProviderPoolInFlightGuard>,
     mut retry_scope_out: Option<&mut AiAttemptRetryScope>,
     mut retry_fallback_out: Option<&mut Option<Response<Body>>>,
+    fallback_response_observation: Option<ExecutionResponseObservation>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
     let request_id = plan.request_id.as_str();
     let request_id_for_log = short_request_id(request_id);
@@ -5535,14 +5590,37 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
     let StreamFramePayload::Headers {
         status_code,
         mut headers,
+        response_observation,
     } = first_frame.payload
     else {
         return Err(GatewayError::Internal(
             "execution runtime stream must start with headers frame".to_string(),
         ));
     };
-    let mut report_context =
-        attach_provider_response_headers_to_report_context(report_context, &headers);
+    let response_observation = response_observation
+        .or(fallback_response_observation)
+        .unwrap_or(ExecutionResponseObservation {
+            request_started_at_unix_ms: candidate_started_unix_secs,
+            response_headers_observed_at_unix_ms: current_request_candidate_unix_ms(),
+            request_order_id: uuid::Uuid::now_v7().to_string(),
+        });
+    let mut report_context = attach_provider_response_headers_to_report_context(
+        report_context,
+        &headers,
+        response_observation.request_started_at_unix_ms,
+        response_observation.response_headers_observed_at_unix_ms,
+        &response_observation.request_order_id,
+    );
+    spawn_local_oauth_success_effect(
+        state.clone(),
+        &plan,
+        report_context.as_ref(),
+        LocalOAuthSuccessEffect {
+            status_code,
+            request_started_at_unix_ms: Some(response_observation.request_started_at_unix_ms),
+            request_order_id: Some(&response_observation.request_order_id),
+        },
+    );
     if status_code == 200 {
         seed_kiro_simulated_cache_enabled(state, &plan, &mut report_context).await;
         if kiro_simulated_cache_enabled_from_report_context(report_context.as_ref()) {
@@ -8310,6 +8388,7 @@ mod tests {
                         "content-type".to_string(),
                         "text/event-stream".to_string(),
                     )]),
+                    response_observation: None,
                 },
             }));
             yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
@@ -8389,6 +8468,7 @@ mod tests {
                         "content-type".to_string(),
                         "text/event-stream".to_string(),
                     )]),
+                    response_observation: None,
                 },
             }));
             yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
@@ -8430,6 +8510,7 @@ mod tests {
             false,
             None,
             Some(&mut retry_scope),
+            None,
             None,
         )
         .await
@@ -8480,6 +8561,7 @@ mod tests {
                         "content-type".to_string(),
                         "text/event-stream".to_string(),
                     )]),
+                    response_observation: None,
                 },
             }));
             yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
@@ -8521,6 +8603,7 @@ mod tests {
             false,
             None,
             Some(&mut retry_scope),
+            None,
             None,
         )
         .await
@@ -8680,6 +8763,7 @@ mod tests {
                         "content-type".to_string(),
                         "text/event-stream".to_string(),
                     )]),
+                    response_observation: None,
                 },
             }));
             for chunk in chunks {
@@ -8725,6 +8809,7 @@ mod tests {
             None,
             Some(&mut retry_scope),
             Some(&mut fallback_response),
+            None,
         )
         .await
         .expect("native Anthropic stream execution should succeed");
@@ -9364,6 +9449,7 @@ mod tests {
                         "content-type".to_string(),
                         "text/event-stream".to_string(),
                     )]),
+                    response_observation: None,
                 },
             }));
             yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
@@ -9410,6 +9496,7 @@ mod tests {
                 true,
                 frame_stream,
                 true,
+                None,
                 None,
                 None,
                 None,
@@ -9850,6 +9937,7 @@ mod tests {
                         "content-type".to_string(),
                         "text/event-stream".to_string(),
                     )]),
+                    response_observation: None,
                 },
             }));
         }
@@ -11532,6 +11620,7 @@ mod tests {
                         "content-type".to_string(),
                         "text/event-stream".to_string(),
                     )]),
+                    response_observation: None,
                 },
             }));
             yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
@@ -11660,6 +11749,7 @@ mod tests {
                         "content-type".to_string(),
                         "text/event-stream".to_string(),
                     )]),
+                    response_observation: None,
                 },
             }));
             yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {
@@ -12384,6 +12474,7 @@ mod tests {
                         "content-type".to_string(),
                         "text/event-stream".to_string(),
                     )]),
+                    response_observation: None,
                 },
             }));
             yield Ok::<Bytes, std::io::Error>(ndjson_frame(StreamFrame {

@@ -1,7 +1,10 @@
 use crate::handlers::admin::admin_provider_pool_config;
 use crate::handlers::admin::provider::shared::paths::admin_update_key_id;
 use crate::handlers::admin::provider::shared::payloads::AdminProviderKeyUpdatePatch;
-use crate::handlers::admin::provider::write::keys::admin_provider_key_update_requires_immediate_model_fetch;
+use crate::handlers::admin::provider::write::keys::{
+    admin_provider_key_update_requires_immediate_model_fetch,
+    build_provider_catalog_key_admin_cas_update,
+};
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::maintenance::ensure_provider_key_pool_scores_for_keys;
 use crate::provider_key_auth::provider_key_effective_api_formats;
@@ -82,7 +85,25 @@ pub(super) async fn maybe_handle(
         Ok(record) => record,
         Err(detail) => return Ok(Some(bad_request_response(detail))),
     };
-    let Some(mut updated) = state.update_provider_catalog_key(&updated_record).await? else {
+    let admin_update = build_provider_catalog_key_admin_cas_update(
+        &existing_key,
+        updated_record.clone(),
+        &provider.provider_type,
+    );
+    if !state
+        .compare_and_update_provider_catalog_key_admin_state(&admin_update)
+        .await?
+    {
+        return Ok(Some(conflict_response(
+            "Key 凭据或配置已被其他请求更新，请刷新后重试",
+        )));
+    }
+    let Some(mut updated) = state
+        .read_provider_catalog_keys_by_ids(std::slice::from_ref(&key_id))
+        .await?
+        .into_iter()
+        .next()
+    else {
         return Ok(None);
     };
     if updated_record.learned_rpm_limit != existing_key.learned_rpm_limit {
@@ -179,6 +200,14 @@ fn bad_request_response(detail: impl Into<String>) -> Response<Body> {
 fn not_found_response(detail: impl Into<String>) -> Response<Body> {
     (
         http::StatusCode::NOT_FOUND,
+        Json(json!({ "detail": detail.into() })),
+    )
+        .into_response()
+}
+
+fn conflict_response(detail: impl Into<String>) -> Response<Body> {
+    (
+        http::StatusCode::CONFLICT,
         Json(json!({ "detail": detail.into() })),
     )
         .into_response()

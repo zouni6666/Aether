@@ -39,7 +39,7 @@ fn classifies_codex_models_list_with_responses_auth_signature() {
 }
 
 #[test]
-fn empty_codex_client_version_keeps_standard_openai_models_signature() {
+fn empty_codex_client_version_uses_responses_signature_for_bounded_fallback() {
     let headers = headers(&[("authorization", "Bearer sk-test")]);
     let uri: Uri = "/v1/models?client_version="
         .parse()
@@ -49,7 +49,7 @@ fn empty_codex_client_version_keeps_standard_openai_models_signature() {
 
     assert_eq!(
         decision.auth_endpoint_signature.as_deref(),
-        Some("openai:chat")
+        Some("openai:responses")
     );
 }
 

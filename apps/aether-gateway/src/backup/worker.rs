@@ -85,29 +85,17 @@ async fn read_last_backup_slot(app: &AppState) -> Result<Option<String>, Gateway
 
 #[cfg(test)]
 mod tests {
-    use crate::backup::schedule::{BackupSchedule, BackupScheduleUnit};
     use crate::task_runtime::{task_definition, TASK_KEY_SYSTEM_S3_BACKUP};
 
     #[test]
     fn backup_worker_skips_already_recorded_slot() {
-        let schedule = BackupSchedule {
-            unit: BackupScheduleUnit::Days,
-            interval: 1,
-            minute: 0,
-            hour: 3,
-            weekday: 1,
-            month_day: 1,
-        };
-        let now = chrono::DateTime::parse_from_rfc3339("2026-05-24T03:00:30+08:00")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
-        let slot = schedule.due_slot(now).expect("slot should be due");
+        let slot = "days:2026-05-23T19:00:00Z";
 
         assert!(super::should_start_scheduled_backup(
             Some("days:2026-05-22T19:00:00Z"),
-            &slot
+            slot
         ));
-        assert!(!super::should_start_scheduled_backup(Some(&slot), &slot));
+        assert!(!super::should_start_scheduled_backup(Some(slot), slot));
     }
 
     #[test]

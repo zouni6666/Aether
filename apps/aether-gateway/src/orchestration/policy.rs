@@ -227,6 +227,30 @@ pub(crate) fn append_local_failover_policy_to_value(
         "local_failover_policy".to_string(),
         local_failover_policy_to_value(&local_failover_policy_from_transport(transport)),
     );
+    if transport
+        .provider
+        .provider_type
+        .trim()
+        .eq_ignore_ascii_case("codex")
+    {
+        let codex = transport
+            .key
+            .upstream_metadata
+            .as_ref()
+            .and_then(Value::as_object)
+            .and_then(|metadata| metadata.get("codex"));
+        object.insert(
+            "codex_quota_reset_generation".to_string(),
+            Value::from(aether_admin::provider::quota::codex_quota_account_reset_generation(codex)),
+        );
+        if let Some(generation) = aether_admin::provider::quota::codex_credential_generation(codex)
+        {
+            object.insert(
+                "codex_credential_generation".to_string(),
+                Value::String(generation.to_string()),
+            );
+        }
+    }
     Value::Object(object)
 }
 
@@ -456,6 +480,26 @@ mod tests {
                 stop_cyber_policy_errors: true,
                 retry_client_errors_by_default: true,
             })
+        );
+    }
+
+    #[test]
+    fn codex_report_context_captures_quota_and_credential_generations() {
+        let mut transport = sample_transport(None, None, None);
+        transport.provider.provider_type = "codex".to_string();
+        transport.key.upstream_metadata = Some(json!({
+            "codex": {
+                "account_quota_reset_generation": 7,
+                "credential_generation": "credential-generation-7"
+            }
+        }));
+
+        let report_context = append_local_failover_policy_to_value(json!({}), &transport);
+
+        assert_eq!(report_context["codex_quota_reset_generation"], json!(7u64));
+        assert_eq!(
+            report_context["codex_credential_generation"],
+            json!("credential-generation-7")
         );
     }
 

@@ -4,8 +4,9 @@ use std::io::Error as IoError;
 use std::time::{Duration, Instant};
 
 use aether_contracts::{
-    ExecutionError, ExecutionErrorKind, ExecutionPhase, ExecutionStreamTerminalSummary,
-    ExecutionTelemetry, StreamFrame, StreamFramePayload, StreamFrameType,
+    ExecutionError, ExecutionErrorKind, ExecutionPhase, ExecutionResponseObservation,
+    ExecutionStreamTerminalSummary, ExecutionTelemetry, StreamFrame, StreamFramePayload,
+    StreamFrameType,
 };
 use async_stream::stream;
 use axum::body::Bytes;
@@ -44,6 +45,7 @@ pub(crate) fn build_direct_execution_frame_stream(
             stream_precommit_committed: _,
             response,
             started_at,
+            response_observation,
             stream_first_byte_timeout,
             upstream_target_permit,
         } = execution;
@@ -108,7 +110,11 @@ pub(crate) fn build_direct_execution_frame_stream(
                         }
                     }
 
-                    match encode_headers_frame(status_code, response_headers) {
+                    match encode_headers_frame(
+                        status_code,
+                        response_headers,
+                        &response_observation,
+                    ) {
                         Ok(frame) => yield Ok(frame),
                         Err(err) => {
                             yield Err(err);
@@ -153,7 +159,11 @@ pub(crate) fn build_direct_execution_frame_stream(
                     upstream_bytes,
                     first_byte_timeout,
                 }) => {
-                    match encode_headers_frame(status_code, original_headers) {
+                    match encode_headers_frame(
+                        status_code,
+                        original_headers,
+                        &response_observation,
+                    ) {
                         Ok(frame) => yield Ok(frame),
                         Err(err) => {
                             yield Err(err);
@@ -192,7 +202,11 @@ pub(crate) fn build_direct_execution_frame_stream(
             return;
         }
 
-        match encode_headers_frame(status_code, headers) {
+        match encode_headers_frame(
+            status_code,
+            headers,
+            &response_observation,
+        ) {
             Ok(frame) => yield Ok(frame),
             Err(err) => {
                 yield Err(err);
@@ -611,12 +625,14 @@ pub(crate) fn build_direct_execution_frame_stream(
 fn encode_headers_frame(
     status_code: u16,
     headers: BTreeMap<String, String>,
+    response_observation: &ExecutionResponseObservation,
 ) -> Result<Bytes, IoError> {
     encode_stream_frame_ndjson(&StreamFrame {
         frame_type: StreamFrameType::Headers,
         payload: StreamFramePayload::Headers {
             status_code,
             headers,
+            response_observation: Some(response_observation.clone()),
         },
     })
 }
@@ -1606,43 +1622,47 @@ mod tests {
             .expect("listener should bind");
         let addr = listener.local_addr().expect("local addr should resolve");
         let server = tokio::spawn(async move {
-            let app = Router::new().route(
-                "/responses",
-                post(|| async {
-                    let body = serde_json::json!({
-                        "id": "resp_sync_bridge_123",
-                        "object": "response",
-                        "model": "gpt-5.4",
-                        "status": "completed",
-                        "output": [{
-                            "type": "message",
-                            "id": "msg_sync_bridge_123",
-                            "role": "assistant",
-                            "content": [{
-                                "type": "output_text",
-                                "text": "Hello from buffered JSON stream",
-                                "annotations": []
-                            }]
-                        }],
-                        "usage": {
-                            "input_tokens": 1,
-                            "output_tokens": 2,
-                            "total_tokens": 3
-                        }
-                    });
-                    let mut response = axum::http::Response::new(Body::from(
-                        serde_json::to_vec(&body).expect("json should encode"),
-                    ));
-                    response.headers_mut().insert(
-                        header::CONTENT_TYPE,
-                        HeaderValue::from_static("application/json"),
-                    );
-                    response
-                }),
-            );
-            axum::serve(listener, app)
+            let (mut socket, _) = listener.accept().await.expect("client should connect");
+            let mut request = [0_u8; 4096];
+            let _ = socket
+                .read(&mut request)
                 .await
-                .expect("server should start");
+                .expect("request should read");
+            let body = serde_json::to_vec(&serde_json::json!({
+                "id": "resp_sync_bridge_123",
+                "object": "response",
+                "model": "gpt-5.4",
+                "status": "completed",
+                "output": [{
+                    "type": "message",
+                    "id": "msg_sync_bridge_123",
+                    "role": "assistant",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "Hello from buffered JSON stream",
+                        "annotations": []
+                    }]
+                }],
+                "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "total_tokens": 3
+                }
+            }))
+            .expect("json should encode");
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .expect("headers should write");
+            socket.flush().await.expect("headers should flush");
+            tokio::time::sleep(Duration::from_millis(75)).await;
+            socket.write_all(&body).await.expect("body should write");
         });
 
         let runtime = DirectSyncExecutionRuntime::new();
@@ -1678,6 +1698,12 @@ mod tests {
             })
             .await
             .expect("stream execution should succeed");
+        let expected_observation = execution.response_observation.clone();
+        assert!(
+            expected_observation.response_headers_observed_at_unix_ms
+                >= expected_observation.request_started_at_unix_ms
+        );
+        assert!(!expected_observation.request_order_id.is_empty());
 
         let frames = build_direct_execution_frame_stream(execution)
             .map(|item| item.expect("frame should encode"))
@@ -1691,6 +1717,10 @@ mod tests {
 
         let header_frame: Value =
             serde_json::from_str(&frames[0]).expect("headers frame should parse");
+        let encoded_observation: aether_contracts::ExecutionResponseObservation =
+            serde_json::from_value(header_frame["payload"]["response_observation"].clone())
+                .expect("headers frame should retain the response observation");
+        assert_eq!(encoded_observation, expected_observation);
         assert_eq!(
             header_frame
                 .get("payload")

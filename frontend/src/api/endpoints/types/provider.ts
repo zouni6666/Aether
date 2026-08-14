@@ -180,8 +180,14 @@ export interface ChatPiiRedactionProviderConfig {
   enabled: boolean
 }
 
+export interface CodexProviderConfig {
+  fingerprint_convergence_enabled?: boolean
+  [key: string]: unknown
+}
+
 export interface ProviderConfig {
   chat_pii_redaction?: ChatPiiRedactionProviderConfig
+  codex?: CodexProviderConfig
   pool_advanced?: PoolAdvancedConfig
   failover_rules?: FailoverRulesConfig
   claude_code_advanced?: ClaudeCodeAdvancedConfig
@@ -317,6 +323,7 @@ export interface EndpointAPIKey {
 
 // Codex 上游元数据类型
 export interface CodexUpstreamMetadata {
+  credential_generation?: string
   updated_at?: number  // 更新时间（Unix 时间戳）
   plan_type?: string  // 套餐类型
   primary_used_percent?: number  // 周限额窗口使用百分比
@@ -342,6 +349,10 @@ export interface CodexUpstreamMetadata {
   has_credits?: boolean  // 是否有积分
   credits_balance?: number  // 积分余额
   reset_credits?: QuotaResetCreditsSnapshot | null  // Codex earned rate-limit reset credits
+  account_quota_reset_reservation?: {
+    idempotency_key?: string | null
+    generation?: number | null
+  } | null
 }
 
 export interface AntigravityModelQuota {
@@ -900,6 +911,7 @@ export interface ProviderWithEndpointsSummary {
   failover_rules?: FailoverRulesConfig | null
   ops_configured: boolean  // 是否配置了扩展操作（余额监控等）
   ops_architecture_id?: string  // 扩展操作使用的架构 ID（如 cubence, anyrouter）
+  codex_fingerprint_convergence_enabled?: boolean
   kiro_simulated_cache_enabled?: boolean
   ops_quota_alert_enabled?: boolean
   created_at: string

@@ -412,7 +412,8 @@ async fn gateway_converts_gemini_image_sync_to_openai_image_provider_impl() {
         authorization: String,
         model: String,
         prompt: String,
-        image_url: String,
+        images: serde_json::Value,
+        has_legacy_image_field: bool,
         request_stream: bool,
         body_stream: Option<bool>,
     }
@@ -605,12 +606,8 @@ async fn gateway_converts_gemini_image_sync_to_openai_image_provider_impl() {
                         .and_then(|value| value.as_str())
                         .unwrap_or_default()
                         .to_string(),
-                    image_url: body_json
-                        .get("image")
-                        .and_then(|value| value.get("image_url"))
-                        .and_then(|value| value.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
+                    images: body_json.get("images").cloned().unwrap_or_default(),
+                    has_legacy_image_field: body_json.get("image").is_some(),
                     request_stream: payload
                         .get("stream")
                         .and_then(|value| value.as_bool())
@@ -735,9 +732,10 @@ async fn gateway_converts_gemini_image_sync_to_openai_image_provider_impl() {
         "Change the background"
     );
     assert_eq!(
-        seen_execution_runtime_request.image_url,
-        "data:image/png;base64,aGVsbG8="
+        seen_execution_runtime_request.images,
+        json!([{"image_url": "data:image/png;base64,aGVsbG8="}])
     );
+    assert!(!seen_execution_runtime_request.has_legacy_image_field);
     assert!(!seen_execution_runtime_request.request_stream);
     assert_eq!(seen_execution_runtime_request.body_stream, None);
 

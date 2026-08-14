@@ -187,6 +187,8 @@
       <Card
         v-if="draft"
         class="overflow-hidden"
+        :inert="saving"
+        :aria-busy="saving"
       >
         <div class="border-b border-border/60 px-5 py-4">
           <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -322,6 +324,75 @@
               </div>
             </div>
           </div>
+
+          <section
+            class="space-y-3 rounded-lg border border-border/60 p-4"
+            aria-labelledby="model-allowlist-heading"
+          >
+            <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <div class="flex flex-wrap items-center gap-2">
+                  <h3
+                    id="model-allowlist-heading"
+                    class="text-sm font-medium"
+                  >
+                    模型白名单
+                  </h3>
+                  <Badge :variant="routingModelScopeLabel(draft.config_json) === '全部模型' ? 'secondary' : 'outline'">
+                    {{ routingModelScopeLabel(draft.config_json) }}
+                  </Badge>
+                </div>
+                <p class="mt-1 text-xs text-muted-foreground">
+                  控制此策略分组适用于哪些模型；留空表示全部模型。它与“区分模型”中的专属调度覆盖相互独立，支持精确值、* 和前缀通配符（如 gpt-*），每行填写一个值。
+                </p>
+              </div>
+              <Button
+                v-if="routingModelScopeLabel(draft.config_json) !== '全部模型'"
+                type="button"
+                variant="ghost"
+                size="sm"
+                class="shrink-0 text-muted-foreground hover:text-foreground"
+                :disabled="saving"
+                data-testid="clear-allowed-models"
+                @click="clearAllowedModelScope"
+              >
+                改为全部模型
+              </Button>
+            </div>
+
+            <Textarea
+              :model-value="allowedModelsInput"
+              class="min-h-[96px] font-mono"
+              :disabled="saving"
+              data-testid="allowed-models-input"
+              aria-label="模型白名单"
+              placeholder="留空表示全部模型，每行一个模型"
+              @update:model-value="updateAllowedModelScope"
+            />
+
+            <div
+              v-if="draft.config_json.allowed_models.length"
+              class="flex flex-wrap gap-2"
+              data-testid="allowed-model-values"
+            >
+              <Badge
+                v-for="(model, index) in draft.config_json.allowed_models"
+                :key="`${model}:${index}`"
+                variant="outline"
+                class="font-mono font-normal"
+              >
+                {{ model }}
+              </Badge>
+            </div>
+
+            <div
+              v-if="allowedModelsLookLikeLegacyMirror"
+              class="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-muted-foreground"
+              data-testid="allowed-models-legacy-mirror"
+            >
+              当前白名单与按模型策略列表一致，可能来自旧版界面的联动保存。现有范围会原样保留；如需让其他模型也使用默认策略，请显式点击“改为全部模型”。
+            </div>
+          </section>
 
           <section
             v-if="sortingScope === 'unified'"
@@ -659,29 +730,58 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ChevronDown, ChevronRight, Copy, Key, Layers, Plus, Save, Star, Trash2 } from 'lucide-vue-next'
+import {
+  ChevronDown,
+  ChevronRight,
+  Copy,
+  Key,
+  Layers,
+  Plus,
+  Save,
+  SlidersHorizontal,
+  Star,
+  Trash2,
+} from 'lucide-vue-next'
 
 import { PageContainer } from '@/components/layout'
-import { Badge, Button, Card, Input, Table, TableBody, TableCell, TableHead, TableHeader, TableRow, TableCard } from '@/components/ui'
+import {
+  Badge,
+  Button,
+  Card,
+  Input,
+  Table,
+  TableBody,
+  TableCard,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+  Textarea,
+} from '@/components/ui'
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from '@/components/ui/dropdown-menu'
 import { AlertDialog } from '@/components/common'
 import {
   DEFAULT_ROUTING_POLICY_MODEL,
+  allowedModelsMirrorPerModelPolicies,
+  clearAllowedModels,
+  copyPerModelRoutingConfig,
   createEmptyModelPolicy,
   createEmptyRoutingGroupConfig,
-  getModelPolicy,
+  formatAllowedModelsInput,
   getModelScheduling,
   isGeneratedModelSchedulingRule,
   modelSchedulingRuleId,
   normalizeRoutingGroupConfig,
-  removeGeneratedModelSchedulingRules,
-  removeModelPolicy,
-  removeModelSchedulingRule,
-  upsertModelPolicy,
+  removePerModelRoutingConfig,
+  routingModelScopeLabel,
+  savePerModelRoutingConfig,
+  setRoutingSortingScope,
+  updateAllowedModelsFromInput,
   upsertModelSchedulingRule,
   type RoutingGroupConfig,
   type RoutingPriorityMode,
   type RoutingSchedulingMode,
+  type RoutingSortingScope,
 } from '@/features/routing/utils/routingPolicy'
 import { RoutingPriorityPolicyEditor } from '@/features/routing/components'
 import {
@@ -707,7 +807,6 @@ interface RoutingGroupDraft {
   updated_at?: number | null
 }
 
-type SortingScope = 'unified' | 'per_model'
 type ModelFilter = 'configured' | 'unconfigured'
 
 const modelFilters: Array<{ value: ModelFilter; label: string }> = [
@@ -729,9 +828,10 @@ const groups = ref<RoutingGroupRecord[]>([])
 const selectedGroupId = ref<string | null>(null)
 const draft = ref<RoutingGroupDraft | null>(null)
 const savedDraftSnapshot = ref<string | null>(null)
-const sortingScope = ref<SortingScope>('unified')
+const sortingScope = ref<RoutingSortingScope>('unified')
 const selectedPerModelName = ref<string | null>(null)
 const editingConfig = ref<RoutingGroupConfig | null>(null)
+const allowedModelsInput = ref('')
 const globalModelSearch = ref('')
 const modelFilter = ref<ModelFilter>('unconfigured')
 const globalModels = ref<GlobalModelResponse[]>([])
@@ -742,6 +842,7 @@ const loading = ref(false)
 const saving = ref(false)
 const deleting = ref(false)
 const isCreating = ref(false)
+let draftGeneration = 0
 
 const switchModelTarget = ref<string | null>(null)
 const switchModelDialogOpen = ref(false)
@@ -772,6 +873,11 @@ const firstStepSchedulingMode = computed<RoutingSchedulingMode>(() => {
     return modelSchedulingMode(activePerModelPolicy.value.model)
   }
   return draft.value?.config_json.default_policy.scheduling_mode ?? 'cache_affinity'
+})
+const allowedModelsLookLikeLegacyMirror = computed(() => {
+  return draft.value
+    ? allowedModelsMirrorPerModelPolicies(draft.value.config_json)
+    : false
 })
 
 interface ModelRow {
@@ -863,12 +969,14 @@ function paramToString(value: unknown): string | null {
 }
 
 function clearDraftState(): void {
+  draftGeneration += 1
   isCreating.value = false
   selectedGroupId.value = null
   draft.value = null
   savedDraftSnapshot.value = null
   selectedPerModelName.value = null
   editingConfig.value = null
+  allowedModelsInput.value = ''
   switchModelTarget.value = null
   switchModelDialogOpen.value = false
   deleteDialogOpen.value = false
@@ -876,9 +984,11 @@ function clearDraftState(): void {
 
 function selectGroup(group: RoutingGroupRecord): void {
   const normalized = normalizeRecord(group)
+  draftGeneration += 1
   isCreating.value = false
   selectedGroupId.value = normalized.id
   draft.value = buildDraft(normalized)
+  allowedModelsInput.value = formatAllowedModelsInput(draft.value.config_json.allowed_models)
   savedDraftSnapshot.value = draftSnapshotValue(draft.value)
   syncEditorStateFromConfig(draft.value.config_json)
   resetEditingConfig()
@@ -890,6 +1000,7 @@ function setDraftEnabled(value: boolean): void {
 }
 
 function startCreate(): void {
+  draftGeneration += 1
   isCreating.value = true
   selectedGroupId.value = null
   draft.value = {
@@ -902,6 +1013,7 @@ function startCreate(): void {
     updated_at: null,
   }
   savedDraftSnapshot.value = null
+  allowedModelsInput.value = ''
   syncEditorStateFromConfig(draft.value.config_json)
   resetEditingConfig()
 }
@@ -958,13 +1070,7 @@ function groupSortingScopeLabel(group: RoutingGroupRecord): string {
 }
 
 function groupModelScopeLabel(group: RoutingGroupRecord): string {
-  const config = normalizeRoutingGroupConfig(group.config_json)
-  if (hasPerModelSorting(config)) {
-    const count = config.model_policies.filter(policy => policy.model !== DEFAULT_ROUTING_POLICY_MODEL).length
-      || config.allowed_models.length
-    return count ? `${count} 个模型` : '未选择模型'
-  }
-  return config.allowed_models.length ? `${config.allowed_models.length} 个模型` : '全部模型'
+  return routingModelScopeLabel(group.config_json)
 }
 
 function groupSchedulingSummary(group: RoutingGroupRecord): string {
@@ -1042,13 +1148,11 @@ function hasPerModelSorting(config: RoutingGroupConfig): boolean {
     || config.rules.some(isGeneratedModelSchedulingRule)
 }
 
-function setSortingScope(scope: SortingScope): void {
+function setSortingScope(scope: RoutingSortingScope): void {
   if (!draft.value) return
   sortingScope.value = scope
   if (scope === 'unified') {
-    const next = removeGeneratedModelSchedulingRules(draft.value.config_json)
-    next.model_policies = next.model_policies.filter(policy => policy.model === DEFAULT_ROUTING_POLICY_MODEL)
-    next.allowed_models = []
+    const next = setRoutingSortingScope(draft.value.config_json, scope)
     updateDraftConfig(next)
     resetEditingConfig()
     return
@@ -1092,9 +1196,7 @@ function removePerModelPolicy(model: string): void {
     showError('请先保存当前改动后再移除模型')
     return
   }
-  let next = removeModelPolicy(draft.value.config_json, model)
-  next = removeModelSchedulingRule(next, model)
-  next.allowed_models = next.allowed_models.filter(item => item !== model)
+  const next = removePerModelRoutingConfig(draft.value.config_json, model)
   if (selectedPerModelName.value === model) {
     selectedPerModelName.value = null
   }
@@ -1157,19 +1259,12 @@ function copyModelConfig(sourceModel: string): void {
   if (!draft.value || !editingConfig.value) return
   const target = selectedPerModelName.value
   if (!target || target === sourceModel) return
-  const sourcePolicy = getModelPolicy(draft.value.config_json, sourceModel)
-  const sourceScheduling = getModelScheduling(draft.value.config_json, sourceModel)
-  let next = upsertModelPolicy(editingConfig.value, {
-    ...sourcePolicy,
-    model: target,
-  })
-  next = upsertModelSchedulingRule(next, target, {
-    priority_mode: sourceScheduling.priority_mode,
-    scheduling_mode: sourceScheduling.scheduling_mode,
-  })
-  if (!next.allowed_models.includes(target)) {
-    next = { ...next, allowed_models: [...next.allowed_models, target] }
-  }
+  const next = copyPerModelRoutingConfig(
+    editingConfig.value,
+    draft.value.config_json,
+    sourceModel,
+    target,
+  )
   updateEditingConfig(next)
   success(`已加载 ${globalModelLabel(sourceModel)} 的配置，点击保存生效`)
 }
@@ -1236,7 +1331,27 @@ function globalModelLabel(modelName: string): string {
   return `${model.display_name} (${model.name})`
 }
 
-function replaceGroup(group: RoutingGroupRecord): void {
+function updateAllowedModelScope(value: string): void {
+  if (!draft.value || saving.value) return
+  allowedModelsInput.value = value
+  const next = updateAllowedModelsFromInput(draft.value.config_json, value)
+  updateDraftConfig(next)
+  if (editingConfig.value) {
+    editingConfig.value = updateAllowedModelsFromInput(editingConfig.value, value)
+  }
+}
+
+function clearAllowedModelScope(): void {
+  if (!draft.value || saving.value) return
+  const next = clearAllowedModels(draft.value.config_json)
+  updateDraftConfig(next)
+  if (editingConfig.value) {
+    editingConfig.value = clearAllowedModels(editingConfig.value)
+  }
+  allowedModelsInput.value = ''
+}
+
+function replaceGroup(group: RoutingGroupRecord, select = true): void {
   const normalized = normalizeRecord(group)
   const index = groups.value.findIndex(item => item.id === normalized.id)
   if (index >= 0) {
@@ -1244,7 +1359,9 @@ function replaceGroup(group: RoutingGroupRecord): void {
   } else {
     groups.value.unshift(normalized)
   }
-  selectGroup(normalized)
+  if (select) {
+    selectGroup(normalized)
+  }
 }
 
 async function fetchGroups(): Promise<void> {
@@ -1280,7 +1397,7 @@ async function loadGlobalModels(options: { cacheTtlMs?: number } = {}): Promise<
 }
 
 async function saveDraft(): Promise<void> {
-  if (!draft.value) return
+  if (!draft.value || saving.value) return
   const name = draft.value.name.trim()
   if (!name) {
     showError('策略名称不能为空')
@@ -1292,6 +1409,10 @@ async function saveDraft(): Promise<void> {
     return
   }
 
+  const targetGroupId = draft.value.id ?? null
+  const submittedGeneration = draftGeneration
+  const submittedSnapshot = draftSnapshotValue(draft.value)
+  const wasCreating = isCreating.value || !draft.value.id
   saving.value = true
   try {
     const payload = {
@@ -1301,13 +1422,28 @@ async function saveDraft(): Promise<void> {
       is_system_default: draft.value.is_system_default,
       config_json: config,
     }
-    const wasCreating = isCreating.value || !draft.value.id
     const saved = wasCreating
       ? await createRoutingGroup(payload)
       : await updateRoutingGroup(draft.value.id, payload)
-    isCreating.value = false
-    replaceGroup(saved)
-    if (wasCreating) {
+
+    const sameDraftGeneration = draftGeneration === submittedGeneration
+    const stillEditingSubmittedDraft = wasCreating
+      ? sameDraftGeneration
+        && isCreateRoute.value
+        && isCreating.value
+        && draft.value != null
+        && draftSnapshotValue(draft.value) === submittedSnapshot
+      : routeGroupId.value === targetGroupId
+        && draft.value?.id === targetGroupId
+        && (sameDraftGeneration
+          ? draftSnapshotValue(draft.value) === submittedSnapshot
+          : !draftDirty.value)
+
+    if (stillEditingSubmittedDraft) {
+      isCreating.value = false
+    }
+    replaceGroup(saved, stillEditingSubmittedDraft)
+    if (wasCreating && stillEditingSubmittedDraft) {
       await router.replace({ name: 'RoutingProfileDetail', params: { groupId: saved.id } })
     }
     success('调度策略已保存')
@@ -1326,13 +1462,7 @@ function saveCurrentModel(): void {
     showError('请先选择模型')
     return
   }
-  let next = editingConfig.value
-  if (!next.model_policies.some(policy => policy.model === model)) {
-    next = upsertModelPolicy(next, createEmptyModelPolicy(model))
-  }
-  if (!next.allowed_models.includes(model)) {
-    next = { ...next, allowed_models: [...next.allowed_models, model] }
-  }
+  const next = savePerModelRoutingConfig(editingConfig.value, model)
   updateDraftConfig(next)
   modelFilter.value = 'configured'
   resetEditingConfig()

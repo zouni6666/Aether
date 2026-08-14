@@ -194,7 +194,7 @@ fn row_exposes_global_model_for_models(
     false
 }
 
-pub(super) fn filter_eligible_model_rows(
+pub(crate) fn filter_eligible_model_rows(
     rows: Vec<StoredMinimalCandidateSelectionRow>,
     auth_snapshot: Option<&crate::data::auth::GatewayAuthApiKeySnapshot>,
     api_format: &str,

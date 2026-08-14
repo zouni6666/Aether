@@ -334,6 +334,13 @@ impl ProviderCatalogReadRepository for CachedProviderCatalogReadRepository {
         }
     }
 
+    async fn list_keys_by_ids_strong(
+        &self,
+        key_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
+        self.inner.list_keys_by_ids_strong(key_ids).await
+    }
+
     async fn list_keys_by_provider_ids(
         &self,
         provider_ids: &[String],
@@ -538,6 +545,7 @@ fn normalize_ids(ids: &[String]) -> Vec<String> {
 mod tests {
     use super::*;
     use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
+    use aether_data_contracts::repository::provider_catalog::ProviderCatalogWriteRepository;
 
     fn cache() -> CachedProviderCatalogReadRepository {
         CachedProviderCatalogReadRepository::new(Arc::new(
@@ -553,6 +561,55 @@ mod tests {
             "openai".to_string(),
         )
         .expect("provider should be valid")
+    }
+
+    #[tokio::test]
+    async fn provider_catalog_strong_key_read_bypasses_fresh_cached_generation() {
+        let old_metadata = serde_json::json!({
+            "codex": {"credential_generation": "old"}
+        });
+        let mut key = StoredProviderCatalogKey::new(
+            "key-1".to_string(),
+            "provider-1".to_string(),
+            "key-1".to_string(),
+            "oauth".to_string(),
+            None,
+            true,
+        )
+        .expect("key should be valid");
+        key.upstream_metadata = Some(old_metadata.clone());
+        let inner = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![provider("provider-1")],
+            Vec::new(),
+            vec![key],
+        ));
+        let cache = CachedProviderCatalogReadRepository::new(inner.clone());
+        let key_ids = vec!["key-1".to_string()];
+
+        let first = cache
+            .list_keys_by_ids(&key_ids)
+            .await
+            .expect("initial key read should succeed");
+        assert_eq!(first[0].upstream_metadata.as_ref(), Some(&old_metadata));
+
+        let new_metadata = serde_json::json!({
+            "codex": {"credential_generation": "new"}
+        });
+        assert!(inner
+            .upsert_key_upstream_metadata_namespace("key-1", "codex", &new_metadata["codex"], None,)
+            .await
+            .expect("inner metadata update should succeed"));
+
+        let cached = cache
+            .list_keys_by_ids(&key_ids)
+            .await
+            .expect("cached key read should succeed");
+        assert_eq!(cached[0].upstream_metadata.as_ref(), Some(&old_metadata));
+        let strong = cache
+            .list_keys_by_ids_strong(&key_ids)
+            .await
+            .expect("strong key read should succeed");
+        assert_eq!(strong[0].upstream_metadata.as_ref(), Some(&new_metadata));
     }
 
     #[tokio::test]

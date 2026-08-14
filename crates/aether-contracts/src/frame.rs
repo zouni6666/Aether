@@ -2,7 +2,10 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ExecutionError, ExecutionStreamTerminalSummary, ExecutionTelemetry};
+use crate::{
+    ExecutionError, ExecutionResponseObservation, ExecutionStreamTerminalSummary,
+    ExecutionTelemetry,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -21,6 +24,8 @@ pub enum StreamFramePayload {
         status_code: u16,
         #[serde(default)]
         headers: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        response_observation: Option<ExecutionResponseObservation>,
     },
     Data {
         #[serde(default, skip_serializing_if = "Option::is_none")]

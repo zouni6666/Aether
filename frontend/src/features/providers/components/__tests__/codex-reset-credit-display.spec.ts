@@ -1,12 +1,18 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  clearPendingCodexResetCreditIdempotencyKey,
+  clearPendingCodexResetCreditIdempotencyKeyForOutcome,
   createCodexResetCreditIdempotencyKey,
   formatCodexResetCreditCount,
   formatCodexResetCreditExpiresAt,
   getCodexResetCreditAvailableCount,
+  getCodexResetCreditReservationIdempotencyKey,
   getVisibleCodexResetCreditItems,
+  isCodexResetCreditTerminalOutcome,
   mergeCodexQuotaDisplays,
+  readPendingCodexResetCreditIdempotencyKey,
+  rememberPendingCodexResetCreditIdempotencyKey,
 } from '@/features/providers/components/codex-reset-credit-display'
 import type { QuotaResetCreditsSnapshot } from '@/api/endpoints/types'
 
@@ -57,6 +63,19 @@ describe('codex reset credit display helpers', () => {
     expect(getCodexResetCreditAvailableCount(snapshot)).toBe(0)
     expect(formatCodexResetCreditCount(0)).toBe('共 0 次机会')
     expect(getVisibleCodexResetCreditItems(snapshot, 1_700_000_000)).toEqual([])
+  })
+
+  it('recovers the active idempotency key from a persisted server reservation', () => {
+    expect(getCodexResetCreditReservationIdempotencyKey({
+      reset_credits: { available_count: 0 },
+      account_quota_reset_reservation: {
+        idempotency_key: ' server-active-attempt ',
+        generation: 3,
+      },
+    })).toBe('server-active-attempt')
+    expect(getCodexResetCreditReservationIdempotencyKey({
+      account_quota_reset_reservation: { idempotency_key: ' ' },
+    })).toBeNull()
   })
 
   it('sorts available detail items by remaining time and labels visible items with short ordinal keys', () => {
@@ -138,5 +157,165 @@ describe('codex reset credit display helpers', () => {
       randomUUID: () => 'existing-random-uuid',
       getRandomValues: array => array,
     })).toBe('existing-random-uuid')
+  })
+
+  it('keeps an unresolved reset idempotency key until a terminal response clears it', () => {
+    const values = new Map<string, string>()
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
+    }
+
+    rememberPendingCodexResetCreditIdempotencyKey(
+      'key-1',
+      'reset-attempt-1',
+      'credential-v1',
+      storage,
+    )
+    expect(readPendingCodexResetCreditIdempotencyKey('key-1', 'credential-v1', storage))
+      .toBe('reset-attempt-1')
+    expect(readPendingCodexResetCreditIdempotencyKey('key-2', 'credential-v1', storage)).toBeNull()
+
+    clearPendingCodexResetCreditIdempotencyKey('key-1', storage)
+    expect(readPendingCodexResetCreditIdempotencyKey('key-1', 'credential-v1', storage)).toBeNull()
+  })
+
+  it('clears pending idempotency keys for compatibility history replays', () => {
+    const values = new Map<string, string>()
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
+    }
+
+    rememberPendingCodexResetCreditIdempotencyKey(
+      'key-1',
+      'reset-attempt-1',
+      'credential-v1',
+      storage,
+    )
+    expect(isCodexResetCreditTerminalOutcome('historical_replay')).toBe(true)
+    expect(clearPendingCodexResetCreditIdempotencyKeyForOutcome(
+      'key-1',
+      'historical_replay',
+      storage,
+    )).toBe(true)
+    expect(readPendingCodexResetCreditIdempotencyKey('key-1', 'credential-v1', storage)).toBeNull()
+
+    rememberPendingCodexResetCreditIdempotencyKey(
+      'key-1',
+      'reset-attempt-2',
+      'credential-v1',
+      storage,
+    )
+    expect(clearPendingCodexResetCreditIdempotencyKeyForOutcome('key-1', 'unknown', storage))
+      .toBe(false)
+    expect(readPendingCodexResetCreditIdempotencyKey('key-1', 'credential-v1', storage))
+      .toBe('reset-attempt-2')
+    expect(isCodexResetCreditTerminalOutcome('unknown')).toBe(false)
+    expect(isCodexResetCreditTerminalOutcome('error')).toBe(false)
+  })
+
+  it('keeps the active idempotency key in memory when session storage is unavailable', () => {
+    const unavailableStorage = {
+      getItem: () => { throw new Error('storage unavailable') },
+      setItem: () => { throw new Error('storage unavailable') },
+      removeItem: () => { throw new Error('storage unavailable') },
+    }
+
+    rememberPendingCodexResetCreditIdempotencyKey(
+      'key-without-storage',
+      'reset-attempt-original',
+      'credential-v1',
+      unavailableStorage,
+    )
+    expect(readPendingCodexResetCreditIdempotencyKey(
+      'key-without-storage',
+      'credential-v1',
+      unavailableStorage,
+    ))
+      .toBe('reset-attempt-original')
+
+    rememberPendingCodexResetCreditIdempotencyKey(
+      'key-without-storage',
+      'reset-attempt-from-conflict',
+      'credential-v1',
+      unavailableStorage,
+    )
+    expect(readPendingCodexResetCreditIdempotencyKey(
+      'key-without-storage',
+      'credential-v1',
+      unavailableStorage,
+    ))
+      .toBe('reset-attempt-from-conflict')
+
+    clearPendingCodexResetCreditIdempotencyKey('key-without-storage', unavailableStorage)
+    expect(readPendingCodexResetCreditIdempotencyKey(
+      'key-without-storage',
+      'credential-v1',
+      unavailableStorage,
+    ))
+      .toBeNull()
+  })
+
+  it('does not resurrect a cleared key when session storage removal fails', () => {
+    const values = new Map<string, string>()
+    const partiallyUnavailableStorage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: () => { throw new Error('storage removal unavailable') },
+    }
+
+    rememberPendingCodexResetCreditIdempotencyKey(
+      'key-with-stale-storage',
+      'terminal-attempt',
+      'credential-v1',
+      partiallyUnavailableStorage,
+    )
+    clearPendingCodexResetCreditIdempotencyKey(
+      'key-with-stale-storage',
+      partiallyUnavailableStorage,
+    )
+
+    expect(readPendingCodexResetCreditIdempotencyKey(
+      'key-with-stale-storage',
+      'credential-v1',
+      partiallyUnavailableStorage,
+    )).toBeNull()
+  })
+
+  it('drops a pending attempt when the credential generation changes', () => {
+    const values = new Map<string, string>()
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
+    }
+
+    rememberPendingCodexResetCreditIdempotencyKey(
+      'key-rotated',
+      'attempt-for-account-a',
+      'credential-a',
+      storage,
+    )
+    expect(readPendingCodexResetCreditIdempotencyKey('key-rotated', 'credential-b', storage))
+      .toBeNull()
+    expect([...values.values()]).toEqual([])
+  })
+
+  it('never replays a legacy v1 pending value without a credential generation', () => {
+    const values = new Map<string, string>([
+      ['aether:codex-reset-credit-pending:v1:key-legacy', 'legacy-attempt'],
+    ])
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
+    }
+
+    expect(readPendingCodexResetCreditIdempotencyKey('key-legacy', 'credential-current', storage))
+      .toBeNull()
+    expect([...values.values()]).toEqual([])
   })
 })

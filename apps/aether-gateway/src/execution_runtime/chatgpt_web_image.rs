@@ -2573,6 +2573,7 @@ fn json_execution_result(
         candidate_id: plan.candidate_id.clone(),
         status_code,
         headers: BTreeMap::from([("content-type".to_string(), "application/json".to_string())]),
+        response_observation: None,
         body: Some(ResponseBody {
             json_body: Some(body),
             body_bytes_b64: None,
@@ -2615,6 +2616,7 @@ fn bytes_execution_result(
         candidate_id: plan.candidate_id.clone(),
         status_code,
         headers,
+        response_observation: None,
         body: Some(ResponseBody {
             json_body: None,
             body_bytes_b64: Some(base64::engine::general_purpose::STANDARD.encode(body)),
@@ -2637,6 +2639,7 @@ fn execution_result_frame_stream(
             payload: StreamFramePayload::Headers {
                 status_code: result.status_code,
                 headers: result.headers.clone(),
+                response_observation: result.response_observation.clone(),
             },
         },
         StreamFrame {

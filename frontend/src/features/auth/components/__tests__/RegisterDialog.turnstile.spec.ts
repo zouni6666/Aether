@@ -2,8 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick } from 'vue'
 import RegisterDialog from '../RegisterDialog.vue'
 
-const { registerMock, toastErrorMock, toastSuccessMock } = vi.hoisted(() => ({
+const { registerMock, sendVerificationCodeMock, toastErrorMock, toastSuccessMock } = vi.hoisted(() => ({
   registerMock: vi.fn(),
+  sendVerificationCodeMock: vi.fn(),
   toastErrorMock: vi.fn(),
   toastSuccessMock: vi.fn(),
 }))
@@ -11,7 +12,7 @@ const { registerMock, toastErrorMock, toastSuccessMock } = vi.hoisted(() => ({
 vi.mock('@/api/auth', () => ({
   authApi: {
     register: registerMock,
-    sendVerificationCode: vi.fn(),
+    sendVerificationCode: sendVerificationCodeMock,
     verifyEmail: vi.fn(),
     getVerificationStatus: vi.fn(),
   },
@@ -75,13 +76,19 @@ async function settle() {
   }
 }
 
-async function mountRegisterDialog() {
+async function mountRegisterDialog({
+  emailConfigured = false,
+  requireEmailVerification = false,
+}: {
+  emailConfigured?: boolean
+  requireEmailVerification?: boolean
+} = {}) {
   const root = document.createElement('div')
   document.body.appendChild(root)
   const app = createApp(RegisterDialog, {
     open: true,
-    emailConfigured: false,
-    requireEmailVerification: false,
+    emailConfigured,
+    requireEmailVerification,
     passwordPolicyLevel: 'weak',
     turnstileEnabled: true,
     turnstileSiteKey: 'site-public-key',
@@ -135,6 +142,12 @@ describe('RegisterDialog Turnstile flow', () => {
   beforeEach(() => {
     registerMock.mockReset()
     registerMock.mockResolvedValue({ message: '注册成功' })
+    sendVerificationCodeMock.mockReset()
+    sendVerificationCodeMock.mockResolvedValue({
+      success: true,
+      message: 'ok',
+      expire_minutes: 5,
+    })
     toastErrorMock.mockReset()
     toastSuccessMock.mockReset()
   })
@@ -187,5 +200,44 @@ describe('RegisterDialog Turnstile flow', () => {
 
     expect(registerMock).not.toHaveBeenCalled()
     expect(toastErrorMock).toHaveBeenCalledWith('人机验证加载失败，请重试', '人机验证')
+  })
+
+  it('does not reset Turnstile while the user types an email address', async () => {
+    const turnstile = installTurnstileMock()
+    mounted = await mountRegisterDialog({
+      emailConfigured: true,
+      requireEmailVerification: true,
+    })
+    await settle()
+
+    turnstile.succeed('turnstile-token')
+    await settle()
+
+    const emailInput = document.body.querySelector('#reg-email') as HTMLInputElement | null
+    expect(emailInput).toBeTruthy()
+
+    let email = ''
+    for (const character of 'alice@example.com') {
+      email += character
+      emailInput!.value = email
+      emailInput!.dispatchEvent(new Event('input', { bubbles: true }))
+      await nextTick()
+    }
+    await settle()
+
+    expect(turnstile.render).toHaveBeenCalledTimes(1)
+    expect(turnstile.reset).not.toHaveBeenCalled()
+    const sendCodeButton = Array.from(document.body.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === '发送验证码'
+    )
+    expect(sendCodeButton?.hasAttribute('disabled')).toBe(false)
+    sendCodeButton!.click()
+    await settle()
+
+    expect(sendVerificationCodeMock).toHaveBeenCalledWith(
+      'alice@example.com',
+      'turnstile-token'
+    )
+    expect(turnstile.reset).toHaveBeenCalledWith('widget-id')
   })
 })

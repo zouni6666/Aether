@@ -22,15 +22,59 @@ use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::shared::sync_provider_key_oauth_status_snapshot;
 use crate::provider_key_auth::provider_key_is_oauth_managed;
 use crate::GatewayError;
-use aether_data_contracts::repository::provider_catalog::ProviderCatalogKeyOAuthRuntimeStateCasUpdate;
+use aether_data_contracts::repository::provider_catalog::{
+    ProviderCatalogKeyOAuthRuntimeStateCasUpdate,
+    ProviderCatalogUpstreamMetadataNamespaceExpectation,
+};
 use axum::{
     body::{Body, Bytes},
     http,
     response::{IntoResponse, Response},
     Json,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+const CODEX_OAUTH_COMPLETE_NAMESPACE_CAS_MAX_RETRIES: usize = 3;
+const CODEX_CREDENTIAL_GENERATION_KEY: &str = "credential_generation";
+
+#[derive(Debug, PartialEq)]
+enum CodexOAuthCompleteCasMissAction {
+    AlreadyCompleted,
+    RetryNamespace(Option<Value>),
+    Conflict,
+}
+
+fn codex_oauth_complete_cas_miss_action(
+    latest_encrypted_auth_config: Option<&str>,
+    latest_upstream_metadata: Option<&Value>,
+    latest_status_snapshot: Option<&Value>,
+    expected_encrypted_auth_config: Option<&str>,
+    persisted_encrypted_auth_config: &str,
+    expected_codex_metadata_value: Option<&Value>,
+    replacement_codex_metadata_value: &Value,
+) -> CodexOAuthCompleteCasMissAction {
+    let latest_codex_metadata_value = latest_upstream_metadata
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get("codex"))
+        .cloned();
+    let quota_is_cleared = latest_status_snapshot
+        .and_then(Value::as_object)
+        .and_then(|snapshot| snapshot.get("quota"))
+        == Some(&Value::Null);
+    if latest_encrypted_auth_config == Some(persisted_encrypted_auth_config)
+        && latest_codex_metadata_value.as_ref() == Some(replacement_codex_metadata_value)
+        && quota_is_cleared
+    {
+        return CodexOAuthCompleteCasMissAction::AlreadyCompleted;
+    }
+    if latest_encrypted_auth_config != expected_encrypted_auth_config
+        || latest_codex_metadata_value.as_ref() == expected_codex_metadata_value
+    {
+        return CodexOAuthCompleteCasMissAction::Conflict;
+    }
+    CodexOAuthCompleteCasMissAction::RetryNamespace(latest_codex_metadata_value)
+}
 
 pub(super) async fn handle_admin_provider_oauth_complete_key(
     state: &AdminAppState<'_>,
@@ -277,29 +321,98 @@ pub(super) async fn handle_admin_provider_oauth_complete_key(
         .and_then(|snapshot| snapshot.get("oauth"))
         .cloned()
         .unwrap_or(serde_json::Value::Null);
+    let mut expected_codex_metadata_value = key
+        .upstream_metadata
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .and_then(|metadata| metadata.get("codex"))
+        .cloned();
+    let mut status_snapshot_patch =
+        serde_json::Map::from_iter([("oauth".to_string(), oauth_status)]);
+    if provider_type == "codex" {
+        status_snapshot_patch.insert("quota".to_string(), serde_json::Value::Null);
+    }
     let persisted_encrypted_auth_config = recovered_key
         .encrypted_auth_config
         .clone()
         .expect("recovered auth config should be present");
-    let updated_result = state
-        .app()
-        .compare_and_update_provider_catalog_key_oauth_runtime_state(
-            &ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
-                key_id: key_id.clone(),
-                expected_encrypted_auth_config: state_data.expected_encrypted_auth_config,
-                expected_credential: None,
-                encrypted_auth_config: persisted_encrypted_auth_config.clone(),
-                encrypted_api_key_update: Some(encrypted_api_key),
-                expires_at_unix_secs_update: Some(expires_at),
-                oauth_invalid_at_unix_secs: None,
-                oauth_invalid_reason: None,
-                reset_error_count: true,
-                upstream_metadata_patch: None,
-                status_snapshot_patch: json!({ "oauth": oauth_status }),
-                updated_at_unix_secs: Some(now_unix_secs),
-            },
-        )
-        .await;
+    let replacement_codex_metadata_value = json!({
+        CODEX_CREDENTIAL_GENERATION_KEY: uuid::Uuid::now_v7().to_string()
+    });
+    let expected_encrypted_auth_config = state_data.expected_encrypted_auth_config.clone();
+    let updated_result: Result<bool, GatewayError> = async {
+        let max_namespace_retries = if provider_type == "codex" {
+            CODEX_OAUTH_COMPLETE_NAMESPACE_CAS_MAX_RETRIES
+        } else {
+            0
+        };
+        for retry in 0..=max_namespace_retries {
+            let updated = state
+                .app()
+                .compare_and_update_provider_catalog_key_oauth_runtime_state(
+                    &ProviderCatalogKeyOAuthRuntimeStateCasUpdate {
+                        key_id: key_id.clone(),
+                        expected_encrypted_auth_config: expected_encrypted_auth_config.clone(),
+                        expected_credential: None,
+                        expected_upstream_metadata_namespace: (provider_type == "codex").then(
+                            || ProviderCatalogUpstreamMetadataNamespaceExpectation {
+                                namespace: "codex".to_string(),
+                                expected_value: expected_codex_metadata_value.clone(),
+                            },
+                        ),
+                        encrypted_auth_config: persisted_encrypted_auth_config.clone(),
+                        encrypted_api_key_update: Some(encrypted_api_key.clone()),
+                        expires_at_unix_secs_update: Some(expires_at),
+                        oauth_invalid_at_unix_secs: None,
+                        oauth_invalid_reason: None,
+                        reset_error_count: true,
+                        upstream_metadata_patch: (provider_type == "codex")
+                            .then(|| json!({"codex": replacement_codex_metadata_value.clone()})),
+                        upstream_metadata_namespace_to_remove: None,
+                        status_snapshot_patch: serde_json::Value::Object(
+                            status_snapshot_patch.clone(),
+                        ),
+                        updated_at_unix_secs: Some(now_unix_secs),
+                    },
+                )
+                .await?;
+            if updated {
+                return Ok(true);
+            }
+            if provider_type != "codex" {
+                return Ok(false);
+            }
+
+            let Some(latest_key) = state
+                .read_provider_catalog_keys_by_ids(std::slice::from_ref(&key_id))
+                .await?
+                .into_iter()
+                .next()
+            else {
+                return Ok(false);
+            };
+            match codex_oauth_complete_cas_miss_action(
+                latest_key.encrypted_auth_config.as_deref(),
+                latest_key.upstream_metadata.as_ref(),
+                latest_key.status_snapshot.as_ref(),
+                expected_encrypted_auth_config.as_deref(),
+                &persisted_encrypted_auth_config,
+                expected_codex_metadata_value.as_ref(),
+                &replacement_codex_metadata_value,
+            ) {
+                CodexOAuthCompleteCasMissAction::AlreadyCompleted => return Ok(true),
+                CodexOAuthCompleteCasMissAction::Conflict => return Ok(false),
+                CodexOAuthCompleteCasMissAction::RetryNamespace(latest_codex_metadata_value) => {
+                    if retry == max_namespace_retries {
+                        return Ok(false);
+                    }
+                    expected_codex_metadata_value = latest_codex_metadata_value;
+                }
+            }
+        }
+        Ok(false)
+    }
+    .await;
     let _ = state
         .app()
         .invalidate_local_oauth_refresh_entry(&key_id)
@@ -396,4 +509,79 @@ pub(super) async fn handle_admin_provider_oauth_complete_key(
         "account_state_recheck_error": serde_json::Value::Null,
     }))
     .into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{codex_oauth_complete_cas_miss_action, CodexOAuthCompleteCasMissAction};
+    use serde_json::json;
+
+    #[test]
+    fn codex_oauth_complete_retries_only_when_namespace_changed() {
+        let expected_codex = json!({"request_id": "old"});
+        let replacement_codex = json!({"credential_generation": "generation-new"});
+        let latest_metadata = json!({
+            "codex": {"request_id": "new"},
+            "unrelated": {"preserved": true}
+        });
+
+        assert_eq!(
+            codex_oauth_complete_cas_miss_action(
+                Some("old-auth"),
+                Some(&latest_metadata),
+                None,
+                Some("old-auth"),
+                "new-auth",
+                Some(&expected_codex),
+                &replacement_codex,
+            ),
+            CodexOAuthCompleteCasMissAction::RetryNamespace(Some(json!({
+                "request_id": "new"
+            })))
+        );
+        assert_eq!(
+            codex_oauth_complete_cas_miss_action(
+                Some("old-auth"),
+                Some(&json!({"codex": expected_codex.clone()})),
+                None,
+                Some("old-auth"),
+                "new-auth",
+                Some(&expected_codex),
+                &replacement_codex,
+            ),
+            CodexOAuthCompleteCasMissAction::Conflict
+        );
+    }
+
+    #[test]
+    fn codex_oauth_complete_accepts_an_ambiguous_success_but_rejects_auth_rotation() {
+        let replacement_codex = json!({"credential_generation": "generation-new"});
+        assert_eq!(
+            codex_oauth_complete_cas_miss_action(
+                Some("new-auth"),
+                Some(&json!({
+                    "codex": replacement_codex.clone(),
+                    "unrelated": {"preserved": true}
+                })),
+                Some(&json!({"quota": null})),
+                Some("old-auth"),
+                "new-auth",
+                Some(&json!({"request_id": "old"})),
+                &replacement_codex,
+            ),
+            CodexOAuthCompleteCasMissAction::AlreadyCompleted
+        );
+        assert_eq!(
+            codex_oauth_complete_cas_miss_action(
+                Some("other-auth"),
+                Some(&json!({"codex": {"request_id": "new"}})),
+                Some(&json!({"quota": null})),
+                Some("old-auth"),
+                "new-auth",
+                Some(&json!({"request_id": "old"})),
+                &replacement_codex,
+            ),
+            CodexOAuthCompleteCasMissAction::Conflict
+        );
+    }
 }

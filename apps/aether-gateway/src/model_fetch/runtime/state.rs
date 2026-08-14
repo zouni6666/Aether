@@ -43,6 +43,14 @@ pub(crate) trait ModelFetchRuntimeState:
         plan: &ExecutionPlan,
     ) -> Result<ExecutionResult, GatewayError>;
 
+    async fn read_recent_codex_catalog_client_version(
+        &self,
+        _provider_id: &str,
+        _key_id: &str,
+    ) -> Option<String> {
+        None
+    }
+
     async fn update_provider_catalog_key_model_fetch_state(
         &self,
         key_id: &str,

@@ -774,6 +774,7 @@ async fn gateway_records_failed_usage_when_all_local_openai_chat_candidates_exha
                     "content-type".to_string(),
                     "application/json".to_string(),
                 )]),
+                response_observation: None,
                 body: Some(aether_contracts::ResponseBody {
                     json_body: Some(json!({
                         "error": {
@@ -1056,6 +1057,7 @@ async fn sync_transport_error_policy_stops_or_retries_candidates_end_to_end_impl
                         "content-type".to_string(),
                         "application/json".to_string(),
                     )]),
+                    response_observation: None,
                     body: Some(aether_contracts::ResponseBody {
                         json_body: Some(json!({
                             "id": "chatcmpl-transport-policy",

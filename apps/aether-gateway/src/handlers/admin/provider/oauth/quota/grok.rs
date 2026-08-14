@@ -796,6 +796,7 @@ mod tests {
             candidate_id: None,
             status_code: 403,
             headers: BTreeMap::new(),
+            response_observation: None,
             body: Some(ResponseBody {
                 json_body: None,
                 body_bytes_b64: Some(base64::engine::general_purpose::STANDARD.encode(body)),

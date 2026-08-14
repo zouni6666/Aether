@@ -151,6 +151,7 @@ fn rerank_execution_result(plan: &ExecutionPlan) -> ExecutionResult {
         candidate_id: plan.candidate_id.clone(),
         status_code: 200,
         headers: BTreeMap::from([("content-type".to_string(), "application/json".to_string())]),
+        response_observation: None,
         body: Some(ResponseBody {
             json_body: Some(json!({
                 "model": "upstream-rerank",

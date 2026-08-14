@@ -1,3 +1,4 @@
+use crate::handlers::admin::provider::oauth::provisioning::rotate_codex_credential_generation;
 use crate::handlers::admin::provider::shared::payloads::AdminProviderKeyCreateRequest;
 use crate::handlers::admin::provider::write::normalize::{
     normalize_allow_auth_channel_mismatch_formats, normalize_api_format_json_object_keys,
@@ -216,6 +217,7 @@ pub(crate) async fn build_admin_create_provider_key_record(
     )?;
     key.created_at_unix_ms = Some(now_unix_secs);
     key.updated_at_unix_secs = Some(now_unix_secs);
+    rotate_codex_credential_generation(&mut key, &provider.provider_type);
     Ok(key)
 }
 
