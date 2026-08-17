@@ -16,9 +16,9 @@ pub use logic::{
     endpoint_supports_rust_models_fetch, extract_error_message, json_string_list,
     merge_upstream_metadata, model_catalog_upstream_metadata, parse_models_response,
     parse_models_response_page, parse_windsurf_model_configs_response, preset_models_for_provider,
-    provider_type_uses_preset_models, select_models_fetch_endpoint,
-    selected_models_fetch_endpoints, upstream_metadata_namespace_updates, ModelFetchRunSummary,
-    ModelsFetchPage, ModelsFetchSuccess,
+    project_codex_models_for_legacy_cache, provider_type_uses_preset_models,
+    select_models_fetch_endpoint, selected_models_fetch_endpoints,
+    upstream_metadata_namespace_updates, ModelFetchRunSummary, ModelsFetchPage, ModelsFetchSuccess,
 };
 pub use strategy::{
     fetch_models_from_transports, fetch_models_from_transports_for_client_version,

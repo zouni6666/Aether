@@ -694,7 +694,7 @@ impl SqlxProviderCatalogReadRepository {
                 )
                 .await?
             }
-            Err(error) => return Err(postgres_error(error)),
+            Err(error) => return Err(error),
         };
         Ok(rows)
     }
@@ -733,7 +733,7 @@ impl SqlxProviderCatalogReadRepository {
                 )
                 .await?
             }
-            Err(error) => return Err(postgres_error(error)),
+            Err(error) => return Err(error),
         };
         Ok(rows)
     }

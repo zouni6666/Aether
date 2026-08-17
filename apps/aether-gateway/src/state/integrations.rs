@@ -469,8 +469,11 @@ impl ModelFetchRuntimeState for AppState {
         key_id: &str,
         cached_models: &[Value],
     ) {
-        let Ok(serialized) = serde_json::to_string(&aggregate_models_for_cache(cached_models))
-        else {
+        let models = aggregate_models_for_cache(cached_models);
+        if models.is_empty() {
+            return;
+        }
+        let Ok(serialized) = serde_json::to_string(&models) else {
             return;
         };
         let cache_key = format!("upstream_models:{provider_id}:{key_id}");

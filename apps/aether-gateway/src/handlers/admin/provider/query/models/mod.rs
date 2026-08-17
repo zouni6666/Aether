@@ -399,7 +399,8 @@ async fn provider_query_read_cached_models(
     let cache_key = format!("upstream_models:{provider_id}:{key_id}");
     let raw = state.runtime_state().kv_get(&cache_key).await.ok()??;
     let parsed = serde_json::from_str::<Vec<Value>>(&raw).ok()?;
-    Some(aggregate_models_for_cache(&parsed))
+    let models = aggregate_models_for_cache(&parsed);
+    (!models.is_empty()).then_some(models)
 }
 
 async fn provider_query_read_provider_cached_models(
@@ -409,7 +410,8 @@ async fn provider_query_read_provider_cached_models(
     let cache_key = format!("{ANTIGRAVITY_PROVIDER_CACHE_KEY_PREFIX}{provider_id}");
     let raw = state.runtime_state().kv_get(&cache_key).await.ok()??;
     let parsed = serde_json::from_str::<Vec<Value>>(&raw).ok()?;
-    Some(aggregate_models_for_cache(&parsed))
+    let models = aggregate_models_for_cache(&parsed);
+    (!models.is_empty()).then_some(models)
 }
 
 async fn provider_query_write_provider_cached_models(
@@ -417,7 +419,11 @@ async fn provider_query_write_provider_cached_models(
     provider_id: &str,
     models: &[Value],
 ) {
-    let Ok(serialized) = serde_json::to_string(&aggregate_models_for_cache(models)) else {
+    let models = aggregate_models_for_cache(models);
+    if models.is_empty() {
+        return;
+    }
+    let Ok(serialized) = serde_json::to_string(&models) else {
         return;
     };
     let cache_key = format!("{ANTIGRAVITY_PROVIDER_CACHE_KEY_PREFIX}{provider_id}");
@@ -577,7 +583,7 @@ async fn provider_query_fetch_models_for_key(
     };
 
     all_errors.extend(outcome.errors);
-    let unique_models = aggregate_models_for_cache(&outcome.cached_models);
+    let unique_models = outcome.legacy_models;
     if outcome.has_success && !unique_models.is_empty() {
         <AppState as ModelFetchRuntimeState>::write_upstream_models_cache(
             state.app(),

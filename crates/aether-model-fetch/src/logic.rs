@@ -303,13 +303,74 @@ fn codex_model_identities(model: &Value) -> Result<Vec<&str>, String> {
 
 pub(crate) fn codex_model_identity(model: &Value) -> Option<&str> {
     let object = model.as_object()?;
-    ["id", "slug"].iter().find_map(|field| {
+    ["slug", "id"].iter().find_map(|field| {
         object
             .get(*field)
             .and_then(Value::as_str)
             .filter(|value| *value == value.trim())
             .filter(|value| valid_codex_model_identity(value))
     })
+}
+
+/// Projects opaque Codex cards into the legacy model-cache shape used by permission sync.
+///
+/// The source cards remain untouched. Only formats from transports that actually returned the
+/// card are admitted into `api_formats`; an upstream `api_format` field is protocol data and is
+/// preserved as-is rather than interpreted as an Aether endpoint format.
+pub fn project_codex_models_for_legacy_cache<'a>(
+    successful_transports: impl IntoIterator<Item = (&'a str, &'a [Value])>,
+) -> Vec<Value> {
+    let mut projected = BTreeMap::<String, serde_json::Map<String, Value>>::new();
+
+    for (endpoint_api_format, models) in successful_transports {
+        let api_format = normalize_api_format(endpoint_api_format);
+        if api_format.is_empty() {
+            continue;
+        }
+
+        for model in models {
+            let Some(model_id) = codex_model_identity(model).map(ToOwned::to_owned) else {
+                continue;
+            };
+            let Some(source) = model.as_object() else {
+                continue;
+            };
+
+            let entry = projected.entry(model_id.clone()).or_insert_with(|| {
+                let mut card = source.clone();
+                card.insert("id".to_string(), Value::String(model_id));
+                // `api_formats` is Aether's routing projection. Never inherit a similarly named
+                // opaque upstream field when constructing this legacy view.
+                card.insert("api_formats".to_string(), Value::Array(Vec::new()));
+                card
+            });
+            let mut formats = entry
+                .get("api_formats")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(ToOwned::to_owned)
+                        .collect::<BTreeSet<_>>()
+                })
+                .unwrap_or_default();
+            formats.insert(api_format.clone());
+            entry.insert(
+                "api_formats".to_string(),
+                Value::Array(
+                    sorted_api_formats(formats)
+                        .into_iter()
+                        .map(Value::String)
+                        .collect(),
+                ),
+            );
+        }
+    }
+
+    projected.into_values().map(Value::Object).collect()
 }
 
 fn valid_codex_model_identity(value: &str) -> bool {
@@ -715,9 +776,15 @@ pub fn aggregate_models_for_cache(models: &[Value]) -> Vec<Value> {
             continue;
         };
 
+        let has_api_formats_array = object
+            .get("api_formats")
+            .and_then(Value::as_array)
+            .is_some();
         let entry = aggregated.entry(model_id.to_string()).or_insert_with(|| {
             let mut cloned = object.clone();
-            cloned.remove("api_format");
+            if !has_api_formats_array {
+                cloned.remove("api_format");
+            }
             cloned
         });
 
@@ -734,12 +801,16 @@ pub fn aggregate_models_for_cache(models: &[Value]) -> Vec<Value> {
                     .collect::<BTreeSet<_>>()
             })
             .unwrap_or_default();
-        let legacy_api_format = object
-            .get("api_format")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned);
+        let legacy_api_format = (!has_api_formats_array)
+            .then(|| {
+                object
+                    .get("api_format")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned)
+            })
+            .flatten();
         let existing_formats = entry
             .get("api_formats")
             .and_then(Value::as_array)
@@ -767,7 +838,13 @@ pub fn aggregate_models_for_cache(models: &[Value]) -> Vec<Value> {
         entry.insert("api_formats".to_string(), Value::Array(merged_formats));
 
         for (key, value) in object {
-            if key == "api_format" || entry.contains_key(key) {
+            if key == "api_format" {
+                if has_api_formats_array && !entry.contains_key(key) {
+                    entry.insert(key.clone(), value.clone());
+                }
+                continue;
+            }
+            if entry.contains_key(key) {
                 continue;
             }
             entry.insert(key.clone(), value.clone());
@@ -1082,7 +1159,8 @@ mod tests {
         aggregate_models_for_cache, apply_model_filters, build_gemini_models_url,
         build_models_fetch_url, build_models_fetch_url_for_client_version, merge_upstream_metadata,
         parse_codex_models_response_page, parse_models_response, parse_models_response_page,
-        preset_models_for_provider, selected_models_fetch_endpoints,
+        preset_models_for_provider, project_codex_models_for_legacy_cache,
+        selected_models_fetch_endpoints,
     };
 
     fn sample_endpoint(
@@ -1198,6 +1276,27 @@ mod tests {
         assert_eq!(aggregated.len(), 1);
         assert_eq!(aggregated[0]["api_formats"], json!(["openai:chat"]));
         assert!(aggregated[0].get("api_format").is_none());
+    }
+
+    #[test]
+    fn aggregate_models_for_cache_preserves_opaque_api_format_on_projected_cards() {
+        let card = json!({
+            "slug": "gpt-slug-only-future",
+            "api_format": "opaque-upstream-protocol",
+            "model_messages": {"instructions_template": "Future instructions"},
+            "future_capability": {"opaque": true}
+        });
+        let cards = vec![card];
+        let projected =
+            project_codex_models_for_legacy_cache([("openai:responses", cards.as_slice())]);
+
+        let aggregated = aggregate_models_for_cache(&projected);
+
+        assert_eq!(aggregated.len(), 1);
+        assert_eq!(aggregated[0]["id"], "gpt-slug-only-future");
+        assert_eq!(aggregated[0]["api_format"], "opaque-upstream-protocol");
+        assert_eq!(aggregated[0]["api_formats"], json!(["openai:responses"]));
+        assert_eq!(aggregated[0]["future_capability"]["opaque"], true);
     }
 
     #[test]
@@ -1464,6 +1563,38 @@ mod tests {
 
         assert_eq!(parsed.fetched_model_ids, vec!["gpt-future-dynamic"]);
         assert_eq!(parsed.cached_models, vec![card]);
+    }
+
+    #[test]
+    fn codex_legacy_projector_adds_internal_identity_and_only_successful_endpoint_formats() {
+        let card = json!({
+            "id": "opaque-upstream-id",
+            "slug": "gpt-slug-only-future",
+            "api_format": "opaque-upstream-protocol",
+            "api_formats": ["opaque-upstream-format-list"],
+            "model_messages": {"instructions_template": "Future instructions"},
+            "future_capability": {"opaque": true}
+        });
+        let cards = vec![card.clone()];
+
+        let projected = project_codex_models_for_legacy_cache([
+            ("openai:responses", cards.as_slice()),
+            ("openai:chat", cards.as_slice()),
+        ]);
+
+        assert_eq!(cards, vec![card]);
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0]["id"], "gpt-slug-only-future");
+        assert_eq!(
+            projected[0]["api_formats"],
+            json!(["openai:chat", "openai:responses"])
+        );
+        assert_eq!(projected[0]["api_format"], "opaque-upstream-protocol");
+        assert_eq!(
+            projected[0]["model_messages"]["instructions_template"],
+            "Future instructions"
+        );
+        assert_eq!(projected[0]["future_capability"]["opaque"], true);
     }
 
     #[test]

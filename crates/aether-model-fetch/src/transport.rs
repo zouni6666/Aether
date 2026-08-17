@@ -973,8 +973,9 @@ mod tests {
         let mut transport = sample_transport("codex", "openai:chat", "oauth");
         transport.endpoint.base_url = "https://chatgpt.com/backend-api/codex".to_string();
         transport.endpoint.header_rules = Some(json!([
-            {"op": "set", "name": "chatgpt-account-id", "value": "spoofed-account"},
-            {"op": "set", "name": "x-openai-fedramp", "value": "false"}
+            {"action": "set", "key": "authorization", "value": "Bearer spoofed-token"},
+            {"action": "set", "key": "chatgpt-account-id", "value": "spoofed-account"},
+            {"action": "set", "key": "x-openai-fedramp", "value": "false"}
         ]));
         transport.key.decrypted_auth_config =
             Some(r#"{"account_id":"account-1","chatgpt_account_is_fedramp":true}"#.to_string());
@@ -1028,8 +1029,8 @@ mod tests {
         let mut transport = sample_transport("codex", "openai:responses", "oauth");
         transport.endpoint.base_url = "https://chatgpt.com/backend-api/codex".to_string();
         transport.endpoint.header_rules = Some(json!([
-            {"op": "set", "name": "user-agent", "value": "codex_cli_rs/0.1.0"},
-            {"op": "remove", "name": "originator"}
+            {"action": "set", "key": "user-agent", "value": "custom-codex-client/0.1.0"},
+            {"action": "drop", "key": "originator"}
         ]));
         transport.key.decrypted_auth_config =
             Some(r#"{"account_id":"account-1","chatgpt_account_is_fedramp":true}"#.to_string());
@@ -1049,10 +1050,6 @@ mod tests {
         assert_eq!(
             plan.headers.get("user-agent").map(String::as_str),
             Some("codex_cli_rs/0.145.2")
-        );
-        assert_eq!(
-            plan.headers.get("originator").map(String::as_str),
-            Some("codex_cli_rs")
         );
         assert_eq!(
             plan.headers.get("originator").map(String::as_str),

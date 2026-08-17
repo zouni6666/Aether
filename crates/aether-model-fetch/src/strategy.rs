@@ -23,6 +23,7 @@ use crate::logic::{
     aggregate_models_for_cache, codex_model_identity, extract_error_message,
     merge_codex_models_preserving_cards, parse_codex_models_response_page,
     parse_models_response_page, parse_windsurf_model_configs_response, preset_models_for_provider,
+    project_codex_models_for_legacy_cache,
 };
 use crate::transport::{
     build_antigravity_fetch_available_models_plan, build_antigravity_load_code_assist_plan,
@@ -46,7 +47,10 @@ const GOOGLE_CLOUD_PLATFORM_SCOPE: &str = "https://www.googleapis.com/auth/cloud
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelsFetchOutcome {
     pub fetched_model_ids: Vec<String>,
+    /// Provider response cards. Versioned Codex catalogs remain byte-for-byte opaque here.
     pub cached_models: Vec<Value>,
+    /// Provider cards projected into Aether's legacy admin/runtime-cache shape.
+    pub legacy_models: Vec<Value>,
     pub errors: Vec<String>,
     pub has_success: bool,
     pub upstream_metadata: Option<Value>,
@@ -253,15 +257,21 @@ async fn fetch_standard_models(
     codex_client_version: Option<&str>,
 ) -> Result<ModelsFetchOutcome, String> {
     let mut all_models = Vec::new();
+    let mut successful_codex_catalogs = Vec::<(String, Vec<Value>)>::new();
     let mut errors = Vec::new();
     let mut has_success = false;
     let mut etag = ConsistentValue::default();
     let mut upstream_status = ConsistentValue::default();
+    let is_codex = provider_type.trim().eq_ignore_ascii_case("codex");
 
     for transport in transports {
         match fetch_standard_models_for_transport(runtime, transport, codex_client_version).await {
             Ok(outcome) => {
-                all_models.extend(outcome.cached_models);
+                all_models.extend(outcome.cached_models.iter().cloned());
+                if is_codex && outcome.has_success {
+                    successful_codex_catalogs
+                        .push((transport.endpoint.api_format.clone(), outcome.cached_models));
+                }
                 has_success |= outcome.has_success;
                 if outcome.has_success {
                     etag.observe(outcome.etag);
@@ -275,7 +285,6 @@ async fn fetch_standard_models(
         }
     }
 
-    let is_codex = provider_type.trim().eq_ignore_ascii_case("codex");
     let merged_models = if is_codex {
         merge_codex_models_preserving_cards(&all_models)?
     } else {
@@ -287,6 +296,11 @@ async fn fetch_standard_models(
     let mut outcome = build_success_outcome(merged_models, upstream_metadata, has_success);
     if let Some(model_ids) = codex_model_ids {
         outcome.fetched_model_ids = model_ids;
+        outcome.legacy_models = project_codex_models_for_legacy_cache(
+            successful_codex_catalogs
+                .iter()
+                .map(|(api_format, models)| (api_format.as_str(), models.as_slice())),
+        );
     }
     Ok(outcome
         .with_errors(errors)
@@ -328,7 +342,11 @@ async fn fetch_standard_models_for_transport(
         let body_json =
             execution_result_json_body(&result).map_err(|err| (err, Some(result.status_code)))?;
         let parsed = if is_codex {
-            parse_codex_models_response_page(&body_json)
+            parse_codex_models_response_for_request(
+                &transport.endpoint.api_format,
+                &body_json,
+                codex_client_version,
+            )
         } else {
             parse_models_response_page(&transport.endpoint.api_format, &body_json)
         }
@@ -370,6 +388,19 @@ async fn fetch_standard_models_for_transport(
     Ok(build_success_outcome(all_models, None, has_success)
         .with_etag(etag.finish())
         .with_upstream_status(upstream_status.finish()))
+}
+
+fn parse_codex_models_response_for_request(
+    endpoint_api_format: &str,
+    body: &Value,
+    codex_client_version: Option<&str>,
+) -> Result<crate::logic::ModelsFetchPage, String> {
+    if codex_client_version.is_none()
+        && (body.is_array() || body.get("data").and_then(Value::as_array).is_some())
+    {
+        return parse_models_response_page(endpoint_api_format, body);
+    }
+    parse_codex_models_response_page(body)
 }
 
 async fn fetch_antigravity_models(
@@ -425,6 +456,7 @@ async fn fetch_antigravity_models(
     Ok(ModelsFetchOutcome {
         fetched_model_ids: Vec::new(),
         cached_models: Vec::new(),
+        legacy_models: Vec::new(),
         errors,
         has_success: false,
         upstream_metadata: None,
@@ -607,6 +639,7 @@ async fn fetch_vertex_api_key_models(
         return Ok(ModelsFetchOutcome {
             fetched_model_ids: Vec::new(),
             cached_models: Vec::new(),
+            legacy_models: Vec::new(),
             errors: vec!["vertex_ai(api_key): missing api key".to_string()],
             has_success: false,
             upstream_metadata: None,
@@ -666,6 +699,7 @@ async fn fetch_vertex_api_key_models(
     Ok(ModelsFetchOutcome {
         fetched_model_ids: Vec::new(),
         cached_models: Vec::new(),
+        legacy_models: Vec::new(),
         errors,
         has_success,
         upstream_metadata: None,
@@ -683,6 +717,7 @@ async fn fetch_vertex_service_account_models(
         return Ok(ModelsFetchOutcome {
             fetched_model_ids: Vec::new(),
             cached_models: Vec::new(),
+            legacy_models: Vec::new(),
             errors: vec!["vertex_ai(service_account): missing auth_config".to_string()],
             has_success: false,
             upstream_metadata: None,
@@ -753,6 +788,7 @@ async fn fetch_vertex_service_account_models(
     Ok(ModelsFetchOutcome {
         fetched_model_ids: Vec::new(),
         cached_models: Vec::new(),
+        legacy_models: Vec::new(),
         errors,
         has_success,
         upstream_metadata: None,
@@ -1367,9 +1403,11 @@ fn build_success_outcome(
     upstream_metadata: Option<Value>,
     has_success: bool,
 ) -> ModelsFetchOutcome {
+    let legacy_models = cached_models.clone();
     ModelsFetchOutcome {
         fetched_model_ids: collect_model_ids(&cached_models),
         cached_models,
+        legacy_models,
         errors: Vec::new(),
         has_success,
         upstream_metadata,
@@ -1580,7 +1618,8 @@ mod tests {
 
     use super::{
         build_vertex_google_list_url, build_vertex_service_account_list_url,
-        select_model_fetch_strategy, ModelFetchStrategy, ModelFetchStrategyKind,
+        parse_codex_models_response_for_request, select_model_fetch_strategy, ModelFetchStrategy,
+        ModelFetchStrategyKind,
     };
     use crate::transport::ModelFetchTransportRuntime;
     use crate::{fetch_models_from_transports, fetch_models_from_transports_for_client_version};
@@ -1930,6 +1969,30 @@ mod tests {
     }
 
     #[test]
+    fn unversioned_codex_parser_accepts_top_level_openai_compatible_array() {
+        let parsed = parse_codex_models_response_for_request(
+            "openai:responses",
+            &json!([{"id": "gpt-array-compatible"}]),
+            None,
+        )
+        .expect("unversioned admin fetch should retain the top-level array fallback");
+
+        assert_eq!(parsed.fetched_model_ids, vec!["gpt-array-compatible"]);
+        assert_eq!(
+            parsed.cached_models[0]["api_formats"],
+            json!(["openai:responses"])
+        );
+
+        let error = parse_codex_models_response_for_request(
+            "openai:responses",
+            &json!([{"id": "gpt-array-compatible"}]),
+            Some("0.145.2"),
+        )
+        .expect_err("versioned catalogs must use the opaque models-array schema");
+        assert!(error.contains("missing models array"));
+    }
+
+    #[test]
     fn strategy_selection_uses_preset_catalog_for_claude_code() {
         let mut transport = sample_custom_aiplatform_transport();
         transport.provider.provider_type = "claude_code".to_string();
@@ -2044,6 +2107,7 @@ mod tests {
             vec!["responses-only", "shared-model"]
         );
         assert_eq!(outcome.cached_models.len(), 2);
+        assert_eq!(outcome.legacy_models, outcome.cached_models);
         assert_eq!(outcome.errors.len(), 1);
         assert!(outcome.errors[0].contains("connection reset"));
         let shared_model = outcome
@@ -2209,6 +2273,16 @@ mod tests {
             "opaque-future-field"
         );
         assert!(outcome.cached_models[0].get("api_formats").is_none());
+        assert_eq!(outcome.legacy_models.len(), 1);
+        assert_eq!(outcome.legacy_models[0]["id"], "gpt-5.6-future");
+        assert_eq!(
+            outcome.legacy_models[0]["api_formats"],
+            json!(["openai:responses"])
+        );
+        assert_eq!(
+            outcome.legacy_models[0]["api_format"],
+            "opaque-future-field"
+        );
         let card = &outcome
             .upstream_metadata
             .as_ref()
@@ -2243,6 +2317,130 @@ mod tests {
         assert_eq!(outcome.fetched_model_ids, vec!["gpt-slug-only-future"]);
         assert_eq!(outcome.cached_models, vec![card]);
         assert!(outcome.cached_models[0].get("id").is_none());
+        assert_eq!(outcome.legacy_models[0]["id"], "gpt-slug-only-future");
+        assert_eq!(
+            outcome.legacy_models[0]["api_formats"],
+            json!(["openai:responses"])
+        );
+        assert_eq!(
+            outcome.legacy_models[0]["future_capability"]["opaque"],
+            true
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_legacy_projection_merges_only_formats_from_successful_transports() {
+        let executed_urls = Arc::new(Mutex::new(Vec::new()));
+        let card = json!({
+            "slug": "gpt-multi-format-future",
+            "api_format": "opaque-upstream-protocol",
+            "future_capability": {"opaque": true}
+        });
+        let runtime = RoutingTestRuntime {
+            executed_urls,
+            routes: vec![
+                (
+                    "chat.example.com/backend-api/codex/models".to_string(),
+                    Ok((200, json!({"models": [card.clone()]}))),
+                ),
+                (
+                    "responses.example.com/backend-api/codex/models".to_string(),
+                    Ok((200, json!({"models": [card.clone()]}))),
+                ),
+                (
+                    "compact.example.com/backend-api/codex/models".to_string(),
+                    Err("compact endpoint unavailable".to_string()),
+                ),
+            ],
+        };
+        let mut chat = sample_codex_transport_for_base(
+            "endpoint-chat",
+            "https://chat.example.com/backend-api/codex",
+        );
+        chat.endpoint.api_format = "openai:chat".to_string();
+        let responses = sample_codex_transport_for_base(
+            "endpoint-responses",
+            "https://responses.example.com/backend-api/codex",
+        );
+        let mut compact = sample_codex_transport_for_base(
+            "endpoint-compact",
+            "https://compact.example.com/backend-api/codex",
+        );
+        compact.endpoint.api_format = "openai:responses:compact".to_string();
+
+        let outcome = fetch_models_from_transports_for_client_version(
+            &runtime,
+            &[chat, responses, compact],
+            Some("0.145.2"),
+        )
+        .await
+        .expect("successful endpoint catalogs should survive a sibling failure");
+
+        assert_eq!(outcome.cached_models, vec![card]);
+        assert_eq!(outcome.legacy_models.len(), 1);
+        assert_eq!(
+            outcome.legacy_models[0]["api_formats"],
+            json!(["openai:chat", "openai:responses"])
+        );
+        assert_eq!(
+            outcome.legacy_models[0]["api_format"],
+            "opaque-upstream-protocol"
+        );
+        assert_eq!(outcome.errors.len(), 1);
+        assert!(outcome.errors[0].contains("compact endpoint unavailable"));
+    }
+
+    #[tokio::test]
+    async fn unversioned_codex_admin_fetch_keeps_openai_compatible_data_fallback() {
+        let executed_urls = Arc::new(Mutex::new(Vec::new()));
+        let runtime = TestRuntime {
+            executed_urls,
+            response_body: json!({
+                "data": [{
+                    "id": "gpt-legacy-compatible",
+                    "future_capability": {"preserved": true}
+                }]
+            }),
+            status_code: 200,
+            response_headers: BTreeMap::new(),
+        };
+
+        let outcome = fetch_models_from_transports(&runtime, &[sample_codex_transport()])
+            .await
+            .expect("unversioned admin fetch should retain the generic parser fallback");
+
+        assert!(outcome.has_success);
+        assert_eq!(outcome.fetched_model_ids, vec!["gpt-legacy-compatible"]);
+        assert_eq!(outcome.cached_models[0]["id"], "gpt-legacy-compatible");
+        assert_eq!(
+            outcome.legacy_models[0]["api_formats"],
+            json!(["openai:responses"])
+        );
+    }
+
+    #[tokio::test]
+    async fn versioned_codex_catalog_does_not_accept_openai_compatible_data_fallback() {
+        let executed_urls = Arc::new(Mutex::new(Vec::new()));
+        let runtime = TestRuntime {
+            executed_urls,
+            response_body: json!({"data": [{"id": "gpt-not-an-opaque-card"}]}),
+            status_code: 200,
+            response_headers: BTreeMap::new(),
+        };
+
+        let outcome = fetch_models_from_transports_for_client_version(
+            &runtime,
+            &[sample_codex_transport()],
+            Some("0.145.2"),
+        )
+        .await
+        .expect("transport failures are returned as observable outcomes");
+
+        assert!(!outcome.has_success);
+        assert!(outcome.cached_models.is_empty());
+        assert!(outcome.legacy_models.is_empty());
+        assert_eq!(outcome.errors.len(), 1);
+        assert!(outcome.errors[0].contains("missing models array"));
     }
 
     #[tokio::test]

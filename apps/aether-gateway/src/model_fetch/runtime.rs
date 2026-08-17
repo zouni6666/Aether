@@ -378,7 +378,7 @@ async fn fetch_and_persist_key_models(
     )
     .await?;
     state
-        .write_upstream_models_cache(&target.provider.id, &target.key.id, &result.cached_models)
+        .write_upstream_models_cache(&target.provider.id, &target.key.id, &result.legacy_models)
         .await;
     sync_provider_model_whitelist_associations(state, &target.provider.id, &filtered_models)
         .await

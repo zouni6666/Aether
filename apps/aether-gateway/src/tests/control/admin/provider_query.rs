@@ -538,6 +538,159 @@ async fn gateway_handles_admin_provider_query_models_with_openai_responses_endpo
 }
 
 #[test]
+fn gateway_recovers_codex_slug_only_models_from_an_empty_legacy_cache() {
+    run_provider_query_test(
+        "gateway_recovers_codex_slug_only_models_from_an_empty_legacy_cache",
+        gateway_recovers_codex_slug_only_models_from_an_empty_legacy_cache_impl,
+    );
+}
+
+async fn gateway_recovers_codex_slug_only_models_from_an_empty_legacy_cache_impl() {
+    let execution_runtime_hits = Arc::new(Mutex::new(0usize));
+    let execution_runtime_hits_clone = Arc::clone(&execution_runtime_hits);
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| {
+            let execution_runtime_hits_inner = Arc::clone(&execution_runtime_hits_clone);
+            async move {
+                *execution_runtime_hits_inner
+                    .lock()
+                    .expect("mutex should lock") += 1;
+                assert_eq!(
+                    plan.url,
+                    "https://chatgpt.com/backend-api/codex/models?client_version=0.144.1"
+                );
+                assert_eq!(plan.provider_api_format, "openai:responses");
+                Json(json!({
+                    "request_id": "req-provider-query-codex-slug-only",
+                    "status_code": 200,
+                    "headers": {
+                        "content-type": "application/json"
+                    },
+                    "body": {
+                        "json_body": {
+                            "models": [{
+                                "slug": "gpt-future-dynamic",
+                                "display_name": "Future Dynamic",
+                                "description": "A model unknown to this Aether build",
+                                "model_messages": {
+                                    "instructions_template": "Follow the dynamic instructions."
+                                },
+                                "api_format": "opaque-upstream-protocol",
+                                "future_capability": {
+                                    "opaque": true,
+                                    "schema_version": 7
+                                }
+                            }]
+                        }
+                    }
+                }))
+            }
+        }),
+    );
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let mut provider = sample_provider("provider-codex-dynamic", "Codex Dynamic", 10);
+    provider.provider_type = "codex".to_string();
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![sample_endpoint(
+            "endpoint-codex-dynamic",
+            "provider-codex-dynamic",
+            "openai:responses",
+            "https://chatgpt.com/backend-api/codex",
+        )],
+        vec![sample_key(
+            "key-codex-dynamic",
+            "provider-codex-dynamic",
+            "openai:responses",
+            "codex-dynamic-token",
+        )],
+    ));
+
+    let state = build_state_with_execution_runtime_override(execution_runtime_url)
+        .with_data_state_for_tests(GatewayDataState::with_provider_transport_reader_for_tests(
+            provider_catalog_repository,
+            DEVELOPMENT_ENCRYPTION_KEY.to_string(),
+        ));
+    state
+        .runtime_state()
+        .kv_set(
+            "upstream_models:provider-codex-dynamic:key-codex-dynamic",
+            "[]".to_string(),
+            None,
+        )
+        .await
+        .expect("empty legacy cache should seed");
+    let cache_state = state.clone();
+    let gateway = build_router_with_state(state);
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    for (request_index, expected_from_cache) in [(0usize, false), (1usize, true)] {
+        let response = reqwest::Client::new()
+            .post(format!("{gateway_url}/api/admin/provider-query/models"))
+            .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+            .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+            .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+            .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+            .json(&json!({
+                "provider_id": "provider-codex-dynamic",
+                "api_key_id": "key-codex-dynamic"
+            }))
+            .send()
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload: serde_json::Value = response.json().await.expect("json body should parse");
+        assert_eq!(payload["success"], json!(true));
+        assert_eq!(payload["data"]["error"], serde_json::Value::Null);
+        assert_eq!(
+            payload["data"]["from_cache"],
+            json!(expected_from_cache),
+            "request {request_index} cache status"
+        );
+        assert_eq!(
+            payload["data"]["models"][0]["id"],
+            json!("gpt-future-dynamic")
+        );
+        assert_eq!(
+            payload["data"]["models"][0]["api_formats"],
+            json!(["openai:responses"])
+        );
+        assert_eq!(
+            payload["data"]["models"][0]["api_format"],
+            json!("opaque-upstream-protocol")
+        );
+        assert_eq!(
+            payload["data"]["models"][0]["model_messages"]["instructions_template"],
+            json!("Follow the dynamic instructions.")
+        );
+        assert_eq!(
+            payload["data"]["models"][0]["future_capability"],
+            json!({"opaque": true, "schema_version": 7})
+        );
+        assert_eq!(
+            *execution_runtime_hits.lock().expect("mutex should lock"),
+            1,
+            "request {request_index} must not cause another upstream fetch"
+        );
+        if request_index == 0 {
+            <AppState as crate::model_fetch::ModelFetchRuntimeState>::write_upstream_models_cache(
+                &cache_state,
+                "provider-codex-dynamic",
+                "key-codex-dynamic",
+                &[],
+            )
+            .await;
+        }
+    }
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[test]
 fn gateway_handles_admin_provider_query_models_falls_back_to_codex_preset_when_token_invalidated() {
     run_provider_query_test(
         "gateway_handles_admin_provider_query_models_falls_back_to_codex_preset_when_token_invalidated",
