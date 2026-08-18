@@ -156,6 +156,20 @@ pub(super) fn decision_reuses_bound_upstream(
             .unwrap_or(false)
 }
 
+pub(super) fn decision_bound_upstream_change_fields(
+    bound: &BoundResponsesConnection,
+    adapter: &'static dyn ResponsesWebSocketProtocolAdapter,
+    decision: &AiExecutionDecision,
+) -> Vec<String> {
+    if bound.upstream.is_none() {
+        return vec!["upstream_socket".to_string()];
+    }
+    match UpstreamBindingIdentity::from_decision(adapter, decision) {
+        Ok(identity) => bound.binding_identity.changed_field_names(&identity),
+        Err(_) => vec!["binding_identity_invalid".to_string()],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;

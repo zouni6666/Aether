@@ -29,7 +29,9 @@ use super::turn::{
     ResponsesWebSocketTurnOutcome,
 };
 use super::turn_state::LogicalTurn;
-use super::upstream::{bind_responses_upstream, decision_reuses_bound_upstream};
+use super::upstream::{
+    bind_responses_upstream, decision_bound_upstream_change_fields, decision_reuses_bound_upstream,
+};
 use crate::ai_serving::ResponsesWebSocketPinnedCandidate;
 use crate::clock::current_unix_secs;
 use crate::control::GatewayControlDecision;
@@ -496,9 +498,15 @@ async fn forward_pinned_continuation(
     let normalization = planned.normalization;
     let decision = planned.execution;
     let planned_provider_model = provider_model_from_decision(&decision);
-    if !decision_reuses_bound_upstream(bound, adapter, &decision)
-        || planned_provider_model.as_deref() != Some(bound.provider_model.as_str())
-    {
+    let reuses_bound_upstream = decision_reuses_bound_upstream(bound, adapter, &decision);
+    let provider_model_changed =
+        planned_provider_model.as_deref() != Some(bound.provider_model.as_str());
+    if !reuses_bound_upstream || provider_model_changed {
+        let binding_change_fields = if reuses_bound_upstream {
+            Vec::new()
+        } else {
+            decision_bound_upstream_change_fields(bound, adapter, &decision)
+        };
         planned_lease.release().await;
         warn!(
             event_name = "responses_websocket_continuation_binding_changed",
@@ -507,6 +515,8 @@ async fn forward_pinned_continuation(
             websocket = true,
             trace_id = %context.trace_id,
             key_id = ?decision.key_id,
+            binding_change_fields = ?binding_change_fields,
+            provider_model_changed,
             "gateway rejected a continuation after the pinned candidate's physical binding changed"
         );
         send_gateway_error_with_status(

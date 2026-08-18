@@ -70,6 +70,7 @@ impl UpstreamBindingIdentity {
             .map_err(|_| UpstreamBindingIdentityError::InvalidUpstreamUrl)?
             .to_string();
 
+        let adapter_kind = adapter.kind();
         let headers = websocket_handshake_headers(&decision.provider_request_headers, "invalid")
             .map_err(|_| UpstreamBindingIdentityError::InvalidHandshakeHeaders)?;
         let authentication_header_names = authentication_header_names(decision);
@@ -82,7 +83,7 @@ impl UpstreamBindingIdentity {
                 .map_err(|_| UpstreamBindingIdentityError::InvalidHandshakeHeaders)?;
             if authentication_header_names.contains(name.as_str()) {
                 authentication_headers.insert(name, value.to_string());
-            } else {
+            } else if !is_turn_scoped_handshake_header(adapter_kind, name.as_str()) {
                 handshake_headers.insert(name, value.to_string());
             }
         }
@@ -90,7 +91,7 @@ impl UpstreamBindingIdentity {
             credential_binding_fingerprint(decision, &authentication_headers);
 
         Ok(Self {
-            adapter_kind: adapter.kind(),
+            adapter_kind,
             provider_id: decision.provider_id.clone(),
             endpoint_id: decision.endpoint_id.clone(),
             key_id: decision.key_id.clone(),
@@ -101,6 +102,58 @@ impl UpstreamBindingIdentity {
             transport_profile: decision.transport_profile.clone(),
         })
     }
+
+    /// Returns only safe field/header names for operator diagnostics. Header
+    /// values and credential fingerprints must never reach logs.
+    pub(super) fn changed_field_names(&self, other: &Self) -> Vec<String> {
+        let mut changed = Vec::new();
+        if self.adapter_kind != other.adapter_kind {
+            changed.push("adapter_kind".to_string());
+        }
+        if self.provider_id != other.provider_id {
+            changed.push("provider_id".to_string());
+        }
+        if self.endpoint_id != other.endpoint_id {
+            changed.push("endpoint_id".to_string());
+        }
+        if self.key_id != other.key_id {
+            changed.push("key_id".to_string());
+        }
+        if self.upstream_url != other.upstream_url {
+            changed.push("upstream_url".to_string());
+        }
+        for name in self
+            .handshake_headers
+            .keys()
+            .chain(other.handshake_headers.keys())
+            .collect::<BTreeSet<_>>()
+        {
+            if self.handshake_headers.get(name) != other.handshake_headers.get(name) {
+                changed.push(format!("handshake_header:{name}"));
+            }
+        }
+        if self.credential_fingerprint != other.credential_fingerprint {
+            changed.push("credential_fingerprint".to_string());
+        }
+        if self.proxy != other.proxy {
+            changed.push("proxy".to_string());
+        }
+        if self.transport_profile != other.transport_profile {
+            changed.push("transport_profile".to_string());
+        }
+        changed
+    }
+}
+
+/// `x-codex-turn-metadata` describes one logical response turn. Fingerprint
+/// convergence intentionally rewrites its `turn_id` and timestamp for every
+/// `response.create`, including a continuation on an already-upgraded socket.
+/// It therefore cannot identify the physical handshake that owns a
+/// `previous_response_id`; the per-turn copy in `client_metadata` still travels
+/// in the response.create body.
+fn is_turn_scoped_handshake_header(adapter_kind: ResponsesWebSocketAdapter, name: &str) -> bool {
+    adapter_kind == ResponsesWebSocketAdapter::Codex
+        && name.eq_ignore_ascii_case("x-codex-turn-metadata")
 }
 
 /// Header names that carry credentials in the provider handshake.  The
@@ -432,6 +485,81 @@ mod tests {
             first_identity,
             UpstreamBindingIdentity::from_decision(adapter, &access_token_refreshed).unwrap()
         );
+    }
+
+    #[test]
+    fn codex_turn_metadata_changes_do_not_change_the_physical_binding() {
+        let adapter = resolve_responses_websocket_adapter(ResponsesWebSocketAdapter::Codex);
+        let mut first = decision();
+        first.provider_type = Some("codex".to_string());
+        first.report_context = Some(json!({
+            "codex_credential_generation": "credential-generation-1"
+        }));
+        first.provider_request_headers.insert(
+            "x-codex-turn-metadata".to_string(),
+            json!({
+                "session_id": "session-1",
+                "thread_id": "thread-1",
+                "turn_id": "turn-1",
+                "turn_started_at_unix_ms": 1
+            })
+            .to_string(),
+        );
+        let first_identity = UpstreamBindingIdentity::from_decision(adapter, &first).unwrap();
+        assert!(!first_identity
+            .handshake_headers
+            .contains_key("x-codex-turn-metadata"));
+
+        let mut continuation = first;
+        continuation.provider_request_headers.insert(
+            "x-codex-turn-metadata".to_string(),
+            json!({
+                "session_id": "session-1",
+                "thread_id": "thread-1",
+                "turn_id": "turn-2",
+                "turn_started_at_unix_ms": 2
+            })
+            .to_string(),
+        );
+        assert_eq!(
+            first_identity,
+            UpstreamBindingIdentity::from_decision(adapter, &continuation).unwrap()
+        );
+    }
+
+    #[test]
+    fn only_codex_turn_metadata_is_excluded_from_binding_headers() {
+        let codex_adapter = resolve_responses_websocket_adapter(ResponsesWebSocketAdapter::Codex);
+        let mut first = decision();
+        first.provider_type = Some("codex".to_string());
+        first.report_context = Some(json!({
+            "codex_credential_generation": "credential-generation-1"
+        }));
+        first.provider_request_headers.insert(
+            "x-codex-turn-metadata".to_string(),
+            r#"{"turn_id":"turn-1"}"#.to_string(),
+        );
+        let first_identity = UpstreamBindingIdentity::from_decision(codex_adapter, &first).unwrap();
+
+        let mut changed = first;
+        changed
+            .provider_request_headers
+            .insert("x-codex-window-id".to_string(), "window-2".to_string());
+        let changed_identity =
+            UpstreamBindingIdentity::from_decision(codex_adapter, &changed).unwrap();
+        assert_ne!(first_identity, changed_identity);
+        assert_eq!(
+            first_identity.changed_field_names(&changed_identity),
+            vec!["handshake_header:x-codex-window-id".to_string()]
+        );
+
+        let standard_adapter =
+            resolve_responses_websocket_adapter(ResponsesWebSocketAdapter::Standard);
+        let standard_identity =
+            UpstreamBindingIdentity::from_decision(standard_adapter, &changed).unwrap();
+        assert!(standard_identity
+            .handshake_headers
+            .contains_key("x-codex-turn-metadata"));
     }
 
     #[test]
