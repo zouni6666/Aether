@@ -69,6 +69,9 @@ pub(crate) use aether_ai_formats::api::{
 };
 pub(crate) use aether_ai_formats::protocol::stream::CanonicalUsage as StreamingCanonicalUsage;
 pub(crate) use aether_ai_formats::CODEX_RESPONSES_LITE_HEADER;
+/// Codex client identity headers re-exported for out-of-crate probe binaries,
+/// which must reach `aether_ai_formats` through this seam.
+pub use aether_ai_formats::{CODEX_CLIENT_ORIGINATOR, CODEX_CLIENT_USER_AGENT};
 
 pub(crate) fn parse_direct_request_body(
     parts: &http::request::Parts,

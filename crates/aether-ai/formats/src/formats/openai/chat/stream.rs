@@ -1264,6 +1264,11 @@ impl OpenAIResponsesProviderState {
         }
     }
 
+    /// SSE 入口：剥掉 `data:` 包装后交给 [`Self::push_event`]。
+    ///
+    /// 解码是这个函数唯一做的事，协议状态机全在 `push_event` 里。已经持有结构化
+    /// 事件的传输（Responses WebSocket）应当直接调用 `push_event`，不要为了复用
+    /// 这个入口先把事件拼回 SSE 文本。
     pub fn push_line(
         &mut self,
         report_context: &Value,
@@ -1272,6 +1277,17 @@ impl OpenAIResponsesProviderState {
         let Some(value) = decode_json_data_line(&line) else {
             return Ok(Vec::new());
         };
+        self.push_event(report_context, &value)
+    }
+
+    /// 结构化入口：消费一个已经解析好的 Responses 协议事件。
+    ///
+    /// 取借用而不是所有权：持有结构化事件的传输不必为了调用它先克隆一份。
+    pub fn push_event(
+        &mut self,
+        report_context: &Value,
+        value: &Value,
+    ) -> Result<Vec<CanonicalStreamFrame>, AiSurfaceFinalizeError> {
         let mut out = Vec::new();
         if let Some(response) = value.get("response").and_then(Value::as_object) {
             self.response_id = response
@@ -1301,12 +1317,12 @@ impl OpenAIResponsesProviderState {
             }
             "response.output_text.delta" | "response.outtext.delta" => match value.get("delta") {
                 Some(Value::String(piece)) if !piece.is_empty() => {
-                    let key = Self::text_part_key_from_event(&value);
+                    let key = Self::text_part_key_from_event(value);
                     self.emit_text_delta(report_context, &mut out, key, piece);
                 }
                 Some(Value::Object(delta)) => {
                     if let Some(text) = delta.get("text").and_then(Value::as_str) {
-                        let key = Self::text_part_key_from_event(&value);
+                        let key = Self::text_part_key_from_event(value);
                         self.emit_missing_text(report_context, &mut out, key, text);
                     }
                 }
@@ -1317,7 +1333,7 @@ impl OpenAIResponsesProviderState {
                     if part.get("type").and_then(Value::as_str) == Some("output_text") {
                         if let Some(text) = part.get("text").and_then(Value::as_str) {
                             if !text.is_empty() {
-                                let key = Self::text_part_key_from_event(&value);
+                                let key = Self::text_part_key_from_event(value);
                                 self.emit_missing_text(report_context, &mut out, key, text);
                             }
                         }
@@ -1356,7 +1372,7 @@ impl OpenAIResponsesProviderState {
                     })
                     .unwrap_or_default();
                 if !text.is_empty() {
-                    let key = Self::text_part_key_from_event(&value);
+                    let key = Self::text_part_key_from_event(value);
                     self.emit_missing_text(report_context, &mut out, key, text);
                 }
             }
@@ -1366,7 +1382,7 @@ impl OpenAIResponsesProviderState {
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 if !piece.is_empty() {
-                    let key = Self::text_part_key_from_event(&value);
+                    let key = Self::text_part_key_from_event(value);
                     self.emit_text_delta(report_context, &mut out, key, piece);
                 }
             }
@@ -1383,7 +1399,7 @@ impl OpenAIResponsesProviderState {
                     })
                     .unwrap_or_default();
                 if !refusal.is_empty() {
-                    let key = Self::text_part_key_from_event(&value);
+                    let key = Self::text_part_key_from_event(value);
                     self.emit_missing_text(report_context, &mut out, key, refusal);
                 }
             }
@@ -1393,7 +1409,7 @@ impl OpenAIResponsesProviderState {
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 if !piece.is_empty() {
-                    let key = Self::text_part_key_from_event(&value);
+                    let key = Self::text_part_key_from_event(value);
                     self.emit_text_delta(report_context, &mut out, key, piece);
                 }
             }
@@ -1404,7 +1420,7 @@ impl OpenAIResponsesProviderState {
                     .or_else(|| value.get("text").and_then(Value::as_str))
                     .unwrap_or_default();
                 if !transcript.is_empty() {
-                    let key = Self::text_part_key_from_event(&value);
+                    let key = Self::text_part_key_from_event(value);
                     self.emit_missing_text(report_context, &mut out, key, transcript);
                 }
             }
@@ -1477,7 +1493,7 @@ impl OpenAIResponsesProviderState {
                 self.emit_output_item_event(
                     report_context,
                     &mut out,
-                    &value,
+                    value,
                     item,
                     output_index,
                     false,
@@ -1724,7 +1740,7 @@ impl OpenAIResponsesProviderState {
                 self.emit_output_item_event(
                     report_context,
                     &mut out,
-                    &value,
+                    value,
                     item,
                     output_index,
                     true,
@@ -1742,7 +1758,7 @@ impl OpenAIResponsesProviderState {
                     id,
                     model,
                     event: CanonicalStreamEvent::Finish {
-                        finish_reason: Some(openai_responses_incomplete_finish_reason(&value)),
+                        finish_reason: Some(openai_responses_incomplete_finish_reason(value)),
                         usage: canonical_usage_from_openai_usage(response.get("usage")),
                     },
                 });
@@ -1752,14 +1768,14 @@ impl OpenAIResponsesProviderState {
             event_type if openai_responses_stream_event_is_known_noop(event_type) => {
                 self.ensure_started(report_context, &mut out);
             }
-            event_type if openai_stream_payload_is_terminal_error(&value) => {
+            event_type if openai_stream_payload_is_terminal_error(value) => {
                 self.finished = true;
                 let mut payload = value.clone();
                 if event_type != "response.failed"
                     && event_type != "response.incomplete"
                     && event_type != "error"
                 {
-                    payload = openai_stream_terminal_error_body(&value).unwrap_or(payload);
+                    payload = openai_stream_terminal_error_body(value).unwrap_or(payload);
                     if let Some(object) = payload.as_object_mut() {
                         object.insert(
                             "type".to_string(),

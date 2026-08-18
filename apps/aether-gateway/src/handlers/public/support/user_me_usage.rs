@@ -479,6 +479,7 @@ fn build_users_me_usage_record_payload(
         "response_time_ms": item.response_time_ms,
         "first_byte_time_ms": item.first_byte_time_ms,
         "is_stream": item.is_stream,
+        "is_websocket": item.is_websocket(),
         "upstream_is_stream": upstream_is_stream,
         "client_requested_stream": client_is_stream,
         "client_is_stream": client_is_stream,
@@ -562,6 +563,7 @@ fn build_users_me_usage_active_payload(item: &StoredRequestUsageAudit) -> serde_
         "api_format": item.api_format,
         "endpoint_api_format": item.endpoint_api_format,
         "is_stream": item.is_stream,
+        "is_websocket": item.is_websocket(),
         "upstream_is_stream": upstream_is_stream,
         "client_requested_stream": client_is_stream,
         "client_is_stream": client_is_stream,
@@ -1721,6 +1723,23 @@ mod tests {
         assert_eq!(active["requested_reasoning_effort"], "xhigh");
         assert_eq!(record["reasoning_effort"], "max");
         assert_eq!(active["reasoning_effort"], "max");
+    }
+
+    #[test]
+    fn user_usage_payloads_expose_websocket_transport() {
+        let item = StoredRequestUsageAudit {
+            request_metadata: Some(json!({
+                "websocket_mode": true,
+                "websocket_transport": "responses",
+            })),
+            ..sample_usage("completed")
+        };
+
+        let record = build_users_me_usage_record_payload(&item, false, &BTreeMap::new(), false);
+        let active = build_users_me_usage_active_payload(&item);
+
+        assert_eq!(record["is_websocket"], true);
+        assert_eq!(active["is_websocket"], true);
     }
 
     #[test]

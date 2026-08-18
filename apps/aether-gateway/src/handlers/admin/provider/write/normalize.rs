@@ -208,6 +208,53 @@ pub(crate) fn normalize_chat_pii_redaction_config(
     }
 }
 
+pub(crate) fn set_responses_websocket_enabled(
+    config: &mut serde_json::Map<String, serde_json::Value>,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut responses = match config.remove("responses_websocket") {
+        None => serde_json::Map::new(),
+        Some(serde_json::Value::Object(config)) => config,
+        Some(_) => return Err("config.responses_websocket 必须是 JSON 对象".to_string()),
+    };
+    responses.insert("enabled".to_string(), serde_json::Value::Bool(enabled));
+    config.insert(
+        "responses_websocket".to_string(),
+        serde_json::Value::Object(responses),
+    );
+    Ok(())
+}
+
+pub(crate) fn remove_responses_websocket_enabled(
+    config: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    let Some(serde_json::Value::Object(responses)) = config.get_mut("responses_websocket") else {
+        return;
+    };
+    responses.remove("enabled");
+    if responses.is_empty() {
+        config.remove("responses_websocket");
+    }
+}
+
+pub(crate) fn validate_responses_websocket_config(
+    config: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    if let Some(value) = config.get("responses_websocket") {
+        let responses = value
+            .as_object()
+            .ok_or_else(|| "config.responses_websocket 必须是 JSON 对象".to_string())?;
+        let enabled = responses
+            .get("enabled")
+            .ok_or_else(|| "config.responses_websocket.enabled 为必填布尔值".to_string())?;
+        if !enabled.is_boolean() {
+            return Err("config.responses_websocket.enabled 必须是布尔值".to_string());
+        }
+    }
+
+    Ok(())
+}
+
 pub(crate) fn validate_vertex_api_formats(
     provider_type: &str,
     auth_type: &str,
@@ -258,7 +305,9 @@ mod tests {
         normalize_api_format_list, normalize_auth_type, normalize_auth_type_by_format,
         normalize_chat_pii_redaction_config, normalize_pool_advanced_config,
         normalize_provider_type_input, normalize_rate_multipliers,
-        reconcile_allow_auth_channel_mismatch_formats, validate_vertex_api_formats,
+        reconcile_allow_auth_channel_mismatch_formats, remove_responses_websocket_enabled,
+        set_responses_websocket_enabled, validate_responses_websocket_config,
+        validate_vertex_api_formats,
     };
     use serde_json::json;
 
@@ -315,6 +364,21 @@ mod tests {
             normalize_chat_pii_redaction_config(Some(json!({ "enabled": "yes" }))).unwrap_err(),
             "chat_pii_redaction.enabled 必须是布尔值"
         );
+    }
+
+    #[test]
+    fn responses_websocket_setting_is_available_to_explicitly_enabled_providers() {
+        let mut config = serde_json::Map::new();
+        set_responses_websocket_enabled(&mut config, true)
+            .expect("Responses setting should be accepted");
+        assert_eq!(
+            config.get("responses_websocket"),
+            Some(&json!({"enabled": true}))
+        );
+        validate_responses_websocket_config(&config).expect("Responses setting should validate");
+
+        remove_responses_websocket_enabled(&mut config);
+        assert!(config.get("responses_websocket").is_none());
     }
 
     #[test]

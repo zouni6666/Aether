@@ -1009,6 +1009,185 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_stream_report_updates_codex_quota_from_websocket_response_body() {
+        crate::orchestration::clear_local_report_effect_caches_for_tests();
+
+        let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider_catalog_provider(
+                "provider-codex-websocket",
+                "codex",
+            )],
+            Vec::new(),
+            vec![sample_provider_catalog_key(
+                "key-codex-websocket",
+                "provider-codex-websocket",
+            )],
+        ));
+        let state = build_provider_catalog_test_state(Arc::clone(&provider_catalog_repository));
+        let websocket_event = json!({
+            "chunks": [{
+                "type": "codex.rate_limits",
+                "plan_type": "free",
+                "rate_limits": {
+                    "allowed": true,
+                    "limit_reached": false,
+                    "primary": {
+                        "used_percent": 91,
+                        "window_minutes": 43200,
+                        "reset_after_seconds": 2590791,
+                        "reset_at": 1787154563u64
+                    }
+                }
+            }]
+        });
+        let body = format!("data: {websocket_event}\n\n");
+
+        submit_stream_report(
+            &state,
+            GatewayStreamReportRequest {
+                trace_id: "trace-codex-reporting-websocket".to_string(),
+                report_kind: "openai_responses_stream_success".to_string(),
+                report_context: Some(json!({
+                    "request_id": "req-codex-reporting-websocket",
+                    "key_id": "key-codex-websocket",
+                    "websocket_mode": true
+                })),
+                status_code: 200,
+                headers: sample_codex_paid_headers(),
+                provider_body_base64: Some(
+                    base64::engine::general_purpose::STANDARD.encode(body.as_bytes()),
+                ),
+                provider_body_state: Some(UsageBodyCaptureState::Inline),
+                client_body_base64: None,
+                client_body_state: None,
+                terminal_summary: None,
+                telemetry: None,
+            },
+        )
+        .await
+        .expect("stream report should stay local");
+
+        let reloaded = provider_catalog_repository
+            .list_keys_by_ids(&["key-codex-websocket".to_string()])
+            .await
+            .expect("keys should list");
+        let codex = reloaded[0]
+            .upstream_metadata
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .and_then(|metadata| metadata.get("codex"))
+            .and_then(serde_json::Value::as_object)
+            .expect("codex metadata should exist");
+        assert_eq!(codex.get("plan_type"), Some(&json!("free")));
+        assert_eq!(codex.get("allowed"), Some(&json!(true)));
+        assert_eq!(codex.get("limit_reached"), Some(&json!(false)));
+        assert_eq!(codex.get("primary_used_percent"), Some(&json!(91.0)));
+        assert_eq!(codex.get("primary_window_minutes"), Some(&json!(43_200u64)));
+
+        let quota = reloaded[0]
+            .status_snapshot
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .and_then(|snapshot| snapshot.get("quota"))
+            .and_then(serde_json::Value::as_object)
+            .expect("quota snapshot should exist");
+        assert_eq!(quota.get("source"), Some(&json!("websocket_response_body")));
+        assert_eq!(quota.get("code"), Some(&json!("ok")));
+        assert_eq!(quota.get("usage_ratio"), Some(&json!(0.91)));
+    }
+
+    #[tokio::test]
+    async fn submit_stream_report_marks_codex_websocket_usage_limit_error_exhausted() {
+        crate::orchestration::clear_local_report_effect_caches_for_tests();
+
+        let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider_catalog_provider(
+                "provider-codex-websocket-limit",
+                "codex",
+            )],
+            Vec::new(),
+            vec![sample_provider_catalog_key(
+                "key-codex-websocket-limit",
+                "provider-codex-websocket-limit",
+            )],
+        ));
+        let state = build_provider_catalog_test_state(Arc::clone(&provider_catalog_repository));
+        let websocket_event = json!({
+            "type": "error",
+            "error": {
+                "type": "usage_limit_reached",
+                "plan_type": "free",
+                "resets_at": 1_787_274_385u64,
+                "resets_in_seconds": 2_590_077u64,
+            },
+            "status_code": 429,
+            "headers": {
+                "X-Codex-Plan-Type": "free",
+                "X-Codex-Primary-Used-Percent": "100",
+                "X-Codex-Primary-Window-Minutes": "43200",
+                "X-Codex-Primary-Reset-After-Seconds": "2590078",
+                "X-Codex-Primary-Reset-At": "1787274385",
+                "X-Codex-Credits-Has-Credits": "False",
+            },
+        });
+        let body = format!("data: {websocket_event}\n\n");
+
+        submit_stream_report(
+            &state,
+            GatewayStreamReportRequest {
+                trace_id: "trace-codex-reporting-websocket-limit".to_string(),
+                report_kind: "openai_responses_stream_success".to_string(),
+                report_context: Some(json!({
+                    "request_id": "req-codex-reporting-websocket-limit",
+                    "key_id": "key-codex-websocket-limit",
+                    "websocket_mode": true,
+                })),
+                status_code: 429,
+                headers: BTreeMap::new(),
+                provider_body_base64: Some(
+                    base64::engine::general_purpose::STANDARD.encode(body.as_bytes()),
+                ),
+                provider_body_state: Some(UsageBodyCaptureState::Inline),
+                client_body_base64: None,
+                client_body_state: None,
+                terminal_summary: None,
+                telemetry: None,
+            },
+        )
+        .await
+        .expect("stream report should stay local");
+
+        let reloaded = provider_catalog_repository
+            .list_keys_by_ids(&["key-codex-websocket-limit".to_string()])
+            .await
+            .expect("keys should list");
+        let codex = reloaded[0]
+            .upstream_metadata
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .and_then(|metadata| metadata.get("codex"))
+            .and_then(serde_json::Value::as_object)
+            .expect("codex metadata should exist");
+        assert_eq!(codex.get("allowed"), Some(&json!(false)));
+        assert_eq!(codex.get("limit_reached"), Some(&json!(true)));
+        assert_eq!(codex.get("primary_used_percent"), Some(&json!(100.0)));
+        assert_eq!(
+            codex.get("primary_reset_at"),
+            Some(&json!(1_787_274_385u64))
+        );
+
+        let quota = reloaded[0]
+            .status_snapshot
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .and_then(|snapshot| snapshot.get("quota"))
+            .and_then(serde_json::Value::as_object)
+            .expect("quota snapshot should exist");
+        assert_eq!(quota.get("source"), Some(&json!("websocket_response_body")));
+        assert_eq!(quota.get("code"), Some(&json!("exhausted")));
+    }
+
+    #[tokio::test]
     async fn submit_stream_report_updates_codex_quota_from_provider_response_headers() {
         crate::orchestration::clear_local_report_effect_caches_for_tests();
 

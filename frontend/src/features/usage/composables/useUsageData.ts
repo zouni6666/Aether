@@ -647,6 +647,7 @@ export function useUsageData(options: UseUsageDataOptions) {
           ? (record.image_progress ?? existing.image_progress)
           : existing.image_progress,
         is_stream: upstreamIsStream,
+        is_websocket: mergeBooleanTrueWins(existing.is_websocket, record.is_websocket),
         upstream_is_stream: upstreamIsStream,
         client_requested_stream: clientRequestedStream,
         client_is_stream: clientIsStream,

@@ -33,6 +33,7 @@ export interface UsageRecord {
   first_byte_time_ms?: number | null
   end_to_end_time_ms?: number | null
   end_to_end_first_byte_time_ms?: number | null
+  is_websocket?: boolean
   created_at: string
   updated_at?: string | null
   response_time_updated_at?: string | null
@@ -570,6 +571,7 @@ export const usageApi = {
       api_format?: string | null
       endpoint_api_format?: string | null
       is_stream?: boolean | null
+      is_websocket?: boolean | null
       upstream_is_stream?: boolean | null
       client_requested_stream?: boolean | null
       client_is_stream?: boolean | null

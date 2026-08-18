@@ -351,6 +351,7 @@ fn apply_codex_oauth_fingerprint_convergence_to_decision(
 struct GatewayAuthenticatedDecisionInputPort<'a> {
     state: PlannerAppState<'a>,
     now_unix_secs: u64,
+    auth_snapshot_override: Option<GatewayAuthApiKeySnapshot>,
     model_directive_policy: &'a crate::system_features::ModelDirectivePolicySnapshot,
     model_directive_base_model: Option<String>,
 }
@@ -367,6 +368,17 @@ impl AiAuthenticatedDecisionInputPort for GatewayAuthenticatedDecisionInputPort<
         &self,
         auth_context: &Self::AuthContext,
     ) -> Result<Option<Self::AuthSnapshot>, Self::Error> {
+        if let Some(snapshot) = self.auth_snapshot_override.as_ref() {
+            if snapshot.user_id != auth_context.user_id
+                || snapshot.api_key_id != auth_context.api_key_id
+            {
+                return Err(GatewayError::Internal(
+                    "WebSocket auth snapshot identity does not match its control decision"
+                        .to_string(),
+                ));
+            }
+            return Ok(Some(snapshot.clone()));
+        }
         self.state
             .read_auth_api_key_snapshot(
                 &auth_context.user_id,
@@ -751,6 +763,27 @@ pub(crate) async fn resolve_local_authenticated_decision_input(
     explicit_required_capabilities: Option<&serde_json::Value>,
     model_directive_policy: &crate::system_features::ModelDirectivePolicySnapshot,
 ) -> Result<Option<ResolvedLocalDecisionAuthInput>, GatewayError> {
+    resolve_local_authenticated_decision_input_with_snapshot(
+        state,
+        auth_context,
+        None,
+        requested_model,
+        requested_model_api_format,
+        explicit_required_capabilities,
+        model_directive_policy,
+    )
+    .await
+}
+
+pub(crate) async fn resolve_local_authenticated_decision_input_with_snapshot(
+    state: &AppState,
+    auth_context: ExecutionRuntimeAuthContext,
+    auth_snapshot_override: Option<GatewayAuthApiKeySnapshot>,
+    requested_model: Option<&str>,
+    requested_model_api_format: Option<&str>,
+    explicit_required_capabilities: Option<&serde_json::Value>,
+    model_directive_policy: &crate::system_features::ModelDirectivePolicySnapshot,
+) -> Result<Option<ResolvedLocalDecisionAuthInput>, GatewayError> {
     let model_directive_base_model = match (requested_model, requested_model_api_format) {
         (Some(model), Some(api_format)) => model_directive_policy
             .resolve_reasoning(api_format, Some(model))
@@ -761,6 +794,7 @@ pub(crate) async fn resolve_local_authenticated_decision_input(
     let port = GatewayAuthenticatedDecisionInputPort {
         state: PlannerAppState::new(state),
         now_unix_secs: current_unix_secs(),
+        auth_snapshot_override,
         model_directive_policy,
         model_directive_base_model,
     };
@@ -1064,6 +1098,52 @@ mod tests {
             }
             other => panic!("unexpected routing repository error mapping: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn explicit_auth_snapshot_override_does_not_fall_back_to_the_planner_cache() {
+        // AppState::new has no auth snapshot repository. Without the explicit
+        // override this resolver returns None; a WebSocket strong snapshot must
+        // therefore be the exact value used to build the planner input.
+        let state = AppState::new().expect("test state should build");
+        let mut strong_snapshot = sample_auth_snapshot();
+        strong_snapshot.api_key_allowed_models = Some(vec!["gpt-live-only".to_string()]);
+
+        let resolved = resolve_local_authenticated_decision_input_with_snapshot(
+            &state,
+            sample_auth_context(),
+            Some(strong_snapshot.clone()),
+            Some("gpt-live-only"),
+            Some("openai:responses"),
+            None,
+            &Default::default(),
+        )
+        .await
+        .expect("snapshot override should resolve")
+        .expect("the explicit snapshot should replace the missing cached value");
+
+        assert_eq!(resolved.auth_snapshot, strong_snapshot);
+    }
+
+    #[tokio::test]
+    async fn explicit_auth_snapshot_override_rejects_an_identity_mismatch() {
+        let state = AppState::new().expect("test state should build");
+        let mut wrong_snapshot = sample_auth_snapshot();
+        wrong_snapshot.api_key_id = "another-key".to_string();
+
+        let error = resolve_local_authenticated_decision_input_with_snapshot(
+            &state,
+            sample_auth_context(),
+            Some(wrong_snapshot),
+            Some("gpt-live-only"),
+            Some("openai:responses"),
+            None,
+            &Default::default(),
+        )
+        .await
+        .expect_err("a snapshot for another API key must never be injected");
+
+        assert!(matches!(error, GatewayError::Internal(message) if message.contains("identity")));
     }
 
     #[tokio::test]

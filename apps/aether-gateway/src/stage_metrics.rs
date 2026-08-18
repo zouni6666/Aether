@@ -94,6 +94,7 @@ const STAGES: &[&str] = &[
     "stream_usage_pending",
     "stream_provider_in_flight",
     "stream_upstream_target_admission",
+    "websocket_turn_admission_held",
     "stream_upstream_headers",
     "stream_first_frame",
     "stream_first_data",

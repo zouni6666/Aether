@@ -574,6 +574,9 @@ async function pollActiveRequests() {
           record.is_stream = update.is_stream
           record.upstream_is_stream = update.is_stream
         }
+        if (typeof update.is_websocket === 'boolean') {
+          record.is_websocket = record.is_websocket === true || update.is_websocket
+        }
         if (typeof update.client_is_stream === 'boolean') {
           record.client_is_stream = update.client_is_stream
           record.client_requested_stream = update.client_is_stream

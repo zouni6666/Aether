@@ -725,20 +725,47 @@ pub(crate) async fn refresh_execution_runtime_auth_context(
     auth_context: GatewayControlAuthContext,
     auth_endpoint_signature: Option<&str>,
 ) -> Result<GatewayControlAuthContext, GatewayError> {
+    refresh_execution_runtime_auth_context_with_snapshot(
+        state,
+        auth_context,
+        auth_endpoint_signature,
+    )
+    .await
+    .map(|(auth_context, _)| auth_context)
+}
+
+/// Strongly refreshes the long-lived execution authorization context and
+/// returns the exact API-key snapshot that produced it.
+///
+/// WebSocket turns need both values: using the refreshed context for RPM and
+/// balance checks while letting the planner independently read its normal
+/// cache can authorize a different provider/model snapshot for up to the cache
+/// TTL. Ordinary HTTP callers keep using [`refresh_execution_runtime_auth_context`].
+pub(crate) async fn refresh_execution_runtime_auth_context_with_snapshot(
+    state: &AppState,
+    auth_context: GatewayControlAuthContext,
+    auth_endpoint_signature: Option<&str>,
+) -> Result<
+    (
+        GatewayControlAuthContext,
+        Option<crate::ai_serving::GatewayAuthApiKeySnapshot>,
+    ),
+    GatewayError,
+> {
     if auth_context.local_rejection.is_some() || !auth_context.access_allowed {
-        return Ok(auth_context);
+        return Ok((auth_context, None));
     }
     let Some(auth_endpoint_signature) = auth_endpoint_signature
         .map(str::trim)
         .filter(|value| !value.is_empty())
     else {
-        return Ok(auth_context);
+        return Ok((auth_context, None));
     };
     if !state.has_auth_api_key_reader()
         || auth_context.user_id.trim().is_empty()
         || auth_context.api_key_id.trim().is_empty()
     {
-        return Ok(auth_context);
+        return Ok((auth_context, None));
     }
 
     let snapshot = {
@@ -758,19 +785,20 @@ pub(crate) async fn refresh_execution_runtime_auth_context(
         denied.access_allowed = false;
         denied.local_rejection = Some(GatewayLocalAuthRejection::InvalidApiKey);
         denied.balance_remaining = None;
-        return Ok(denied);
+        return Ok((denied, None));
     };
 
     let wallet_access = resolve_wallet_auth_gate_uncached(state, &snapshot).await?;
-    Ok(build_data_backed_auth_context(
+    let refreshed = build_data_backed_auth_context(
         state,
-        snapshot,
+        snapshot.clone(),
         auth_endpoint_signature,
         Some(true),
         auth_context.balance_remaining,
         wallet_access,
     )
-    .await)
+    .await;
+    Ok((refreshed, Some(snapshot)))
 }
 
 fn put_cached_auth_context(

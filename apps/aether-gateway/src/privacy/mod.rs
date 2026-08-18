@@ -2523,7 +2523,14 @@ fn restore_json_response_body(
     })
 }
 
-fn restore_json_strings(value: &mut Value, session: &RedactionSession) -> bool {
+/// 递归把 JSON 里的占位符换回真实值，只认本 `session` 记录过的映射。
+///
+/// 同步响应体（[`restore_sync_response_body`]）和 Responses WebSocket 的
+/// provider 事件帧（`handlers::proxy::websocket::responses::redaction`）共用它，
+/// 两边因此保持同一套还原语义：未映射的占位符原样保留，`type` / `model` / `id`
+/// 这类协议字段虽然也被遍历，但它们不可能包含本 session 派生出的 sentinel，
+/// 所以不会被改写。
+pub(crate) fn restore_json_strings(value: &mut Value, session: &RedactionSession) -> bool {
     match value {
         Value::String(text) => {
             let restored = session.restore_text(text);

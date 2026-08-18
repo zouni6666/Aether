@@ -68,12 +68,14 @@ impl ProviderPoolInFlightGuard {
         if self.released {
             return;
         }
-        self.released = true;
         match &mut self.kind {
             ProviderPoolInFlightGuardKind::Local {
                 provider_id,
                 counter,
-            } => decrement_local_provider_in_flight(provider_id, counter),
+            } => {
+                self.released = true;
+                decrement_local_provider_in_flight(provider_id, counter);
+            }
             ProviderPoolInFlightGuardKind::Runtime {
                 runtime,
                 tokens_key,
@@ -85,11 +87,17 @@ impl ProviderPoolInFlightGuard {
                 if let Some(handle) = renew_handle.take() {
                     handle.abort();
                 }
-                if let Err(err) = runtime.score_remove(tokens_key, token).await {
-                    debug!(
-                        error = ?err,
-                        "gateway provider pool demand: failed to release in-flight token"
-                    );
+                // Mark the guard released only after Redis confirms removal.
+                // If this future is cancelled, Drop still schedules the same
+                // idempotent cleanup instead of leaving the token until TTL.
+                match runtime.score_remove(tokens_key, token).await {
+                    Ok(_) => self.released = true,
+                    Err(err) => {
+                        debug!(
+                            error = ?err,
+                            "gateway provider pool demand: failed to release in-flight token; scheduling drop fallback"
+                        );
+                    }
                 }
             }
         }

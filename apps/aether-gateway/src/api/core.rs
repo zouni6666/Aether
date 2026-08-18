@@ -50,12 +50,40 @@ pub(crate) async fn health(State(state): State<AppState>) -> impl IntoResponse {
                 "rejected": snapshot.rejected,
             })
         });
+    let websocket_connection_concurrency =
+        state
+            .websocket_connection_concurrency_snapshot()
+            .map(|snapshot| {
+                json!({
+                    "limit": snapshot.limit,
+                    "in_flight": snapshot.in_flight,
+                    "available_permits": snapshot.available_permits,
+                    "high_watermark": snapshot.high_watermark,
+                    "rejected": snapshot.rejected,
+                })
+            });
+    let distributed_websocket_connection_concurrency = state
+        .distributed_websocket_connection_concurrency_snapshot()
+        .await
+        .ok()
+        .flatten()
+        .map(|snapshot| {
+            json!({
+                "limit": snapshot.limit,
+                "in_flight": snapshot.in_flight,
+                "available_permits": snapshot.available_permits,
+                "high_watermark": snapshot.high_watermark,
+                "rejected": snapshot.rejected,
+            })
+        });
     Json(json!({
         "status": "ok",
         "component": "aether-gateway",
         "control_api_enabled": true,
         "request_concurrency": request_concurrency,
         "distributed_request_concurrency": distributed_request_concurrency,
+        "websocket_connection_concurrency": websocket_connection_concurrency,
+        "distributed_websocket_connection_concurrency": distributed_websocket_connection_concurrency,
     }))
 }
 
@@ -113,6 +141,12 @@ pub(crate) async fn frontdoor_manifest(State(state): State<AppState>) -> impl In
             "execution_runtime_configured": state.execution_runtime_configured(),
             "request_concurrency_enabled": state.request_concurrency_snapshot().is_some(),
             "distributed_request_concurrency_enabled": state.distributed_request_gate.is_some(),
+            "websocket_connection_concurrency_enabled": state
+                .websocket_connection_concurrency_snapshot()
+                .is_some(),
+            "distributed_websocket_connection_concurrency_enabled": state
+                .distributed_websocket_connection_gate
+                .is_some(),
             "frontdoor_cors_enabled": cors_enabled,
             "frontdoor_cors_allow_credentials": cors_allow_credentials,
             "frontdoor_cors_allowed_origins": cors_allowed_origins,

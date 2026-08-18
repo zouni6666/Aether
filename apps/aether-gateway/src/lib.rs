@@ -90,6 +90,7 @@ pub(crate) use self::ai_serving::api::{
     EXECUTION_RUNTIME_SYNC_DECISION_ACTION, GEMINI_FILES_DOWNLOAD_PLAN_KIND,
     OPENAI_VIDEO_CONTENT_PLAN_KIND,
 };
+pub use self::ai_serving::api::{CODEX_CLIENT_ORIGINATOR, CODEX_CLIENT_USER_AGENT};
 pub(crate) use self::ai_serving::{
     AiExecutionDecision, AiExecutionPlanPayload, AiStreamAttempt, AiSyncAttempt,
 };

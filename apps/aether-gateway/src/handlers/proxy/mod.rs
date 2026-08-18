@@ -1,5 +1,6 @@
 mod body_buffer;
 mod local;
+mod websocket;
 
 use self::body_buffer::{
     buffer_and_normalize_request_body, build_request_body_buffer_error_response,
@@ -8,6 +9,7 @@ use self::body_buffer::{
 use self::local::{
     maybe_build_local_admin_proxy_response, maybe_build_local_internal_proxy_response,
 };
+pub(crate) use self::websocket::responses::responses_websocket;
 use super::internal::resolve_local_proxy_execution_path;
 pub(crate) use super::public::matches_model_mapping_for_models;
 use crate::ai_serving::api::{

@@ -11,8 +11,9 @@ use crate::provider::{
 };
 use crate::quota::{
     provider_pool_current_unix_secs, provider_pool_json_bool, provider_pool_json_f64,
-    provider_pool_metadata_bucket, provider_pool_quota_snapshot_exhausted_decision,
-    provider_pool_reset_deadline_elapsed, provider_pool_timestamp_unix_secs,
+    provider_pool_member_quota_snapshot, provider_pool_metadata_bucket,
+    provider_pool_quota_snapshot_exhausted_decision, provider_pool_reset_deadline_elapsed,
+    provider_pool_timestamp_unix_secs,
 };
 use crate::quota_refresh::ProviderPoolQuotaRequestSpec;
 
@@ -48,6 +49,23 @@ impl ProviderPoolAdapter for CodexProviderPoolAdapter {
     }
 
     fn quota_exhausted(&self, input: &ProviderPoolMemberInput<'_>) -> bool {
+        if let Some(quota_snapshot) =
+            provider_pool_member_quota_snapshot(input.key, input.provider_type)
+        {
+            let explicitly_exhausted = provider_pool_json_bool(quota_snapshot.get("allowed"))
+                == Some(false)
+                || provider_pool_json_bool(quota_snapshot.get("limit_reached")) == Some(true);
+            if explicitly_exhausted {
+                let observed_at = provider_pool_timestamp_unix_secs(
+                    quota_snapshot
+                        .get("observed_at")
+                        .or_else(|| quota_snapshot.get("updated_at")),
+                );
+                return !provider_pool_current_unix_secs().is_some_and(|now_unix_secs| {
+                    provider_pool_reset_deadline_elapsed(quota_snapshot, observed_at, now_unix_secs)
+                });
+            }
+        }
         if let Some(exhausted) =
             provider_pool_quota_snapshot_exhausted_decision(input.key, input.provider_type)
         {
@@ -55,6 +73,10 @@ impl ProviderPoolAdapter for CodexProviderPoolAdapter {
         }
         provider_pool_metadata_bucket(input.key.upstream_metadata.as_ref(), input.provider_type)
             .is_some_and(quota_exhausted_from_bucket)
+    }
+
+    fn quota_hard_blocked(&self, input: &ProviderPoolMemberInput<'_>) -> bool {
+        codex_explicit_quota_block_active(input.key, input.provider_type)
     }
 
     fn quota_refresh_endpoint(
@@ -70,6 +92,35 @@ impl ProviderPoolAdapter for CodexProviderPoolAdapter {
     fn quota_refresh_missing_endpoint_message(&self) -> String {
         "找不到有效的 openai:responses 端点".to_string()
     }
+}
+
+fn codex_explicit_quota_block_active(
+    key: &aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey,
+    provider_type: &str,
+) -> bool {
+    let Some(quota_snapshot) = provider_pool_member_quota_snapshot(key, provider_type) else {
+        return provider_pool_metadata_bucket(key.upstream_metadata.as_ref(), provider_type)
+            .is_some_and(|bucket| {
+                (provider_pool_json_bool(bucket.get("allowed")) == Some(false)
+                    || provider_pool_json_bool(bucket.get("limit_reached")) == Some(true))
+                    && !["primary", "secondary"]
+                        .into_iter()
+                        .any(|prefix| codex_window_reset_elapsed(bucket, prefix))
+            });
+    };
+    let explicitly_blocked = provider_pool_json_bool(quota_snapshot.get("allowed")) == Some(false)
+        || provider_pool_json_bool(quota_snapshot.get("limit_reached")) == Some(true);
+    if !explicitly_blocked {
+        return false;
+    }
+    let observed_at = provider_pool_timestamp_unix_secs(
+        quota_snapshot
+            .get("observed_at")
+            .or_else(|| quota_snapshot.get("updated_at")),
+    );
+    !provider_pool_current_unix_secs().is_some_and(|now_unix_secs| {
+        provider_pool_reset_deadline_elapsed(quota_snapshot, observed_at, now_unix_secs)
+    })
 }
 
 fn build_codex_wham_headers(
@@ -248,6 +299,19 @@ fn codex_window_used_percent_exhausted(bucket: &Map<String, Value>, prefix: &str
 }
 
 pub(crate) fn quota_exhausted_from_bucket(bucket: &Map<String, Value>) -> bool {
+    let allowed = provider_pool_json_bool(bucket.get("allowed"));
+    let limit_reached = provider_pool_json_bool(bucket.get("limit_reached"));
+    if allowed == Some(false) || limit_reached == Some(true) {
+        let reset_elapsed = ["primary", "secondary"]
+            .into_iter()
+            .any(|prefix| codex_window_reset_elapsed(bucket, prefix));
+        if !reset_elapsed {
+            return true;
+        }
+    }
+    if allowed == Some(true) || limit_reached == Some(false) {
+        return false;
+    }
     if provider_pool_json_bool(bucket.get("credits_unlimited")) == Some(true) {
         return false;
     }

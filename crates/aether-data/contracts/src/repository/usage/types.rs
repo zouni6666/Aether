@@ -9,6 +9,8 @@ pub const PROVIDER_ACTUAL_SERVICE_TIER_METADATA_KEY: &str = "provider_actual_ser
 pub const PROVIDER_CACHE_TTL_MINUTES_METADATA_KEY: &str = "provider_cache_ttl_minutes";
 pub const ROUTING_CANDIDATE_SKIP_REASON_METADATA_KEY: &str = "routing_candidate_skip_reason";
 pub const ROUTING_FAILURE_DIAGNOSTIC_METADATA_KEY: &str = "routing_failure_diagnostic";
+pub const WEBSOCKET_MODE_METADATA_KEY: &str = "websocket_mode";
+pub const WEBSOCKET_TRANSPORT_METADATA_KEY: &str = "websocket_transport";
 
 pub fn extract_provider_reasoning_effort_from_body(value: Option<&Value>) -> Option<String> {
     let object = value.and_then(Value::as_object)?;
@@ -537,6 +539,11 @@ impl StoredRequestUsageAudit {
 
     pub fn request_metadata_client_family(&self) -> Option<&str> {
         usage_request_metadata_client_family(self.request_metadata.as_ref())
+    }
+
+    pub fn is_websocket(&self) -> bool {
+        self.request_metadata_bool(WEBSOCKET_MODE_METADATA_KEY)
+            .unwrap_or(false)
     }
 
     fn billing_snapshot_resolved_number(&self, key: &str) -> Option<f64> {
@@ -2394,7 +2401,8 @@ mod tests {
         extract_provider_actual_service_tier_from_response,
         extract_provider_service_tier_from_body, resolve_provider_cache_ttl_minutes,
         StoredRequestUsageAudit, UpsertUsageRecord, UsageBodyCaptureState, UsageBodyCaptureStorage,
-        UsageBodyField, UsageProviderPerformanceQuery,
+        UsageBodyField, UsageProviderPerformanceQuery, WEBSOCKET_MODE_METADATA_KEY,
+        WEBSOCKET_TRANSPORT_METADATA_KEY,
     };
     use serde_json::{json, Value};
 
@@ -2661,6 +2669,19 @@ mod tests {
         assert_eq!(usage.settlement_cache_creation_price_per_1m(), Some(3.75));
         assert_eq!(usage.settlement_cache_read_price_per_1m(), Some(0.3));
         assert_eq!(usage.settlement_price_per_request(), Some(0.02));
+    }
+
+    #[test]
+    fn websocket_transport_uses_typed_request_metadata() {
+        let mut usage = sample_usage();
+        assert!(!usage.is_websocket());
+
+        usage.request_metadata = Some(json!({
+            WEBSOCKET_MODE_METADATA_KEY: true,
+            WEBSOCKET_TRANSPORT_METADATA_KEY: "responses",
+        }));
+
+        assert!(usage.is_websocket());
     }
 
     #[test]

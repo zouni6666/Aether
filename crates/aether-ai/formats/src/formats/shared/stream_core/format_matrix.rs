@@ -251,6 +251,44 @@ impl StreamingStandardTerminalObserver {
         Ok(())
     }
 
+    /// 结构化入口：给已经持有解析好的协议事件的传输用（Responses WebSocket），
+    /// 避免为了复用 [`Self::push_line`] 把事件重新拼成 `data: {json}` 再解析回来。
+    ///
+    /// 只要 provider 的协议状态机本身接受结构化事件，这条路径与 `push_line`
+    /// 完全等价——`push_line` 现在就是「解码 + `push_event`」。
+    ///
+    /// `openai:image` 的终态状态机没有结构化入口（它按 SSE 行做增量解析），
+    /// 这里返回 `Err`，由调用方 `disable_with_error` 把摘要标成 parser_error，
+    /// 而不是静默丢事件。
+    pub fn push_event(
+        &mut self,
+        report_context: &Value,
+        event: &Value,
+    ) -> Result<(), AiSurfaceFinalizeError> {
+        self.ensure_initialized(report_context);
+        let Some(provider) = self.provider.as_mut() else {
+            return Ok(());
+        };
+        match provider {
+            TerminalStreamParser::Standard(provider) => {
+                let frames = provider.push_event(report_context, event)?;
+                let actual_service_tier = provider.actual_service_tier().map(ToOwned::to_owned);
+                self.observe_frames(frames);
+                if let Some(actual_service_tier) = actual_service_tier {
+                    self.latest_summary
+                        .get_or_insert_with(ExecutionStreamTerminalSummary::default)
+                        .provider_actual_service_tier = Some(actual_service_tier);
+                }
+            }
+            TerminalStreamParser::OpenAIImage(_) => {
+                return Err(AiSurfaceFinalizeError::new(
+                    "openai:image terminal observation has no structured event entry",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub fn finish(
         &mut self,
         report_context: &Value,
@@ -401,6 +439,24 @@ impl ProviderStreamParser {
             ProviderStreamParser::OpenAIResponses(state) => state.push_line(report_context, line),
             ProviderStreamParser::Claude(state) => state.push_line(report_context, line),
             ProviderStreamParser::Gemini(state) => state.push_line(report_context, line),
+        }
+    }
+
+    /// 结构化入口。目前只有 `openai:responses` 有传输会走它（Responses
+    /// WebSocket）；其余格式的协议状态机同样可以按「解码 + push_event」机械拆分，
+    /// 等到真有非 SSE 传输需要时再拆，不做无调用方的接口。
+    fn push_event(
+        &mut self,
+        report_context: &Value,
+        event: &Value,
+    ) -> Result<Vec<CanonicalStreamFrame>, AiSurfaceFinalizeError> {
+        match self {
+            ProviderStreamParser::OpenAIResponses(state) => state.push_event(report_context, event),
+            ProviderStreamParser::OpenAIChat(_)
+            | ProviderStreamParser::Claude(_)
+            | ProviderStreamParser::Gemini(_) => Err(AiSurfaceFinalizeError::new(
+                "this provider stream parser has no structured event entry",
+            )),
         }
     }
 
@@ -2488,5 +2544,262 @@ mod tests {
             usage.dimensions.get("image_quality"),
             Some(&json!("medium"))
         );
+    }
+}
+
+#[cfg(test)]
+mod structured_entry_tests {
+    use super::StreamingStandardTerminalObserver;
+    use aether_contracts::ExecutionStreamTerminalSummary;
+    use serde_json::{json, Value};
+
+    fn report_context() -> Value {
+        json!({
+            "provider_api_format": "openai:responses",
+            "client_api_format": "openai:responses",
+            "mapped_model": "gpt-5-codex",
+        })
+    }
+
+    /// 用 SSE 入口观测一组事件。这是 C5 之前 WebSocket 走的路径：把结构化事件
+    /// 拼成 `data: {json}` 再交给解析器。
+    fn summary_via_push_line(events: &[Value]) -> ExecutionStreamTerminalSummary {
+        let context = report_context();
+        let mut observer = StreamingStandardTerminalObserver::default();
+        for event in events {
+            observer
+                .push_line(&context, format!("data: {event}\n\n").into_bytes())
+                .expect("the SSE entry must accept these events");
+        }
+        observer
+            .finish(&context)
+            .expect("the observer must finish")
+            .unwrap_or_default()
+    }
+
+    /// 用结构化入口观测同一组事件。这是 C5 之后的路径。
+    fn summary_via_push_event(events: &[Value]) -> ExecutionStreamTerminalSummary {
+        let context = report_context();
+        let mut observer = StreamingStandardTerminalObserver::default();
+        for event in events {
+            observer
+                .push_event(&context, event)
+                .expect("the structured entry must accept these events");
+        }
+        observer
+            .finish(&context)
+            .expect("the observer must finish")
+            .unwrap_or_default()
+    }
+
+    fn assert_entries_agree(label: &str, events: &[Value]) {
+        let via_line = summary_via_push_line(events);
+        let via_event = summary_via_push_event(events);
+        assert_eq!(
+            via_line, via_event,
+            "the SSE entry and the structured entry must produce identical summaries for {label}"
+        );
+    }
+
+    fn created() -> Value {
+        json!({"type": "response.created", "response": {"id": "resp_diff", "model": "gpt-5-codex"}})
+    }
+
+    fn text_delta(piece: &str) -> Value {
+        json!({
+            "type": "response.output_text.delta",
+            "item_id": "msg_diff",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": piece,
+        })
+    }
+
+    /// 批量事件：WS 一帧可以带多个协议事件，逐个喂入的结果必须和逐行喂入一致。
+    #[test]
+    fn a_batched_delta_sequence_agrees_across_both_entries() {
+        let events = vec![
+            created(),
+            text_delta("he"),
+            text_delta("ll"),
+            text_delta("o"),
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_diff",
+                    "model": "gpt-5-codex",
+                    "status": "completed",
+                    "usage": {"input_tokens": 11, "output_tokens": 3, "total_tokens": 14},
+                },
+            }),
+        ];
+        assert_entries_agree("a batched delta sequence", &events);
+        let summary = summary_via_push_event(&events);
+        assert!(summary.observed_finish);
+        assert_eq!(summary.response_id.as_deref(), Some("resp_diff"));
+        let usage = summary
+            .standardized_usage
+            .as_ref()
+            .expect("completed carries usage");
+        assert_eq!(usage.input_tokens, 11);
+        assert_eq!(usage.output_tokens, 3);
+    }
+
+    /// 合法 `response.incomplete`：C1 定过的语义（终态、可计费），两条入口必须
+    /// 得到同一个摘要，尤其是 finish_reason 与 parser_error 的取值。
+    #[test]
+    fn a_legitimate_incomplete_agrees_across_both_entries() {
+        let events = vec![
+            created(),
+            text_delta("partial"),
+            json!({
+                "type": "response.incomplete",
+                "response": {
+                    "id": "resp_diff",
+                    "model": "gpt-5-codex",
+                    "status": "incomplete",
+                    "incomplete_details": {"reason": "max_output_tokens"},
+                    "usage": {"input_tokens": 7, "output_tokens": 5, "total_tokens": 12},
+                },
+            }),
+        ];
+        assert_entries_agree("a legitimate incomplete", &events);
+        let summary = summary_via_push_event(&events);
+        assert!(summary.observed_finish);
+        assert!(
+            summary.parser_error.is_none(),
+            "a legitimate incomplete is not a parser error: {:?}",
+            summary.parser_error
+        );
+    }
+
+    #[test]
+    fn a_terminal_error_agrees_across_both_entries() {
+        let events = vec![
+            created(),
+            json!({
+                "type": "error",
+                "error": {"type": "server_error", "message": "upstream exploded"},
+            }),
+        ];
+        assert_entries_agree("a terminal error", &events);
+        let summary = summary_via_push_event(&events);
+        assert!(summary.observed_finish);
+        assert_eq!(summary.finish_reason.as_deref(), Some("error"));
+        assert!(summary.parser_error.is_some());
+    }
+
+    #[test]
+    fn a_response_failed_event_agrees_across_both_entries() {
+        assert_entries_agree(
+            "a response.failed event",
+            &[
+                created(),
+                json!({
+                    "type": "response.failed",
+                    "response": {
+                        "id": "resp_diff",
+                        "model": "gpt-5-codex",
+                        "status": "failed",
+                        "error": {"type": "server_error", "message": "generation failed"},
+                    },
+                }),
+            ],
+        );
+    }
+
+    /// 未知事件只增计数、不改终态判定，两条入口的计数必须一致。
+    #[test]
+    fn unknown_events_agree_across_both_entries() {
+        let events = vec![
+            created(),
+            json!({"type": "response.some_future_event", "payload": {"anything": true}}),
+            json!({"type": "response.another_future_event"}),
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_diff",
+                    "model": "gpt-5-codex",
+                    "status": "completed",
+                    "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                },
+            }),
+        ];
+        assert_entries_agree("unknown events", &events);
+        let summary = summary_via_push_event(&events);
+        assert!(summary.observed_finish);
+        assert!(
+            summary.unknown_event_count > 0,
+            "unknown events are counted"
+        );
+    }
+
+    /// 供应商声明的 service tier 通过两条入口都要落到摘要上。
+    #[test]
+    fn a_service_tier_agrees_across_both_entries() {
+        assert_entries_agree(
+            "a declared service tier",
+            &[
+                json!({
+                    "type": "response.created",
+                    "response": {
+                        "id": "resp_diff",
+                        "model": "gpt-5-codex",
+                        "service_tier": "priority",
+                    },
+                }),
+                json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_diff",
+                        "model": "gpt-5-codex",
+                        "status": "completed",
+                        "service_tier": "priority",
+                        "usage": {"input_tokens": 2, "output_tokens": 2, "total_tokens": 4},
+                    },
+                }),
+            ],
+        );
+    }
+
+    /// 没有任何供应商终态事件。注意 `finish()` 会补一个 `stop`（这是 HTTP 与
+    /// WebSocket 共享的既有行为，C5 不改），所以 `observed_finish` 为真而 usage
+    /// 缺失——真正的「缺终态」判定看的是 usage 与被捕获的 body。这里要钉住的是
+    /// 两条入口在这种不完整序列上仍然给出同一个摘要。
+    #[test]
+    fn a_missing_terminal_agrees_across_both_entries() {
+        let events = vec![created(), text_delta("truncated")];
+        assert_entries_agree("a missing terminal", &events);
+        let summary = summary_via_push_event(&events);
+        assert_eq!(summary.finish_reason.as_deref(), Some("stop"));
+        assert!(
+            summary.standardized_usage.is_none(),
+            "a synthesized finish carries no usage"
+        );
+    }
+
+    /// `openai:image` 没有结构化入口：必须显式报错，让调用方标记 parser_error，
+    /// 而不是静默丢掉事件、把摘要留成「未观察到终态」。
+    #[test]
+    fn the_image_format_rejects_the_structured_entry() {
+        let context = json!({
+            "provider_api_format": "openai:image",
+            "client_api_format": "openai:image",
+            "mapped_model": "gpt-image-1",
+        });
+        let mut observer = StreamingStandardTerminalObserver::default();
+        let error = observer
+            .push_event(&context, &json!({"type": "image_generation.completed"}))
+            .expect_err("openai:image has no structured entry");
+        assert!(
+            error.to_string().contains("structured event entry"),
+            "the error must name the missing entry: {error}"
+        );
+
+        observer.disable_with_error(error.to_string());
+        let summary = observer
+            .latest_summary()
+            .expect("disable_with_error records a summary");
+        assert!(summary.parser_error.is_some());
     }
 }

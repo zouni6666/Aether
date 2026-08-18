@@ -18,6 +18,18 @@ pub fn provider_pool_key_account_quota_exhausted(
     })
 }
 
+pub fn provider_pool_key_quota_hard_blocked(
+    key: &StoredProviderCatalogKey,
+    provider_type: &str,
+) -> bool {
+    let adapter = ProviderPoolService::with_builtin_adapters().adapter(provider_type);
+    adapter.quota_hard_blocked(&ProviderPoolMemberInput {
+        provider_type,
+        key,
+        auth_config: None,
+    })
+}
+
 pub fn provider_pool_member_quota_snapshot<'a>(
     key: &'a StoredProviderCatalogKey,
     provider_type: &str,

@@ -55,6 +55,7 @@ function normalizeProviderSummary(
     kiro_simulated_cache_enabled: provider.kiro_simulated_cache_enabled ?? false,
     max_transfer_count: provider.max_transfer_count ?? 0,
     max_transfer_timeout_seconds: provider.max_transfer_timeout_seconds ?? 0,
+    responses_websocket_enabled: provider.responses_websocket_enabled ?? false,
   }
 }
 
@@ -115,6 +116,7 @@ export async function updateProvider(
     website: string
     provider_priority: number
     keep_priority_on_conversion: boolean
+    responses_websocket_enabled: boolean
     billing_type: 'monthly_quota' | 'pay_as_you_go' | 'free_tier'
     monthly_quota_usd: number
     quota_reset_day: number
@@ -158,6 +160,7 @@ export async function createProvider(
     quota_expires_at?: string
     provider_priority?: number
     keep_priority_on_conversion?: boolean
+    responses_websocket_enabled?: boolean
     is_active?: boolean
     max_retries?: number
     max_transfer_count?: number

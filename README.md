@@ -137,6 +137,8 @@ Aether Tunnel 是配套的正向代理节点，部署在海外 VPS 上，为墙�
 
 - Embeddings: [OpenAI compatible `POST /v1/embeddings`](docs/api/embeddings.md)
 - Rerank: [OpenAI/Jina compatible `POST /v1/rerank`](docs/api/rerank.md)
+- Responses WebSocket mode: [protocol and Aether behavior](docs/WebSocket-Mode.md)
+- WebSocket probes: [Codex](docs/operations/codex-responses-websocket-probe.md) · [OpenAI Responses](docs/operations/openai-responses-websocket-probe.md)
 
 ## 环境变量
 

@@ -325,6 +325,7 @@ impl AppState {
                 frontdoor_runtime_guards.request_body_buffer_budget_permits,
             )),
             request_gate: None,
+            websocket_connection_gate: None,
             auth_snapshot_load_gate: frontdoor_runtime_guards
                 .auth_snapshot_load_gate_limit
                 .map(|limit| Arc::new(ConcurrencyGate::new("gateway_auth_snapshot_load", limit))),
@@ -341,6 +342,7 @@ impl AppState {
                 ),
             ),
             distributed_request_gate: None,
+            distributed_websocket_connection_gate: None,
             client,
             owner_forward_client,
             auth_context_cache: Arc::new(AuthContextCache::default()),
@@ -574,8 +576,20 @@ impl AppState {
     }
 
     pub fn with_request_concurrency_limit(mut self, limit: usize) -> Self {
-        self.request_gate = Some(Arc::new(ConcurrencyGate::new(
-            "gateway_requests",
+        let limit = limit.max(1);
+        self.request_gate = Some(Arc::new(ConcurrencyGate::new("gateway_requests", limit)));
+        if self.websocket_connection_gate.is_none() {
+            self.websocket_connection_gate = Some(Arc::new(ConcurrencyGate::new(
+                "gateway_websocket_connections",
+                limit,
+            )));
+        }
+        self
+    }
+
+    pub fn with_websocket_connection_limit(mut self, limit: usize) -> Self {
+        self.websocket_connection_gate = Some(Arc::new(ConcurrencyGate::new(
+            "gateway_websocket_connections",
             limit.max(1),
         )));
         self
@@ -643,6 +657,11 @@ impl AppState {
 
     pub fn with_distributed_request_concurrency_gate(mut self, gate: RuntimeSemaphore) -> Self {
         self.distributed_request_gate = Some(Arc::new(gate));
+        self
+    }
+
+    pub fn with_distributed_websocket_connection_gate(mut self, gate: RuntimeSemaphore) -> Self {
+        self.distributed_websocket_connection_gate = Some(Arc::new(gate));
         self
     }
 
@@ -1224,6 +1243,12 @@ impl AppState {
         self.request_gate.as_ref().map(|gate| gate.snapshot())
     }
 
+    pub(crate) fn websocket_connection_concurrency_snapshot(&self) -> Option<ConcurrencySnapshot> {
+        self.websocket_connection_gate
+            .as_ref()
+            .map(|gate| gate.snapshot())
+    }
+
     pub(crate) fn auth_snapshot_load_concurrency_snapshot(&self) -> Option<ConcurrencySnapshot> {
         self.auth_snapshot_load_gate
             .as_ref()
@@ -1246,6 +1271,15 @@ impl AppState {
         &self,
     ) -> Result<Option<RuntimeSemaphoreSnapshot>, RuntimeSemaphoreError> {
         match self.distributed_request_gate.as_ref() {
+            Some(gate) => gate.snapshot().await.map(Some),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn distributed_websocket_connection_concurrency_snapshot(
+        &self,
+    ) -> Result<Option<RuntimeSemaphoreSnapshot>, RuntimeSemaphoreError> {
+        match self.distributed_websocket_connection_gate.as_ref() {
             Some(gate) => gate.snapshot().await.map(Some),
             None => Ok(None),
         }
@@ -1557,6 +1591,9 @@ impl AppState {
         if let Some(snapshot) = self.request_concurrency_snapshot() {
             samples.extend(snapshot.to_metric_samples("gateway_requests"));
         }
+        if let Some(snapshot) = self.websocket_connection_concurrency_snapshot() {
+            samples.extend(snapshot.to_metric_samples("gateway_websocket_connections"));
+        }
         if let Some(snapshot) = self.auth_snapshot_load_concurrency_snapshot() {
             samples.extend(snapshot.to_metric_samples("gateway_auth_snapshot_load"));
         }
@@ -1597,6 +1634,28 @@ impl AppState {
                 .with_labels(vec![MetricLabel::new(
                     "gate",
                     "gateway_requests_distributed",
+                )])],
+            }
+        };
+        let distributed_websocket_connection_metrics = async {
+            let Some(gate) = self.distributed_websocket_connection_gate.as_ref() else {
+                return Vec::new();
+            };
+            match tokio::time::timeout(DISTRIBUTED_CONCURRENCY_METRICS_TIMEOUT, gate.snapshot())
+                .await
+            {
+                Ok(Ok(snapshot)) => {
+                    snapshot.to_metric_samples("gateway_websocket_connections_distributed")
+                }
+                Ok(Err(_)) | Err(_) => vec![MetricSample::new(
+                    "concurrency_unavailable",
+                    "Whether the distributed concurrency gate is currently unavailable.",
+                    MetricKind::Gauge,
+                    1,
+                )
+                .with_labels(vec![MetricLabel::new(
+                    "gate",
+                    "gateway_websocket_connections_distributed",
                 )])],
             }
         };
@@ -1649,6 +1708,7 @@ impl AppState {
             );
         let (
             distributed_request_metrics,
+            distributed_websocket_connection_metrics,
             postgres_observability_metrics,
             postgres_activity_group_metrics,
             redis_runtime_metrics,
@@ -1656,6 +1716,7 @@ impl AppState {
             usage_counter_pending_health_metrics,
         ) = tokio::join!(
             distributed_request_metrics,
+            distributed_websocket_connection_metrics,
             postgres_observability_metrics,
             postgres_activity_group_metrics,
             redis_runtime_metrics,
@@ -1663,6 +1724,7 @@ impl AppState {
             usage_counter_pending_health_metrics,
         );
         samples.extend(distributed_request_metrics);
+        samples.extend(distributed_websocket_connection_metrics);
         samples.extend(postgres_observability_metrics);
         samples.extend(postgres_activity_group_metrics);
         samples.extend(redis_runtime_metrics);
@@ -1773,6 +1835,26 @@ impl AppState {
             .transpose()
             .map_err(RequestAdmissionError::Local)?;
         let distributed = match self.distributed_request_gate.as_ref() {
+            Some(gate) => Some(
+                gate.try_acquire()
+                    .await
+                    .map_err(RequestAdmissionError::Distributed)?,
+            ),
+            None => None,
+        };
+        Ok(AdmissionPermit::from_parts(local, distributed))
+    }
+
+    pub(crate) async fn try_acquire_websocket_connection_permit(
+        &self,
+    ) -> Result<Option<AdmissionPermit>, RequestAdmissionError> {
+        let local = self
+            .websocket_connection_gate
+            .as_ref()
+            .map(|gate| gate.try_acquire())
+            .transpose()
+            .map_err(RequestAdmissionError::Local)?;
+        let distributed = match self.distributed_websocket_connection_gate.as_ref() {
             Some(gate) => Some(
                 gate.try_acquire()
                     .await

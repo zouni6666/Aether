@@ -6,6 +6,7 @@ import {
   hasUsageRetry,
   isUsageRecordFailed,
   isUsageRecordSuccessful,
+  isUsageWebSocket,
   mapRequestStatusToTimelineStatus,
   normalizeRequestStatus,
   resolveDisplayRequestStatus,
@@ -175,6 +176,12 @@ describe('usage status helpers', () => {
     expect(hasUsageRetry(buildUsageRecord({ has_retry: true }))).toBe(true)
     expect(hasUsageRetry(buildUsageRecord({ has_retry: false }))).toBe(false)
     expect(hasUsageRetry(buildUsageRecord({ has_retry: undefined }))).toBe(false)
+  })
+
+  it('recognizes persisted WebSocket usage records', () => {
+    expect(isUsageWebSocket(buildUsageRecord({ is_websocket: true }))).toBe(true)
+    expect(isUsageWebSocket(buildUsageRecord({ is_websocket: false }))).toBe(false)
+    expect(isUsageWebSocket(buildUsageRecord({ is_websocket: undefined }))).toBe(false)
   })
 
   it('prefers symmetric stream aliases when present', () => {

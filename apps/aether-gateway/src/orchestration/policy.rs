@@ -8,6 +8,7 @@ use crate::provider_transport::GatewayProviderTransportSnapshot;
 use crate::AppState;
 
 pub(crate) const CYBER_CONTINUE_FAILOVER_CONFIG_KEY: &str = "cyber_continue_failover";
+pub(crate) const RESPONSES_WEBSOCKET_CONFIG_KEY: &str = "responses_websocket";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LocalFailoverPolicy {
@@ -297,6 +298,63 @@ pub(crate) fn codex_cyber_flag_passthrough_enabled(
         .unwrap_or(true)
 }
 
+/// Selects the protocol adapter responsible for one eligible Responses
+/// WebSocket upstream. Provider-scoped feature switches remain the source of
+/// truth; this enum only identifies provider-specific extensions around the
+/// otherwise standard Responses WebSocket protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResponsesWebSocketAdapter {
+    /// A provider that speaks the standard OpenAI Responses WebSocket protocol.
+    Standard,
+    /// Standard protocol plus Codex account and quota extensions.
+    Codex,
+}
+
+impl ResponsesWebSocketAdapter {
+    pub(crate) fn supports_provider_type(self, provider_type: &str) -> bool {
+        match self {
+            Self::Standard => {
+                !provider_type.trim().is_empty()
+                    && !provider_type.trim().eq_ignore_ascii_case("codex")
+            }
+            Self::Codex => provider_type.trim().eq_ignore_ascii_case("codex"),
+        }
+    }
+}
+
+/// Whether a provider explicitly enables the standard Responses WebSocket
+/// bridge. The setting is provider-scoped so rollout remains opt-in per
+/// verified upstream.
+pub(crate) fn responses_websocket_enabled(provider_config: Option<&Value>) -> bool {
+    provider_config
+        .and_then(|config| config.get(RESPONSES_WEBSOCKET_CONFIG_KEY))
+        .and_then(Value::as_object)
+        .and_then(|responses| responses.get("enabled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Returns the enabled Responses WebSocket adapter for a provider. The shared
+/// protocol bridge remains opt-in, while this resolver isolates provider-only
+/// extensions from candidate planning and the session engine.
+pub(crate) fn responses_websocket_adapter(
+    provider_type: &str,
+    provider_config: Option<&Value>,
+) -> Option<ResponsesWebSocketAdapter> {
+    let provider_type = provider_type.trim();
+    if provider_type.is_empty() {
+        return None;
+    }
+    if !responses_websocket_enabled(provider_config) {
+        return None;
+    }
+    Some(if provider_type.eq_ignore_ascii_case("codex") {
+        ResponsesWebSocketAdapter::Codex
+    } else {
+        ResponsesWebSocketAdapter::Standard
+    })
+}
+
 fn local_failover_regex_rule_to_value(rule: &LocalFailoverRegexRule) -> Value {
     json!({
         "pattern": rule.pattern,
@@ -368,7 +426,9 @@ mod tests {
 
     use super::{
         append_local_failover_policy_to_value, local_failover_policy_from_report_context,
-        local_failover_policy_from_transport, LocalFailoverPolicy, LocalFailoverRegexRule,
+        local_failover_policy_from_transport, responses_websocket_adapter,
+        responses_websocket_enabled, LocalFailoverPolicy, LocalFailoverRegexRule,
+        ResponsesWebSocketAdapter,
     };
     use crate::provider_transport::snapshot::{
         GatewayProviderTransportEndpoint, GatewayProviderTransportKey,
@@ -592,5 +652,42 @@ mod tests {
 
         transport.provider.provider_type = "llm".to_string();
         assert!(local_failover_policy_from_transport(&transport).stop_cyber_policy_errors);
+    }
+
+    #[test]
+    fn responses_websocket_requires_an_explicit_provider_switch() {
+        assert!(!responses_websocket_enabled(None));
+        assert!(!responses_websocket_enabled(Some(&json!({
+            "responses_websocket": {"enabled": false}
+        }))));
+        assert!(responses_websocket_enabled(Some(&json!({
+            "responses_websocket": {"enabled": true}
+        }))));
+
+        assert_eq!(
+            responses_websocket_adapter(
+                "custom",
+                Some(&json!({"responses_websocket": {"enabled": false}})),
+            ),
+            None
+        );
+        assert_eq!(
+            responses_websocket_adapter(
+                "custom",
+                Some(&json!({"responses_websocket": {"enabled": true}})),
+            ),
+            Some(ResponsesWebSocketAdapter::Standard)
+        );
+        assert_eq!(
+            responses_websocket_adapter(
+                "codex",
+                Some(&json!({"responses_websocket": {"enabled": true}})),
+            ),
+            Some(ResponsesWebSocketAdapter::Codex)
+        );
+        assert!(ResponsesWebSocketAdapter::Codex.supports_provider_type("CODEX"));
+        assert!(!ResponsesWebSocketAdapter::Codex.supports_provider_type("openai"));
+        assert!(ResponsesWebSocketAdapter::Standard.supports_provider_type("custom"));
+        assert!(!ResponsesWebSocketAdapter::Standard.supports_provider_type("codex"));
     }
 }

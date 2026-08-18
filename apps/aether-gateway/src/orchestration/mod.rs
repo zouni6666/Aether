@@ -7,6 +7,7 @@ use crate::AppState;
 mod adaptive;
 mod attempt;
 mod classifier;
+mod codex_quota_breaker;
 mod effects;
 mod health;
 mod oauth_error;
@@ -32,11 +33,19 @@ pub(crate) use self::classifier::{
     FailureTokenAction, LocalFailoverClassification, LocalFailoverInput,
     LocalTransportFailoverClassification,
 };
+pub(crate) use self::codex_quota_breaker::{
+    codex_account_id_from_headers, codex_quota_breaker_blocks_candidate,
+    codex_quota_exhaustion_reset_at, install_codex_quota_exhaustion_breaker,
+    log_codex_quota_breaker_check_failure, log_codex_quota_breaker_install_failure,
+};
 pub(crate) use self::effects::{
-    apply_local_execution_effect, spawn_local_oauth_success_effect, LocalAdaptiveRateLimitEffect,
-    LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect, LocalExecutionEffect,
-    LocalExecutionEffectContext, LocalHealthFailureEffect, LocalHealthSuccessEffect,
-    LocalOAuthInvalidationEffect, LocalOAuthSuccessEffect, LocalPoolErrorEffect,
+    apply_local_execution_effect, apply_local_stream_failure_effects,
+    apply_local_stream_success_effects, release_local_pool_key_lease,
+    release_pool_key_lease_from_report_context, spawn_local_oauth_success_effect,
+    LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect,
+    LocalExecutionEffect, LocalExecutionEffectContext, LocalHealthFailureEffect,
+    LocalHealthSuccessEffect, LocalOAuthInvalidationEffect, LocalOAuthSuccessEffect,
+    LocalPoolErrorEffect, LocalStreamFailureEffect,
 };
 pub(crate) use self::health::{
     project_local_failure_health, project_local_key_circuit_closed,
@@ -48,8 +57,9 @@ pub(crate) use self::oauth_error::{
 pub(crate) use self::policy::{
     append_local_failover_policy_to_value, codex_cyber_flag_passthrough_enabled,
     cyber_continue_failover_enabled, local_failover_policy_from_report_context,
-    local_failover_policy_from_transport, resolve_local_failover_policy, LocalFailoverPolicy,
-    LocalFailoverRegexRule, CYBER_CONTINUE_FAILOVER_CONFIG_KEY,
+    local_failover_policy_from_transport, resolve_local_failover_policy,
+    responses_websocket_adapter, LocalFailoverPolicy, LocalFailoverRegexRule,
+    ResponsesWebSocketAdapter, CYBER_CONTINUE_FAILOVER_CONFIG_KEY, RESPONSES_WEBSOCKET_CONFIG_KEY,
 };
 pub(crate) use self::recovery::{
     analyze_local_failover, analyze_local_transport_error, apply_provider_failure_disposition,
@@ -59,7 +69,8 @@ pub(crate) use self::recovery::{
 #[cfg(test)]
 pub(crate) use self::report_effects::clear_local_report_effect_caches_for_tests;
 pub(crate) use self::report_effects::{
-    apply_local_report_effect, store_local_gemini_file_mapping, LocalReportEffect,
+    apply_local_report_effect, store_local_gemini_file_mapping,
+    sync_codex_websocket_quota_metadata, LocalReportEffect,
 };
 
 pub(crate) async fn resolve_local_failover_analysis_for_attempt(

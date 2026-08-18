@@ -342,6 +342,17 @@ describe('UsageRecordsTable', () => {
     expect(root.textContent).toContain('gpt-5')
   })
 
+  it('shows WS in the type column for completed WebSocket usage records', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      is_websocket: true,
+      status: 'completed',
+    })])
+
+    const badges = [...root.querySelectorAll<HTMLElement>('[data-usage-transport="websocket"]')]
+    expect(badges.length).toBeGreaterThan(0)
+    expect(badges.every(badge => badge.textContent?.trim() === 'WS')).toBe(true)
+  })
+
   it('shows reasoning effort next to the model name', () => {
     const root = mountUsageRecordsTable([buildRecord({
       requested_reasoning_effort: 'xhigh',

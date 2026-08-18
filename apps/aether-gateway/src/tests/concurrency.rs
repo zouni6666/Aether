@@ -53,6 +53,83 @@ fn memory_runtime_semaphore(gate: &'static str, limit: usize) -> RuntimeSemaphor
         .expect("memory runtime semaphore should build")
 }
 
+#[test]
+fn gateway_websocket_connections_use_independent_admission() {
+    run_concurrency_test(
+        "gateway_websocket_connections_use_independent_admission",
+        gateway_websocket_connections_use_independent_admission_impl,
+    );
+}
+
+async fn gateway_websocket_connections_use_independent_admission_impl() {
+    let state = AppState::new()
+        .expect("gateway state should build")
+        .with_request_concurrency_limit(1)
+        .with_websocket_connection_limit(1);
+
+    let request_permit = state
+        .try_acquire_request_permit()
+        .await
+        .expect("request admission should succeed")
+        .expect("request gate should return a permit");
+    let websocket_permit = state
+        .try_acquire_websocket_connection_permit()
+        .await
+        .expect("WebSocket admission should be independent from request admission")
+        .expect("WebSocket connection gate should return a permit");
+
+    assert_eq!(
+        state
+            .request_concurrency_snapshot()
+            .expect("request gate should be configured")
+            .in_flight,
+        1
+    );
+    assert_eq!(
+        state
+            .websocket_connection_concurrency_snapshot()
+            .expect("WebSocket connection gate should be configured")
+            .in_flight,
+        1
+    );
+
+    let websocket_error = state
+        .try_acquire_websocket_connection_permit()
+        .await
+        .expect_err("second WebSocket connection should be rejected");
+    assert!(matches!(
+        websocket_error,
+        crate::router::RequestAdmissionError::Local(aether_runtime::ConcurrencyError::Saturated {
+            gate: "gateway_websocket_connections",
+            limit: 1,
+        })
+    ));
+
+    drop(request_permit);
+    let replacement_request_permit = state
+        .try_acquire_request_permit()
+        .await
+        .expect("request admission should remain available independently")
+        .expect("request gate should return a replacement permit");
+    assert_eq!(
+        state
+            .websocket_connection_concurrency_snapshot()
+            .expect("WebSocket connection gate should be configured")
+            .in_flight,
+        1
+    );
+
+    drop(websocket_permit);
+    let replacement_websocket_permit = state
+        .try_acquire_websocket_connection_permit()
+        .await
+        .expect("WebSocket admission should recover after release")
+        .expect("WebSocket connection gate should return a replacement permit");
+
+    drop(replacement_request_permit);
+    drop(replacement_websocket_permit);
+}
+
 fn sample_decision() -> crate::control::GatewayControlDecision {
     crate::control::GatewayControlDecision {
         public_path: "/v1/chat/completions".to_string(),
@@ -316,9 +393,14 @@ async fn gateway_exposes_request_concurrency_metrics_impl() {
     let state = AppState::new()
         .expect("gateway state should build")
         .with_request_concurrency_limit(3)
+        .with_websocket_connection_limit(7)
         .with_distributed_request_concurrency_gate(memory_runtime_semaphore(
             "gateway_requests_distributed",
             5,
+        ))
+        .with_distributed_websocket_connection_gate(memory_runtime_semaphore(
+            "gateway_websocket_connections_distributed",
+            9,
         ));
     assert!(state.prewarm_metric_snapshot().await);
     let gateway = build_router_with_state(state);
@@ -344,6 +426,15 @@ async fn gateway_exposes_request_concurrency_metrics_impl() {
     assert!(body.contains("concurrency_available_permits{gate=\"gateway_requests\"} 3"));
     assert!(body.contains("concurrency_in_flight{gate=\"gateway_requests_distributed\"} 0"));
     assert!(body.contains("concurrency_available_permits{gate=\"gateway_requests_distributed\"} 5"));
+    assert!(body.contains("concurrency_in_flight{gate=\"gateway_websocket_connections\"} 0"));
+    assert!(
+        body.contains("concurrency_available_permits{gate=\"gateway_websocket_connections\"} 7")
+    );
+    assert!(body
+        .contains("concurrency_in_flight{gate=\"gateway_websocket_connections_distributed\"} 0"));
+    assert!(body.contains(
+        "concurrency_available_permits{gate=\"gateway_websocket_connections_distributed\"} 9"
+    ));
     assert!(body.contains("tunnel_proxy_connections 0"));
     assert!(body.contains("tunnel_nodes 0"));
     assert!(body.contains("tunnel_active_streams 0"));

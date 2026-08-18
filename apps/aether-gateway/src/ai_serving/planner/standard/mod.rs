@@ -42,13 +42,15 @@ pub(crate) use self::openai::{
     build_local_openai_responses_sync_attempt_source_for_kind,
     build_local_openai_responses_sync_plan_and_reports_for_kind, copy_request_number_field,
     copy_request_number_field_as, map_openai_reasoning_effort_to_claude_output,
-    map_openai_reasoning_effort_to_gemini_budget, maybe_build_stream_local_decision_payload,
+    map_openai_reasoning_effort_to_gemini_budget, maybe_build_responses_websocket_decision,
+    maybe_build_stream_local_decision_payload,
     maybe_build_stream_local_openai_responses_decision_payload,
     maybe_build_sync_local_decision_payload,
     maybe_build_sync_local_openai_embedding_decision_payload,
     maybe_build_sync_local_openai_responses_decision_payload, parse_openai_stop_sequences,
     resolve_openai_chat_max_tokens, set_local_openai_chat_execution_exhausted_diagnostic,
-    value_as_u64,
+    value_as_u64, ResponsesWebSocketBodyNormalization, ResponsesWebSocketDecision,
+    ResponsesWebSocketPinnedCandidate,
 };
 pub(crate) use crate::ai_serving::normalize_standard_request_to_openai_chat_request;
 pub(crate) use crate::ai_serving::{

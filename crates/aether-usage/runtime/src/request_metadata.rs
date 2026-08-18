@@ -10,7 +10,8 @@ use aether_data_contracts::repository::usage::{
     PROVIDER_ACTUAL_SERVICE_TIER_METADATA_KEY, PROVIDER_CACHE_TTL_MINUTES_METADATA_KEY,
     PROVIDER_REASONING_EFFORT_METADATA_KEY, PROVIDER_SERVICE_TIER_METADATA_KEY,
     REQUESTED_REASONING_EFFORT_METADATA_KEY, ROUTING_CANDIDATE_SKIP_REASON_METADATA_KEY,
-    ROUTING_FAILURE_DIAGNOSTIC_METADATA_KEY,
+    ROUTING_FAILURE_DIAGNOSTIC_METADATA_KEY, WEBSOCKET_MODE_METADATA_KEY,
+    WEBSOCKET_TRANSPORT_METADATA_KEY,
 };
 use serde_json::{json, Map, Value};
 
@@ -348,6 +349,8 @@ fn copy_allowed_metadata_fields(source: &Map<String, Value>, target: &mut Map<St
     copy_bool(source, target, UPSTREAM_IS_STREAM_KEY);
     copy_non_null_value(source, target, "client_session_affinity");
     copy_bool(source, target, "api_key_is_standalone");
+    copy_bool(source, target, WEBSOCKET_MODE_METADATA_KEY);
+    copy_non_empty_string(source, target, WEBSOCKET_TRANSPORT_METADATA_KEY);
     copy_non_empty_string(source, target, "request_path");
     copy_non_empty_string(source, target, "request_query_string");
     copy_non_empty_string(source, target, "request_path_and_query");
@@ -402,6 +405,8 @@ fn move_allowed_metadata_fields(mut source: Map<String, Value>, target: &mut Map
     remove_bool(&mut source, target, UPSTREAM_IS_STREAM_KEY);
     remove_non_null_value(&mut source, target, "client_session_affinity");
     remove_bool(&mut source, target, "api_key_is_standalone");
+    remove_bool(&mut source, target, WEBSOCKET_MODE_METADATA_KEY);
+    remove_non_empty_string(&mut source, target, WEBSOCKET_TRANSPORT_METADATA_KEY);
     remove_non_empty_string(&mut source, target, "request_path");
     remove_non_empty_string(&mut source, target, "request_query_string");
     remove_non_empty_string(&mut source, target, "request_path_and_query");
@@ -903,6 +908,24 @@ mod tests {
                 "request_path_and_query": "/v1/chat/completions",
                 "upstream_is_stream": true,
                 "proxy": {"mode": "manual", "node_id": "proxy-1"}
+            })
+        );
+    }
+
+    #[test]
+    fn sanitizes_websocket_transport_metadata() {
+        let metadata = sanitize_usage_request_metadata(Some(json!({
+            "websocket_mode": true,
+            "websocket_transport": "responses",
+            "untrusted_field": "drop-me",
+        })))
+        .expect("WebSocket metadata should remain");
+
+        assert_eq!(
+            metadata,
+            json!({
+                "websocket_mode": true,
+                "websocket_transport": "responses",
             })
         );
     }

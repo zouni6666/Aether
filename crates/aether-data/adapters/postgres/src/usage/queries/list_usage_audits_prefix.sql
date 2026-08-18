@@ -185,6 +185,7 @@ SELECT
       OR NULLIF(BTRIM("usage".request_metadata->>'provider_actual_service_tier'), '') IS NOT NULL
       OR ("usage".request_metadata->>'client_requested_stream') IN ('true', 'false')
       OR ("usage".request_metadata->>'upstream_is_stream') IN ('true', 'false')
+      OR ("usage".request_metadata->>'websocket_mode') IN ('true', 'false')
       THEN jsonb_strip_nulls(jsonb_build_object(
         'client_ip',
         NULLIF(BTRIM("usage".request_metadata->>'client_ip'), ''),
@@ -212,6 +213,12 @@ SELECT
         CASE
           WHEN ("usage".request_metadata->>'upstream_is_stream') IN ('true', 'false')
             THEN ("usage".request_metadata->>'upstream_is_stream')::boolean
+          ELSE NULL
+        END,
+        'websocket_mode',
+        CASE
+          WHEN ("usage".request_metadata->>'websocket_mode') IN ('true', 'false')
+            THEN ("usage".request_metadata->>'websocket_mode')::boolean
           ELSE NULL
         END
       ))::json

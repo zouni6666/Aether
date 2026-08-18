@@ -4,7 +4,7 @@ use crate::handlers::admin::provider::shared::support::{
 };
 use crate::handlers::admin::shared::unix_secs_to_rfc3339;
 use crate::handlers::public::{request_candidate_event_unix_ms, request_candidate_status_label};
-use crate::orchestration::codex_cyber_flag_passthrough_enabled;
+use crate::orchestration::{codex_cyber_flag_passthrough_enabled, responses_websocket_adapter};
 use crate::provider_key_auth::provider_key_effective_api_formats;
 use aether_data_contracts::repository::candidates::{
     RequestCandidateStatus, StoredRequestCandidate,
@@ -222,6 +222,7 @@ pub(crate) fn build_admin_provider_summary_value(
             &provider.provider_type,
             provider.config.as_ref(),
         ),
+        "responses_websocket_enabled": responses_websocket_adapter(&provider.provider_type, provider.config.as_ref()).is_some(),
         "ops_quota_alert_enabled": ops_quota_alert_enabled,
         "created_at": endpoint_timestamp_or_now(provider.created_at_unix_ms, now_unix_secs),
         "updated_at": endpoint_timestamp_or_now(provider.updated_at_unix_secs, now_unix_secs),

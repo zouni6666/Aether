@@ -278,6 +278,14 @@
                 取消
               </Badge>
               <Badge
+                v-else-if="isUsageWebSocket(record)"
+                variant="outline"
+                data-usage-transport="websocket"
+                class="whitespace-nowrap border-sky-500/50 text-sky-600 dark:text-sky-400 text-[10px] px-1.5 h-4 leading-4 inline-flex items-center flex-shrink-0"
+              >
+                WS
+              </Badge>
+              <Badge
                 v-else-if="getStreamModeSegments(record).hasConversion"
                 :variant="streamBadgeVariant(getStreamModeSegments(record).client === '流式')"
                 :class="(streamBadgeVariant(getStreamModeSegments(record).client === '流式') === 'secondary')
@@ -832,6 +840,14 @@
               已取消
             </Badge>
             <Badge
+              v-else-if="isUsageWebSocket(record)"
+              variant="outline"
+              data-usage-transport="websocket"
+              class="whitespace-nowrap border-sky-500/50 text-sky-600 dark:text-sky-400"
+            >
+              WS
+            </Badge>
+            <Badge
               v-else-if="getStreamModeSegments(record).hasConversion"
               :variant="streamBadgeVariant(getStreamModeSegments(record).client === '流式')"
               :class="(streamBadgeVariant(getStreamModeSegments(record).client === '流式') === 'secondary')
@@ -1022,6 +1038,7 @@ import {
   formatUsageStreamLabel,
   isUsageRecordFailed,
   isUsageUpstreamStream,
+  isUsageWebSocket,
   resolveDisplayRequestStatus,
   resolveUsageStreamLabelSegments
 } from '../utils/status'

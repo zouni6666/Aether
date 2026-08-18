@@ -29,7 +29,8 @@ use tracing::warn;
 use super::{
     classify_failure_disposition, local_failover_error_message, project_local_adaptive_rate_limit,
     project_local_adaptive_success, project_local_failure_health, project_local_key_circuit_closed,
-    project_local_key_circuit_failure, project_local_success_health, FailureScope,
+    project_local_key_circuit_failure, project_local_success_health,
+    resolve_local_failover_analysis_for_attempt, FailureScope, LocalFailoverAnalysis,
     LocalFailoverClassification,
 };
 use crate::ai_serving::extract_pool_sticky_session_token;
@@ -325,6 +326,41 @@ pub(crate) fn spawn_local_oauth_success_effect(
     });
 }
 
+/// Inputs for the terminal effects of a failed streaming attempt.
+///
+/// The status/body are deliberately supplied by the transport-specific caller:
+/// a WebSocket terminal event may carry its own status and error body, while a
+/// normal stream failure gets them from the HTTP response. Keeping this type at
+/// the orchestration boundary prevents each transport from rebuilding the
+/// health, adaptive, OAuth, and pool effect sequence independently.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LocalStreamFailureEffect<'a> {
+    pub(crate) status_code: u16,
+    pub(crate) headers: &'a BTreeMap<String, String>,
+    pub(crate) response_text: Option<&'a str>,
+    pub(crate) stream_timeout: bool,
+}
+
+impl<'a> LocalStreamFailureEffect<'a> {
+    pub(crate) const fn new(
+        status_code: u16,
+        headers: &'a BTreeMap<String, String>,
+        response_text: Option<&'a str>,
+    ) -> Self {
+        Self {
+            status_code,
+            headers,
+            response_text,
+            stream_timeout: false,
+        }
+    }
+
+    pub(crate) const fn with_stream_timeout(mut self) -> Self {
+        self.stream_timeout = true;
+        self
+    }
+}
+
 struct PoolFeedbackContext {
     pool_config: AdminProviderPoolConfig,
     sticky_session_token: Option<String>,
@@ -377,36 +413,157 @@ pub(crate) async fn apply_local_execution_effect(
         }
         LocalExecutionEffect::PoolSuccessSync { payload } => {
             record_sync_pool_success_effect(state, context, payload).await;
-            release_pool_key_lease_effect(state, context).await;
+            release_local_pool_key_lease(state, context).await;
         }
         LocalExecutionEffect::PoolSuccessStream { payload } => {
             record_stream_pool_success_effect(state, context, payload).await;
-            release_pool_key_lease_effect(state, context).await;
+            release_local_pool_key_lease(state, context).await;
         }
         LocalExecutionEffect::PoolError(effect) => {
             record_pool_error_effect(state, context, effect).await;
-            release_pool_key_lease_effect(state, context).await;
+            release_local_pool_key_lease(state, context).await;
         }
         LocalExecutionEffect::PoolStreamTimeout => {
             record_pool_stream_timeout_effect(state, context).await;
-            release_pool_key_lease_effect(state, context).await;
+            release_local_pool_key_lease(state, context).await;
         }
     }
 }
 
-async fn release_pool_key_lease_effect(state: &AppState, context: LocalExecutionEffectContext<'_>) {
+/// Apply the provider/key effects shared by every successful streaming
+/// transport. Usage persistence and request-candidate terminal status remain
+/// owned by the report layer; this helper only projects execution health,
+/// adaptive state, and pool feedback.
+pub(crate) async fn apply_local_stream_success_effects(
+    state: &AppState,
+    context: LocalExecutionEffectContext<'_>,
+    payload: &GatewayStreamReportRequest,
+) {
+    apply_local_execution_effect(
+        state,
+        context,
+        LocalExecutionEffect::HealthSuccess(LocalHealthSuccessEffect),
+    )
+    .await;
+    apply_local_execution_effect(
+        state,
+        context,
+        LocalExecutionEffect::AdaptiveSuccess(LocalAdaptiveSuccessEffect),
+    )
+    .await;
+    apply_local_execution_effect(
+        state,
+        context,
+        LocalExecutionEffect::PoolSuccessStream { payload },
+    )
+    .await;
+}
+
+/// Apply the provider/key effects shared by every failed streaming attempt.
+/// The returned analysis is the same failover classification used by the
+/// normal stream runtime, allowing the caller to make a transport-specific
+/// retry/close decision without re-running policy evaluation.
+pub(crate) async fn apply_local_stream_failure_effects(
+    state: &AppState,
+    context: LocalExecutionEffectContext<'_>,
+    effect: LocalStreamFailureEffect<'_>,
+) -> LocalFailoverAnalysis {
+    let analysis = resolve_local_failover_analysis_for_attempt(
+        state,
+        context.plan,
+        context.report_context,
+        effect.status_code,
+        effect.response_text,
+    )
+    .await;
+
+    if effect.stream_timeout {
+        apply_local_execution_effect(state, context, LocalExecutionEffect::PoolStreamTimeout).await;
+    }
+    apply_local_execution_effect(
+        state,
+        context,
+        LocalExecutionEffect::AttemptFailure(LocalAttemptFailureEffect {
+            status_code: effect.status_code,
+            classification: analysis.classification,
+        }),
+    )
+    .await;
+    apply_local_execution_effect(
+        state,
+        context,
+        LocalExecutionEffect::AdaptiveRateLimit(LocalAdaptiveRateLimitEffect {
+            status_code: effect.status_code,
+            classification: analysis.classification,
+            headers: Some(effect.headers),
+        }),
+    )
+    .await;
+    apply_local_execution_effect(
+        state,
+        context,
+        LocalExecutionEffect::HealthFailure(LocalHealthFailureEffect {
+            status_code: effect.status_code,
+            classification: analysis.classification,
+        }),
+    )
+    .await;
+    apply_local_execution_effect(
+        state,
+        context,
+        LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
+            status_code: effect.status_code,
+            response_text: effect.response_text,
+        }),
+    )
+    .await;
+    apply_local_execution_effect(
+        state,
+        context,
+        LocalExecutionEffect::PoolError(LocalPoolErrorEffect {
+            status_code: effect.status_code,
+            classification: analysis.classification,
+            headers: effect.headers,
+            error_body: effect.response_text,
+        }),
+    )
+    .await;
+
+    analysis
+}
+
+pub(crate) async fn release_local_pool_key_lease(
+    state: &AppState,
+    context: LocalExecutionEffectContext<'_>,
+) {
     let metadata = local_execution_candidate_metadata_from_report_context(context.report_context);
     let Some(lease) = metadata.pool_key_lease else {
         return;
     };
+    release_pool_key_lease(state, &lease).await;
+}
+
+/// Releases a lease carried by a planned-but-not-started report context. This
+/// path has no execution plan yet, so it intentionally omits candidate health
+/// logging and only performs the distributed lock cleanup.
+pub(crate) async fn release_pool_key_lease_from_report_context(
+    state: &AppState,
+    report_context: Option<&Value>,
+) {
+    let metadata = local_execution_candidate_metadata_from_report_context(report_context);
+    let Some(lease) = metadata.pool_key_lease else {
+        return;
+    };
+    release_pool_key_lease(state, &lease).await;
+}
+
+async fn release_pool_key_lease(state: &AppState, lease: &aether_runtime_state::RuntimeLockLease) {
     if let Err(err) =
-        release_admin_provider_pool_key_lease(state.runtime_state.as_ref(), &lease).await
+        release_admin_provider_pool_key_lease(state.runtime_state.as_ref(), lease).await
     {
         warn!(
             error = ?err,
-            provider_id = %context.plan.provider_id,
-            key_id = %context.plan.key_id,
-            "gateway orchestration effects: failed to release pool key lease"
+            "gateway orchestration effects: failed to release a planned pool key lease"
         );
     }
 }
@@ -1967,20 +2124,22 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::{
-        apply_local_execution_effect, execution_plan_bearer_matches_transport,
+        apply_local_execution_effect, apply_local_stream_failure_effects,
+        apply_local_stream_success_effects, execution_plan_bearer_matches_transport,
         local_candidate_failure_should_apply_key_effects,
         local_candidate_failure_should_record_pool_error, pool_score_feedback_gate_allows,
         pool_score_hard_state_for_status, resolve_pool_feedback_context,
         LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect,
         LocalExecutionEffect, LocalExecutionEffectContext, LocalHealthFailureEffect,
         LocalHealthSuccessEffect, LocalOAuthInvalidationEffect, LocalOAuthSuccessEffect,
-        LocalPoolErrorEffect, ProviderKeyEffectLockPool,
+        LocalPoolErrorEffect, LocalStreamFailureEffect, ProviderKeyEffectLockPool,
     };
     use crate::data::{GatewayDataConfig, GatewayDataState};
     use crate::orchestration::{
         apply_local_report_effect, LocalFailoverClassification, LocalReportEffect,
     };
     use crate::scheduler::affinity::SCHEDULER_AFFINITY_TTL;
+    use crate::usage::GatewayStreamReportRequest;
     use crate::AppState;
     use aether_scheduler_core::{
         build_scheduler_affinity_cache_key_for_api_key_id,
@@ -2029,6 +2188,22 @@ mod tests {
         plan.provider_name = Some("anthropic".to_string());
         plan.provider_api_format = "claude:messages".to_string();
         plan
+    }
+
+    fn sample_stream_report() -> GatewayStreamReportRequest {
+        GatewayStreamReportRequest {
+            trace_id: "trace-stream-effects".to_string(),
+            report_kind: "openai_chat_stream_success".to_string(),
+            report_context: None,
+            status_code: 200,
+            headers: BTreeMap::new(),
+            provider_body_base64: None,
+            provider_body_state: None,
+            client_body_base64: None,
+            client_body_state: None,
+            terminal_summary: None,
+            telemetry: None,
+        }
     }
 
     #[test]
@@ -2826,6 +3001,79 @@ mod tests {
         assert!(state
             .read_scheduler_affinity_target(cache_key.as_str(), SCHEDULER_AFFINITY_TTL)
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn stream_success_effect_helper_projects_health_and_scheduler_affinity() {
+        let state = AppState::new().expect("gateway state should build");
+        let plan = sample_plan();
+        let report_context = json!({
+            "api_key_id": "api-key-1",
+            "client_api_format": "openai:chat",
+            "model": "gpt-5",
+        });
+        let cache_key =
+            build_scheduler_affinity_cache_key_for_api_key_id("api-key-1", "openai:chat", "gpt-5")
+                .expect("scheduler affinity cache key should build");
+        let payload = sample_stream_report();
+
+        apply_local_stream_success_effects(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: Some(&report_context),
+            },
+            &payload,
+        )
+        .await;
+
+        assert_eq!(
+            state.read_scheduler_affinity_target(cache_key.as_str(), SCHEDULER_AFFINITY_TTL),
+            Some(SchedulerAffinityTarget {
+                provider_id: "prov-1".to_string(),
+                endpoint_id: "ep-1".to_string(),
+                key_id: "key-1".to_string(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_failure_effect_helper_returns_analysis_and_projects_health() {
+        let state = health_state();
+        let plan = sample_plan();
+        let headers = BTreeMap::new();
+        let analysis = apply_local_stream_failure_effects(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: None,
+            },
+            LocalStreamFailureEffect::new(503, &headers, Some("upstream unavailable"))
+                .with_stream_timeout(),
+        )
+        .await;
+
+        assert_eq!(
+            analysis.classification,
+            LocalFailoverClassification::UseDefault
+        );
+        assert_eq!(analysis.decision.as_str(), "use_default");
+        let stored_key = state
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
+            .await
+            .expect("provider catalog keys should load")
+            .into_iter()
+            .next()
+            .expect("stored key should exist");
+        assert_eq!(
+            stored_key
+                .health_by_format
+                .as_ref()
+                .and_then(|value| value.get("openai:chat"))
+                .and_then(|value| value.get("consecutive_failures"))
+                .and_then(Value::as_u64),
+            Some(1)
+        );
     }
 
     #[tokio::test]

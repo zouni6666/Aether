@@ -35,7 +35,10 @@ pub(super) fn classify_ai_public_route(
             "openai:rerank",
             true,
         ))
-    } else if method == http::Method::POST
+    } else if (method == http::Method::POST
+        || (method == http::Method::GET
+            && normalized_path == "/v1/responses"
+            && is_websocket_upgrade_request(headers)))
         && matches!(normalized_path, "/v1/responses" | "/v1/responses/compact")
     {
         if normalized_path.ends_with("/compact") {
@@ -199,6 +202,24 @@ fn claude_request_auth_channel(headers: &http::HeaderMap) -> &'static str {
     }
 }
 
+fn is_websocket_upgrade_request(headers: &http::HeaderMap) -> bool {
+    let has_upgrade_connection = headers
+        .get(http::header::CONNECTION)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .any(|value| value.eq_ignore_ascii_case("upgrade"))
+        });
+    let has_websocket_upgrade = headers
+        .get(http::header::UPGRADE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("websocket"));
+
+    has_upgrade_connection && has_websocket_upgrade
+}
+
 fn is_gemini_operation_method(method: &http::Method, normalized_path: &str) -> bool {
     method == http::Method::GET
         || (method == http::Method::POST && normalized_path.ends_with(":cancel"))
@@ -241,4 +262,33 @@ fn classify_antigravity_v1internal_route(
         "antigravity:v1internal",
         execution_runtime_candidate,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::header::{CONNECTION, UPGRADE};
+    use axum::http::{HeaderMap, HeaderValue, Method};
+
+    use super::classify_ai_public_route;
+
+    #[test]
+    fn classifies_websocket_upgrade_on_responses_route() {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONNECTION, HeaderValue::from_static("keep-alive, Upgrade"));
+        headers.insert(UPGRADE, HeaderValue::from_static("websocket"));
+
+        let route = classify_ai_public_route(&Method::GET, "/v1/responses", &headers)
+            .expect("Responses WebSocket should be an AI public route");
+        assert_eq!(route.route_class, "ai_public");
+        assert_eq!(route.route_family, "openai");
+        assert_eq!(route.route_kind, "responses");
+        assert_eq!(route.auth_endpoint_signature, "openai:responses");
+    }
+
+    #[test]
+    fn does_not_classify_plain_get_as_responses_websocket() {
+        assert!(
+            classify_ai_public_route(&Method::GET, "/v1/responses", &HeaderMap::new()).is_none()
+        );
+    }
 }

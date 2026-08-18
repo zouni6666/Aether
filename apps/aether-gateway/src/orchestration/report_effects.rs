@@ -16,12 +16,16 @@ use serde_json::{json, Value};
 use tracing::warn;
 use uuid::Uuid;
 
+use super::codex_quota_breaker::{
+    install_codex_quota_exhaustion_breaker, log_codex_quota_breaker_install_failure,
+};
 use crate::clock::current_unix_secs;
 use crate::handlers::shared::sync_provider_key_quota_status_snapshot;
 use crate::log_ids::short_request_id;
 use crate::{AppState, GatewayError};
 
 const RUNTIME_METADATA_CAS_MAX_ATTEMPTS: usize = 16;
+const CODEX_WEBSOCKET_RATE_LIMITS_REPORT_CONTEXT_FIELD: &str = "codex_websocket_rate_limits";
 static GROK_CHINESE_WAIT_DURATION_RE: OnceLock<Regex> = OnceLock::new();
 static GROK_ENGLISH_WAIT_DURATION_RE: OnceLock<Regex> = OnceLock::new();
 
@@ -95,6 +99,12 @@ fn report_context_provider_response_headers(
     (!out.is_empty()).then_some(out)
 }
 
+fn codex_websocket_quota_from_report_context(report_context: Option<&Value>) -> Option<Value> {
+    report_context
+        .and_then(|context| context.get(CODEX_WEBSOCKET_RATE_LIMITS_REPORT_CONTEXT_FIELD))
+        .filter(|value| value.as_object().is_some_and(|object| !object.is_empty()))
+        .cloned()
+}
 fn merge_metadata_object(
     current: Option<&Value>,
     section_key: &str,
@@ -252,6 +262,35 @@ fn gemini_cli_credits_from_stream_payload(
             )
         {
             latest = Some(credits);
+        }
+    }
+    latest
+}
+
+fn codex_websocket_quota_from_stream_payload(
+    payload: &GatewayStreamReportRequest,
+    now_unix_secs: u64,
+) -> Option<Value> {
+    let body_base64 = payload.provider_body_base64.as_deref()?;
+    let body = base64::engine::general_purpose::STANDARD
+        .decode(body_base64)
+        .ok()?;
+    let text = std::str::from_utf8(&body).ok()?;
+    let mut latest = None::<Value>;
+    for raw_line in text.lines() {
+        let line = raw_line.trim_matches('\r').trim();
+        let data = line.strip_prefix("data:").map(str::trim).unwrap_or(line);
+        if data.is_empty() || data == "[DONE]" || data.starts_with(':') {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        if let Some(quota) = admin_provider_quota_pure::parse_codex_websocket_rate_limits_response(
+            &value,
+            now_unix_secs,
+        ) {
+            latest = Some(quota);
         }
     }
     latest
@@ -572,7 +611,24 @@ async fn apply_local_sync_report_effect(state: &AppState, payload: &GatewaySyncR
 }
 
 async fn apply_local_stream_report_effect(state: &AppState, payload: &GatewayStreamReportRequest) {
-    if (200..300).contains(&payload.status_code) {
+    let websocket_quota_seen = match sync_codex_websocket_quota_from_stream_payload(state, payload)
+        .await
+    {
+        Ok(Some(_)) => true,
+        Ok(None) => false,
+        Err(err) => {
+            warn!(
+                event_name = "codex_realtime_quota_sync_failed",
+                log_type = "ops",
+                report_kind = %payload.report_kind,
+                report_request_id = %short_request_id(report_request_id(payload.report_context.as_ref())),
+                error = ?err,
+                "gateway failed to persist Codex realtime quota from WebSocket response body"
+            );
+            false
+        }
+    };
+    if !websocket_quota_seen && (200..300).contains(&payload.status_code) {
         if let Err(err) = sync_codex_quota_from_response_headers(
             state,
             payload.report_context.as_ref(),
@@ -762,11 +818,6 @@ async fn sync_codex_quota_from_response_headers(
     report_context: Option<&Value>,
     headers: &BTreeMap<String, String>,
 ) -> Result<bool, GatewayError> {
-    let key_id = match report_context_key_id(report_context) {
-        Some(value) => value,
-        None => return Ok(false),
-    };
-
     let now_unix_secs = current_unix_secs();
     let observed_at_unix_secs = report_context_u64(
         report_context,
@@ -790,6 +841,97 @@ async fn sync_codex_quota_from_response_headers(
         admin_provider_quota_pure::parse_codex_usage_headers(headers, observed_at_unix_secs)
     }) else {
         return Ok(false);
+    };
+    sync_codex_quota_metadata_with_observation(
+        state,
+        report_context,
+        parsed,
+        "response_headers",
+        observed_at_unix_secs,
+        request_started_at_unix_ms,
+        request_order_id,
+        observed_reset_generation,
+        observed_credential_generation,
+    )
+    .await
+}
+
+async fn sync_codex_websocket_quota_from_stream_payload(
+    state: &AppState,
+    payload: &GatewayStreamReportRequest,
+) -> Result<Option<bool>, GatewayError> {
+    let now_unix_secs = current_unix_secs();
+    let parsed = codex_websocket_quota_from_report_context(payload.report_context.as_ref())
+        .or_else(|| codex_websocket_quota_from_stream_payload(payload, now_unix_secs));
+    let Some(parsed) = parsed else {
+        return Ok(None);
+    };
+    Ok(Some(
+        sync_codex_quota_metadata(
+            state,
+            payload.report_context.as_ref(),
+            parsed,
+            "websocket_response_body",
+        )
+        .await?,
+    ))
+}
+
+async fn sync_codex_quota_metadata(
+    state: &AppState,
+    report_context: Option<&Value>,
+    parsed: Value,
+    source: &'static str,
+) -> Result<bool, GatewayError> {
+    let observed_at_unix_secs = parsed
+        .get("updated_at")
+        .and_then(admin_provider_quota_pure::coerce_json_u64)
+        .filter(|value| *value > 0)
+        .unwrap_or_else(current_unix_secs);
+    let request_started_at_unix_ms =
+        report_context_u64(report_context, "provider_request_started_at_unix_ms");
+    let request_order_id = report_context_string(report_context, "provider_request_order_id");
+    let observed_reset_generation =
+        report_context_u64(report_context, "codex_quota_reset_generation");
+    let observed_credential_generation =
+        report_context_string(report_context, "codex_credential_generation");
+    sync_codex_quota_metadata_with_observation(
+        state,
+        report_context,
+        parsed,
+        source,
+        observed_at_unix_secs,
+        request_started_at_unix_ms,
+        request_order_id,
+        observed_reset_generation,
+        observed_credential_generation,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn sync_codex_quota_metadata_with_observation(
+    state: &AppState,
+    report_context: Option<&Value>,
+    parsed: Value,
+    source: &'static str,
+    observed_at_unix_secs: u64,
+    request_started_at_unix_ms: Option<u64>,
+    request_order_id: Option<&str>,
+    observed_reset_generation: Option<u64>,
+    observed_credential_generation: Option<&str>,
+) -> Result<bool, GatewayError> {
+    if admin_provider_quota_pure::codex_rate_limit_metadata_exhausted(&parsed) {
+        if let Err(error) =
+            install_codex_quota_exhaustion_breaker(state, report_context, &parsed, source).await
+        {
+            log_codex_quota_breaker_install_failure(&error);
+        }
+    }
+
+    let key_id = match report_context_key_id(report_context) {
+        Some(value) => value,
+        None => return Ok(false),
     };
     // Runtime headers can be partial (for example only the primary window),
     // so absence never authoritatively removes another stored window.
@@ -845,7 +987,7 @@ async fn sync_codex_quota_from_response_headers(
             key.status_snapshot.as_ref(),
             provider.provider_type.as_str(),
             updated_upstream_metadata.as_ref(),
-            "response_headers",
+            source,
         );
         let updated = state
             .update_provider_catalog_key_runtime_metadata(
@@ -870,6 +1012,14 @@ async fn sync_codex_quota_from_response_headers(
         }
     }
     Ok(false)
+}
+
+pub(crate) async fn sync_codex_websocket_quota_metadata(
+    state: &AppState,
+    report_context: Option<&Value>,
+    parsed: Value,
+) -> Result<bool, GatewayError> {
+    sync_codex_quota_metadata(state, report_context, parsed, "websocket_response_body").await
 }
 
 #[cfg(test)]

@@ -1,0 +1,560 @@
+//! Identity of the physical upstream connection backing a Responses session.
+//!
+//! A Responses continuation carries state that lives on one provider socket.
+//! Comparing only the selected key is therefore not sufficient: transport
+//! settings, stable account headers, credentials, and the protocol adapter can
+//! all change the connection that would receive the next event. Ordinary Codex
+//! OAuth access-token refreshes retain the credential generation and therefore
+//! do not unnecessarily replace an already-upgraded socket.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+
+use aether_contracts::{ProxySnapshot, ResolvedTransportProfile};
+use sha2::{Digest, Sha256};
+
+use super::adapter::ResponsesWebSocketProtocolAdapter;
+use crate::ai_serving::AiExecutionDecision;
+use crate::handlers::proxy::websocket::transport::{
+    websocket_handshake_headers, websocket_upstream_url,
+};
+use crate::orchestration::ResponsesWebSocketAdapter;
+
+/// Stable, comparable identity for the actual WebSocket connection target.
+///
+/// The identity deliberately owns the normalized handshake values rather than
+/// retaining a reference to the planner decision.  A later re-plan can then
+/// be compared without accidentally ignoring a field that changes the
+/// physical connection.
+#[derive(Clone, PartialEq)]
+pub(super) struct UpstreamBindingIdentity {
+    adapter_kind: ResponsesWebSocketAdapter,
+    provider_id: Option<String>,
+    endpoint_id: Option<String>,
+    key_id: Option<String>,
+    upstream_url: String,
+    handshake_headers: BTreeMap<String, String>,
+    /// One-way identity for the credential generation used by this socket.
+    ///
+    /// A provider key id identifies a catalog row, not the secret currently
+    /// stored in that row. Codex decisions carry a server-owned credential
+    /// generation which is stable across access-token refreshes but rotates
+    /// when the account/static/refresh credential is replaced. Other
+    /// decisions conservatively fingerprint the effective authentication
+    /// handshake values.
+    credential_fingerprint: [u8; 32],
+    proxy: Option<ProxySnapshot>,
+    transport_profile: Option<ResolvedTransportProfile>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum UpstreamBindingIdentityError {
+    MissingUpstreamUrl,
+    InvalidUpstreamUrl,
+    InvalidHandshakeHeaders,
+}
+
+impl UpstreamBindingIdentity {
+    /// Builds an identity from the same normalized URL and headers used by
+    /// the WebSocket transport client.
+    pub(super) fn from_decision(
+        adapter: &'static dyn ResponsesWebSocketProtocolAdapter,
+        decision: &AiExecutionDecision,
+    ) -> Result<Self, UpstreamBindingIdentityError> {
+        let raw_url = decision
+            .upstream_url
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or(UpstreamBindingIdentityError::MissingUpstreamUrl)?;
+        let upstream_url = websocket_upstream_url(raw_url, "invalid")
+            .map_err(|_| UpstreamBindingIdentityError::InvalidUpstreamUrl)?
+            .to_string();
+
+        let headers = websocket_handshake_headers(&decision.provider_request_headers, "invalid")
+            .map_err(|_| UpstreamBindingIdentityError::InvalidHandshakeHeaders)?;
+        let authentication_header_names = authentication_header_names(decision);
+        let mut handshake_headers = BTreeMap::new();
+        let mut authentication_headers = BTreeMap::new();
+        for (name, value) in &headers {
+            let name = name.as_str().to_ascii_lowercase();
+            let value = value
+                .to_str()
+                .map_err(|_| UpstreamBindingIdentityError::InvalidHandshakeHeaders)?;
+            if authentication_header_names.contains(name.as_str()) {
+                authentication_headers.insert(name, value.to_string());
+            } else {
+                handshake_headers.insert(name, value.to_string());
+            }
+        }
+        let credential_fingerprint =
+            credential_binding_fingerprint(decision, &authentication_headers);
+
+        Ok(Self {
+            adapter_kind: adapter.kind(),
+            provider_id: decision.provider_id.clone(),
+            endpoint_id: decision.endpoint_id.clone(),
+            key_id: decision.key_id.clone(),
+            upstream_url,
+            handshake_headers,
+            credential_fingerprint,
+            proxy: effective_proxy_snapshot(decision.proxy.as_ref()),
+            transport_profile: decision.transport_profile.clone(),
+        })
+    }
+}
+
+/// Header names that carry credentials in the provider handshake.  The
+/// planner's explicit `auth_header` extends this list for provider-specific
+/// schemes; unknown headers remain part of the stable handshake identity.
+fn authentication_header_names(decision: &AiExecutionDecision) -> BTreeSet<String> {
+    let mut names = BTreeSet::from([
+        "authorization".to_string(),
+        "proxy-authorization".to_string(),
+        "x-api-key".to_string(),
+        "api-key".to_string(),
+        "x-goog-api-key".to_string(),
+        "x-azure-api-key".to_string(),
+    ]);
+    if let Some(name) = decision
+        .auth_header
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        names.insert(name.to_ascii_lowercase());
+    }
+    names
+}
+
+fn fingerprint_headers(headers: &BTreeMap<String, String>) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"aether-responses-websocket-auth-headers-v1");
+    for (name, value) in headers {
+        hasher.update((name.len() as u64).to_be_bytes());
+        hasher.update(name.as_bytes());
+        hasher.update((value.len() as u64).to_be_bytes());
+        hasher.update(value.as_bytes());
+    }
+    hasher.finalize().into()
+}
+
+/// Returns the non-secret credential identity represented by a planner
+/// decision. The generation is emitted by Aether's trusted Codex planner from
+/// provider-key metadata; it is not sourced from the downstream request.
+fn credential_binding_fingerprint(
+    decision: &AiExecutionDecision,
+    authentication_headers: &BTreeMap<String, String>,
+) -> [u8; 32] {
+    if decision
+        .provider_type
+        .as_deref()
+        .is_some_and(|provider_type| provider_type.trim().eq_ignore_ascii_case("codex"))
+    {
+        if let Some(generation) = decision
+            .report_context
+            .as_ref()
+            .and_then(|context| context.get("codex_credential_generation"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|generation| !generation.is_empty())
+        {
+            let mut hasher = Sha256::new();
+            hasher.update(b"aether-responses-websocket-codex-credential-generation-v1");
+            hasher.update((generation.len() as u64).to_be_bytes());
+            hasher.update(generation.as_bytes());
+            // Only a planner-owned Codex bearer access token is expected to
+            // rotate without changing credential generation. Compare the
+            // effective handshake value with the decision's original auth
+            // value: auth-config/routing/header overrides change only the
+            // former and therefore must force a rebind.
+            let stable_authentication_headers = authentication_headers
+                .iter()
+                .filter(|(name, value)| {
+                    !is_planner_owned_codex_bearer(decision, name.as_str(), value.as_str())
+                })
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect::<BTreeMap<_, _>>();
+            hasher.update(fingerprint_headers(&stable_authentication_headers));
+            return hasher.finalize().into();
+        }
+    }
+
+    // Fail closed when no trusted generation is available. Rebinding after an
+    // access-token change is preferable to sending a continuation over a
+    // socket authenticated with a credential that may have been replaced.
+    fingerprint_headers(authentication_headers)
+}
+
+fn is_planner_owned_codex_bearer(
+    decision: &AiExecutionDecision,
+    name: &str,
+    effective_value: &str,
+) -> bool {
+    name.eq_ignore_ascii_case("authorization")
+        && decision
+            .auth_header
+            .as_deref()
+            .is_some_and(|header| header.eq_ignore_ascii_case(name))
+        && decision.auth_value.as_deref() == Some(effective_value)
+        && effective_value
+            .get(.."bearer ".len())
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("bearer "))
+}
+
+/// Normalize only values that are provably direct transport.  Keep node/tunnel
+/// fields even though the current WebSocket builder rejects those proxies: a
+/// re-plan must not accidentally reuse an already-bound direct socket for a
+/// decision that selected a different proxy topology.
+fn effective_proxy_snapshot(proxy: Option<&ProxySnapshot>) -> Option<ProxySnapshot> {
+    let proxy = proxy?;
+    if proxy.enabled == Some(false) {
+        return None;
+    }
+    let mut normalized = proxy.clone();
+    normalized.url = normalized
+        .url
+        .take()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    normalized.mode = normalized
+        .mode
+        .take()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty());
+    normalized.node_id = normalized
+        .node_id
+        .take()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    normalized.label = normalized
+        .label
+        .take()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let has_effective_proxy = normalized.url.is_some()
+        || normalized.node_id.is_some()
+        || normalized.mode.is_some()
+        || normalized.extra.is_some();
+    has_effective_proxy.then_some(normalized)
+}
+
+impl fmt::Debug for UpstreamBindingIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UpstreamBindingIdentity")
+            .field("adapter_kind", &self.adapter_kind)
+            .field("provider_id", &self.provider_id)
+            .field("endpoint_id", &self.endpoint_id)
+            .field("key_id", &self.key_id)
+            .field("upstream_url", &self.upstream_url)
+            .field(
+                "handshake_header_names",
+                &self.handshake_headers.keys().collect::<Vec<_>>(),
+            )
+            .field("proxy_configured", &self.proxy.is_some())
+            .field(
+                "transport_profile_id",
+                &self
+                    .transport_profile
+                    .as_ref()
+                    .map(|profile| profile.profile_id.as_str()),
+            )
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use serde_json::json;
+
+    use super::{UpstreamBindingIdentity, UpstreamBindingIdentityError};
+    use crate::ai_serving::AiExecutionDecision;
+    use crate::handlers::proxy::websocket::responses::adapter::resolve_responses_websocket_adapter;
+    use crate::orchestration::ResponsesWebSocketAdapter;
+
+    fn decision() -> AiExecutionDecision {
+        AiExecutionDecision {
+            action: "execute".to_string(),
+            decision_kind: None,
+            execution_strategy: None,
+            conversion_mode: None,
+            request_id: Some("request-1".to_string()),
+            candidate_id: Some("candidate-1".to_string()),
+            provider_name: Some("provider".to_string()),
+            provider_type: Some("openai".to_string()),
+            provider_id: Some("provider-1".to_string()),
+            endpoint_id: Some("endpoint-1".to_string()),
+            key_id: Some("key-1".to_string()),
+            upstream_base_url: Some("https://api.example.test".to_string()),
+            upstream_url: Some("https://api.example.test/v1/responses".to_string()),
+            provider_request_method: Some("POST".to_string()),
+            auth_header: Some("authorization".to_string()),
+            auth_value: Some("Bearer secret".to_string()),
+            provider_api_format: Some("openai:responses".to_string()),
+            client_api_format: Some("openai:responses".to_string()),
+            provider_contract: None,
+            client_contract: None,
+            model_name: Some("gpt-5.6-sol".to_string()),
+            mapped_model: None,
+            prompt_cache_key: None,
+            extra_headers: BTreeMap::new(),
+            provider_request_headers: BTreeMap::from([
+                ("Authorization".to_string(), "Bearer secret".to_string()),
+                ("X-Client".to_string(), "aether".to_string()),
+                ("Connection".to_string(), "keep-alive".to_string()),
+            ]),
+            provider_request_body: Some(json!({"model": "gpt-5.6-sol"})),
+            provider_request_body_base64: None,
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            request_gzip: None,
+            proxy: None,
+            transport_profile: None,
+            timeouts: None,
+            upstream_is_stream: true,
+            report_kind: None,
+            report_context: None,
+            auth_context: None,
+        }
+    }
+
+    #[test]
+    fn identity_normalizes_url_and_hop_by_hop_headers() {
+        let adapter = resolve_responses_websocket_adapter(ResponsesWebSocketAdapter::Standard);
+        let identity = UpstreamBindingIdentity::from_decision(adapter, &decision()).unwrap();
+
+        assert_eq!(identity.upstream_url, "wss://api.example.test/v1/responses");
+        assert_eq!(
+            identity.handshake_headers,
+            BTreeMap::from([("x-client".to_string(), "aether".to_string())])
+        );
+    }
+
+    #[test]
+    fn identity_changes_when_physical_binding_changes() {
+        let adapter = resolve_responses_websocket_adapter(ResponsesWebSocketAdapter::Standard);
+        let base = decision();
+        let identity = UpstreamBindingIdentity::from_decision(adapter, &base).unwrap();
+
+        let codex_adapter = resolve_responses_websocket_adapter(ResponsesWebSocketAdapter::Codex);
+        assert_ne!(
+            identity,
+            UpstreamBindingIdentity::from_decision(codex_adapter, &base).unwrap()
+        );
+
+        for mutate in [
+            |decision: &mut AiExecutionDecision| {
+                decision.key_id = Some("key-2".to_string());
+            },
+            |decision: &mut AiExecutionDecision| {
+                decision.upstream_url = Some("https://other.example.test/v1/responses".to_string());
+            },
+            |decision: &mut AiExecutionDecision| {
+                decision
+                    .provider_request_headers
+                    .insert("X-Client".to_string(), "other".to_string());
+            },
+            |decision: &mut AiExecutionDecision| {
+                decision.proxy = Some(aether_contracts::ProxySnapshot {
+                    enabled: Some(true),
+                    url: Some("http://proxy.example.test:8080".to_string()),
+                    ..Default::default()
+                });
+            },
+            |decision: &mut AiExecutionDecision| {
+                decision.transport_profile = Some(aether_contracts::ResolvedTransportProfile {
+                    profile_id: "chrome136".to_string(),
+                    ..Default::default()
+                });
+            },
+        ] {
+            let mut changed = base.clone();
+            mutate(&mut changed);
+            let changed_identity =
+                UpstreamBindingIdentity::from_decision(adapter, &changed).unwrap();
+            assert_ne!(identity, changed_identity);
+        }
+
+        let mut static_secret_rotated = base.clone();
+        static_secret_rotated
+            .provider_request_headers
+            .insert("Authorization".to_string(), "Bearer rotated".to_string());
+        assert_ne!(
+            identity,
+            UpstreamBindingIdentity::from_decision(adapter, &static_secret_rotated).unwrap()
+        );
+    }
+
+    #[test]
+    fn stable_key_identity_rejects_custom_static_auth_value_rotation() {
+        let adapter = resolve_responses_websocket_adapter(ResponsesWebSocketAdapter::Standard);
+        let mut base = decision();
+        base.auth_header = Some("X-Provider-Token".to_string());
+        base.provider_request_headers.remove("Authorization");
+        base.provider_request_headers.insert(
+            "X-Provider-Token".to_string(),
+            "provider-token-1".to_string(),
+        );
+        let identity = UpstreamBindingIdentity::from_decision(adapter, &base).unwrap();
+        assert!(!identity.handshake_headers.contains_key("x-provider-token"));
+
+        let mut rotated = base;
+        rotated.provider_request_headers.insert(
+            "X-Provider-Token".to_string(),
+            "provider-token-2".to_string(),
+        );
+        assert_ne!(
+            identity,
+            UpstreamBindingIdentity::from_decision(adapter, &rotated).unwrap()
+        );
+    }
+
+    #[test]
+    fn codex_access_token_refresh_reuses_the_same_credential_generation() {
+        let adapter = resolve_responses_websocket_adapter(ResponsesWebSocketAdapter::Codex);
+        let mut first = decision();
+        first.provider_type = Some("codex".to_string());
+        first.report_context = Some(json!({
+            "codex_credential_generation": "credential-generation-1"
+        }));
+        let first_identity = UpstreamBindingIdentity::from_decision(adapter, &first).unwrap();
+
+        let mut access_token_refreshed = first;
+        access_token_refreshed.auth_value = Some("Bearer refreshed-access-token".to_string());
+        access_token_refreshed.provider_request_headers.insert(
+            "Authorization".to_string(),
+            "Bearer refreshed-access-token".to_string(),
+        );
+        assert_eq!(
+            first_identity,
+            UpstreamBindingIdentity::from_decision(adapter, &access_token_refreshed).unwrap()
+        );
+    }
+
+    #[test]
+    fn codex_authorization_override_changes_binding_with_the_same_generation() {
+        let adapter = resolve_responses_websocket_adapter(ResponsesWebSocketAdapter::Codex);
+        let mut first = decision();
+        first.provider_type = Some("codex".to_string());
+        first.report_context = Some(json!({
+            "codex_credential_generation": "credential-generation-1"
+        }));
+        let first_identity = UpstreamBindingIdentity::from_decision(adapter, &first).unwrap();
+
+        // The planner-owned auth value remains unchanged while an effective
+        // auth-config/header override replaces the actual handshake value.
+        first.provider_request_headers.insert(
+            "Authorization".to_string(),
+            "Bearer endpoint-override".to_string(),
+        );
+        assert_ne!(
+            first_identity,
+            UpstreamBindingIdentity::from_decision(adapter, &first).unwrap()
+        );
+    }
+
+    #[test]
+    fn codex_credential_replacement_changes_binding_for_the_same_key_id() {
+        let adapter = resolve_responses_websocket_adapter(ResponsesWebSocketAdapter::Codex);
+        let mut first = decision();
+        first.provider_type = Some("codex".to_string());
+        first.report_context = Some(json!({
+            "codex_credential_generation": "credential-generation-1"
+        }));
+        let first_identity = UpstreamBindingIdentity::from_decision(adapter, &first).unwrap();
+
+        let mut replaced = first;
+        replaced.provider_request_headers.insert(
+            "Authorization".to_string(),
+            "Bearer replacement-access-token".to_string(),
+        );
+        replaced.report_context = Some(json!({
+            "codex_credential_generation": "credential-generation-2"
+        }));
+        assert_ne!(
+            first_identity,
+            UpstreamBindingIdentity::from_decision(adapter, &replaced).unwrap()
+        );
+    }
+
+    #[test]
+    fn codex_custom_auth_rotation_changes_binding_with_the_same_generation() {
+        let adapter = resolve_responses_websocket_adapter(ResponsesWebSocketAdapter::Codex);
+        let mut first = decision();
+        first.provider_type = Some("codex".to_string());
+        first.auth_header = Some("X-Provider-Token".to_string());
+        first.provider_request_headers.insert(
+            "X-Provider-Token".to_string(),
+            "provider-token-1".to_string(),
+        );
+        first.report_context = Some(json!({
+            "codex_credential_generation": "credential-generation-1"
+        }));
+        let first_identity = UpstreamBindingIdentity::from_decision(adapter, &first).unwrap();
+
+        first.provider_request_headers.insert(
+            "X-Provider-Token".to_string(),
+            "provider-token-2".to_string(),
+        );
+        assert_ne!(
+            first_identity,
+            UpstreamBindingIdentity::from_decision(adapter, &first).unwrap()
+        );
+    }
+
+    #[test]
+    fn missing_codex_credential_generation_fails_closed_on_auth_rotation() {
+        let adapter = resolve_responses_websocket_adapter(ResponsesWebSocketAdapter::Codex);
+        let mut first = decision();
+        first.provider_type = Some("codex".to_string());
+        let first_identity = UpstreamBindingIdentity::from_decision(adapter, &first).unwrap();
+
+        first.provider_request_headers.insert(
+            "Authorization".to_string(),
+            "Bearer possibly-replaced-credential".to_string(),
+        );
+        assert_ne!(
+            first_identity,
+            UpstreamBindingIdentity::from_decision(adapter, &first).unwrap()
+        );
+    }
+
+    #[test]
+    fn disabled_proxy_is_equivalent_to_direct_transport() {
+        let adapter = resolve_responses_websocket_adapter(ResponsesWebSocketAdapter::Standard);
+        let direct = decision();
+        let direct_identity = UpstreamBindingIdentity::from_decision(adapter, &direct).unwrap();
+        let mut explicitly_disabled = direct;
+        explicitly_disabled.proxy = Some(aether_contracts::ProxySnapshot {
+            enabled: Some(false),
+            url: Some("http://ignored.example.test:8080".to_string()),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            direct_identity,
+            UpstreamBindingIdentity::from_decision(adapter, &explicitly_disabled).unwrap()
+        );
+    }
+
+    #[test]
+    fn identity_rejects_missing_or_invalid_connection_fields() {
+        let adapter = resolve_responses_websocket_adapter(ResponsesWebSocketAdapter::Standard);
+        let mut missing = decision();
+        missing.upstream_url = None;
+        assert_eq!(
+            UpstreamBindingIdentity::from_decision(adapter, &missing),
+            Err(UpstreamBindingIdentityError::MissingUpstreamUrl)
+        );
+
+        let mut invalid = decision();
+        invalid.upstream_url = Some("file:///tmp/responses".to_string());
+        assert_eq!(
+            UpstreamBindingIdentity::from_decision(adapter, &invalid),
+            Err(UpstreamBindingIdentityError::InvalidUpstreamUrl)
+        );
+    }
+}

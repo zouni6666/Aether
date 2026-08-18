@@ -73,6 +73,7 @@ export interface UsageRecordDetail {
   updated_at?: string | null
   response_time_updated_at?: string | null
   is_stream: boolean
+  is_websocket?: boolean
   upstream_is_stream?: boolean
   client_requested_stream?: boolean
   client_is_stream?: boolean
@@ -370,6 +371,7 @@ export const meApi = {
       api_format?: string | null
       endpoint_api_format?: string | null
       is_stream?: boolean | null
+      is_websocket?: boolean | null
       upstream_is_stream?: boolean | null
       client_requested_stream?: boolean | null
       client_is_stream?: boolean | null

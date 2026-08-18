@@ -443,6 +443,7 @@ name = "aether-integration-tests"
 version = "0.1.0"
 dependencies = [
  "aether-contracts",
+ "aether-crypto",
  "aether-data",
  "aether-data-contracts",
  "aether-gateway",
@@ -459,6 +460,7 @@ dependencies = [
  "sqlx",
  "tokio",
  "tokio-tungstenite 0.28.0",
+ "uuid",
 ]
 
 [[package]]
