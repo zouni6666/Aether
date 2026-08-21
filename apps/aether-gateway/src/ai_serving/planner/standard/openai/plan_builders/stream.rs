@@ -10,6 +10,7 @@ use super::super::{
     AiStreamAttempt,
 };
 use crate::ai_serving::planner::common::enforce_provider_body_stream_policy;
+use crate::ai_serving::planner::redaction::sanitize_upstream_url_for_log;
 use crate::ai_serving::provider_adaptation_requires_eventstream_accept;
 use crate::ai_serving::transport::{
     build_standard_plan_fallback_headers, build_standard_plan_fallback_openai_chat_url,
@@ -233,6 +234,19 @@ pub(crate) fn build_openai_responses_stream_plan_from_decision(
         },
     );
 
+    let log_downstream_query = parts
+        .uri
+        .query()
+        .and_then(crate::ai_serving::api::sanitize_request_query_string);
+    let log_decision_upstream_base_url = payload
+        .upstream_base_url
+        .as_deref()
+        .map(sanitize_upstream_url_for_log);
+    let log_decision_upstream_url = payload
+        .upstream_url
+        .as_deref()
+        .map(sanitize_upstream_url_for_log);
+    let log_plan_url = sanitize_upstream_url_for_log(plan.url.as_str());
     debug!(
         event_name = "local_openai_responses_stream_plan_built",
         log_type = "debug",
@@ -242,11 +256,11 @@ pub(crate) fn build_openai_responses_stream_plan_from_decision(
         endpoint_id = %plan.endpoint_id,
         key_id = %plan.key_id,
         downstream_path = %parts.uri.path(),
-        downstream_query = ?parts.uri.query(),
+        downstream_query = ?log_downstream_query,
         url_source,
-        decision_upstream_base_url = ?payload.upstream_base_url,
-        decision_upstream_url = ?payload.upstream_url,
-        plan_url = %plan.url,
+        decision_upstream_base_url = ?log_decision_upstream_base_url,
+        decision_upstream_url = ?log_decision_upstream_url,
+        plan_url = %log_plan_url,
         client_api_format = %plan.client_api_format,
         provider_api_format = %plan.provider_api_format,
         upstream_is_stream = effective_upstream_is_stream,

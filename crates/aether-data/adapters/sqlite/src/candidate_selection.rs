@@ -4,10 +4,11 @@ use async_trait::async_trait;
 use sqlx::{sqlite::SqliteRow, QueryBuilder, Row, Sqlite};
 
 use aether_data_contracts::repository::candidate_selection::{
-    MinimalCandidateSelectionReadRepository, StoredApiFormatCandidateRowsQuery,
-    StoredMinimalCandidateSelectionRow, StoredPoolKeyCandidateOrder,
-    StoredPoolKeyCandidateRowsByKeyIdsQuery, StoredPoolKeyCandidateRowsQuery,
-    StoredProviderModelMapping, StoredRequestedModelCandidateRowsQuery,
+    provider_model_mapping_api_format_covers, MinimalCandidateSelectionReadRepository,
+    StoredApiFormatCandidateRowsQuery, StoredMinimalCandidateSelectionRow,
+    StoredPoolKeyCandidateOrder, StoredPoolKeyCandidateRowsByKeyIdsQuery,
+    StoredPoolKeyCandidateRowsQuery, StoredProviderModelMapping,
+    StoredRequestedModelCandidateRowsQuery,
 };
 use aether_data_contracts::DataLayerError;
 
@@ -605,7 +606,7 @@ fn push_key_auth_channel_sql_filter(
     );
     builder.push_bind(api_format.clone());
     builder.push(
-        r#" IN ('openai:responses', 'openai:responses:compact', 'openai:search', 'openai:image')
+        r#" IN ('openai:responses', 'openai:responses:compact', 'openai:search', 'openai:image', 'codex:live')
     )
     OR (
       LOWER(TRIM(p.provider_type)) = 'chatgpt_web'
@@ -945,9 +946,9 @@ fn mapping_scope_matches(
     api_format: &str,
 ) -> bool {
     mapping.api_formats.as_ref().is_none_or(|formats| {
-        formats
-            .iter()
-            .any(|value| api_format_scope_covers(value, api_format))
+        formats.iter().any(|value| {
+            provider_model_mapping_api_format_covers(&row.provider_type, value, api_format)
+        })
     }) && mapping.endpoint_ids.as_ref().is_none_or(|endpoint_ids| {
         endpoint_ids
             .iter()
@@ -968,6 +969,7 @@ fn key_auth_channel_matches(row: &CandidateSelectionRow, api_format: &str) -> bo
                         | "openai:responses:compact"
                         | "openai:search"
                         | "openai:image"
+                        | "codex:live"
                 )
         }
         "chatgpt_web" => {
@@ -1326,10 +1328,6 @@ fn api_format_matches(left: &str, right: &str) -> bool {
     aether_ai_formats::api_format_alias_matches(left, right)
 }
 
-fn api_format_scope_covers(allowed: &str, requested: &str) -> bool {
-    aether_ai_formats::api_format_permission_covers(allowed, requested)
-}
-
 fn sql_match_aliases(api_formats: &[String]) -> Vec<String> {
     api_formats
         .iter()
@@ -1340,9 +1338,9 @@ fn sql_match_aliases(api_formats: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        push_key_auth_channel_sql_filter, push_pool_key_order, vertex_key_auth_channel_matches,
-        ExactPageAccumulator, SqliteMinimalCandidateSelectionReadRepository,
-        REQUESTED_MODEL_RAW_SCAN_LIMIT,
+        provider_model_mapping_api_format_covers, push_key_auth_channel_sql_filter,
+        push_pool_key_order, vertex_key_auth_channel_matches, ExactPageAccumulator,
+        SqliteMinimalCandidateSelectionReadRepository, REQUESTED_MODEL_RAW_SCAN_LIMIT,
     };
     use crate::run_migrations;
     use aether_data_contracts::repository::candidate_selection::{
@@ -1378,6 +1376,47 @@ mod tests {
         assert!(!vertex_clause.contains("claude:messages"));
         assert!(vertex_clause.contains("gemini:generate_content"));
         assert!(vertex_clause.contains("gemini:embedding"));
+    }
+
+    #[test]
+    fn codex_auth_sql_allows_live_for_oauth_keys() {
+        let mut builder = sqlx::QueryBuilder::<sqlx::Sqlite>::new("SELECT 1 WHERE 1 = 1");
+        push_key_auth_channel_sql_filter(&mut builder, "codex:live");
+        let sql = builder.sql();
+        let codex_clause = sql
+            .split_once("LOWER(TRIM(p.provider_type)) = 'codex'")
+            .and_then(|(_, suffix)| {
+                suffix.split_once("LOWER(TRIM(p.provider_type)) = 'chatgpt_web'")
+            })
+            .map(|(clause, _)| clause)
+            .expect("Codex auth clause should exist");
+
+        assert!(codex_clause.contains("LOWER(TRIM(pak.auth_type)) = 'oauth'"));
+        assert!(codex_clause.contains("'codex:live'"));
+    }
+
+    #[test]
+    fn sqlite_mapping_scope_keeps_legacy_responses_compatibility_codex_only() {
+        assert!(provider_model_mapping_api_format_covers(
+            "codex",
+            "openai:responses",
+            "codex:live"
+        ));
+        assert!(!provider_model_mapping_api_format_covers(
+            "openai",
+            "openai:responses",
+            "codex:live"
+        ));
+        assert!(!provider_model_mapping_api_format_covers(
+            "custom",
+            "openai:responses",
+            "codex:live"
+        ));
+        assert!(!provider_model_mapping_api_format_covers(
+            "codex",
+            "openai:chat",
+            "codex:live"
+        ));
     }
 
     #[test]

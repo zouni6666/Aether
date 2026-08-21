@@ -383,6 +383,30 @@ mod tests {
     }
 
     #[test]
+    fn embeds_scoped_codex_live_permission_migration() {
+        let migration = POSTGRES_MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 20260821000000)
+            .expect("Codex Live permission migration should be embedded");
+        let sql = migration.sql.as_ref();
+
+        for required_fragment in [
+            "UPDATE public.users",
+            "UPDATE public.user_groups",
+            "UPDATE public.api_keys",
+            "UPDATE public.provider_api_keys",
+            "provider.provider_type",
+            "openai:responses",
+            "codex:live",
+        ] {
+            assert!(
+                sql.contains(required_fragment),
+                "Codex Live permission migration is missing {required_fragment}"
+            );
+        }
+    }
+
+    #[test]
     fn concurrent_index_migrations_opt_out_of_transactions() {
         for version in [20260715000000, 20260715130000, 20260720000000] {
             let migration = POSTGRES_MIGRATOR

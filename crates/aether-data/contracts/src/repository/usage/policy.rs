@@ -254,12 +254,15 @@ pub fn provider_api_key_usage_contribution(
         request_count: 1,
         success_count: i64::from(is_success),
         error_count: i64::from(is_error),
-        total_tokens: if is_in_flight {
+        total_tokens: if is_in_flight || !usage.usage_available() {
             0
         } else {
             i64::try_from(usage.total_tokens).unwrap_or(i64::MAX)
         },
-        total_cost_usd: if is_in_flight {
+        total_cost_usd: if is_in_flight
+            || !usage.usage_available()
+            || !usage.usage_pricing_available()
+        {
             0.0
         } else if usage.total_cost_usd.is_finite() {
             usage.total_cost_usd.max(0.0)
@@ -308,8 +311,14 @@ pub fn api_key_usage_contribution(
     Some(ApiKeyUsageContribution {
         api_key_id,
         total_requests: 1,
-        total_tokens: i64::try_from(usage.total_tokens).unwrap_or(i64::MAX),
-        total_cost_usd: if usage.total_cost_usd.is_finite() {
+        total_tokens: if usage.usage_available() {
+            i64::try_from(usage.total_tokens).unwrap_or(i64::MAX)
+        } else {
+            0
+        },
+        total_cost_usd: if !usage.usage_available() || !usage.usage_pricing_available() {
+            0.0
+        } else if usage.total_cost_usd.is_finite() {
             usage.total_cost_usd.max(0.0)
         } else {
             0.0
@@ -323,5 +332,82 @@ fn newer_last_used_at(before: Option<u64>, after: Option<u64>) -> Option<u64> {
         (Some(before), Some(after)) if after > before => Some(after),
         (None, Some(after)) => Some(after),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{api_key_usage_contribution, provider_api_key_usage_contribution};
+    use crate::repository::usage::StoredRequestUsageAudit;
+
+    fn authoritative_unpriced_usage() -> StoredRequestUsageAudit {
+        let mut usage = StoredRequestUsageAudit::new(
+            "usage-realtime".to_string(),
+            "request-realtime".to_string(),
+            None,
+            Some("downstream-key".to_string()),
+            None,
+            None,
+            "OpenAI".to_string(),
+            "gpt-realtime".to_string(),
+            None,
+            Some("provider-realtime".to_string()),
+            Some("endpoint-realtime".to_string()),
+            Some("provider-key-realtime".to_string()),
+            Some("realtime".to_string()),
+            Some("openai:realtime".to_string()),
+            Some("openai".to_string()),
+            Some("realtime".to_string()),
+            Some("openai:realtime".to_string()),
+            Some("openai".to_string()),
+            Some("realtime".to_string()),
+            false,
+            true,
+            120,
+            40,
+            160,
+            9.75,
+            11.25,
+            Some(200),
+            None,
+            None,
+            Some(250),
+            Some(30),
+            "completed".to_string(),
+            "void".to_string(),
+            100,
+            101,
+            Some(102),
+        )
+        .expect("usage should build");
+        usage.request_metadata = Some(json!({
+            "usage_available": true,
+            "usage_pricing_available": false,
+            "realtime_session": {
+                "input_audio_tokens": 20,
+                "output_audio_tokens": 10,
+            }
+        }));
+        usage
+    }
+
+    #[test]
+    fn authoritative_unpriced_usage_contributes_tokens_but_never_cost() {
+        let usage = authoritative_unpriced_usage();
+
+        let provider = provider_api_key_usage_contribution(&usage)
+            .expect("provider key contribution should exist");
+        assert_eq!(provider.request_count, 1);
+        assert_eq!(provider.success_count, 1);
+        assert_eq!(provider.total_tokens, 160);
+        assert_eq!(provider.total_cost_usd, 0.0);
+
+        let downstream =
+            api_key_usage_contribution(&usage).expect("API key contribution should exist");
+        assert_eq!(downstream.total_requests, 1);
+        assert_eq!(downstream.total_tokens, 160);
+        assert_eq!(downstream.total_cost_usd, 0.0);
     }
 }

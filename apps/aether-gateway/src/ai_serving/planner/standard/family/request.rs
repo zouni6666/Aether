@@ -23,8 +23,8 @@ use crate::ai_serving::planner::spec_metadata::local_standard_spec_metadata;
 use crate::ai_serving::planner::standard::{
     apply_codex_openai_special_headers, apply_deepseek_tool_call_thinking_compat,
     codex_model_capabilities_for_transport, is_deepseek_provider,
-    openai_provider_request_contract_failure_extra_data, request_body_build_failure_extra_data,
-    request_conversion_failure_extra_data,
+    openai_provider_request_contract_failure_extra_data, openai_responses_reasoning_replay_policy,
+    request_body_build_failure_extra_data, request_conversion_failure_extra_data,
 };
 use crate::ai_serving::transport::kiro::{
     build_kiro_provider_headers, build_kiro_provider_request_body,
@@ -364,6 +364,7 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
             body_json,
             &input.auth_context,
             spec_metadata.api_format,
+            crate::ai_serving::OpenAiResponsesReasoningReplayPolicy::OpenAiItemIds,
             &attempt.candidate_id,
         )
         .await?;
@@ -593,18 +594,23 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
         input.auth_context.api_key_id.as_str(),
     )
     .await?;
+    let reasoning_replay_policy = openai_responses_reasoning_replay_policy(
+        transport.provider.provider_type.as_str(),
+        transport.endpoint.base_url.as_str(),
+    );
     let redaction = resolve_provider_chat_pii_redaction(
         state,
         parts,
         body_json,
         &input.auth_context,
         spec_metadata.api_format,
+        reasoning_replay_policy,
         &attempt.candidate_id,
     )
     .await?;
     let body_json = redaction.body_json.as_ref();
     let mut provider_request_body =
-        match crate::ai_serving::planner::standard::build_standard_request_body_with_model_directives_and_request_headers(
+        match crate::ai_serving::planner::standard::build_standard_request_body_with_model_directives_and_request_headers_and_reasoning_replay_policy(
             body_json,
             spec_metadata.api_format,
             &prepared_candidate.mapped_model,
@@ -620,6 +626,7 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
             Some(input.auth_context.api_key_id.as_str()),
             Some(effective_headers),
             false,
+            reasoning_replay_policy,
         ) {
             Some(body) => body,
             None => {
@@ -750,7 +757,7 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
             source_model,
         );
         if let Err(violation) =
-            crate::ai_serving::finalize_openai_provider_request_with_codex_model_capabilities(
+            crate::ai_serving::finalize_openai_provider_request_with_codex_model_capabilities_and_reasoning_replay_policy(
                 &mut provider_request_body,
                 crate::ai_serving::OpenAiProviderRequestFinalization {
                     source_api_format: spec_metadata.api_format,
@@ -766,6 +773,7 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
                     ),
                 },
                 codex_model_capabilities.as_ref(),
+                reasoning_replay_policy,
             )
         {
             mark_skipped_local_standard_candidate_with_extra_data(

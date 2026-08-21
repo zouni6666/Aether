@@ -11,6 +11,24 @@ pub const ROUTING_CANDIDATE_SKIP_REASON_METADATA_KEY: &str = "routing_candidate_
 pub const ROUTING_FAILURE_DIAGNOSTIC_METADATA_KEY: &str = "routing_failure_diagnostic";
 pub const WEBSOCKET_MODE_METADATA_KEY: &str = "websocket_mode";
 pub const WEBSOCKET_TRANSPORT_METADATA_KEY: &str = "websocket_transport";
+/// Whether token/cost usage is authoritative for this audit row.
+///
+/// The field is absent for legacy and normally-metered requests. An explicit
+/// `false` marks a transport/session audit whose lifecycle is known while the
+/// upstream protocol exposes no trustworthy token/cost usage. Such rows still
+/// count as requests and retain status/latency; only token and cost accounting
+/// is unavailable.
+pub const USAGE_AVAILABLE_METADATA_KEY: &str = "usage_available";
+/// Whether Aether has a compatible pricing model for the authoritative usage
+/// dimensions on this row. An explicit `false` keeps token telemetry visible
+/// while preventing those tokens from being priced with an incompatible rule.
+pub const USAGE_PRICING_AVAILABLE_METADATA_KEY: &str = "usage_pricing_available";
+/// Bounded session-level telemetry for transports that do not expose token
+/// usage (for example Codex Live direct/sideband WebSockets).
+pub const LIVE_SESSION_METADATA_KEY: &str = "live_session";
+/// Bounded lifecycle and authoritative usage facts for an OpenAI Realtime
+/// WebSocket connection. Audio payloads themselves are never stored here.
+pub const REALTIME_SESSION_METADATA_KEY: &str = "realtime_session";
 
 pub fn extract_provider_reasoning_effort_from_body(value: Option<&Value>) -> Option<String> {
     let object = value.and_then(Value::as_object)?;
@@ -546,6 +564,40 @@ impl StoredRequestUsageAudit {
             .unwrap_or(false)
     }
 
+    pub fn websocket_transport(&self) -> Option<&str> {
+        self.request_metadata_string(WEBSOCKET_TRANSPORT_METADATA_KEY)
+    }
+
+    /// Returns whether this row may participate in token/cost accounting.
+    /// Missing metadata is treated as available for backward compatibility.
+    pub fn usage_available(&self) -> bool {
+        self.request_metadata_bool(USAGE_AVAILABLE_METADATA_KEY)
+            .unwrap_or(true)
+    }
+
+    /// Returns whether token usage can be safely converted into cost. Missing
+    /// metadata remains eligible for backward compatibility.
+    pub fn usage_pricing_available(&self) -> bool {
+        self.request_metadata_bool(USAGE_PRICING_AVAILABLE_METADATA_KEY)
+            .unwrap_or(true)
+    }
+
+    pub fn realtime_input_audio_tokens(&self) -> Option<u64> {
+        self.request_metadata_object()
+            .and_then(|metadata| metadata.get(REALTIME_SESSION_METADATA_KEY))
+            .and_then(Value::as_object)
+            .and_then(|session| session.get("input_audio_tokens"))
+            .and_then(Value::as_u64)
+    }
+
+    pub fn realtime_output_audio_tokens(&self) -> Option<u64> {
+        self.request_metadata_object()
+            .and_then(|metadata| metadata.get(REALTIME_SESSION_METADATA_KEY))
+            .and_then(Value::as_object)
+            .and_then(|session| session.get("output_audio_tokens"))
+            .and_then(Value::as_u64)
+    }
+
     fn billing_snapshot_resolved_number(&self, key: &str) -> Option<f64> {
         self.request_metadata_object()
             .and_then(|metadata| metadata.get("billing_snapshot"))
@@ -953,6 +1005,7 @@ pub struct UsageAuditListQuery {
     pub statuses: Option<Vec<String>>,
     pub exclude_status_codes: Vec<u16>,
     pub is_stream: Option<bool>,
+    pub is_websocket: Option<bool>,
     pub error_only: bool,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
@@ -972,6 +1025,7 @@ pub struct UsageAuditKeywordSearchQuery {
     pub statuses: Option<Vec<String>>,
     pub exclude_status_codes: Vec<u16>,
     pub is_stream: Option<bool>,
+    pub is_websocket: Option<bool>,
     pub error_only: bool,
     pub keywords: Vec<String>,
     pub matched_user_ids_by_keyword: Vec<Vec<String>>,
@@ -2401,8 +2455,9 @@ mod tests {
         extract_provider_actual_service_tier_from_response,
         extract_provider_service_tier_from_body, resolve_provider_cache_ttl_minutes,
         StoredRequestUsageAudit, UpsertUsageRecord, UsageBodyCaptureState, UsageBodyCaptureStorage,
-        UsageBodyField, UsageProviderPerformanceQuery, WEBSOCKET_MODE_METADATA_KEY,
-        WEBSOCKET_TRANSPORT_METADATA_KEY,
+        UsageBodyField, UsageProviderPerformanceQuery, REALTIME_SESSION_METADATA_KEY,
+        USAGE_AVAILABLE_METADATA_KEY, USAGE_PRICING_AVAILABLE_METADATA_KEY,
+        WEBSOCKET_MODE_METADATA_KEY, WEBSOCKET_TRANSPORT_METADATA_KEY,
     };
     use serde_json::{json, Value};
 
@@ -2675,13 +2730,26 @@ mod tests {
     fn websocket_transport_uses_typed_request_metadata() {
         let mut usage = sample_usage();
         assert!(!usage.is_websocket());
+        assert!(usage.usage_available());
+        assert!(usage.usage_pricing_available());
 
         usage.request_metadata = Some(json!({
-            WEBSOCKET_MODE_METADATA_KEY: true,
-            WEBSOCKET_TRANSPORT_METADATA_KEY: "responses",
+            (WEBSOCKET_MODE_METADATA_KEY): true,
+            (WEBSOCKET_TRANSPORT_METADATA_KEY): "responses",
+            (USAGE_AVAILABLE_METADATA_KEY): false,
+            (USAGE_PRICING_AVAILABLE_METADATA_KEY): false,
+            (REALTIME_SESSION_METADATA_KEY): {
+                "input_audio_tokens": 7,
+                "output_audio_tokens": 3,
+            },
         }));
 
         assert!(usage.is_websocket());
+        assert_eq!(usage.websocket_transport(), Some("responses"));
+        assert!(!usage.usage_available());
+        assert!(!usage.usage_pricing_available());
+        assert_eq!(usage.realtime_input_audio_tokens(), Some(7));
+        assert_eq!(usage.realtime_output_audio_tokens(), Some(3));
     }
 
     #[test]

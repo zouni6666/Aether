@@ -243,7 +243,7 @@ fn select_primary_credential(
     if signature.starts_with("claude:") {
         return select_claude_messages_credential(bundle);
     }
-    if signature.starts_with("openai:") {
+    if signature.starts_with("openai:") || signature.starts_with("codex:") {
         return select_openai_credential(bundle);
     }
     if signature.starts_with("aether:") {
@@ -486,6 +486,25 @@ mod tests {
             extracted.primary,
             Some(GatewayPrimaryCredential::ProviderApiKey {
                 raw: "sk-openai".to_string(),
+                carrier: GatewayCredentialCarrier::AuthorizationBearer,
+            })
+        );
+    }
+
+    #[test]
+    fn selects_codex_live_bearer_as_provider_api_key() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::AUTHORIZATION,
+            "Bearer sk-codex-live".parse().unwrap(),
+        );
+
+        let extracted =
+            extract_request_credentials(&headers, &uri("/v1/live?model=gpt-live"), "codex:live");
+        assert_eq!(
+            extracted.primary,
+            Some(GatewayPrimaryCredential::ProviderApiKey {
+                raw: "sk-codex-live".to_string(),
                 carrier: GatewayCredentialCarrier::AuthorizationBearer,
             })
         );

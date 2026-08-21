@@ -1046,6 +1046,7 @@ import {
 } from '@/utils/providerKeyStatus'
 import { getGeminiCliAccountCreditsText } from '@/utils/providerKeyQuota'
 import {
+  clearPendingCodexResetCreditIdempotencyKey,
   clearPendingCodexResetCreditIdempotencyKeyForOutcome,
   createCodexResetCreditIdempotencyKey,
   formatCodexResetCreditCount as formatCodexResetCreditCountLabel,

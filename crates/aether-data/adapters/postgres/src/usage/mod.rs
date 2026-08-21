@@ -1640,6 +1640,21 @@ fn push_postgres_usage_client_family_filter(
         .push_bind(client_family.to_ascii_lowercase());
 }
 
+fn push_postgres_usage_websocket_filter(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    has_where: &mut bool,
+    is_websocket: Option<bool>,
+) {
+    let Some(is_websocket) = is_websocket else {
+        return;
+    };
+
+    push_postgres_usage_where(builder, has_where);
+    builder
+        .push("LOWER(COALESCE(\"usage\".request_metadata->>'websocket_mode', 'false')) = ")
+        .push_bind(if is_websocket { "true" } else { "false" });
+}
+
 fn push_postgres_usage_exclude_unknown_filter(
     builder: &mut QueryBuilder<'_, Postgres>,
     has_where: &mut bool,
@@ -3015,6 +3030,7 @@ ORDER BY request_count DESC, "usage".provider_name ASC
             has_where = true;
             builder.push("\"usage\".is_stream = ").push_bind(is_stream);
         }
+        push_postgres_usage_websocket_filter(&mut builder, &mut has_where, query.is_websocket);
         if query.error_only {
             builder.push(if has_where { " AND " } else { " WHERE " });
             builder.push(
@@ -3127,6 +3143,7 @@ OR (\"usage\".error_message IS NOT NULL AND BTRIM(\"usage\".error_message) <> ''
             has_where = true;
             builder.push("\"usage\".is_stream = ").push_bind(is_stream);
         }
+        push_postgres_usage_websocket_filter(&mut builder, &mut has_where, query.is_websocket);
         if query.error_only {
             builder.push(if has_where { " AND " } else { " WHERE " });
             has_where = true;
@@ -3320,6 +3337,7 @@ OR (\"usage\".error_message IS NOT NULL AND BTRIM(\"usage\".error_message) <> ''
             has_where = true;
             builder.push("\"usage\".is_stream = ").push_bind(is_stream);
         }
+        push_postgres_usage_websocket_filter(&mut builder, &mut has_where, query.is_websocket);
         if query.error_only {
             builder.push(if has_where { " AND " } else { " WHERE " });
             builder.push(
@@ -3421,6 +3439,7 @@ OR (\"usage\".error_message IS NOT NULL AND BTRIM(\"usage\".error_message) <> ''
             has_where = true;
             builder.push("\"usage\".is_stream = ").push_bind(is_stream);
         }
+        push_postgres_usage_websocket_filter(&mut builder, &mut has_where, query.is_websocket);
         if query.error_only {
             builder.push(if has_where { " AND " } else { " WHERE " });
             has_where = true;

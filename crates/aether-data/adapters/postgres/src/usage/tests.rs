@@ -1,6 +1,6 @@
 use chrono::{TimeZone, Utc};
 use serde_json::json;
-use sqlx::Row;
+use sqlx::{Postgres, QueryBuilder, Row};
 use std::sync::Arc;
 
 use super::{
@@ -8,14 +8,15 @@ use super::{
     attach_usage_routing_snapshot_metadata, attach_usage_settlement_pricing_snapshot_metadata,
     clear_previous_request_body_facts, inflate_usage_json_value,
     prepare_request_metadata_for_body_storage, prepare_usage_body_storage,
-    prepare_usage_upsert_context, request_body_capture_replaces_derived_facts,
-    resolved_read_usage_body_ref, resolved_write_usage_body_ref,
-    split_dashboard_daily_aggregate_range, split_dashboard_hourly_aggregate_range,
-    usage_body_capture_state_for_storage, usage_body_ref, usage_capture_update_allowed,
-    usage_effective_input_tokens, usage_http_audit_body_refs, usage_http_audit_capture_mode,
-    usage_routing_snapshot_from_usage, usage_settlement_pricing_snapshot_from_usage,
-    usage_total_input_context, AggregateRangeSplit, SqlxUsageReadRepository, UsageHttpAuditRefs,
-    UsageRoutingSnapshot, UsageSettlementPricingSnapshot, MAX_INLINE_USAGE_BODY_BYTES,
+    prepare_usage_upsert_context, push_postgres_usage_websocket_filter,
+    request_body_capture_replaces_derived_facts, resolved_read_usage_body_ref,
+    resolved_write_usage_body_ref, split_dashboard_daily_aggregate_range,
+    split_dashboard_hourly_aggregate_range, usage_body_capture_state_for_storage, usage_body_ref,
+    usage_capture_update_allowed, usage_effective_input_tokens, usage_http_audit_body_refs,
+    usage_http_audit_capture_mode, usage_routing_snapshot_from_usage,
+    usage_settlement_pricing_snapshot_from_usage, usage_total_input_context, AggregateRangeSplit,
+    SqlxUsageReadRepository, UsageHttpAuditRefs, UsageRoutingSnapshot,
+    UsageSettlementPricingSnapshot, MAX_INLINE_USAGE_BODY_BYTES,
     SELECT_STALE_PENDING_USAGE_BATCH_SQL,
 };
 use crate::{PostgresPoolConfig, PostgresPoolFactory};
@@ -3247,6 +3248,26 @@ fn usage_sql_admin_record_filters_are_pushed_into_postgres_queries() {
     assert!(source.contains("request_metadata->>'client_family'"));
     assert!(source.contains("exclude_unknown_model_or_provider"));
     assert!(source.contains("NOT IN ('unknown', 'unknow')"));
+    assert_eq!(
+        source
+            .matches("push_postgres_usage_websocket_filter(")
+            .count(),
+        5,
+        "the WebSocket filter must cover list/count and keyword list/count"
+    );
+}
+
+#[test]
+fn usage_sql_websocket_filter_compares_json_metadata_without_boolean_casts() {
+    let mut builder = QueryBuilder::<Postgres>::new("SELECT * FROM usage");
+    let mut has_where = false;
+    push_postgres_usage_websocket_filter(&mut builder, &mut has_where, Some(true));
+
+    assert!(has_where);
+    assert!(builder
+        .sql()
+        .contains("LOWER(COALESCE(\"usage\".request_metadata->>'websocket_mode', 'false'))"));
+    assert!(!builder.sql().contains("::boolean"));
 }
 
 #[test]

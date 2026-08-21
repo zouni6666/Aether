@@ -74,6 +74,11 @@ export interface UsageRecordDetail {
   response_time_updated_at?: string | null
   is_stream: boolean
   is_websocket?: boolean
+  websocket_transport?: string | null
+  usage_available?: boolean
+  usage_pricing_available?: boolean
+  input_audio_tokens?: number | null
+  output_audio_tokens?: number | null
   upstream_is_stream?: boolean
   client_requested_stream?: boolean
   client_is_stream?: boolean
@@ -338,6 +343,7 @@ export const meApi = {
     timezone?: string
     tz_offset_minutes?: number
     search?: string  // 通用搜索：密钥名、模型名
+    status?: string
     limit?: number
     offset?: number
   }): Promise<UsageResponse> {
@@ -372,6 +378,11 @@ export const meApi = {
       endpoint_api_format?: string | null
       is_stream?: boolean | null
       is_websocket?: boolean | null
+      websocket_transport?: string | null
+      usage_available?: boolean | null
+      usage_pricing_available?: boolean | null
+      input_audio_tokens?: number | null
+      output_audio_tokens?: number | null
       upstream_is_stream?: boolean | null
       client_requested_stream?: boolean | null
       client_is_stream?: boolean | null

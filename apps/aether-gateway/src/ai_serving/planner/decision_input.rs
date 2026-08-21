@@ -102,6 +102,22 @@ pub(crate) fn apply_provider_request_routing_policy_to_decision(
     decision: &mut AiExecutionDecision,
     transport: Option<&GatewayProviderTransportSnapshot>,
 ) -> Result<(), GatewayError> {
+    apply_provider_request_routing_policy_to_decision_with_websocket_mode(
+        input, decision, transport, false,
+    )
+}
+
+/// Applies provider-request routing mutations while retaining the transport
+/// boundary of a pinned Responses WebSocket continuation. Routing rules may
+/// mutate the body and therefore require a second provider-contract pass; the
+/// pass must use the same explicit continuation mode as the first pass rather
+/// than guessing from JSON fields.
+pub(crate) fn apply_provider_request_routing_policy_to_decision_with_websocket_mode(
+    input: &LocalRequestedModelDecisionInput,
+    decision: &mut AiExecutionDecision,
+    transport: Option<&GatewayProviderTransportSnapshot>,
+    websocket_continuation: bool,
+) -> Result<(), GatewayError> {
     let provider_api_format = decision
         .provider_api_format
         .clone()
@@ -257,9 +273,8 @@ pub(crate) fn apply_provider_request_routing_policy_to_decision(
                 input.requested_model.as_str(),
             )
         });
-        crate::ai_serving::finalize_openai_provider_request_with_codex_model_capabilities(
-            &mut provider_request_body,
-            crate::ai_serving::OpenAiProviderRequestFinalization {
+        {
+            let finalization = crate::ai_serving::OpenAiProviderRequestFinalization {
                 source_api_format: context.client_api_format.as_str(),
                 provider_api_format: provider_api_format.as_str(),
                 provider_type: provider_type.as_str(),
@@ -270,9 +285,31 @@ pub(crate) fn apply_provider_request_routing_policy_to_decision(
                 require_body_stream_field: original_provider_request_body
                     .as_ref()
                     .is_some_and(|body| body.get("stream").is_some()),
-            },
-            model_capabilities.as_ref(),
-        )
+            };
+            let reasoning_replay_policy = transport
+                .map(|transport| {
+                    crate::ai_serving::openai_responses_reasoning_replay_policy(
+                        transport.provider.provider_type.as_str(),
+                        transport.endpoint.base_url.as_str(),
+                    )
+                })
+                .unwrap_or_default();
+            if websocket_continuation {
+                crate::ai_serving::finalize_openai_provider_request_with_codex_model_capabilities_and_reasoning_replay_policy_for_websocket_continuation(
+                    &mut provider_request_body,
+                    finalization,
+                    model_capabilities.as_ref(),
+                    reasoning_replay_policy,
+                )
+            } else {
+                crate::ai_serving::finalize_openai_provider_request_with_codex_model_capabilities_and_reasoning_replay_policy(
+                    &mut provider_request_body,
+                    finalization,
+                    model_capabilities.as_ref(),
+                    reasoning_replay_policy,
+                )
+            }
+        }
         .map_err(|violation| GatewayError::Client {
             status: StatusCode::BAD_REQUEST,
             message: format!("routing provider_request violates provider contract: {violation:?}"),
@@ -449,8 +486,7 @@ pub(crate) async fn attach_routing_policy_to_local_requested_model_input(
     body_json: &Value,
     client_api_format: &str,
 ) -> Result<(), GatewayError> {
-    input.original_client_session_id = routing_header_value_str(&parts.headers, "session-id")
-        .or_else(|| routing_header_value_str(&parts.headers, "session_id"));
+    input.original_client_session_id = original_client_session_id_from_headers(&parts.headers);
     let explicit_group = routing_header_value_str(&parts.headers, ROUTING_GROUP_HEADER);
     let selected_group = match state.routing_group_read_repository() {
         Some(repository) => {
@@ -699,6 +735,12 @@ pub(crate) async fn attach_routing_policy_to_local_requested_model_input(
         effective_headers,
     });
     Ok(())
+}
+
+fn original_client_session_id_from_headers(headers: &HeaderMap) -> Option<String> {
+    routing_header_value_str(headers, "session-id")
+        .or_else(|| routing_header_value_str(headers, "session_id"))
+        .or_else(|| routing_header_value_str(headers, "x-session-id"))
 }
 
 fn try_attach_static_default_routing_policy_to_input(
@@ -1063,6 +1105,38 @@ mod tests {
         GatewayProviderTransportEndpoint, GatewayProviderTransportKey,
         GatewayProviderTransportProvider,
     };
+
+    #[test]
+    fn original_client_session_id_accepts_live_header_as_fallback() {
+        let headers = HeaderMap::from_iter([(
+            HeaderName::from_static("x-session-id"),
+            HeaderValue::from_static("live-thread-1"),
+        )]);
+
+        assert_eq!(
+            original_client_session_id_from_headers(&headers).as_deref(),
+            Some("live-thread-1")
+        );
+    }
+
+    #[test]
+    fn original_client_session_id_prefers_responses_headers_over_live_fallback() {
+        let headers = HeaderMap::from_iter([
+            (
+                HeaderName::from_static("session-id"),
+                HeaderValue::from_static("responses-session"),
+            ),
+            (
+                HeaderName::from_static("x-session-id"),
+                HeaderValue::from_static("live-thread"),
+            ),
+        ]);
+
+        assert_eq!(
+            original_client_session_id_from_headers(&headers).as_deref(),
+            Some("responses-session")
+        );
+    }
 
     #[test]
     fn explicit_routing_selection_cache_key_is_principal_specific() {

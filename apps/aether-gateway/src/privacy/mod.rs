@@ -244,7 +244,19 @@ impl RedactionSessionConfig {
     }
 }
 
-pub(crate) type RedactionMaskError = Infallible;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RedactionMaskError {
+    /// Provider-owned reasoning text cannot be rewritten independently from
+    /// its encrypted continuation state. Reject the request instead of either
+    /// leaking detected sensitive text or corrupting the provider binding.
+    SensitiveOpaqueReasoningState,
+}
+
+impl From<Infallible> for RedactionMaskError {
+    fn from(value: Infallible) -> Self {
+        match value {}
+    }
+}
 
 #[derive(Clone, Copy, Default)]
 struct RedactionScanState;
@@ -307,6 +319,7 @@ pub(crate) struct RedactionSession {
     mappings: HashMap<MappingKey, RedactionMapping>,
     sentinel_index: HashMap<String, MappingKey>,
     collision_corpus: Vec<String>,
+    preserve_deepseek_opaque_reasoning_state: bool,
 }
 
 impl RedactionSession {
@@ -316,11 +329,47 @@ impl RedactionSession {
             mappings: HashMap::new(),
             sentinel_index: HashMap::new(),
             collision_corpus: Vec::new(),
+            preserve_deepseek_opaque_reasoning_state: false,
         }
+    }
+
+    fn apply_mask_options(&mut self, options: MaskChatRequestOptions) {
+        self.preserve_deepseek_opaque_reasoning_state =
+            options.preserve_deepseek_opaque_reasoning_state;
+    }
+
+    /// Updates the provider-owned reasoning replay policy after the initial
+    /// request has been planned and its upstream binding authenticated.
+    ///
+    /// A new WebSocket chain has to redact its first event before planning, so
+    /// it starts with the conservative OpenAI item-id policy.  Once the
+    /// planner has selected the provider, response restoration must use that
+    /// trusted binding's policy as well; otherwise a DeepSeek opaque reasoning
+    /// item could have a PII sentinel restored inside provider-owned state.
+    pub(crate) fn set_reasoning_replay_policy(
+        &mut self,
+        policy: crate::ai_serving::OpenAiResponsesReasoningReplayPolicy,
+    ) {
+        self.apply_mask_options(
+            MaskChatRequestOptions::runtime().with_reasoning_replay_policy(policy),
+        );
+    }
+
+    fn preserves_deepseek_opaque_reasoning_state(&self) -> bool {
+        self.preserve_deepseek_opaque_reasoning_state
     }
 
     fn set_collision_corpus(&mut self, collision_corpus: Vec<String>) {
         self.collision_corpus = collision_corpus;
+    }
+
+    fn text_has_redaction_candidate(&self, input: &str) -> bool {
+        !select_non_overlapping(detect_candidates_for_session_config(
+            input,
+            &self.config,
+            None,
+        ))
+        .is_empty()
     }
 
     pub(crate) fn redact_text(&mut self, input: &str) -> RedactedText {
@@ -630,6 +679,10 @@ impl fmt::Debug for RedactionSession {
             .field("bucket", &self.config.bucket())
             .field("mapping_count", &self.mappings.len())
             .field("type_counts", &counts)
+            .field(
+                "preserve_deepseek_opaque_reasoning_state",
+                &self.preserve_deepseek_opaque_reasoning_state,
+            )
             .finish()
     }
 }
@@ -972,12 +1025,29 @@ impl ChatPiiRedactionRuntimeConfigCache {
     }
 }
 
-#[derive(Clone, Copy, Default)]
-pub(crate) struct MaskChatRequestOptions;
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct MaskChatRequestOptions {
+    /// This bit is derived from the selected provider configuration, never
+    /// from request JSON. It permits byte-identical handling only for the
+    /// provider-owned, id-less continuation state used by DeepSeek's
+    /// Responses contract.
+    preserve_deepseek_opaque_reasoning_state: bool,
+}
 
 impl MaskChatRequestOptions {
     pub(crate) fn runtime() -> Self {
-        Self
+        Self::default()
+    }
+
+    pub(crate) fn with_reasoning_replay_policy(
+        mut self,
+        policy: crate::ai_serving::OpenAiResponsesReasoningReplayPolicy,
+    ) -> Self {
+        self.preserve_deepseek_opaque_reasoning_state = matches!(
+            policy,
+            crate::ai_serving::OpenAiResponsesReasoningReplayPolicy::DeepSeekOpaque
+        );
+        self
     }
 }
 
@@ -1387,7 +1457,7 @@ pub(crate) fn try_mask_chat_request_json_with_options(
     body: &[u8],
     config: RedactionSessionConfig,
     options: MaskChatRequestOptions,
-) -> Result<MaskedChatRequest, Infallible> {
+) -> Result<MaskedChatRequest, RedactionMaskError> {
     try_mask_chat_pii_request_json_with_options(
         body,
         ChatPiiRedactionRequestFormat::OpenAiChat,
@@ -1417,8 +1487,9 @@ pub(crate) fn try_mask_chat_pii_request_json_with_options(
     format: ChatPiiRedactionRequestFormat,
     config: RedactionSessionConfig,
     options: MaskChatRequestOptions,
-) -> Result<MaskedChatRequest, Infallible> {
+) -> Result<MaskedChatRequest, RedactionMaskError> {
     let mut session = RedactionSession::new(config);
+    session.apply_mask_options(options);
     let Ok(mut value) = serde_json::from_slice::<Value>(body) else {
         return Ok(MaskedChatRequest {
             body: body.to_vec(),
@@ -1428,8 +1499,10 @@ pub(crate) fn try_mask_chat_pii_request_json_with_options(
     };
 
     session.set_collision_corpus(request_collision_corpus(format, &value));
+    reject_sensitive_opaque_reasoning_state(format, &value, &session)?;
     let mut scan_state = RedactionScanState;
-    let redacted = mask_request_value(format, &mut value, &mut session, &mut scan_state, options)?;
+    let redacted = mask_request_value(format, &mut value, &mut session, &mut scan_state, options)
+        .unwrap_or_else(|never| match never {});
 
     if !redacted {
         return Ok(MaskedChatRequest {
@@ -1455,6 +1528,7 @@ pub(crate) async fn try_mask_chat_pii_request_json_with_cache_options(
     cache: Option<&RedisRedactionMappingCache<'_>>,
 ) -> Result<MaskedChatRequest, RedactionMaskError> {
     let mut session = RedactionSession::new(config);
+    session.apply_mask_options(options);
     let Ok(mut value) = serde_json::from_slice::<Value>(body) else {
         return Ok(MaskedChatRequest {
             body: body.to_vec(),
@@ -1464,6 +1538,7 @@ pub(crate) async fn try_mask_chat_pii_request_json_with_cache_options(
     };
 
     session.set_collision_corpus(request_collision_corpus(format, &value));
+    reject_sensitive_opaque_reasoning_state(format, &value, &session)?;
     let mut scan_state = RedactionScanState;
     let redacted = mask_request_value_async(
         format,
@@ -1499,9 +1574,11 @@ pub(crate) async fn try_mask_chat_pii_request_value_with_cache_options(
     cache: Option<&RedisRedactionMappingCache<'_>>,
 ) -> Result<MaskedChatRequestValue, RedactionMaskError> {
     let mut session = RedactionSession::new(config);
+    session.apply_mask_options(options);
     let mut value = body_json.clone();
 
     session.set_collision_corpus(request_collision_corpus(format, &value));
+    reject_sensitive_opaque_reasoning_state(format, &value, &session)?;
     let mut scan_state = RedactionScanState;
     let redacted = mask_request_value_async(
         format,
@@ -1530,6 +1607,62 @@ fn request_collision_corpus(format: ChatPiiRedactionRequestFormat, value: &Value
         ChatPiiRedactionRequestFormat::OpenAiResponses => openai_responses_collision_corpus(value),
         ChatPiiRedactionRequestFormat::OpenAiSearch => openai_search_collision_corpus(value),
         ChatPiiRedactionRequestFormat::ClaudeMessages => claude_messages_collision_corpus(value),
+    }
+}
+
+fn reject_sensitive_opaque_reasoning_state(
+    format: ChatPiiRedactionRequestFormat,
+    value: &Value,
+    session: &RedactionSession,
+) -> Result<(), RedactionMaskError> {
+    if !session.preserves_deepseek_opaque_reasoning_state() {
+        return Ok(());
+    }
+    if !matches!(
+        format,
+        ChatPiiRedactionRequestFormat::OpenAiResponses
+            | ChatPiiRedactionRequestFormat::OpenAiSearch
+    ) {
+        return Ok(());
+    }
+    let Some(items) = value.get("input").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    if items.iter().any(|item| {
+        item.as_object().is_some_and(|object| {
+            openai_responses_object_is_opaque_reasoning_state(object)
+                && opaque_reasoning_state_has_sensitive_text(item, session)
+        })
+    }) {
+        return Err(RedactionMaskError::SensitiveOpaqueReasoningState);
+    }
+    Ok(())
+}
+
+fn opaque_reasoning_state_has_sensitive_text(value: &Value, session: &RedactionSession) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    object.iter().any(|(key, value)| {
+        // The provider token is ciphertext/high-entropy state. Scanning it as
+        // user text would reject essentially every valid continuation (the
+        // generic API-key detector intentionally matches high-entropy data).
+        // Only this exact top-level protocol field is excluded; every other
+        // known or future string in the opaque item is scanned fail-closed.
+        key != "encrypted_content" && json_value_has_redaction_candidate(value, session)
+    })
+}
+
+fn json_value_has_redaction_candidate(value: &Value, session: &RedactionSession) -> bool {
+    match value {
+        Value::String(text) => session.text_has_redaction_candidate(text),
+        Value::Array(values) => values
+            .iter()
+            .any(|value| json_value_has_redaction_candidate(value, session)),
+        Value::Object(values) => values
+            .values()
+            .any(|value| json_value_has_redaction_candidate(value, session)),
+        _ => false,
     }
 }
 
@@ -1824,7 +1957,7 @@ fn collect_openai_responses_content_part_collision_text(part: &Value, corpus: &m
 fn response_textish_type(raw_type: Option<&str>) -> bool {
     matches!(
         raw_type,
-        Some("text" | "input_text" | "output_text" | "summary_text")
+        Some("text" | "input_text" | "output_text" | "summary_text" | "reasoning_text")
     )
 }
 
@@ -2032,6 +2165,16 @@ fn mask_openai_responses_input_item(
     let Some(item) = item.as_object_mut() else {
         return Ok(false);
     };
+    // Some Responses-compatible providers bind the clear-text reasoning
+    // payload to sibling opaque continuation state. The top-level validation
+    // rejects such an item when its text contains sensitive data; a safe item
+    // can then remain byte-identical for provider replay. Unbound reasoning
+    // text still follows the ordinary PII policy below.
+    if session.preserves_deepseek_opaque_reasoning_state()
+        && openai_responses_object_is_opaque_reasoning_state(item)
+    {
+        return Ok(false);
+    }
     let mut redacted = false;
     if let Some(content) = item.get_mut("content") {
         redacted |= mask_openai_responses_content_value(content, session, scan_state)?;
@@ -2348,6 +2491,11 @@ async fn mask_openai_responses_input_item_async(
     let Some(item) = item.as_object_mut() else {
         return Ok(false);
     };
+    if session.preserves_deepseek_opaque_reasoning_state()
+        && openai_responses_object_is_opaque_reasoning_state(item)
+    {
+        return Ok(false);
+    }
     let mut redacted = false;
     if let Some(content) = item.get_mut("content") {
         redacted |=
@@ -2530,6 +2678,12 @@ fn restore_json_response_body(
 /// 两边因此保持同一套还原语义：未映射的占位符原样保留，`type` / `model` / `id`
 /// 这类协议字段虽然也被遍历，但它们不可能包含本 session 派生出的 sentinel，
 /// 所以不会被改写。
+///
+/// Provider-owned Responses reasoning state is the exception. DeepSeek-style
+/// items bind `reasoning_text` to `encrypted_content` and require both to be
+/// replayed unchanged. Restoring a sentinel in only the text half would make
+/// the client return a different continuation item, so those objects/events
+/// stay opaque even when another response field is restored.
 pub(crate) fn restore_json_strings(value: &mut Value, session: &RedactionSession) -> bool {
     match value {
         Value::String(text) => {
@@ -2548,6 +2702,11 @@ pub(crate) fn restore_json_strings(value: &mut Value, session: &RedactionSession
             restored
         }
         Value::Object(values) => {
+            if session.preserves_deepseek_opaque_reasoning_state()
+                && openai_responses_object_is_opaque_reasoning_state(values)
+            {
+                return false;
+            }
             let mut restored = false;
             for value in values.values_mut() {
                 restored = restore_json_strings(value, session) || restored;
@@ -2556,6 +2715,38 @@ pub(crate) fn restore_json_strings(value: &mut Value, session: &RedactionSession
         }
         _ => false,
     }
+}
+
+fn openai_responses_object_is_opaque_reasoning_state(
+    object: &serde_json::Map<String, Value>,
+) -> bool {
+    let Some(item_type) = object.get("type").and_then(Value::as_str) else {
+        return false;
+    };
+    // Never treat a `reasoning_text` content part or delta/done event name by
+    // itself as proof of opaque state: ordinary OpenAI reasoning text may
+    // contain mask placeholders that still need client-side restoration. The
+    // binding evidence is the parent reasoning item carrying provider-owned
+    // encrypted continuation state. Returning here keeps that whole object,
+    // including its nested reasoning_text parts, value-for-value unchanged.
+    let id_is_absent_or_empty = object
+        .get("id")
+        .is_none_or(|id| id.is_null() || id.as_str().is_some_and(|value| value.trim().is_empty()));
+    item_type == "reasoning"
+        && id_is_absent_or_empty
+        && object
+            .get("encrypted_content")
+            .and_then(Value::as_str)
+            .is_some_and(|state| !state.trim().is_empty())
+        && object
+            .get("content")
+            .and_then(Value::as_array)
+            .is_some_and(|content| {
+                content.iter().any(|part| {
+                    part.get("type").and_then(Value::as_str) == Some("reasoning_text")
+                        && part.get("text").is_some_and(Value::is_string)
+                })
+            })
 }
 
 fn restore_text_response_body(body: &[u8], session: &RedactionSession) -> RestoredSyncResponseBody {
@@ -4091,14 +4282,14 @@ fn redacted_sentinel_debug(sentinel: &str) -> String {
 mod tests {
     use super::{
         build_redaction_session_config, detect_candidates_with_probe, mask_chat_request_json,
-        mask_chat_request_json_with_options, parse_chat_pii_redaction_rules,
+        mask_chat_request_json_with_options, parse_chat_pii_redaction_rules, restore_json_strings,
         restore_sync_response_body, try_mask_chat_pii_request_json_with_options,
         try_mask_chat_pii_request_value_with_cache_options,
         try_mask_chat_request_json_with_cache_options, try_mask_chat_request_json_with_options,
         ChatPiiRedactionRequestFormat, ChatPiiRedactionRuntimeConfig, DetectorProbe, MappingKey,
-        MaskChatRequestOptions, RedactionKind, RedactionMapping, RedactionSession,
-        RedactionSessionConfig, RedactionSessionSlot, RedisRedactionMappingCache, SentinelMatcher,
-        StreamingResponseRestorer,
+        MaskChatRequestOptions, RedactionKind, RedactionMapping, RedactionMaskError,
+        RedactionSession, RedactionSessionConfig, RedactionSessionSlot, RedisRedactionMappingCache,
+        SentinelMatcher, StreamingResponseRestorer,
     };
     use std::collections::BTreeMap;
     use std::time::Duration;
@@ -4770,6 +4961,349 @@ mod tests {
             .as_str()
             .expect("arguments should remain a string")
             .contains("secretValueABCDEF1234567890abcdef"));
+    }
+
+    #[test]
+    fn pii_redaction_preserves_opaque_reasoning_state_while_masking_user_input() {
+        let request = json!({
+            "model": "deepseek-reasoner",
+            "input": [
+                {
+                    "type": "reasoning",
+                    "encrypted_content": "opaque-state-must-remain-byte-identical",
+                    "future_state": {"version": 2},
+                    "content": [
+                        {
+                            "type": "reasoning_text",
+                            "text": "Provider reasoning state must remain byte-identical"
+                        },
+                        {
+                            "type": "summary_text",
+                            "text": "Bound future text must also remain byte-identical"
+                        }
+                    ]
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": "Please contact bob@example.net"
+                    }]
+                }
+            ]
+        });
+        let raw = serde_json::to_vec(&request).expect("request should serialize");
+
+        let masked = try_mask_chat_pii_request_json_with_options(
+            &raw,
+            ChatPiiRedactionRequestFormat::OpenAiResponses,
+            test_config(),
+            deepseek_opaque_replay_options(),
+        )
+        .expect("reasoning request should mask");
+
+        assert!(masked.redacted);
+        let masked_json: serde_json::Value =
+            serde_json::from_slice(&masked.body).expect("masked request should stay valid JSON");
+        assert_eq!(
+            masked_json["input"][0]["encrypted_content"],
+            "opaque-state-must-remain-byte-identical"
+        );
+        assert_eq!(
+            masked_json["input"][0]["future_state"],
+            json!({"version": 2})
+        );
+        assert_eq!(
+            masked_json["input"][0]["content"][0]["text"],
+            "Provider reasoning state must remain byte-identical"
+        );
+        assert_eq!(
+            masked_json["input"][0]["content"][1]["text"],
+            "Bound future text must also remain byte-identical",
+            "the complete provider-bound item must remain unchanged"
+        );
+        let user_text = masked_json["input"][1]["content"][0]["text"]
+            .as_str()
+            .expect("user text should remain a string");
+        assert!(!user_text.contains("bob@example.net"));
+        assert!(user_text.contains("<AETHER:EMAIL:"));
+
+        let sentinel = masked
+            .session
+            .sentinel_for_original("bob@example.net")
+            .expect("masked user email should have a sentinel");
+        let provider_response = serde_json::to_vec(&json!({
+            "output": [
+                {
+                    "type": "reasoning",
+                    "encrypted_content": "provider-bound-state",
+                    "future_state": {"version": 3},
+                    "content": [{
+                        "type": "reasoning_text",
+                        "text": format!("opaque {sentinel}")
+                    }]
+                },
+                {
+                    "type": "message",
+                    "content": [{
+                        "type": "output_text",
+                        "text": format!("visible {sentinel}")
+                    }]
+                }
+            ]
+        }))
+        .expect("provider response should serialize");
+        let mut headers =
+            BTreeMap::from([("content-type".to_string(), "application/json".to_string())]);
+        let restored =
+            restore_sync_response_body(&mut headers, provider_response.as_slice(), &masked.session)
+                .expect("provider response should restore");
+        let restored_json: serde_json::Value =
+            serde_json::from_slice(&restored.body).expect("restored response should remain JSON");
+        let nested_reasoning_text = restored_json["output"][0]["content"][0].clone();
+        assert_eq!(
+            restored_json["output"][0]["content"][0]["text"],
+            format!("opaque {sentinel}"),
+            "provider-bound reasoning text must remain byte-identical"
+        );
+        assert_eq!(
+            restored_json["output"][0]["encrypted_content"],
+            "provider-bound-state"
+        );
+        assert_eq!(
+            restored_json["output"][0]["future_state"],
+            json!({"version": 3})
+        );
+        assert_eq!(
+            restored_json["output"][1]["content"][0]["text"], "visible bob@example.net",
+            "ordinary assistant output should still be restored"
+        );
+        assert_eq!(
+            nested_reasoning_text,
+            json!({
+                "type": "reasoning_text",
+                "text": format!("opaque {sentinel}")
+            }),
+            "opaque reasoning parts must retain all original fields and values"
+        );
+    }
+
+    #[test]
+    fn pii_redaction_rejects_sensitive_provider_bound_reasoning_state() {
+        let request = json!({
+            "model": "deepseek-reasoner",
+            "input": [{
+                "type": "reasoning",
+                "encrypted_content": "opaque-state-must-remain-byte-identical",
+                "content": [{
+                    "type": "reasoning_text",
+                    "text": "Provider state contains alice@example.com"
+                }]
+            }]
+        });
+        let raw = serde_json::to_vec(&request).expect("request should serialize");
+
+        let error = try_mask_chat_pii_request_json_with_options(
+            &raw,
+            ChatPiiRedactionRequestFormat::OpenAiResponses,
+            test_config(),
+            deepseek_opaque_replay_options(),
+        )
+        .expect_err("sensitive opaque state must fail closed");
+
+        assert_eq!(error, RedactionMaskError::SensitiveOpaqueReasoningState);
+    }
+
+    #[test]
+    fn forged_opaque_reasoning_shape_cannot_opt_out_of_pii_masking() {
+        let request = json!({
+            "model": "client-selected-model",
+            "input": [{
+                "type": "reasoning",
+                "encrypted_content": "client-forged-opaque-state",
+                "content": [{
+                    "type": "reasoning_text",
+                    "text": "Send this to alice@example.com"
+                }]
+            }]
+        });
+        let raw = serde_json::to_vec(&request).expect("request should serialize");
+
+        let masked = try_mask_chat_pii_request_json_with_options(
+            &raw,
+            ChatPiiRedactionRequestFormat::OpenAiResponses,
+            test_config(),
+            MaskChatRequestOptions::runtime(),
+        )
+        .expect("an untrusted reasoning shape should use ordinary masking");
+
+        assert!(masked.redacted);
+        let masked_json: Value =
+            serde_json::from_slice(&masked.body).expect("masked request should remain JSON");
+        let text = masked_json["input"][0]["content"][0]["text"]
+            .as_str()
+            .expect("reasoning text should remain a string");
+        assert!(!text.contains("alice@example.com"));
+        assert!(text.contains("<AETHER:EMAIL:"));
+        assert_eq!(
+            masked_json["input"][0]["encrypted_content"],
+            "client-forged-opaque-state"
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_pii_redaction_rejects_sensitive_provider_bound_reasoning_state() {
+        let request = json!({
+            "model": "deepseek-reasoner",
+            "input": [{
+                "type": "reasoning",
+                "encrypted_content": "opaque-state-must-remain-byte-identical",
+                "future_state": {
+                    "nested": {"future_owner": "alice@example.com"}
+                },
+                "content": [{
+                    "type": "reasoning_text",
+                    "text": "Provider state remains byte-identical"
+                }]
+            }]
+        });
+
+        let error = try_mask_chat_pii_request_value_with_cache_options(
+            &request,
+            ChatPiiRedactionRequestFormat::OpenAiResponses,
+            test_config(),
+            deepseek_opaque_replay_options(),
+            None,
+        )
+        .await
+        .expect_err("sensitive future text in opaque state must fail closed");
+
+        assert_eq!(error, RedactionMaskError::SensitiveOpaqueReasoningState);
+    }
+
+    #[test]
+    fn pii_restore_still_restores_unbound_reasoning_text_events() {
+        let masked = try_mask_chat_pii_request_json_with_options(
+            br#"{"model":"gpt","input":"alice@example.com"}"#,
+            ChatPiiRedactionRequestFormat::OpenAiResponses,
+            test_config(),
+            MaskChatRequestOptions::runtime(),
+        )
+        .expect("input should mask");
+        let sentinel = masked
+            .session
+            .sentinel_for_original("alice@example.com")
+            .expect("masked email should have a sentinel");
+        let mut event = json!({
+            "type": "response.reasoning_text.delta",
+            "delta": format!("thinking about {sentinel}")
+        });
+
+        assert!(restore_json_strings(&mut event, &masked.session));
+        assert_eq!(
+            event["delta"], "thinking about alice@example.com",
+            "an event name alone must not be treated as opaque bound state"
+        );
+
+        let mut unbound_part = json!({
+            "type": "reasoning_text",
+            "text": format!("thinking about {sentinel}")
+        });
+        assert!(restore_json_strings(&mut unbound_part, &masked.session));
+        assert_eq!(
+            unbound_part["text"], "thinking about alice@example.com",
+            "a reasoning_text part without encrypted parent state must still restore"
+        );
+
+        let unbound_request = json!({
+            "model": "gpt",
+            "input": [{
+                "type": "reasoning",
+                "content": [{
+                    "type": "reasoning_text",
+                    "text": "unbound alice@example.com"
+                }]
+            }]
+        });
+        let unbound_raw =
+            serde_json::to_vec(&unbound_request).expect("unbound request should serialize");
+        let unbound_masked = try_mask_chat_pii_request_json_with_options(
+            &unbound_raw,
+            ChatPiiRedactionRequestFormat::OpenAiResponses,
+            test_config(),
+            MaskChatRequestOptions::runtime(),
+        )
+        .expect("unbound reasoning request should mask");
+        let unbound_masked_json: Value = serde_json::from_slice(&unbound_masked.body)
+            .expect("masked unbound request should remain JSON");
+        let masked_reasoning_text = unbound_masked_json["input"][0]["content"][0]["text"]
+            .as_str()
+            .expect("unbound reasoning text should remain a string");
+        assert!(!masked_reasoning_text.contains("alice@example.com"));
+        assert!(masked_reasoning_text.contains("<AETHER:EMAIL:"));
+
+        let mut invalid_opaque_item = json!({
+            "type": "reasoning",
+            "encrypted_content": "non-empty-but-unbound",
+            "content": [{
+                "type": "summary_text",
+                "text": format!("thinking about {sentinel}")
+            }]
+        });
+        assert!(restore_json_strings(
+            &mut invalid_opaque_item,
+            &masked.session
+        ));
+        assert_eq!(
+            invalid_opaque_item["content"][0]["text"], "thinking about alice@example.com",
+            "encrypted state without a reasoning_text part must not suppress restoration"
+        );
+
+        let mut identified_reasoning_item = json!({
+            "type": "reasoning",
+            "id": "rs_provider_123",
+            "encrypted_content": "provider-state",
+            "content": [{
+                "type": "reasoning_text",
+                "text": format!("thinking about {sentinel}")
+            }]
+        });
+        assert!(restore_json_strings(
+            &mut identified_reasoning_item,
+            &masked.session
+        ));
+        assert_eq!(
+            identified_reasoning_item["content"][0]["text"], "thinking about alice@example.com",
+            "only id-less DeepSeek-style state may bypass ordinary restoration"
+        );
+
+        let identified_request = json!({
+            "model": "gpt",
+            "input": [{
+                "type": "reasoning",
+                "id": "rs_provider_123",
+                "encrypted_content": "provider-state",
+                "content": [{
+                    "type": "reasoning_text",
+                    "text": "identified alice@example.com"
+                }]
+            }]
+        });
+        let identified_masked = try_mask_chat_pii_request_json_with_options(
+            &serde_json::to_vec(&identified_request).expect("request should serialize"),
+            ChatPiiRedactionRequestFormat::OpenAiResponses,
+            test_config(),
+            MaskChatRequestOptions::runtime(),
+        )
+        .expect("identified reasoning request should mask");
+        let identified_masked_json: Value = serde_json::from_slice(&identified_masked.body)
+            .expect("identified reasoning request should remain JSON");
+        let identified_text = identified_masked_json["input"][0]["content"][0]["text"]
+            .as_str()
+            .expect("identified reasoning text should remain a string");
+        assert!(!identified_text.contains("alice@example.com"));
+        assert!(identified_text.contains("<AETHER:EMAIL:"));
     }
 
     #[test]
@@ -5966,5 +6500,11 @@ mod tests {
 
     fn test_config() -> RedactionSessionConfig {
         RedactionSessionConfig::new(b"redaction-test-key".to_vec(), 300, 600)
+    }
+
+    fn deepseek_opaque_replay_options() -> MaskChatRequestOptions {
+        MaskChatRequestOptions::runtime().with_reasoning_replay_policy(
+            crate::ai_serving::OpenAiResponsesReasoningReplayPolicy::DeepSeekOpaque,
+        )
     }
 }

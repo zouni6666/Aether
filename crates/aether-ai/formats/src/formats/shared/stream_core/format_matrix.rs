@@ -418,6 +418,7 @@ impl ProviderStreamParser {
             FormatId::ClaudeMessages => Self::Claude(ClaudeProviderState::default()),
             FormatId::GeminiGenerateContent => Self::Gemini(GeminiProviderState::default()),
             FormatId::OpenAiEmbedding
+            | FormatId::OpenAiRealtime
             | FormatId::OpenAiSearch
             | FormatId::OpenAiRerank
             | FormatId::GeminiEmbedding
@@ -425,7 +426,8 @@ impl ProviderStreamParser {
             | FormatId::JinaEmbedding
             | FormatId::JinaRerank
             | FormatId::DoubaoEmbedding
-            | FormatId::AliyunMultimodalEmbedding => return None,
+            | FormatId::AliyunMultimodalEmbedding
+            | FormatId::CodexLive => return None,
         })
     }
 
@@ -537,6 +539,7 @@ impl ClientStreamEmitter {
             FormatId::ClaudeMessages => Self::Claude(ClaudeClientEmitter::default()),
             FormatId::GeminiGenerateContent => Self::Gemini(GeminiClientEmitter::default()),
             FormatId::OpenAiEmbedding
+            | FormatId::OpenAiRealtime
             | FormatId::OpenAiSearch
             | FormatId::OpenAiRerank
             | FormatId::GeminiEmbedding
@@ -544,7 +547,8 @@ impl ClientStreamEmitter {
             | FormatId::JinaEmbedding
             | FormatId::JinaRerank
             | FormatId::DoubaoEmbedding
-            | FormatId::AliyunMultimodalEmbedding => return None,
+            | FormatId::AliyunMultimodalEmbedding
+            | FormatId::CodexLive => return None,
         })
     }
 
@@ -660,13 +664,15 @@ fn parse_provider_error(
             parse_gemini_error(payload)
         }
         FormatId::OpenAiEmbedding
+        | FormatId::OpenAiRealtime
         | FormatId::OpenAiSearch
         | FormatId::OpenAiRerank
         | FormatId::GeminiEmbedding
         | FormatId::JinaEmbedding
         | FormatId::JinaRerank
         | FormatId::DoubaoEmbedding
-        | FormatId::AliyunMultimodalEmbedding => None,
+        | FormatId::AliyunMultimodalEmbedding
+        | FormatId::CodexLive => None,
     }
 }
 

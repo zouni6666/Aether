@@ -16,7 +16,7 @@ use crate::provider_pool_demand::{
 use crate::upstream_admission::UpstreamTargetAdmissionPermit;
 use crate::{AppState, GatewayError};
 
-pub(super) struct ResponsesWebSocketTurnAdmission {
+pub(crate) struct ResponsesWebSocketTurnAdmission {
     upstream_execution: Option<aether_runtime::ConcurrencyPermit>,
     upstream_target: Option<UpstreamTargetAdmissionPermit>,
     provider_pool: Option<ProviderPoolInFlightGuard>,
@@ -24,7 +24,7 @@ pub(super) struct ResponsesWebSocketTurnAdmission {
 }
 
 impl ResponsesWebSocketTurnAdmission {
-    pub(super) async fn acquire(
+    pub(crate) async fn acquire(
         state: &AppState,
         plan: &ExecutionPlan,
         trace_id: &str,
@@ -61,7 +61,7 @@ impl ResponsesWebSocketTurnAdmission {
     /// Release the distributed provider token before the turn's persistence
     /// work. The remaining permits are local RAII guards and are dropped with
     /// this value.
-    pub(super) async fn release(mut self) {
+    pub(crate) async fn release(mut self) {
         if let Some(provider_pool) = self.provider_pool.take() {
             provider_pool.release().await;
         }

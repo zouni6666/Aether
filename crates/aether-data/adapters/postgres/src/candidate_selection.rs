@@ -73,7 +73,7 @@ INNER JOIN LATERAL (
       (
         LOWER(BTRIM(p.provider_type)) = 'codex'
         AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
-        AND LOWER($3) IN ('openai:responses', 'openai:responses:compact', 'openai:search', 'openai:image')
+        AND LOWER($3) IN ('openai:responses', 'openai:responses:compact', 'openai:search', 'openai:image', 'codex:live')
       )
       OR (
         LOWER(BTRIM(p.provider_type)) = 'chatgpt_web'
@@ -158,7 +158,7 @@ WHERE p.is_active = TRUE
     (
       LOWER(BTRIM(p.provider_type)) = 'codex'
       AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
-      AND LOWER($3) IN ('openai:responses', 'openai:responses:compact', 'openai:search', 'openai:image')
+      AND LOWER($3) IN ('openai:responses', 'openai:responses:compact', 'openai:search', 'openai:image', 'codex:live')
     )
     OR (
       LOWER(BTRIM(p.provider_type)) = 'chatgpt_web'
@@ -336,7 +336,7 @@ INNER JOIN LATERAL (
       (
         LOWER(BTRIM(p.provider_type)) = 'codex'
         AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
-        AND LOWER($4) IN ('openai:responses', 'openai:responses:compact', 'openai:search', 'openai:image')
+        AND LOWER($4) IN ('openai:responses', 'openai:responses:compact', 'openai:search', 'openai:image', 'codex:live')
       )
       OR (
         LOWER(BTRIM(p.provider_type)) = 'chatgpt_web'
@@ -422,7 +422,7 @@ WHERE p.is_active = TRUE
     (
       LOWER(BTRIM(p.provider_type)) = 'codex'
       AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
-      AND LOWER($4) IN ('openai:responses', 'openai:responses:compact', 'openai:search', 'openai:image')
+      AND LOWER($4) IN ('openai:responses', 'openai:responses:compact', 'openai:search', 'openai:image', 'codex:live')
     )
     OR (
       LOWER(BTRIM(p.provider_type)) = 'chatgpt_web'
@@ -608,7 +608,7 @@ WHERE p.is_active = TRUE
     (
       LOWER(BTRIM(p.provider_type)) = 'codex'
       AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
-      AND LOWER($6) IN ('openai:responses', 'openai:responses:compact', 'openai:search', 'openai:image')
+      AND LOWER($6) IN ('openai:responses', 'openai:responses:compact', 'openai:search', 'openai:image', 'codex:live')
     )
     OR (
       LOWER(BTRIM(p.provider_type)) = 'chatgpt_web'
@@ -971,6 +971,17 @@ impl SqlxMinimalCandidateSelectionReadRepository {
     }
 }
 
+const PROVIDER_MODEL_MAPPING_API_FORMAT_MATCH_MARKER: &str =
+    "__AETHER_PROVIDER_MODEL_MAPPING_API_FORMAT_MATCH__";
+const PROVIDER_MODEL_MAPPING_API_FORMAT_MATCH_SQL: &str = r#"(
+  LOWER(BTRIM(fmt.value)) = ANY($3::text[])
+  OR (
+    LOWER(BTRIM(p.provider_type)) = 'codex'
+    AND LOWER($4) = 'codex:live'
+    AND LOWER(BTRIM(fmt.value)) = 'openai:responses'
+  )
+)"#;
+
 fn requested_model_selection_sql() -> String {
     LIST_FOR_EXACT_API_FORMAT_AND_GLOBAL_MODEL_SQL
         .replace(
@@ -996,7 +1007,7 @@ fn requested_model_selection_sql() -> String {
             OR EXISTS (
               SELECT 1
               FROM jsonb_array_elements_text(mapping.value -> 'api_formats') AS fmt(value)
-              WHERE LOWER(BTRIM(fmt.value)) = ANY($3::text[])
+              WHERE __AETHER_PROVIDER_MODEL_MAPPING_API_FORMAT_MATCH__
             )
           )
           AND (
@@ -1054,7 +1065,7 @@ fn requested_model_selection_sql() -> String {
               OR EXISTS (
                 SELECT 1
                 FROM jsonb_array_elements_text(mapping.value -> 'api_formats') AS fmt(value)
-                WHERE LOWER(BTRIM(fmt.value)) = ANY($3::text[])
+                WHERE __AETHER_PROVIDER_MODEL_MAPPING_API_FORMAT_MATCH__
               )
             )
             AND (
@@ -1087,7 +1098,7 @@ fn requested_model_selection_sql() -> String {
             OR EXISTS (
               SELECT 1
               FROM jsonb_array_elements_text(mapping.value -> 'api_formats') AS fmt(value)
-              WHERE LOWER(BTRIM(fmt.value)) = ANY($3::text[])
+              WHERE __AETHER_PROVIDER_MODEL_MAPPING_API_FORMAT_MATCH__
             )
           )
           AND (
@@ -1102,6 +1113,10 @@ fn requested_model_selection_sql() -> String {
       )
     )
   )"#,
+        )
+        .replace(
+            PROVIDER_MODEL_MAPPING_API_FORMAT_MATCH_MARKER,
+            PROVIDER_MODEL_MAPPING_API_FORMAT_MATCH_SQL,
         )
         .replace(
             "ORDER BY\n  provider_priority ASC,",
@@ -1494,7 +1509,8 @@ mod tests {
         requested_model_selection_page_sql, requested_model_selection_sql,
         SqlxMinimalCandidateSelectionReadRepository,
         LIST_FOR_EXACT_API_FORMAT_AND_GLOBAL_MODEL_SQL, LIST_FOR_EXACT_API_FORMAT_SQL,
-        LIST_POOL_KEYS_FOR_GROUP_SQL,
+        LIST_POOL_KEYS_FOR_GROUP_SQL, PROVIDER_MODEL_MAPPING_API_FORMAT_MATCH_MARKER,
+        PROVIDER_MODEL_MAPPING_API_FORMAT_MATCH_SQL,
     };
     use crate::{PostgresPoolConfig, PostgresPoolFactory};
     use aether_data_contracts::repository::candidate_selection::{
@@ -1564,6 +1580,36 @@ mod tests {
             assert!(sql.contains("LOWER(BTRIM(pak.auth_type)) IN ('oauth', 'bearer')"));
             assert!(sql.contains("'chatgpt_web',"));
         }
+    }
+
+    #[test]
+    fn candidate_selection_sql_allows_codex_live_oauth_auth() {
+        let requested_model_sql = requested_model_selection_sql();
+        for sql in [
+            LIST_FOR_EXACT_API_FORMAT_SQL,
+            LIST_FOR_EXACT_API_FORMAT_AND_GLOBAL_MODEL_SQL,
+            LIST_POOL_KEYS_FOR_GROUP_SQL,
+            requested_model_sql.as_str(),
+        ] {
+            assert!(sql.contains("LOWER(BTRIM(p.provider_type)) = 'codex'"));
+            assert!(sql.contains("LOWER(BTRIM(pak.auth_type)) = 'oauth'"));
+            assert!(sql.contains("'codex:live'"));
+        }
+    }
+
+    #[test]
+    fn requested_model_sql_scopes_legacy_responses_mapping_to_codex_live() {
+        let sql = requested_model_selection_sql();
+        let compatibility = PROVIDER_MODEL_MAPPING_API_FORMAT_MATCH_SQL;
+
+        assert_eq!(sql.matches(compatibility).count(), 3);
+        assert!(!sql.contains(PROVIDER_MODEL_MAPPING_API_FORMAT_MATCH_MARKER));
+        assert!(compatibility.contains("LOWER(BTRIM(p.provider_type)) = 'codex'"));
+        assert!(compatibility.contains("LOWER($4) = 'codex:live'"));
+        assert!(compatibility.contains("LOWER(BTRIM(fmt.value)) = 'openai:responses'"));
+        assert!(!LIST_FOR_EXACT_API_FORMAT_SQL.contains(compatibility));
+        assert!(!LIST_FOR_EXACT_API_FORMAT_AND_GLOBAL_MODEL_SQL.contains(compatibility));
+        assert!(!LIST_POOL_KEYS_FOR_GROUP_SQL.contains(compatibility));
     }
 
     #[test]

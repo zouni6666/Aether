@@ -4,10 +4,11 @@ use async_trait::async_trait;
 use sqlx::{mysql::MySqlRow, MySql, QueryBuilder, Row};
 
 use aether_data_contracts::repository::candidate_selection::{
-    MinimalCandidateSelectionReadRepository, StoredApiFormatCandidateRowsQuery,
-    StoredMinimalCandidateSelectionRow, StoredPoolKeyCandidateOrder,
-    StoredPoolKeyCandidateRowsByKeyIdsQuery, StoredPoolKeyCandidateRowsQuery,
-    StoredProviderModelMapping, StoredRequestedModelCandidateRowsQuery,
+    provider_model_mapping_api_format_covers, MinimalCandidateSelectionReadRepository,
+    StoredApiFormatCandidateRowsQuery, StoredMinimalCandidateSelectionRow,
+    StoredPoolKeyCandidateOrder, StoredPoolKeyCandidateRowsByKeyIdsQuery,
+    StoredPoolKeyCandidateRowsQuery, StoredProviderModelMapping,
+    StoredRequestedModelCandidateRowsQuery,
 };
 use aether_data_contracts::DataLayerError;
 
@@ -675,9 +676,9 @@ fn mapping_scope_matches(
     api_format: &str,
 ) -> bool {
     mapping.api_formats.as_ref().is_none_or(|formats| {
-        formats
-            .iter()
-            .any(|value| api_format_scope_covers(value, api_format))
+        formats.iter().any(|value| {
+            provider_model_mapping_api_format_covers(&row.provider_type, value, api_format)
+        })
     }) && mapping.endpoint_ids.as_ref().is_none_or(|endpoint_ids| {
         endpoint_ids
             .iter()
@@ -690,7 +691,7 @@ fn push_key_auth_channel_filter(builder: &mut QueryBuilder<'_, MySql>, api_forma
     builder.push(" AND LOWER(TRIM(pak.auth_type)) = 'oauth' AND ");
     builder.push_bind(api_format.to_string());
     builder.push(
-        " IN ('openai:responses', 'openai:responses:compact', 'openai:search', 'openai:image'))",
+        " IN ('openai:responses', 'openai:responses:compact', 'openai:search', 'openai:image', 'codex:live'))",
     );
 
     builder.push(" OR (LOWER(TRIM(p.provider_type)) = 'chatgpt_web'");
@@ -749,6 +750,7 @@ fn key_auth_channel_matches(row: &CandidateSelectionRow, api_format: &str) -> bo
                         | "openai:responses:compact"
                         | "openai:search"
                         | "openai:image"
+                        | "codex:live"
                 )
         }
         "chatgpt_web" => {
@@ -1096,10 +1098,6 @@ fn api_format_matches(left: &str, right: &str) -> bool {
     aether_ai_formats::api_format_alias_matches(left, right)
 }
 
-fn api_format_scope_covers(allowed: &str, requested: &str) -> bool {
-    aether_ai_formats::api_format_permission_covers(allowed, requested)
-}
-
 fn sql_match_aliases(api_formats: &[String]) -> Vec<String> {
     api_formats
         .iter()
@@ -1111,6 +1109,7 @@ fn sql_match_aliases(api_formats: &[String]) -> Vec<String> {
 mod tests {
     use super::{
         api_format_page_query, pool_key_group_by_key_ids_query, pool_key_group_query,
+        provider_model_mapping_api_format_covers, push_key_auth_channel_filter,
         requested_model_page_query, vertex_key_auth_channel_matches, ExactPageAccumulator,
         MysqlMinimalCandidateSelectionReadRepository, REQUESTED_MODEL_RAW_SCAN_LIMIT,
     };
@@ -1145,6 +1144,47 @@ mod tests {
         assert!(sql.contains("LOCATE(?, m.provider_model_mappings) > 0"));
         assert!(sql.contains("ROW_NUMBER() OVER ("));
         assert!(sql.contains("LIMIT ? OFFSET ?"));
+    }
+
+    #[test]
+    fn codex_auth_sql_allows_live_for_oauth_keys() {
+        let mut builder = sqlx::QueryBuilder::<sqlx::MySql>::new("SELECT 1 WHERE 1 = 1");
+        push_key_auth_channel_filter(&mut builder, "codex:live");
+        let sql = builder.sql();
+        let codex_clause = sql
+            .split_once("LOWER(TRIM(p.provider_type)) = 'codex'")
+            .and_then(|(_, suffix)| {
+                suffix.split_once("LOWER(TRIM(p.provider_type)) = 'chatgpt_web'")
+            })
+            .map(|(clause, _)| clause)
+            .expect("Codex auth clause should exist");
+
+        assert!(codex_clause.contains("LOWER(TRIM(pak.auth_type)) = 'oauth'"));
+        assert!(codex_clause.contains("'codex:live'"));
+    }
+
+    #[test]
+    fn mysql_mapping_scope_keeps_legacy_responses_compatibility_codex_only() {
+        assert!(provider_model_mapping_api_format_covers(
+            "codex",
+            "openai:responses",
+            "codex:live"
+        ));
+        assert!(!provider_model_mapping_api_format_covers(
+            "openai",
+            "openai:responses",
+            "codex:live"
+        ));
+        assert!(!provider_model_mapping_api_format_covers(
+            "custom",
+            "openai:responses",
+            "codex:live"
+        ));
+        assert!(!provider_model_mapping_api_format_covers(
+            "codex",
+            "openai:chat",
+            "codex:live"
+        ));
     }
 
     #[test]

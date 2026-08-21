@@ -770,6 +770,12 @@ const ADMIN_API_FORMAT_DEFINITIONS: &[AdminApiFormatDefinition] = &[
         aliases: &["responses_compact"],
     },
     AdminApiFormatDefinition {
+        value: "openai:realtime",
+        label: "OpenAI Realtime",
+        default_path: "/v1/realtime",
+        aliases: &["openai_realtime", "realtime"],
+    },
+    AdminApiFormatDefinition {
         value: "openai:search",
         label: "OpenAI Search",
         default_path: "/v1/alpha/search",
@@ -798,6 +804,12 @@ const ADMIN_API_FORMAT_DEFINITIONS: &[AdminApiFormatDefinition] = &[
         label: "OpenAI Video",
         default_path: "/v1/videos",
         aliases: &["openai_video", "sora"],
+    },
+    AdminApiFormatDefinition {
+        value: "codex:live",
+        label: "Codex Live",
+        default_path: "/v1/live",
+        aliases: &["codex_live", "live"],
     },
     AdminApiFormatDefinition {
         value: "claude:messages",
@@ -3120,6 +3132,32 @@ fn mask_admin_proxy_node_password(password: Option<&str>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn api_formats_payload_exposes_realtime_and_codex_live_separately() {
+        let payload = build_admin_api_formats_payload();
+        let formats = payload["formats"]
+            .as_array()
+            .expect("formats payload should be an array");
+        let realtime = formats
+            .iter()
+            .find(|format| format["value"] == "openai:realtime")
+            .expect("OpenAI Realtime format should be registered");
+        let live = formats
+            .iter()
+            .find(|format| format["value"] == "codex:live")
+            .expect("Codex Live format should be registered");
+
+        assert_eq!(realtime["label"], "OpenAI Realtime");
+        assert_eq!(realtime["default_path"], "/v1/realtime");
+        assert_eq!(
+            realtime["aliases"],
+            serde_json::json!(["openai_realtime", "realtime"])
+        );
+        assert_eq!(live["label"], "Codex Live");
+        assert_eq!(live["default_path"], "/v1/live");
+        assert_eq!(live["aliases"], serde_json::json!(["codex_live", "live"]));
+    }
 
     #[test]
     fn build_admin_system_check_update_payload_reports_available_release() {

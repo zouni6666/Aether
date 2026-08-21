@@ -20,6 +20,10 @@ use super::request::response_create_has_previous_response_id;
 #[derive(Debug, Clone)]
 pub(super) struct LogicalTurn {
     pub(super) client_event: Value,
+    /// Effective `store` after provider body rules and WebSocket framing. Only
+    /// an explicit provider-side `true` permits cross-connection registry
+    /// state; false or absent remains ZDR/connection-local.
+    pub(super) provider_store: bool,
     pub(super) turn_index: u64,
     pub(super) logical_turn_id: String,
     pub(super) turn_attempt: u32,
@@ -35,6 +39,7 @@ impl LogicalTurn {
     pub(super) fn new(client_event: Value, turn_index: u64, logical_turn_id: String) -> Self {
         Self {
             client_event,
+            provider_store: false,
             turn_index,
             logical_turn_id,
             turn_attempt: 1,
@@ -46,6 +51,11 @@ impl LogicalTurn {
 
     pub(super) fn with_turn_control(mut self, turn_control: ResponsesWebSocketTurnControl) -> Self {
         self.turn_control = Some(turn_control);
+        self
+    }
+
+    pub(super) fn with_provider_store(mut self, provider_store: bool) -> Self {
+        self.provider_store = provider_store;
         self
     }
 

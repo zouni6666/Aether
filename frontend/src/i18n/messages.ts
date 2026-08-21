@@ -1794,6 +1794,7 @@ const legacyExactEnglishMessages: Record<string, string> = {
   '端点已启用': 'Endpoint enabled',
   '端点已停用': 'Endpoint disabled',
   '请先关闭系统级开关': 'Turn off the system-level switch first',
+  'WebSocket 端点不支持格式转换': 'WebSocket endpoints do not support format conversion',
   '请先关闭提供商级开关': 'Turn off the provider-level switch first',
   'JSON 规则已应用': 'JSON rules applied',
   '规则 JSON 必须是对象': 'Rules JSON must be an object',

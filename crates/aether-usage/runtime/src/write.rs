@@ -3,8 +3,9 @@ use std::collections::BTreeMap;
 use aether_ai_formats::UPSTREAM_IS_STREAM_KEY;
 use aether_contracts::{ExecutionPlan, ExecutionTelemetry};
 use aether_data_contracts::repository::usage::{
-    UpsertUsageRecord, UsageBodyCaptureState, WEBSOCKET_MODE_METADATA_KEY,
-    WEBSOCKET_TRANSPORT_METADATA_KEY,
+    UpsertUsageRecord, UsageBodyCaptureState, LIVE_SESSION_METADATA_KEY,
+    USAGE_AVAILABLE_METADATA_KEY, USAGE_PRICING_AVAILABLE_METADATA_KEY,
+    WEBSOCKET_MODE_METADATA_KEY, WEBSOCKET_TRANSPORT_METADATA_KEY,
 };
 use aether_data_contracts::DataLayerError;
 use base64::Engine as _;
@@ -2128,6 +2129,21 @@ fn build_runtime_request_metadata_seed_from_parts(
             WEBSOCKET_TRANSPORT_METADATA_KEY.to_string(),
             Value::String(websocket_transport),
         );
+    }
+    if let Some(usage_available) = context_bool(context, USAGE_AVAILABLE_METADATA_KEY) {
+        metadata.insert(
+            USAGE_AVAILABLE_METADATA_KEY.to_string(),
+            Value::Bool(usage_available),
+        );
+    }
+    if let Some(pricing_available) = context_bool(context, USAGE_PRICING_AVAILABLE_METADATA_KEY) {
+        metadata.insert(
+            USAGE_PRICING_AVAILABLE_METADATA_KEY.to_string(),
+            Value::Bool(pricing_available),
+        );
+    }
+    if let Some(live_session) = context_value_ref(context, LIVE_SESSION_METADATA_KEY) {
+        metadata.insert(LIVE_SESSION_METADATA_KEY.to_string(), live_session.clone());
     }
     let provider_source_bytes = provider_request_body_base64.and_then(decoded_base64_len_hint);
     append_runtime_body_capture_metadata(

@@ -47,7 +47,15 @@ vi.mock('@/components/ui', async () => {
     TableCell: passthrough('TableCellStub', 'td'),
     Pagination: passthrough('PaginationStub'),
     SortableTableHead: passthrough('SortableTableHeadStub', 'th'),
-    TableFilterMenu: passthrough('TableFilterMenuStub'),
+    TableFilterMenu: defineComponent({
+      name: 'TableFilterMenuStub',
+      props: { options: Array },
+      setup(props) {
+        return () => h('div', { 'data-table-filter-menu': '' },
+          (props.options as Array<{ value: string, label: string }> | undefined)
+            ?.map(option => h('div', { 'data-filter-value': option.value }, option.label)))
+      },
+    }),
   }
 })
 
@@ -351,6 +359,50 @@ describe('UsageRecordsTable', () => {
     const badges = [...root.querySelectorAll<HTMLElement>('[data-usage-transport="websocket"]')]
     expect(badges.length).toBeGreaterThan(0)
     expect(badges.every(badge => badge.textContent?.trim() === 'WS')).toBe(true)
+  })
+
+  it('offers a WebSocket type filter in both filter menus', () => {
+    const root = mountUsageRecordsTable([buildRecord()])
+
+    const labels = [...root.querySelectorAll<HTMLElement>('div')]
+      .filter(element => element.textContent?.trim() === 'WebSocket (WS)')
+    expect(labels.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('labels Codex Live transport rows without inventing token or cost usage', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      is_websocket: true,
+      websocket_transport: 'codex_live_direct',
+      usage_available: false,
+      input_tokens: 0,
+      output_tokens: 0,
+      total_tokens: 0,
+      cost: 0,
+    })])
+
+    const badges = [...root.querySelectorAll<HTMLElement>('[data-usage-transport="websocket"]')]
+    expect(badges.length).toBeGreaterThan(0)
+    expect(badges.every(badge => badge.textContent?.trim() === 'Live WS')).toBe(true)
+    expect(badges.every(badge => badge.title === 'Codex Live 直连 WebSocket')).toBe(true)
+
+    const unavailableTokens = [...root.querySelectorAll<HTMLElement>('[data-usage-unavailable="tokens"]')]
+    const unavailableCosts = [...root.querySelectorAll<HTMLElement>('[data-usage-unavailable="cost"]')]
+    expect(unavailableTokens.length).toBeGreaterThanOrEqual(2)
+    expect(unavailableCosts.length).toBeGreaterThanOrEqual(2)
+    expect(unavailableTokens.every(element => element.textContent?.trim() === '不可用')).toBe(true)
+    expect(unavailableCosts.every(element => element.textContent?.trim() === '不可用')).toBe(true)
+  })
+
+  it('labels OpenAI Realtime WebSocket rows consistently in both layouts', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      is_websocket: true,
+      websocket_transport: 'openai_realtime',
+    })])
+
+    const badges = [...root.querySelectorAll<HTMLElement>('[data-usage-transport="websocket"]')]
+    expect(badges.length).toBeGreaterThan(0)
+    expect(badges.every(badge => badge.textContent?.trim() === 'Realtime WS')).toBe(true)
+    expect(badges.every(badge => badge.title === 'OpenAI Realtime WebSocket')).toBe(true)
   })
 
   it('shows reasoning effort next to the model name', () => {

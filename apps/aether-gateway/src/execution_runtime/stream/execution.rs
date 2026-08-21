@@ -64,6 +64,11 @@ use crate::ai_serving::api::{
     extract_provider_private_stream_error_body, maybe_bridge_standard_sync_json_to_stream,
     maybe_build_provider_private_stream_normalizer, maybe_build_stream_response_rewriter,
     normalize_provider_private_report_context, StreamingStandardTerminalObserver,
+    CLAUDE_CHAT_STREAM_PLAN_KIND, CLAUDE_CLI_STREAM_PLAN_KIND, GEMINI_CHAT_STREAM_PLAN_KIND,
+    GEMINI_CLI_STREAM_PLAN_KIND, GEMINI_INTERACTIONS_STREAM_PLAN_KIND,
+    OPENAI_CHAT_STREAM_PLAN_KIND, OPENAI_IMAGE_STREAM_PLAN_KIND,
+    OPENAI_RESPONSES_COMPACT_STREAM_PLAN_KIND, OPENAI_RESPONSES_STREAM_PLAN_KIND,
+    UPSTREAM_IS_STREAM_KEY,
 };
 use crate::ai_serving::is_openai_responses_family_format;
 use crate::api::response::{
@@ -144,7 +149,6 @@ use crate::{
     AppState, GatewayError, GEMINI_FILES_DOWNLOAD_PLAN_KIND, OPENAI_VIDEO_CONTENT_PLAN_KIND,
 };
 
-const OPENAI_IMAGE_STREAM_PLAN_KIND: &str = "openai_image_stream";
 const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const SSE_KEEPALIVE_BYTES: &[u8] = b": aether-keepalive\n\n";
 const SSE_CONTROL_FILTER_MAX_BUFFER_BYTES: usize = 1024 * 1024;
@@ -4524,11 +4528,84 @@ fn decode_stream_data_chunk(
 
 fn response_headers_indicate_sse(headers: &BTreeMap<String, String>) -> bool {
     headers
-        .get("content-type")
-        .map(String::as_str)
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+        .map(|(_, value)| value.as_str())
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .is_some_and(|value| value.to_ascii_lowercase().contains("text/event-stream"))
+}
+
+fn report_context_upstream_is_stream(report_context: Option<&Value>) -> bool {
+    report_context
+        .and_then(|value| value.get(UPSTREAM_IS_STREAM_KEY))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn response_headers_have_octet_stream_content_type(headers: &BTreeMap<String, String>) -> bool {
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+        .map(|(_, value)| value.as_str())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .is_some_and(|value| value.eq_ignore_ascii_case("application/octet-stream"))
+}
+
+fn response_headers_have_only_identity_content_encoding(
+    headers: &BTreeMap<String, String>,
+) -> bool {
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-encoding"))
+        .map(|(_, value)| value.as_str())
+        .is_none_or(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .all(|coding| coding.is_empty() || coding.eq_ignore_ascii_case("identity"))
+        })
+}
+
+fn plan_kind_uses_text_event_stream(plan_kind: &str) -> bool {
+    matches!(
+        plan_kind,
+        OPENAI_CHAT_STREAM_PLAN_KIND
+            | OPENAI_RESPONSES_STREAM_PLAN_KIND
+            | OPENAI_RESPONSES_COMPACT_STREAM_PLAN_KIND
+            | OPENAI_IMAGE_STREAM_PLAN_KIND
+            | CLAUDE_CHAT_STREAM_PLAN_KIND
+            | CLAUDE_CLI_STREAM_PLAN_KIND
+            | GEMINI_CHAT_STREAM_PLAN_KIND
+            | GEMINI_CLI_STREAM_PLAN_KIND
+            | GEMINI_INTERACTIONS_STREAM_PLAN_KIND
+    )
+}
+
+fn should_normalize_declared_stream_response_headers(
+    plan_kind: &str,
+    status_code: u16,
+    headers: &BTreeMap<String, String>,
+    report_context: Option<&Value>,
+) -> bool {
+    plan_kind_uses_text_event_stream(plan_kind)
+        && (200..300).contains(&status_code)
+        && report_context_upstream_is_stream(report_context)
+        && response_headers_have_octet_stream_content_type(headers)
+        && response_headers_have_only_identity_content_encoding(headers)
+        && !headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("content-length"))
+}
+
+fn normalize_declared_stream_response_headers(headers: &mut BTreeMap<String, String>) {
+    headers.retain(|name, _| {
+        !name.eq_ignore_ascii_case("content-encoding")
+            && !name.eq_ignore_ascii_case("content-length")
+            && !name.eq_ignore_ascii_case("content-type")
+    });
+    headers.insert("content-type".to_string(), "text/event-stream".to_string());
 }
 
 fn parse_prefetched_sync_json_body(body: &[u8]) -> Option<Value> {
@@ -6042,6 +6119,32 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
         headers.insert("content-type".to_string(), "text/event-stream".to_string());
     }
     let upstream_content_type = upstream_headers.get("content-type").map(String::as_str);
+    let normalized_declared_stream_headers = private_stream_normalizer.is_none()
+        && local_stream_rewriter.is_none()
+        && should_normalize_declared_stream_response_headers(
+            plan_kind,
+            status_code,
+            &upstream_headers,
+            report_context.as_ref(),
+        );
+    if normalized_declared_stream_headers {
+        normalize_declared_stream_response_headers(&mut headers);
+        debug!(
+            event_name = "execution_runtime_stream_content_type_corrected",
+            log_type = "debug",
+            trace_id = %trace_id,
+            request_id = %request_id_for_log,
+            candidate_id = ?candidate_id,
+            plan_kind,
+            provider_name,
+            endpoint_id = %plan.endpoint_id,
+            key_id = %plan.key_id,
+            model_name,
+            candidate_index = candidate_index.as_str(),
+            upstream_content_type = upstream_content_type.unwrap_or("-"),
+            "gateway normalized declared upstream stream response headers for the client"
+        );
+    }
     let prefetch_for_cyber_failover =
         is_openai_responses_family_format(plan.provider_api_format.as_str())
             && cyber_continue_failover_enabled(state).await;
@@ -6729,8 +6832,9 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
     let native_anthropic_stream_for_report = stream_commit_policy.is_native_anthropic();
     let plan_for_report = plan;
     let emit_passthrough_sse_terminal_error = (skip_direct_finalize_prefetch
-        || stream_commit_policy.is_native_anthropic())
-        && response_headers_indicate_sse(&upstream_headers)
+        || stream_commit_policy.is_native_anthropic()
+        || normalized_declared_stream_headers)
+        && (response_headers_indicate_sse(&upstream_headers) || normalized_declared_stream_headers)
         && !is_openai_image_stream_for_report;
     let plan_kind_for_report = plan_kind.to_string();
     let stream_started_at_for_report = stream_started_at;
@@ -8092,20 +8196,22 @@ mod tests {
         execute_execution_runtime_stream, execute_in_process_stream_with_oauth_retry,
         execute_stream_from_frame_stream, execute_stream_from_frame_stream_with_retry_scope,
         maybe_apply_kiro_prompt_cache_usage_to_stream_summary, merge_stream_terminal_summary,
-        parse_direct_passthrough_mode, prefetch_direct_stream_error_body,
-        prefetched_openai_responses_body_has_output_boundary,
+        normalize_declared_stream_response_headers, parse_direct_passthrough_mode,
+        prefetch_direct_stream_error_body, prefetched_openai_responses_body_has_output_boundary,
         record_sync_terminal_usage_with_handoff,
         record_sync_terminal_usage_with_handoff_after_spawn,
         resolve_provider_stream_error_status_code, select_direct_anthropic_prefetch_wait,
-        should_limit_direct_finalize_prefetch, should_probe_success_failover_before_stream,
-        should_skip_direct_finalize_prefetch, stream_chunk_contains_sse_done,
-        stream_requires_observed_terminal_event, stream_terminal_summary_missing_observed_finish,
+        should_limit_direct_finalize_prefetch, should_normalize_declared_stream_response_headers,
+        should_probe_success_failover_before_stream, should_skip_direct_finalize_prefetch,
+        stream_chunk_contains_sse_done, stream_requires_observed_terminal_event,
+        stream_terminal_summary_missing_observed_finish,
         stream_terminal_summary_missing_observed_finish_with_requirement,
         stream_terminal_summary_represents_failure_with_requirement,
         ClientVisibleStreamCompletionTracker, DirectPassthroughFinalizer,
         DirectPassthroughFinalizerCore, DirectPassthroughInlineBodyState, DirectPassthroughMode,
         PostStopFrameReadBudget, PostStopLimitedStreamReader, ProviderStreamErrorInspection,
-        ANTHROPIC_POST_STOP_DRAIN_MAX_BYTES, POST_STOP_MAX_EMPTY_CHUNKS_PER_POLL,
+        ANTHROPIC_POST_STOP_DRAIN_MAX_BYTES, GEMINI_FILES_DOWNLOAD_PLAN_KIND,
+        OPENAI_CHAT_STREAM_PLAN_KIND, POST_STOP_MAX_EMPTY_CHUNKS_PER_POLL,
     };
     use crate::control::GatewayControlDecision;
     use crate::stage_metrics::RequestStageTrace;
@@ -12060,6 +12166,109 @@ mod tests {
     }
 
     #[test]
+    fn declared_stream_response_headers_are_normalized_without_body_inspection() {
+        let mut headers = BTreeMap::from([
+            (
+                "Content-Type".to_string(),
+                "Application/Octet-Stream; charset=binary".to_string(),
+            ),
+            ("Content-Encoding".to_string(), "identity".to_string()),
+            ("x-upstream-header".to_string(), "preserved".to_string()),
+        ]);
+        assert!(should_normalize_declared_stream_response_headers(
+            OPENAI_CHAT_STREAM_PLAN_KIND,
+            200,
+            &headers,
+            Some(&json!({"upstream_is_stream": true})),
+        ));
+        headers.insert("Content-Length".to_string(), "4096".to_string());
+        normalize_declared_stream_response_headers(&mut headers);
+
+        assert_eq!(
+            headers.get("content-type").map(String::as_str),
+            Some("text/event-stream")
+        );
+        assert!(!headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("content-encoding")));
+        assert!(!headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("content-length")));
+        assert_eq!(
+            headers.get("x-upstream-header").map(String::as_str),
+            Some("preserved")
+        );
+    }
+
+    #[test]
+    fn declared_stream_header_normalization_requires_success_and_stream_context() {
+        let headers = BTreeMap::from([(
+            "content-type".to_string(),
+            "application/octet-stream".to_string(),
+        )]);
+        assert!(!should_normalize_declared_stream_response_headers(
+            OPENAI_CHAT_STREAM_PLAN_KIND,
+            500,
+            &headers,
+            Some(&json!({"upstream_is_stream": true})),
+        ));
+        assert!(!should_normalize_declared_stream_response_headers(
+            OPENAI_CHAT_STREAM_PLAN_KIND,
+            200,
+            &headers,
+            Some(&json!({"upstream_is_stream": false})),
+        ));
+        assert!(!should_normalize_declared_stream_response_headers(
+            OPENAI_CHAT_STREAM_PLAN_KIND,
+            200,
+            &BTreeMap::from([("content-type".to_string(), "text/event-stream".to_string(),)]),
+            Some(&json!({"upstream_is_stream": true})),
+        ));
+        assert!(!should_normalize_declared_stream_response_headers(
+            OPENAI_CHAT_STREAM_PLAN_KIND,
+            200,
+            &BTreeMap::from([("content-type".to_string(), "application/json".to_string(),)]),
+            Some(&json!({"upstream_is_stream": true})),
+        ));
+        assert!(!should_normalize_declared_stream_response_headers(
+            OPENAI_CHAT_STREAM_PLAN_KIND,
+            200,
+            &BTreeMap::from([("content-type".to_string(), "text/plain".to_string(),)]),
+            Some(&json!({"upstream_is_stream": true})),
+        ));
+        assert!(!should_normalize_declared_stream_response_headers(
+            OPENAI_CHAT_STREAM_PLAN_KIND,
+            200,
+            &BTreeMap::from([
+                (
+                    "content-type".to_string(),
+                    "application/octet-stream".to_string(),
+                ),
+                ("content-encoding".to_string(), "gzip".to_string()),
+            ]),
+            Some(&json!({"upstream_is_stream": true})),
+        ));
+        assert!(!should_normalize_declared_stream_response_headers(
+            OPENAI_CHAT_STREAM_PLAN_KIND,
+            200,
+            &BTreeMap::from([
+                (
+                    "content-type".to_string(),
+                    "application/octet-stream".to_string(),
+                ),
+                ("content-length".to_string(), "128".to_string()),
+            ]),
+            Some(&json!({"upstream_is_stream": true})),
+        ));
+        assert!(!should_normalize_declared_stream_response_headers(
+            GEMINI_FILES_DOWNLOAD_PLAN_KIND,
+            200,
+            &headers,
+            Some(&json!({"upstream_is_stream": true})),
+        ));
+    }
+
+    #[test]
     fn skips_prefetch_for_event_streams_even_when_cross_format_or_rewritten() {
         assert!(should_skip_direct_finalize_prefetch(
             Some("claude_cli_sync_finalize"),
@@ -13791,6 +14000,7 @@ mod tests {
             Some(json!({
                 "provider_api_format": "openai:responses",
                 "client_api_format": "openai:responses",
+                "upstream_is_stream": true,
             })),
         )
         .await

@@ -885,6 +885,12 @@ AND LOWER(TRIM(COALESCE(provider_name, ''))) NOT IN ('unknown', 'unknow'))",
             .push("is_stream = ")
             .push_bind(if is_stream { 1_i64 } else { 0_i64 });
     }
+    if let Some(is_websocket) = query.is_websocket {
+        push_sqlite_usage_where(builder, has_where);
+        builder
+            .push("COALESCE(CAST(json_extract(request_metadata, '$.websocket_mode') AS INTEGER), 0) = ")
+            .push_bind(if is_websocket { 1_i64 } else { 0_i64 });
+    }
     if query.error_only {
         push_sqlite_usage_where(builder, has_where);
         builder.push(
@@ -931,6 +937,7 @@ fn push_sqlite_usage_keyword_filters(
             statuses: query.statuses.clone(),
             exclude_status_codes: query.exclude_status_codes.clone(),
             is_stream: query.is_stream,
+            is_websocket: query.is_websocket,
             error_only: query.error_only,
             limit: None,
             offset: None,

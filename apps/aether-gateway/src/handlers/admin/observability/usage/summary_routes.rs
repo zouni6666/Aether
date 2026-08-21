@@ -52,19 +52,27 @@ fn apply_admin_usage_status_filter(query: &mut UsageAuditListQuery, status: Opti
     let Some(status) = status
         .map(str::trim)
         .filter(|candidate| !candidate.is_empty())
+        .map(str::to_ascii_lowercase)
     else {
         return;
     };
 
-    match status {
-        "stream" => query.is_stream = Some(true),
-        "standard" => query.is_stream = Some(false),
+    match status.as_str() {
+        "stream" => {
+            query.is_stream = Some(true);
+            query.is_websocket = Some(false);
+        }
+        "standard" => {
+            query.is_stream = Some(false);
+            query.is_websocket = Some(false);
+        }
+        "websocket" | "ws" => query.is_websocket = Some(true),
         "error" | "failed" => query.error_only = true,
         "active" => {
             query.statuses = Some(vec!["pending".to_string(), "streaming".to_string()]);
         }
         "pending" | "streaming" | "completed" | "cancelled" => {
-            query.statuses = Some(vec![status.to_string()]);
+            query.statuses = Some(vec![status]);
         }
         "has_fallback" | "has_retry" => {}
         _ => {}
@@ -655,6 +663,7 @@ fn build_admin_usage_keyword_search_query(
         statuses: base_query.statuses.clone(),
         exclude_status_codes: base_query.exclude_status_codes.clone(),
         is_stream: base_query.is_stream,
+        is_websocket: base_query.is_websocket,
         error_only: base_query.error_only,
         keywords,
         matched_user_ids_by_keyword: search_context.matched_user_ids_by_keyword,
@@ -1027,7 +1036,10 @@ mod tests {
     };
     use serde_json::json;
 
-    use super::admin_usage_terminal_candidate_state_override;
+    use super::{
+        admin_usage_terminal_candidate_state_override, build_admin_usage_keyword_search_query,
+        build_admin_usage_records_query, AdminUsageSearchContext,
+    };
 
     fn sample_candidate(
         candidate_index: i32,
@@ -1126,5 +1138,50 @@ mod tests {
         let payload = admin_usage_terminal_candidate_state_override(&[failed]);
 
         assert!(payload.is_none());
+    }
+
+    #[test]
+    fn admin_usage_transport_statuses_are_disjoint_in_list_and_keyword_queries() {
+        for status in ["websocket", "ws", "WS"] {
+            let raw_query = format!("status={status}");
+            let list_query =
+                build_admin_usage_records_query(100, 200, Some(&raw_query), None, None);
+
+            assert_eq!(list_query.is_websocket, Some(true));
+            assert_eq!(list_query.is_stream, None);
+
+            let keyword_query = build_admin_usage_keyword_search_query(
+                &list_query,
+                vec!["live".to_string()],
+                None,
+                AdminUsageSearchContext::default(),
+                false,
+                false,
+                None,
+                None,
+            );
+            assert_eq!(keyword_query.is_websocket, Some(true));
+        }
+
+        for (status, expected_stream) in [("stream", true), ("standard", false)] {
+            let raw_query = format!("status={status}");
+            let list_query =
+                build_admin_usage_records_query(100, 200, Some(&raw_query), None, None);
+            assert_eq!(list_query.is_stream, Some(expected_stream));
+            assert_eq!(list_query.is_websocket, Some(false));
+
+            let keyword_query = build_admin_usage_keyword_search_query(
+                &list_query,
+                vec!["live".to_string()],
+                None,
+                AdminUsageSearchContext::default(),
+                false,
+                false,
+                None,
+                None,
+            );
+            assert_eq!(keyword_query.is_stream, Some(expected_stream));
+            assert_eq!(keyword_query.is_websocket, Some(false));
+        }
     }
 }

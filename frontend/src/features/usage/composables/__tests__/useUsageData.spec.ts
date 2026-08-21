@@ -121,6 +121,39 @@ describe('useUsageData', () => {
     expect(totalRecords.value).toBe(1)
   })
 
+  it('sends the WebSocket type filter to the admin records endpoint', async () => {
+    const isAdminPage = ref(true)
+    const { loadRecords } = useUsageData({ isAdminPage })
+
+    await loadRecords(
+      { page: 1, pageSize: 20 },
+      { status: 'websocket' },
+      { preset: 'today', tz_offset_minutes: 0 },
+    )
+
+    expect(getAllUsageRecordsMock).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'websocket',
+      include_total: false,
+    }))
+  })
+
+  it('sends the WebSocket type filter to the user records endpoint before pagination', async () => {
+    const isAdminPage = ref(false)
+    const { loadRecords } = useUsageData({ isAdminPage })
+
+    await loadRecords(
+      { page: 2, pageSize: 20 },
+      { status: 'websocket' },
+      { preset: 'today', tz_offset_minutes: 0 },
+    )
+
+    expect(meGetUsageMock).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'websocket',
+      limit: 20,
+      offset: 20,
+    }))
+  })
+
   it('keeps locally resolved failure fields when a stale active record refreshes', async () => {
     const isAdminPage = ref(true)
     const { loadRecords, currentRecords } = useUsageData({ isAdminPage })

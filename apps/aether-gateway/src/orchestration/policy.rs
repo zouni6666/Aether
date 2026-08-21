@@ -302,7 +302,8 @@ pub(crate) fn codex_cyber_flag_passthrough_enabled(
 /// WebSocket upstream. Provider-scoped feature switches remain the source of
 /// truth; this enum only identifies provider-specific extensions around the
 /// otherwise standard Responses WebSocket protocol.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum ResponsesWebSocketAdapter {
     /// A provider that speaks the standard OpenAI Responses WebSocket protocol.
     Standard,

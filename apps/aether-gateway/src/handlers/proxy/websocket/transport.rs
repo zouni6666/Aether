@@ -15,6 +15,8 @@ use axum::http::header::{
 use axum::http::{HeaderMap, HeaderName};
 use futures_util::{SinkExt, TryFutureExt};
 use serde_json::json;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use url::Url;
 use wreq::ws::message::{CloseFrame as WreqCloseFrame, Message as WreqWsMessage};
 
@@ -22,6 +24,7 @@ use crate::ai_serving::AiExecutionDecision;
 use crate::execution_runtime::transport::{
     build_browser_wreq_client, build_request_headers, ExecutionTransportControls,
 };
+use crate::frontdoor_loop_guard::gateway_frontdoor_self_loop_guard_error;
 use crate::handlers::proxy::websocket::session::{
     WebSocketSessionLimits, RELAY_WRITE_TIMEOUT, TEARDOWN_WRITE_TIMEOUT,
 };
@@ -30,6 +33,7 @@ use crate::handlers::proxy::websocket::session::{
 pub(crate) struct UpstreamWebSocketErrorCodes {
     pub(crate) upstream_url_missing: &'static str,
     pub(crate) upstream_url_invalid: &'static str,
+    pub(crate) frontdoor_self_loop: &'static str,
     pub(crate) headers_invalid: &'static str,
     pub(crate) client_build_failed: &'static str,
     pub(crate) proxy_invalid: &'static str,
@@ -53,7 +57,11 @@ pub(crate) async fn connect_upstream_websocket(
         .upstream_url
         .as_deref()
         .ok_or(errors.upstream_url_missing)?;
-    let upstream_url = websocket_upstream_url(upstream_url, errors.upstream_url_invalid)?;
+    let upstream_url = guarded_websocket_upstream_url(
+        upstream_url,
+        errors.upstream_url_invalid,
+        errors.frontdoor_self_loop,
+    )?;
     let headers =
         websocket_handshake_headers(&decision.provider_request_headers, errors.headers_invalid)?;
     let client = build_websocket_client(decision, errors)?;
@@ -79,9 +87,22 @@ pub(crate) async fn connect_upstream_websocket(
     })
 }
 
+fn guarded_websocket_upstream_url(
+    raw: &str,
+    invalid_code: &'static str,
+    frontdoor_self_loop_code: &'static str,
+) -> Result<Url, &'static str> {
+    let upstream_url = websocket_upstream_url(raw, invalid_code)?;
+    if gateway_frontdoor_self_loop_guard_error(upstream_url.as_str()).is_some() {
+        return Err(frontdoor_self_loop_code);
+    }
+    Ok(upstream_url)
+}
+
 fn websocket_response_headers(headers: &HeaderMap) -> BTreeMap<String, String> {
     headers
         .iter()
+        .filter(|(name, _)| websocket_response_header_is_safe_to_retain(name))
         .filter_map(|(name, value)| {
             value
                 .to_str()
@@ -89,6 +110,24 @@ fn websocket_response_headers(headers: &HeaderMap) -> BTreeMap<String, String> {
                 .map(|value| (name.as_str().to_string(), value.to_string()))
         })
         .collect()
+}
+
+fn websocket_response_header_is_safe_to_retain(name: &HeaderName) -> bool {
+    !matches!(
+        name.as_str(),
+        "authorization"
+            | "proxy-authorization"
+            | "www-authenticate"
+            | "proxy-authenticate"
+            | "authentication-info"
+            | "proxy-authentication-info"
+            | "cookie"
+            | "set-cookie"
+            | "set-cookie2"
+            | "x-api-key"
+            | "api-key"
+            | "x-goog-api-key"
+    )
 }
 
 pub(crate) fn websocket_upstream_url(
@@ -218,6 +257,7 @@ pub(crate) fn websocket_timeouts(
 pub(crate) enum WebSocketWriteError {
     Failed,
     TimedOut,
+    Cancelled,
 }
 
 impl WebSocketWriteError {
@@ -225,8 +265,74 @@ impl WebSocketWriteError {
         match self {
             Self::Failed => "write_failed",
             Self::TimedOut => "write_timeout",
+            Self::Cancelled => "write_cancelled",
         }
     }
+}
+
+/// A small per-direction buffer keeps a slow reader from blocking the opposite
+/// WebSocket direction while still applying bounded backpressure. At the Live
+/// audio cadence this is deliberately only a short burst buffer, not a place
+/// where a session can accumulate unbounded media.
+pub(crate) const RELAY_FRAME_QUEUE_CAPACITY: usize = 16;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WebSocketRelayQueueError {
+    Closed,
+    Cancelled,
+}
+
+/// Shared cancellation for both read/write halves of a bidirectional relay.
+///
+/// Queue admission and socket writes both observe this token, so a connection
+/// deadline or lease loss can interrupt a full queue and an in-flight slow
+/// write immediately instead of waiting for [`RELAY_WRITE_TIMEOUT`].
+#[derive(Clone, Default)]
+pub(crate) struct WebSocketRelayPumpControl {
+    cancellation: CancellationToken,
+}
+
+impl WebSocketRelayPumpControl {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+
+    pub(crate) async fn cancelled(&self) {
+        self.cancellation.cancelled().await;
+    }
+
+    pub(crate) async fn enqueue<T>(
+        &self,
+        sender: &mpsc::Sender<T>,
+        message: T,
+    ) -> Result<(), WebSocketRelayQueueError> {
+        tokio::select! {
+            biased;
+            _ = self.cancellation.cancelled() => Err(WebSocketRelayQueueError::Cancelled),
+            result = sender.send(message) => {
+                result.map_err(|_| WebSocketRelayQueueError::Closed)
+            }
+        }
+    }
+
+    pub(crate) async fn send<F>(&self, write: F) -> Result<(), WebSocketWriteError>
+    where
+        F: std::future::Future<Output = Result<(), ()>>,
+    {
+        tokio::select! {
+            biased;
+            _ = self.cancellation.cancelled() => Err(WebSocketWriteError::Cancelled),
+            result = bounded_send(RELAY_WRITE_TIMEOUT, write) => result,
+        }
+    }
+}
+
+pub(crate) fn websocket_relay_frame_queue<T>() -> (mpsc::Sender<T>, mpsc::Receiver<T>) {
+    mpsc::channel(RELAY_FRAME_QUEUE_CAPACITY)
 }
 
 /// Relays one frame to the client under [`RELAY_WRITE_TIMEOUT`].
@@ -291,6 +397,19 @@ pub(crate) fn upstream_message_to_client(message: WreqWsMessage) -> AxumWsMessag
     }
 }
 
+pub(crate) fn client_message_to_upstream(message: AxumWsMessage) -> WreqWsMessage {
+    match message {
+        AxumWsMessage::Text(text) => WreqWsMessage::Text(text.to_string().into()),
+        AxumWsMessage::Binary(data) => WreqWsMessage::Binary(data),
+        AxumWsMessage::Ping(data) => WreqWsMessage::Ping(data),
+        AxumWsMessage::Pong(data) => WreqWsMessage::Pong(data),
+        AxumWsMessage::Close(frame) => WreqWsMessage::Close(frame.map(|frame| WreqCloseFrame {
+            code: frame.code.into(),
+            reason: frame.reason.to_string().into(),
+        })),
+    }
+}
+
 /// Builds a Responses WebSocket error event in the shape understood by the
 /// official client implementations.  The status is part of the event body,
 /// not the WebSocket handshake, because the connection is already upgraded.
@@ -300,7 +419,20 @@ pub(crate) fn responses_websocket_error_event(
     code: &str,
     message: &str,
 ) -> serde_json::Value {
-    json!({
+    responses_websocket_error_event_with_stream_id(status, error_type, code, message, None)
+}
+
+/// Builds a request-scoped Responses error. Callers must supply `stream_id`
+/// only after validating the protocol's named-lane grammar; untrusted or
+/// malformed identifiers must never be reflected into a provider event.
+pub(crate) fn responses_websocket_error_event_with_stream_id(
+    status: u16,
+    error_type: &str,
+    code: &str,
+    message: &str,
+    stream_id: Option<&str>,
+) -> serde_json::Value {
+    let mut event = json!({
         "type": "error",
         "status": status,
         "error": {
@@ -308,7 +440,17 @@ pub(crate) fn responses_websocket_error_event(
             "code": code,
             "message": message,
         },
-    })
+    });
+    if let Some(stream_id) = stream_id {
+        event
+            .as_object_mut()
+            .expect("Responses error events are JSON objects")
+            .insert(
+                "stream_id".to_string(),
+                serde_json::Value::String(stream_id.to_string()),
+            );
+    }
+    event
 }
 
 pub(crate) async fn send_responses_websocket_error(
@@ -318,7 +460,49 @@ pub(crate) async fn send_responses_websocket_error(
     code: &str,
     message: &str,
 ) {
-    let event = responses_websocket_error_event(status, error_type, code, message);
+    send_responses_websocket_error_with_stream_id(
+        client_socket,
+        status,
+        error_type,
+        code,
+        message,
+        None,
+    )
+    .await;
+}
+
+/// Sends a standard invalid-request error with a bounded, server-owned
+/// parameter name. This is used for protocol fields such as
+/// `previous_response_id`; no untrusted value is reflected.
+pub(crate) async fn send_responses_websocket_error_with_param(
+    client_socket: &mut WebSocket,
+    status: u16,
+    error_type: &str,
+    code: &str,
+    message: &str,
+    param: &'static str,
+) {
+    let mut event = responses_websocket_error_event(status, error_type, code, message);
+    event["error"]["param"] = serde_json::Value::String(param.to_string());
+    send_teardown_message(
+        client_socket
+            .send(AxumWsMessage::Text(event.to_string().into()))
+            .map_err(|_| ()),
+    )
+    .await;
+}
+
+pub(crate) async fn send_responses_websocket_error_with_stream_id(
+    client_socket: &mut WebSocket,
+    status: u16,
+    error_type: &str,
+    code: &str,
+    message: &str,
+    stream_id: Option<&str>,
+) {
+    let event = responses_websocket_error_event_with_stream_id(
+        status, error_type, code, message, stream_id,
+    );
     send_teardown_message(
         client_socket
             .send(AxumWsMessage::Text(event.to_string().into()))
@@ -331,13 +515,41 @@ pub(crate) async fn send_gateway_error(client_socket: &mut WebSocket, code: &str
     send_gateway_error_with_status(client_socket, 400, code, message).await;
 }
 
+pub(crate) async fn send_gateway_error_with_stream_id(
+    client_socket: &mut WebSocket,
+    code: &str,
+    message: &str,
+    stream_id: Option<&str>,
+) {
+    send_gateway_error_with_status_and_stream_id(client_socket, 400, code, message, stream_id)
+        .await;
+}
+
 pub(crate) async fn send_gateway_error_with_status(
     client_socket: &mut WebSocket,
     status: u16,
     code: &str,
     message: &str,
 ) {
-    send_responses_websocket_error(client_socket, status, "gateway_error", code, message).await;
+    send_gateway_error_with_status_and_stream_id(client_socket, status, code, message, None).await;
+}
+
+pub(crate) async fn send_gateway_error_with_status_and_stream_id(
+    client_socket: &mut WebSocket,
+    status: u16,
+    code: &str,
+    message: &str,
+    stream_id: Option<&str>,
+) {
+    send_responses_websocket_error_with_stream_id(
+        client_socket,
+        status,
+        "gateway_error",
+        code,
+        message,
+        stream_id,
+    )
+    .await;
 }
 
 pub(crate) async fn close_client_socket(client_socket: &mut WebSocket, code: u16, reason: &str) {
@@ -355,9 +567,14 @@ pub(crate) async fn close_client_socket(client_socket: &mut WebSocket, code: u16
 #[cfg(test)]
 mod tests {
     use super::{
-        bounded_send, responses_websocket_error_event, websocket_handshake_headers,
-        websocket_upstream_url, WebSocketWriteError, RELAY_WRITE_TIMEOUT, TEARDOWN_WRITE_TIMEOUT,
+        bounded_send, guarded_websocket_upstream_url, responses_websocket_error_event,
+        responses_websocket_error_event_with_stream_id, websocket_handshake_headers,
+        websocket_relay_frame_queue, websocket_response_headers, websocket_upstream_url,
+        WebSocketRelayPumpControl, WebSocketRelayQueueError, WebSocketWriteError,
+        RELAY_FRAME_QUEUE_CAPACITY, RELAY_WRITE_TIMEOUT, TEARDOWN_WRITE_TIMEOUT,
     };
+    use crate::frontdoor_loop_guard::configured_gateway_frontdoor_base_url;
+    use axum::http::HeaderMap;
     use std::collections::BTreeMap;
     use std::time::Duration;
 
@@ -377,6 +594,64 @@ mod tests {
         assert_eq!(outcome, Err(WebSocketWriteError::Failed));
         assert_eq!(WebSocketWriteError::Failed.as_str(), "write_failed");
         assert_eq!(WebSocketWriteError::TimedOut.as_str(), "write_timeout");
+        assert_eq!(WebSocketWriteError::Cancelled.as_str(), "write_cancelled");
+    }
+
+    #[tokio::test]
+    async fn relay_frame_queue_is_bounded_and_fifo() {
+        let (sender, mut receiver) = websocket_relay_frame_queue();
+        for frame in 0..RELAY_FRAME_QUEUE_CAPACITY {
+            sender
+                .try_send(frame)
+                .expect("the configured burst buffer should accept this frame");
+        }
+        assert!(matches!(
+            sender.try_send(RELAY_FRAME_QUEUE_CAPACITY),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+        ));
+        for expected in 0..RELAY_FRAME_QUEUE_CAPACITY {
+            assert_eq!(receiver.recv().await, Some(expected));
+        }
+    }
+
+    #[tokio::test]
+    async fn relay_cancellation_interrupts_a_full_queue_without_waiting_for_capacity() {
+        let control = WebSocketRelayPumpControl::new();
+        let (sender, _receiver) = websocket_relay_frame_queue();
+        for frame in 0..RELAY_FRAME_QUEUE_CAPACITY {
+            sender.try_send(frame).expect("queue should fill exactly");
+        }
+        let enqueue = control.enqueue(&sender, RELAY_FRAME_QUEUE_CAPACITY);
+        tokio::pin!(enqueue);
+        assert!(tokio::time::timeout(Duration::from_millis(5), &mut enqueue)
+            .await
+            .is_err());
+
+        control.cancel();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(100), enqueue)
+                .await
+                .expect("cancellation should wake a blocked producer"),
+            Err(WebSocketRelayQueueError::Cancelled)
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_cancellation_interrupts_a_stalled_socket_write() {
+        let control = WebSocketRelayPumpControl::new();
+        let write = control.send(std::future::pending::<Result<(), ()>>());
+        tokio::pin!(write);
+        assert!(tokio::time::timeout(Duration::from_millis(5), &mut write)
+            .await
+            .is_err());
+
+        control.cancel();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(100), write)
+                .await
+                .expect("cancellation should wake a stalled writer"),
+            Err(WebSocketWriteError::Cancelled)
+        );
     }
 
     #[tokio::test]
@@ -389,6 +664,32 @@ mod tests {
     #[test]
     fn teardown_writes_are_given_a_shorter_budget_than_relayed_frames() {
         assert!(TEARDOWN_WRITE_TIMEOUT < RELAY_WRITE_TIMEOUT);
+    }
+
+    #[test]
+    fn upstream_handshake_observability_drops_credential_bearing_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-codex-primary-used-percent", "10".parse().unwrap());
+        headers.insert("x-request-id", "request-123".parse().unwrap());
+        headers.insert("set-cookie", "session=secret".parse().unwrap());
+        headers.insert("www-authenticate", "Bearer secret".parse().unwrap());
+        headers.insert("authentication-info", "nextnonce=secret".parse().unwrap());
+
+        let retained = websocket_response_headers(&headers);
+
+        assert_eq!(
+            retained
+                .get("x-codex-primary-used-percent")
+                .map(String::as_str),
+            Some("10")
+        );
+        assert_eq!(
+            retained.get("x-request-id").map(String::as_str),
+            Some("request-123")
+        );
+        assert!(!retained.contains_key("set-cookie"));
+        assert!(!retained.contains_key("www-authenticate"));
+        assert!(!retained.contains_key("authentication-info"));
     }
 
     #[test]
@@ -408,6 +709,24 @@ mod tests {
             event["error"]["message"],
             "Previous response was not found."
         );
+        assert!(event.get("stream_id").is_none());
+    }
+
+    #[test]
+    fn request_scoped_responses_errors_include_the_validated_named_stream() {
+        let event = responses_websocket_error_event_with_stream_id(
+            400,
+            "gateway_error",
+            "responses_websocket_named_stream_unsupported",
+            "Named streams are not supported.",
+            Some("main-lane_1.test"),
+        );
+
+        assert_eq!(event["stream_id"], "main-lane_1.test");
+        assert_eq!(
+            event["error"]["code"],
+            "responses_websocket_named_stream_unsupported"
+        );
     }
 
     #[test]
@@ -426,6 +745,39 @@ mod tests {
     #[test]
     fn rejects_upstream_url_with_credentials() {
         assert!(websocket_upstream_url("https://token@example.test/responses", "invalid").is_err());
+    }
+
+    #[test]
+    fn rejects_responses_websocket_frontdoor_self_loop_before_connecting() {
+        let base_url = configured_gateway_frontdoor_base_url();
+        let raw_url = format!("{base_url}/v1/responses");
+
+        assert_eq!(
+            guarded_websocket_upstream_url(
+                raw_url.as_str(),
+                "responses_upstream_url_invalid",
+                "responses_websocket_frontdoor_self_loop",
+            ),
+            Err("responses_websocket_frontdoor_self_loop")
+        );
+    }
+
+    #[test]
+    fn rejects_live_direct_and_sideband_frontdoor_self_loops_before_connecting() {
+        let base_url = configured_gateway_frontdoor_base_url();
+
+        for path in ["/v1/live", "/v1/live/rtc_test"] {
+            let raw_url = format!("{base_url}{path}");
+            assert_eq!(
+                guarded_websocket_upstream_url(
+                    raw_url.as_str(),
+                    "codex_live_upstream_url_invalid",
+                    "codex_live_websocket_frontdoor_self_loop",
+                ),
+                Err("codex_live_websocket_frontdoor_self_loop"),
+                "{path} must be rejected before an upstream handshake"
+            );
+        }
     }
 
     #[test]

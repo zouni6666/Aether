@@ -3162,7 +3162,7 @@ async fn provider_query_execute_standard_test_candidate(
         | "openai:rerank"
         | "jina:rerank" => {
             let Some(mut provider_request_body) =
-                crate::ai_serving::build_standard_request_body_with_model_directives_and_request_headers(
+                crate::ai_serving::build_standard_request_body_with_model_directives_and_request_headers_and_reasoning_replay_policy(
                     &request_body,
                     client_api_format,
                     request_model,
@@ -3174,6 +3174,10 @@ async fn provider_query_execute_standard_test_candidate(
                     Some(candidate.key.id.as_str()),
                     Some(&incoming_request_headers),
                     false,
+                    crate::ai_serving::openai_responses_reasoning_replay_policy(
+                        transport.provider.provider_type.as_str(),
+                        transport.endpoint.base_url.as_str(),
+                    ),
                 )
             else {
                 return Ok(provider_query_skipped_execution_outcome(
@@ -3218,7 +3222,7 @@ async fn provider_query_execute_standard_test_candidate(
     if matches!(
         normalized_provider_api_format.as_str(),
         "openai:chat" | "openai:responses" | "openai:responses:compact" | "openai:search"
-    ) && crate::ai_serving::finalize_openai_provider_request_with_codex_model_capabilities(
+    ) && crate::ai_serving::finalize_openai_provider_request_with_codex_model_capabilities_and_reasoning_replay_policy(
         &mut provider_request_body,
         crate::ai_serving::OpenAiProviderRequestFinalization {
             source_api_format: client_api_format,
@@ -3231,6 +3235,10 @@ async fn provider_query_execute_standard_test_candidate(
             require_body_stream_field,
         },
         codex_model_capabilities.as_ref(),
+        crate::ai_serving::openai_responses_reasoning_replay_policy(
+            transport.provider.provider_type.as_str(),
+            transport.endpoint.base_url.as_str(),
+        ),
     )
     .is_err()
     {

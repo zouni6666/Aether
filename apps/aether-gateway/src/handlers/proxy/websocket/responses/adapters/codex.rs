@@ -24,6 +24,7 @@ const CODEX_WEBSOCKET_RATE_LIMITS_REPORT_CONTEXT_FIELD: &str = "codex_websocket_
 const CODEX_UPSTREAM_WEBSOCKET_ERRORS: UpstreamWebSocketErrorCodes = UpstreamWebSocketErrorCodes {
     upstream_url_missing: "codex_upstream_url_missing",
     upstream_url_invalid: "codex_upstream_url_invalid",
+    frontdoor_self_loop: "codex_websocket_frontdoor_self_loop",
     headers_invalid: "codex_websocket_headers_invalid",
     client_build_failed: "codex_websocket_client_build_failed",
     proxy_invalid: "codex_websocket_proxy_invalid",
@@ -258,6 +259,16 @@ mod tests {
         CodexResponsesWebSocketAdapter, ResponsesWebSocketProtocolAdapter,
         ResponsesWebSocketRebindSafety, ResponsesWebSocketRelayDirective,
     };
+
+    #[test]
+    fn codex_adapter_has_a_distinct_frontdoor_self_loop_error() {
+        let adapter = CodexResponsesWebSocketAdapter;
+
+        assert_eq!(
+            adapter.upstream_errors().frontdoor_self_loop,
+            "codex_websocket_frontdoor_self_loop"
+        );
+    }
 
     #[test]
     fn codex_rate_limit_chunk_is_kept_for_the_terminal_report() {

@@ -4,7 +4,7 @@ use std::sync::OnceLock;
 use aether_ai_formats::ApiOperation;
 use regex::Regex;
 use serde_json::Value;
-use url::form_urlencoded;
+use url::{form_urlencoded, Url};
 
 use crate::antigravity::{
     build_antigravity_v1internal_url, is_antigravity_provider_transport,
@@ -128,7 +128,10 @@ fn build_transport_request_url_inner(
                 .ends_with("/messages/count_tokens");
         let blocked_keys = if normalized_provider_api_format.starts_with("gemini:")
             || normalized_provider_api_format == "claude:messages"
-        {
+            || matches!(
+                normalized_provider_api_format.as_str(),
+                "openai:realtime" | "codex:live"
+            ) {
             GATEWAY_CREDENTIAL_QUERY_KEYS
         } else {
             &[][..]
@@ -153,6 +156,11 @@ fn build_transport_request_url_inner(
         {
             url = build_claude_messages_url(&url, None);
         }
+        let url = if normalized_provider_api_format == "openai:realtime" {
+            replace_realtime_model_query(url, params.mapped_model?)?
+        } else {
+            url
+        };
         return Some(maybe_add_gemini_stream_alt_sse(
             url,
             &provider_api_format,
@@ -179,6 +187,19 @@ fn build_transport_request_url_inner(
             &transport.endpoint.base_url,
             params.request_query,
         )),
+        "openai:realtime" => build_passthrough_path_url(
+            &transport.endpoint.base_url,
+            "/v1/realtime",
+            params.request_query,
+            GATEWAY_CREDENTIAL_QUERY_KEYS,
+        )
+        .and_then(|url| replace_realtime_model_query(url, params.mapped_model?)),
+        "codex:live" => build_passthrough_path_url(
+            &transport.endpoint.base_url,
+            "/live",
+            params.request_query,
+            GATEWAY_CREDENTIAL_QUERY_KEYS,
+        ),
         "openai:embedding" | "jina:embedding" => {
             build_provider_embedding_v1_url(&transport.endpoint.base_url, params.request_query)
         }
@@ -226,6 +247,24 @@ fn build_transport_request_url_inner(
         &provider_api_format,
         params.upstream_is_stream,
     ))
+}
+
+fn replace_realtime_model_query(raw_url: String, mapped_model: &str) -> Option<String> {
+    let mut url = Url::parse(raw_url.as_str()).ok()?;
+    let retained = url
+        .query_pairs()
+        .filter(|(name, _)| !name.eq_ignore_ascii_case("model"))
+        .map(|(name, value)| (name.into_owned(), value.into_owned()))
+        .collect::<Vec<_>>();
+    url.set_query(None);
+    {
+        let mut query = url.query_pairs_mut();
+        for (name, value) in retained {
+            query.append_pair(name.as_str(), value.as_str());
+        }
+        query.append_pair("model", mapped_model);
+    }
+    Some(url.to_string())
 }
 
 pub fn build_local_openai_chat_upstream_url(
@@ -784,6 +823,118 @@ mod tests {
                 decrypted_auth_config: None,
             },
         }
+    }
+
+    #[test]
+    fn realtime_url_uses_mapped_model_and_drops_downstream_credentials() {
+        let transport = sample_transport(
+            "custom",
+            "openai:realtime",
+            "https://api.openai.com/v1",
+            None,
+        );
+
+        let url = build_transport_request_url(
+            &transport,
+            TransportRequestUrlParams {
+                provider_api_format: "openai:realtime",
+                mapped_model: Some("gpt-realtime-provider"),
+                upstream_is_stream: true,
+                request_query: Some("model=client-alias&trace=1&key=downstream-secret"),
+                kiro_api_region: None,
+                api_operation: None,
+            },
+        )
+        .expect("realtime URL");
+
+        assert_eq!(
+            url,
+            "https://api.openai.com/v1/realtime?trace=1&model=gpt-realtime-provider"
+        );
+        assert!(!url.contains("downstream-secret"));
+        assert!(!url.contains("client-alias"));
+    }
+
+    #[test]
+    fn realtime_custom_path_still_rewrites_the_model_query() {
+        let transport = sample_transport(
+            "custom",
+            "openai:realtime",
+            "https://voice.example.test/api",
+            Some("/socket/realtime?deployment=future"),
+        );
+
+        let url = build_transport_request_url(
+            &transport,
+            TransportRequestUrlParams {
+                provider_api_format: "openai:realtime",
+                mapped_model: Some("provider-model"),
+                upstream_is_stream: true,
+                request_query: Some("model=client-model&tenant=alpha"),
+                kiro_api_region: None,
+                api_operation: None,
+            },
+        )
+        .expect("custom realtime URL");
+
+        assert_eq!(
+            url,
+            "https://voice.example.test/api/socket/realtime?deployment=future&tenant=alpha&model=provider-model"
+        );
+    }
+
+    #[test]
+    fn codex_live_url_uses_the_dedicated_endpoint_without_forwarding_credentials() {
+        let transport = sample_transport(
+            "custom",
+            "codex:live",
+            "https://voice.example.test/v1",
+            None,
+        );
+
+        let url = build_transport_request_url(
+            &transport,
+            TransportRequestUrlParams {
+                provider_api_format: "codex:live",
+                mapped_model: Some("provider-model"),
+                upstream_is_stream: true,
+                request_query: Some("trace=1&key=downstream-secret"),
+                kiro_api_region: None,
+                api_operation: None,
+            },
+        )
+        .expect("Codex Live URL");
+
+        assert_eq!(url, "https://voice.example.test/v1/live?trace=1");
+        assert!(!url.contains("downstream-secret"));
+    }
+
+    #[test]
+    fn codex_live_custom_path_remains_an_explicit_protocol_endpoint() {
+        let transport = sample_transport(
+            "custom",
+            "codex:live",
+            "https://voice.example.test/v1",
+            Some("/socket/live?deployment=future"),
+        );
+
+        let url = build_transport_request_url(
+            &transport,
+            TransportRequestUrlParams {
+                provider_api_format: "codex:live",
+                mapped_model: Some("provider-model"),
+                upstream_is_stream: true,
+                request_query: Some("tenant=alpha&key=downstream-secret"),
+                kiro_api_region: None,
+                api_operation: None,
+            },
+        )
+        .expect("custom Codex Live URL");
+
+        assert_eq!(
+            url,
+            "https://voice.example.test/v1/socket/live?deployment=future&tenant=alpha"
+        );
     }
 
     #[test]

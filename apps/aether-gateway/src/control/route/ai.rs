@@ -35,6 +35,25 @@ pub(super) fn classify_ai_public_route(
             "openai:rerank",
             true,
         ))
+    } else if method == http::Method::GET
+        && normalized_path == "/v1/realtime"
+        && is_websocket_upgrade_request(headers)
+    {
+        Some(classified(
+            "ai_public",
+            "openai",
+            "realtime",
+            "openai:realtime",
+            true,
+        ))
+    } else if (method == http::Method::POST && normalized_path == "/v1/live")
+        || (method == http::Method::GET
+            && (normalized_path == "/v1/live" || normalized_path.starts_with("/v1/live/"))
+            && is_websocket_upgrade_request(headers))
+    {
+        // Codex Live has an independent wire contract and permission surface;
+        // it must never be authorized as an OpenAI Responses request.
+        Some(classified("ai_public", "codex", "live", "codex:live", true))
     } else if (method == http::Method::POST
         || (method == http::Method::GET
             && normalized_path == "/v1/responses"
@@ -289,6 +308,51 @@ mod tests {
     fn does_not_classify_plain_get_as_responses_websocket() {
         assert!(
             classify_ai_public_route(&Method::GET, "/v1/responses", &HeaderMap::new()).is_none()
+        );
+    }
+
+    #[test]
+    fn classifies_only_websocket_upgrade_on_realtime_route() {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONNECTION, HeaderValue::from_static("keep-alive, Upgrade"));
+        headers.insert(UPGRADE, HeaderValue::from_static("websocket"));
+
+        let route = classify_ai_public_route(&Method::GET, "/v1/realtime", &headers)
+            .expect("Realtime WebSocket should be an AI public route");
+        assert_eq!(route.route_class, "ai_public");
+        assert_eq!(route.route_family, "openai");
+        assert_eq!(route.route_kind, "realtime");
+        assert_eq!(route.auth_endpoint_signature, "openai:realtime");
+        assert!(route.execution_runtime_candidate);
+
+        assert!(
+            classify_ai_public_route(&Method::GET, "/v1/realtime", &HeaderMap::new()).is_none()
+        );
+        assert!(classify_ai_public_route(&Method::POST, "/v1/realtime", &headers).is_none());
+    }
+
+    #[test]
+    fn classifies_live_http_and_websocket_routes_as_codex_live() {
+        let post = classify_ai_public_route(&Method::POST, "/v1/live", &HeaderMap::new())
+            .expect("Live WebRTC call creation should be an AI public route");
+        assert_eq!(post.route_family, "codex");
+        assert_eq!(post.route_kind, "live");
+        assert_eq!(post.auth_endpoint_signature, "codex:live");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(CONNECTION, HeaderValue::from_static("Upgrade"));
+        headers.insert(UPGRADE, HeaderValue::from_static("websocket"));
+        for path in ["/v1/live", "/v1/live/rtc_opaque"] {
+            let route = classify_ai_public_route(&Method::GET, path, &headers)
+                .expect("Live WebSocket should be an AI public route");
+            assert_eq!(route.route_family, "codex");
+            assert_eq!(route.route_kind, "live");
+            assert_eq!(route.auth_endpoint_signature, "codex:live");
+        }
+
+        assert!(
+            classify_ai_public_route(&Method::GET, "/v1/live/rtc_opaque", &HeaderMap::new())
+                .is_none()
         );
     }
 }

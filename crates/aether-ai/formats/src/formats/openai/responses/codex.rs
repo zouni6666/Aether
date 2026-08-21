@@ -69,6 +69,7 @@ enum CodexOpenAiEndpointKind {
     Compact,
     Search,
     Images,
+    Live,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -652,6 +653,8 @@ fn codex_openai_endpoint_kind(
         Some(CodexOpenAiEndpointKind::Search)
     } else if is_openai_image_request(provider_api_format) {
         Some(CodexOpenAiEndpointKind::Images)
+    } else if aether_ai_formats::api_format_alias_matches(provider_api_format, "codex:live") {
+        Some(CodexOpenAiEndpointKind::Live)
     } else {
         None
     }
@@ -1258,11 +1261,23 @@ fn is_codex_responses_lite_additional_tools_item(value: &Value) -> bool {
         .is_some_and(|item_type| item_type == "additional_tools")
 }
 
+fn is_codex_responses_lite_static_additional_tools_item(value: &Value) -> bool {
+    is_codex_responses_lite_additional_tools_item(value)
+        && value.get("role").and_then(Value::as_str) == Some("developer")
+        && value.get("tools").is_some_and(Value::is_array)
+}
+
 fn codex_tool_type_accepts_top_level_name(tool_type: &str) -> bool {
     matches!(tool_type, "function" | "custom" | "namespace")
 }
 
-fn is_codex_client_executed_tool(tool: &Value) -> bool {
+/// Returns whether a tool is represented in the Responses Lite synthetic
+/// `additional_tools` item and therefore becomes part of stored history.
+///
+/// Keep callers that compare raw client configuration with the synthetic wire
+/// prefix on this predicate so hosted/server-executed tools do not create a
+/// false configuration change.
+pub fn codex_responses_lite_tool_is_client_executed(tool: &Value) -> bool {
     match tool.get("type").and_then(Value::as_str) {
         Some("function" | "custom" | "namespace") => true,
         Some("tool_search") => tool.get("execution").and_then(Value::as_str) == Some("client"),
@@ -1277,7 +1292,7 @@ fn retain_codex_client_executed_tools(additional_tools: &mut Value) {
     else {
         return;
     };
-    tools.retain(is_codex_client_executed_tool);
+    tools.retain(codex_responses_lite_tool_is_client_executed);
 }
 
 fn is_codex_responses_lite_instruction_item(value: &Value) -> bool {
@@ -1345,6 +1360,7 @@ fn codex_responses_lite_supports_request_body(provider_request_body: Option<&Val
 fn apply_codex_responses_lite_body_contract(
     body_object: &mut serde_json::Map<String, Value>,
     capabilities: &CodexResponsesModelCapabilities,
+    websocket_continuation: bool,
 ) {
     if !capabilities.use_responses_lite {
         return;
@@ -1369,7 +1385,7 @@ fn apply_codex_responses_lite_body_contract(
         .map(|tools| {
             tools
                 .into_iter()
-                .filter(is_codex_client_executed_tool)
+                .filter(codex_responses_lite_tool_is_client_executed)
                 .collect::<Vec<_>>()
         });
     let top_level_instructions = body_object
@@ -1380,6 +1396,41 @@ fn apply_codex_responses_lite_body_contract(
         .get_mut("input")
         .and_then(Value::as_array_mut)
         .expect("Responses Lite input was validated as an array");
+
+    // `previous_response_id` already references the prior response's stored
+    // input. The Codex client sends only the new input items on these turns;
+    // replaying the current top-level tools/instructions as synthetic history
+    // would permanently append another copy on every tool round-trip. Keep
+    // the Lite wire requirements below, but do not synthesize static config
+    // for a continuation.
+    if websocket_continuation {
+        // A few compatible clients send the already-normalized Lite prefix
+        // instead of top-level fields. It is still inherited through
+        // `previous_response_id`, so remove every repeated leading prefix
+        // item. Limit this to the prefix: a later developer message can be
+        // genuine incremental input and must not be deleted by shape alone.
+        let mut repeated_prefix_len = 0;
+        while input
+            .get(repeated_prefix_len)
+            .is_some_and(is_codex_responses_lite_static_additional_tools_item)
+        {
+            repeated_prefix_len += 1;
+            if input
+                .get(repeated_prefix_len)
+                .is_some_and(is_codex_responses_lite_instruction_item)
+            {
+                repeated_prefix_len += 1;
+            }
+        }
+        if repeated_prefix_len > 0 {
+            input.drain(..repeated_prefix_len);
+        }
+        for item in input.iter_mut() {
+            strip_codex_responses_lite_image_details(item);
+        }
+        body_object.insert("parallel_tool_calls".to_string(), json!(false));
+        return;
+    }
 
     let existing_additional_tools = input
         .iter()
@@ -1702,6 +1753,50 @@ pub fn apply_codex_openai_responses_special_body_edits_with_source_model_and_cap
     model_capabilities: Option<&CodexResponsesModelCapabilities>,
     body_rules: Option<&Value>,
 ) {
+    apply_codex_openai_responses_special_body_edits_with_source_model_and_capabilities_inner(
+        provider_request_body,
+        provider_type,
+        provider_api_format,
+        provider_model,
+        source_model,
+        model_capabilities,
+        body_rules,
+        false,
+    );
+}
+
+pub fn apply_codex_openai_responses_websocket_continuation_body_edits_with_source_model_and_capabilities(
+    provider_request_body: &mut Value,
+    provider_type: &str,
+    provider_api_format: &str,
+    provider_model: &str,
+    source_model: &str,
+    model_capabilities: Option<&CodexResponsesModelCapabilities>,
+    body_rules: Option<&Value>,
+) {
+    apply_codex_openai_responses_special_body_edits_with_source_model_and_capabilities_inner(
+        provider_request_body,
+        provider_type,
+        provider_api_format,
+        provider_model,
+        source_model,
+        model_capabilities,
+        body_rules,
+        true,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_codex_openai_responses_special_body_edits_with_source_model_and_capabilities_inner(
+    provider_request_body: &mut Value,
+    provider_type: &str,
+    provider_api_format: &str,
+    provider_model: &str,
+    source_model: &str,
+    model_capabilities: Option<&CodexResponsesModelCapabilities>,
+    body_rules: Option<&Value>,
+    websocket_continuation: bool,
+) {
     if !is_codex_openai_responses_request(provider_type, provider_api_format) {
         return;
     }
@@ -1794,7 +1889,7 @@ pub fn apply_codex_openai_responses_special_body_edits_with_source_model_and_cap
         capabilities,
         body_rules,
     );
-    apply_codex_responses_lite_body_contract(body_object, capabilities);
+    apply_codex_responses_lite_body_contract(body_object, capabilities, websocket_continuation);
     strip_codex_cache_control_fields(provider_request_body);
     apply_codex_openai_responses_compact_body_edits(
         provider_request_body,
@@ -1987,7 +2082,13 @@ pub fn apply_codex_openai_special_headers(
         }
         return;
     }
-    if endpoint_kind == CodexOpenAiEndpointKind::Images {
+    if matches!(
+        endpoint_kind,
+        CodexOpenAiEndpointKind::Images | CodexOpenAiEndpointKind::Live
+    ) {
+        if endpoint_kind == CodexOpenAiEndpointKind::Live {
+            remove_btree_header(provider_request_headers, CODEX_RESPONSES_LITE_HEADER);
+        }
         return;
     }
 
@@ -2021,6 +2122,7 @@ mod tests {
         apply_codex_openai_responses_lite_header_with_capabilities,
         apply_codex_openai_responses_special_body_edits,
         apply_codex_openai_responses_special_body_edits_with_source_model_and_capabilities,
+        apply_codex_openai_responses_websocket_continuation_body_edits_with_source_model_and_capabilities,
         apply_codex_openai_special_headers, apply_openai_responses_compact_special_body_edits,
         build_codex_model_catalog_metadata, bundled_codex_model_cards, effective_codex_model_cards,
         project_codex_catalog_model_card, resolve_codex_responses_model_capabilities,
@@ -2781,6 +2883,42 @@ mod tests {
     }
 
     #[test]
+    fn codex_live_uses_account_identity_without_responses_lite_headers() {
+        let mut headers = std::collections::BTreeMap::from([(
+            CODEX_RESPONSES_LITE_HEADER.to_string(),
+            "true".to_string(),
+        )]);
+
+        apply_codex_openai_special_headers(
+            &mut headers,
+            &json!({"model": "gpt-live"}),
+            &http::HeaderMap::new(),
+            "codex",
+            "codex:live",
+            Some("request-live"),
+            Some(r#"{"account_id":"account-live","is_fedramp":true}"#),
+        );
+
+        assert_eq!(
+            headers.get("chatgpt-account-id").map(String::as_str),
+            Some("account-live")
+        );
+        assert_eq!(
+            headers.get("x-openai-fedramp").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            headers.get("user-agent").map(String::as_str),
+            Some(CODEX_CLIENT_USER_AGENT)
+        );
+        assert_eq!(
+            headers.get("originator").map(String::as_str),
+            Some(CODEX_CLIENT_ORIGINATOR)
+        );
+        assert!(!headers.contains_key(CODEX_RESPONSES_LITE_HEADER));
+    }
+
+    #[test]
     fn standard_codex_models_do_not_send_the_responses_lite_header() {
         let mut headers = std::collections::BTreeMap::from([(
             "x-openai-internal-codex-responses-lite".to_string(),
@@ -3192,6 +3330,167 @@ mod tests {
         assert_eq!(
             existing_additional_tools["input"][0]["tools"],
             json!([{"type": "function", "name": "shell", "parameters": {}}])
+        );
+    }
+
+    #[test]
+    fn codex_responses_lite_websocket_continuations_do_not_reappend_static_config() {
+        let incremental_input = json!([
+            {
+                "type": "reasoning",
+                "id": "rs_provider_123",
+                "content": [{
+                    "type": "reasoning_text",
+                    "text": "Pass the provider reasoning state through unchanged."
+                }],
+                "encrypted_content": "opaque-provider-state"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_123",
+                "output": "small result"
+            }
+        ]);
+        let mut provider_request_body = json!({
+            "type": "response.create",
+            "model": "gpt-5.6-sol",
+            "previous_response_id": "resp_123",
+            "instructions": "Static developer instructions.",
+            "tools": [{
+                "type": "function",
+                "name": "lookup",
+                "parameters": {"type": "object"}
+            }],
+            "input": incremental_input.clone()
+        });
+
+        apply_codex_openai_responses_websocket_continuation_body_edits_with_source_model_and_capabilities(
+            &mut provider_request_body,
+            "codex",
+            "openai:responses",
+            "gpt-5.6-sol",
+            "gpt-5.6-sol",
+            None,
+            None,
+        );
+
+        assert!(provider_request_body.get("previous_response_id").is_none());
+        assert!(provider_request_body.get("instructions").is_none());
+        assert!(provider_request_body.get("tools").is_none());
+        assert_eq!(provider_request_body["input"], incremental_input);
+        assert_eq!(provider_request_body["parallel_tool_calls"], false);
+
+        let once = provider_request_body.clone();
+        apply_codex_openai_responses_websocket_continuation_body_edits_with_source_model_and_capabilities(
+            &mut provider_request_body,
+            "codex",
+            "openai:responses",
+            "gpt-5.6-sol",
+            "gpt-5.6-sol",
+            None,
+            None,
+        );
+        assert_eq!(provider_request_body, once);
+    }
+
+    #[test]
+    fn codex_responses_lite_websocket_continuation_removes_only_the_static_prefix() {
+        let later_developer_message = json!({
+            "type": "message",
+            "role": "developer",
+            "content": [{"type": "input_text", "text": "genuine incremental input"}]
+        });
+        let mut provider_request_body = json!({
+            "model": "gpt-5.6-sol",
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{"type": "function", "name": "lookup", "parameters": {}}]
+                },
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": "static instructions"}]
+                },
+                {"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+                later_developer_message.clone()
+            ]
+        });
+
+        apply_codex_openai_responses_websocket_continuation_body_edits_with_source_model_and_capabilities(
+            &mut provider_request_body,
+            "codex",
+            "openai:responses",
+            "gpt-5.6-sol",
+            "gpt-5.6-sol",
+            None,
+            None,
+        );
+
+        let input = provider_request_body["input"]
+            .as_array()
+            .expect("continuation input");
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["type"], "function_call_output");
+        assert_eq!(input[1], later_developer_message);
+    }
+
+    #[test]
+    fn codex_responses_lite_http_body_cannot_opt_into_websocket_continuation_edits() {
+        let mut provider_request_body = json!({
+            "type": "response.create",
+            "model": "gpt-5.6-sol",
+            "previous_response_id": "resp_123",
+            "instructions": "Static developer instructions.",
+            "tools": [{"type": "function", "name": "lookup", "parameters": {}}],
+            "input": [{"type": "message", "role": "user", "content": []}]
+        });
+
+        apply_codex_openai_responses_special_body_edits(
+            &mut provider_request_body,
+            "codex",
+            "openai:responses",
+            None,
+            None,
+        );
+
+        assert!(provider_request_body.get("previous_response_id").is_none());
+        assert_eq!(
+            provider_request_body["input"][0]["type"],
+            "additional_tools"
+        );
+        assert_eq!(provider_request_body["input"][1]["role"], "developer");
+    }
+
+    #[test]
+    fn codex_responses_lite_null_previous_id_is_an_independent_turn() {
+        let mut provider_request_body = json!({
+            "type": "response.create",
+            "model": "gpt-5.6-sol",
+            "previous_response_id": null,
+            "instructions": "Fresh instructions.",
+            "tools": [{"type": "function", "name": "lookup", "parameters": {}}],
+            "input": [{"type": "message", "role": "user", "content": []}]
+        });
+
+        apply_codex_openai_responses_special_body_edits(
+            &mut provider_request_body,
+            "codex",
+            "openai:responses",
+            None,
+            None,
+        );
+
+        assert!(provider_request_body.get("previous_response_id").is_none());
+        assert_eq!(
+            provider_request_body["input"][0]["type"],
+            "additional_tools"
+        );
+        assert_eq!(provider_request_body["input"][1]["role"], "developer");
+        assert_eq!(
+            provider_request_body["input"][1]["content"][0]["text"],
+            "Fresh instructions."
         );
     }
 

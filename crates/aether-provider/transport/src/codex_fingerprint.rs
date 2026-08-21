@@ -41,6 +41,8 @@ pub fn apply_codex_oauth_fingerprint_convergence(
     provider_request_headers: &mut BTreeMap<String, String>,
     provider_request_body: &mut Value,
 ) -> bool {
+    let is_responses = aether_ai_formats::is_openai_responses_format(provider_api_format);
+    let is_live = aether_ai_formats::api_format_alias_matches(provider_api_format, "codex:live");
     if !transport
         .provider
         .provider_type
@@ -48,11 +50,12 @@ pub fn apply_codex_oauth_fingerprint_convergence(
         .eq_ignore_ascii_case("codex")
         || !transport.key.auth_type.trim().eq_ignore_ascii_case("oauth")
         || crate::agent_identity::is_codex_agent_identity_transport(transport)
-        || !aether_ai_formats::is_openai_responses_format(provider_api_format)
-        || aether_ai_formats::openai_responses_request_operation(
-            provider_api_format,
-            provider_request_body,
-        ) == Some(aether_ai_formats::OPENAI_RESPONSES_OPERATION_COMPACT)
+        || (!is_responses && !is_live)
+        || is_responses
+            && aether_ai_formats::openai_responses_request_operation(
+                provider_api_format,
+                provider_request_body,
+            ) == Some(aether_ai_formats::OPENAI_RESPONSES_OPERATION_COMPACT)
         || !codex_fingerprint_convergence_enabled(
             transport.provider.provider_type.as_str(),
             transport.provider.config.as_ref(),
@@ -74,7 +77,12 @@ pub fn apply_codex_oauth_fingerprint_convergence(
     let fingerprint = resolve_converged_fingerprint(account_seed, original_client_session_id);
 
     apply_converged_headers(provider_request_headers, &fingerprint);
-    apply_converged_client_metadata(provider_request_body, &fingerprint);
+    // Live uses the converged identity on the WebSocket/call-control headers.
+    // Its event/session payload is an independent opaque protocol and must not
+    // receive Responses-only `client_metadata` fields.
+    if is_responses {
+        apply_converged_client_metadata(provider_request_body, &fingerprint);
+    }
     true
 }
 
@@ -138,6 +146,10 @@ fn apply_converged_headers(
     set_header(headers, "session-id", fingerprint.session_id.clone());
     set_header(headers, "session_id", fingerprint.session_id.clone());
     set_header(headers, "thread-id", fingerprint.thread_id.clone());
+    // Codex Live/Realtime uses `x-session-id` for the thread-scoped session
+    // identity on the WebSocket upgrade request. Keep it aligned with the
+    // converged thread identity instead of the account-scoped session value.
+    set_header(headers, "x-session-id", fingerprint.thread_id.clone());
     rewrite_header_turn_metadata(headers, fingerprint);
 }
 
@@ -357,6 +369,10 @@ mod tests {
         let mut headers = BTreeMap::from([
             ("Session-Id".to_string(), "client-session".to_string()),
             (
+                "X-Session-Id".to_string(),
+                "client-live-session".to_string(),
+            ),
+            (
                 "x-codex-turn-metadata".to_string(),
                 json!({
                     "installation_id": "client-installation",
@@ -410,7 +426,15 @@ mod tests {
         );
         assert_eq!(headers["session_id"], *session_id);
         assert_eq!(headers["x-client-request-id"], *thread_id);
+        assert_eq!(headers["x-session-id"], *thread_id);
         assert_eq!(headers["x-codex-window-id"], format!("{thread_id}:0"));
+        assert_eq!(
+            headers
+                .keys()
+                .filter(|name| name.eq_ignore_ascii_case("x-session-id"))
+                .count(),
+            1
+        );
         assert_eq!(body["client_metadata"]["session_id"], *session_id);
         assert_eq!(body["client_metadata"]["thread_id"], *thread_id);
         assert_eq!(
@@ -459,6 +483,27 @@ mod tests {
         assert_ne!(first.thread_id, other_client.thread_id);
         assert_eq!(first.session_id, other_client.session_id);
         assert_ne!(first.installation_id, other_account.installation_id);
+    }
+
+    #[test]
+    fn live_convergence_sets_the_websocket_identity_without_mutating_the_payload() {
+        let transport = sample_transport();
+        let original_body = json!({"model": "gpt-live", "future_live_field": true});
+        let mut body = original_body.clone();
+        let mut headers = BTreeMap::new();
+
+        assert!(apply_codex_oauth_fingerprint_convergence(
+            &transport,
+            "codex:live",
+            Some("client-live-session"),
+            &mut headers,
+            &mut body,
+        ));
+
+        assert_eq!(body, original_body);
+        assert_eq!(headers.get("x-session-id"), headers.get("thread-id"));
+        assert!(headers.contains_key("x-codex-installation-id"));
+        assert!(headers.contains_key("x-codex-window-id"));
     }
 
     #[test]

@@ -42,13 +42,17 @@
                 <!-- 格式转换按钮 -->
                 <span
                   class="mr-1"
-                  :title="isEndpointFormatConversionDisabled ? formatConversionDisabledTooltip : (endpoint.format_acceptance_config?.enabled ? '已启用格式转换（点击关闭）' : '启用格式转换')"
+                  :title="isEndpointFormatConversionDisabled(endpoint) ? getFormatConversionDisabledTooltip(endpoint) : (endpoint.format_acceptance_config?.enabled ? '已启用格式转换（点击关闭）' : '启用格式转换')"
                 >
                   <Button
                     variant="ghost"
                     size="icon"
-                    :class="`h-7 w-7 ${endpoint.format_acceptance_config?.enabled ? 'text-primary' : ''} ${isEndpointFormatConversionDisabled ? 'opacity-50' : ''}`"
-                    :disabled="togglingFormatEndpointId === endpoint.id || isEndpointFormatConversionDisabled"
+                    class="h-7 w-7"
+                    :class="{
+                      'text-primary': endpoint.format_acceptance_config?.enabled,
+                      'opacity-50': isEndpointFormatConversionDisabled(endpoint),
+                    }"
+                    :disabled="togglingFormatEndpointId === endpoint.id || isEndpointFormatConversionDisabled(endpoint)"
                     @click="handleToggleFormatConversion(endpoint)"
                   >
                     <Shuffle class="w-3.5 h-3.5" />
@@ -103,6 +107,7 @@
                 </Popover>
                 <!-- 上游流式三态按钮 -->
                 <Button
+                  v-if="!isWebSocketEndpointApiFormat(endpoint.api_format)"
                   variant="ghost"
                   size="icon"
                   :class="getUpstreamStreamButtonClass(endpoint)"
@@ -1052,7 +1057,10 @@ import AlertDialog from '@/components/common/AlertDialog.vue'
 import EndpointConditionEditor from './EndpointConditionEditor.vue'
 import ProxyNodeSelect from './ProxyNodeSelect.vue'
 import { getDefaultEndpointBaseUrl, getDefaultEndpointPath } from './endpoint-default-paths'
-import { fixedEndpointUpstreamStreamPolicy } from './endpoint-protocol-policy'
+import {
+  fixedEndpointUpstreamStreamPolicy,
+  isWebSocketEndpointApiFormat,
+} from './endpoint-protocol-policy'
 import { useProxyNodesStore } from '@/stores/proxy-nodes'
 import {
   createEndpoint,
@@ -1136,13 +1144,17 @@ const emit = defineEmits<{
   'endpointUpdated': []
 }>()
 
-// 计算端点级格式转换是否应该被禁用
-const isEndpointFormatConversionDisabled = computed(() => {
-  return props.systemFormatConversionEnabled || props.providerFormatConversionEnabled
-})
+// WebSocket 端点只支持原始帧透传，不能进入 HTTP body 格式转换链。
+function isEndpointFormatConversionDisabled(endpoint: ProviderEndpoint): boolean {
+  return isWebSocketEndpointApiFormat(endpoint.api_format)
+    || Boolean(props.systemFormatConversionEnabled)
+    || Boolean(props.providerFormatConversionEnabled)
+}
 
-// 获取禁用提示
-const formatConversionDisabledTooltip = computed(() => {
+function getFormatConversionDisabledTooltip(endpoint: ProviderEndpoint): string {
+  if (isWebSocketEndpointApiFormat(endpoint.api_format)) {
+    return legacyT('WebSocket 端点不支持格式转换')
+  }
   if (props.systemFormatConversionEnabled) {
     return legacyT('请先关闭系统级开关')
   }
@@ -1150,7 +1162,7 @@ const formatConversionDisabledTooltip = computed(() => {
     return legacyT('请先关闭提供商级开关')
   }
   return ''
-})
+}
 
 const { success, error: showError } = useToast()
 const proxyNodesStore = useProxyNodesStore()

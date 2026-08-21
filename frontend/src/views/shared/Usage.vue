@@ -166,6 +166,7 @@ import {
   hasUsageFallback,
   isUsageRecordFailed,
   isUsageUpstreamStream,
+  isUsageWebSocket,
   normalizeRequestStatus,
   resolveDisplayRequestStatus,
 } from '@/features/usage/utils/status'
@@ -404,13 +405,19 @@ const filteredRecords = computed(() => {
     }
 
     if (filterStatus.value !== '__all__') {
-      if (filterStatus.value === 'stream') {
+      if (filterStatus.value === 'websocket') {
+        records = records.filter(record => isUsageWebSocket(record))
+      } else if (filterStatus.value === 'stream') {
         records = records.filter(record =>
-          isUsageUpstreamStream(record) && !isUsageRecordFailed(record)
+          isUsageUpstreamStream(record)
+          && !isUsageWebSocket(record)
+          && !isUsageRecordFailed(record)
         )
       } else if (filterStatus.value === 'standard') {
         records = records.filter(record =>
-          !isUsageUpstreamStream(record) && !isUsageRecordFailed(record)
+          !isUsageUpstreamStream(record)
+          && !isUsageWebSocket(record)
+          && !isUsageRecordFailed(record)
         )
       } else if (filterStatus.value === 'active') {
         records = records.filter(record =>
@@ -576,6 +583,26 @@ async function pollActiveRequests() {
         }
         if (typeof update.is_websocket === 'boolean') {
           record.is_websocket = record.is_websocket === true || update.is_websocket
+        }
+        if (typeof update.websocket_transport === 'string' && update.websocket_transport.trim()) {
+          record.websocket_transport = update.websocket_transport
+        }
+        if (typeof update.usage_available === 'boolean') {
+          record.usage_available = record.usage_available === false || update.usage_available === false
+            ? false
+            : true
+        }
+        if (typeof update.usage_pricing_available === 'boolean') {
+          record.usage_pricing_available = record.usage_pricing_available === false
+            || update.usage_pricing_available === false
+            ? false
+            : true
+        }
+        if (typeof update.input_audio_tokens === 'number') {
+          record.input_audio_tokens = update.input_audio_tokens
+        }
+        if (typeof update.output_audio_tokens === 'number') {
+          record.output_audio_tokens = update.output_audio_tokens
         }
         if (typeof update.client_is_stream === 'boolean') {
           record.client_is_stream = update.client_is_stream
@@ -1078,6 +1105,12 @@ function handleDetailRequestState(update: {
   responseTimeMs?: number | null
   firstByteTimeMs?: number | null
   isStream?: boolean | null
+  isWebSocket?: boolean | null
+  websocketTransport?: string | null
+  usageAvailable?: boolean | null
+  usagePricingAvailable?: boolean | null
+  inputAudioTokens?: number | null
+  outputAudioTokens?: number | null
   upstreamIsStream?: boolean | null
   clientRequestedStream?: boolean | null
   clientIsStream?: boolean | null
@@ -1168,6 +1201,31 @@ function handleDetailRequestState(update: {
   }
   if ('isStream' in update && typeof update.isStream === 'boolean') {
     record.is_stream = update.isStream
+  }
+  if ('isWebSocket' in update && typeof update.isWebSocket === 'boolean') {
+    record.is_websocket = record.is_websocket === true || update.isWebSocket
+  }
+  if (
+    'websocketTransport' in update
+    && typeof update.websocketTransport === 'string'
+    && update.websocketTransport.trim()
+  ) {
+    record.websocket_transport = update.websocketTransport
+  }
+  if ('usageAvailable' in update && typeof update.usageAvailable === 'boolean') {
+    record.usage_available = update.usageAvailable
+  }
+  if (
+    'usagePricingAvailable' in update
+    && typeof update.usagePricingAvailable === 'boolean'
+  ) {
+    record.usage_pricing_available = update.usagePricingAvailable
+  }
+  if ('inputAudioTokens' in update && typeof update.inputAudioTokens === 'number') {
+    record.input_audio_tokens = update.inputAudioTokens
+  }
+  if ('outputAudioTokens' in update && typeof update.outputAudioTokens === 'number') {
+    record.output_audio_tokens = update.outputAudioTokens
   }
   if ('upstreamIsStream' in update && typeof update.upstreamIsStream === 'boolean') {
     record.upstream_is_stream = update.upstreamIsStream

@@ -2,11 +2,12 @@ use super::{SqliteUsageReadRepository, SqliteUsageWriteRepository};
 use crate::run_migrations;
 use aether_data_contracts::repository::usage::{
     ProviderApiKeyWindowUsageRequest, UpsertUsageRecord, UsageAuditAggregationGroupBy,
-    UsageAuditAggregationQuery, UsageAuditListQuery, UsageAuditSummaryQuery, UsageBodyCaptureState,
-    UsageBreakdownGroupBy, UsageBreakdownSummaryQuery, UsageCleanupExecutionMode,
-    UsageCleanupTargets, UsageCleanupWindow, UsageDailyHeatmapQuery,
-    UsageDashboardDailyBreakdownQuery, UsageDashboardSummaryQuery, UsageProviderPerformanceQuery,
-    UsageReadRepository, UsageTimeSeriesGranularity, UsageWriteRepository,
+    UsageAuditAggregationQuery, UsageAuditKeywordSearchQuery, UsageAuditListQuery,
+    UsageAuditSummaryQuery, UsageBodyCaptureState, UsageBreakdownGroupBy,
+    UsageBreakdownSummaryQuery, UsageCleanupExecutionMode, UsageCleanupTargets, UsageCleanupWindow,
+    UsageDailyHeatmapQuery, UsageDashboardDailyBreakdownQuery, UsageDashboardSummaryQuery,
+    UsageProviderPerformanceQuery, UsageReadRepository, UsageTimeSeriesGranularity,
+    UsageWriteRepository,
 };
 use chrono::{DateTime, Utc};
 
@@ -1743,6 +1744,105 @@ WHERE request_id = 'request-1'
     assert_eq!(summary.total_requests, 2);
     assert_eq!(summary.error_requests, 1);
     assert_eq!(summary.total_tokens, 10);
+}
+
+#[tokio::test]
+async fn sqlite_usage_websocket_filter_applies_to_list_count_and_keyword_search() {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("sqlite pool should connect");
+    run_migrations(&pool)
+        .await
+        .expect("sqlite migrations should run");
+    seed_stats_targets(&pool).await;
+
+    let writer = SqliteUsageWriteRepository::new(pool.clone());
+    writer
+        .upsert(sample_usage("request-http", "completed", "settled", 1_000))
+        .await
+        .expect("HTTP usage should upsert");
+    let mut websocket = sample_usage("request-ws", "completed", "void", 1_001);
+    websocket.request_metadata = Some(serde_json::json!({
+        "websocket_mode": true,
+        "websocket_transport": "codex_live_direct",
+        "usage_available": false,
+    }));
+    websocket.input_tokens = None;
+    websocket.output_tokens = None;
+    websocket.total_tokens = None;
+    websocket.cache_creation_input_tokens = None;
+    websocket.cache_creation_ephemeral_5m_input_tokens = None;
+    websocket.cache_creation_ephemeral_1h_input_tokens = None;
+    websocket.cache_read_input_tokens = None;
+    websocket.cache_creation_cost_usd = None;
+    websocket.cache_read_cost_usd = None;
+    websocket.total_cost_usd = None;
+    websocket.actual_total_cost_usd = None;
+    writer
+        .upsert(websocket)
+        .await
+        .expect("WebSocket usage should upsert");
+
+    let reader = SqliteUsageReadRepository::new(pool);
+    let list_query = UsageAuditListQuery {
+        is_websocket: Some(true),
+        ..UsageAuditListQuery::default()
+    };
+    let listed = reader
+        .list_usage_audits(&list_query)
+        .await
+        .expect("WebSocket list should load");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].request_id, "request-ws");
+    assert_eq!(
+        reader
+            .count_usage_audits(&list_query)
+            .await
+            .expect("WebSocket count should load"),
+        1
+    );
+
+    let keyword_query = UsageAuditKeywordSearchQuery {
+        is_websocket: Some(true),
+        keywords: vec!["model-1".to_string()],
+        ..UsageAuditKeywordSearchQuery::default()
+    };
+    let keyword_matches = reader
+        .list_usage_audits_by_keyword_search(&keyword_query)
+        .await
+        .expect("WebSocket keyword list should load");
+    assert_eq!(keyword_matches.len(), 1);
+    assert_eq!(keyword_matches[0].request_id, "request-ws");
+    assert_eq!(
+        reader
+            .count_usage_audits_by_keyword_search(&keyword_query)
+            .await
+            .expect("WebSocket keyword count should load"),
+        1
+    );
+
+    let summary = reader
+        .summarize_usage_audits(&UsageAuditSummaryQuery {
+            created_from_unix_secs: 0,
+            created_until_unix_secs: 2_000,
+            ..UsageAuditSummaryQuery::default()
+        })
+        .await
+        .expect("lifecycle summary should load");
+    assert_eq!(summary.total_requests, 2);
+    assert_eq!(summary.recorded_total_tokens, 5);
+
+    let provider_key_summaries = reader
+        .summarize_usage_by_provider_api_key_ids(&["provider-key-1".to_string()])
+        .await
+        .expect("provider key lifecycle summary should load");
+    let provider_key_summary = provider_key_summaries
+        .get("provider-key-1")
+        .expect("provider key summary");
+    assert_eq!(provider_key_summary.request_count, 2);
+    assert_eq!(provider_key_summary.total_tokens, 5);
 }
 
 #[tokio::test]

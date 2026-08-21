@@ -153,7 +153,7 @@ fn local_openai_responses_wrapper_preserves_body_order_after_edits() {
 }
 
 #[test]
-fn local_openai_responses_wrapper_strips_foreign_reasoning_item_ids() {
+fn local_openai_responses_wrapper_defers_reasoning_replay_filtering() {
     let body_json = json!({
         "model": "gpt-5.4",
         "input": [
@@ -184,9 +184,14 @@ fn local_openai_responses_wrapper_strips_foreign_reasoning_item_ids() {
     let input = provider_request_body["input"]
         .as_array()
         .expect("input array");
-    assert_eq!(input.len(), 2);
+    // This provider-agnostic normalization layer cannot decide whether an
+    // id-less/foreign reasoning item is opaque state required by DeepSeek.
+    // The provider-aware finalization pass applies the strict or DeepSeek
+    // replay policy once the selected upstream base URL is known.
+    assert_eq!(input.len(), 3);
     assert_eq!(input[0]["id"], "rs_provider_123");
-    assert_eq!(input[1]["type"], "message");
+    assert_eq!(input[1]["id"], "item_72d3bd8d367d01977ace23f1");
+    assert_eq!(input[2]["type"], "message");
 }
 
 #[test]

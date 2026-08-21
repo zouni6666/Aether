@@ -9,8 +9,21 @@ pub(crate) fn is_deepseek_provider(provider_type: &str, base_url: &str) -> bool 
         return true;
     }
 
-    let host = base_url_host(base_url);
+    let Some(host) = base_url_host(base_url) else {
+        return false;
+    };
     host == "deepseek.com" || host.ends_with(".deepseek.com")
+}
+
+pub(crate) fn openai_responses_reasoning_replay_policy(
+    provider_type: &str,
+    base_url: &str,
+) -> crate::ai_serving::OpenAiResponsesReasoningReplayPolicy {
+    if is_deepseek_provider(provider_type, base_url) {
+        crate::ai_serving::OpenAiResponsesReasoningReplayPolicy::DeepSeekOpaque
+    } else {
+        crate::ai_serving::OpenAiResponsesReasoningReplayPolicy::OpenAiItemIds
+    }
 }
 
 pub(crate) fn apply_deepseek_tool_call_thinking_compat(
@@ -36,24 +49,33 @@ pub(crate) fn apply_deepseek_tool_call_thinking_compat(
     }
 }
 
-fn base_url_host(base_url: &str) -> String {
-    let lower = base_url.trim().to_ascii_lowercase();
-    let without_scheme = lower
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(lower.as_str());
-    let without_userinfo = without_scheme
-        .rsplit_once('@')
-        .map(|(_, host)| host)
-        .unwrap_or(without_scheme);
-    without_userinfo
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or_default()
-        .split(':')
-        .next()
-        .unwrap_or_default()
-        .to_string()
+fn base_url_host(base_url: &str) -> Option<String> {
+    let base_url = base_url.trim();
+    if base_url.is_empty() {
+        return None;
+    }
+
+    // Provider configuration historically accepted both absolute URLs and a
+    // bare authority/path. Use a real URL parser for both forms: hand-parsing
+    // userinfo with `rsplit_once('@')` can mistake an `@` in the path or query
+    // for the authority delimiter and classify an attacker-controlled host as
+    // `api.deepseek.com`.
+    if let Ok(parsed) = url::Url::parse(base_url) {
+        if let Some(host) = parsed
+            .host_str()
+            .filter(|_| matches!(parsed.scheme(), "http" | "https" | "ws" | "wss"))
+        {
+            return Some(host.to_ascii_lowercase());
+        }
+        if base_url.contains("://") {
+            return None;
+        }
+    }
+
+    url::Url::parse(&format!("https://{base_url}"))
+        .ok()?
+        .host_str()
+        .map(str::to_ascii_lowercase)
 }
 
 fn source_disables_thinking(
@@ -241,7 +263,10 @@ fn is_claude_thinking_block(block: &Value) -> bool {
 mod tests {
     use serde_json::json;
 
-    use super::{apply_deepseek_tool_call_thinking_compat, is_deepseek_provider};
+    use super::{
+        apply_deepseek_tool_call_thinking_compat, is_deepseek_provider,
+        openai_responses_reasoning_replay_policy,
+    };
 
     #[test]
     fn detects_deepseek_provider_by_type_or_host() {
@@ -253,10 +278,116 @@ mod tests {
             "custom",
             "https://api.deepseek.com/v1"
         ));
+        assert!(is_deepseek_provider("custom", "api.deepseek.com/v1"));
+        assert!(is_deepseek_provider("custom", "api.deepseek.com:443/v1"));
         assert!(!is_deepseek_provider(
             "custom",
             "https://example.com/deepseek"
         ));
+        assert!(!is_deepseek_provider(
+            "custom",
+            "https://api.deepseek.com.evil.example/v1"
+        ));
+        assert!(!is_deepseek_provider(
+            "custom",
+            "https://api.deepseek.com@evil.example/v1"
+        ));
+        assert!(!is_deepseek_provider(
+            "custom",
+            "https://evil.example/path@api.deepseek.com/v1"
+        ));
+        assert!(!is_deepseek_provider(
+            "custom",
+            "https://evil.example/?relay=@api.deepseek.com"
+        ));
+        assert!(!is_deepseek_provider("custom", "ftp://api.deepseek.com/v1"));
+        assert_eq!(
+            openai_responses_reasoning_replay_policy("custom", "https://api.deepseek.com/v1"),
+            crate::ai_serving::OpenAiResponsesReasoningReplayPolicy::DeepSeekOpaque
+        );
+        assert_eq!(
+            openai_responses_reasoning_replay_policy("openai", "https://api.openai.com/v1"),
+            crate::ai_serving::OpenAiResponsesReasoningReplayPolicy::OpenAiItemIds
+        );
+    }
+
+    #[test]
+    fn custom_deepseek_host_preserves_production_shaped_opaque_reasoning_replay() {
+        let reasoning_items = (0..66)
+            .map(|index| {
+                json!({
+                    "type": "reasoning",
+                    "encrypted_content": format!("550e8400-e29b-41d4-a716-{index:012}"),
+                    "content": [{
+                        "type": "reasoning_text",
+                        "text": format!("opaque DeepSeek reasoning {index}")
+                    }]
+                })
+            })
+            .collect::<Vec<_>>();
+        let request = json!({
+            "model": "deepseek-v4-flash",
+            "input": reasoning_items.clone(),
+            "future_request_field": {"preserve": true}
+        });
+        let replay_policy =
+            openai_responses_reasoning_replay_policy("custom", "https://api.deepseek.com/v1");
+        let mut provider_body = crate::ai_serving::build_standard_request_body_with_model_directives_and_request_headers_and_reasoning_replay_policy(
+            &request,
+            "openai:responses",
+            "deepseek-v4-flash",
+            "custom",
+            "openai:responses",
+            "/v1/responses",
+            false,
+            None,
+            None,
+            None,
+            false,
+            replay_policy,
+        )
+        .expect("custom DeepSeek Responses body should build");
+        crate::ai_serving::finalize_openai_provider_request_with_codex_model_capabilities_and_reasoning_replay_policy(
+            &mut provider_body,
+            crate::ai_serving::OpenAiProviderRequestFinalization {
+                source_api_format: "openai:responses",
+                provider_api_format: "openai:responses",
+                provider_type: "custom",
+                provider_model: "deepseek-v4-flash",
+                source_model: "deepseek-v4-flash",
+                body_rules: None,
+                upstream_is_stream: false,
+                require_body_stream_field: false,
+            },
+            None,
+            replay_policy,
+        )
+        .expect("custom DeepSeek finalization should accept opaque reasoning replay");
+        assert_eq!(provider_body["input"].as_array().map(Vec::len), Some(66));
+        assert_eq!(provider_body["future_request_field"]["preserve"], true);
+
+        let mut deepseek = json!({"input": reasoning_items.clone()});
+        let mut openai = json!({"input": reasoning_items});
+
+        assert_eq!(
+            crate::ai_serving::strip_incompatible_openai_responses_reasoning_items_with_policy(
+                &mut deepseek,
+                "openai:responses",
+                openai_responses_reasoning_replay_policy("custom", "https://api.deepseek.com/v1"),
+            ),
+            0
+        );
+        assert_eq!(deepseek["input"].as_array().map(Vec::len), Some(66));
+
+        assert_eq!(
+            crate::ai_serving::strip_incompatible_openai_responses_reasoning_items_with_policy(
+                &mut openai,
+                "openai:responses",
+                openai_responses_reasoning_replay_policy("openai", "https://api.openai.com/v1"),
+            ),
+            66
+        );
+        assert_eq!(openai["input"].as_array().map(Vec::len), Some(0));
     }
 
     #[test]

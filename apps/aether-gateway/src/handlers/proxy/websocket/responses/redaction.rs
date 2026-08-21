@@ -29,12 +29,14 @@
 //!   （"你刚才给我的邮箱是……"），本轮 session 里没有这条映射，占位符就漏给客户端。
 //!   HTTP 不会漏，是因为它每次都重发整段历史，重新 mask 同一个值会派生出同一个
 //!   sentinel（HMAC over 规则 + bucket + 值），所以映射天然齐备。
-//! * 挂在连接上（当前实现）：每轮仍然各自 mask、各自持有独立 session
+//! * 挂在当前 response chain 上（当前实现）：每轮仍然各自 mask、各自持有独立 session
 //!   （per-turn 语义不变），连接只是把最近若干轮的 session 留下来一起参与还原，
 //!   凑出的映射集合正好等于「等价 HTTP 请求会拥有的那一份」。
 //!
-//! 选后者。代价是每帧最多对 [`MAX_RETAINED_TURN_REDACTION_SESSIONS`] 个 session
-//! 各扫一遍，以及这些 session 的映射会驻留到连接结束；用有界 FIFO 兜住上限。
+//! 选后者。省略（或置空）`previous_response_id` 会开始一条独立 response chain，
+//! 此时必须丢弃旧链的映射，否则新链里偶然出现的旧 sentinel 会被还原成旧链 PII。
+//! 代价是每帧最多对 [`MAX_RETAINED_TURN_REDACTION_SESSIONS`] 个 session 各扫一遍，
+//! 以及这些 session 的映射会驻留到当前链结束；用有界 FIFO 兜住上限。
 //! 窗口不够用或每帧成本变高时，正确的下一步是在 `privacy` 侧提供跨 session 的
 //! 合并匹配器，而不是把这个窗口调大。
 
@@ -90,6 +92,27 @@ pub(super) async fn redact_responses_websocket_client_event(
     control_decision: &GatewayControlDecision,
     client_event: &Value,
 ) -> Result<Option<ResponsesWebSocketTurnRedaction>, GatewayError> {
+    redact_responses_websocket_client_event_with_reasoning_replay_policy(
+        state,
+        parts,
+        control_decision,
+        client_event,
+        crate::ai_serving::OpenAiResponsesReasoningReplayPolicy::OpenAiItemIds,
+    )
+    .await
+}
+
+/// Variant used only after the gateway has selected and authenticated the
+/// provider binding. The replay policy comes from that trusted binding, never
+/// from client JSON, so a forged reasoning-item shape cannot opt itself into
+/// byte-opaque PII handling.
+pub(super) async fn redact_responses_websocket_client_event_with_reasoning_replay_policy(
+    state: &AppState,
+    parts: &http::request::Parts,
+    control_decision: &GatewayControlDecision,
+    client_event: &Value,
+    reasoning_replay_policy: crate::ai_serving::OpenAiResponsesReasoningReplayPolicy,
+) -> Result<Option<ResponsesWebSocketTurnRedaction>, GatewayError> {
     let Some(auth_context) =
         resolve_local_decision_execution_runtime_auth_context(control_decision)
     else {
@@ -101,6 +124,7 @@ pub(super) async fn redact_responses_websocket_client_event(
         client_event,
         &auth_context,
         RESPONSES_WEBSOCKET_CLIENT_API_FORMAT,
+        reasoning_replay_policy,
         WEBSOCKET_TURN_REDACTION_CANDIDATE_ID,
     )
     .await?;
@@ -126,17 +150,22 @@ pub(super) async fn redact_responses_websocket_client_event(
     }))
 }
 
-/// 一条连接上「我们 mask 过哪些映射」的留存集合，供响应侧还原使用。
+/// 当前 response chain 上「我们 mask 过哪些映射」的留存集合，供响应侧还原使用。
 ///
-/// 每轮一个独立 session（per-turn mask 语义不变），连接按 FIFO 留最近
-/// [`MAX_RETAINED_TURN_REDACTION_SESSIONS`] 轮。上游重绑不清空：客户端仍在同一段
-/// 对话里，旧占位符可能随重发的输入再次出现。
+/// 每轮一个独立 session（per-turn mask 语义不变），当前链按 FIFO 留最近
+/// [`MAX_RETAINED_TURN_REDACTION_SESSIONS`] 轮。物理上游重绑本身不决定生命周期；
+/// `previous_response_id` 决定是否延续旧链。独立请求成功发出时由调用方通过
+/// [`Self::start_new_chain`] 原子替换为新链的首轮 session。
 #[derive(Default)]
 pub(super) struct ResponsesWebSocketRedactionRestorer {
     sessions: VecDeque<RedactionSession>,
 }
 
 impl ResponsesWebSocketRedactionRestorer {
+    pub(super) fn has_sessions(&self) -> bool {
+        !self.sessions.is_empty()
+    }
+
     /// 登记这一轮的 mask session。
     pub(super) fn register(&mut self, session: RedactionSession) {
         if session.mapping_count() == 0 {
@@ -145,6 +174,18 @@ impl ResponsesWebSocketRedactionRestorer {
         self.sessions.push_back(session);
         while self.sessions.len() > MAX_RETAINED_TURN_REDACTION_SESSIONS {
             self.sessions.pop_front();
+        }
+    }
+
+    /// Commits a successfully started independent response chain.
+    ///
+    /// Keep this transition next to the successful upstream send/bind. A
+    /// rejected independent request has not replaced the active chain and
+    /// therefore must not discard the old chain's restore mappings.
+    pub(super) fn start_new_chain(&mut self, session: Option<RedactionSession>) {
+        self.sessions.clear();
+        if let Some(session) = session {
+            self.register(session);
         }
     }
 
@@ -497,8 +538,9 @@ mod tests {
             seed_report_context_with_raw_pii(),
         );
         // 首轮实际发上游的事件由 decision.provider_request_body 派生。
+        let normalization = ResponsesWebSocketBodyNormalization::for_tests("provider-model");
         let provider_event: Value = serde_json::from_str(
-            &planned_response_create_event(&template, &effective_event)
+            &planned_response_create_event(&template, &normalization, &effective_event)
                 .expect("first provider event should serialize"),
         )
         .expect("first provider event should parse");
@@ -602,8 +644,9 @@ mod tests {
             provider_body_from(&active.client_event),
             seed_report_context_with_raw_pii(),
         );
+        let normalization = ResponsesWebSocketBodyNormalization::for_tests("provider-model");
         let provider_event: Value = serde_json::from_str(
-            &planned_response_create_event(&template, &active.client_event)
+            &planned_response_create_event(&template, &normalization, &active.client_event)
                 .expect("retry provider event should serialize"),
         )
         .expect("retry provider event should parse");
@@ -812,6 +855,53 @@ mod tests {
         assert!(restored.contains(OTHER_TEST_EMAIL), "{restored}");
         assert!(!restored.contains(&first_sentinel), "{restored}");
         assert!(!restored.contains(&second_sentinel), "{restored}");
+    }
+
+    /// Omitting `previous_response_id` starts a new response chain. Restore
+    /// mappings from the prior chain must not leak into that independent
+    /// response, while the new chain's first-turn mapping remains available.
+    #[tokio::test]
+    async fn an_independent_chain_replaces_prior_restore_mappings() {
+        let state = redaction_enabled_state();
+        let decision = control_decision();
+        let prior = turn_redaction(&state, &decision, TEST_EMAIL).await;
+        let current = turn_redaction(&state, &decision, OTHER_TEST_EMAIL).await;
+        let prior_sentinel = sentinel_for(&prior, TEST_EMAIL);
+        let current_sentinel = sentinel_for(&current, OTHER_TEST_EMAIL);
+
+        let mut restorer = ResponsesWebSocketRedactionRestorer::default();
+        restorer.register(prior.session);
+        restorer.start_new_chain(Some(current.session));
+
+        assert!(
+            restorer
+                .restore_provider_frame_text(&provider_delta_frame(&prior_sentinel))
+                .is_none(),
+            "an independent chain must not restore PII from its predecessor"
+        );
+        let restored = restorer
+            .restore_provider_frame_text(&provider_delta_frame(&current_sentinel))
+            .expect("the new chain's first-turn mapping must remain available");
+        assert!(restored.contains(OTHER_TEST_EMAIL), "{restored}");
+        assert!(!restored.contains(&current_sentinel), "{restored}");
+    }
+
+    #[tokio::test]
+    async fn an_unredacted_independent_chain_clears_prior_restore_mappings() {
+        let state = redaction_enabled_state();
+        let prior = turn_redaction(&state, &control_decision(), TEST_EMAIL).await;
+        let prior_sentinel = sentinel_for(&prior, TEST_EMAIL);
+
+        let mut restorer = ResponsesWebSocketRedactionRestorer::default();
+        restorer.register(prior.session);
+        assert!(restorer.has_sessions());
+
+        restorer.start_new_chain(None);
+
+        assert!(!restorer.has_sessions());
+        assert!(restorer
+            .restore_provider_frame_text(&provider_delta_frame(&prior_sentinel))
+            .is_none());
     }
 
     /// 留存窗口是有界的：长连接不能无限累积映射，代价是更早的轮次会退回

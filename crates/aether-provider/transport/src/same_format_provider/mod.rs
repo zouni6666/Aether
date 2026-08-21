@@ -207,15 +207,32 @@ pub fn classify_same_format_provider_request_behavior_for_operation(
 pub fn build_same_format_provider_request_body(
     input: SameFormatProviderRequestBodyInput<'_>,
 ) -> Option<Value> {
-    build_same_format_provider_request_body_inner(input, None)
+    build_same_format_provider_request_body_inner(
+        input,
+        None,
+        aether_ai_formats::OpenAiResponsesReasoningReplayPolicy::OpenAiItemIds,
+    )
 }
 
 pub fn build_same_format_provider_request_body_with_compatibility_report(
     input: SameFormatProviderRequestBodyInput<'_>,
 ) -> Option<SameFormatProviderRequestBodyOutput> {
+    build_same_format_provider_request_body_with_compatibility_report_and_reasoning_replay_policy(
+        input,
+        aether_ai_formats::OpenAiResponsesReasoningReplayPolicy::OpenAiItemIds,
+    )
+}
+
+pub fn build_same_format_provider_request_body_with_compatibility_report_and_reasoning_replay_policy(
+    input: SameFormatProviderRequestBodyInput<'_>,
+    reasoning_replay_policy: aether_ai_formats::OpenAiResponsesReasoningReplayPolicy,
+) -> Option<SameFormatProviderRequestBodyOutput> {
     let mut compatibility_edits = Vec::new();
-    let body =
-        build_same_format_provider_request_body_inner(input, Some(&mut compatibility_edits))?;
+    let body = build_same_format_provider_request_body_inner(
+        input,
+        Some(&mut compatibility_edits),
+        reasoning_replay_policy,
+    )?;
     Some(SameFormatProviderRequestBodyOutput {
         body,
         compatibility_edits,
@@ -239,6 +256,7 @@ pub fn enforce_same_format_provider_api_operation_body_policy(
 fn build_same_format_provider_request_body_inner(
     input: SameFormatProviderRequestBodyInput<'_>,
     mut compatibility_edits: Option<&mut Vec<SameFormatProviderCompatibilityEdit>>,
+    reasoning_replay_policy: aether_ai_formats::OpenAiResponsesReasoningReplayPolicy,
 ) -> Option<Value> {
     if let Some(kiro_auth_config) = input.kiro_auth_config {
         let body = build_kiro_provider_request_body(
@@ -437,9 +455,10 @@ fn build_same_format_provider_request_body_inner(
         );
     }
     let stripped_reasoning_items =
-        aether_ai_formats::strip_incompatible_openai_responses_reasoning_items(
+        aether_ai_formats::strip_incompatible_openai_responses_reasoning_items_with_policy(
             &mut provider_request_body,
             input.provider_api_format,
+            reasoning_replay_policy,
         );
     if stripped_reasoning_items > 0 {
         record_compatibility_edit(
@@ -466,7 +485,7 @@ fn build_same_format_provider_request_body_inner(
     ) {
         return None;
     }
-    if aether_ai_formats::finalize_openai_provider_request(
+    if aether_ai_formats::finalize_openai_provider_request_with_codex_model_capabilities_and_reasoning_replay_policy(
         &mut provider_request_body,
         aether_ai_formats::OpenAiProviderRequestFinalization {
             source_api_format: input.provider_api_format,
@@ -478,6 +497,8 @@ fn build_same_format_provider_request_body_inner(
             upstream_is_stream: input.upstream_is_stream,
             require_body_stream_field,
         },
+        None,
+        reasoning_replay_policy,
     )
     .is_err()
     {
@@ -814,6 +835,8 @@ fn resolve_same_format_standard_direct_auth(
 ) -> Option<(String, String)> {
     if aether_ai_formats::api_format_alias_matches(provider_api_format, "openai:embedding")
         || aether_ai_formats::api_format_alias_matches(provider_api_format, "openai:search")
+        || aether_ai_formats::api_format_alias_matches(provider_api_format, "openai:realtime")
+        || aether_ai_formats::api_format_alias_matches(provider_api_format, "codex:live")
     {
         resolve_local_openai_bearer_auth(transport)
     } else {
@@ -1405,6 +1428,56 @@ mod tests {
                 &transport,
                 SameFormatProviderFamily::Standard,
                 "openai:search",
+            ),
+            Some(("authorization".to_string(), "Bearer secret".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolves_openai_realtime_direct_auth_with_bearer_header() {
+        let mut transport = sample_transport("openai");
+        transport.endpoint.api_format = "openai:realtime".to_string();
+        transport.key.auth_type = "api_key".to_string();
+        let behavior = classify_same_format_provider_request_behavior(
+            &transport,
+            SameFormatProviderRequestBehaviorParams {
+                require_streaming: true,
+                provider_api_format: "openai:realtime",
+                report_kind: "openai_realtime_websocket_success",
+            },
+        );
+
+        assert_eq!(
+            resolve_same_format_provider_direct_auth(
+                &behavior,
+                &transport,
+                SameFormatProviderFamily::Standard,
+                "openai:realtime",
+            ),
+            Some(("authorization".to_string(), "Bearer secret".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolves_codex_live_direct_auth_with_bearer_header() {
+        let mut transport = sample_transport("openai");
+        transport.endpoint.api_format = "codex:live".to_string();
+        transport.key.auth_type = "api_key".to_string();
+        let behavior = classify_same_format_provider_request_behavior(
+            &transport,
+            SameFormatProviderRequestBehaviorParams {
+                require_streaming: true,
+                provider_api_format: "codex:live",
+                report_kind: "codex_live_websocket_success",
+            },
+        );
+
+        assert_eq!(
+            resolve_same_format_provider_direct_auth(
+                &behavior,
+                &transport,
+                SameFormatProviderFamily::Standard,
+                "codex:live",
             ),
             Some(("authorization".to_string(), "Bearer secret".to_string()))
         );
@@ -2092,6 +2165,112 @@ mod tests {
         assert_eq!(input.len(), 2);
         assert_eq!(input[0]["id"], "rs_provider_123");
         assert_eq!(input[1]["type"], "message");
+        assert!(output.compatibility_edits.iter().any(|edit| {
+            edit.field == "input[].id"
+                && edit.action
+                    == SameFormatProviderCompatibilityEditAction::ProviderCompatibilityRewrite
+        }));
+    }
+
+    #[test]
+    fn same_format_responses_body_preserves_deepseek_opaque_reasoning_replay() {
+        let reasoning_items = (0..66)
+            .map(|index| {
+                json!({
+                    "type": "reasoning",
+                    "encrypted_content": format!("opaque-deepseek-state-{index}"),
+                    "content": [{
+                        "type": "reasoning_text",
+                        "text": format!("provider thinking state {index}")
+                    }]
+                })
+            })
+            .chain(std::iter::once(json!({
+                "type": "message",
+                "role": "user",
+                "content": "continue"
+            })))
+            .collect::<Vec<_>>();
+        let request_body = json!({
+            "model": "deepseek-v4-flash",
+            "input": reasoning_items
+        });
+        let input = SameFormatProviderRequestBodyInput {
+            body_json: &request_body,
+            mapped_model: "deepseek-v4-flash",
+            client_api_format: "openai:responses",
+            provider_api_format: "openai:responses",
+            source_model: Some("deepseek-v4-flash"),
+            family: SameFormatProviderFamily::Standard,
+            body_rules: None,
+            request_headers: None,
+            upstream_is_stream: false,
+            force_body_stream_field: false,
+            kiro_auth_config: None,
+            is_claude_code: false,
+            enable_model_directives: false,
+        };
+
+        let deepseek =
+            build_same_format_provider_request_body_with_compatibility_report_and_reasoning_replay_policy(
+                input,
+                aether_ai_formats::OpenAiResponsesReasoningReplayPolicy::DeepSeekOpaque,
+            )
+            .expect("DeepSeek same-format Responses body should build");
+        let strict = build_same_format_provider_request_body_with_compatibility_report(input)
+            .expect("strict same-format Responses body should build");
+
+        assert_eq!(
+            deepseek.body["input"]
+                .as_array()
+                .expect("DeepSeek input array")
+                .iter()
+                .filter(|item| item["type"] == "reasoning")
+                .count(),
+            66
+        );
+        assert_eq!(
+            strict.body["input"]
+                .as_array()
+                .expect("strict input array")
+                .iter()
+                .filter(|item| item["type"] == "reasoning")
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn same_format_compact_keeps_strict_reasoning_replay_under_deepseek_policy() {
+        let request_body = json!({
+            "model": "deepseek-v4-flash",
+            "input": [{
+                "type": "reasoning",
+                "encrypted_content": "opaque-deepseek-state",
+                "content": [{"type": "reasoning_text", "text": "thinking"}]
+            }]
+        });
+        let output = build_same_format_provider_request_body_with_compatibility_report_and_reasoning_replay_policy(
+            SameFormatProviderRequestBodyInput {
+                body_json: &request_body,
+                mapped_model: "deepseek-v4-flash",
+                client_api_format: "openai:responses:compact",
+                provider_api_format: "openai:responses:compact",
+                source_model: Some("deepseek-v4-flash"),
+                family: SameFormatProviderFamily::Standard,
+                body_rules: None,
+                request_headers: None,
+                upstream_is_stream: false,
+                force_body_stream_field: false,
+                kiro_auth_config: None,
+                is_claude_code: false,
+                enable_model_directives: false,
+            },
+            aether_ai_formats::OpenAiResponsesReasoningReplayPolicy::DeepSeekOpaque,
+        )
+        .expect("Compact body should keep the strict OpenAI replay contract");
+
+        assert_eq!(output.body["input"].as_array().map(Vec::len), Some(0));
         assert!(output.compatibility_edits.iter().any(|edit| {
             edit.field == "input[].id"
                 && edit.action

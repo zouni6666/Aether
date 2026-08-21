@@ -15,7 +15,8 @@ use crate::repository::usage::{
 };
 use aether_data_contracts::repository::usage::{
     usage_body_ref, ProviderApiKeyWindowUsageRequest, UsageAuditAggregationGroupBy,
-    UsageAuditAggregationQuery, UsageBodyCaptureState, UsageBodyField, UsageDashboardSummaryQuery,
+    UsageAuditAggregationQuery, UsageAuditKeywordSearchQuery, UsageAuditListQuery,
+    UsageAuditSummaryQuery, UsageBodyCaptureState, UsageBodyField, UsageDashboardSummaryQuery,
     UsageLeaderboardGroupBy, UsageLeaderboardQuery, UsageProviderPerformanceQuery,
     UsageTimeSeriesGranularity,
 };
@@ -330,6 +331,79 @@ async fn provider_aggregation_skips_unknown_provider_labels() {
         legacy_name_row.secondary_name.as_deref(),
         Some("legacy_name")
     );
+}
+
+#[tokio::test]
+async fn unmetered_session_audit_counts_lifecycle_without_token_or_cost_contribution() {
+    let metered = sample_usage("req-metered", 100);
+    let mut live = sample_usage("req-live", 200);
+    live.request_metadata = Some(json!({
+        "usage_available": false,
+        "websocket_mode": true,
+        "websocket_transport": "codex_live_direct",
+    }));
+    live.billing_status = "void".to_string();
+    live.input_tokens = 0;
+    live.output_tokens = 0;
+    live.total_tokens = 0;
+    live.cache_creation_input_tokens = 0;
+    live.cache_creation_ephemeral_5m_input_tokens = 0;
+    live.cache_creation_ephemeral_1h_input_tokens = 0;
+    live.cache_read_input_tokens = 0;
+    live.total_cost_usd = 0.0;
+    live.actual_total_cost_usd = 0.0;
+    let repository = InMemoryUsageReadRepository::seed(vec![metered, live]);
+
+    let listed = repository
+        .list_usage_audits(&UsageAuditListQuery {
+            created_from_unix_secs: Some(0),
+            created_until_unix_secs: Some(1_000),
+            newest_first: true,
+            ..UsageAuditListQuery::default()
+        })
+        .await
+        .expect("audit list should succeed");
+    assert_eq!(listed.len(), 2);
+    assert!(!listed
+        .iter()
+        .find(|item| item.request_id == "req-live")
+        .expect("Live row should remain visible")
+        .usage_available());
+
+    let aggregate = repository
+        .aggregate_usage_audits(&UsageAuditAggregationQuery {
+            created_from_unix_secs: 0,
+            created_until_unix_secs: 1_000,
+            group_by: UsageAuditAggregationGroupBy::Model,
+            limit: 10,
+            exclude_reserved_provider_labels: false,
+        })
+        .await
+        .expect("aggregate should succeed");
+    assert_eq!(aggregate.len(), 1);
+    assert_eq!(aggregate[0].request_count, 2);
+    assert_eq!(aggregate[0].total_tokens, 150);
+
+    let summary = repository
+        .summarize_usage_audits(&UsageAuditSummaryQuery {
+            created_from_unix_secs: 0,
+            created_until_unix_secs: 1_000,
+            ..UsageAuditSummaryQuery::default()
+        })
+        .await
+        .expect("summary should succeed");
+    assert_eq!(summary.total_requests, 2);
+    assert_eq!(summary.recorded_total_tokens, 150);
+
+    let provider_key_summaries = repository
+        .summarize_usage_by_provider_api_key_ids(&["provider-key-1".to_string()])
+        .await
+        .expect("provider key lifecycle summary should succeed");
+    let provider_key_summary = provider_key_summaries
+        .get("provider-key-1")
+        .expect("provider key summary");
+    assert_eq!(provider_key_summary.request_count, 2);
+    assert_eq!(provider_key_summary.total_tokens, 150);
 }
 
 #[tokio::test]
@@ -1908,6 +1982,54 @@ async fn list_usage_audits_applies_second_based_time_filters() {
 
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].request_id, "req-2");
+}
+
+#[tokio::test]
+async fn usage_audit_websocket_filter_applies_to_list_count_and_keyword_search() {
+    let mut websocket = sample_usage("req-ws", 2);
+    websocket.request_metadata = Some(json!({
+        "websocket_mode": true,
+        "websocket_transport": "codex_live_direct",
+    }));
+    let repository =
+        InMemoryUsageReadRepository::seed(vec![sample_usage("req-http", 1), websocket]);
+
+    let list_query = crate::repository::usage::UsageAuditListQuery {
+        is_websocket: Some(true),
+        ..Default::default()
+    };
+    let listed = repository
+        .list_usage_audits(&list_query)
+        .await
+        .expect("WebSocket list should succeed");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].request_id, "req-ws");
+    assert_eq!(
+        repository
+            .count_usage_audits(&list_query)
+            .await
+            .expect("WebSocket count should succeed"),
+        1
+    );
+
+    let keyword_query = UsageAuditKeywordSearchQuery {
+        is_websocket: Some(true),
+        keywords: vec!["gpt-4.1".to_string()],
+        ..Default::default()
+    };
+    let keyword_matches = repository
+        .list_usage_audits_by_keyword_search(&keyword_query)
+        .await
+        .expect("WebSocket keyword list should succeed");
+    assert_eq!(keyword_matches.len(), 1);
+    assert_eq!(keyword_matches[0].request_id, "req-ws");
+    assert_eq!(
+        repository
+            .count_usage_audits_by_keyword_search(&keyword_query)
+            .await
+            .expect("WebSocket keyword count should succeed"),
+        1
+    );
 }
 
 #[tokio::test]

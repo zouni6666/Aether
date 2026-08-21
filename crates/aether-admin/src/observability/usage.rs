@@ -263,12 +263,17 @@ pub fn admin_usage_has_fallback(item: &StoredRequestUsageAudit) -> bool {
 }
 
 pub fn admin_usage_matches_status(item: &StoredRequestUsageAudit, status: Option<&str>) -> bool {
-    let Some(status) = status.map(str::trim).filter(|value| !value.is_empty()) else {
+    let Some(status) = status
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+    else {
         return true;
     };
-    match status {
-        "stream" => item.is_stream,
-        "standard" => !item.is_stream,
+    match status.as_str() {
+        "stream" => item.is_stream && !item.is_websocket(),
+        "standard" => !item.is_stream && !item.is_websocket(),
+        "websocket" | "ws" => item.is_websocket(),
         "error" => {
             item.status_code
                 .is_some_and(|value| !(200..300).contains(&value))
@@ -1217,6 +1222,11 @@ fn admin_usage_active_request_json(
         "provider_key_name": provider_key_name,
         "is_stream": item.is_stream,
         "is_websocket": item.is_websocket(),
+        "websocket_transport": item.websocket_transport(),
+        "usage_available": item.usage_available(),
+        "usage_pricing_available": item.usage_pricing_available(),
+        "input_audio_tokens": item.realtime_input_audio_tokens(),
+        "output_audio_tokens": item.realtime_output_audio_tokens(),
         "upstream_is_stream": upstream_is_stream,
         "client_requested_stream": client_is_stream,
         "client_is_stream": client_is_stream,
@@ -1350,6 +1360,23 @@ pub fn admin_usage_record_json(
         )),
     );
     object.insert("is_websocket".to_string(), json!(item.is_websocket()));
+    object.insert(
+        "websocket_transport".to_string(),
+        json!(item.websocket_transport()),
+    );
+    object.insert("usage_available".to_string(), json!(item.usage_available()));
+    object.insert(
+        "usage_pricing_available".to_string(),
+        json!(item.usage_pricing_available()),
+    );
+    object.insert(
+        "input_audio_tokens".to_string(),
+        json!(item.realtime_input_audio_tokens()),
+    );
+    object.insert(
+        "output_audio_tokens".to_string(),
+        json!(item.realtime_output_audio_tokens()),
+    );
     object.insert("is_stream".to_string(), json!(item.is_stream));
     object.insert(
         UPSTREAM_IS_STREAM_KEY.to_string(),
@@ -2705,6 +2732,12 @@ mod tests {
             request_metadata: Some(json!({
                 "websocket_mode": true,
                 "websocket_transport": "responses",
+                "usage_available": false,
+                "usage_pricing_available": false,
+                "realtime_session": {
+                    "input_audio_tokens": 7,
+                    "output_audio_tokens": 3,
+                },
             })),
             ..sample_usage("completed", Some(200), None)
         };
@@ -2721,6 +2754,21 @@ mod tests {
 
         assert_eq!(record["is_websocket"], true);
         assert_eq!(active["is_websocket"], true);
+        assert_eq!(record["websocket_transport"], "responses");
+        assert_eq!(active["websocket_transport"], "responses");
+        assert_eq!(record["usage_available"], false);
+        assert_eq!(active["usage_available"], false);
+        assert_eq!(record["usage_pricing_available"], false);
+        assert_eq!(active["usage_pricing_available"], false);
+        assert_eq!(record["input_audio_tokens"], 7);
+        assert_eq!(active["input_audio_tokens"], 7);
+        assert_eq!(record["output_audio_tokens"], 3);
+        assert_eq!(active["output_audio_tokens"], 3);
+        assert!(admin_usage_matches_status(&item, Some("websocket")));
+        assert!(admin_usage_matches_status(&item, Some("ws")));
+        assert!(admin_usage_matches_status(&item, Some("WS")));
+        assert!(!admin_usage_matches_status(&item, Some("standard")));
+        assert!(!admin_usage_matches_status(&item, Some("stream")));
     }
 
     #[test]
