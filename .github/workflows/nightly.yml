@@ -251,18 +251,6 @@ jobs:
             arch: arm64
             os: ubuntu-latest
             use_cross: true
-          - name: macos-amd64
-            target: x86_64-apple-darwin
-            platform: macos
-            arch: amd64
-            os: macos-15-intel
-            use_cross: false
-          - name: macos-arm64
-            target: aarch64-apple-darwin
-            platform: macos
-            arch: arm64
-            os: macos-15
-            use_cross: false
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -398,31 +386,29 @@ jobs:
           VERSION="nightly"
 
           mkdir -p package release-assets
-          for platform in linux macos; do
-            for arch in amd64 arm64; do
-              bundle="aether-${VERSION}-${platform}-${arch}"
-              root="package/${bundle}"
-              mkdir -p "${root}/bin" "${root}/frontend"
+          for arch in amd64 arm64; do
+            bundle="aether-${VERSION}-linux-${arch}"
+            root="package/${bundle}"
+            mkdir -p "${root}/bin" "${root}/frontend"
 
-              install -m 0755 \
-                "artifacts/nightly-gateway-${platform}-${arch}/aether-gateway" \
-                "${root}/bin/aether-gateway"
-              cp -R artifacts/nightly-frontend-dist/. "${root}/frontend/"
-              sed \
-                -e "s/^SOURCE_REF=\"\${AETHER_SOURCE_REF:-main}\"/SOURCE_REF=\"\${AETHER_SOURCE_REF:-${SOURCE_REF}}\"/" \
-                -e "s/^VERSION=\"\${AETHER_VERSION:-}\"/VERSION=\"\${AETHER_VERSION:-${VERSION}}\"/" \
-                install.sh > "${root}/install.sh"
-              chmod 0755 "${root}/install.sh"
-              install -m 0755 update.sh "${root}/update.sh"
-              install -m 0644 docker-compose.yml "${root}/docker-compose.yml"
-              install -m 0644 docker-compose.single-node.yml "${root}/docker-compose.single-node.yml"
-              install -m 0644 .env.example "${root}/.env.example"
-              install -m 0755 generate_keys.sh "${root}/generate_keys.sh"
-              install -m 0644 README.md "${root}/README.md"
-              install -m 0644 LICENSE "${root}/LICENSE"
+            install -m 0755 \
+              "artifacts/nightly-gateway-linux-${arch}/aether-gateway" \
+              "${root}/bin/aether-gateway"
+            cp -R artifacts/nightly-frontend-dist/. "${root}/frontend/"
+            sed \
+              -e "s/^SOURCE_REF=\"\${AETHER_SOURCE_REF:-main}\"/SOURCE_REF=\"\${AETHER_SOURCE_REF:-${SOURCE_REF}}\"/" \
+              -e "s/^VERSION=\"\${AETHER_VERSION:-}\"/VERSION=\"\${AETHER_VERSION:-${VERSION}}\"/" \
+              install.sh > "${root}/install.sh"
+            chmod 0755 "${root}/install.sh"
+            install -m 0755 update.sh "${root}/update.sh"
+            install -m 0644 docker-compose.yml "${root}/docker-compose.yml"
+            install -m 0644 docker-compose.single-node.yml "${root}/docker-compose.single-node.yml"
+            install -m 0644 .env.example "${root}/.env.example"
+            install -m 0755 generate_keys.sh "${root}/generate_keys.sh"
+            install -m 0644 README.md "${root}/README.md"
+            install -m 0644 LICENSE "${root}/LICENSE"
 
-              tar -C package -czf "release-assets/${bundle}.tar.gz" "${bundle}"
-            done
+            tar -C package -czf "release-assets/${bundle}.tar.gz" "${bundle}"
           done
 
           sed \
@@ -432,8 +418,8 @@ jobs:
           chmod 0755 release-assets/install.sh
           (cd release-assets && sha256sum *.tar.gz > SHA256SUMS)
 
-          test "$(find release-assets -maxdepth 1 -name '*.tar.gz' | wc -l)" -eq 4
-          test "$(wc -l < release-assets/SHA256SUMS)" -eq 4
+          test "$(find release-assets -maxdepth 1 -name '*.tar.gz' | wc -l)" -eq 2
+          test "$(wc -l < release-assets/SHA256SUMS)" -eq 2
           (cd release-assets && sha256sum -c SHA256SUMS)
           for archive in release-assets/*.tar.gz; do
             tar -tzf "${archive}" >/dev/null
@@ -517,6 +503,15 @@ jobs:
             --repo "${REPOSITORY}" \
             --clobber
 
+          published_assets="$(gh release view "${RELEASE_TAG}" --repo "${REPOSITORY}" --json assets --jq '.assets[].name')"
+          while IFS= read -r asset_name; do
+            if [[ "${asset_name}" == aether-nightly-*.tar.gz && ! -f "release-assets/${asset_name}" ]]; then
+              gh release delete-asset "${RELEASE_TAG}" "${asset_name}" \
+                --repo "${REPOSITORY}" \
+                --yes
+            fi
+          done <<<"${published_assets}"
+
           # target_commitish does not move an existing git tag. Move the ref
           # only after the complete asset set is available.
           if gh api "repos/${REPOSITORY}/git/ref/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
@@ -541,8 +536,6 @@ jobs:
           expected_assets=(
             aether-nightly-linux-amd64.tar.gz
             aether-nightly-linux-arm64.tar.gz
-            aether-nightly-macos-amd64.tar.gz
-            aether-nightly-macos-arm64.tar.gz
             SHA256SUMS
             install.sh
           )

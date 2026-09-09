@@ -106,6 +106,29 @@ function mount(props: InstanceType<typeof ProviderKeyActionCluster>['$props']) {
 }
 
 describe('ProviderKeyActionCluster', () => {
+  it.each([
+    { score: 0, label: '0%' },
+    { score: 1, label: '100%' },
+  ])('renders the legacy health score $score as $label', ({ score, label }) => {
+    const { root, unmount } = mount({
+      apiKey: createProviderKey({ health_score: score }),
+      providerType: 'codex',
+      recoverable: false,
+      recoverTitle: '',
+      circuitBreakerTitle: '',
+      circuitProbeCountdown: '',
+      healthScoreBarClass: 'bg-red-500',
+      healthScoreTextClass: 'text-red-600',
+      proxyPopoverOpen: false,
+      proxyNodeName: '',
+    })
+
+    const health = root.querySelector('[data-testid="provider-key-health"]')
+    expect(health?.textContent?.trim()).toBe(label)
+    expect(health?.textContent).not.toContain('待观测')
+    unmount()
+  })
+
   it('renders circuit, health, proxy and antigravity actions', () => {
     const { root, unmount } = mount({
       apiKey: createProviderKey({

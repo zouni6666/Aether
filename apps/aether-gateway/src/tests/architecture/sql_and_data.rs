@@ -96,12 +96,11 @@ fn aether_data_backend_pool_modules_do_not_own_maintenance_sql() {
 #[test]
 fn wallet_maintenance_sql_is_partitioned_by_driver() {
     let facade = read_workspace_file("crates/aether-data/runtime/src/backend/wallet.rs");
-    for module in ["mod postgres;"] {
-        assert!(
-            facade.contains(module),
-            "wallet facade should declare {module}"
-        );
-    }
+    let module = "mod postgres;";
+    assert!(
+        facade.contains(module),
+        "wallet facade should declare {module}"
+    );
     for forbidden in [
         "sqlx::",
         "PostgresBackend",
@@ -115,24 +114,22 @@ fn wallet_maintenance_sql_is_partitioned_by_driver() {
         );
     }
 
-    for (driver, backend) in [("postgres", "PostgresBackend")] {
-        let path = format!("crates/aether-data/runtime/src/backend/wallet/{driver}.rs");
-        let source = read_workspace_file(&path);
-        assert!(source.contains(&format!("impl {backend}")));
-        assert!(source.contains("aggregate_wallet_daily_usage"));
-        assert!(source.contains("sqlx::query"));
-    }
+    let (driver, backend) = ("postgres", "PostgresBackend");
+    let path = format!("crates/aether-data/runtime/src/backend/wallet/{driver}.rs");
+    let source = read_workspace_file(&path);
+    assert!(source.contains(&format!("impl {backend}")));
+    assert!(source.contains("aggregate_wallet_daily_usage"));
+    assert!(source.contains("sqlx::query"));
 }
 
 #[test]
 fn table_maintenance_is_partitioned_for_each_driver() {
     let facade = read_workspace_file("crates/aether-data/runtime/src/backend/maintenance.rs");
-    for module in ["mod postgres;"] {
-        assert!(
-            facade.contains(module),
-            "maintenance facade should declare {module}"
-        );
-    }
+    let module = "mod postgres;";
+    assert!(
+        facade.contains(module),
+        "maintenance facade should declare {module}"
+    );
     for forbidden in [
         "impl PostgresBackend",
         "VACUUM ANALYZE",
@@ -156,12 +153,11 @@ fn table_maintenance_is_partitioned_for_each_driver() {
 #[test]
 fn system_driver_database_operations_are_partitioned() {
     let facade = read_workspace_file("crates/aether-data/runtime/src/backend/system.rs");
-    for module in ["mod postgres;"] {
-        assert!(
-            facade.contains(module),
-            "system facade should declare {module}"
-        );
-    }
+    let module = "mod postgres;";
+    assert!(
+        facade.contains(module),
+        "system facade should declare {module}"
+    );
     for forbidden in [
         "impl PostgresBackend",
         "fn map_postgres_stats_daily_aggregate(",
@@ -1521,12 +1517,11 @@ fn lifecycle_migrations_are_partitioned_by_driver() {
         types.contains(required),
         "migrate/types.rs should own {required}"
     );
-    for forbidden in ["PgPool"] {
-        assert!(
-            !types.contains(forbidden),
-            "migrate/types.rs should remain driver-independent from {forbidden}"
-        );
-    }
+    let forbidden = "PgPool";
+    assert!(
+        !types.contains(forbidden),
+        "migrate/types.rs should remain driver-independent from {forbidden}"
+    );
 
     let postgres =
         read_workspace_file("crates/aether-data/runtime/src/lifecycle/migrate/postgres.rs");
@@ -1905,12 +1900,11 @@ fn gateway_system_config_types_are_owned_by_aether_data() {
     }
     let data_backends =
         read_workspace_file("crates/aether-data/runtime/src/backend/maintenance.rs");
-    for pattern in ["postgres.list_system_config_entries().await"] {
-        assert!(
-            data_backends.contains(pattern),
-            "aether-data backends should own driver-specific system config dispatch {pattern}"
-        );
-    }
+    let pattern = "postgres.list_system_config_entries().await";
+    assert!(
+        data_backends.contains(pattern),
+        "aether-data backends should own driver-specific system config dispatch {pattern}"
+    );
     for pattern in [
         "|(key, value, description, updated_at_unix_secs)|",
         "Ok((0, 0, 0, 0))",

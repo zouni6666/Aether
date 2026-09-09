@@ -3075,6 +3075,45 @@ mod tests {
     }
 
     #[test]
+    fn admin_provider_key_health_response_preserves_v0_7_13_defaults() {
+        let state = AppState::new().expect("gateway should build");
+        for (health, expected_score) in [
+            (None, json!(1.0)),
+            (Some(json!({})), json!(1.0)),
+            (
+                Some(json!({"openai:chat": {"consecutive_failures": 0}})),
+                json!(1.0),
+            ),
+            (
+                Some(json!({"openai:chat": {"health_score": 0.0}})),
+                json!(0.0),
+            ),
+            (
+                Some(json!({"openai:chat": {"health_score": 1.0}})),
+                json!(1.0),
+            ),
+            (
+                Some(json!({
+                    "openai:chat": {"health_score": 0.25},
+                    "openai:responses": {"health_score": 0.75},
+                })),
+                json!(0.25),
+            ),
+        ] {
+            let mut key = sample_catalog_key();
+            key.health_by_format = health;
+            let payload = build_admin_provider_key_response(
+                &state,
+                &key,
+                "openai",
+                &["openai:chat".to_string()],
+                1_000,
+            );
+            assert_eq!(payload["health_score"], expected_score);
+        }
+    }
+
+    #[test]
     fn responses_key_scope_covers_search_in_one_direction() {
         let mut responses_key = sample_catalog_key();
         responses_key.api_formats = Some(json!(["openai:responses"]));

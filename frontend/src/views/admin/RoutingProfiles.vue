@@ -402,7 +402,7 @@
                 这些选项作用于当前调度策略。
               </p>
             </div>
-            <div class="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-4">
+            <div class="grid auto-rows-fr grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-4">
               <div
                 class="order-1 flex min-h-12 items-center justify-between gap-3 rounded-lg border border-border/60 px-3 py-2 text-sm"
                 data-testid="keep-priority-on-conversion"
@@ -479,8 +479,35 @@
                   @update:model-value="updateExecutionPolicy('cyber_continue_failover', $event)"
                 />
               </div>
+              <div
+                class="order-5 flex min-h-12 items-center justify-between gap-3 rounded-lg border border-border/60 px-3 py-2 text-sm"
+                data-testid="cancel-on-client-disconnect"
+              >
+                <div class="flex min-w-0 items-center gap-1.5">
+                  <span class="font-medium">取消请求立即打断</span>
+                  <HelpHint
+                    label="取消请求立即打断"
+                    text="默认关闭：客户端取消或断开后，服务端继续等待请求完成并正常计费。开启后立即打断且不计费，按次计费的请求仍收取单次请求费用。仅作用于当前调度策略。"
+                  />
+                </div>
+                <Switch
+                  :model-value="cancelOnClientDisconnect"
+                  :disabled="saving"
+                  aria-label="取消请求立即打断"
+                  @update:model-value="updateExecutionPolicy('cancel_on_client_disconnect', $event)"
+                />
+              </div>
             </div>
           </section>
+
+          <RoutingFailoverPolicyEditor
+            :key="draftGeneration"
+            ref="routingFailoverPolicyEditor"
+            :model-value="draft.config_json.default_policy"
+            :disabled="saving"
+            @update:model-value="updateRoutingFailoverPolicy"
+            @pending-change="routingFailoverPending = $event"
+          />
 
           <section class="space-y-4 rounded-lg border border-border/60 p-4">
             <div>
@@ -864,7 +891,8 @@ import {
   type RoutingSchedulingMode,
   type RoutingSortingScope,
 } from '@/features/routing/utils/routingPolicy'
-import { RoutingPriorityPolicyEditor } from '@/features/routing/components'
+import { RoutingFailoverPolicyEditor, RoutingPriorityPolicyEditor } from '@/features/routing/components'
+import { normalizeRoutingFailoverPolicy, validateRoutingFailoverPolicy, type RoutingFailoverPolicy } from '@/features/routing/utils/routingFailover'
 import {
   createRoutingGroup,
   deleteRoutingGroup,
@@ -908,6 +936,8 @@ const schedulingModes: Array<{ value: RoutingSchedulingMode; label: string }> = 
 const groups = ref<RoutingGroupRecord[]>([])
 const selectedGroupId = ref<string | null>(null)
 const draft = ref<RoutingGroupDraft | null>(null)
+const routingFailoverPolicyEditor = ref<{ commitJsonDrafts: () => boolean } | null>(null)
+const routingFailoverPending = ref(false)
 const savedDraftSnapshot = ref<string | null>(null)
 const sortingScope = ref<RoutingSortingScope>('unified')
 const selectedPerModelName = ref<string | null>(null)
@@ -925,7 +955,7 @@ const groupActionId = ref<string | null>(null)
 const draggedGroupId = ref<string | null>(null)
 const dragOverGroupId = ref<string | null>(null)
 const isCreating = ref(false)
-let draftGeneration = 0
+const draftGeneration = ref(0)
 
 const switchModelTarget = ref<string | null>(null)
 const switchModelDialogOpen = ref(false)
@@ -969,6 +999,9 @@ const cfHeartbeat = computed<boolean>(() => (
 ))
 const cyberContinueFailover = computed<boolean>(() => (
   draft.value?.config_json.default_policy.cyber_continue_failover ?? false
+))
+const cancelOnClientDisconnect = computed<boolean>(() => (
+  draft.value?.config_json.default_policy.cancel_on_client_disconnect ?? false
 ))
 interface ModelRow {
   name: string
@@ -1068,7 +1101,8 @@ function paramToString(value: unknown): string | null {
 }
 
 function clearDraftState(): void {
-  draftGeneration += 1
+  draftGeneration.value += 1
+  routingFailoverPending.value = false
   isCreating.value = false
   selectedGroupId.value = null
   draft.value = null
@@ -1083,7 +1117,8 @@ function clearDraftState(): void {
 
 function selectGroup(group: RoutingGroupRecord): void {
   const normalized = normalizeRecord(group)
-  draftGeneration += 1
+  draftGeneration.value += 1
+  routingFailoverPending.value = false
   isCreating.value = false
   selectedGroupId.value = normalized.id
   draft.value = buildDraft(normalized)
@@ -1098,7 +1133,8 @@ function setDraftEnabled(value: boolean): void {
 }
 
 function startCreate(): void {
-  draftGeneration += 1
+  draftGeneration.value += 1
+  routingFailoverPending.value = false
   isCreating.value = true
   selectedGroupId.value = null
   draft.value = {
@@ -1198,7 +1234,7 @@ const editingDirty = computed(() => {
 const draftDirty = computed(() => {
   if (!draft.value) return false
   if (isCreating.value) return true
-  return savedDraftSnapshot.value !== draftSnapshotValue(draft.value)
+  return routingFailoverPending.value || savedDraftSnapshot.value !== draftSnapshotValue(draft.value)
 })
 
 const canSaveDraft = computed(() => {
@@ -1306,7 +1342,7 @@ function updateKeepPriorityOnConversion(value: boolean): void {
 }
 
 function updateExecutionPolicy(
-  field: 'enable_cf_heartbeat' | 'cyber_continue_failover',
+  field: 'enable_cf_heartbeat' | 'cyber_continue_failover' | 'cancel_on_client_disconnect',
   value: boolean,
 ): void {
   if (!draft.value) return
@@ -1317,6 +1353,15 @@ function updateExecutionPolicy(
       [field]: value,
     },
   })
+}
+
+function updateRoutingFailoverPolicy(value: RoutingFailoverPolicy): void {
+  if (!draft.value) return
+  const patch = normalizeRoutingFailoverPolicy(value)
+  Object.assign(draft.value.config_json.default_policy, patch)
+  if (editingConfig.value) {
+    Object.assign(editingConfig.value.default_policy, normalizeRoutingFailoverPolicy(patch))
+  }
 }
 
 function removePerModelPolicy(model: string): void {
@@ -1627,6 +1672,12 @@ async function saveDraft(): Promise<void> {
     showError('策略名称不能为空')
     return
   }
+  if (routingFailoverPolicyEditor.value && !routingFailoverPolicyEditor.value.commitJsonDrafts()) return
+  const failoverError = validateRoutingFailoverPolicy(draft.value.config_json.default_policy)
+  if (failoverError) {
+    showError(failoverError)
+    return
+  }
   const config = cloneConfig(draft.value.config_json)
   if (sortingScope.value === 'per_model' && perModelPolicies.value.length === 0) {
     showError('按模型排序时至少选择一个模型')
@@ -1634,7 +1685,7 @@ async function saveDraft(): Promise<void> {
   }
 
   const targetGroupId = draft.value.id ?? null
-  const submittedGeneration = draftGeneration
+  const submittedGeneration = draftGeneration.value
   const submittedSnapshot = draftSnapshotValue(draft.value)
   const wasCreating = isCreating.value || !draft.value.id
   saving.value = true
@@ -1653,7 +1704,7 @@ async function saveDraft(): Promise<void> {
       ? await createRoutingGroup(payload)
       : await updateRoutingGroup(targetGroupId, payload)
 
-    const sameDraftGeneration = draftGeneration === submittedGeneration
+    const sameDraftGeneration = draftGeneration.value === submittedGeneration
     const stillEditingSubmittedDraft = wasCreating
       ? sameDraftGeneration
         && isCreateRoute.value

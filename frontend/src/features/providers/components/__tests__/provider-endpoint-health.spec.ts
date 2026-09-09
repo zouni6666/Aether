@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, type App, type Component } from 'vue'
 
-import type { ProviderWithEndpointsSummary } from '@/api/endpoints'
+import type { EndpointHealthDetail, ProviderWithEndpointsSummary } from '@/api/endpoints'
 import { createI18n } from '@/i18n'
 import ProviderTableRow from '../ProviderTableRow.vue'
 import ProviderMobileCard from '../ProviderMobileCard.vue'
@@ -20,7 +20,7 @@ afterEach(() => {
   }
 })
 
-function mountProvider(component: Component, healthScore: number | null) {
+function mountProvider(component: Component, healthScore: number | null, overrides: Partial<EndpointHealthDetail> = {}) {
   const provider: ProviderWithEndpointsSummary = {
     id: 'provider-1',
     name: 'Provider One',
@@ -45,6 +45,7 @@ function mountProvider(component: Component, healthScore: number | null) {
       is_active: true,
       total_keys: 1,
       active_keys: 1,
+      ...overrides,
     }],
     ops_configured: false,
     created_at: '2026-09-06T00:00:00Z',
@@ -81,6 +82,7 @@ describe.each([
     { score: null, label: '-', width: '100%', color: 'bg-muted-foreground/40' },
     { score: 0, label: '0%', width: '5%', color: 'bg-red-500' },
     { score: 0.8, label: '80%', width: '80%', color: 'bg-green-500' },
+    { score: 1, label: '100%', width: '100%', color: 'bg-green-500' },
   ])('renders $score without confusing unknown health with zero', ({ score, label, width, color }) => {
     const root = mountProvider(component, score)
     const health = root.querySelector('[title*="健康"]')
@@ -89,5 +91,18 @@ describe.each([
     expect(health?.querySelectorAll('span')[1]?.textContent?.trim()).toBe(label)
     expect(bar?.style.width).toBe(width)
     expect(bar?.classList.contains(color)).toBe(true)
+  })
+
+  it.each([
+    { overrides: { is_active: false }, tooltip: '端点禁用' },
+    { overrides: { active_keys: 0, total_keys: 0 }, tooltip: '未配置密钥' },
+    { overrides: { active_keys: 0 }, tooltip: '无可用密钥' },
+  ])('keeps $tooltip gray even when the health score defaults to one', ({ overrides, tooltip }) => {
+    const root = mountProvider(component, 1, overrides)
+    const health = root.querySelector(`[title*="${tooltip}"]`)
+    const bar = health?.querySelector<HTMLElement>('.transition-all')
+
+    expect(health?.querySelectorAll('span')[1]?.textContent?.trim()).toBe('-')
+    expect(bar?.classList.contains('bg-muted-foreground/40')).toBe(true)
   })
 })

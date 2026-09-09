@@ -4,6 +4,7 @@ set -euo pipefail
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 COMPOSE_FILE="${REPO_ROOT}/docker-compose.yml"
 RELEASE_WORKFLOW="${REPO_ROOT}/.github/workflows/release.yml"
+NIGHTLY_WORKFLOW="${REPO_ROOT}/.github/workflows/nightly.yml"
 TUNNEL_RELEASE_WORKFLOW="${REPO_ROOT}/.github/workflows/build-tunnel.yml"
 APP_DOCKERFILE="${REPO_ROOT}/Dockerfile.app"
 
@@ -48,6 +49,27 @@ assert_line "${RELEASE_WORKFLOW}" "            release-assets/install.sh"
 assert_line "${RELEASE_WORKFLOW}" "            release-assets/SHA256SUMS"
 assert_line "${RELEASE_WORKFLOW}" "            release-assets/AETHER_RELEASE_PROVENANCE.sigstore.json"
 
+for workflow in "${RELEASE_WORKFLOW}" "${NIGHTLY_WORKFLOW}"; do
+    assert_line "${workflow}" "          - name: linux-amd64"
+    assert_line "${workflow}" "          - name: linux-arm64"
+    assert_line "${workflow}" "          for arch in amd64 arm64; do"
+    assert_line "${workflow}" '            bundle="aether-${VERSION}-linux-${arch}"'
+    if grep -Eq 'macos|apple-darwin|for platform in' "${workflow}"; then
+        fail_test "gateway workflow still references a removed build platform: ${workflow}"
+    fi
+done
+
+assert_line "${NIGHTLY_WORKFLOW}" \
+    '          test "$(find release-assets -maxdepth 1 -name '\''*.tar.gz'\'' | wc -l)" -eq 2'
+assert_line "${NIGHTLY_WORKFLOW}" \
+    '          test "$(wc -l < release-assets/SHA256SUMS)" -eq 2'
+assert_line "${NIGHTLY_WORKFLOW}" "            aether-nightly-linux-amd64.tar.gz"
+assert_line "${NIGHTLY_WORKFLOW}" "            aether-nightly-linux-arm64.tar.gz"
+assert_line "${NIGHTLY_WORKFLOW}" \
+    '            if [[ "${asset_name}" == aether-nightly-*.tar.gz && ! -f "release-assets/${asset_name}" ]]; then'
+assert_line "${NIGHTLY_WORKFLOW}" \
+    '              gh release delete-asset "${RELEASE_TAG}" "${asset_name}" \'
+
 assert_line "${TUNNEL_RELEASE_WORKFLOW}" "      attestations: write"
 assert_line "${TUNNEL_RELEASE_WORKFLOW}" "      id-token: write"
 assert_line "${TUNNEL_RELEASE_WORKFLOW}" \
@@ -63,4 +85,4 @@ if grep -ERq '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]+[^[:space:]#]+@[^0-9
     fail_test "workflow contains a mutable third-party action reference"
 fi
 
-echo "PASS: release supply-chain pins and provenance workflow"
+echo "PASS: release supply-chain pins, provenance and Linux-only gateway platforms"

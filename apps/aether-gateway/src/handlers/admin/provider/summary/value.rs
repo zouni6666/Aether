@@ -95,8 +95,11 @@ pub(crate) fn build_admin_provider_summary_value(
             let scores = endpoint_keys
                 .iter()
                 .filter(|key| endpoint.is_active && key.is_active)
-                .filter_map(|key| provider_key_health_score(key, &endpoint.api_format))
-                .filter(|score| score.is_finite())
+                .map(|key| {
+                    provider_key_health_score(key, &endpoint.api_format)
+                        .filter(|score| score.is_finite())
+                        .unwrap_or(1.0)
+                })
                 .collect::<Vec<_>>();
             let health_score =
                 (!scores.is_empty()).then(|| scores.iter().sum::<f64>() / scores.len() as f64);
