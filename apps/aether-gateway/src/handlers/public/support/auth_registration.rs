@@ -360,7 +360,7 @@ pub(super) async fn handle_auth_send_verification_code(
     if let Err(err) = send_auth_email(state, smtp_config, email_message).await {
         tracing::warn!(
             event_name = "auth_verification_email_send_failed",
-            error = ?err,
+            error = %crate::error::redact_error_debug(&err),
             "failed to send authentication verification email"
         );
         let _ = clear_auth_email_pending_code(state, &email).await;
@@ -665,7 +665,7 @@ pub(super) async fn handle_auth_register(
             Err(err) => {
                 tracing::warn!(
                     event_name = "auth_email_registration_proof_consume_failed",
-                    error = ?err,
+                    error = %crate::error::redact_error_debug(&err),
                     "failed to consume email registration proof"
                 );
                 return build_auth_error_response(
@@ -931,7 +931,7 @@ pub(super) async fn handle_auth_verify_email(
         Err(err) => {
             tracing::warn!(
                 event_name = "auth_email_verification_consume_failed",
-                error = ?err,
+                error = %crate::error::redact_error_debug(&err),
                 "failed to consume email verification challenge"
             );
             false
@@ -944,7 +944,7 @@ pub(super) async fn handle_auth_verify_email(
             Err(err) => {
                 tracing::warn!(
                     event_name = "auth_registration_proof_store_failed",
-                    error = ?err,
+                    error = %crate::error::redact_error_debug(&err),
                     "failed to store email registration proof"
                 );
                 true

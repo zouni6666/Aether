@@ -1,14 +1,13 @@
 //! Bounded request-body buffering for frontdoor adapters.
 //!
-//! The policy reserves weighted memory before reading a body and holds the
-//! reservation through the caller's normalization callback. This keeps body
-//! buffering independent from gateway business routing while preventing a
-//! burst of compressed requests from bypassing the memory budget.
+//! The policy grows weighted reservations as bytes arrive and holds them through
+//! normalization. Growth never waits while retaining a partial buffer, so
+//! concurrent uploads cannot deadlock while competing for the remaining budget.
 
-use axum::body::{to_bytes, Body};
+use axum::body::Body;
 use bytes::Bytes;
+use futures_util::StreamExt;
 use http::{header, HeaderMap, StatusCode};
-use std::error::Error as StdError;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -127,7 +126,12 @@ impl BodyBufferPolicy {
     }
 
     pub fn reservation_bytes(&self, headers: &HeaderMap) -> usize {
-        reservation_bytes(headers, self.max_bytes, self.budget_bytes)
+        reservation_bytes(
+            headers,
+            self.max_bytes,
+            self.budget_bytes,
+            self.permit_bytes,
+        )
     }
 
     pub fn reservation_permits(&self, reservation_bytes: usize) -> u32 {
@@ -168,67 +172,134 @@ impl BodyBufferPolicy {
         };
 
         Ok(BodyBufferReservation {
-            permit,
+            memory: BodyBufferBudget {
+                permit,
+                budget: Arc::clone(&self.budget),
+                budget_bytes: self.budget_bytes,
+                permit_bytes: self.permit_bytes,
+                requested_bytes,
+            },
             max_bytes: effective_max_bytes,
             read_timeout: self.read_timeout,
-            requested_bytes,
         })
     }
 }
 
 #[derive(Debug)]
 pub struct BodyBufferReservation {
-    permit: OwnedSemaphorePermit,
+    memory: BodyBufferBudget,
     max_bytes: u64,
     read_timeout: Option<Duration>,
+}
+
+#[derive(Debug)]
+pub struct BodyBufferBudget {
+    permit: OwnedSemaphorePermit,
+    budget: Arc<Semaphore>,
+    budget_bytes: usize,
+    permit_bytes: usize,
     requested_bytes: usize,
+}
+
+impl BodyBufferBudget {
+    /// Reserve a new high-water mark before retaining or decoding more bytes.
+    /// Never queue for growth while another partial request may hold the rest.
+    pub fn try_reserve_bytes(&mut self, requested_bytes: usize) -> Result<(), BodyBufferError> {
+        if requested_bytes > self.budget_bytes {
+            return Err(self.overloaded(requested_bytes));
+        }
+        let permits = reservation_permits(requested_bytes, self.permit_bytes) as usize;
+        let additional = permits.saturating_sub(self.permit.num_permits());
+        if additional > 0 {
+            let permit = Arc::clone(&self.budget)
+                .try_acquire_many_owned(additional as u32)
+                .map_err(|_| self.overloaded(requested_bytes))?;
+            self.permit.merge(permit);
+        }
+        self.requested_bytes = self.requested_bytes.max(requested_bytes);
+        Ok(())
+    }
+
+    fn overloaded(&self, requested_bytes: usize) -> BodyBufferError {
+        BodyBufferError::Overloaded {
+            requested_bytes,
+            budget_bytes: self.budget_bytes,
+            timeout_ms: 0,
+        }
+    }
 }
 
 impl BodyBufferReservation {
     pub fn requested_bytes(&self) -> usize {
-        self.requested_bytes
+        self.memory.requested_bytes
     }
 
     pub async fn collect(self, body: Body) -> Result<BufferedBody, BodyBufferError> {
         let Self {
-            permit,
+            mut memory,
             max_bytes,
             read_timeout,
-            requested_bytes,
         } = self;
         let started_at = Instant::now();
-        let body_limit = usize::try_from(max_bytes).unwrap_or(usize::MAX);
-        let collected = match read_timeout {
-            Some(read_timeout) => {
-                match tokio::time::timeout(read_timeout, to_bytes(body, body_limit)).await {
-                    Ok(result) => result,
-                    Err(_) => {
-                        return Err(BodyBufferError::Timeout {
-                            timeout_ms: duration_millis(read_timeout),
-                        });
+        let collect = async {
+            let mut stream = body.into_data_stream();
+            let mut bytes = Vec::new();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|error| BodyBufferError::ReadFailed {
+                    message: error.to_string(),
+                })?;
+                let length =
+                    bytes
+                        .len()
+                        .checked_add(chunk.len())
+                        .ok_or(BodyBufferError::TooLarge {
+                            limit_bytes: max_bytes,
+                        })?;
+                if length as u64 > max_bytes {
+                    return Err(BodyBufferError::TooLarge {
+                        limit_bytes: max_bytes,
+                    });
+                }
+                if length > bytes.capacity() {
+                    let mut capacity = if length <= DEFAULT_BODY_BUFFER_PERMIT_BYTES {
+                        length
+                    } else {
+                        bytes
+                            .capacity()
+                            .saturating_mul(2)
+                            .max(length)
+                            .min(usize::try_from(max_bytes).unwrap_or(usize::MAX))
+                    };
+                    if memory.try_reserve_bytes(capacity).is_err() {
+                        memory.try_reserve_bytes(length)?;
+                        capacity = length;
+                    }
+                    // Account for geometric growth, falling back to the bytes needed under load.
+                    bytes
+                        .try_reserve_exact(capacity - bytes.len())
+                        .map_err(|error| BodyBufferError::ReadFailed {
+                            message: error.to_string(),
+                        })?;
+                    if bytes.capacity() > capacity {
+                        memory.try_reserve_bytes(bytes.capacity())?;
                     }
                 }
+                bytes.extend_from_slice(&chunk);
             }
-            None => to_bytes(body, body_limit).await,
+            Ok(Bytes::from(bytes))
         };
-        let bytes = match collected {
-            Ok(bytes) => bytes,
-            Err(error) if collection_exceeded_limit(&error) => {
-                return Err(BodyBufferError::TooLarge {
-                    limit_bytes: max_bytes,
-                });
-            }
-            Err(error) => {
-                return Err(BodyBufferError::ReadFailed {
-                    message: error.to_string(),
-                });
-            }
-        };
+        let bytes = match read_timeout {
+            Some(read_timeout) => tokio::time::timeout(read_timeout, collect)
+                .await
+                .map_err(|_| BodyBufferError::Timeout {
+                    timeout_ms: duration_millis(read_timeout),
+                }),
+            None => Ok(collect.await),
+        }??;
 
         Ok(BufferedBody {
             bytes,
-            permit: Some(permit),
-            requested_bytes,
+            memory,
             elapsed: started_at.elapsed(),
         })
     }
@@ -237,8 +308,7 @@ impl BodyBufferReservation {
 #[derive(Debug)]
 pub struct BufferedBody {
     bytes: Bytes,
-    permit: Option<OwnedSemaphorePermit>,
-    requested_bytes: usize,
+    memory: BodyBufferBudget,
     elapsed: Duration,
 }
 
@@ -248,19 +318,28 @@ impl BufferedBody {
     }
 
     pub fn requested_bytes(&self) -> usize {
-        self.requested_bytes
+        self.memory.requested_bytes
     }
 
     pub fn elapsed(&self) -> Duration {
         self.elapsed
     }
 
-    /// Apply normalization while retaining the memory permit until the
-    /// callback completes.
+    /// Retain the permit for a callback that does not grow the buffered payload.
     pub fn try_map<T, E>(self, map: impl FnOnce(Bytes) -> Result<T, E>) -> Result<T, E> {
-        let Self { bytes, permit, .. } = self;
-        let result = map(bytes);
-        drop(permit);
+        self.try_map_with_budget(|bytes, _| map(bytes))
+    }
+
+    /// The callback must account for decoded buffers before allocating them.
+    pub fn try_map_with_budget<T, E>(
+        self,
+        map: impl FnOnce(Bytes, &mut BodyBufferBudget) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let Self {
+            bytes, mut memory, ..
+        } = self;
+        let result = map(bytes, &mut memory);
+        drop(memory);
         result
     }
 }
@@ -389,23 +468,15 @@ fn invalid_body_headers(message: &str) -> BodyBufferError {
     }
 }
 
-fn reservation_bytes(headers: &HeaderMap, max_bytes: u64, budget_bytes: usize) -> usize {
+fn reservation_bytes(
+    headers: &HeaderMap,
+    max_bytes: u64,
+    budget_bytes: usize,
+    permit_bytes: usize,
+) -> usize {
     let reservation_ceiling = usize::try_from(max_bytes)
         .unwrap_or(usize::MAX)
         .min(budget_bytes);
-    let encoded = headers
-        .get_all(header::CONTENT_ENCODING)
-        .iter()
-        .any(|value| {
-            value.to_str().map_or(true, |value| {
-                value.split(',').map(str::trim).any(|encoding| {
-                    !encoding.is_empty() && !encoding.eq_ignore_ascii_case("identity")
-                })
-            })
-        });
-    if encoded {
-        return reservation_ceiling;
-    }
     declared_content_length(headers)
         .ok()
         .flatten()
@@ -414,7 +485,7 @@ fn reservation_bytes(headers: &HeaderMap, max_bytes: u64, budget_bytes: usize) -
                 .unwrap_or(usize::MAX)
                 .min(reservation_ceiling)
         })
-        .unwrap_or(reservation_ceiling)
+        .unwrap_or_else(|| permit_bytes.min(reservation_ceiling))
 }
 
 fn reservation_permits(reservation_bytes: usize, permit_bytes: usize) -> u32 {
@@ -427,17 +498,6 @@ fn reservation_permits(reservation_bytes: usize, permit_bytes: usize) -> u32 {
 
 fn duration_millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
-}
-
-fn collection_exceeded_limit(error: &(dyn StdError + 'static)) -> bool {
-    let mut current = Some(error);
-    while let Some(error) = current {
-        if error.to_string().contains("length limit exceeded") {
-            return true;
-        }
-        current = error.source();
-    }
-    false
 }
 
 #[cfg(test)]
@@ -579,9 +639,9 @@ mod tests {
         let reservation = policy
             .reserve(&headers)
             .await
-            .expect("encoded unlimited body should reserve the available budget");
-        assert_eq!(reservation.requested_bytes(), 4);
-        assert_eq!(budget.available_permits(), 0);
+            .expect("encoded unlimited body should reserve its initial chunk");
+        assert_eq!(reservation.requested_bytes(), 1);
+        assert_eq!(budget.available_permits(), 3);
 
         let error = reservation
             .collect(Body::from(Bytes::from_static(b"01234")))
@@ -706,5 +766,173 @@ mod tests {
             .await
             .expect_err("exhausted budget should fail closed");
         assert!(matches!(error, BodyBufferError::Overloaded { .. }));
+    }
+
+    #[tokio::test]
+    async fn small_compressed_and_unknown_length_requests_share_the_budget() {
+        let budget_bytes = 256 * 1024 * 1024;
+        let budget = Arc::new(Semaphore::new(
+            budget_bytes / DEFAULT_BODY_BUFFER_PERMIT_BYTES,
+        ));
+        let policy = policy(
+            budget_bytes as u64,
+            Duration::from_secs(1),
+            Arc::clone(&budget),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+        headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("1024"));
+        let compressed = policy.reserve(&headers).await.unwrap();
+        let unknown = policy.reserve(&HeaderMap::new()).await.unwrap();
+        assert_eq!(compressed.requested_bytes(), 1024);
+        assert_eq!(unknown.requested_bytes(), DEFAULT_BODY_BUFFER_PERMIT_BYTES);
+        assert_eq!(budget.available_permits(), 4094);
+        drop((compressed, unknown));
+        assert_eq!(budget.available_permits(), 4096);
+    }
+
+    #[tokio::test]
+    async fn unknown_length_body_grows_its_reservation_and_holds_it_until_normalized() {
+        let budget = Arc::new(Semaphore::new(8));
+        let policy = BodyBufferPolicy::with_permit_bytes(
+            8,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            8,
+            1,
+            Arc::clone(&budget),
+        );
+        let reservation = policy.reserve(&HeaderMap::new()).await.unwrap();
+        assert_eq!(budget.available_permits(), 7);
+        let body = Body::from_stream(stream::iter([
+            Ok::<_, std::io::Error>(Bytes::from_static(b"ab")),
+            Ok(Bytes::from_static(b"cd")),
+        ]));
+        let buffered = reservation.collect(body).await.unwrap();
+        assert_eq!(buffered.bytes().as_ref(), b"abcd");
+        assert_eq!(budget.available_permits(), 4);
+        buffered
+            .try_map_with_budget(|_, memory| {
+                memory.try_reserve_bytes(7)?;
+                assert_eq!(budget.available_permits(), 1);
+                Ok::<_, BodyBufferError>(())
+            })
+            .unwrap();
+        assert_eq!(budget.available_permits(), 8);
+    }
+
+    #[tokio::test]
+    async fn partial_upload_growth_rejects_without_waiting_and_releases_its_budget() {
+        let budget = Arc::new(Semaphore::new(2));
+        let policy = BodyBufferPolicy::with_permit_bytes(
+            2,
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+            2,
+            1,
+            Arc::clone(&budget),
+        );
+        let first = policy.reserve(&HeaderMap::new()).await.unwrap();
+        let second = policy.reserve(&HeaderMap::new()).await.unwrap();
+        let error =
+            tokio::time::timeout(Duration::from_millis(100), first.collect(Body::from("ab")))
+                .await
+                .expect("growth must not wait while holding a partial reservation")
+                .unwrap_err();
+        assert_eq!(
+            error,
+            BodyBufferError::Overloaded {
+                requested_bytes: 2,
+                budget_bytes: 2,
+                timeout_ms: 0,
+            }
+        );
+        assert_eq!(budget.available_permits(), 1);
+        let buffered = second.collect(Body::from("ab")).await.unwrap();
+        assert_eq!(budget.available_permits(), 0);
+        drop(buffered);
+        assert_eq!(budget.available_permits(), 2);
+    }
+
+    #[tokio::test]
+    async fn normalization_budget_failure_releases_all_upload_permits() {
+        let budget = Arc::new(Semaphore::new(4));
+        let policy = BodyBufferPolicy::with_permit_bytes(
+            4,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            4,
+            1,
+            Arc::clone(&budget),
+        );
+        let buffered = policy
+            .reserve(&HeaderMap::new())
+            .await
+            .unwrap()
+            .collect(Body::from("ab"))
+            .await
+            .unwrap();
+        let result = buffered.try_map_with_budget(|_, memory| memory.try_reserve_bytes(5));
+        assert!(matches!(
+            result,
+            Err(BodyBufferError::Overloaded {
+                requested_bytes: 5,
+                ..
+            })
+        ));
+        assert_eq!(budget.available_permits(), 4);
+    }
+
+    #[tokio::test]
+    async fn upload_growth_uses_available_budget_without_requiring_geometric_headroom() {
+        let budget = Arc::new(Semaphore::new(128));
+        let held = Arc::clone(&budget).acquire_many_owned(32).await.unwrap();
+        let policy = BodyBufferPolicy::with_permit_bytes(
+            128 * 1024,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            128 * 1024,
+            1024,
+            Arc::clone(&budget),
+        );
+        let body = Body::from_stream(stream::iter([
+            Ok::<_, std::io::Error>(Bytes::from(vec![b'a'; 70_000])),
+            Ok(Bytes::from(vec![b'b'; 20_000])),
+        ]));
+        let buffered = policy
+            .reserve(&HeaderMap::new())
+            .await
+            .unwrap()
+            .collect(body)
+            .await
+            .unwrap();
+        assert_eq!(buffered.bytes().len(), 90_000);
+        assert_eq!(buffered.requested_bytes(), 90_000);
+        drop((buffered, held));
+        assert_eq!(budget.available_permits(), 128);
+    }
+
+    #[tokio::test]
+    async fn cancellation_releases_partial_upload_budget() {
+        let budget = Arc::new(Semaphore::new(4));
+        let policy = BodyBufferPolicy::with_permit_bytes(
+            4,
+            Duration::from_secs(60),
+            Duration::from_secs(1),
+            4,
+            1,
+            Arc::clone(&budget),
+        );
+        let reservation = policy.reserve(&HeaderMap::new()).await.unwrap();
+        let body = Body::from_stream(
+            stream::once(async { Ok::<_, std::io::Error>(Bytes::from_static(b"ab")) })
+                .chain(stream::pending()),
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), reservation.collect(body))
+                .await
+                .is_err()
+        );
+        assert_eq!(budget.available_permits(), 4);
     }
 }

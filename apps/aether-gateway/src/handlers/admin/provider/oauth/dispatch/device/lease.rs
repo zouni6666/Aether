@@ -47,7 +47,7 @@ impl AdminProviderOAuthDevicePollLease {
             Err(error) => {
                 tracing::warn!(
                     lock_key = %lock_key,
-                    error = ?error,
+                    error = %crate::error::redact_error_detail(&error),
                     "gateway provider OAuth device poll lease acquisition failed"
                 );
                 AdminProviderOAuthDevicePollLeaseAcquire::Unavailable
@@ -87,7 +87,7 @@ impl AdminProviderOAuthDevicePollLease {
             Err(error) => {
                 tracing::error!(
                     lock_key = %lease.key,
-                    error = ?error,
+                    error = %crate::error::redact_error_detail(&error),
                     "gateway provider OAuth device poll final lease renewal failed"
                 );
                 Err(AdminProviderOAuthDevicePollLeaseFailure::Unavailable)
@@ -106,7 +106,7 @@ impl AdminProviderOAuthDevicePollLease {
             Err(error) => {
                 tracing::warn!(
                     lock_key = %lease.key,
-                    error = ?error,
+                    error = %crate::error::redact_error_detail(&error),
                     "gateway provider OAuth device poll lease release failed"
                 );
                 // Keep the lease in the guard so Drop can make one best-effort retry.
@@ -128,7 +128,7 @@ impl Drop for AdminProviderOAuthDevicePollLease {
             if let Err(error) = runtime.lock_release(&lease).await {
                 tracing::warn!(
                     lock_key = %lease.key,
-                    error = ?error,
+                    error = %crate::error::redact_error_detail(&error),
                     "gateway provider OAuth device poll lease Drop release failed"
                 );
             }

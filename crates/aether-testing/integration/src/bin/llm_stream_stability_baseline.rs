@@ -318,8 +318,13 @@ struct ProtocolPeer {
     stats: Arc<PeerStats>,
 }
 
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _log_shutdown = aether_runtime::LogShutdownGuard::new();
+    run()
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     init_test_runtime_for("llm-stream-stability-baseline");
     let config = parse_args(std::env::args().skip(1).collect())?;
     config.validate().map_err(std::io::Error::other)?;

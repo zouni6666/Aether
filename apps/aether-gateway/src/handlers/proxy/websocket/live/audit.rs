@@ -508,7 +508,9 @@ async fn persist_live_audit_event(
     let usage_runtime = std::sync::Arc::clone(&state.usage_runtime);
     let usage_data = std::sync::Arc::clone(state.usage_lifecycle_data_state());
     let write_request_id = request_id.clone();
+    let usage_producer = usage_runtime.track_producer();
     let task = tokio::spawn(async move {
+        let _usage_producer = usage_producer;
         if tokio::time::timeout(
             LIVE_AUDIT_WRITE_HARD_TIMEOUT,
             usage_runtime.record_terminal_event_direct(usage_data.as_ref(), event),
@@ -572,7 +574,9 @@ fn spawn_live_audit_event_detached(state: &AppState, event: UsageEvent, audit_sc
     };
     let usage_runtime = std::sync::Arc::clone(&state.usage_runtime);
     let usage_data = std::sync::Arc::clone(state.usage_lifecycle_data_state());
+    let usage_producer = usage_runtime.track_producer();
     runtime.spawn(async move {
+        let _usage_producer = usage_producer;
         if tokio::time::timeout(
             LIVE_AUDIT_WRITE_HARD_TIMEOUT,
             usage_runtime.record_terminal_event_direct(usage_data.as_ref(), event),

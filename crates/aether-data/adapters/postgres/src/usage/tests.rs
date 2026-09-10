@@ -8,7 +8,7 @@ use super::{
     attach_usage_routing_snapshot_metadata, attach_usage_settlement_pricing_snapshot_metadata,
     clear_previous_request_body_facts, inflate_usage_json_value,
     prepare_request_metadata_for_body_storage, prepare_usage_body_storage,
-    prepare_usage_upsert_context, push_postgres_usage_websocket_filter,
+    prepare_usage_for_persistence, push_postgres_usage_websocket_filter,
     request_body_capture_replaces_derived_facts, resolved_read_usage_body_ref,
     resolved_write_usage_body_ref, split_dashboard_daily_aggregate_range,
     split_dashboard_hourly_aggregate_range, usage_body_capture_state_for_storage, usage_body_ref,
@@ -39,6 +39,7 @@ fn fast_clear_usage_record(
     terminal_service_tier: Option<&str>,
 ) -> UpsertUsageRecord {
     UpsertUsageRecord {
+        capture_retention: Default::default(),
         request_id: request_id.to_string(),
         user_id: None,
         api_key_id: None,
@@ -204,7 +205,26 @@ async fn live_full_http_capture_round_trips_for_direct_and_batch_writes() {
     let repository = SqlxUsageReadRepository::new(factory.connect_lazy().unwrap());
     crate::run_migrations(repository.pool()).await.unwrap();
 
-    for batch in [false, true] {
+    for write_mode in 0..3 {
+        use aether_data_contracts::repository::usage::{
+            usage_json_heap_estimate, UsageCaptureMemoryBudget,
+        };
+        let batch = write_mode != 0;
+        let budget = Arc::new(UsageCaptureMemoryBudget::new(4 * 1024 * 1024));
+        let retain_capture = |usage: &mut UpsertUsageRecord| {
+            let bytes = [
+                usage.request_body.as_ref(),
+                usage.provider_request_body.as_ref(),
+                usage.response_body.as_ref(),
+                usage.client_response_body.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .map(|body| std::mem::size_of::<serde_json::Value>() + usage_json_heap_estimate(body))
+            .sum();
+            assert!(usage.capture_retention.reserve(Arc::clone(&budget), bytes));
+            bytes
+        };
         let request_id = format!("req-full-capture-{}", uuid::Uuid::new_v4().simple());
         let now_unix_secs = Utc::now().timestamp() as u64;
         let mut pending = fast_clear_usage_record(
@@ -225,14 +245,18 @@ async fn live_full_http_capture_round_trips_for_direct_and_batch_writes() {
         pending.response_body_state = Some(UsageBodyCaptureState::Inline);
         pending.client_response_body = Some(json!("pending client response"));
         pending.client_response_body_state = Some(UsageBodyCaptureState::Inline);
+        let pending_bytes = retain_capture(&mut pending);
         if batch {
-            repository
-                .upsert_pending_many(vec![pending.clone()])
-                .await
-                .unwrap();
+            let records = if write_mode == 2 {
+                vec![pending.clone(), pending.clone()]
+            } else {
+                vec![pending.clone()]
+            };
+            repository.upsert_pending_many(records).await.unwrap();
         } else {
             repository.upsert(pending.clone()).await.unwrap();
         }
+        assert_eq!(budget.retained_bytes(), pending_bytes);
         for (field, expected) in [
             (UsageBodyField::RequestBody, pending.request_body.as_ref()),
             (
@@ -274,7 +298,10 @@ async fn live_full_http_capture_round_trips_for_direct_and_batch_writes() {
         terminal.response_body_state = Some(UsageBodyCaptureState::Inline);
         terminal.client_response_body = Some(json!({"output": "final response"}));
         terminal.client_response_body_state = Some(UsageBodyCaptureState::Inline);
+        let terminal_bytes = retain_capture(&mut terminal);
         repository.upsert(terminal.clone()).await.unwrap();
+        assert_eq!(budget.retained_bytes(), pending_bytes + terminal_bytes);
+        assert_eq!(budget.downgraded_total(), 0);
 
         let stored = repository
             .find_by_request_id_shallow(&request_id)
@@ -330,6 +357,9 @@ async fn live_full_http_capture_round_trips_for_direct_and_batch_writes() {
             .execute(repository.pool())
             .await
             .unwrap();
+        drop(pending);
+        drop(terminal);
+        assert_eq!(budget.retained_bytes(), 0);
     }
 }
 
@@ -2411,6 +2441,7 @@ async fn validates_upsert_before_hitting_database() {
     let repository = SqlxUsageReadRepository::new(pool);
     let result = repository
         .upsert(UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "".to_string(),
             user_id: None,
             api_key_id: None,
@@ -4325,6 +4356,96 @@ fn prepare_usage_body_storage_compresses_large_payloads() {
 }
 
 #[test]
+fn prepare_usage_body_storage_streams_json_shapes_into_compatible_gzip() {
+    for payload in [
+        serde_json::Value::Null,
+        json!(false),
+        json!(42),
+        json!(["quoted\"text", "line\nbreak", "\u{4e2d}\u{6587}", null]),
+        json!({
+            "content": "escaped\n\"\\value".repeat(32 * 1024),
+            "nested": {"values": [true, null, 1.25, -7]}
+        }),
+    ] {
+        let storage = prepare_usage_body_storage(Some(&payload)).expect("body should compress");
+        assert!(storage.inline_json.is_none());
+        let compressed = storage
+            .detached_blob_bytes
+            .expect("body should be detached");
+        assert_eq!(
+            inflate_usage_json_value(&compressed).expect("body should remain readable"),
+            payload
+        );
+    }
+}
+
+#[test]
+fn managed_capture_preparation_moves_bodies_without_a_second_reservation() {
+    use aether_data_contracts::repository::usage::{
+        sanitize_usage_for_persistence, usage_json_heap_estimate, UsageCaptureMemoryBudget,
+    };
+
+    let mut usage = fast_clear_usage_record(
+        "req-managed-capture",
+        "managed-capture",
+        100,
+        true,
+        UsageBodyCaptureState::Inline,
+        Some("priority"),
+    );
+    let bodies = [
+        json!({"messages": [{"role": "user", "content": "request".repeat(4096)}]}),
+        json!({"input": "provider request".repeat(4096), "service_tier": "priority"}),
+        json!({"output": "provider response".repeat(4096)}),
+        json!({"output": "client response".repeat(4096)}),
+    ];
+    usage.request_body = Some(bodies[0].clone());
+    usage.provider_request_body = Some(bodies[1].clone());
+    usage.response_body = Some(bodies[2].clone());
+    usage.client_response_body = Some(bodies[3].clone());
+    usage.request_body_state = Some(UsageBodyCaptureState::Inline);
+    usage.response_body_state = Some(UsageBodyCaptureState::Inline);
+    usage.client_response_body_state = Some(UsageBodyCaptureState::Inline);
+    usage.request_headers = Some(json!({"content-type": "application/json"}));
+    usage.cache_read_input_tokens = Some(0);
+    usage.total_cost_usd = Some(0.25);
+    usage.actual_total_cost_usd = Some(0.125);
+    let expected_accounting = sanitize_usage_for_persistence(usage.clone());
+    let bytes = [
+        usage.request_body.as_ref(),
+        usage.provider_request_body.as_ref(),
+        usage.response_body.as_ref(),
+        usage.client_response_body.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|body| std::mem::size_of::<serde_json::Value>() + usage_json_heap_estimate(body))
+    .sum();
+    let budget = Arc::new(UsageCaptureMemoryBudget::new(bytes));
+    assert!(usage.capture_retention.reserve(Arc::clone(&budget), bytes));
+
+    let (accounting, prepared) = prepare_usage_for_persistence(usage);
+    let prepared = prepared.expect("managed capture should prepare without cloning bodies");
+    assert_eq!(budget.retained_bytes(), 0);
+    assert_eq!(budget.downgraded_total(), 0);
+    assert_eq!(accounting, expected_accounting);
+    for (storage, expected) in [
+        prepared.request_body_storage,
+        prepared.provider_request_body_storage,
+        prepared.response_body_storage,
+        prepared.client_response_body_storage,
+    ]
+    .into_iter()
+    .zip(bodies)
+    {
+        assert_eq!(
+            inflate_usage_json_value(storage.detached_blob_bytes.as_deref().unwrap()).unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn usage_body_capture_state_for_storage_marks_detached_bodies_as_reference() {
     let payload = json!({"message": "hello"});
     let storage = prepare_usage_body_storage(Some(&payload)).expect("storage should serialize");
@@ -4413,7 +4534,8 @@ fn explicit_none_capture_drops_residual_body_ref_and_incoming_fast_metadata_befo
         "provider_request_body_ref": "usage://request/req-none-residual/provider_request_body"
     }));
 
-    let prepared = prepare_usage_upsert_context(&usage).expect("usage should prepare");
+    let (_, prepared) = prepare_usage_for_persistence(usage);
+    let prepared = prepared.expect("usage should prepare");
     assert!(prepared.clear_provider_request_body);
     assert!(!prepared.provider_request_body_storage.has_detached_blob());
     assert_eq!(prepared.http_audit_refs.provider_request_body_ref, None);
@@ -4805,6 +4927,7 @@ fn attach_usage_http_audit_body_refs_adds_missing_metadata_without_overwriting_e
 fn usage_routing_snapshot_from_usage_only_activates_for_routing_metadata() {
     let snapshot = usage_routing_snapshot_from_usage(
         &UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-123".to_string(),
             user_id: None,
             api_key_id: None,
@@ -4904,6 +5027,7 @@ fn usage_routing_snapshot_from_usage_only_activates_for_routing_metadata() {
 
     let empty_snapshot = usage_routing_snapshot_from_usage(
         &UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-124".to_string(),
             user_id: None,
             api_key_id: None,
@@ -4982,6 +5106,7 @@ fn usage_routing_snapshot_from_usage_only_activates_for_routing_metadata() {
 fn usage_routing_snapshot_from_usage_prefers_typed_routing_fields_without_metadata() {
     let snapshot = usage_routing_snapshot_from_usage(
         &UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-typed-routing-1".to_string(),
             user_id: None,
             api_key_id: None,
@@ -5116,6 +5241,7 @@ fn attach_usage_routing_snapshot_metadata_adds_missing_keys_without_overwriting_
 fn usage_settlement_pricing_snapshot_from_usage_extracts_typed_billing_fields() {
     let snapshot = usage_settlement_pricing_snapshot_from_usage(
         &UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-125".to_string(),
             user_id: None,
             api_key_id: None,

@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, QueryBuilder, Row};
 
 use aether_data_contracts::repository::settlement::{
     finite_wallet_available_usd, plan_finite_wallet_debit, settlement_billable_cost_usd,
@@ -297,6 +297,76 @@ fn usage_policy_subject_missing() -> DataLayerError {
     DataLayerError::InvalidInput("usage policy subject does not exist".to_string())
 }
 
+fn usage_policy_window_aggregate_query(
+    windows: impl Iterator<Item = (u64, u64)>,
+    aggregate: &str,
+) -> Result<(QueryBuilder<'static, Postgres>, i64, i64), DataLayerError> {
+    let mut builder = QueryBuilder::new("SELECT ");
+    let mut earliest = i64::MAX;
+    let mut latest = i64::MIN;
+    for (index, (start, end)) in windows.enumerate() {
+        let start = usage_policy_cost_i64(start, "usage policy window start")?;
+        let end = usage_policy_cost_i64(end, "usage policy window end")?;
+        earliest = earliest.min(start);
+        latest = latest.max(end);
+        if index > 0 {
+            builder.push(", ");
+        }
+        builder
+            .push("COALESCE(")
+            .push(aggregate)
+            .push(" FILTER (WHERE admitted_at >= TO_TIMESTAMP(")
+            .push_bind(start)
+            .push("::double precision) AND admitted_at < TO_TIMESTAMP(")
+            .push_bind(end)
+            .push("::double precision)), 0)::BIGINT");
+    }
+    Ok((builder, earliest, latest))
+}
+
+async fn usage_policy_request_window_counts(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    input: &ReserveUsagePolicyRequestInput,
+) -> Result<sqlx::postgres::PgRow, DataLayerError> {
+    let (mut query, earliest, latest) = usage_policy_window_aggregate_query(
+        input
+            .windows
+            .iter()
+            .map(|window| (window.starts_at_unix_secs, window.ends_at_unix_secs)),
+        "COUNT(*)",
+    )?;
+    // The subject lock protects all windows. One bounded history scan replaces
+    // repeated scans of overlapping windows without approximating their counts.
+    query
+        .push(" FROM usage_request_admissions WHERE subject_id = ")
+        .push_bind(input.subject_id.clone())
+        .push(" AND state = 'active' AND admitted_at >= TO_TIMESTAMP(")
+        .push_bind(earliest)
+        .push("::double precision) AND admitted_at < TO_TIMESTAMP(")
+        .push_bind(latest)
+        .push("::double precision)");
+    query.build().fetch_one(&mut **tx).await.map_postgres_err()
+}
+
+async fn usage_policy_cost_window_totals(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    input: &ReserveUsagePolicyCostInput,
+) -> Result<sqlx::postgres::PgRow, DataLayerError> {
+    let (mut query, earliest, latest) = usage_policy_window_aggregate_query(
+        input.windows.iter().map(|window| (window.starts_at_unix_secs, window.ends_at_unix_secs)),
+        "SUM(CASE WHEN state = 'finalized' THEN COALESCE(actual_cost_units, 0) ELSE reserved_cost_units END)",
+    )?;
+    query.push(" FROM usage_cost_reservations WHERE subject_id = ")
+        .push_bind(input.subject_id.clone())
+        .push(" AND admitted_at >= TO_TIMESTAMP(").push_bind(earliest)
+        .push("::double precision) AND admitted_at < TO_TIMESTAMP(").push_bind(latest)
+        .push("::double precision) AND reservation_token <> ").push_bind(input.reservation_token.clone())
+        .push(" AND (state = 'finalized' OR (state = 'reserved' AND reservation_expires_at > TO_TIMESTAMP(")
+        .push_bind(usage_policy_cost_i64(input.admitted_at_unix_secs, "usage policy admitted_at")?)
+        .push("::double precision)))");
+    query.build().fetch_one(&mut **tx).await.map_postgres_err()
+}
+
 fn settlement_from_row(
     row: &sqlx::postgres::PgRow,
 ) -> Result<StoredUsageSettlement, DataLayerError> {
@@ -479,6 +549,8 @@ async fn consume_daily_quota_postgres(
         return Ok(DailyQuotaDebitResult::default());
     }
     let now = chrono::Utc::now();
+    // Serialize each entitlement's debits. Read the shared plan's current overage policy
+    // from this statement's snapshot without locking every subscriber's plan row.
     let entitlement_rows = sqlx::query(
         r#"
 SELECT
@@ -494,7 +566,7 @@ WHERE user_plan_entitlements.user_id = $1
 ORDER BY user_plan_entitlements.expires_at ASC,
                  user_plan_entitlements.created_at ASC,
                  user_plan_entitlements.id ASC
-FOR UPDATE
+FOR UPDATE OF user_plan_entitlements
         "#,
     )
     .bind(user_id)
@@ -655,31 +727,10 @@ WHERE event_token = $1
                         });
                     }
 
+                    let window_counts = usage_policy_request_window_counts(tx, &input).await?;
                     for (window_index, window) in input.windows.iter().enumerate() {
-                        let used_requests = sqlx::query_scalar::<_, i64>(
-                            r#"
-SELECT COUNT(*)::BIGINT
-FROM usage_request_admissions
-WHERE subject_id = $1
-  AND state = 'active'
-  AND admitted_at >= TO_TIMESTAMP($2::double precision)
-  AND admitted_at < TO_TIMESTAMP($3::double precision)
-                            "#,
-                        )
-                        .bind(&input.subject_id)
-                        .bind(usage_policy_cost_i64(
-                            window.starts_at_unix_secs,
-                            "usage policy request window start",
-                        )?)
-                        .bind(usage_policy_cost_i64(
-                            window.ends_at_unix_secs,
-                            "usage policy request window end",
-                        )?)
-                        .fetch_one(&mut **tx)
-                        .await
-                        .map_postgres_err()?;
                         let used_requests = usage_policy_cost_u64(
-                            used_requests,
+                            window_counts.try_get(window_index).map_postgres_err()?,
                             "usage policy request used_requests",
                         )?;
                         if used_requests >= window.limit_requests {
@@ -884,43 +935,12 @@ WHERE retain_until <= TO_TIMESTAMP($1::double precision)
                         .unwrap_or(0);
                     let target_reserved_cost_units =
                         previous_reserved_cost_units.max(input.reserved_cost_units);
+                    let window_totals = usage_policy_cost_window_totals(tx, &input).await?;
                     for (window_index, window) in input.windows.iter().enumerate() {
-                        let used_cost_units = sqlx::query_scalar::<_, i64>(
-                            r#"
-SELECT COALESCE(SUM(
-  CASE
-    WHEN state = 'finalized' THEN COALESCE(actual_cost_units, 0)
-    WHEN state = 'reserved' AND reservation_expires_at > TO_TIMESTAMP($4::double precision)
-      THEN reserved_cost_units
-    ELSE 0
-  END
-), 0)::BIGINT
-FROM usage_cost_reservations
-WHERE subject_id = $1
-  AND admitted_at >= TO_TIMESTAMP($2::double precision)
-  AND admitted_at < TO_TIMESTAMP($3::double precision)
-  AND reservation_token <> $5
-                            "#,
-                        )
-                        .bind(&input.subject_id)
-                        .bind(usage_policy_cost_i64(
-                            window.starts_at_unix_secs,
-                            "usage policy window start",
-                        )?)
-                        .bind(usage_policy_cost_i64(
-                            window.ends_at_unix_secs,
-                            "usage policy window end",
-                        )?)
-                        .bind(usage_policy_cost_i64(
-                            input.admitted_at_unix_secs,
-                            "usage policy admitted_at",
-                        )?)
-                        .bind(&input.reservation_token)
-                        .fetch_one(&mut **tx)
-                        .await
-                        .map_postgres_err()?;
-                        let used_cost_units =
-                            usage_policy_cost_u64(used_cost_units, "usage policy used_cost_units")?;
+                        let used_cost_units = usage_policy_cost_u64(
+                            window_totals.try_get(window_index).map_postgres_err()?,
+                            "usage policy used_cost_units",
+                        )?;
                         if used_cost_units
                             .checked_add(target_reserved_cost_units)
                             .is_none_or(|total| total > window.limit_cost_units)
@@ -1415,6 +1435,264 @@ WHERE id = $1
 
 #[cfg(test)]
 mod tests {
+    use futures_util::FutureExt;
+    use std::panic::AssertUnwindSafe;
+
+    async fn isolated_settlement_test_pool() -> (sqlx::PgPool, String) {
+        let database_url = std::env::var("AETHER_TEST_DATABASE_URL")
+            .expect("AETHER_TEST_DATABASE_URL must point at the test database");
+        let schema = format!("settlement_test_{}", uuid::Uuid::new_v4().simple());
+        let options = database_url
+            .parse::<sqlx::postgres::PgConnectOptions>()
+            .expect("test database URL should parse")
+            .options([("search_path", schema.as_str())]);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect_with(options)
+            .await
+            .expect("test database should connect");
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&pool)
+            .await
+            .expect("isolated settlement schema should be created");
+        // Separate connections must see the same fixture, so pg_temp cannot be used here.
+        for table in [
+            "billing_plans",
+            "user_plan_entitlements",
+            "entitlement_usage_ledgers",
+            "users",
+            "usage_request_admissions",
+            "usage_cost_reservations",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TABLE {table} (LIKE public.{table} INCLUDING ALL)"
+            ))
+            .execute(&pool)
+            .await
+            .expect("isolated settlement table should be created");
+        }
+        (pool, schema)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AETHER_TEST_DATABASE_URL and PostgreSQL migrations"]
+    async fn live_usage_policy_window_aggregates_preserve_exact_admission_and_idempotency() {
+        use super::*;
+        use aether_data_contracts::repository::settlement::{
+            UsagePolicyCostWindow, UsagePolicyRequestWindow,
+        };
+
+        let (pool, schema) = isolated_settlement_test_pool().await;
+        let result = AssertUnwindSafe(async {
+            sqlx::query("INSERT INTO users (id, username, email_verified) VALUES ('subject', 'subject', false)")
+                .execute(&pool).await.unwrap();
+            sqlx::raw_sql("INSERT INTO usage_request_admissions (request_id, subject_id, event_token, admitted_at, retain_until, state, released_at) VALUES
+                ('older', 'subject', 'older', TO_TIMESTAMP(50), TO_TIMESTAMP(500), 'active', NULL),
+                ('start', 'subject', 'start', TO_TIMESTAMP(100), TO_TIMESTAMP(500), 'active', NULL),
+                ('inside', 'subject', 'inside', TO_TIMESTAMP(150), TO_TIMESTAMP(500), 'active', NULL),
+                ('end', 'subject', 'end', TO_TIMESTAMP(200), TO_TIMESTAMP(500), 'active', NULL),
+                ('released', 'subject', 'released', TO_TIMESTAMP(150), TO_TIMESTAMP(500), 'released', TO_TIMESTAMP(170))")
+                .execute(&pool).await.unwrap();
+            let repo = SqlxSettlementRepository::new(pool.clone());
+            let mut request = ReserveUsagePolicyRequestInput {
+                request_id: "new".to_string(), subject_id: "subject".to_string(), event_token: "new".to_string(),
+                admitted_at_unix_secs: 175, retain_until_unix_secs: 500,
+                windows: vec![
+                    UsagePolicyRequestWindow { starts_at_unix_secs: 100, ends_at_unix_secs: 200, limit_requests: 2 },
+                    UsagePolicyRequestWindow { starts_at_unix_secs: 0, ends_at_unix_secs: 300, limit_requests: 4 },
+                ],
+            };
+            assert_eq!(repo.reserve_usage_policy_request(request.clone()).await.unwrap(),
+                ReserveUsagePolicyRequestOutcome::Rejected { window_index: 0, limit_requests: 2, used_requests: 2 });
+            request.windows[0].limit_requests = 3;
+            assert_eq!(repo.reserve_usage_policy_request(request.clone()).await.unwrap(),
+                ReserveUsagePolicyRequestOutcome::Rejected { window_index: 1, limit_requests: 4, used_requests: 4 });
+            request.windows[1].limit_requests = 5;
+            assert_eq!(repo.reserve_usage_policy_request(request.clone()).await.unwrap(), ReserveUsagePolicyRequestOutcome::Allowed);
+            assert_eq!(repo.reserve_usage_policy_request(request.clone()).await.unwrap(), ReserveUsagePolicyRequestOutcome::Allowed);
+            assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM usage_request_admissions WHERE event_token = 'new'")
+                .fetch_one(&pool).await.unwrap(), 1);
+            repo.release_usage_policy_request_admission(ReleaseUsagePolicyRequestAdmissionInput {
+                request_id: request.request_id.clone(), subject_id: request.subject_id.clone(), event_token: request.event_token.clone(), released_at_unix_secs: 180,
+            }).await.unwrap();
+            assert_eq!(repo.reserve_usage_policy_request(request).await.unwrap(), ReserveUsagePolicyRequestOutcome::AlreadyReleased);
+
+            sqlx::raw_sql("INSERT INTO usage_cost_reservations (request_id, subject_id, reservation_token, admitted_at, reserved_cost_units, actual_cost_units, state, reservation_expires_at, retain_until, finalized_at) VALUES
+                ('older', 'subject', 'older', TO_TIMESTAMP(50), 99, 11, 'finalized', TO_TIMESTAMP(160), TO_TIMESTAMP(500), TO_TIMESTAMP(160)),
+                ('start', 'subject', 'start', TO_TIMESTAMP(100), 99, 7, 'finalized', TO_TIMESTAMP(160), TO_TIMESTAMP(500), TO_TIMESTAMP(160)),
+                ('inside', 'subject', 'inside', TO_TIMESTAMP(150), 5, NULL, 'reserved', TO_TIMESTAMP(300), TO_TIMESTAMP(500), NULL),
+                ('expired', 'subject', 'expired', TO_TIMESTAMP(150), 99, NULL, 'reserved', TO_TIMESTAMP(175), TO_TIMESTAMP(500), NULL),
+                ('end', 'subject', 'end', TO_TIMESTAMP(200), 99, 13, 'finalized', TO_TIMESTAMP(300), TO_TIMESTAMP(500), TO_TIMESTAMP(250)),
+                ('released', 'subject', 'released', TO_TIMESTAMP(150), 99, 0, 'released', TO_TIMESTAMP(300), TO_TIMESTAMP(500), TO_TIMESTAMP(170))")
+                .execute(&pool).await.unwrap();
+            let mut cost = ReserveUsagePolicyCostInput {
+                request_id: "cost".to_string(), subject_id: "subject".to_string(), reservation_token: "cost".to_string(),
+                admitted_at_unix_secs: 175, reserved_cost_units: 3, reservation_expires_at_unix_secs: 400, retain_until_unix_secs: 500,
+                windows: vec![
+                    UsagePolicyCostWindow { window_id: "short".to_string(), starts_at_unix_secs: 100, ends_at_unix_secs: 200, limit_cost_units: 14 },
+                    UsagePolicyCostWindow { window_id: "long".to_string(), starts_at_unix_secs: 0, ends_at_unix_secs: 300, limit_cost_units: 38 },
+                ],
+            };
+            assert_eq!(repo.reserve_usage_policy_cost(cost.clone()).await.unwrap(),
+                ReserveUsagePolicyCostOutcome::Rejected { window_index: 0, limit_cost_units: 14, used_cost_units: 12 });
+            cost.windows[0].limit_cost_units = 15;
+            assert_eq!(repo.reserve_usage_policy_cost(cost.clone()).await.unwrap(),
+                ReserveUsagePolicyCostOutcome::Rejected { window_index: 1, limit_cost_units: 38, used_cost_units: 36 });
+            cost.windows[1].limit_cost_units = 39;
+            let allowed = repo.reserve_usage_policy_cost(cost.clone()).await.unwrap();
+            assert!(matches!(allowed, ReserveUsagePolicyCostOutcome::Allowed { .. }), "{allowed:?}");
+            let repeated = repo.reserve_usage_policy_cost(cost.clone()).await.unwrap();
+            assert!(matches!(repeated, ReserveUsagePolicyCostOutcome::Allowed { .. }), "{repeated:?}");
+            cost.reserved_cost_units = 4;
+            assert_eq!(repo.reserve_usage_policy_cost(cost).await.unwrap(),
+                ReserveUsagePolicyCostOutcome::Rejected { window_index: 0, limit_cost_units: 15, used_cost_units: 12 });
+
+            sqlx::query("DELETE FROM usage_request_admissions").execute(&pool).await.unwrap();
+            let make_request = |id: &str| ReserveUsagePolicyRequestInput {
+                request_id: id.to_string(), subject_id: "subject".to_string(), event_token: id.to_string(),
+                admitted_at_unix_secs: 175, retain_until_unix_secs: 500,
+                windows: vec![UsagePolicyRequestWindow { starts_at_unix_secs: 0, ends_at_unix_secs: 300, limit_requests: 1 }],
+            };
+            let (first, second) = tokio::join!(repo.reserve_usage_policy_request(make_request("race-a")), repo.reserve_usage_policy_request(make_request("race-b")));
+            let outcomes = [first.unwrap(), second.unwrap()];
+            assert_eq!(outcomes.iter().filter(|outcome| matches!(outcome, ReserveUsagePolicyRequestOutcome::Allowed)).count(), 1);
+            assert_eq!(outcomes.iter().filter(|outcome| matches!(outcome, ReserveUsagePolicyRequestOutcome::Rejected { used_requests: 1, .. })).count(), 1);
+        }).catch_unwind().await;
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AETHER_TEST_DATABASE_URL and PostgreSQL migrations"]
+    async fn live_daily_quota_serializes_each_entitlement_without_locking_shared_plan() {
+        let (pool, schema) = isolated_settlement_test_pool().await;
+        let result = AssertUnwindSafe(async {
+            let grant = serde_json::json!([{
+                "type": "daily_quota",
+                "daily_quota_usd": 10.0,
+                "reset_timezone": "UTC",
+                "allow_wallet_overage": false,
+            }]);
+            sqlx::query(
+                "INSERT INTO billing_plans (id, title, price_amount, duration_unit, duration_value, entitlements_json, created_at, updated_at) VALUES ('shared-plan', 'Shared plan', 10, 'month', 1, $1, NOW(), NOW())",
+            )
+            .bind(&grant)
+            .execute(&pool)
+            .await
+            .expect("shared plan should insert");
+            for user_id in ["user-a", "user-b"] {
+                sqlx::query(
+                    "INSERT INTO user_plan_entitlements (id, user_id, plan_id, payment_order_id, starts_at, expires_at, entitlements_snapshot, created_at, updated_at) VALUES ($1, $1, 'shared-plan', $1, NOW() - INTERVAL '1 hour', NOW() + INTERVAL '1 day', $2, NOW(), NOW())",
+                )
+                .bind(user_id)
+                .bind(&grant)
+                .execute(&pool)
+                .await
+                .expect("user entitlement should insert");
+            }
+
+            let mut first = pool.begin().await.expect("first transaction should start");
+            let first_debit = super::consume_daily_quota_postgres(
+                &mut first, "user-a", "request-a", 7.0, Some(0.0), false,
+            )
+            .await
+            .expect("first user should consume quota");
+            assert_eq!(first_debit.debited_usd, 7.0);
+            assert!(!first_debit.insufficient);
+
+            let mut second = pool.begin().await.expect("second transaction should start");
+            sqlx::query("SET LOCAL lock_timeout = '500ms'")
+                .execute(&mut *second)
+                .await
+                .expect("lock timeout should be configured");
+            let second_debit = super::consume_daily_quota_postgres(
+                &mut second, "user-b", "request-b", 2.0, Some(0.0), false,
+            )
+            .await
+            .expect("another user's quota must not wait for the shared plan");
+            assert_eq!(second_debit.debited_usd, 2.0);
+            assert!(!second_debit.insufficient);
+            second.commit().await.expect("second debit should commit");
+
+            let mut same_user = pool.begin().await.expect("contending transaction should start");
+            sqlx::query("SET LOCAL lock_timeout = '500ms'")
+                .execute(&mut *same_user)
+                .await
+                .expect("lock timeout should be configured");
+            let blocked = super::consume_daily_quota_postgres(
+                &mut same_user, "user-a", "request-a-next", 2.0, Some(0.0), false,
+            )
+            .await
+            .expect_err("the same entitlement must remain locked until commit");
+            assert!(blocked.to_string().contains("SQLSTATE 55P03"), "{blocked}");
+            same_user.rollback().await.expect("blocked transaction should roll back");
+            first.commit().await.expect("first debit should commit");
+
+            let mut next = pool.begin().await.expect("next transaction should start");
+            let next_debit = super::consume_daily_quota_postgres(
+                &mut next, "user-a", "request-a-next", 2.0, Some(0.0), false,
+            )
+            .await
+            .expect("same user should consume the remaining quota after commit");
+            assert_eq!(next_debit.debited_usd, 2.0);
+            assert!(!next_debit.insufficient);
+            next.commit().await.expect("next debit should commit");
+            let balance: (f64, f64) = sqlx::query_as(
+                "SELECT balance_before::double precision, balance_after::double precision FROM entitlement_usage_ledgers WHERE request_id = 'request-a-next'",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("next debit ledger should exist");
+            assert_eq!(balance, (3.0, 1.0));
+
+            let mut held = pool.begin().await.expect("quota transaction should start");
+            super::consume_daily_quota_postgres(
+                &mut held, "user-a", "request-policy-before", 0.5, Some(0.0), false,
+            )
+            .await
+            .expect("quota transaction should retain its entitlement lock");
+            let mut edit = pool.begin().await.expect("plan edit transaction should start");
+            sqlx::query("SET LOCAL lock_timeout = '500ms'")
+                .execute(&mut *edit)
+                .await
+                .expect("plan edit timeout should be configured");
+            sqlx::query(
+                "UPDATE billing_plans SET entitlements_json = jsonb_set(entitlements_json, '{0,allow_wallet_overage}', 'true'::jsonb) WHERE id = 'shared-plan'",
+            )
+            .execute(&mut *edit)
+            .await
+            .expect("plan configuration edits must not wait for usage settlement");
+            edit.commit().await.expect("plan edit should commit");
+            held.rollback().await.expect("held quota debit should roll back");
+
+            let mut after_edit = pool.begin().await.expect("fresh transaction should start");
+            let updated_policy = super::consume_daily_quota_postgres(
+                &mut after_edit, "user-a", "request-policy-after", 2.0, Some(5.0), true,
+            )
+            .await
+            .expect("fresh quota read should use current plan configuration");
+            assert!(!updated_policy.insufficient);
+            assert_eq!(updated_policy.debited_usd, 1.0);
+            after_edit.rollback().await.expect("policy verification should roll back");
+        })
+        .catch_unwind()
+        .await;
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&pool)
+            .await
+            .expect("isolated settlement schema should be removed");
+        pool.close().await;
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
     #[test]
     fn finalize_usage_billing_sql_does_not_require_usage_updated_at_column() {
         assert!(!super::FINALIZE_USAGE_BILLING_SQL.contains("updated_at"));

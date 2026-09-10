@@ -59,6 +59,37 @@ pub use embedded::{
     ControlPlaneClient as TunnelControlPlaneClient,
 };
 
+#[cfg(feature = "testkit")]
+pub fn build_tunnel_pressure_router(
+    state: TunnelRuntimeState,
+    instance_id: &str,
+    secret: &[u8],
+) -> Result<axum::Router, String> {
+    validate_tunnel_relay_auth_secret(secret)?;
+    let directory = TunnelAttachmentDirectory::from_parts(instance_id, None::<String>, 90);
+    let state = state.with_relay_auth(
+        instance_id,
+        Some(secret.to_vec()),
+        Arc::clone(&directory.runtime_state),
+    );
+    let runtime_router = build_tunnel_runtime_router_with_state(state.clone());
+    let mut gateway = AppState::new().map_err(|error| error.to_string())?;
+    gateway.tunnel = EmbeddedTunnelState {
+        inner: state,
+        attachment_directory: directory,
+        relay_auth_secret: Ok(Arc::from(secret)),
+    };
+    // HTTP relay requests must pass the same authentication and verified spool
+    // preparation as the gateway before reaching the embedded local dispatcher.
+    Ok(axum::Router::new()
+        .route(
+            TUNNEL_RELAY_PATH_PATTERN,
+            axum::routing::post(relay_request),
+        )
+        .with_state(gateway)
+        .fallback_service(runtime_router))
+}
+
 const DEFAULT_ATTACHMENT_TTL_SECS: u64 = 90;
 const TUNNEL_ATTACHMENT_KEY_PREFIX: &str = "tunnel.attachments.";
 const TUNNEL_ATTACHMENT_REDIS_KEY_PREFIX: &str = "tunnel:attachments:";

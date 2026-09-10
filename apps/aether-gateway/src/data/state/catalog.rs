@@ -81,6 +81,19 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn list_recent_runtime_request_candidates(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<StoredRequestCandidate>, DataLayerError> {
+        match &self.request_candidate_reader {
+            Some(repository) => repository
+                .list_recent_runtime(limit)
+                .await
+                .map(sanitize_request_candidate_rows),
+            None => Ok(Vec::new()),
+        }
+    }
+
     pub(crate) async fn list_finalized_request_candidates_by_endpoint_ids_since(
         &self,
         endpoint_ids: &[String],

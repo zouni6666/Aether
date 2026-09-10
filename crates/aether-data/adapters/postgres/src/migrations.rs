@@ -93,7 +93,7 @@ pub async fn run_migrations_with_bootstrap(
     pool: &PgPool,
     bootstrap: &dyn PostgresMigrationBootstrap,
 ) -> Result<(), MigrateError> {
-    let mut conn = pool.acquire().await?;
+    let mut conn = crate::pool::acquire_postgres_migration_connection(pool).await?;
 
     if POSTGRES_MIGRATOR.locking {
         conn.lock().await?;
@@ -132,7 +132,7 @@ pub async fn prepare_database_for_startup_with_bootstrap(
     pool: &PgPool,
     bootstrap: &dyn PostgresMigrationBootstrap,
 ) -> Result<Vec<PendingMigrationInfo>, MigrateError> {
-    let mut conn = pool.acquire().await?;
+    let mut conn = crate::pool::acquire_postgres_migration_connection(pool).await?;
 
     if POSTGRES_MIGRATOR.locking {
         conn.lock().await?;

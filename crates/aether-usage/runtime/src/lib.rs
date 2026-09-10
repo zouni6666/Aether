@@ -1,15 +1,19 @@
 mod body_capture;
 pub mod config;
+mod dead_letter_encoding;
 pub mod event;
+mod event_capture_budget;
 mod executor;
 mod keyed_lock;
 pub mod queue;
+mod queue_read_budget;
 pub mod record;
 pub mod report;
 pub mod report_context;
 mod request_metadata;
 pub mod runtime;
 pub mod settlement;
+mod shutdown;
 pub mod standardized_usage;
 pub mod usage_mapper;
 pub mod worker;
@@ -21,6 +25,7 @@ pub use body_capture::{
 };
 pub use config::UsageRuntimeConfig;
 pub use event::{now_ms, UsageEvent, UsageEventData, UsageEventType, USAGE_EVENT_VERSION};
+pub use executor::shutdown_usage_background_runtime;
 pub use queue::UsageQueue;
 pub use record::build_upsert_usage_record_from_event;
 pub use report::{
@@ -50,6 +55,7 @@ pub use runtime::{
 pub use settlement::{
     reconcile_usage_policy_cost_for_event, settle_usage_if_needed, UsageSettlementWriter,
 };
+pub use shutdown::UsageProducerGuard;
 pub use standardized_usage::StandardizedUsage;
 pub use usage_mapper::{map_usage, map_usage_from_response, UsageMapper};
 pub use worker::{

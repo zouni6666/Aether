@@ -116,6 +116,7 @@ name = "aether-billing"
 version = "0.1.0"
 dependencies = [
  "aether-data-contracts",
+ "aether-runtime-state",
  "aether-usage-runtime",
  "async-trait",
  "serde",
@@ -370,8 +371,12 @@ dependencies = [
  "bytes",
  "futures-util",
  "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "serde_json",
  "tokio",
+ "tokio-util",
  "tower",
  "tracing",
  "tracing-subscriber",
@@ -421,6 +426,7 @@ dependencies = [
  "aether-data",
  "aether-data-contracts",
  "aether-gateway",
+ "aether-runtime",
  "aether-runtime-state",
  "aether-testkit",
  "async-stream",
@@ -5274,6 +5280,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

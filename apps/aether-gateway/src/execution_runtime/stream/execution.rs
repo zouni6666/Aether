@@ -42,6 +42,7 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::codec::{FramedRead, LinesCodec};
 use tracing::{debug, info, warn};
 
+use super::capture_budget::StreamBodyCapture;
 use super::commit_policy::{
     anthropic_error_status_code, find_sse_record_boundary, StreamCommitGate, StreamCommitPolicy,
     StreamPrecommitObservation,
@@ -53,6 +54,7 @@ use super::error::{
     stream_client_error_status_code_for_upstream_status, synthetic_error_response_headers,
     StreamPrefetchInspection,
 };
+use super::usage_fallback::StreamUsageFallback;
 #[path = "execution_failures.rs"]
 mod execution_failures;
 use self::execution_failures::{
@@ -95,17 +97,20 @@ use crate::execution_runtime::kiro_web_search::maybe_execute_kiro_web_search_str
 use crate::execution_runtime::oauth_retry::refresh_oauth_plan_auth_for_retry;
 #[cfg(test)]
 use crate::execution_runtime::remote_compat::post_stream_plan_to_remote_execution_runtime;
+use crate::execution_runtime::stream_read_timeout::{
+    await_stream_idle_read, resolve_stream_idle_timeout, stream_idle_timeout_message,
+};
 use crate::execution_runtime::submission::{
     resolve_core_error_background_report_kind, resolve_local_sync_error_status_code,
     strip_utf8_bom_and_ws, submit_local_core_error_or_sync_finalize,
 };
 use crate::execution_runtime::transport::{
-    decode_base64_body_with_limit, execute_stream_plan_via_local_tunnel, format_hyper_error_chain,
-    format_upstream_request_error, format_wreq_upstream_request_error,
-    record_manual_proxy_request_failure, record_manual_proxy_request_success,
-    record_manual_proxy_stream_error, stream_first_byte_timeout_message,
-    DirectSyncExecutionRuntime, DirectUpstreamResponse, DirectUpstreamStreamExecution,
-    ExecutionRuntimeTransportError,
+    decode_base64_body_with_limit, direct_upstream_response_byte_stream,
+    execute_stream_plan_via_local_tunnel, format_hyper_error_chain, format_upstream_request_error,
+    format_wreq_upstream_request_error, record_manual_proxy_request_failure,
+    record_manual_proxy_request_success, record_manual_proxy_stream_error,
+    stream_first_byte_timeout_message, DirectSyncExecutionRuntime, DirectUpstreamResponse,
+    DirectUpstreamStreamExecution, ExecutionRuntimeTransportError,
 };
 use crate::execution_runtime::windsurf::maybe_execute_windsurf_stream;
 use crate::execution_runtime::{
@@ -481,7 +486,9 @@ async fn record_sync_terminal_usage_with_handoff_after_spawn<F>(
     let (context_seed, payload_seed) =
         build_sync_terminal_usage_seeds(plan, report_context, payload);
     let state = state.clone();
+    let usage_producer = state.usage_runtime.track_producer();
     let task = tokio::spawn(async move {
+        let _usage_producer = usage_producer;
         before_dispatch.await;
         state
             .usage_runtime
@@ -1040,12 +1047,39 @@ fn append_stream_capture_bytes(
     }
 }
 
+fn append_budgeted_stream_capture_bytes(
+    buffer: &mut StreamBodyCapture,
+    chunk: &[u8],
+    max_bytes: usize,
+    truncated: &mut bool,
+) {
+    buffer.append(chunk, max_bytes, truncated);
+}
+
+struct StreamUsageObservationBuffer {
+    line: Vec<u8>,
+    fallback: StreamUsageFallback,
+    recovered_usage_after_parser_error: bool,
+}
+
+impl StreamUsageObservationBuffer {
+    fn new(record_limit: usize) -> Self {
+        Self {
+            line: Vec::new(),
+            fallback: StreamUsageFallback::new(record_limit),
+            recovered_usage_after_parser_error: false,
+        }
+    }
+}
+
 fn observe_stream_usage_bytes(
     observer: &mut StreamingStandardTerminalObserver,
     report_context: &Value,
-    buffered: &mut Vec<u8>,
+    buffer: &mut StreamUsageObservationBuffer,
     chunk: &[u8],
 ) {
+    buffer.fallback.observe(report_context, chunk);
+    let buffered = &mut buffer.line;
     if chunk.is_empty()
         || observer
             .latest_summary()
@@ -1065,7 +1099,7 @@ fn observe_stream_usage_bytes(
             observer.disable_with_error(format!(
                 "stream usage event exceeded {SSE_TERMINAL_DETECTOR_MAX_LINE_BYTES} bytes"
             ));
-            buffered.clear();
+            *buffered = Vec::new();
             return;
         }
         buffered.extend_from_slice(&remaining[..line_part_len]);
@@ -1074,7 +1108,7 @@ fn observe_stream_usage_bytes(
             let line = std::mem::take(buffered);
             if let Err(_err) = observer.push_line(report_context, line) {
                 observer.disable_with_error("stream usage parsing failed");
-                buffered.clear();
+                *buffered = Vec::new();
                 return;
             }
         }
@@ -1084,12 +1118,13 @@ fn observe_stream_usage_bytes(
 fn finalize_stream_usage_observer(
     observer: &mut Option<StreamingStandardTerminalObserver>,
     report_context: Option<&Value>,
-    buffered: &mut Vec<u8>,
+    buffer: &mut StreamUsageObservationBuffer,
 ) -> Option<ExecutionStreamTerminalSummary> {
     let (Some(observer), Some(report_context)) = (observer.as_mut(), report_context) else {
         return None;
     };
 
+    let buffered = &mut buffer.line;
     if !buffered.is_empty() {
         let line = std::mem::take(buffered);
         if let Err(_err) = observer.push_line(report_context, line) {
@@ -1097,13 +1132,53 @@ fn finalize_stream_usage_observer(
         }
     }
 
-    match observer.finish(report_context) {
+    let mut summary = match observer.finish(report_context) {
         Ok(summary) => summary,
         Err(_err) => {
             observer.disable_with_error("stream usage parsing failed");
             observer.latest_summary().cloned()
         }
+    };
+    let mut fallback_usage = buffer.fallback.finish(report_context);
+    let fallback_tier = buffer.fallback.take_service_tier();
+    if let Some(summary) = summary.as_mut() {
+        if summary.parser_error.is_some() && fallback_usage.is_some() {
+            // A disabled parser can retain an earlier usage snapshot. Later
+            // complete fallback events remain authoritative even when their
+            // signal score is unchanged or an explicit zero reduces it.
+            summary.standardized_usage = fallback_usage.take();
+            buffer.recovered_usage_after_parser_error = true;
+        }
+        if summary.provider_actual_service_tier.is_none() {
+            summary.provider_actual_service_tier = fallback_tier.clone();
+        }
     }
+    let fallback = fallback_usage.map(|usage| ExecutionStreamTerminalSummary {
+        standardized_usage: Some(usage),
+        provider_actual_service_tier: summary.is_none().then_some(fallback_tier).flatten(),
+        ..ExecutionStreamTerminalSummary::default()
+    });
+    merge_stream_terminal_summary(summary, fallback)
+}
+
+fn merge_observed_stream_terminal_summary(
+    current: Option<ExecutionStreamTerminalSummary>,
+    observed: Option<ExecutionStreamTerminalSummary>,
+    usage_buffer: &StreamUsageObservationBuffer,
+) -> Option<ExecutionStreamTerminalSummary> {
+    let recovered_usage = usage_buffer
+        .recovered_usage_after_parser_error
+        .then(|| {
+            observed
+                .as_ref()
+                .and_then(|summary| summary.standardized_usage.clone())
+        })
+        .flatten();
+    let mut summary = merge_stream_terminal_summary(current, observed);
+    if let (Some(summary), Some(usage)) = (summary.as_mut(), recovered_usage) {
+        summary.standardized_usage = Some(usage);
+    }
+    summary
 }
 
 fn merge_stream_terminal_summary(
@@ -1694,43 +1769,6 @@ fn should_use_direct_sse_passthrough(
 
 type DirectUpstreamByteStream = BoxStream<'static, Result<Bytes, String>>;
 
-fn direct_upstream_response_byte_stream(
-    prefetched_body: VecDeque<Result<Bytes, String>>,
-    response: DirectUpstreamResponse,
-) -> DirectUpstreamByteStream {
-    let response_stream = match response {
-        DirectUpstreamResponse::Reqwest(response) => response
-            .bytes_stream()
-            .map(|item| item.map_err(|err| format_upstream_request_error(&err)))
-            .boxed(),
-        DirectUpstreamResponse::HyperH2c(response) => response
-            .into_body()
-            .into_data_stream()
-            .map(|item| item.map_err(|err| format_hyper_error_chain(&err)))
-            .boxed(),
-        DirectUpstreamResponse::BrowserWreq(response) => response
-            .bytes_stream()
-            .map(|item| item.map_err(|err| format_wreq_upstream_request_error(&err)))
-            .boxed(),
-        DirectUpstreamResponse::LocalTunnel(mut response) => stream! {
-            loop {
-                match response.next_chunk().await {
-                    Ok(Some(chunk)) => yield Ok(chunk),
-                    Ok(None) => break,
-                    Err(err) => {
-                        yield Err(err);
-                        break;
-                    }
-                }
-            }
-        }
-        .boxed(),
-    };
-    futures_stream::iter(prefetched_body)
-        .chain(response_stream)
-        .boxed()
-}
-
 async fn await_direct_passthrough_first_item<T, F>(
     future: F,
     started_at: Instant,
@@ -1762,7 +1800,7 @@ async fn forward_direct_passthrough_client_chunk(
     client_stream_completion_tracker: &mut ClientVisibleStreamCompletionTracker,
     observe_stream_completion: bool,
     client_stream_bytes: &mut u64,
-    buffered_body: &mut Vec<u8>,
+    buffered_body: &mut StreamBodyCapture,
     client_body_truncated: &mut bool,
     max_stream_body_buffer_bytes: usize,
     stream_started_at: Instant,
@@ -1775,7 +1813,7 @@ async fn forward_direct_passthrough_client_chunk(
     if chunk.is_empty() {
         return false;
     }
-    append_stream_capture_bytes(
+    append_budgeted_stream_capture_bytes(
         buffered_body,
         chunk.as_ref(),
         max_stream_body_buffer_bytes,
@@ -1840,11 +1878,11 @@ struct DirectPassthroughFinalizerCore {
     headers: BTreeMap<String, String>,
     stream_usage_report_context: Option<Value>,
     stream_usage_observer: Option<StreamingStandardTerminalObserver>,
-    stream_usage_observer_buffered: Vec<u8>,
+    stream_usage_observer_buffered: StreamUsageObservationBuffer,
     provider_error_inspection: ProviderStreamErrorInspection,
     max_stream_body_buffer_bytes: usize,
-    provider_buffered_body: Vec<u8>,
-    buffered_body: Vec<u8>,
+    provider_buffered_body: StreamBodyCapture,
+    buffered_body: StreamBodyCapture,
     provider_body_truncated: bool,
     client_body_truncated: bool,
     client_stream_completion_tracker: ClientVisibleStreamCompletionTracker,
@@ -1990,7 +2028,7 @@ impl DirectPassthroughFinalizer {
         core.provider_stream_bytes = core
             .provider_stream_bytes
             .saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
-        append_stream_capture_bytes(
+        append_budgeted_stream_capture_bytes(
             &mut core.provider_buffered_body,
             chunk.as_ref(),
             core.max_stream_body_buffer_bytes,
@@ -2028,7 +2066,7 @@ impl DirectPassthroughFinalizer {
             return;
         }
         let core = self.core_mut();
-        append_stream_capture_bytes(
+        append_budgeted_stream_capture_bytes(
             &mut core.buffered_body,
             chunk.as_ref(),
             core.max_stream_body_buffer_bytes,
@@ -2096,7 +2134,9 @@ impl DirectPassthroughFinalizer {
         // client disconnect or an execution timeout may cancel this body
         // future while terminal admission is backpressured; the handoff must
         // continue independently so the usage row cannot remain streaming.
+        let usage_producer = core.state.usage_runtime.track_producer();
         let task = tokio::spawn(async move {
+            let _usage_producer = usage_producer;
             core.finalize(downstream_dropped).await;
         });
         if let Err(_err) = task.await {
@@ -2117,7 +2157,9 @@ impl Drop for DirectPassthroughFinalizer {
         };
         observe_gateway_stage_ms("stream_finalizer_enqueue", 0);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let usage_producer = core.state.usage_runtime.track_producer();
             handle.spawn(async move {
+                let _usage_producer = usage_producer;
                 core.finalize(true).await;
             });
         }
@@ -2543,6 +2585,7 @@ struct DirectPassthroughInlineBodyState {
     upstream_control_filter: Option<SseControlBlockFilter>,
     upstream_started_at: Instant,
     stream_first_byte_timeout: Option<Duration>,
+    stream_idle_timeout: Option<Duration>,
     observed_first_body_poll: bool,
     observed_first_client_yield: bool,
     upstream_done: bool,
@@ -2559,6 +2602,7 @@ impl DirectPassthroughInlineBodyState {
         upstream_started_at: Instant,
         stream_first_byte_timeout: Option<Duration>,
     ) -> Self {
+        let stream_idle_timeout = resolve_stream_idle_timeout(&finalizer.core().plan);
         Self {
             finalizer: Some(finalizer),
             upstream: Some(direct_upstream_response_byte_stream(
@@ -2568,6 +2612,7 @@ impl DirectPassthroughInlineBodyState {
             upstream_control_filter: Some(SseControlBlockFilter::default()),
             upstream_started_at,
             stream_first_byte_timeout,
+            stream_idle_timeout,
             observed_first_body_poll: false,
             observed_first_client_yield: false,
             upstream_done: false,
@@ -2723,7 +2768,28 @@ impl DirectPassthroughInlineBodyState {
                 }
             }
         } else {
-            upstream.next().await
+            match await_stream_idle_read(upstream.next(), self.stream_idle_timeout).await {
+                Ok(item) => item,
+                Err(timeout) => {
+                    self.upstream.take();
+                    if let Some(finalizer) = self.finalizer.as_mut() {
+                        if finalizer.terminal_failure().is_none()
+                            && !finalizer
+                                .core()
+                                .client_stream_completion_tracker
+                                .successful_completion()
+                        {
+                            finalizer.set_terminal_failure(build_stream_transport_failure_report(
+                                "read_timeout",
+                                stream_idle_timeout_message(timeout),
+                                504,
+                            ));
+                        }
+                        finalizer.core_mut()._provider_pool_in_flight_guard.take();
+                    }
+                    None
+                }
+            }
         }
     }
 
@@ -2800,7 +2866,12 @@ impl Drop for DirectPassthroughInlineBodyState {
         if let Some(finalizer) = self.finalizer.take() {
             observe_gateway_stage_ms("stream_finalizer_enqueue", 0);
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let usage_producer = finalizer
+                    .core
+                    .as_ref()
+                    .map(|core| core.state.usage_runtime.track_producer());
                 handle.spawn(async move {
+                    let _usage_producer = usage_producer;
                     let mut finalizer = finalizer;
                     finalizer.finalize(true).await;
                 });
@@ -2901,6 +2972,7 @@ async fn execute_stream_from_direct_passthrough(
         started_at: upstream_started_at,
         response_observation,
         stream_first_byte_timeout,
+        stream_idle_timeout,
         upstream_target_permit,
     } = execution;
 
@@ -3036,11 +3108,13 @@ async fn execute_stream_from_direct_passthrough(
             headers: headers_for_report,
             stream_usage_report_context,
             stream_usage_observer,
-            stream_usage_observer_buffered: Vec::new(),
+            stream_usage_observer_buffered: StreamUsageObservationBuffer::new(
+                max_stream_body_buffer_bytes,
+            ),
             provider_error_inspection: ProviderStreamErrorInspection::default(),
             max_stream_body_buffer_bytes,
-            provider_buffered_body: Vec::new(),
-            buffered_body: Vec::new(),
+            provider_buffered_body: StreamBodyCapture::default(),
+            buffered_body: StreamBodyCapture::default(),
             provider_body_truncated: false,
             client_body_truncated: false,
             client_stream_completion_tracker: ClientVisibleStreamCompletionTracker::default(),
@@ -3102,7 +3176,9 @@ async fn execute_stream_from_direct_passthrough(
     let candidate_id_for_report = candidate_id.clone();
     let provider_pool_in_flight_guard_for_report = in_flight_guard;
     record_stream_pre_first_byte_spawn();
+    let usage_producer = state_for_report.usage_runtime.track_producer();
     tokio::spawn(async move {
+        let _usage_producer = usage_producer;
         let mut stage_trace_for_report = stage_trace_for_report;
         let _stream_total_guard =
             StageElapsedGuard::from_started_at("stream_total", stream_started_at_for_report);
@@ -3118,10 +3194,11 @@ async fn execute_stream_from_direct_passthrough(
         let mut stream_usage_observer = stream_usage_report_context
             .as_ref()
             .map(|_| StreamingStandardTerminalObserver::default());
-        let mut stream_usage_observer_buffered = Vec::new();
+        let mut stream_usage_observer_buffered =
+            StreamUsageObservationBuffer::new(max_stream_body_buffer_bytes);
         let mut provider_error_inspection = ProviderStreamErrorInspection::default();
-        let mut provider_buffered_body = Vec::new();
-        let mut buffered_body = Vec::new();
+        let mut provider_buffered_body = StreamBodyCapture::default();
+        let mut buffered_body = StreamBodyCapture::default();
         let mut provider_body_truncated = false;
         let mut client_body_truncated = false;
         let mut upstream_control_filter = Some(SseControlBlockFilter::default());
@@ -3180,7 +3257,20 @@ async fn execute_stream_from_direct_passthrough(
                         downstream_dropped = true;
                         break;
                     }
-                    item = upstream.next() => item,
+                    result = await_stream_idle_read(upstream.next(), stream_idle_timeout) => {
+                        match result {
+                            Ok(item) => item,
+                            Err(timeout) => {
+                                if terminal_failure.is_none()
+                                    && !client_stream_completion_tracker.successful_completion() {
+                                    terminal_failure = Some(build_stream_transport_failure_report(
+                                        "read_timeout", stream_idle_timeout_message(timeout), 504,
+                                    ));
+                                }
+                                break;
+                            }
+                        }
+                    },
                 }
             };
 
@@ -3304,7 +3394,7 @@ async fn execute_stream_from_direct_passthrough(
 
             provider_stream_bytes = provider_stream_bytes
                 .saturating_add(u64::try_from(provider_chunk.len()).unwrap_or(u64::MAX));
-            append_stream_capture_bytes(
+            append_budgeted_stream_capture_bytes(
                 &mut provider_buffered_body,
                 provider_chunk.as_ref(),
                 max_stream_body_buffer_bytes,
@@ -5165,7 +5255,7 @@ enum SseTerminalPolicy {
 }
 
 #[derive(Default)]
-struct ClientVisibleStreamCompletionTracker {
+pub(crate) struct ClientVisibleStreamCompletionTracker {
     line_buffer: Vec<u8>,
     event_type: Option<String>,
     data_payload: String,
@@ -5175,11 +5265,20 @@ struct ClientVisibleStreamCompletionTracker {
     discarded_line_nonempty: bool,
     skip_next_lf: bool,
     completed: bool,
+    successfully_completed: bool,
 }
 
 impl ClientVisibleStreamCompletionTracker {
-    fn observe_chunk(&mut self, chunk: &[u8]) -> bool {
+    pub(crate) fn observe_chunk(&mut self, chunk: &[u8]) -> bool {
         self.observe_chunk_terminal_end(chunk);
+        self.completed
+    }
+
+    pub(crate) fn successful_completion(&self) -> bool {
+        self.successfully_completed
+    }
+
+    pub(crate) fn observed_terminal(&self) -> bool {
         self.completed
     }
 
@@ -5270,6 +5369,9 @@ impl ClientVisibleStreamCompletionTracker {
 
         if line.is_empty() {
             self.completed = self.current_event_is_terminal(policy);
+            if self.completed {
+                self.successfully_completed = self.current_event_is_successful();
+            }
             self.reset_current_event();
             self.record_bytes = 0;
             return;
@@ -5333,6 +5435,37 @@ impl ClientVisibleStreamCompletionTracker {
         self.event_type = None;
         self.data_payload.clear();
         self.has_data_payload = false;
+    }
+
+    fn current_event_is_successful(&self) -> bool {
+        let payload = self
+            .has_data_payload
+            .then(|| serde_json::from_str::<Value>(&self.data_payload).ok())
+            .flatten();
+        let payload_type = payload
+            .as_ref()
+            .and_then(|value| value.get("type"))
+            .and_then(Value::as_str);
+        if [self.event_type.as_deref(), payload_type]
+            .into_iter()
+            .flatten()
+            .any(|kind| matches!(kind, "response.failed" | "response.incomplete" | "error"))
+        {
+            return false;
+        }
+        if payload
+            .as_ref()
+            .and_then(|value| value.pointer("/response/status"))
+            .and_then(Value::as_str)
+            .is_some_and(|status| status != "completed")
+        {
+            return false;
+        }
+        self.data_payload == "[DONE]"
+            || matches!(
+                payload_type.or(self.event_type.as_deref()),
+                Some("message_stop" | "response.completed")
+            )
     }
 }
 
@@ -7148,13 +7281,15 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
     let stage_trace_for_report = stage_trace;
     let request_diagnostics_for_report = current_request_diagnostics();
     let provider_pool_in_flight_guard_for_report = in_flight_guard;
+    let usage_producer = state_for_report.usage_runtime.track_producer();
     tokio::spawn(async move {
+        let _usage_producer = usage_producer;
         let mut stage_trace_for_report = stage_trace_for_report;
         let _stream_total_guard =
             StageElapsedGuard::from_started_at("stream_total", stream_started_at_for_report);
         let _provider_pool_in_flight_guard = provider_pool_in_flight_guard_for_report;
-        let mut provider_buffered_body = Vec::new();
-        let mut buffered_body = Vec::new();
+        let mut provider_buffered_body = StreamBodyCapture::default();
+        let mut buffered_body = StreamBodyCapture::default();
         let mut provider_body_truncated = false;
         let mut client_body_truncated = false;
         let mut private_stream_normalizer = if sync_json_stream_bridge_active_for_report {
@@ -7178,15 +7313,16 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
             .as_ref()
             .filter(|_| !sync_json_stream_bridge_active_for_report)
             .map(|_| StreamingStandardTerminalObserver::default());
-        let mut stream_usage_observer_buffered = Vec::new();
+        let mut stream_usage_observer_buffered =
+            StreamUsageObservationBuffer::new(max_stream_body_buffer_bytes);
         let mut provider_error_inspection = ProviderStreamErrorInspection::default();
-        append_stream_capture_bytes(
+        append_budgeted_stream_capture_bytes(
             &mut provider_buffered_body,
             &provider_prefetched_body_for_report,
             max_stream_body_buffer_bytes,
             &mut provider_body_truncated,
         );
-        append_stream_capture_bytes(
+        append_budgeted_stream_capture_bytes(
             &mut buffered_body,
             &prefetched_body_for_report,
             max_stream_body_buffer_bytes,
@@ -7413,6 +7549,12 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
             }
         }
 
+        // These buffers restore parser/rewriter state above. Audit capture owns
+        // its budgeted copies; retaining semantic prefetch duplicates for the
+        // rest of the stream would bypass the capture memory limit.
+        drop(provider_prefetched_body_for_report);
+        drop(prefetched_body_for_report);
+
         if terminal_failure.is_none() && !reached_eof {
             loop {
                 let draining_after_anthropic_stop = anthropic_post_stop_drain_started_at.is_some();
@@ -7593,7 +7735,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                             u64::try_from(chunk.len()).unwrap_or(u64::MAX),
                             Ordering::Relaxed,
                         );
-                        append_stream_capture_bytes(
+                        append_budgeted_stream_capture_bytes(
                             &mut provider_buffered_body,
                             &chunk,
                             max_stream_body_buffer_bytes,
@@ -7694,7 +7836,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                             continue;
                         }
 
-                        append_stream_capture_bytes(
+                        append_budgeted_stream_capture_bytes(
                             &mut buffered_body,
                             &rewritten_chunk,
                             max_stream_body_buffer_bytes,
@@ -7885,7 +8027,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                             }
                         }
                         if !rewritten_chunk.is_empty() {
-                            append_stream_capture_bytes(
+                            append_budgeted_stream_capture_bytes(
                                 &mut buffered_body,
                                 &rewritten_chunk,
                                 max_stream_body_buffer_bytes,
@@ -7964,7 +8106,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                 }
                 match finish_result {
                     Ok(flushed_chunk) if !flushed_chunk.is_empty() => {
-                        append_stream_capture_bytes(
+                        append_budgeted_stream_capture_bytes(
                             &mut buffered_body,
                             &flushed_chunk,
                             max_stream_body_buffer_bytes,
@@ -8050,7 +8192,7 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
                         Ok(error_event) => {
                             let error_event_len =
                                 u64::try_from(error_event.len()).unwrap_or(u64::MAX);
-                            append_stream_capture_bytes(
+                            append_budgeted_stream_capture_bytes(
                                 &mut buffered_body,
                                 error_event.as_ref(),
                                 max_stream_body_buffer_bytes,
@@ -8098,13 +8240,15 @@ async fn execute_stream_from_frame_stream_with_retry_scope(
         idle_monitor_done.store(true, Ordering::Relaxed);
         idle_monitor_handle.abort();
 
-        stream_terminal_summary = merge_stream_terminal_summary(
+        let observed_terminal_summary = finalize_stream_usage_observer(
+            &mut stream_usage_observer,
+            stream_usage_report_context.as_ref(),
+            &mut stream_usage_observer_buffered,
+        );
+        stream_terminal_summary = merge_observed_stream_terminal_summary(
             stream_terminal_summary,
-            finalize_stream_usage_observer(
-                &mut stream_usage_observer,
-                stream_usage_report_context.as_ref(),
-                &mut stream_usage_observer_buffered,
-            ),
+            observed_terminal_summary,
+            &stream_usage_observer_buffered,
         );
 
         if downstream_dropped && client_visible_stream_completed && terminal_failure.is_none() {
@@ -9487,11 +9631,13 @@ mod tests {
             )]),
             stream_usage_report_context: None,
             stream_usage_observer: None,
-            stream_usage_observer_buffered: Vec::new(),
+            stream_usage_observer_buffered: super::StreamUsageObservationBuffer::new(
+                super::DEFAULT_USAGE_RESPONSE_BODY_CAPTURE_LIMIT_BYTES,
+            ),
             provider_error_inspection: ProviderStreamErrorInspection::default(),
             max_stream_body_buffer_bytes: super::DEFAULT_USAGE_RESPONSE_BODY_CAPTURE_LIMIT_BYTES,
-            provider_buffered_body: Vec::new(),
-            buffered_body: Vec::new(),
+            provider_buffered_body: super::StreamBodyCapture::default(),
+            buffered_body: super::StreamBodyCapture::default(),
             provider_body_truncated: false,
             client_body_truncated: false,
             client_stream_completion_tracker: ClientVisibleStreamCompletionTracker::default(),
@@ -9527,12 +9673,379 @@ mod tests {
             upstream_control_filter: Some(super::SseControlBlockFilter::default()),
             upstream_started_at: Instant::now(),
             stream_first_byte_timeout: None,
+            stream_idle_timeout: None,
             observed_first_body_poll: false,
             observed_first_client_yield: false,
             upstream_done: false,
             control_filter_flushed: false,
             terminal_error_sent: false,
             finalized: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_capture_budget_exhaustion_preserves_inline_bytes_and_terminal_usage() {
+        use super::super::capture_budget::{StreamBodyCapture, StreamCaptureBudget};
+
+        let chunks = [
+            Bytes::from_static(b"data: {\"id\":\"x\",\"model\":\"gpt\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n"),
+            Bytes::from_static(b"data: {\"id\":\"x\",\"model\":\"gpt\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"prompt_tokens_details\":{\"cached_tokens\":3}}}\n\n"),
+            Bytes::from_static(b"data: [DONE]\n\n"),
+        ];
+        for budget_bytes in [0, 64] {
+            let budget = StreamCaptureBudget::new(budget_bytes);
+            let mut state = direct_anthropic_inline_state(
+                "capture-budget-inline",
+                chunks.iter().cloned().map(Ok).collect(),
+            );
+            let core = state.finalizer.as_mut().unwrap().core_mut();
+            core.requires_anthropic_message_stop = false;
+            core.plan.provider_api_format = "openai:chat".to_string();
+            core.plan.client_api_format = "openai:chat".to_string();
+            core.stream_usage_report_context = Some(json!({
+                "provider_api_format": "openai:chat", "client_api_format": "openai:chat"
+            }));
+            core.stream_usage_observer = Some(super::StreamingStandardTerminalObserver::default());
+            core.provider_buffered_body = StreamBodyCapture::with_budget(Arc::clone(&budget));
+            core.buffered_body = StreamBodyCapture::with_budget(budget);
+            for expected in &chunks {
+                let (actual, next) = state.next_item().await.expect("streamed chunk");
+                assert_eq!(actual.unwrap(), *expected);
+                state = next;
+            }
+            let core = state.finalizer.as_mut().unwrap().core_mut();
+            assert!(core.terminal_failure.is_none());
+            assert!(core.client_visible_stream_completed);
+            assert!(core.provider_body_truncated);
+            assert!(core.client_body_truncated);
+            assert!(core.provider_buffered_body.len() + core.buffered_body.len() <= budget_bytes);
+            let summary = super::finalize_stream_usage_observer(
+                &mut core.stream_usage_observer,
+                core.stream_usage_report_context.as_ref(),
+                &mut core.stream_usage_observer_buffered,
+            )
+            .unwrap();
+            assert!(summary.observed_finish);
+            assert!(summary.parser_error.is_none());
+            let payload = super::build_stream_usage_payload(
+                "capture-budget-inline".to_string(),
+                "openai_chat_stream".to_string(),
+                core.stream_usage_report_context.clone(),
+                200,
+                BTreeMap::new(),
+                &core.provider_buffered_body,
+                core.provider_body_truncated,
+                &core.buffered_body,
+                core.client_body_truncated,
+                Some(summary),
+                None,
+            );
+            let seed = aether_usage_runtime::build_stream_terminal_usage_payload_seed(&payload);
+            let usage = seed.standardized_usage.unwrap();
+            assert_eq!(usage.input_tokens, 11);
+            assert_eq!(usage.output_tokens, 7);
+            assert_eq!(usage.cache_read_tokens, 3);
+            assert_eq!(
+                payload.provider_body_state,
+                Some(UsageBodyCaptureState::Truncated)
+            );
+            assert_eq!(
+                payload.client_body_state,
+                Some(UsageBodyCaptureState::Truncated)
+            );
+            discard_direct_test_finalizer(&mut state);
+        }
+    }
+
+    #[test]
+    fn stream_capture_fallback_after_disabled_observer_updates_tokens_zero_cache_and_tier() {
+        let context = json!({"provider_api_format": "openai:chat"});
+        let mut observer = Some(super::StreamingStandardTerminalObserver::default());
+        let mut buffer =
+            super::StreamUsageObservationBuffer::new(super::BASIC_STREAM_BODY_ANALYSIS_LIMIT_BYTES);
+        super::observe_stream_usage_bytes(observer.as_mut().unwrap(), &context, &mut buffer,
+            b"data: {\"id\":\"x\",\"model\":\"gpt\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,\"prompt_tokens_details\":{\"cached_tokens\":30}}}\n\n");
+        let oversized = format!(
+            "data: {{\"content\":\"{}\"}}\n\n",
+            "x".repeat(super::SSE_TERMINAL_DETECTOR_MAX_LINE_BYTES)
+        );
+        for part in oversized.as_bytes().chunks(4096) {
+            super::observe_stream_usage_bytes(
+                observer.as_mut().unwrap(),
+                &context,
+                &mut buffer,
+                part,
+            );
+        }
+        super::observe_stream_usage_bytes(observer.as_mut().unwrap(), &context, &mut buffer,
+            b"data: {\"\\u0075sage\":{\"prompt_tokens\":100,\"completion_tokens\":500,\"prompt_tokens_details\":{\"cached_tokens\":0}},\"service_tier\":\"priority\"}\n\n");
+        let summary =
+            super::finalize_stream_usage_observer(&mut observer, Some(&context), &mut buffer)
+                .unwrap();
+        assert!(summary
+            .parser_error
+            .as_deref()
+            .unwrap()
+            .contains("exceeded"));
+        assert!(summary.observed_finish);
+        assert_eq!(
+            summary.provider_actual_service_tier.as_deref(),
+            Some("priority")
+        );
+        let usage = summary.standardized_usage.as_ref().unwrap();
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 500);
+        assert_eq!(usage.cache_read_tokens, 0);
+
+        let eof_summary = ExecutionStreamTerminalSummary {
+            standardized_usage: Some(StandardizedUsage {
+                input_tokens: 100,
+                output_tokens: 10,
+                cache_read_tokens: 30,
+                ..StandardizedUsage::new()
+            }),
+            response_id: Some("authoritative-eof-id".to_string()),
+            finish_reason: Some("stop".to_string()),
+            observed_finish: true,
+            ..ExecutionStreamTerminalSummary::default()
+        };
+        let merged = super::merge_observed_stream_terminal_summary(
+            Some(eof_summary),
+            Some(summary),
+            &buffer,
+        )
+        .unwrap();
+        assert_eq!(merged.response_id.as_deref(), Some("authoritative-eof-id"));
+        assert_eq!(merged.finish_reason.as_deref(), Some("stop"));
+        assert!(merged.observed_finish);
+        assert!(merged.parser_error.as_deref().unwrap().contains("exceeded"));
+        let usage = merged.standardized_usage.unwrap();
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 500);
+        assert_eq!(usage.cache_read_tokens, 0);
+    }
+
+    #[test]
+    fn stream_capture_budget_zero_preserves_conversion_bytes_and_usage() {
+        use super::super::capture_budget::{StreamBodyCapture, StreamCaptureBudget};
+
+        let context = json!({
+            "provider_api_format": "openai:chat",
+            "client_api_format": "claude:messages",
+            "needs_conversion": true,
+        });
+        let chunks: [&[u8]; 3] = [
+            b"data: {\"id\":\"x\",\"model\":\"gpt\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\"},\"finish_reason\":null}]}\n\n",
+            b"data: {\"id\":\"x\",\"model\":\"gpt\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"prompt_tokens_details\":{\"cached_tokens\":3}}}\n\n",
+            b"data: [DONE]\n\n",
+        ];
+        let mut expected = None;
+        for bytes in [32 * 1024, 0] {
+            let budget = StreamCaptureBudget::new(bytes);
+            let mut provider = StreamBodyCapture::with_budget(Arc::clone(&budget));
+            let mut client = StreamBodyCapture::with_budget(budget);
+            let mut provider_truncated = false;
+            let mut client_truncated = false;
+            let mut observer = Some(super::StreamingStandardTerminalObserver::default());
+            let mut buffer = super::StreamUsageObservationBuffer::new(32 * 1024);
+            let mut rewriter = super::maybe_build_stream_response_rewriter(Some(&context)).unwrap();
+            let mut delivered = Vec::new();
+            for chunk in chunks {
+                provider.append(chunk, 32 * 1024, &mut provider_truncated);
+                super::observe_stream_usage_bytes(
+                    observer.as_mut().unwrap(),
+                    &context,
+                    &mut buffer,
+                    chunk,
+                );
+                let output = rewriter.push_chunk(chunk).unwrap();
+                client.append(&output, 32 * 1024, &mut client_truncated);
+                delivered.extend(output);
+            }
+            let tail = rewriter.finish().unwrap();
+            client.append(&tail, 32 * 1024, &mut client_truncated);
+            delivered.extend(tail);
+            let summary =
+                super::finalize_stream_usage_observer(&mut observer, Some(&context), &mut buffer)
+                    .unwrap();
+            assert!(summary.observed_finish);
+            assert!(summary.parser_error.is_none());
+            let payload = super::build_stream_usage_payload(
+                "capture-budget-conversion".to_string(),
+                "claude_chat_stream".to_string(),
+                Some(context.clone()),
+                200,
+                BTreeMap::new(),
+                &provider,
+                provider_truncated,
+                &client,
+                client_truncated,
+                Some(summary),
+                None,
+            );
+            let seed = aether_usage_runtime::build_stream_terminal_usage_payload_seed(&payload);
+            let usage = seed.standardized_usage.unwrap();
+            assert_eq!(usage.input_tokens, 11);
+            assert_eq!(usage.output_tokens, 7);
+            assert_eq!(usage.cache_read_tokens, 3);
+            assert!(String::from_utf8_lossy(&delivered).contains("message_stop"));
+            if let Some(expected) = &expected {
+                assert_eq!(&delivered, expected);
+                assert_eq!(
+                    payload.provider_body_state,
+                    Some(UsageBodyCaptureState::Truncated)
+                );
+                assert_eq!(
+                    payload.client_body_state,
+                    Some(UsageBodyCaptureState::Truncated)
+                );
+            } else {
+                expected = Some(delivered);
+            }
+        }
+    }
+
+    #[test]
+    fn stream_capture_budget_zero_preserves_sync_json_bridge_terminal_usage_and_tier() {
+        use super::super::capture_budget::{StreamBodyCapture, StreamCaptureBudget};
+
+        let response = json!({
+            "id": "chatcmpl-capture", "object": "chat.completion", "model": "gpt",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "hello"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18,
+                "prompt_tokens_details": {"cached_tokens": 3}},
+            "service_tier": "priority",
+        });
+        let outcome = super::maybe_bridge_standard_sync_json_to_stream(
+            &response,
+            "openai:chat",
+            "openai:chat",
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        let delivered = outcome.sse_body;
+        assert!(String::from_utf8_lossy(&delivered).contains("hello"));
+        assert!(String::from_utf8_lossy(&delivered).contains("[DONE]"));
+        let budget = StreamCaptureBudget::new(0);
+        let mut provider = StreamBodyCapture::with_budget(Arc::clone(&budget));
+        let mut client = StreamBodyCapture::with_budget(budget);
+        let mut provider_truncated = false;
+        let mut client_truncated = false;
+        provider.append(
+            &serde_json::to_vec(&response).unwrap(),
+            32 * 1024,
+            &mut provider_truncated,
+        );
+        client.append(&delivered, 32 * 1024, &mut client_truncated);
+        let summary = outcome.terminal_summary.unwrap();
+        assert!(summary.observed_finish);
+        assert!(summary.parser_error.is_none());
+        assert_eq!(
+            summary.provider_actual_service_tier.as_deref(),
+            Some("priority")
+        );
+        let payload = super::build_stream_usage_payload(
+            "capture-budget-sync-bridge".to_string(),
+            "openai_chat_stream".to_string(),
+            None,
+            200,
+            BTreeMap::new(),
+            &provider,
+            provider_truncated,
+            &client,
+            client_truncated,
+            Some(summary),
+            None,
+        );
+        assert!(payload.provider_body_base64.is_none());
+        assert!(payload.client_body_base64.is_none());
+        assert_eq!(
+            payload.provider_body_state,
+            Some(UsageBodyCaptureState::Truncated)
+        );
+        let seed = aether_usage_runtime::build_stream_terminal_usage_payload_seed(&payload);
+        let usage = seed.standardized_usage.unwrap();
+        assert_eq!(usage.input_tokens, 11);
+        assert_eq!(usage.output_tokens, 7);
+        assert_eq!(usage.cache_read_tokens, 3);
+        assert_eq!(
+            seed.provider_actual_service_tier.as_deref(),
+            Some("priority")
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_inline_idle_timeout_after_first_chunk_emits_terminal_read_timeout() {
+        let message_start = Bytes::from_static(
+            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{}}\n\n",
+        );
+        let mut state = direct_anthropic_inline_state("req-inline-idle-timeout", Vec::new());
+        state.stream_idle_timeout = Some(Duration::from_millis(5));
+        state.upstream = Some(
+            futures_util::stream::iter(vec![Ok(message_start.clone())])
+                .chain(futures_util::stream::pending())
+                .boxed(),
+        );
+        let (first, state) = state.next_item().await.expect("first chunk should stream");
+        assert_eq!(first.expect("first chunk"), message_start);
+        let (error, mut state) = tokio::time::timeout(Duration::from_secs(1), state.next_item())
+            .await
+            .expect("idle timeout should complete")
+            .expect("terminal error should stream");
+        let error =
+            String::from_utf8(error.expect("terminal error should encode").to_vec()).unwrap();
+        assert!(error.starts_with("event: error\n"));
+        let failure = state
+            .finalizer
+            .as_ref()
+            .unwrap()
+            .terminal_failure()
+            .unwrap();
+        assert_eq!(failure.error_type, "read_timeout");
+        assert_eq!(failure.status_code, 504);
+        assert!(
+            state.upstream.is_none(),
+            "timeout should drop the upstream before settlement"
+        );
+        discard_direct_test_finalizer(&mut state);
+    }
+
+    #[tokio::test]
+    async fn direct_inline_idle_timeout_preserves_successful_protocol_completion() {
+        for terminal in [
+            "data: [DONE]\n\n",
+            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+        ] {
+            let mut state = direct_anthropic_inline_state("req-inline-idle-completed", Vec::new());
+            state.finalizer.as_mut().unwrap().core_mut().requires_anthropic_message_stop = false;
+            state.stream_idle_timeout = Some(Duration::from_millis(5));
+            state.upstream = Some(futures_util::stream::iter(vec![Ok(Bytes::from(terminal))])
+                .chain(futures_util::stream::pending()).boxed());
+            let (first, mut state) = state.next_item().await.expect("terminal chunk should stream");
+            assert_eq!(first.unwrap(), Bytes::from(terminal));
+            assert!(state.finalizer.as_ref().unwrap().core().client_stream_completion_tracker.successful_completion());
+            let item = tokio::time::timeout(Duration::from_secs(1), state.next_upstream_item())
+                .await.expect("teardown idle should finish");
+            assert!(item.is_none());
+            assert!(state.upstream.is_none());
+            assert!(state.finalizer.as_ref().unwrap().terminal_failure().is_none(),
+                "successful protocol terminal must not become a read timeout");
+            discard_direct_test_finalizer(&mut state);
+        }
+    }
+
+    #[test]
+    fn idle_timeout_completion_tracker_does_not_treat_failure_as_success() {
+        for terminal in [
+            "event: response.failed\ndata: {\"type\":\"response.failed\"}\n\n",
+            "event: response.incomplete\ndata: {\"type\":\"response.incomplete\"}\n\n",
+            "event: error\ndata: {\"type\":\"error\"}\n\n",
+            "event: response.completed\ndata: {\"type\":\"response.failed\"}\n\n",
+        ] {
+            let mut tracker = ClientVisibleStreamCompletionTracker::default();
+            assert!(tracker.observe_chunk(terminal.as_bytes()));
+            assert!(!tracker.successful_completion());
         }
     }
 
@@ -10607,11 +11120,13 @@ mod tests {
             headers: BTreeMap::new(),
             stream_usage_report_context: None,
             stream_usage_observer: None,
-            stream_usage_observer_buffered: Vec::new(),
+            stream_usage_observer_buffered: super::StreamUsageObservationBuffer::new(
+                super::DEFAULT_USAGE_RESPONSE_BODY_CAPTURE_LIMIT_BYTES,
+            ),
             provider_error_inspection: ProviderStreamErrorInspection::default(),
             max_stream_body_buffer_bytes: super::DEFAULT_USAGE_RESPONSE_BODY_CAPTURE_LIMIT_BYTES,
-            provider_buffered_body: Vec::new(),
-            buffered_body: Vec::new(),
+            provider_buffered_body: super::StreamBodyCapture::default(),
+            buffered_body: super::StreamBodyCapture::default(),
             provider_body_truncated: false,
             client_body_truncated: false,
             client_stream_completion_tracker: ClientVisibleStreamCompletionTracker::default(),
@@ -10639,6 +11154,7 @@ mod tests {
             upstream_control_filter: None,
             upstream_started_at: stream_started_at,
             stream_first_byte_timeout: None,
+            stream_idle_timeout: None,
             observed_first_body_poll: true,
             observed_first_client_yield: false,
             upstream_done: false,

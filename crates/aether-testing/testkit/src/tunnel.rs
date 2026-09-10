@@ -1,9 +1,6 @@
 use std::time::Duration;
 
-use aether_gateway::{
-    build_tunnel_runtime_router_with_state, TunnelConnConfig, TunnelControlPlaneClient,
-    TunnelRuntimeState,
-};
+use aether_gateway::{TunnelConnConfig, TunnelControlPlaneClient, TunnelRuntimeState};
 use aether_runtime_state::RuntimeSemaphore;
 
 use crate::server::SpawnedServer;
@@ -11,6 +8,8 @@ use crate::server::SpawnedServer;
 pub const TUNNEL_HARNESS_NODE_ID: &str = "node-baseline";
 pub const TUNNEL_HARNESS_GENERATION: &str = "tunnel-harness-generation-1";
 pub const TUNNEL_HARNESS_MANAGEMENT_TOKEN: &str = "ae-tunnel-harness-management-token";
+const RELAY_INSTANCE: &str = "tunnel-harness";
+const RELAY_SECRET: &[u8] = b"tunnel-harness-relay-secret-32-bytes-minimum";
 
 #[derive(Debug, Clone)]
 pub struct TunnelHarnessConfig {
@@ -38,6 +37,7 @@ impl Default for TunnelHarnessConfig {
 #[derive(Debug)]
 pub struct TunnelHarness {
     server: SpawnedServer,
+    node_id: String,
 }
 
 impl TunnelHarness {
@@ -74,7 +74,11 @@ impl TunnelHarness {
             TUNNEL_HARNESS_GENERATION,
             TUNNEL_HARNESS_MANAGEMENT_TOKEN,
         )?;
-        let router = build_tunnel_runtime_router_with_state(state);
+        let router = aether_gateway::testkit::build_tunnel_pressure_router(
+            state,
+            RELAY_INSTANCE,
+            RELAY_SECRET,
+        )?;
         let server = match port {
             Some(port) => SpawnedServer::start_on_port(port, router)
                 .await
@@ -83,7 +87,10 @@ impl TunnelHarness {
                 .await
                 .map_err(|err| format!("failed to start tunnel harness: {err}"))?,
         };
-        Ok(Self { server })
+        Ok(Self {
+            server,
+            node_id: config.node_id,
+        })
     }
 
     pub fn base_url(&self) -> &str {
@@ -92,6 +99,50 @@ impl TunnelHarness {
 
     pub fn port(&self) -> u16 {
         self.server.port()
+    }
+
+    pub fn relay_headers(
+        &self,
+        metadata_envelope: &[u8],
+        body: &[u8],
+    ) -> std::collections::BTreeMap<String, String> {
+        use aether_contracts::tunnel::*;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NONCE: AtomicU64 = AtomicU64::new(0);
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let nonce = format!("harness-{}", NONCE.fetch_add(1, Ordering::Relaxed));
+        let digest = tunnel_relay_payload_digest(metadata_envelope, body);
+        let signature = sign_tunnel_relay_request(
+            RELAY_SECRET,
+            "load-probe",
+            RELAY_INSTANCE,
+            &self.node_id,
+            "",
+            false,
+            timestamp,
+            &nonce,
+            &digest,
+        );
+        [
+            (TUNNEL_RELAY_AUTH_SENDER_HEADER, "load-probe".to_string()),
+            (
+                TUNNEL_RELAY_OWNER_INSTANCE_HEADER,
+                RELAY_INSTANCE.to_string(),
+            ),
+            (TUNNEL_RELAY_AUTH_TIMESTAMP_HEADER, timestamp.to_string()),
+            (TUNNEL_RELAY_AUTH_NONCE_HEADER, nonce),
+            (
+                TUNNEL_RELAY_AUTH_PAYLOAD_HEADER,
+                digest.encode_header_value(),
+            ),
+            (TUNNEL_RELAY_AUTH_SIGNATURE_HEADER, signature),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect()
     }
 }
 

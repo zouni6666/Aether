@@ -66,6 +66,7 @@ fn sample_usage(request_id: &str, created_at_unix_ms: i64) -> StoredRequestUsage
 
 fn sample_upsert_usage_record(request_id: &str) -> UpsertUsageRecord {
     UpsertUsageRecord {
+        capture_retention: Default::default(),
         request_id: request_id.to_string(),
         user_id: None,
         api_key_id: None,
@@ -535,6 +536,7 @@ async fn stale_pending_update_does_not_regress_finalized_usage() {
     let repository = InMemoryUsageReadRepository::default();
     repository
         .upsert(UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-finalized-1".to_string(),
             user_id: Some("user-1".to_string()),
             api_key_id: Some("api-key-1".to_string()),
@@ -608,6 +610,7 @@ async fn stale_pending_update_does_not_regress_finalized_usage() {
 
     repository
         .upsert(UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-finalized-1".to_string(),
             user_id: Some("user-1".to_string()),
             api_key_id: Some("api-key-1".to_string()),
@@ -695,6 +698,7 @@ async fn upsert_allows_completed_recovery_after_void_failure() {
     let repository = InMemoryUsageReadRepository::default();
     repository
         .upsert(UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-recover-1".to_string(),
             user_id: Some("user-1".to_string()),
             api_key_id: Some("api-key-1".to_string()),
@@ -768,6 +772,7 @@ async fn upsert_allows_completed_recovery_after_void_failure() {
 
     repository
         .upsert(UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-recover-1".to_string(),
             user_id: Some("user-1".to_string()),
             api_key_id: Some("api-key-1".to_string()),
@@ -1009,6 +1014,7 @@ async fn stale_pending_update_does_not_regress_streaming_usage() {
     let repository = InMemoryUsageReadRepository::default();
     repository
         .upsert(UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-streaming-1".to_string(),
             user_id: Some("user-1".to_string()),
             api_key_id: Some("api-key-1".to_string()),
@@ -1084,6 +1090,7 @@ async fn stale_pending_update_does_not_regress_streaming_usage() {
 
     repository
         .upsert(UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-streaming-1".to_string(),
             user_id: Some("user-1".to_string()),
             api_key_id: Some("api-key-1".to_string()),
@@ -1339,6 +1346,7 @@ async fn upsert_writes_usage_record() {
     let repository = InMemoryUsageReadRepository::default();
     let stored = repository
         .upsert(UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-upsert-1".to_string(),
             user_id: Some("user-1".to_string()),
             api_key_id: Some("key-1".to_string()),
@@ -1430,6 +1438,7 @@ async fn upsert_defaults_created_at_to_second_timestamp() {
     let repository = InMemoryUsageReadRepository::default();
     let stored = repository
         .upsert(UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-upsert-ms-default".to_string(),
             user_id: None,
             api_key_id: None,
@@ -1509,6 +1518,7 @@ async fn upsert_does_not_backfill_legacy_output_price_from_request_metadata() {
     let repository = InMemoryUsageReadRepository::default();
     let stored = repository
         .upsert(UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-upsert-price-metadata".to_string(),
             user_id: None,
             api_key_id: None,
@@ -1591,6 +1601,7 @@ async fn upsert_does_not_backfill_typed_body_refs_from_request_metadata() {
     let repository = InMemoryUsageReadRepository::default();
     let stored = repository
         .upsert(UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-upsert-body-ref-metadata".to_string(),
             user_id: None,
             api_key_id: None,
@@ -1673,6 +1684,7 @@ async fn upsert_keeps_typed_routing_fields_out_of_request_metadata() {
     let repository = InMemoryUsageReadRepository::default();
     let stored = repository
         .upsert(UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-upsert-routing-metadata".to_string(),
             user_id: None,
             api_key_id: None,
@@ -1771,6 +1783,7 @@ async fn upsert_does_not_persist_legacy_display_columns_for_new_rows() {
     let repository = InMemoryUsageReadRepository::default();
     let stored = repository
         .upsert(UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-upsert-display-columns".to_string(),
             user_id: Some("user-1".to_string()),
             api_key_id: Some("key-1".to_string()),
@@ -1921,6 +1934,7 @@ async fn upsert_preserves_existing_legacy_display_columns_when_new_write_omits_t
     }]);
     let stored = repository
         .upsert(UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-existing-display-columns".to_string(),
             user_id: Some("user-1".to_string()),
             api_key_id: Some("key-1".to_string()),

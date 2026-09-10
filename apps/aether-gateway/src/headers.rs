@@ -402,9 +402,21 @@ pub(crate) enum RequestBodyNormalizationError {
     InvalidBodyFraming,
     AmbiguousBodyFraming,
     UnsupportedContentEncoding(String),
-    DecodeFailed { encoding: String, reason: String },
-    DecompressedBodyTooLarge { encoding: String, limit_bytes: u64 },
-    RequestBodyTooLarge { limit_bytes: u64 },
+    DecodeFailed {
+        encoding: String,
+        reason: String,
+    },
+    DecompressedBodyTooLarge {
+        encoding: String,
+        limit_bytes: u64,
+    },
+    RequestBodyTooLarge {
+        limit_bytes: u64,
+    },
+    BodyBufferOverloaded {
+        requested_bytes: usize,
+        budget_bytes: usize,
+    },
 }
 
 impl RequestBodyNormalizationError {
@@ -428,6 +440,9 @@ impl RequestBodyNormalizationError {
             Self::RequestBodyTooLarge { limit_bytes } => {
                 format!("Request body exceeds {limit_bytes} bytes")
             }
+            Self::BodyBufferOverloaded { .. } => {
+                "Request body buffering capacity is temporarily exhausted".to_string()
+            }
         }
     }
 
@@ -440,6 +455,7 @@ impl RequestBodyNormalizationError {
             Self::UnsupportedContentEncoding(_) | Self::DecodeFailed { .. } => {
                 http::StatusCode::BAD_REQUEST
             }
+            Self::BodyBufferOverloaded { .. } => http::StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 }
@@ -468,6 +484,10 @@ impl fmt::Display for RequestBodyNormalizationError {
             Self::RequestBodyTooLarge { limit_bytes } => {
                 write!(f, "request body exceeds {limit_bytes} bytes")
             }
+            Self::BodyBufferOverloaded { requested_bytes, budget_bytes } => write!(
+                f,
+                "request body buffering needs {requested_bytes} bytes of a {budget_bytes} byte budget"
+            ),
         }
     }
 }
@@ -490,8 +510,23 @@ pub(crate) fn normalize_request_body_headers_and_bytes_with_limit(
     body_bytes: Bytes,
     limit_bytes: u64,
 ) -> Result<Bytes, RequestBodyNormalizationError> {
+    normalize_request_body_headers_and_bytes_with_budget(
+        headers,
+        body_bytes,
+        limit_bytes,
+        &mut |_| Ok(()),
+    )
+}
+
+pub(crate) fn normalize_request_body_headers_and_bytes_with_budget(
+    headers: &mut http::HeaderMap,
+    body_bytes: Bytes,
+    limit_bytes: u64,
+    budget: &mut impl FnMut(usize) -> Result<(), RequestBodyNormalizationError>,
+) -> Result<Bytes, RequestBodyNormalizationError> {
     let body_was_encoded = !request_content_encodings(headers).is_empty();
-    let decoded = decoded_request_body_bytes_with_limit(headers, body_bytes.as_ref(), limit_bytes)?;
+    let decoded =
+        decoded_request_body_bytes_with_budget(headers, body_bytes.as_ref(), limit_bytes, budget)?;
     if !body_was_encoded {
         return Ok(body_bytes);
     }
@@ -534,6 +569,15 @@ pub(crate) fn decoded_request_body_bytes_with_limit<'a>(
     body_bytes: &'a [u8],
     limit: u64,
 ) -> Result<Cow<'a, [u8]>, RequestBodyNormalizationError> {
+    decoded_request_body_bytes_with_budget(headers, body_bytes, limit, &mut |_| Ok(()))
+}
+
+fn decoded_request_body_bytes_with_budget<'a>(
+    headers: &http::HeaderMap,
+    body_bytes: &'a [u8],
+    limit: u64,
+    budget: &mut impl FnMut(usize) -> Result<(), RequestBodyNormalizationError>,
+) -> Result<Cow<'a, [u8]>, RequestBodyNormalizationError> {
     validate_request_body_framing(headers)?;
     let encodings = request_content_encodings(headers);
     if encodings.is_empty() {
@@ -543,11 +587,21 @@ pub(crate) fn decoded_request_body_bytes_with_limit<'a>(
         return Ok(Cow::Borrowed(body_bytes));
     }
 
-    let mut decoded = body_bytes.to_vec();
+    let mut decoded = Cow::Borrowed(body_bytes);
     for encoding in encodings.iter().rev() {
-        decoded = decode_single_request_body_with_limit(encoding, decoded.as_slice(), limit)?;
+        let retained_input_bytes = body_bytes.len().saturating_add(match &decoded {
+            Cow::Borrowed(_) => 0,
+            Cow::Owned(bytes) => bytes.capacity(),
+        });
+        decoded = Cow::Owned(decode_single_request_body_with_budget(
+            encoding,
+            decoded.as_ref(),
+            limit,
+            retained_input_bytes,
+            budget,
+        )?);
     }
-    Ok(Cow::Owned(decoded))
+    Ok(decoded)
 }
 
 fn request_content_encodings(headers: &http::HeaderMap) -> Vec<String> {
@@ -632,10 +686,55 @@ fn decode_single_request_body_with_limit(
     body_bytes: &[u8],
     limit: u64,
 ) -> Result<Vec<u8>, RequestBodyNormalizationError> {
+    decode_single_request_body_with_budget(
+        encoding,
+        body_bytes,
+        limit,
+        body_bytes.len(),
+        &mut |_| Ok(()),
+    )
+}
+
+fn decode_single_request_body_with_budget(
+    encoding: &str,
+    body_bytes: &[u8],
+    limit: u64,
+    retained_input_bytes: usize,
+    budget: &mut impl FnMut(usize) -> Result<(), RequestBodyNormalizationError>,
+) -> Result<Vec<u8>, RequestBodyNormalizationError> {
     match encoding {
-        "gzip" | "x-gzip" => decode_gzip_body_with_limit(encoding, body_bytes, limit),
-        "deflate" => decode_deflate_body_with_limit(encoding, body_bytes, limit),
-        "zstd" => decode_zstd_body_with_limit(encoding, body_bytes, limit),
+        "gzip" | "x-gzip" => {
+            let mut decoder = GzDecoder::new(body_bytes);
+            read_request_decoder_to_end_with_budget(
+                encoding,
+                &mut decoder,
+                limit,
+                retained_input_bytes,
+                budget,
+            )
+        }
+        "deflate" => decode_deflate_body_with_budget(
+            encoding,
+            body_bytes,
+            limit,
+            retained_input_bytes,
+            budget,
+        ),
+        "zstd" => {
+            let mut decoder = zstd::stream::read::Decoder::new(body_bytes).map_err(|err| {
+                RequestBodyNormalizationError::DecodeFailed {
+                    encoding: encoding.to_string(),
+                    reason: err.to_string(),
+                }
+            })?;
+            read_request_decoder_to_end_with_budget(
+                encoding,
+                &mut decoder,
+                limit,
+                retained_input_bytes,
+                budget,
+            )
+        }
         _ => Err(RequestBodyNormalizationError::UnsupportedContentEncoding(
             encoding.to_string(),
         )),
@@ -670,19 +769,47 @@ fn decode_deflate_body_with_limit(
     body_bytes: &[u8],
     limit: u64,
 ) -> Result<Vec<u8>, RequestBodyNormalizationError> {
+    decode_deflate_body_with_budget(encoding, body_bytes, limit, body_bytes.len(), &mut |_| {
+        Ok(())
+    })
+}
+
+fn decode_deflate_body_with_budget(
+    encoding: &str,
+    body_bytes: &[u8],
+    limit: u64,
+    retained_input_bytes: usize,
+    budget: &mut impl FnMut(usize) -> Result<(), RequestBodyNormalizationError>,
+) -> Result<Vec<u8>, RequestBodyNormalizationError> {
     let mut zlib_decoder = ZlibDecoder::new(body_bytes);
-    match read_request_decoder_to_end_with_limit(encoding, &mut zlib_decoder, limit) {
+    match read_request_decoder_to_end_with_budget(
+        encoding,
+        &mut zlib_decoder,
+        limit,
+        retained_input_bytes,
+        budget,
+    ) {
         Ok(decoded) => Ok(decoded),
-        Err(err @ RequestBodyNormalizationError::DecompressedBodyTooLarge { .. }) => Err(err),
-        Err(zlib_error) => {
+        Err(zlib_error @ RequestBodyNormalizationError::DecodeFailed { .. }) => {
             let mut raw_decoder = DeflateDecoder::new(body_bytes);
-            read_request_decoder_to_end_with_limit(encoding, &mut raw_decoder, limit).map_err(
-                |raw_error| RequestBodyNormalizationError::DecodeFailed {
-                    encoding: encoding.to_string(),
-                    reason: format!("{zlib_error}; raw deflate fallback failed: {raw_error}"),
-                },
+            read_request_decoder_to_end_with_budget(
+                encoding,
+                &mut raw_decoder,
+                limit,
+                retained_input_bytes,
+                budget,
             )
+            .map_err(|raw_error| match raw_error {
+                RequestBodyNormalizationError::DecodeFailed { .. } => {
+                    RequestBodyNormalizationError::DecodeFailed {
+                        encoding: encoding.to_string(),
+                        reason: format!("{zlib_error}; raw deflate fallback failed: {raw_error}"),
+                    }
+                }
+                error => error,
+            })
         }
+        Err(error) => Err(error),
     }
 }
 
@@ -719,21 +846,70 @@ fn read_request_decoder_to_end_with_limit(
     decoder: &mut impl Read,
     limit: u64,
 ) -> Result<Vec<u8>, RequestBodyNormalizationError> {
-    let mut limited = decoder.take(limit.saturating_add(1));
+    read_request_decoder_to_end_with_budget(encoding, decoder, limit, 0, &mut |_| Ok(()))
+}
+
+fn read_request_decoder_to_end_with_budget(
+    encoding: &str,
+    decoder: &mut impl Read,
+    limit: u64,
+    retained_input_bytes: usize,
+    budget: &mut impl FnMut(usize) -> Result<(), RequestBodyNormalizationError>,
+) -> Result<Vec<u8>, RequestBodyNormalizationError> {
+    let capacity_limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    let mut scratch = [0_u8; 8 * 1024];
     let mut out = Vec::new();
-    limited
-        .read_to_end(&mut out)
-        .map_err(|err| RequestBodyNormalizationError::DecodeFailed {
-            encoding: encoding.to_string(),
-            reason: err.to_string(),
+    loop {
+        let remaining = limit.saturating_sub(out.len() as u64).saturating_add(1);
+        let read_limit = scratch
+            .len()
+            .min(usize::try_from(remaining).unwrap_or(usize::MAX));
+        let read = decoder.read(&mut scratch[..read_limit]).map_err(|err| {
+            RequestBodyNormalizationError::DecodeFailed {
+                encoding: encoding.to_string(),
+                reason: err.to_string(),
+            }
         })?;
-    if out.len() as u64 > limit {
-        return Err(RequestBodyNormalizationError::DecompressedBodyTooLarge {
-            encoding: encoding.to_string(),
-            limit_bytes: limit,
-        });
+        if read == 0 {
+            return Ok(out);
+        }
+        let next_len = out.len().saturating_add(read);
+        if next_len as u64 > limit {
+            return Err(RequestBodyNormalizationError::DecompressedBodyTooLarge {
+                encoding: encoding.to_string(),
+                limit_bytes: limit,
+            });
+        }
+        if next_len > out.capacity() {
+            let mut capacity = out
+                .capacity()
+                .saturating_mul(2)
+                .max(next_len)
+                .min(capacity_limit);
+            // The encoded body and previous decoding layer remain alive during growth.
+            match budget(retained_input_bytes.saturating_add(capacity)) {
+                Ok(()) => {}
+                Err(RequestBodyNormalizationError::BodyBufferOverloaded { .. })
+                    if capacity > next_len =>
+                {
+                    // Rejected reservations leave the budget unchanged. Spare capacity
+                    // must not reject a body whose actual bytes still fit.
+                    capacity = next_len;
+                    budget(retained_input_bytes.saturating_add(capacity))?;
+                }
+                Err(error) => return Err(error),
+            }
+            out.try_reserve_exact(capacity.saturating_sub(out.len()))
+                .map_err(|err| RequestBodyNormalizationError::DecodeFailed {
+                    encoding: encoding.to_string(),
+                    reason: err.to_string(),
+                })?;
+            if out.capacity() > capacity {
+                budget(retained_input_bytes.saturating_add(out.capacity()))?;
+            }
+        }
+        out.extend_from_slice(&scratch[..read]);
     }
-    Ok(out)
 }
 
 pub(crate) fn header_equals(
@@ -1224,6 +1400,14 @@ mod tests {
     #[test]
     fn request_body_normalization_error_maps_http_status() {
         assert_eq!(
+            RequestBodyNormalizationError::BodyBufferOverloaded {
+                requested_bytes: 2,
+                budget_bytes: 1,
+            }
+            .http_status(),
+            http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
             RequestBodyNormalizationError::RequestBodyTooLarge { limit_bytes: 1 }.http_status(),
             http::StatusCode::PAYLOAD_TOO_LARGE
         );
@@ -1248,6 +1432,193 @@ mod tests {
             .http_status(),
             http::StatusCode::BAD_REQUEST
         );
+    }
+
+    #[test]
+    fn budgeted_normalization_accounts_for_encoded_input_and_output_capacity() {
+        let payload = vec![b'a'; 150_000];
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&payload).expect("gzip payload");
+        let encoded = encoder.finish().expect("gzip finish");
+        let encoded_len = encoded.len();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_ENCODING,
+            HeaderValue::from_static("gzip"),
+        );
+        let mut reservations = Vec::new();
+
+        let decoded = super::normalize_request_body_headers_and_bytes_with_budget(
+            &mut headers,
+            encoded.into(),
+            256 * 1024,
+            &mut |bytes| {
+                reservations.push(bytes);
+                Ok(())
+            },
+        )
+        .expect("budgeted gzip should decode");
+
+        assert_eq!(decoded.as_ref(), payload.as_slice());
+        assert!(!headers.contains_key(http::header::CONTENT_ENCODING));
+        assert_eq!(reservations[0], encoded_len + 8 * 1024);
+        assert!(reservations.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert!(reservations.last().copied().unwrap() >= encoded_len + payload.len());
+        assert!(reservations.last().copied().unwrap() <= encoded_len + payload.len() * 2);
+        assert!(
+            reservations.len() <= 8,
+            "output growth should remain geometric"
+        );
+    }
+
+    #[test]
+    fn budgeted_normalization_accounts_for_retained_encoding_layers() {
+        let payload = b"small chained request body";
+        let mut inner = GzEncoder::new(Vec::new(), Compression::default());
+        inner.write_all(payload).expect("inner gzip payload");
+        let inner = inner.finish().expect("inner gzip finish");
+        let mut outer = GzEncoder::new(Vec::new(), Compression::default());
+        outer.write_all(&inner).expect("outer gzip payload");
+        let encoded = outer.finish().expect("outer gzip finish");
+        let encoded_len = encoded.len();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_ENCODING,
+            HeaderValue::from_static("gzip, gzip"),
+        );
+        let mut reservations = Vec::new();
+
+        let decoded = super::normalize_request_body_headers_and_bytes_with_budget(
+            &mut headers,
+            encoded.into(),
+            256,
+            &mut |bytes| {
+                reservations.push(bytes);
+                Ok(())
+            },
+        )
+        .expect("chained gzip should decode");
+
+        assert_eq!(decoded.as_ref(), payload);
+        assert_eq!(
+            reservations,
+            vec![
+                encoded_len + inner.len(),
+                encoded_len + inner.len() + payload.len(),
+            ]
+        );
+    }
+
+    #[test]
+    fn budgeted_decoder_stops_before_collecting_when_capacity_is_exhausted() {
+        let source = vec![b'a'; 150_000];
+        let mut decoder = std::io::Cursor::new(source);
+        let error = super::read_request_decoder_to_end_with_budget(
+            "test",
+            &mut decoder,
+            256 * 1024,
+            100,
+            &mut |requested_bytes| {
+                Err(RequestBodyNormalizationError::BodyBufferOverloaded {
+                    requested_bytes,
+                    budget_bytes: 100,
+                })
+            },
+        )
+        .expect_err("budget rejection must stop output growth");
+
+        assert_eq!(decoder.position(), 8 * 1024);
+        assert_eq!(
+            error,
+            RequestBodyNormalizationError::BodyBufferOverloaded {
+                requested_bytes: 100 + 8 * 1024,
+                budget_bytes: 100,
+            }
+        );
+    }
+
+    #[test]
+    fn budgeted_decoder_accepts_actual_output_when_geometric_growth_does_not_fit() {
+        let source = vec![b'a'; 100_000];
+        let mut decoder = std::io::Cursor::new(&source);
+        let retained_input_bytes = 100;
+        let budget_bytes = retained_input_bytes + source.len();
+        let mut reserved_bytes = retained_input_bytes;
+        let mut rejected_growth = false;
+
+        let decoded = super::read_request_decoder_to_end_with_budget(
+            "test",
+            &mut decoder,
+            256 * 1024,
+            retained_input_bytes,
+            &mut |requested_bytes| {
+                if requested_bytes > budget_bytes {
+                    rejected_growth = true;
+                    return Err(RequestBodyNormalizationError::BodyBufferOverloaded {
+                        requested_bytes,
+                        budget_bytes,
+                    });
+                }
+                reserved_bytes = reserved_bytes.max(requested_bytes);
+                Ok(())
+            },
+        )
+        .expect("actual output within the budget should finish decoding");
+
+        assert!(
+            rejected_growth,
+            "test must exercise oversized spare capacity"
+        );
+        assert_eq!(decoded, source);
+        assert_eq!(reserved_bytes, budget_bytes);
+        assert_eq!(decoded.capacity() + retained_input_bytes, budget_bytes);
+    }
+
+    #[test]
+    fn budgeted_deflate_preserves_capacity_and_size_rejections() {
+        let payload = [b'a'; 128];
+        let mut wrapped = ZlibEncoder::new(Vec::new(), Compression::default());
+        wrapped.write_all(&payload).expect("zlib payload");
+        let wrapped = wrapped.finish().expect("zlib finish");
+        let mut raw = DeflateEncoder::new(Vec::new(), Compression::default());
+        raw.write_all(&payload).expect("raw deflate payload");
+        let raw = raw.finish().expect("raw deflate finish");
+
+        for encoded in [wrapped, raw] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                http::header::CONTENT_ENCODING,
+                HeaderValue::from_static("deflate"),
+            );
+            let rejection = RequestBodyNormalizationError::BodyBufferOverloaded {
+                requested_bytes: 300,
+                budget_bytes: 200,
+            };
+            let error = super::normalize_request_body_headers_and_bytes_with_budget(
+                &mut headers,
+                encoded.clone().into(),
+                256,
+                &mut |_| Err(rejection.clone()),
+            )
+            .expect_err("capacity rejection must remain an overload error");
+            assert_eq!(error, rejection);
+            assert!(headers.contains_key(http::header::CONTENT_ENCODING));
+
+            let error = super::normalize_request_body_headers_and_bytes_with_budget(
+                &mut headers,
+                encoded.into(),
+                64,
+                &mut |_| Ok(()),
+            )
+            .expect_err("size rejection must remain a size error");
+            assert!(matches!(
+                error,
+                RequestBodyNormalizationError::DecompressedBodyTooLarge {
+                    limit_bytes: 64,
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]

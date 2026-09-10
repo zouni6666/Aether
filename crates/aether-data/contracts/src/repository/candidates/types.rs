@@ -224,6 +224,36 @@ pub struct StoredRequestCandidate {
 }
 
 impl StoredRequestCandidate {
+    /// Scheduling needs identity, status, counters and times, without diagnostic payloads.
+    pub fn runtime_snapshot(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            request_id: self.request_id.clone(),
+            user_id: self.user_id.clone(),
+            api_key_id: self.api_key_id.clone(),
+            username: None,
+            api_key_name: None,
+            candidate_index: self.candidate_index,
+            retry_index: self.retry_index,
+            provider_id: self.provider_id.clone(),
+            endpoint_id: self.endpoint_id.clone(),
+            key_id: self.key_id.clone(),
+            status: self.status,
+            skip_reason: None,
+            is_cached: self.is_cached,
+            status_code: self.status_code,
+            error_type: None,
+            error_message: None,
+            latency_ms: self.latency_ms,
+            concurrent_requests: self.concurrent_requests,
+            extra_data: None,
+            required_capabilities: None,
+            created_at_unix_ms: self.created_at_unix_ms,
+            started_at_unix_ms: self.started_at_unix_ms,
+            finished_at_unix_ms: self.finished_at_unix_ms,
+        }
+    }
+
     pub fn sanitize_for_persistence(&mut self) {
         self.username = None;
         self.api_key_name = None;
@@ -691,6 +721,19 @@ pub trait RequestCandidateReadRepository: Send + Sync {
         limit: usize,
     ) -> Result<Vec<StoredRequestCandidate>, crate::DataLayerError>;
 
+    /// Same ordering and limit as `list_recent`, omitting diagnostic fields.
+    async fn list_recent_runtime(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<StoredRequestCandidate>, crate::DataLayerError> {
+        Ok(self
+            .list_recent(limit)
+            .await?
+            .iter()
+            .map(StoredRequestCandidate::runtime_snapshot)
+            .collect())
+    }
+
     async fn list_by_provider_id(
         &self,
         provider_id: &str,
@@ -849,9 +892,7 @@ pub fn sanitize_request_candidate_extra_data_for_persistence(
     extra_data: Option<serde_json::Value>,
 ) -> Option<serde_json::Value> {
     let object = extra_data.as_ref()?.as_object()?;
-    let mut sanitized = sanitize_request_candidate_extra_data(extra_data.clone())
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default();
+    let mut sanitized = sanitize_candidate_extra_data_object(object);
     for (key, fields) in [
         ("upstream_response", &["headers", "body"][..]),
         ("error_flow", &["message"][..]),
@@ -884,7 +925,10 @@ pub fn sanitize_request_candidate_extra_data_for_persistence(
         };
         let mut summary = sanitized
             .remove(key)
-            .and_then(|value| value.as_object().cloned())
+            .and_then(|value| match value {
+                serde_json::Value::Object(object) => Some(object),
+                _ => None,
+            })
             .unwrap_or_default();
         for field in fields {
             if let Some(value) = diagnostic.get(*field).filter(|value| !value.is_null()) {
@@ -907,70 +951,72 @@ pub fn sanitize_request_candidate_extra_data(
     let serde_json::Value::Object(object) = extra_data? else {
         return None;
     };
+    let sanitized = sanitize_candidate_extra_data_object(&object);
+    (!sanitized.is_empty()).then_some(serde_json::Value::Object(sanitized))
+}
+
+fn sanitize_candidate_extra_data_object(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
     let mut sanitized = serde_json::Map::new();
 
     for field in ["gateway_execution_runtime", "stream_completed", "cache_1h"] {
-        insert_candidate_bool(&object, &mut sanitized, field);
+        insert_candidate_bool(object, &mut sanitized, field);
     }
     for field in ["first_byte_time_ms", "pool_key_index"] {
-        insert_candidate_u64(&object, &mut sanitized, field);
+        insert_candidate_u64(object, &mut sanitized, field);
     }
-    insert_candidate_i64(&object, &mut sanitized, "priority_slot");
-    insert_candidate_u64(&object, &mut sanitized, "ranking_index");
+    insert_candidate_i64(object, &mut sanitized, "priority_slot");
+    insert_candidate_u64(object, &mut sanitized, "ranking_index");
 
-    insert_candidate_known_string(&object, &mut sanitized, "phase", sanitize_candidate_phase);
+    insert_candidate_known_string(object, &mut sanitized, "phase", sanitize_candidate_phase);
     for field in [
         "client_api_format",
         "provider_api_format",
         "client_contract",
         "provider_contract",
     ] {
-        insert_candidate_known_string(
-            &object,
-            &mut sanitized,
-            field,
-            sanitize_candidate_api_format,
-        );
+        insert_candidate_known_string(object, &mut sanitized, field, sanitize_candidate_api_format);
     }
     insert_candidate_known_string(
-        &object,
+        object,
         &mut sanitized,
         "execution_strategy",
         sanitize_candidate_execution_strategy,
     );
     insert_candidate_known_string(
-        &object,
+        object,
         &mut sanitized,
         "conversion_mode",
         sanitize_candidate_conversion_mode,
     );
     insert_candidate_known_string(
-        &object,
+        object,
         &mut sanitized,
         "ranking_mode",
         sanitize_candidate_ranking_mode,
     );
     insert_candidate_known_string(
-        &object,
+        object,
         &mut sanitized,
         "priority_mode",
         sanitize_candidate_priority_mode,
     );
     insert_candidate_known_string(
-        &object,
+        object,
         &mut sanitized,
         "promoted_by",
         sanitize_candidate_promotion_reason,
     );
     insert_candidate_known_string(
-        &object,
+        object,
         &mut sanitized,
         "demoted_by",
         sanitize_candidate_demotion_reason,
     );
-    insert_candidate_known_string(&object, &mut sanitized, "source", sanitize_candidate_source);
+    insert_candidate_known_string(object, &mut sanitized, "source", sanitize_candidate_source);
     insert_candidate_known_string(
-        &object,
+        object,
         &mut sanitized,
         "execution_path",
         sanitize_candidate_execution_path,
@@ -1030,7 +1076,7 @@ pub fn sanitize_request_candidate_extra_data(
         sanitized.insert("pool_group_exhaustion".to_string(), exhaustion);
     }
 
-    (!sanitized.is_empty()).then_some(serde_json::Value::Object(sanitized))
+    sanitized
 }
 
 pub fn sanitize_request_candidate_required_capabilities(

@@ -207,7 +207,7 @@ pub(crate) async fn send_user_important_notification_email(
     match send_single_email_notification(smtp_config, user_email, &notification).await {
         Ok(()) => Ok(single_report("user_email", true, "用户邮件通知已发送")),
         Err(err) => {
-            warn!(error = ?err, user_email = %user_email, "failed to send user notification email");
+            warn!(error = %crate::error::redact_error_debug(&err), user_email = %user_email, "failed to send user notification email");
             Ok(single_report(
                 "user_email",
                 false,

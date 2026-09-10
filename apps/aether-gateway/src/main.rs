@@ -18,6 +18,7 @@ use hyper_util::{
     server::conn::auto::Builder as HyperServerBuilder,
     service::TowerToHyperService,
 };
+use tokio_util::sync::CancellationToken;
 use tower::{Service as _, ServiceExt as _};
 use tracing::{debug, info, warn};
 
@@ -127,6 +128,7 @@ use aether_gateway::{
     FrontdoorCorsConfig, FrontdoorUserRpmConfig, GatewayDataConfig, UsageRuntimeConfig,
     VideoTaskTruthSourceMode,
 };
+use aether_gateway_frontdoor::{http_connection_limit, HttpConnectionBudget};
 use aether_runtime::{
     init_service_runtime, FileLoggingConfig, LogDestination, LogFormat, LogRotation,
     ServiceRuntimeConfig,
@@ -1009,6 +1011,13 @@ struct GatewayUsageArgs {
 
     #[arg(
         long,
+        env = "AETHER_GATEWAY_USAGE_QUEUE_PAYLOAD_MAX_BYTES",
+        default_value_t = 1024 * 1024
+    )]
+    queue_payload_max_bytes: usize,
+
+    #[arg(
+        long,
         env = "AETHER_GATEWAY_USAGE_QUEUE_BATCH_SIZE",
         default_value_t = 128
     )]
@@ -1220,6 +1229,7 @@ impl GatewayUsageArgs {
             consumer_group: self.queue_group.trim().to_string(),
             dlq_stream_key: self.queue_dlq_stream_key.trim().to_string(),
             stream_maxlen: self.queue_stream_maxlen.max(1),
+            queue_payload_max_bytes: self.queue_payload_max_bytes,
             consumer_batch_size: self.queue_batch_size.max(1),
             consumer_block_ms: self.queue_block_ms.max(1),
             reclaim_idle_ms: self.queue_reclaim_idle_ms.max(1),
@@ -1486,6 +1496,22 @@ struct Args {
     /// Maximum number of HTTP/1 request header fields.
     http_max_headers: usize,
 
+    #[arg(
+        long,
+        env = "AETHER_GATEWAY_HTTP_SHUTDOWN_TIMEOUT_MS",
+        default_value_t = 30_000
+    )]
+    /// Grace period for HTTP requests and upgraded connections before forced close.
+    http_shutdown_timeout_ms: u64,
+
+    #[arg(
+        long,
+        env = "AETHER_GATEWAY_USAGE_SHUTDOWN_TIMEOUT_MS",
+        default_value_t = 30_000
+    )]
+    /// Additional time for request finalizers and local usage buffers to persist.
+    usage_shutdown_timeout_ms: u64,
+
     /// 容器内健康检查入口：根据当前 bind 端口探测本地 /health。
     #[arg(long, hide = true, default_value_t = false)]
     healthcheck: bool,
@@ -1566,6 +1592,11 @@ struct Args {
 
     #[arg(long, env = "AETHER_GATEWAY_MAX_IN_FLIGHT_REQUESTS")]
     max_in_flight_requests: Option<usize>,
+
+    /// Maximum accepted HTTP TCP connections across all listener shards, including upgrades.
+    /// Unset or 0 follows request plus WebSocket capacity, bounded by the FD allowance.
+    #[arg(long, env = "AETHER_GATEWAY_MAX_HTTP_CONNECTIONS")]
+    max_http_connections: Option<usize>,
 
     /// Maximum number of long-lived public WebSocket connections. When unset,
     /// this follows `max_in_flight_requests` while remaining an independent
@@ -1848,40 +1879,59 @@ fn gateway_listeners(
     Ok(listeners)
 }
 
-async fn serve_gateway_router(
-    listeners: Vec<tokio::net::TcpListener>,
-    router: axum::Router,
+#[derive(Clone, Copy)]
+struct GatewayHttpLimits {
     http2_max_concurrent_streams: u32,
     http_header_read_timeout_ms: u64,
     http_header_max_bytes: usize,
     http_max_headers: usize,
+}
+
+async fn serve_gateway_router(
+    listeners: Vec<tokio::net::TcpListener>,
+    router: axum::Router,
+    connection_budget: Arc<HttpConnectionBudget>,
+    limits: GatewayHttpLimits,
+    shutdown: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let http2_max_concurrent_streams =
-        gateway_http2_max_concurrent_streams(http2_max_concurrent_streams);
-    let http_header_read_timeout_ms =
-        gateway_http_header_read_timeout_ms(http_header_read_timeout_ms);
-    let http_header_max_bytes = gateway_http_header_max_bytes(http_header_max_bytes);
-    let http_max_headers = gateway_http_max_headers(http_max_headers);
+    let limits = GatewayHttpLimits {
+        http2_max_concurrent_streams: gateway_http2_max_concurrent_streams(
+            limits.http2_max_concurrent_streams,
+        ),
+        http_header_read_timeout_ms: gateway_http_header_read_timeout_ms(
+            limits.http_header_read_timeout_ms,
+        ),
+        http_header_max_bytes: gateway_http_header_max_bytes(limits.http_header_max_bytes),
+        http_max_headers: gateway_http_max_headers(limits.http_max_headers),
+    };
     let mut servers = tokio::task::JoinSet::new();
     for listener in listeners {
         let router = router.clone();
+        let connection_budget = Arc::clone(&connection_budget);
+        let shutdown = shutdown.clone();
         servers.spawn(async move {
-            serve_gateway_listener(
-                listener,
-                router,
-                http2_max_concurrent_streams,
-                http_header_read_timeout_ms,
-                http_header_max_bytes,
-                http_max_headers,
-            )
-            .await
+            serve_gateway_listener(listener, router, connection_budget, limits, shutdown).await
         });
     }
-    if let Some(result) = servers.join_next().await {
-        servers.abort_all();
-        let serve_result = result
-            .map_err(|err| std::io::Error::other(format!("gateway listener task failed: {err}")))?;
-        serve_result?;
+    let mut failure = None;
+    while let Some(result) = servers.join_next().await {
+        let result = result.unwrap_or_else(|err| {
+            Err(std::io::Error::other(format!(
+                "gateway listener task failed: {err}"
+            )))
+        });
+        if let Err(error) = result {
+            failure.get_or_insert(error);
+            shutdown.cancel();
+            connection_budget.force_close();
+        }
+    }
+    if let Some(error) = failure {
+        return Err(error.into());
+    }
+    // Hyper hands upgrades to application tasks; their IO still owns this budget.
+    while connection_budget.snapshot().in_flight != 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     Ok(())
 }
@@ -1889,14 +1939,29 @@ async fn serve_gateway_router(
 async fn serve_gateway_listener(
     listener: tokio::net::TcpListener,
     router: axum::Router,
-    http2_max_concurrent_streams: u32,
-    http_header_read_timeout_ms: u64,
-    http_header_max_bytes: usize,
-    http_max_headers: usize,
+    connection_budget: Arc<HttpConnectionBudget>,
+    limits: GatewayHttpLimits,
+    shutdown: CancellationToken,
 ) -> Result<(), std::io::Error> {
+    let GatewayHttpLimits {
+        http2_max_concurrent_streams,
+        http_header_read_timeout_ms,
+        http_header_max_bytes,
+        http_max_headers,
+    } = limits;
     let mut make_service = router.into_make_service_with_connect_info::<std::net::SocketAddr>();
+    let mut connections = tokio::task::JoinSet::new();
     loop {
-        let (io, remote_addr) = listener.accept().await?;
+        let (io, remote_addr) = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => break,
+            _ = connections.join_next(), if !connections.is_empty() => continue,
+            accepted = connection_budget.accept(&listener) => accepted,
+        };
+        let Ok(io) = connection_budget.try_admit(io) else {
+            tokio::task::yield_now().await;
+            continue;
+        };
         let tower_service = make_service
             .call(remote_addr)
             .await
@@ -1909,7 +1974,9 @@ async fn serve_gateway_listener(
         });
         let io = TokioIo::new(io);
 
-        tokio::spawn(async move {
+        let shutdown = shutdown.clone();
+        let connection_budget = Arc::clone(&connection_budget);
+        connections.spawn(async move {
             let mut builder = HyperServerBuilder::new(TokioExecutor::new());
             // Hyper's HTTP/1 header timer is opt-in when using the custom
             // connection builder. Configure both protocol parsers explicitly:
@@ -1938,17 +2005,34 @@ async fn serve_gateway_listener(
             // the service so a peer cannot hold a socket open while dribbling
             // protocol bytes or an initial header block. Once the gate opens,
             // request and response bodies remain fully streaming.
-            let connection_result = drive_gateway_connection(
-                builder.serve_connection_with_upgrades(io, hyper_service),
-                first_request_gate,
-                std::time::Duration::from_millis(http_header_read_timeout_ms),
-            )
-            .await;
+            let connection = builder.serve_connection_with_upgrades(io, hyper_service);
+            tokio::pin!(connection);
+            let draining_connection = async {
+                tokio::select! {
+                    result = &mut connection => result,
+                    _ = shutdown.cancelled() => {
+                        connection.as_mut().graceful_shutdown();
+                        connection.await
+                    }
+                }
+            };
+            let connection_result = tokio::select! {
+                biased;
+                _ = connection_budget.wait_for_forced_close() => Ok(()),
+                result = drive_gateway_connection(
+                    draining_connection,
+                    first_request_gate,
+                    std::time::Duration::from_millis(http_header_read_timeout_ms),
+                ) => result,
+            };
             if let Err(err) = connection_result {
                 tracing::trace!(error = ?err, "gateway connection closed with error");
             }
         });
     }
+    drop(listener);
+    while connections.join_next().await.is_some() {}
+    Ok(())
 }
 
 fn resolve_local_http_base_url(app_port: u16) -> Result<String, std::io::Error> {
@@ -2065,11 +2149,14 @@ fn validate_deployment_topology(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tokio::runtime::Builder::new_multi_thread()
+    let _log_shutdown = aether_runtime::LogShutdownGuard::new();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_stack_size(GATEWAY_TOKIO_WORKER_STACK_SIZE_BYTES)
-        .build()?
-        .block_on(run())
+        .build()?;
+    let result = runtime.block_on(run());
+    aether_usage_runtime::shutdown_usage_background_runtime(std::time::Duration::from_secs(5));
+    result
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -2133,6 +2220,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .max_websocket_connections
         .filter(|limit| *limit > 0)
         .unwrap_or(request_concurrency_limit);
+    let http_connection_limit = http_connection_limit(
+        args.max_http_connections,
+        request_concurrency_limit,
+        websocket_connection_limit,
+        soft_fd_limit(),
+    );
+    let http_connection_budget = Arc::new(HttpConnectionBudget::new(http_connection_limit));
     let distributed_websocket_connection_limit = match args.distributed_websocket_connection_limit {
         Some(limit) if limit > 0 => Some(limit),
         Some(_) => None,
@@ -2323,7 +2417,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     state = state
         .with_request_concurrency_limit(request_concurrency_limit)
-        .with_websocket_connection_limit(websocket_connection_limit);
+        .with_websocket_connection_limit(websocket_connection_limit)
+        .with_http_connection_budget(Arc::clone(&http_connection_budget));
     if let Some(limit) = args.distributed_request_limit.filter(|limit| *limit > 0) {
         let distributed_gate = state
             .runtime_state()
@@ -2467,6 +2562,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let listeners = gateway_listeners(bind_addr, listen_backlog, listener_shards)?;
     let public_base_url = resolve_local_http_base_url(app_port)?;
     let frontdoor_health_url = format!("{public_base_url}/_gateway/health");
+    let shutdown_state = state.clone();
     let api_router = build_router_with_state(state);
 
     // Compose the final router: API routes + optional static file serving.
@@ -2486,6 +2582,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         app_port,
         listen_backlog,
         listener_shards,
+        max_http_connections = http_connection_limit,
         http2_max_concurrent_streams = gateway_http2_max_concurrent_streams(args.http2_max_concurrent_streams),
         public_url = %public_base_url,
         healthcheck_url = %frontdoor_health_url,
@@ -2493,18 +2590,63 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         "aether-gateway ready"
     );
 
-    serve_gateway_router(
-        listeners,
-        router,
-        args.http2_max_concurrent_streams,
-        args.http_header_read_timeout_ms,
-        args.http_header_max_bytes,
-        args.http_max_headers,
-    )
-    .await?;
+    let shutdown = CancellationToken::new();
+    let serve_result = {
+        let server = serve_gateway_router(
+            listeners,
+            router,
+            Arc::clone(&http_connection_budget),
+            GatewayHttpLimits {
+                http2_max_concurrent_streams: args.http2_max_concurrent_streams,
+                http_header_read_timeout_ms: args.http_header_read_timeout_ms,
+                http_header_max_bytes: args.http_header_max_bytes,
+                http_max_headers: args.http_max_headers,
+            },
+            shutdown.clone(),
+        );
+        tokio::pin!(server);
+        tokio::select! {
+            result = &mut server => result,
+            signal = aether_runtime::wait_for_shutdown_signal() => {
+                signal?;
+                info!("shutdown signal received, draining gateway requests");
+                shutdown.cancel();
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(args.http_shutdown_timeout_ms),
+                    &mut server,
+                ).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        warn!(
+                            event_name = "gateway_http_shutdown_deadline",
+                            connections = http_connection_budget.snapshot().in_flight,
+                            "HTTP drain deadline reached; closing remaining sockets"
+                        );
+                        http_connection_budget.force_close();
+                        match tokio::time::timeout(std::time::Duration::from_secs(5), &mut server).await {
+                            Ok(result) => result,
+                            Err(_) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut,
+                                "gateway connection tasks did not stop after forced close").into()),
+                        }
+                    }
+                }
+            }
+        }
+    };
+    let usage_result = shutdown_state
+        .shutdown_usage_runtime(std::time::Duration::from_millis(
+            args.usage_shutdown_timeout_ms,
+        ))
+        .await;
     if let Some(background_tasks) = background_tasks {
         background_tasks.shutdown().await;
     }
+    serve_result?;
+    usage_result?;
+    info!(
+        event_name = "gateway_shutdown_complete",
+        "gateway local persistence drained"
+    );
     Ok(())
 }
 
@@ -3437,6 +3579,10 @@ fn pending_backfills_error(
 
 #[cfg(test)]
 mod tests {
+    mod shutdown {
+        include!("shutdown_tests.rs");
+    }
+
     use super::{
         automatic_gateway_request_concurrency_for_capacity,
         automatic_gateway_request_concurrency_for_parallelism, automatic_sql_pool_config,
@@ -3478,6 +3624,8 @@ mod tests {
             http_header_read_timeout_ms: DEFAULT_GATEWAY_HTTP_HEADER_READ_TIMEOUT_MS,
             http_header_max_bytes: DEFAULT_GATEWAY_HTTP_HEADER_MAX_BYTES,
             http_max_headers: DEFAULT_GATEWAY_HTTP_MAX_HEADERS,
+            http_shutdown_timeout_ms: 30_000,
+            usage_shutdown_timeout_ms: 30_000,
             healthcheck: false,
             healthcheck_timeout_ms: 3_000,
             deployment_topology: DeploymentTopologyArg::SingleNode,
@@ -3492,6 +3640,7 @@ mod tests {
             video_task_poller_batch_size: 32,
             video_task_store_path: None,
             max_in_flight_requests: None,
+            max_http_connections: None,
             max_websocket_connections: None,
             distributed_request_limit: None,
             distributed_websocket_connection_limit: None,
@@ -3532,6 +3681,7 @@ mod tests {
                 queue_group: "usage_consumers".to_string(),
                 queue_dlq_stream_key: "usage:events:dlq".to_string(),
                 queue_stream_maxlen: 200_000,
+                queue_payload_max_bytes: 1024 * 1024,
                 queue_batch_size: 128,
                 queue_block_ms: 500,
                 queue_reclaim_idle_ms: 60_000,
@@ -3923,6 +4073,37 @@ mod tests {
                 20
             );
         }
+    }
+
+    #[test]
+    fn gateway_usage_queue_payload_limit_preserves_cli_override_and_rejects_zero() {
+        let command = <Args as clap::CommandFactory>::command();
+        let argument = command
+            .get_arguments()
+            .find(|argument| argument.get_id() == "queue_payload_max_bytes")
+            .expect("usage payload argument must be registered");
+        assert_eq!(
+            argument.get_env(),
+            Some(std::ffi::OsStr::new(
+                "AETHER_GATEWAY_USAGE_QUEUE_PAYLOAD_MAX_BYTES"
+            ))
+        );
+        assert_eq!(argument.get_default_values()[0].to_str(), Some("1048576"));
+        let args = Args::try_parse_from(["aether-gateway", "--queue-payload-max-bytes", "32768"])
+            .expect("explicit usage payload limit should parse");
+        let config = args.usage.to_config(4, 8, Some(4));
+        assert_eq!(config.queue_payload_max_bytes, 32_768);
+        assert!(config.validate().is_ok());
+
+        let mut args = test_args();
+        assert_eq!(
+            args.usage.to_config(4, 8, Some(4)).queue_payload_max_bytes,
+            1024 * 1024
+        );
+        args.usage.queue_payload_max_bytes = 0;
+        let config = args.usage.to_config(4, 8, Some(4));
+        assert_eq!(config.queue_payload_max_bytes, 0);
+        assert!(config.validate().is_err());
     }
 
     #[test]

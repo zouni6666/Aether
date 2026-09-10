@@ -72,7 +72,7 @@ fn admin_management_token_internal_error_response(
     tracing::error!(
         event_name,
         trace_id,
-        error = ?error,
+        error = %crate::error::redact_error_debug(&error),
         "management token operation failed"
     );
     (

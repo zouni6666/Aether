@@ -72,6 +72,7 @@ export interface RoutingGroupConfig {
 
 export const DEFAULT_ROUTING_POLICY_MODEL = '*'
 export const MODEL_SCHEDULING_RULE_PREFIX = 'ui_model_scheduling:'
+export const SCHEDULING_POLICY_RULE_PREFIX = 'ui_scheduling_policy:'
 
 export function createEmptyRoutingGroupConfig(): RoutingGroupConfig {
   return {
@@ -351,6 +352,29 @@ export function isGeneratedModelSchedulingRule(rule: RoutingRule): boolean {
   return rule.id.startsWith(MODEL_SCHEDULING_RULE_PREFIX)
 }
 
+export function isGeneratedSchedulingPolicyRule(rule: RoutingRule): boolean {
+  return rule.id.startsWith(SCHEDULING_POLICY_RULE_PREFIX)
+}
+
+export function schedulingRuleModels(rule: RoutingRule): string[] {
+  if (isGeneratedModelSchedulingRule(rule)) {
+    try {
+      return [decodeURIComponent(rule.id.slice(MODEL_SCHEDULING_RULE_PREFIX.length))]
+    } catch {
+      return []
+    }
+  }
+  if (!isGeneratedSchedulingPolicyRule(rule)) return []
+  const conditions = rule.conditions as { any?: RoutingPredicateCondition[] } | null
+  if (!Array.isArray(conditions?.any)) return []
+  return conditions.any.flatMap(condition => {
+    if (condition?.field !== 'model' || typeof condition.value !== 'string') return []
+    if (condition.op === 'eq') return [condition.value]
+    if (condition.op === 'prefix') return [`${condition.value}*`]
+    return []
+  })
+}
+
 export function modelPatternCondition(model: string): RoutingPredicateCondition {
   const normalizedModel = model.trim()
   if (normalizedModel.endsWith('*')) {
@@ -372,8 +396,18 @@ export function getModelScheduling(
   model: string,
 ): RoutingDefaultPolicy {
   const normalized = normalizeRoutingGroupConfig(config)
-  const rule = normalized.rules.find(rule => rule.id === modelSchedulingRuleId(model))
-  const action = rule?.actions.find(isSetSchedulingAction)
+  const rules = normalized.rules
+    .filter(rule => rule.enabled && rule.phase === 'client_request' && schedulingRuleModels(rule).some(pattern => (
+      pattern.endsWith('*') ? model.startsWith(pattern.slice(0, -1)) : pattern === model
+    )))
+    .sort((left, right) => left.priority - right.priority || left.id.localeCompare(right.id))
+  let action: RoutingSetSchedulingAction | undefined
+  for (const rule of rules) {
+    for (const candidate of rule.actions) {
+      if (isSetSchedulingAction(candidate)) action = { ...action, ...candidate }
+    }
+    if (rule.stop_processing) break
+  }
   return {
     ...normalized.default_policy,
     priority_mode: action?.priority_mode ?? normalized.default_policy.priority_mode,
@@ -433,7 +467,7 @@ export function removeModelSchedulingRule(config: RoutingGroupConfig, model: str
 
 export function removeGeneratedModelSchedulingRules(config: RoutingGroupConfig): RoutingGroupConfig {
   const next = normalizeRoutingGroupConfig(config)
-  next.rules = next.rules.filter(rule => !isGeneratedModelSchedulingRule(rule))
+  next.rules = next.rules.filter(rule => !isGeneratedModelSchedulingRule(rule) && !isGeneratedSchedulingPolicyRule(rule))
   return next
 }
 

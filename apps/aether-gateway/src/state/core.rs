@@ -13,6 +13,7 @@ use aether_data::repository::proxy_nodes::{
 use aether_data_contracts::repository::usage::{
     UsageCounterHealthSnapshot, UsageCounterPendingHealthSnapshot,
 };
+use aether_gateway_frontdoor::{HttpConnectionBudget, HttpConnectionBudgetSnapshot};
 use aether_http::{apply_http_client_config, HttpClientConfig};
 use aether_runtime::{
     service_up_sample, AdmissionPermit, ConcurrencyGate, ConcurrencySnapshot, MetricKind,
@@ -358,6 +359,7 @@ impl AppState {
             request_body_buffer_budget: Arc::new(tokio::sync::Semaphore::new(
                 frontdoor_runtime_guards.request_body_buffer_budget_permits,
             )),
+            http_connection_budget: None,
             request_gate: None,
             websocket_connection_gate: None,
             auth_snapshot_load_gate: frontdoor_runtime_guards
@@ -438,6 +440,9 @@ impl AppState {
             local_execution_runtime_miss_diagnostics: Arc::new(DashMap::new()),
             admin_monitoring_error_stats_reset_at: Arc::new(StdMutex::new(None)),
             provider_delete_tasks: Arc::new(StdMutex::new(HashMap::new())),
+            pool_quota_probe_replenish: Arc::new(
+                crate::maintenance::PoolQuotaProbeReplenishCoordinator::default(),
+            ),
             #[cfg(test)]
             turnstile_siteverify_url_override: None,
             #[cfg(test)]
@@ -614,6 +619,11 @@ impl AppState {
         self
     }
 
+    pub fn with_http_connection_budget(mut self, budget: Arc<HttpConnectionBudget>) -> Self {
+        self.http_connection_budget = Some(budget);
+        self
+    }
+
     pub fn with_request_concurrency_limit(mut self, limit: usize) -> Self {
         let limit = limit.max(1);
         self.request_gate = Some(Arc::new(ConcurrencyGate::new("gateway_requests", limit)));
@@ -635,6 +645,10 @@ impl AppState {
     }
 
     pub fn with_runtime_state(mut self, runtime_state: Arc<RuntimeState>) -> Self {
+        if !Arc::ptr_eq(&self.runtime_state, &runtime_state) {
+            self.pool_quota_probe_replenish =
+                Arc::new(crate::maintenance::PoolQuotaProbeReplenishCoordinator::default());
+        }
         self.runtime_state = runtime_state;
         self.admin_security_blacklist_cache.clear();
         self.admin_security_whitelist_cache.clear();
@@ -884,7 +898,7 @@ impl AppState {
                 }
                 Err(error) => {
                     guard.fail(GatewayError::Internal(error.to_string()));
-                    warn!(error = %error, "background system config refresh failed");
+                    warn!(error = %crate::error::redact_error_detail(&error), "background system config refresh failed");
                 }
             }
             drop(guard);
@@ -1666,6 +1680,9 @@ impl AppState {
                 .unwrap_or(u64::MAX),
             ),
         ]);
+        if let Some(budget) = &self.http_connection_budget {
+            samples.extend(http_connection_metric_samples(&budget.snapshot()));
+        }
         if let Some(snapshot) = self.request_concurrency_snapshot() {
             samples.extend(snapshot.to_metric_samples("gateway_requests"));
         }
@@ -1820,10 +1837,44 @@ impl AppState {
             &self.task_supervisor_metrics.snapshot(),
         ));
         samples.extend(crate::tokio_metrics::gateway_tokio_runtime_metric_samples());
+        samples.extend(aether_runtime::logging_metric_samples());
         samples.extend(
             crate::execution_runtime::transport::direct_reqwest_client_cache_metric_samples(),
         );
         samples.extend(self.upstream_target_admission.metric_samples());
+        let probe_replenish = self.pool_quota_probe_replenish.snapshot();
+        samples.extend([
+            MetricSample::new(
+                "pool_quota_probe_replenish_provider_capacity",
+                "Maximum providers with an active local request-triggered probe task.",
+                MetricKind::Gauge,
+                probe_replenish.capacity as u64,
+            ),
+            MetricSample::new(
+                "pool_quota_probe_replenish_active_providers",
+                "Providers with an active local request-triggered probe task.",
+                MetricKind::Gauge,
+                probe_replenish.active as u64,
+            ),
+            MetricSample::new(
+                "pool_quota_probe_replenish_started_total",
+                "Local request-triggered provider probe tasks admitted.",
+                MetricKind::Counter,
+                probe_replenish.started_total,
+            ),
+            MetricSample::new(
+                "pool_quota_probe_replenish_coalesced_total",
+                "Request triggers merged into an existing local provider probe task.",
+                MetricKind::Counter,
+                probe_replenish.coalesced_total,
+            ),
+            MetricSample::new(
+                "pool_quota_probe_replenish_capacity_rejected_total",
+                "Request-triggered probe tasks skipped because the local provider limit was reached.",
+                MetricKind::Counter,
+                probe_replenish.capacity_rejected_total,
+            ),
+        ]);
         samples.extend(crate::cache::candidate_page_cache_metric_samples());
         samples.extend(crate::stage_metrics::gateway_stage_metric_samples());
         samples.extend(self.tunnel.metric_samples());
@@ -2118,6 +2169,36 @@ impl AppState {
         state
     }
 
+    pub async fn shutdown_usage_runtime(
+        &self,
+        timeout: Duration,
+    ) -> Result<(), aether_data_contracts::DataLayerError> {
+        tokio::time::timeout(timeout, async {
+            let local_queue = self.runtime_state.is_memory().then(|| {
+                let queue: Arc<dyn RuntimeQueueStore> = self.runtime_state.clone();
+                queue
+            });
+            self.usage_runtime
+                .shutdown_with_local_queue(timeout, local_queue)
+                .await?;
+            while self
+                .request_candidate_queue
+                .as_ref()
+                .is_some_and(|queue| queue.pending_writes() != 0)
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| {
+            aether_data_contracts::DataLayerError::TimedOut(
+                "gateway usage or candidate persistence did not drain before shutdown deadline"
+                    .to_string(),
+            )
+        })?
+    }
+
     pub fn spawn_background_tasks(&self) -> crate::task_runtime::TaskSupervisor {
         let background_state = self.background_worker_state();
         let mut supervisor =
@@ -2275,6 +2356,41 @@ fn database_bounded_auth_load_limit(
         let database_limit = (database_max_connections as usize / 2).max(1);
         configured_limit.max(1).min(database_limit)
     })
+}
+
+fn http_connection_metric_samples(snapshot: &HttpConnectionBudgetSnapshot) -> Vec<MetricSample> {
+    vec![
+        MetricSample::new(
+            "gateway_http_connections_limit",
+            "Maximum admitted inbound TCP connections across gateway listeners.",
+            MetricKind::Gauge,
+            u64::try_from(snapshot.limit).unwrap_or(u64::MAX),
+        ),
+        MetricSample::new(
+            "gateway_http_connections_in_flight",
+            "Currently admitted inbound TCP connections, including upgraded connections.",
+            MetricKind::Gauge,
+            u64::try_from(snapshot.in_flight).unwrap_or(u64::MAX),
+        ),
+        MetricSample::new(
+            "gateway_http_connections_high_watermark",
+            "Highest simultaneous admitted inbound TCP connection count.",
+            MetricKind::Gauge,
+            u64::try_from(snapshot.high_watermark).unwrap_or(u64::MAX),
+        ),
+        MetricSample::new(
+            "gateway_http_connections_rejected_total",
+            "Inbound TCP connections closed because the connection budget was full.",
+            MetricKind::Counter,
+            snapshot.rejected_total,
+        ),
+        MetricSample::new(
+            "gateway_http_connections_accept_errors_total",
+            "Listener accept errors retried with bounded backoff.",
+            MetricKind::Counter,
+            snapshot.accept_errors_total,
+        ),
+    ]
 }
 
 fn task_supervisor_metric_samples(
@@ -3191,6 +3307,18 @@ fn usage_runtime_metric_samples(
 ) -> Vec<MetricSample> {
     vec![
         MetricSample::new(
+            "usage_runtime_shutdown_started", "Whether local usage admission is closed for shutdown.",
+            MetricKind::Gauge, u64::from(snapshot.shutdown_started),
+        ),
+        MetricSample::new(
+            "usage_runtime_producers_in_flight", "Tracked requests and finalizers that can still submit usage events.",
+            MetricKind::Gauge, snapshot.producers_in_flight as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_delayed_lifecycle_pending", "Delayed lifecycle events still held in this process.",
+            MetricKind::Gauge, snapshot.delayed_lifecycle_pending as u64,
+        ),
+        MetricSample::new(
             "usage_runtime_enabled",
             "Whether the gateway usage runtime is enabled.",
             MetricKind::Gauge,
@@ -3321,6 +3449,132 @@ fn usage_runtime_metric_samples(
             "Whether deferred lifecycle usage events are scheduled for local enqueue retry.",
             MetricKind::Gauge,
             u64::from(snapshot.retry_deferred_lifecycle_events),
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_payload_max_bytes",
+            "Maximum serialized JSON payload bytes for a new usage queue message.",
+            MetricKind::Gauge,
+            snapshot.queue_payload_max_bytes as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_payload_downgraded_total",
+            "Process-wide enqueue and retry validation encoding attempts that omitted diagnostic data after exceeding the payload limit; not unique events.",
+            MetricKind::Counter,
+            snapshot.queue_payload_downgraded_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_payload_rejected_total",
+            "Process-wide enqueue and retry validation encoding attempts rejected because the payload exceeded its limit or billing facts could not be preserved; not unique events.",
+            MetricKind::Counter,
+            snapshot.queue_payload_rejected_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_read_payload_budget_bytes",
+            "Process-wide payload reservation limit for usage worker reads and reclaims; not a wire or heap limit.",
+            MetricKind::Gauge,
+            snapshot.queue_read_payload_budget_bytes as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_read_batch_payload_bytes",
+            "Target payload reservation per usage worker batch, allowing at least one configured maximum payload.",
+            MetricKind::Gauge,
+            snapshot.queue_read_batch_payload_bytes as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_read_payload_reserved_bytes",
+            "Process-wide logical payload bytes reserved by usage worker reads, reclaims and unprocessed batches.",
+            MetricKind::Gauge,
+            snapshot.queue_read_payload_reserved_bytes as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_read_payload_waiters",
+            "Usage workers currently waiting for shared payload reservation capacity.",
+            MetricKind::Gauge,
+            snapshot.queue_read_payload_waiters as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_read_payload_wait_total",
+            "Process-wide usage worker batch reservation attempts that had to wait for capacity.",
+            MetricKind::Counter,
+            snapshot.queue_read_payload_wait_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_read_actual_field_bytes_total",
+            "Cumulative key and value bytes observed in reserved usage worker batches, including repeated reclaims; excludes Redis framing and allocations.",
+            MetricKind::Counter,
+            snapshot.queue_read_actual_field_bytes_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_read_oversized_entries_total",
+            "Observed usage entries whose combined field value bytes exceed the consumer payload estimate, including repeated reclaims.",
+            MetricKind::Counter,
+            snapshot.queue_read_oversized_entries_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_queue_read_oversized_batches_total",
+            "Observed usage batches whose combined field value bytes exceed their initial reservation; entries remain eligible for processing.",
+            MetricKind::Counter,
+            snapshot.queue_read_oversized_batches_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_event_capture_memory_budget_bytes",
+            "Process-wide diagnostic JSON heap estimate budget for retained usage events.",
+            MetricKind::Gauge,
+            snapshot.event_capture_memory_budget_bytes as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_dlq_encoding_budget_bytes",
+            "Process-wide logical raw string and JSON reservation limit for dead letter encoding; excludes Redis buffers.",
+            MetricKind::Gauge,
+            snapshot.dlq_encoding_budget_bytes as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_dlq_encoding_max_jobs",
+            "Maximum admitted dead letter encoding and write jobs per process.",
+            MetricKind::Gauge,
+            snapshot.dlq_encoding_max_jobs as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_dlq_encoding_reserved_bytes",
+            "Logical raw string and JSON bytes reserved by admitted dead letter jobs.",
+            MetricKind::Gauge,
+            snapshot.dlq_encoding_reserved_bytes as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_dlq_encoding_active_jobs",
+            "Admitted dead letter jobs awaiting or performing encoding or queue writes.",
+            MetricKind::Gauge,
+            snapshot.dlq_encoding_active_jobs as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_dlq_encoding_capacity_rejected_total",
+            "Dead letter attempts rejected because encoding byte or job capacity was occupied; source remains pending.",
+            MetricKind::Counter,
+            snapshot.dlq_encoding_capacity_rejected_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_dlq_encoding_oversized_rejected_total",
+            "Dead letter attempts rejected because the conservative encoding reservation exceeded the total budget or overflowed.",
+            MetricKind::Counter,
+            snapshot.dlq_encoding_oversized_rejected_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_dlq_encoding_encoded_total",
+            "Completed dead letter JSON encodings, including repeated attempts; not successful archives.",
+            MetricKind::Counter,
+            snapshot.dlq_encoding_encoded_total,
+        ),
+        MetricSample::new(
+            "usage_runtime_event_capture_memory_retained_bytes",
+            "Estimated diagnostic JSON heap retained by budgeted usage events and their clones.",
+            MetricKind::Gauge,
+            snapshot.event_capture_memory_retained_bytes as u64,
+        ),
+        MetricSample::new(
+            "usage_runtime_event_capture_memory_downgraded_total",
+            "Usage event diagnostic captures omitted after memory budget exhaustion.",
+            MetricKind::Counter,
+            snapshot.event_capture_memory_downgraded_total,
         ),
         MetricSample::new(
             "usage_runtime_terminal_submission_limit",
@@ -3701,6 +3955,12 @@ fn usage_runtime_metric_samples(
             snapshot.enqueue_retry_failed_total,
         ),
         MetricSample::new(
+            "usage_runtime_enqueue_retry_permanent_failure_total",
+            "Usage enqueue retry submissions rejected or queued events terminated because of permanent input errors.",
+            MetricKind::Counter,
+            snapshot.enqueue_retry_permanent_failure_total,
+        ),
+        MetricSample::new(
             "usage_runtime_enqueue_retry_closed_or_unavailable_total",
             "Total usage events rejected because the local enqueue dispatcher was full, closed, or unavailable.",
             MetricKind::Counter,
@@ -3970,6 +4230,126 @@ mod tests {
         assert_eq!(database_bounded_auth_load_limit(Some(64), Some(1)), Some(1));
         assert_eq!(database_bounded_auth_load_limit(None, Some(92)), None);
         assert_eq!(database_bounded_auth_load_limit(Some(64), None), Some(64));
+    }
+
+    #[tokio::test]
+    async fn http_connection_budget_is_optional_and_shared_by_app_state_clones() {
+        let state = AppState::new().expect("app state should build");
+        assert!(state.http_connection_budget.is_none());
+        let budget = Arc::new(super::HttpConnectionBudget::new(1));
+        let state = state.with_http_connection_budget(Arc::clone(&budget));
+        let cloned = state.clone();
+        assert!(Arc::ptr_eq(
+            cloned.http_connection_budget.as_ref().unwrap(),
+            &budget,
+        ));
+
+        let connection = budget.try_admit(()).expect("first connection admitted");
+        assert!(cloned
+            .http_connection_budget
+            .as_ref()
+            .unwrap()
+            .try_admit(())
+            .is_err());
+        let samples = state.collect_metric_samples().await;
+        for (name, expected) in [
+            ("gateway_http_connections_limit", 1),
+            ("gateway_http_connections_in_flight", 1),
+            ("gateway_http_connections_high_watermark", 1),
+            ("gateway_http_connections_rejected_total", 1),
+            ("gateway_http_connections_accept_errors_total", 0),
+        ] {
+            assert_eq!(
+                samples
+                    .iter()
+                    .find(|sample| sample.name == name)
+                    .unwrap()
+                    .value,
+                expected,
+            );
+        }
+        drop(connection);
+        assert_eq!(budget.snapshot().in_flight, 0);
+    }
+
+    #[test]
+    fn http_connection_metrics_export_all_budget_counters() {
+        let samples = super::http_connection_metric_samples(&super::HttpConnectionBudgetSnapshot {
+            limit: 4096,
+            in_flight: 11,
+            high_watermark: 30,
+            rejected_total: 7,
+            accept_errors_total: 3,
+        });
+        for (name, kind, value) in [
+            ("gateway_http_connections_limit", MetricKind::Gauge, 4096),
+            ("gateway_http_connections_in_flight", MetricKind::Gauge, 11),
+            (
+                "gateway_http_connections_high_watermark",
+                MetricKind::Gauge,
+                30,
+            ),
+            (
+                "gateway_http_connections_rejected_total",
+                MetricKind::Counter,
+                7,
+            ),
+            (
+                "gateway_http_connections_accept_errors_total",
+                MetricKind::Counter,
+                3,
+            ),
+        ] {
+            let matching = samples
+                .iter()
+                .filter(|sample| sample.name == name)
+                .collect::<Vec<_>>();
+            assert_eq!(matching.len(), 1);
+            assert_eq!((matching[0].kind, matching[0].value), (kind, value));
+        }
+    }
+
+    #[test]
+    fn usage_runtime_metrics_export_queue_payload_limit_and_attempt_counters() {
+        let mut snapshot = crate::usage::UsageRuntimeMetricsSnapshot::default();
+        snapshot.queue_payload_max_bytes = 1024 * 1024;
+        snapshot.queue_payload_downgraded_total = 11;
+        snapshot.queue_payload_rejected_total = 3;
+        snapshot.enqueue_retry_permanent_failure_total = 2;
+        let samples = usage_runtime_metric_samples(&snapshot);
+        for (name, kind, value) in [
+            (
+                "usage_runtime_queue_payload_max_bytes",
+                MetricKind::Gauge,
+                1024 * 1024,
+            ),
+            (
+                "usage_runtime_queue_payload_downgraded_total",
+                MetricKind::Counter,
+                11,
+            ),
+            (
+                "usage_runtime_queue_payload_rejected_total",
+                MetricKind::Counter,
+                3,
+            ),
+            (
+                "usage_runtime_enqueue_retry_permanent_failure_total",
+                MetricKind::Counter,
+                2,
+            ),
+        ] {
+            let matching = samples
+                .iter()
+                .filter(|sample| sample.name == name)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                matching.len(),
+                1,
+                "each payload metric must be emitted once"
+            );
+            assert_eq!((matching[0].kind, matching[0].value), (kind, value));
+        }
     }
 
     #[test]

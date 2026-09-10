@@ -164,7 +164,7 @@ pub(crate) async fn refresh_oauth_plan_auth_for_retry(
                     key_id = %plan.key_id,
                     status_code,
                     refresh_status_code,
-                    error = ?err,
+                    error = %crate::error::redact_error_debug(&err),
                     "gateway failed to persist oauth retry refresh failure"
                 );
             }

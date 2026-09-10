@@ -1,13 +1,15 @@
 #![cfg(target_os = "linux")]
 
 use std::fs;
+use std::io::Read;
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use aether_runtime::{
-    init_reloadable_service_tracing, init_service_runtime, FileLoggingConfig, LogDestination,
-    LogFormat, LogRotation, ServiceRuntimeConfig,
+    init_reloadable_service_tracing, init_service_runtime, shutdown_logging, FileLoggingConfig,
+    LogDestination, LogFormat, LogRotation, ServiceRuntimeConfig,
 };
 
 #[test]
@@ -23,7 +25,9 @@ fn root_appends_to_existing_logs_without_changing_ownership() {
             for format in ["pretty", "json"] {
                 for owner in ["0", "1000", "65532", "new"] {
                     let scenario = format!("{entrypoint}-{destination}-{format}-{owner}");
-                    let output = Command::new(std::env::current_exe().expect("test executable"))
+                    let mut command =
+                        Command::new(std::env::current_exe().expect("test executable"));
+                    command
                         .args([
                             "--ignored",
                             "--exact",
@@ -31,9 +35,8 @@ fn root_appends_to_existing_logs_without_changing_ownership() {
                             "--nocapture",
                         ])
                         .env("AETHER_TEST_ROOT_LOGGING_CASE", &scenario)
-                        .env_remove("RUST_LOG")
-                        .output()
-                        .expect("root logging subprocess");
+                        .env_remove("RUST_LOG");
+                    let output = run_subprocess(&mut command);
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     assert!(output.status.success(), "{scenario}: {stdout}\n{stderr}");
@@ -47,6 +50,51 @@ fn root_appends_to_existing_logs_without_changing_ownership() {
             }
         }
     }
+}
+
+fn run_subprocess(command: &mut Command) -> Output {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("root logging subprocess");
+    let mut stdout = child.stdout.take().expect("stdout pipe");
+    let mut stderr = child.stderr.take().expect("stderr pipe");
+    let stdout_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).expect("read child stdout");
+        bytes
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).expect("read child stderr");
+        bytes
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut timed_out = false;
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("child status") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            timed_out = true;
+            let _ = child.kill();
+            break child.wait().expect("reap timed out child");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let output = Output {
+        status,
+        stdout: stdout_reader.join().expect("stdout reader"),
+        stderr: stderr_reader.join().expect("stderr reader"),
+    };
+    assert!(
+        !timed_out,
+        "root logging subprocess timed out: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
 }
 
 fn run_scenario(scenario: &str) {
@@ -117,6 +165,10 @@ fn run_scenario(scenario: &str) {
         other => panic!("unknown entrypoint: {other}"),
     };
     tracing::info!("root logging ready");
+    assert!(
+        shutdown_logging(Duration::from_secs(2)),
+        "root file logging should drain"
+    );
 
     let metadata = fs::metadata(&log_file).expect("written log file");
     assert_eq!(metadata.uid(), expected_owner);

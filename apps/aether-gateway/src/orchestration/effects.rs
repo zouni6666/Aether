@@ -973,7 +973,7 @@ async fn record_adaptive_rate_limit_effect(
     let _effect_guard = effect_lock.lock().await;
     let observed_at_unix_secs = current_unix_secs();
     let current_rpm = state
-        .read_recent_request_candidates(ADAPTIVE_RPM_RECENT_CANDIDATE_LIMIT)
+        .read_recent_runtime_request_candidates(ADAPTIVE_RPM_RECENT_CANDIDATE_LIMIT)
         .await
         .ok()
         .map(|recent_candidates| {
@@ -1123,7 +1123,7 @@ async fn record_adaptive_success_effect(
         return;
     }
     let Some(recent_candidates) = state
-        .read_recent_request_candidates(ADAPTIVE_RPM_RECENT_CANDIDATE_LIMIT)
+        .read_recent_runtime_request_candidates(ADAPTIVE_RPM_RECENT_CANDIDATE_LIMIT)
         .await
         .ok()
     else {

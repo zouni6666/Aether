@@ -24,6 +24,8 @@ struct GeminiProviderToolResultState {
 
 #[derive(Default)]
 pub struct GeminiProviderState {
+    terminal_observation_only: bool,
+    observed_tool_calls: bool,
     response_id: Option<String>,
     model: Option<String>,
     started: bool,
@@ -37,6 +39,13 @@ pub struct GeminiProviderState {
 }
 
 impl GeminiProviderState {
+    pub(crate) fn terminal_observation() -> Self {
+        Self {
+            terminal_observation_only: true,
+            ..Self::default()
+        }
+    }
+
     fn identity(&self, report_context: &Value) -> (String, String) {
         resolve_identity(
             self.response_id.as_deref(),
@@ -133,14 +142,21 @@ impl GeminiProviderState {
                 let Some(part_object) = part.as_object() else {
                     continue;
                 };
-                let reasoning_signature = part_object
-                    .get("thoughtSignature")
-                    .or_else(|| part_object.get("thought_signature"))
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(ToOwned::to_owned);
+                let reasoning_signature = if self.terminal_observation_only {
+                    None
+                } else {
+                    part_object
+                        .get("thoughtSignature")
+                        .or_else(|| part_object.get("thought_signature"))
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(ToOwned::to_owned)
+                };
                 if let Some(text) = render_gemini_part_as_text(part_object) {
+                    if self.terminal_observation_only {
+                        continue;
+                    }
                     let is_reasoning = part_object
                         .get("thought")
                         .and_then(Value::as_bool)
@@ -193,6 +209,9 @@ impl GeminiProviderState {
                     .or_else(|| part_object.get("function_response"))
                     .and_then(Value::as_object)
                 {
+                    if self.terminal_observation_only {
+                        continue;
+                    }
                     let tool_use_id = function_response
                         .get("id")
                         .and_then(Value::as_str)
@@ -240,6 +259,9 @@ impl GeminiProviderState {
                 else {
                     if let Some(content_part) = canonical_content_part_from_gemini_part(part_object)
                     {
+                        if self.terminal_observation_only {
+                            continue;
+                        }
                         let should_emit = self
                             .content_parts
                             .get(&index)
@@ -260,6 +282,10 @@ impl GeminiProviderState {
                     }
                     continue;
                 };
+                if self.terminal_observation_only {
+                    self.observed_tool_calls = true;
+                    continue;
+                }
                 let tool_state = self.tool_calls.entry(index).or_default();
                 tool_state.call_id = function_call
                     .get("id")
@@ -329,7 +355,7 @@ impl GeminiProviderState {
             if let Some(finish_reason) =
                 candidate_object.get("finishReason").and_then(Value::as_str)
             {
-                let has_tool_calls = !self.tool_calls.is_empty();
+                let has_tool_calls = self.observed_tool_calls || !self.tool_calls.is_empty();
                 let mut finish_reason =
                     normalize_openai_finish_reason(map_gemini_stream_finish_reason(finish_reason));
                 if has_tool_calls && finish_reason.as_deref().is_none_or(|value| value == "stop") {
@@ -934,6 +960,232 @@ mod tests {
 
     fn data_line(value: Value) -> Vec<u8> {
         format!("data: {}\n", value).into_bytes()
+    }
+
+    fn terminal_frames(frames: Vec<CanonicalStreamFrame>) -> Vec<CanonicalStreamFrame> {
+        frames
+            .into_iter()
+            .filter(|frame| {
+                matches!(
+                    frame.event,
+                    CanonicalStreamEvent::Start
+                        | CanonicalStreamEvent::Finish { .. }
+                        | CanonicalStreamEvent::UnknownEvent(_)
+                )
+            })
+            .collect()
+    }
+
+    fn observation_record(parts: Vec<Value>, finish_reason: Option<&str>) -> Value {
+        let mut record = json!({
+            "responseId": "resp_observation",
+            "modelVersion": "gemini-2.5-pro",
+            "candidates": [{"content": {"parts": parts}}],
+            "usageMetadata": {
+                "promptTokenCount": 22,
+                "cachedContentTokenCount": 7,
+                "candidatesTokenCount": 13,
+                "thoughtsTokenCount": 5,
+                "totalTokenCount": 40
+            }
+        });
+        if let Some(finish_reason) = finish_reason {
+            record["candidates"][0]["finishReason"] = json!(finish_reason);
+        }
+        record
+    }
+
+    fn assert_terminal_record_matches(
+        normal: &mut GeminiProviderState,
+        observer: &mut GeminiProviderState,
+        record: Value,
+    ) -> Vec<CanonicalStreamFrame> {
+        let context = json!({"mapped_model": "fallback-model"});
+        let expected = terminal_frames(
+            normal
+                .push_line(&context, data_line(record.clone()))
+                .expect("normal provider parser"),
+        );
+        let actual = observer
+            .push_line(&context, data_line(record))
+            .expect("terminal provider parser");
+        assert_eq!(
+            actual, expected,
+            "terminal frames must retain their full payloads"
+        );
+        actual
+    }
+
+    fn assert_observer_has_no_content_buffers(observer: &GeminiProviderState) {
+        assert!(observer.text_parts.is_empty());
+        assert!(observer.reasoning_parts.is_empty());
+        assert!(observer.reasoning_signatures.is_empty());
+        assert!(observer.content_parts.is_empty());
+        assert!(observer.tool_calls.is_empty());
+        assert!(observer.tool_results.is_empty());
+    }
+
+    #[test]
+    fn gemini_terminal_observation_does_not_retain_long_stream_content() {
+        let mut normal = GeminiProviderState::default();
+        let mut observer = GeminiProviderState::terminal_observation();
+        let media = "YQ==".repeat(4_096);
+        for index in 0..32 {
+            let text = format!("record-{index}:{}", "x".repeat(16_384));
+            assert_terminal_record_matches(
+                &mut normal,
+                &mut observer,
+                observation_record(
+                    vec![
+                        json!({"text": text}),
+                        json!({"text": text, "thought": true, "thoughtSignature": media}),
+                        json!({"functionCall": {"id": format!("call-{index}"), "name": "lookup", "args": {"value": text}}}),
+                        json!({"functionResponse": {"name": "lookup", "response": {"result": text}}}),
+                        json!({"inlineData": {"mimeType": "image/png", "data": media}}),
+                        json!({"inline_data": {"mime_type": "audio/wav", "data": media}}),
+                        json!({"inlineData": {"mimeType": "application/pdf", "data": media}}),
+                    ],
+                    None,
+                ),
+            );
+            assert_observer_has_no_content_buffers(&observer);
+            assert!(observer.observed_tool_calls);
+        }
+        assert!(!normal.text_parts.is_empty());
+        assert!(!normal.reasoning_parts.is_empty());
+        assert!(!normal.reasoning_signatures.is_empty());
+        assert!(!normal.content_parts.is_empty());
+        assert!(!normal.tool_calls.is_empty());
+        assert!(normal
+            .tool_results
+            .values()
+            .any(|state| state.content.len() > 16_384));
+        let frames = assert_terminal_record_matches(
+            &mut normal,
+            &mut observer,
+            observation_record(Vec::new(), Some("STOP")),
+        );
+        assert!(frames.iter().any(|frame| matches!(
+            &frame.event,
+            CanonicalStreamEvent::Finish { finish_reason: Some(reason), usage: Some(usage) }
+                if reason == "tool_calls" && usage.input_tokens == 22 && usage.output_tokens == 18
+                    && usage.cache_read_tokens == 7 && usage.reasoning_tokens == 5 && usage.total_tokens == 40
+        )));
+        assert_observer_has_no_content_buffers(&observer);
+    }
+
+    #[test]
+    fn gemini_terminal_observation_matches_known_and_unknown_part_classification() {
+        let parts = vec![
+            Value::Null,
+            json!({}),
+            json!({"text": ""}),
+            json!({"text": 17}),
+            json!({"text": "", "thought_signature": "signature"}),
+            json!({"thoughtSignature": "signature"}),
+            json!({"executableCode": {"language": "python", "code": "print(1)"}}),
+            json!({"codeExecutionResult": {"output": "1"}}),
+            json!({"functionResponse": {}}),
+            json!({"function_response": {"response": ["result"]}}),
+            json!({"functionCall": {}}),
+            json!({"functionCall": null}),
+            json!({"inlineData": {"mimeType": "image/png", "data": "YQ=="}}),
+            json!({"inline_data": {"mime_type": "audio/wav", "data": "YQ=="}}),
+            json!({"inlineData": {"mimeType": "application/pdf", "data": "YQ=="}}),
+            json!({"inlineData": {"mimeType": "", "data": "YQ=="}}),
+            json!({"inlineData": {"mimeType": "image/png", "data": ""}}),
+            json!({"file_data": {"file_uri": "gs://test/file", "mime_type": "application/pdf"}}),
+            json!({"fileData": {"fileUri": ""}}),
+            json!({"futurePart": {"kept": true}}),
+        ];
+        for part in parts {
+            let mut normal = GeminiProviderState::default();
+            let mut observer = GeminiProviderState::terminal_observation();
+            assert_terminal_record_matches(
+                &mut normal,
+                &mut observer,
+                json!({"responseId": "outer", "response": observation_record(vec![part], Some("STOP"))}),
+            );
+            assert_eq!(observer.response_id.as_deref(), Some("resp_observation"));
+            assert_observer_has_no_content_buffers(&observer);
+        }
+    }
+
+    #[test]
+    fn gemini_terminal_observation_preserves_finish_reasons_and_eof() {
+        for has_tool in [false, true] {
+            for reason in [
+                None,
+                Some("STOP"),
+                Some("MAX_TOKENS"),
+                Some("RECITATION"),
+                Some("FUTURE_REASON"),
+            ] {
+                let mut normal = GeminiProviderState::default();
+                let mut observer = GeminiProviderState::terminal_observation();
+                let part = if has_tool {
+                    json!({"functionCall": {"name": "lookup", "args": {"query": "test"}}})
+                } else {
+                    json!({"text": "partial output"})
+                };
+                assert_terminal_record_matches(
+                    &mut normal,
+                    &mut observer,
+                    observation_record(vec![part], None),
+                );
+                if let Some(reason) = reason {
+                    assert_terminal_record_matches(
+                        &mut normal,
+                        &mut observer,
+                        observation_record(Vec::new(), Some(reason)),
+                    );
+                }
+                let context = json!({});
+                assert_eq!(
+                    observer.finish(&context).expect("observer EOF"),
+                    terminal_frames(normal.finish(&context).expect("normal EOF"))
+                );
+                assert!(observer
+                    .finish(&context)
+                    .expect("idempotent EOF")
+                    .is_empty());
+                assert_observer_has_no_content_buffers(&observer);
+            }
+        }
+    }
+
+    #[test]
+    fn gemini_terminal_observation_preserves_failure_payloads_with_usage() {
+        for reason in [
+            "MALFORMED_FUNCTION_CALL",
+            "UNEXPECTED_TOOL_CALL",
+            "TOO_MANY_TOOL_CALLS",
+            "MISSING_THOUGHT_SIGNATURE",
+            "MALFORMED_RESPONSE",
+        ] {
+            for content in [
+                Value::Null,
+                json!({}),
+                json!({"parts": []}),
+                json!({"parts": [{"text": ""}]}),
+            ] {
+                let mut normal = GeminiProviderState::default();
+                let mut observer = GeminiProviderState::terminal_observation();
+                let mut record = observation_record(Vec::new(), Some(reason));
+                record["candidates"][0]["content"] = content;
+                record["candidates"][0]["finishMessage"] = json!("provider failure details");
+                let frames = assert_terminal_record_matches(&mut normal, &mut observer, record);
+                assert!(frames.iter().any(|frame| matches!(
+                    &frame.event,
+                    CanonicalStreamEvent::UnknownEvent(payload)
+                        if payload["response"]["error"]["code"] == reason
+                            && payload["response"]["error"]["message"] == "provider failure details"
+                            && payload["response"]["usage"]["input_tokens"] == 22
+                )));
+                assert!(observer.finish(&json!({})).expect("failed EOF").is_empty());
+                assert_observer_has_no_content_buffers(&observer);
+            }
+        }
     }
 
     #[test]

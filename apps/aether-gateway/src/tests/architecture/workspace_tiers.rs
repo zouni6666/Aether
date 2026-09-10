@@ -183,7 +183,8 @@ fn gateway_tunnel_protocol_path_is_a_thin_compatibility_facade() {
 fn frontdoor_owns_bounded_request_body_buffering() {
     let frontdoor = read_workspace_file("crates/aether-gateway/frontdoor/src/body.rs");
     assert!(frontdoor.contains("acquire_many_owned"));
-    assert!(frontdoor.contains("to_bytes(body, body_limit)"));
+    assert!(frontdoor.contains("body.into_data_stream()"));
+    assert!(frontdoor.contains("try_reserve_bytes"));
     assert!(frontdoor.contains("BodyBufferReservation"));
 
     let gateway = read_workspace_file("apps/aether-gateway/src/handlers/proxy/body_buffer.rs");

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use aether_routing_core::RoutingExecutionPolicy;
+use aether_usage_runtime::{UsageProducerGuard, UsageRuntime};
 use axum::body::{Body, Bytes, HttpBody};
 use http::Response;
 use http_body::{Frame, SizeHint};
@@ -29,24 +30,49 @@ pub(crate) fn cancel_on_client_disconnect() -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(test)]
 pub(crate) async fn run_request<F>(future: F) -> Result<Response<Body>, GatewayError>
+where
+    F: Future<Output = Result<Response<Body>, GatewayError>> + Send + 'static,
+{
+    run_tracked_request(future, None).await
+}
+
+pub(crate) async fn run_request_with_usage<F>(
+    usage: Arc<UsageRuntime>,
+    future: F,
+) -> Result<Response<Body>, GatewayError>
+where
+    F: Future<Output = Result<Response<Body>, GatewayError>> + Send + 'static,
+{
+    run_tracked_request(future, Some(Arc::new(usage.track_producer()))).await
+}
+
+async fn run_tracked_request<F>(
+    future: F,
+    producer: Option<Arc<UsageProducerGuard>>,
+) -> Result<Response<Body>, GatewayError>
 where
     F: Future<Output = Result<Response<Body>, GatewayError>> + Send + 'static,
 {
     let cancel = Arc::new(AtomicBool::new(true));
     let diagnostics = Arc::new(RequestDiagnostics::default());
     let cancel_for_response = Arc::clone(&cancel);
+    let producer_for_request = producer.clone();
     let future = CANCEL_ON_CLIENT_DISCONNECT.scope(
         Arc::clone(&cancel),
         scope_request_diagnostics_with(Some(Arc::clone(&diagnostics)), async move {
             let response = future.await?;
-            if cancel_for_response.load(Ordering::Acquire) {
+            let complete_on_disconnect = !cancel_for_response.load(Ordering::Acquire);
+            if !complete_on_disconnect && producer.is_none() {
                 return Ok(response);
             }
             Ok(response.map(|body| {
                 Body::new(CompleteOnDisconnectBody {
                     body: Some(body),
                     diagnostics,
+                    complete_on_disconnect,
+                    producer,
                 })
             }))
         }),
@@ -54,6 +80,7 @@ where
     CompleteOnDisconnectRequest {
         future: Some(Box::pin(future)),
         cancel,
+        producer: producer_for_request,
     }
     .await
 }
@@ -64,6 +91,7 @@ where
 {
     future: Option<Pin<Box<F>>>,
     cancel: Arc<AtomicBool>,
+    producer: Option<Arc<UsageProducerGuard>>,
 }
 
 impl<F> Future for CompleteOnDisconnectRequest<F>
@@ -97,7 +125,9 @@ where
         if let (Some(future), Ok(runtime)) =
             (self.future.take(), tokio::runtime::Handle::try_current())
         {
+            let producer = self.producer.take();
             runtime.spawn(async move {
+                let _producer = producer;
                 if let Ok(response) = future.await {
                     drain_body(response.into_body()).await;
                 }
@@ -109,6 +139,9 @@ where
 struct CompleteOnDisconnectBody {
     body: Option<Body>,
     diagnostics: Arc<RequestDiagnostics>,
+    complete_on_disconnect: bool,
+    // Drop the body first so its terminal handoff registers before this guard ends.
+    producer: Option<Arc<UsageProducerGuard>>,
 }
 
 impl HttpBody for CompleteOnDisconnectBody {
@@ -125,6 +158,7 @@ impl HttpBody for CompleteOnDisconnectBody {
         let result = Pin::new(body).poll_frame(context);
         if matches!(result, Poll::Ready(None | Some(Err(_)))) {
             self.body.take();
+            self.producer.take();
         }
         result
     }
@@ -143,13 +177,20 @@ impl HttpBody for CompleteOnDisconnectBody {
 
 impl Drop for CompleteOnDisconnectBody {
     fn drop(&mut self) {
+        if !self.complete_on_disconnect {
+            return;
+        }
         let Some(body) = self.body.take().filter(|body| !body.is_end_stream()) else {
             return;
         };
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let producer = self.producer.take();
             runtime.spawn(scope_request_diagnostics_with(
                 Some(Arc::clone(&self.diagnostics)),
-                drain_body(body),
+                async move {
+                    let _producer = producer;
+                    drain_body(body).await;
+                },
             ));
         }
     }
@@ -295,6 +336,78 @@ mod tests {
         .unwrap();
         drop(response);
         assert!(sender.is_closed());
+    }
+
+    #[tokio::test]
+    async fn usage_shutdown_waits_for_a_disconnected_request_before_headers() {
+        let usage = Arc::new(UsageRuntime::disabled());
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+        let request = tokio::spawn(run_request_with_usage(usage.clone(), async move {
+            configure_client_disconnect(RoutingExecutionPolicy::default());
+            started_tx.send(()).unwrap();
+            release_rx.await.unwrap();
+            Ok(Response::new(Body::empty()))
+        }));
+        started_rx.await.unwrap();
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        assert!(usage.shutdown(Duration::from_millis(30)).await.is_err());
+        assert_eq!(usage.metrics_snapshot().producers_in_flight, 1);
+        release_tx.send(()).unwrap();
+        usage.shutdown(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(usage.metrics_snapshot().producers_in_flight, 0);
+    }
+
+    #[tokio::test]
+    async fn usage_shutdown_waits_for_disconnected_body_drain() {
+        let usage = Arc::new(UsageRuntime::disabled());
+        let (sender, receiver) = mpsc::channel::<Result<Bytes, io::Error>>(1);
+        let response = run_request_with_usage(usage.clone(), async move {
+            configure_client_disconnect(RoutingExecutionPolicy::default());
+            Ok(Response::new(Body::from_stream(stream::unfold(
+                receiver,
+                |mut receiver| async { receiver.recv().await.map(|item| (item, receiver)) },
+            ))))
+        })
+        .await
+        .unwrap();
+        drop(response);
+        assert!(usage.shutdown(Duration::from_millis(30)).await.is_err());
+        sender.send(Ok(Bytes::from_static(b"last"))).await.unwrap();
+        drop(sender);
+        usage.shutdown(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(usage.metrics_snapshot().producers_in_flight, 0);
+    }
+
+    #[tokio::test]
+    async fn tracked_bodies_release_shutdown_on_cancellation_or_eof() {
+        for cancel_on_client_disconnect in [false, true] {
+            let usage = Arc::new(UsageRuntime::disabled());
+            let (sender, receiver) = mpsc::channel::<Result<Bytes, io::Error>>(1);
+            let response = run_request_with_usage(usage.clone(), async move {
+                configure_client_disconnect(RoutingExecutionPolicy {
+                    cancel_on_client_disconnect,
+                    ..Default::default()
+                });
+                Ok(Response::new(Body::from_stream(stream::unfold(
+                    receiver,
+                    |mut receiver| async { receiver.recv().await.map(|item| (item, receiver)) },
+                ))))
+            })
+            .await
+            .unwrap();
+            let mut body = response.into_body();
+            if cancel_on_client_disconnect {
+                drop(body);
+                assert!(sender.is_closed());
+            } else {
+                drop(sender);
+                assert!(body.frame().await.is_none());
+                assert_eq!(usage.metrics_snapshot().producers_in_flight, 0);
+            }
+            usage.shutdown(Duration::from_secs(1)).await.unwrap();
+        }
     }
 
     #[tokio::test]

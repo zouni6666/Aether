@@ -14,6 +14,7 @@ use tracing::{debug, info, warn};
 
 use super::hub::{ConnConfig, HubRouter, ProxyConn, ProxyManagementTokenCredential, SendStatus};
 use super::protocol;
+use crate::error::redact_error_detail;
 use aether_contracts::tunnel::{Frame, HelloPayload, MsgType};
 use aether_contracts::tunnel_security::{SecureFrameCodec, TunnelSecurityRole};
 
@@ -61,7 +62,7 @@ pub async fn handle_proxy_connection(
             ) {
                 Ok(codec) => Arc::new(codec),
                 Err(error) => {
-                    warn!(conn_id, node_id = %node_id, error = %error, "secure tunnel codec initialization failed");
+                    warn!(conn_id, node_id = %node_id, error = %redact_error_detail(&error), "secure tunnel codec initialization failed");
                     return;
                 }
             };
@@ -157,7 +158,7 @@ pub async fn handle_proxy_connection(
                             let msg = match encrypt_message(msg, writer_security.as_deref()) {
                             Ok(msg) => msg,
                             Err(error) => {
-                                warn!(conn_id = writer_conn_id, error = %error, "failed to encrypt outbound proxy frame");
+                                warn!(conn_id = writer_conn_id, error = %redact_error_detail(&error), "failed to encrypt outbound proxy frame");
                                 break;
                             }
                         };
@@ -366,7 +367,7 @@ async fn read_authenticated_proxy_hello(
                         return None;
                     }
                     if let Err(error) = ws_tx.send(Message::Pong(payload)).await {
-                        warn!(conn_id, node_id = %node_id, error = %error, "failed to answer WebSocket ping before proxy authentication");
+                        warn!(conn_id, node_id = %node_id, error = %redact_error_detail(&error), "failed to answer WebSocket ping before proxy authentication");
                         return None;
                     }
                 }
@@ -380,7 +381,7 @@ async fn read_authenticated_proxy_hello(
                     return None;
                 }
                 Some(Err(error)) => {
-                    warn!(conn_id, node_id = %node_id, error = %error, "proxy WebSocket failed before encrypted HELLO authentication");
+                    warn!(conn_id, node_id = %node_id, error = %redact_error_detail(&error), "proxy WebSocket failed before encrypted HELLO authentication");
                     return None;
                 }
             }
@@ -471,7 +472,7 @@ async fn run_proxy_reader(
                 let mut data = match decrypt_message(data, security.as_deref()) {
                     Ok(data) => data,
                     Err(error) => {
-                        warn!(conn_id = conn.id, error = %error, "failed to decrypt secure proxy frame");
+                        warn!(conn_id = conn.id, error = %redact_error_detail(&error), "failed to decrypt secure proxy frame");
                         conn.request_close();
                         break;
                     }

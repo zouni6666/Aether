@@ -123,9 +123,17 @@ Aether Tunnel 是配套的正向代理节点，部署在海外 VPS 上，为墙�
 - `APP_PORT`：`aether-gateway` 唯一监听端口，固定绑定 `0.0.0.0:${APP_PORT}`
 - `DATABASE_URL`：PostgreSQL 连接串，例如 `postgresql://USER:PASSWORD@HOST:5432/aether`
 - `AETHER_GATEWAY_DATA_POSTGRES_MIN_CONNECTIONS` / `AETHER_GATEWAY_DATA_POSTGRES_MAX_CONNECTIONS`：数据库连接池手动覆盖值；未配置时 PostgreSQL 按每核 `4` 条自动推导，总池范围为 `32-100`。该预算按进程计算，多实例部署应按数据库连接上限显式分配
+- `AETHER_GATEWAY_DATA_POSTGRES_STATEMENT_TIMEOUT_MS` / `AETHER_GATEWAY_DATA_POSTGRES_LOCK_TIMEOUT_MS`：普通数据库连接的单条 SQL / 锁等待期限，默认 `30000` / `3000` 毫秒，显式 `0` 关闭；不是整个事务总期限。迁移与历史 backfill 使用独立连接放宽，事务可通过局部设置覆盖
+- `AETHER_USAGE_EVENT_CAPTURE_MEMORY_BUDGET_BYTES`：usage 诊断正文共享预算，默认 `134217728`（128 MiB），按 JSON 堆内存估算，覆盖进入终态队列的 seed、Redis 解码后的事件、数据库写入 DTO 及其正文副本。额度不足或显式 `0` 时先保留计费事实，再舍弃诊断正文；已有清空或禁用状态保持不变，其余标记截断。预算随正文保留到释放，后台构建或压缩不会因调用方取消而提前归还额度。该额度不覆盖原始 Redis 批次、解码临时分配、序列化及压缩结果、协议观察缓冲或进程总内存；可通过 `usage_runtime_event_capture_memory_*` 指标观察
+- `AETHER_GATEWAY_USAGE_QUEUE_PAYLOAD_MAX_BYTES`：新增 usage 队列消息的完整 JSON payload 上限，默认 `1048576`（1 MiB），按序列化后的 UTF-8 字节计算，显式 `0` 非法。超限先保留计费事实并舍弃诊断字段；仍超限或无法保留计费语义时拒绝入队，终态消息尝试受限数据库落库，失败则明确失败，不继续 Redis 重试。该限制不覆盖存量 Redis 消息、整个读取批次、DLQ 或进程总内存。`usage_runtime_queue_payload_*` 导出上限及进程级降级、拒绝编码尝试次数，包含入队和重试预校验，不代表唯一事件数；`usage_runtime_enqueue_retry_permanent_failure_total` 记录永久输入错误导致的重试拒绝或终止
+- `AETHER_USAGE_QUEUE_READ_PAYLOAD_BUDGET_BYTES` / `AETHER_USAGE_QUEUE_READ_BATCH_PAYLOAD_BYTES`：usage worker 读取和重领共用的进程级逻辑 payload 预留，默认总额 `134217728`（128 MiB）、单批目标 `8388608`（8 MiB）。按当前 `QUEUE_PAYLOAD_MAX_BYTES` 推导实际 COUNT，默认最多读取 8 条，自动扩容使用实际 COUNT 判断批次是否读满。预留覆盖读取、整批处理和确认，额度不足等待；取消/失败释放。单批目标至少允许一条，当前 payload 上限大于总额时读取报配置错误。`0` 或非法值回退默认，过大值收敛到约 4 GiB 的有效总额。收到消息后按全部字段值长度缩减多余预留；历史消息、其他生产者使用更高上限或额外字段可能超出估算，仍继续原计费流程并记录 `usage_runtime_queue_read_oversized_*`。`usage_runtime_queue_read_*` 同时导出预留、等待与累计字段字节；该预留不是 RESP 解码、连接缓冲容量、字段结构、诊断 JSON、DLQ 或进程 RSS 的硬上限，旧公开 Vec 读取接口不携带处理阶段预留
+- `AETHER_USAGE_DLQ_ENCODING_BUDGET_BYTES` / `AETHER_USAGE_DLQ_ENCODING_MAX_JOBS`：死信原文和 JSON 编码独立共享预留，默认 `67108864`（64 MiB）、最多 `4` 个后台编码及写入任务。根据原始字段、ID、错误字符串及 JSON 最坏 6 倍转义一次预留；预算占满或单条超总额时立即失败，worker 保留原消息等待重领，不截断账务原文。编码失败会继续处理同批其他消息，只确认成功项，批次末尾仍报告失败；存储转移失败则停止该批后续处理。取消编码等待不会提前归还仍在后台使用的额度。`0`/非法值回退默认，bytes 最大约 4 GiB，jobs 最大 128；超大存量消息可能需要调高总额后恢复。`usage_runtime_dlq_encoding_*` 导出额度、在途任务、拒绝和编码尝试次数；不包含字段结构、字符串额外容量、Redis 命令/连接副本或进程 RSS。内置 Redis/Memory worker 将死信追加、源 ACK 和删除作为一次原子转移，同一源 stream、消费组及 pending ID 的并发或重试只追加一次；Redis 要求 7+ 及 `EVAL/TYPE/XPENDING/XADD/XACK/XDEL` 权限，Cluster 两键须同 slot（当前默认键不自动迁移）。源和 DLQ 不能同名。源已不在 PEL 时不宣称已归档；外部 ACK/trim/delete 及多消费组仍有原来的删除语义。公开 `push_dead_letter` 仍为追加接口，未实现新原子 trait 方法的外部后端沿用追加后 ACK，仍可能重复归档
 - `AETHER_GATEWAY_MAX_IN_FLIGHT_REQUESTS`：单实例请求并发上限；未配置时按 CPU 自动推导（基础范围 `512-65536`），低文件描述符预算时会进一步下调
-- `AETHER_GATEWAY_REQUEST_BODY_BUFFER_BUDGET_MB`：单实例同时读取和解压请求体的加权内存预算，默认 `256MB`
-- `AETHER_GATEWAY_REQUEST_BODY_READ_TIMEOUT_MS`：可选的请求体完整读取超时；默认或显式设为 `0` 时关闭，非零值限制在 `1000-600000ms`
+- `AETHER_GATEWAY_MAX_HTTP_CONNECTIONS`：二进制入口全部监听分片共用的入站 TCP 连接上限，包含握手、空闲 keep-alive 和 HTTP 升级后仍存活的 socket。未设置或 `0` 时使用请求上限与 WebSocket 上限之和；自动及显式值均最多 `65536`，已知 FD soft limit 时进一步限制为 `max(1, (FD - 256) / 2)`。接入后立即尝试取得额度，满额时关闭新连接，不创建 HTTP 处理任务、不等待额度，不返回 HTTP 状态码；取消、解析失败和连接释放归还，WebSocket 升级不会提前归还。HTTP/2 多流共用一个 TCP 许可，原请求和 WebSocket 准入仍独立有效。`gateway_http_connections_*` 导出配置上限、当前数、高水位、拒绝数及 accept 错误数。该限制不包含 kernel backlog、上游、Redis 或数据库连接，也不是整个进程 FD/内存硬上限。临时 accept 错误重试，资源类错误退避一秒后重试，避免单次错误停止监听
+- `AETHER_GATEWAY_REQUEST_BODY_BUFFER_BUDGET_MB`：单实例同时读取和解压请求体的加权内存预算，默认 `256MB`；压缩和未知长度上传按实际缓冲增长申请额度，解压时计入同时存活的输入和输出。额度不足返回 `503`；接近单请求上限的压缩上传需要为输入和解压输出预留额外预算
+- `AETHER_GATEWAY_REQUEST_BODY_READ_TIMEOUT_MS`：请求体完整读取超时，默认 `120000ms`；显式设为 `0` 时关闭，非零值限制在 `1000-600000ms`
+- `AETHER_GATEWAY_UPSTREAM_STREAM_IDLE_TIMEOUT_MS`：上游流首包后的空闲超时，默认 `300000ms`；请求执行配置中的 `read_ms` 优先，显式 `0` 关闭对应超时。网关生成的 keepalive 不会重置计时
+- `AETHER_GATEWAY_STREAM_CAPTURE_MEMORY_BUDGET_BYTES`：进程内流式响应诊断捕获的共享字节预算，默认 `134217728`（128 MiB）；包含 provider/client 捕获容量和扩容时的新旧分配。额度不足时仅截断审计副本，显式 `0` 关闭此类捕获；协议解析、客户端传输和计费观察继续执行。该预算不包含协议解析缓冲、终态编码及 usage 队列副本，不是进程总内存上限
 - `AETHER_MAX_REQUEST_BODY_MB`：单请求解压后请求体上限，默认 `256MB`；显式设为 `0` 表示不再收紧默认值，但仍受 `256MB` 安全硬上限约束
 - `AETHER_MAX_INTERNAL_BUFFERED_BODY_MB`：heartbeat、管理探测等内部整包响应体上限，默认 `64MB`；显式设为 `0` 表示不再收紧默认值，但仍受 `256MB` 安全硬上限约束
 - `AETHER_TUNNEL_NODE_STATUS_QUEUE_CAPACITY`：隧道节点状态上报队列容量，默认 `1024`；满载时拒绝新事件，避免控制面故障导致无界内存增长
@@ -145,6 +153,8 @@ Aether Tunnel 是配套的正向代理节点，部署在海外 VPS 上，为墙�
 - `CORS_ORIGINS` / `CORS_ALLOW_CREDENTIALS`：前端跨域来源控制；如果要跨域带登录 Cookie，`CORS_ORIGINS` 不能写 `*`
 - `RUST_LOG`：Rust 日志过滤，例如 `aether_gateway=info`、`aether_gateway=debug,sqlx=warn`
 - `DB_PASSWORD` / `REDIS_PASSWORD`：Docker Compose 后端密码，首次安装时分别随机生成；手工部署必须替换示例占位值，不要互相复用
+
+运行日志由独立后台线程写入 stdout 和文件，每个输出队列最多 4096 条、保留正文最多 8 MiB（包含正在写入的记录），单条最多 256 KiB。队列满、正文预算不足或单条超限时整条丢弃，不等待日志设备；`Both` 两个输出独立降级。`logging_stdout_*` 和 `logging_file_*` 指标记录丢弃和写入错误，网关指标沿用其命名空间前缀。正常退出时日志最多等待 2 秒排空；这不是请求优雅排空或整个进程退出期限。日志格式化仍在调用线程执行，日志预算不包含格式化临时内存，运行日志也不能作为可靠计费账本。
 
 ### S3 备份离线恢复
 

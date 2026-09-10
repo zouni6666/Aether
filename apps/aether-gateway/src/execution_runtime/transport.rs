@@ -36,7 +36,7 @@ use hyper::body::Incoming as HyperIncomingBody;
 use hyper::client::conn::http2::SendRequest as HyperH2cSendRequest;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client as HyperLegacyClient;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::redirect::Policy;
 use serde::Serialize;
@@ -50,6 +50,7 @@ use tokio::sync::OnceCell as TokioOnceCell;
 use crate::ai_serving::api::extract_provider_private_stream_error_body;
 #[cfg(test)]
 use crate::execution_runtime::remote_compat::execute_sync_plan_via_remote_execution_runtime;
+use crate::execution_runtime::stream_read_timeout::resolve_stream_idle_timeout;
 use crate::execution_runtime::windsurf::maybe_execute_windsurf_sync;
 use crate::frontdoor_loop_guard::{
     configured_gateway_frontdoor_base_url, gateway_frontdoor_self_loop_guard_error,
@@ -109,7 +110,7 @@ const DIRECT_REQWEST_PREWARM_SYNC_CLIENTS_ENV: &str =
     "AETHER_GATEWAY_DIRECT_REQWEST_PREWARM_SYNC_CLIENTS";
 const DEFAULT_H2_TARGET_STREAMS_PER_CLIENT: usize = 8;
 const DEFAULT_HTTP1_TARGET_STREAMS_PER_CLIENT: usize = 512;
-const DEFAULT_DIRECT_H2C_POOL_MAX_IDLE_PER_HOST: usize = 512;
+const DEFAULT_DIRECT_H2C_POOL_MAX_IDLE_PER_HOST: usize = 32;
 const DEFAULT_DIRECT_H2C_TARGET_STREAMS_PER_CLIENT: usize = 128;
 const DEFAULT_DIRECT_H2C_SENDER_SELECT_WINDOW: usize = 4;
 const MAX_DIRECT_H2C_DRIVER_RUNTIME_THREADS: usize = 16;
@@ -382,6 +383,7 @@ static DIRECT_H2C_SENDER_CACHE: LazyLock<
 static DIRECT_H2C_POOL_MAX_IDLE_PER_HOST: LazyLock<usize> = LazyLock::new(|| {
     env_positive_usize(DIRECT_H2C_POOL_MAX_IDLE_PER_HOST_ENV)
         .unwrap_or(DEFAULT_DIRECT_H2C_POOL_MAX_IDLE_PER_HOST)
+        .min(1024)
 });
 
 static DIRECT_H2C_SENDER_SELECT_WINDOW: LazyLock<usize> = LazyLock::new(|| {
@@ -1198,6 +1200,42 @@ pub(crate) enum DirectUpstreamResponse {
     LocalTunnel(tunnel::DirectRelayResponse),
 }
 
+pub(crate) fn direct_upstream_response_byte_stream(
+    prefetched_body: VecDeque<Result<Bytes, String>>,
+    response: DirectUpstreamResponse,
+) -> futures_util::stream::BoxStream<'static, Result<Bytes, String>> {
+    let response_stream = match response {
+        DirectUpstreamResponse::Reqwest(response) => response
+            .bytes_stream()
+            .map(|item| item.map_err(|err| format_upstream_request_error(&err)))
+            .boxed(),
+        DirectUpstreamResponse::HyperH2c(response) => response
+            .into_body()
+            .into_data_stream()
+            .map(|item| item.map_err(|err| format_hyper_error_chain(&err)))
+            .boxed(),
+        DirectUpstreamResponse::BrowserWreq(response) => response
+            .bytes_stream()
+            .map(|item| item.map_err(|err| format_wreq_upstream_request_error(&err)))
+            .boxed(),
+        DirectUpstreamResponse::LocalTunnel(mut response) => async_stream::stream! {
+            loop {
+                match response.next_chunk().await {
+                    Ok(Some(chunk)) => yield Ok(chunk),
+                    Ok(None) => break,
+                    Err(err) => {
+                        yield Err(err);
+                        break;
+                    }
+                }
+            }
+        }
+        .boxed(),
+    };
+    let upstream = futures_util::stream::iter(prefetched_body).chain(response_stream);
+    crate::execution_runtime::stream_read_timeout::skip_empty_upstream_chunks(upstream).boxed()
+}
+
 pub(crate) struct DirectUpstreamStreamExecution {
     pub(crate) request_id: String,
     pub(crate) candidate_id: Option<String>,
@@ -1214,6 +1252,7 @@ pub(crate) struct DirectUpstreamStreamExecution {
     pub(crate) started_at: Instant,
     pub(crate) response_observation: ExecutionResponseObservation,
     pub(crate) stream_first_byte_timeout: Option<Duration>,
+    pub(crate) stream_idle_timeout: Option<Duration>,
     pub(crate) upstream_target_permit: Option<UpstreamTargetAdmissionPermit>,
 }
 
@@ -1347,6 +1386,7 @@ impl DirectSyncExecutionRuntime {
                 request_order_id,
             },
             stream_first_byte_timeout: resolve_stream_first_byte_timeout(plan),
+            stream_idle_timeout: resolve_stream_idle_timeout(plan),
             upstream_target_permit: None,
         })
     }
@@ -1494,6 +1534,7 @@ pub(crate) async fn execute_stream_plan_via_local_tunnel(
             request_order_id,
         },
         stream_first_byte_timeout: resolve_stream_first_byte_timeout(plan),
+        stream_idle_timeout: resolve_stream_idle_timeout(plan),
         upstream_target_permit: None,
     }))
 }
@@ -2593,6 +2634,8 @@ fn build_direct_h2c_client_from_cache_key(
     builder.http2_only(true);
     builder.http2_adaptive_window(true);
     builder.pool_max_idle_per_host(cache_key.pool_max_idle_per_host);
+    builder.pool_timer(TokioTimer::new());
+    builder.pool_idle_timeout(Duration::from_millis(upstream_pool_idle_timeout_ms()));
     builder.build(connector)
 }
 
@@ -2854,8 +2897,18 @@ async fn send_via_browser_wreq_transport(
     let profile = plan.transport_profile.as_ref().ok_or_else(|| {
         ExecutionRuntimeTransportError::UnsupportedTransportProfile(String::new())
     })?;
+    let mut client_timeouts = plan.timeouts.clone();
+    if plan.stream {
+        if let Some(timeouts) = client_timeouts.as_mut() {
+            // Streamed responses use the shared idle reader; sync collectors retain
+            // their existing client read timeout. Zero explicitly disables either.
+            if apply_request_total_timeout || timeouts.read_ms == Some(0) {
+                timeouts.read_ms = None;
+            }
+        }
+    }
     let client = build_browser_wreq_client(
-        plan.timeouts.as_ref(),
+        client_timeouts.as_ref(),
         plan.proxy.as_ref(),
         profile,
         transport_controls,
@@ -4214,6 +4267,7 @@ fn build_direct_reqwest_client_from_cache_key(
         &HttpClientConfig {
             connect_timeout_ms: cache_key.connect_timeout_ms,
             pool_max_idle_per_host: Some(direct_reqwest_pool_max_idle_per_host()),
+            pool_idle_timeout_ms: Some(upstream_pool_idle_timeout_ms()),
             ..HttpClientConfig::default()
         },
     );
@@ -4233,12 +4287,22 @@ fn build_direct_reqwest_client_from_cache_key(
 }
 
 fn direct_reqwest_pool_max_idle_per_host() -> usize {
-    const DEFAULT_MAX_IDLE_PER_HOST: usize = 1024;
+    const DEFAULT_MAX_IDLE_PER_HOST: usize = 32;
     std::env::var("AETHER_GATEWAY_UPSTREAM_POOL_MAX_IDLE_PER_HOST")
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_MAX_IDLE_PER_HOST)
+        .min(1024)
+}
+
+fn upstream_pool_idle_timeout_ms() -> u64 {
+    std::env::var("AETHER_GATEWAY_UPSTREAM_POOL_IDLE_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(15_000)
+        .min(300_000)
 }
 
 pub(crate) fn direct_reqwest_client_cache_metric_samples() -> Vec<MetricSample> {
@@ -4585,7 +4649,11 @@ pub(crate) fn build_browser_wreq_client(
 ) -> Result<wreq::Client, ExecutionRuntimeTransportError> {
     let emulation = browser_wreq_emulation_from_profile(transport_profile)?;
     let proxy_url = resolve_proxy_url(proxy)?;
-    let mut builder = wreq::Client::builder().no_proxy().emulation(emulation);
+    let mut builder = wreq::Client::builder()
+        .no_proxy()
+        .emulation(emulation)
+        .pool_max_idle_per_host(direct_reqwest_pool_max_idle_per_host())
+        .pool_idle_timeout(Duration::from_millis(upstream_pool_idle_timeout_ms()));
     if proxy_url.is_none() {
         builder = builder.dns_resolver(ExecutionSafeDnsResolver);
     }

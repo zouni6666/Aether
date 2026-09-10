@@ -7,6 +7,7 @@ use std::io;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use aether_crypto::PythonFernetCompat;
 use aether_data::repository::auth::CreateStandaloneApiKeyRecord;
 use aether_data::repository::wallet::WalletLookupKey;
 use aether_data::{
@@ -16,6 +17,7 @@ use aether_data_contracts::repository::global_models::{
     CreateAdminGlobalModelRecord, UpdateAdminGlobalModelRecord, UpsertAdminProviderModelRecord,
 };
 use aether_data_contracts::repository::provider_catalog::{
+    ProviderCatalogKeyAdminCasUpdate, ProviderCatalogKeyOAuthCredentialFence,
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
 use serde_json::json;
@@ -200,6 +202,12 @@ impl Config {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env_and_args().map_err(|err| format!("invalid config: {err}"))?;
+    let encryption_key = env_value("AETHER_GATEWAY_DATA_ENCRYPTION_KEY")
+        .or_else(|| env_value("ENCRYPTION_KEY"))
+        .ok_or(
+            "set AETHER_GATEWAY_DATA_ENCRYPTION_KEY or ENCRYPTION_KEY to the gateway's encryption key before seeding",
+        )?;
+    let secret_cipher = PythonFernetCompat::from_secret(&encryption_key);
 
     let backends = DataBackends::from_config(DataLayerConfig::from_database(SqlDatabaseConfig {
         driver: DatabaseDriver::Postgres,
@@ -215,10 +223,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     }))?;
 
-    seed_provider_catalog(&backends, &config).await?;
+    seed_provider_catalog(&backends, &config, &secret_cipher).await?;
     seed_models(&backends, &config).await?;
     let operator_user_id = seed_operator_user(&backends, &config).await?;
-    seed_api_keys(&backends, &config, &operator_user_id).await?;
+    seed_api_keys(&backends, &config, &operator_user_id, &secret_cipher).await?;
     verify_candidate_selection(&backends, &config).await?;
     write_outputs(&config)?;
 
@@ -243,6 +251,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn seed_provider_catalog(
     backends: &DataBackends,
     config: &Config,
+    secret_cipher: &PythonFernetCompat,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let reader = backends
         .read()
@@ -326,7 +335,7 @@ async fn seed_provider_catalog(
     )?
     .with_transport_fields(
         Some(json!(["openai:chat"])),
-        Some(config.provider_api_key.clone()),
+        Some(secret_cipher.encrypt_plaintext(&config.provider_api_key)?),
         None,
         None,
         None,
@@ -341,17 +350,40 @@ async fn seed_provider_catalog(
         Some(json!({"openai:chat": {"state": "closed"}})),
     );
 
-    if reader
-        .list_keys_by_ids(std::slice::from_ref(&config.provider_key_id))
-        .await?
-        .is_empty()
-    {
-        writer.create_key(&provider_key).await?;
-    } else {
-        writer.update_key(&provider_key).await?;
+    for _ in 0..8 {
+        let existing = reader
+            .list_keys_by_ids(std::slice::from_ref(&config.provider_key_id))
+            .await?
+            .into_iter()
+            .next();
+        let Some(existing) = existing else {
+            writer.create_key(&provider_key).await?;
+            return Ok(());
+        };
+        if existing.provider_id != config.provider_id {
+            return Err("existing pressure provider key belongs to a different provider".into());
+        }
+
+        // Randomized ciphertext changes on every seed. Fence against the observed
+        // credential and preserve runtime fields when rotating the configured key.
+        let update = ProviderCatalogKeyAdminCasUpdate {
+            expected_encrypted_auth_config: existing.encrypted_auth_config.clone(),
+            expected_credential: ProviderCatalogKeyOAuthCredentialFence {
+                encrypted_api_key: existing.encrypted_api_key,
+                auth_type: existing.auth_type,
+                provider_id: existing.provider_id,
+                provider_type: provider.provider_type.clone(),
+            },
+            key: provider_key.clone(),
+            codex_rotation: None,
+            reset_oauth_runtime: true,
+        };
+        if writer.compare_and_update_key_admin_state(&update).await? {
+            return Ok(());
+        }
     }
 
-    Ok(())
+    Err("pressure provider key changed repeatedly during seed; retry initialization".into())
 }
 
 fn pressure_provider_transport_config(mock_upstream_h2c: bool) -> Option<serde_json::Value> {
@@ -466,9 +498,10 @@ async fn seed_api_keys(
     backends: &DataBackends,
     config: &Config,
     operator_user_id: &str,
+    secret_cipher: &PythonFernetCompat,
 ) -> Result<(), Box<dyn std::error::Error>> {
     for index in 0..config.api_key_count {
-        seed_api_key(backends, config, operator_user_id, index).await?;
+        seed_api_key(backends, config, operator_user_id, index, secret_cipher).await?;
     }
     Ok(())
 }
@@ -478,6 +511,7 @@ async fn seed_api_key(
     config: &Config,
     operator_user_id: &str,
     key_index: usize,
+    secret_cipher: &PythonFernetCompat,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let auth_reader = backends
         .read()
@@ -494,17 +528,28 @@ async fn seed_api_key(
 
     let api_key_id = pressure_api_key_id(config, key_index);
     let api_key_value = pressure_api_key_value(config, key_index);
+    let key_hash = sha256_hex(&api_key_value);
+    let key_encrypted = secret_cipher.encrypt_plaintext(&api_key_value)?;
 
     let existing = auth_reader
         .find_export_standalone_api_key_by_id(&api_key_id)
         .await?;
+    if existing
+        .as_ref()
+        .is_some_and(|record| record.key_hash != key_hash)
+    {
+        return Err(format!(
+            "existing pressure API key {api_key_id} has a different hash; use its original value or a new --api-key-id"
+        )
+        .into());
+    }
     if existing.is_none() {
         auth_writer
             .create_standalone_api_key(CreateStandaloneApiKeyRecord {
                 user_id: operator_user_id.to_string(),
                 api_key_id: api_key_id.clone(),
-                key_hash: sha256_hex(&api_key_value),
-                key_encrypted: Some(api_key_value),
+                key_hash,
+                key_encrypted: Some(key_encrypted),
                 name: Some(format!("Local pressure API key {}", key_index + 1)),
                 allowed_providers: Some(vec![config.provider_id.clone()]),
                 allowed_api_formats: Some(vec!["openai:chat".to_string()]),
@@ -526,8 +571,8 @@ async fn seed_api_key(
             .update_standalone_api_key_basic(
                 aether_data::repository::auth::UpdateStandaloneApiKeyBasicRecord {
                     api_key_id: api_key_id.clone(),
-                    key_encrypted: None,
-                    key_encrypted_present: false,
+                    key_encrypted: Some(key_encrypted),
+                    key_encrypted_present: true,
                     name: Some(format!("Local pressure API key {}", key_index + 1)),
                     name_present: true,
                     force_capabilities: None,
@@ -866,6 +911,8 @@ fn parse_usize(value: &str, name: &str) -> Result<usize, String> {
 fn print_help() {
     println!(
         "Usage: cargo run -p aether-integration-tests --bin gateway_pressure_seed -- [options]\n\
+\n\
+The seed and gateway must share AETHER_GATEWAY_DATA_ENCRYPTION_KEY (or ENCRYPTION_KEY).\n\
 \n\
 Options:\n\
   --database-url URL\n\

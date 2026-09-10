@@ -109,6 +109,16 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
+    pub(crate) async fn read_recent_runtime_request_candidates(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<candidates::StoredRequestCandidate>, GatewayError> {
+        self.data
+            .list_recent_runtime_request_candidates(limit)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn upsert_request_candidate(
         &self,
         mut candidate: candidates::UpsertRequestCandidateRecord,

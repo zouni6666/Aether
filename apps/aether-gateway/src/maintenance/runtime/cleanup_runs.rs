@@ -431,7 +431,7 @@ async fn run_admin_system_purge_task(
             if let Err(record_err) = record_cleanup_run(&data, failed).await {
                 warn!(error = %record_err, "failed to record admin system purge task failure");
             }
-            warn!(error = ?err, kind = ?kind, "admin system purge task failed");
+            warn!(error = %crate::error::redact_error_debug(&err), kind = ?kind, "admin system purge task failed");
         }
     }
 }

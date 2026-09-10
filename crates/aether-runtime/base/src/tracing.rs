@@ -21,6 +21,11 @@ use crate::config::ServiceRuntimeConfig;
 use crate::error::RuntimeBootstrapError;
 use crate::observability::{FileLoggingConfig, LogDestination, LogRotation};
 
+mod writer;
+
+pub use writer::{logging_metric_samples, shutdown_logging, LogShutdownGuard};
+use writer::{register_log_workers, LogWorker, NonBlockingLogWriter};
+
 static TRACING_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 
 pub type LogReloader = Box<dyn Fn(&str) + Send + Sync>;
@@ -385,17 +390,12 @@ pub(crate) fn init_tracing(config: ServiceRuntimeConfig) -> Result<(), RuntimeBo
                 .unwrap_or_else(|_| config.default_log_filter.into());
             let identity = RuntimeLogIdentity::from_config(&config);
 
-            let (file_writer, startup_cleanup_warning) =
-                if config.observability.log_destination.needs_file_sink() {
-                    let Some(file_logging) = config.observability.file_logging.clone() else {
-                        return Err("file logging requires a configured log directory".to_string());
-                    };
-                    let (writer, startup_cleanup_warning) =
-                        RollingFileMakeWriter::new(config.service_name, file_logging)?;
-                    (Some(writer), startup_cleanup_warning)
-                } else {
-                    (None, None)
-                };
+            let RuntimeLogWriters {
+                stdout_writer,
+                file_writer,
+                workers,
+                startup_cleanup_warning,
+            } = RuntimeLogWriters::new(&config)?;
 
             let init_result = match (
                 config.observability.log_format,
@@ -403,16 +403,26 @@ pub(crate) fn init_tracing(config: ServiceRuntimeConfig) -> Result<(), RuntimeBo
             ) {
                 (LogFormat::Pretty, LogDestination::Stdout) => tracing_subscriber::registry()
                     .with(filter)
-                    .with(tracing_subscriber::fmt::layer().event_format(
-                        PrettyRuntimeEventFormatter::new(identity.clone(), stdout_supports_ansi()),
-                    ))
+                    .with(
+                        tracing_subscriber::fmt::layer()
+                            .event_format(PrettyRuntimeEventFormatter::new(
+                                identity.clone(),
+                                stdout_supports_ansi(),
+                            ))
+                            .with_writer(
+                                stdout_writer.clone().expect("stdout writer should exist"),
+                            ),
+                    )
                     .try_init(),
                 (LogFormat::Json, LogDestination::Stdout) => tracing_subscriber::registry()
                     .with(filter)
                     .with(
                         tracing_subscriber::fmt::layer()
                             .json()
-                            .event_format(JsonRuntimeEventFormatter::new(identity.clone())),
+                            .event_format(JsonRuntimeEventFormatter::new(identity.clone()))
+                            .with_writer(
+                                stdout_writer.clone().expect("stdout writer should exist"),
+                            ),
                     )
                     .try_init(),
                 (LogFormat::Pretty, LogDestination::File) => tracing_subscriber::registry()
@@ -435,9 +445,16 @@ pub(crate) fn init_tracing(config: ServiceRuntimeConfig) -> Result<(), RuntimeBo
                     .try_init(),
                 (LogFormat::Pretty, LogDestination::Both) => tracing_subscriber::registry()
                     .with(filter)
-                    .with(tracing_subscriber::fmt::layer().event_format(
-                        PrettyRuntimeEventFormatter::new(identity.clone(), stdout_supports_ansi()),
-                    ))
+                    .with(
+                        tracing_subscriber::fmt::layer()
+                            .event_format(PrettyRuntimeEventFormatter::new(
+                                identity.clone(),
+                                stdout_supports_ansi(),
+                            ))
+                            .with_writer(
+                                stdout_writer.clone().expect("stdout writer should exist"),
+                            ),
+                    )
                     .with(
                         tracing_subscriber::fmt::layer()
                             .with_ansi(false)
@@ -450,7 +467,10 @@ pub(crate) fn init_tracing(config: ServiceRuntimeConfig) -> Result<(), RuntimeBo
                     .with(
                         tracing_subscriber::fmt::layer()
                             .json()
-                            .event_format(JsonRuntimeEventFormatter::new(identity.clone())),
+                            .event_format(JsonRuntimeEventFormatter::new(identity.clone()))
+                            .with_writer(
+                                stdout_writer.clone().expect("stdout writer should exist"),
+                            ),
                     )
                     .with(
                         tracing_subscriber::fmt::layer()
@@ -463,6 +483,7 @@ pub(crate) fn init_tracing(config: ServiceRuntimeConfig) -> Result<(), RuntimeBo
             .map_err(|err| err.to_string());
 
             if init_result.is_ok() {
+                register_log_workers(workers);
                 if let Some(warning) = startup_cleanup_warning.as_ref() {
                     emit_log_cleanup_warning("startup", warning.log_dir.as_path(), &warning.error);
                 }
@@ -497,39 +518,35 @@ pub fn init_reloadable_service_tracing(
     let (filter_layer, reload_handle) = reload::Layer::new(filter);
     let identity = RuntimeLogIdentity::from_config(&config);
 
-    let (file_writer, startup_cleanup_warning) =
-        if config.observability.log_destination.needs_file_sink() {
-            let Some(file_logging) = config.observability.file_logging.clone() else {
-                return Err(RuntimeBootstrapError::Tracing(
-                    "file logging requires a configured log directory".to_string(),
-                ));
-            };
-            let (writer, startup_cleanup_warning) =
-                RollingFileMakeWriter::new(config.service_name, file_logging)
-                    .map_err(RuntimeBootstrapError::Tracing)?;
-            (Some(writer), startup_cleanup_warning)
-        } else {
-            (None, None)
-        };
+    let RuntimeLogWriters {
+        stdout_writer,
+        file_writer,
+        workers,
+        startup_cleanup_warning,
+    } = RuntimeLogWriters::new(&config).map_err(RuntimeBootstrapError::Tracing)?;
 
     match (
         config.observability.log_format,
         config.observability.log_destination,
     ) {
-        (LogFormat::Pretty, LogDestination::Stdout) => {
-            tracing_subscriber::registry()
-                .with(filter_layer)
-                .with(tracing_subscriber::fmt::layer().event_format(
-                    PrettyRuntimeEventFormatter::new(identity.clone(), stdout_supports_ansi()),
-                ))
-                .try_init()
-        }
+        (LogFormat::Pretty, LogDestination::Stdout) => tracing_subscriber::registry()
+            .with(filter_layer)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .event_format(PrettyRuntimeEventFormatter::new(
+                        identity.clone(),
+                        stdout_supports_ansi(),
+                    ))
+                    .with_writer(stdout_writer.clone().expect("stdout writer should exist")),
+            )
+            .try_init(),
         (LogFormat::Json, LogDestination::Stdout) => tracing_subscriber::registry()
             .with(filter_layer)
             .with(
                 tracing_subscriber::fmt::layer()
                     .json()
-                    .event_format(JsonRuntimeEventFormatter::new(identity.clone())),
+                    .event_format(JsonRuntimeEventFormatter::new(identity.clone()))
+                    .with_writer(stdout_writer.clone().expect("stdout writer should exist")),
             )
             .try_init(),
         (LogFormat::Pretty, LogDestination::File) => tracing_subscriber::registry()
@@ -550,26 +567,30 @@ pub fn init_reloadable_service_tracing(
                     .with_writer(file_writer.clone().expect("file writer should exist")),
             )
             .try_init(),
-        (LogFormat::Pretty, LogDestination::Both) => {
-            tracing_subscriber::registry()
-                .with(filter_layer)
-                .with(tracing_subscriber::fmt::layer().event_format(
-                    PrettyRuntimeEventFormatter::new(identity.clone(), stdout_supports_ansi()),
-                ))
-                .with(
-                    tracing_subscriber::fmt::layer()
-                        .with_ansi(false)
-                        .event_format(PrettyRuntimeEventFormatter::new(identity.clone(), false))
-                        .with_writer(file_writer.clone().expect("file writer should exist")),
-                )
-                .try_init()
-        }
+        (LogFormat::Pretty, LogDestination::Both) => tracing_subscriber::registry()
+            .with(filter_layer)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .event_format(PrettyRuntimeEventFormatter::new(
+                        identity.clone(),
+                        stdout_supports_ansi(),
+                    ))
+                    .with_writer(stdout_writer.clone().expect("stdout writer should exist")),
+            )
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .event_format(PrettyRuntimeEventFormatter::new(identity.clone(), false))
+                    .with_writer(file_writer.clone().expect("file writer should exist")),
+            )
+            .try_init(),
         (LogFormat::Json, LogDestination::Both) => tracing_subscriber::registry()
             .with(filter_layer)
             .with(
                 tracing_subscriber::fmt::layer()
                     .json()
-                    .event_format(JsonRuntimeEventFormatter::new(identity.clone())),
+                    .event_format(JsonRuntimeEventFormatter::new(identity.clone()))
+                    .with_writer(stdout_writer.clone().expect("stdout writer should exist")),
             )
             .with(
                 tracing_subscriber::fmt::layer()
@@ -581,6 +602,7 @@ pub fn init_reloadable_service_tracing(
     }
     .map_err(|err| RuntimeBootstrapError::Tracing(err.to_string()))?;
 
+    register_log_workers(workers);
     if let Some(warning) = startup_cleanup_warning.as_ref() {
         emit_log_cleanup_warning("startup", warning.log_dir.as_path(), &warning.error);
     }
@@ -593,6 +615,54 @@ pub fn init_reloadable_service_tracing(
             let _ = reload_handle.modify(|filter| *filter = new_filter);
         }
     }))
+}
+
+struct RuntimeLogWriters {
+    stdout_writer: Option<NonBlockingLogWriter>,
+    file_writer: Option<NonBlockingLogWriter>,
+    workers: Vec<LogWorker>,
+    startup_cleanup_warning: Option<StartupCleanupWarning>,
+}
+
+impl RuntimeLogWriters {
+    fn new(config: &ServiceRuntimeConfig) -> Result<Self, String> {
+        let (file_sink, startup_cleanup_warning) =
+            if config.observability.log_destination.needs_file_sink() {
+                let file_logging = config
+                    .observability
+                    .file_logging
+                    .clone()
+                    .ok_or("file logging requires a configured log directory")?;
+                let (sink, warning) =
+                    RollingFileMakeWriter::new(config.service_name, file_logging)?;
+                (Some(sink), warning)
+            } else {
+                (None, None)
+            };
+        let mut workers = Vec::with_capacity(2);
+        let stdout_writer = if config.observability.log_destination != LogDestination::File {
+            let (writer, worker) = NonBlockingLogWriter::new("stdout", io::stdout())
+                .map_err(|err| format!("failed to start stdout log writer: {err}"))?;
+            workers.push(worker);
+            Some(writer)
+        } else {
+            None
+        };
+        let file_writer = if let Some(sink) = file_sink {
+            let (writer, worker) = NonBlockingLogWriter::new("file", sink.make_writer())
+                .map_err(|err| format!("failed to start file log writer: {err}"))?;
+            workers.push(worker);
+            Some(writer)
+        } else {
+            None
+        };
+        Ok(Self {
+            stdout_writer,
+            file_writer,
+            workers,
+            startup_cleanup_warning,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -692,7 +762,10 @@ impl RollingFileSink {
     }
 
     fn write(&self, buf: &[u8]) -> io::Result<usize> {
-        let now = Local::now();
+        self.write_at(buf, Local::now())
+    }
+
+    fn write_at(&self, buf: &[u8], now: DateTime<Local>) -> io::Result<usize> {
         let mut state = self
             .state
             .lock()
@@ -833,8 +906,19 @@ fn spawn_log_cleanup_task(service_name: &'static str, config: FileLoggingConfig)
         let interval = Duration::from_secs(6 * 60 * 60);
         loop {
             tokio::time::sleep(interval).await;
-            if let Err(err) = cleanup_log_files(service_name, &config) {
-                emit_log_cleanup_warning("background", config.dir.as_path(), &err);
+            let cleanup_config = config.clone();
+            match tokio::task::spawn_blocking(move || {
+                cleanup_log_files(service_name, &cleanup_config)
+            })
+            .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(err)) => {
+                    emit_log_cleanup_warning("background", config.dir.as_path(), &err);
+                }
+                Err(err) => {
+                    emit_log_cleanup_warning("background", config.dir.as_path(), &err);
+                }
             }
         }
     });
@@ -1026,6 +1110,78 @@ mod tests {
             log_bucket_key(LogRotation::Hourly, instant),
             "2026-04-04-13".to_string()
         );
+    }
+
+    #[test]
+    fn rolling_file_sink_rotates_without_mixing_bucket_contents() {
+        for rotation in [LogRotation::Hourly, LogRotation::Daily] {
+            let dir = std::env::temp_dir().join(format!("aether-runtime-logs-{}", Uuid::new_v4()));
+            let config = FileLoggingConfig::new(&dir, rotation, 7, 30);
+            let (sink, _) = RollingFileSink::new("runtime-test", config).expect("sink should open");
+            let before = Local
+                .with_ymd_and_hms(2026, 4, 4, 23, 59, 59)
+                .single()
+                .expect("timestamp should build");
+            let after = before + chrono::Duration::seconds(2);
+
+            assert_eq!(sink.write_at(b"before\n", before).unwrap(), 7);
+            assert_eq!(sink.write_at(b"after\n", after).unwrap(), 6);
+            sink.flush().unwrap();
+            for (instant, expected) in [(before, "before\n"), (after, "after\n")] {
+                let path =
+                    bucketed_log_path(&dir, "runtime-test", &log_bucket_key(rotation, instant));
+                assert_eq!(fs::read_to_string(&path).unwrap(), expected);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    assert_eq!(
+                        fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                        0o600
+                    );
+                }
+            }
+            drop(sink);
+            fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_rotation_preserves_old_file_and_can_retry_safely() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!("aether-runtime-logs-{}", Uuid::new_v4()));
+        let config = FileLoggingConfig::new(&dir, LogRotation::Daily, 7, 30);
+        let (sink, _) = RollingFileSink::new("runtime-test", config).unwrap();
+        let before = Local
+            .with_ymd_and_hms(2026, 4, 4, 12, 0, 0)
+            .single()
+            .unwrap();
+        let after = before + chrono::Duration::days(1);
+        let old_bucket = log_bucket_key(LogRotation::Daily, before);
+        let old_path = bucketed_log_path(&dir, "runtime-test", &old_bucket);
+        let new_path = bucketed_log_path(
+            &dir,
+            "runtime-test",
+            &log_bucket_key(LogRotation::Daily, after),
+        );
+        let victim = dir.join("victim.txt");
+        fs::write(&victim, b"unchanged").unwrap();
+        sink.write_at(b"before\n", before).unwrap();
+        symlink(&victim, &new_path).unwrap();
+
+        assert!(sink.write_at(b"rejected\n", after).is_err());
+        assert_eq!(sink.state.lock().unwrap().current_bucket, old_bucket);
+        assert_eq!(fs::read(&victim).unwrap(), b"unchanged");
+        assert_eq!(fs::read(&old_path).unwrap(), b"before\n");
+
+        fs::remove_file(&new_path).unwrap();
+        sink.write_at(b"after\n", after).unwrap();
+        sink.flush().unwrap();
+        assert_eq!(fs::read(&new_path).unwrap(), b"after\n");
+        assert_eq!(fs::read(&old_path).unwrap(), b"before\n");
+        drop(sink);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

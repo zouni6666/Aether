@@ -671,7 +671,7 @@ impl SchedulerRuntimeState for AppState {
         &self,
         limit: usize,
     ) -> Result<Vec<StoredRequestCandidate>, GatewayError> {
-        AppState::read_recent_request_candidates(self, limit).await
+        AppState::read_recent_runtime_request_candidates(self, limit).await
     }
 
     fn provider_key_rpm_reset_at(&self, key_id: &str, now_unix_secs: u64) -> Option<u64> {

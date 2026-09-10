@@ -57,7 +57,7 @@ pub(super) struct AppliedBackfill {
 }
 
 pub async fn run_backfills(pool: &PgPool) -> Result<(), MigrateError> {
-    let mut conn = pool.acquire().await?;
+    let mut conn = aether_data_postgres::acquire_postgres_migration_connection(pool).await?;
 
     if BACKFILL_MIGRATOR.locking {
         conn.lock().await?;

@@ -480,6 +480,7 @@ async fn diagnostics_metrics(
     AxumState(diagnostics): AxumState<DiagnosticsState>,
 ) -> impl axum::response::IntoResponse {
     let mut samples = diagnostics.state.metric_samples().await;
+    samples.extend(aether_runtime::logging_metric_samples());
     let servers = diagnostics.server_contexts.lock().await.clone();
     for server in servers {
         samples.extend(server.metric_samples());

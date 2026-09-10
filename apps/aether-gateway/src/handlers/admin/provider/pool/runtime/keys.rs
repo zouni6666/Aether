@@ -40,20 +40,6 @@ pub(super) fn pool_stream_timeout_key(provider_id: &str, key_id: &str) -> String
     format!("ap:{provider_id}:stream_timeout:{key_id}")
 }
 
-pub(super) fn parse_pool_cost_member(member: &str) -> u64 {
-    member
-        .rsplit_once(':')
-        .and_then(|(_, suffix)| suffix.parse::<u64>().ok())
-        .unwrap_or(0)
-}
-
-pub(super) fn parse_pool_latency_member(member: &str) -> u64 {
-    member
-        .rsplit_once(':')
-        .and_then(|(_, suffix)| suffix.parse::<u64>().ok())
-        .unwrap_or(0)
-}
-
 pub(super) fn pool_cooldown_keys(provider_id: &str, key_ids: &[String]) -> Vec<String> {
     key_ids
         .iter()

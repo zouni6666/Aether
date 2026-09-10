@@ -7,8 +7,12 @@ use crate::redis::{
 };
 use crate::{
     DataLayerError, RateLimitCheck, RateLimitInput, RateLimitScope, RuntimeSemaphoreError,
-    UsageLimitCheck, UsageLimitInput, UsageLimitReleaseInput,
+    ScoreWindowU64Stats, UsageLimitCheck, UsageLimitInput, UsageLimitReleaseInput,
+    SCORE_WINDOW_AGGREGATION_MEMBER_LIMIT,
 };
+
+const SCORE_WINDOW_STATS_SCRIPT: &str = include_str!("score_window.lua");
+const SCORE_WINDOW_STATS_PIPELINE_KEY_LIMIT: usize = 16;
 
 const RATE_LIMIT_CHECK_AND_CONSUME_SCRIPT: &str = r#"
 local user_key = KEYS[1]
@@ -52,15 +56,119 @@ end
 return {1, 0, 0, remaining}
 "#;
 
-const USAGE_LIMIT_CHECK_AND_CONSUME_SCRIPT: &str = r#"
+pub(super) const USAGE_LIMIT_CHECK_AND_CONSUME_SCRIPT: &str = r#"
 local count = #KEYS
 local now = tonumber(ARGV[1])
 local event_id = ARGV[2]
 
+-- Large mixed windows are copied in bounded commands on an exclusive WATCH
+-- connection. This read-only pass must finish before pruning any of the rules.
+if ARGV[count * 3 + 3] ~= 'inline' and redis.acl_check_cmd then
+    local deferred = {2}
+    for i = 1, count do
+        local key = KEYS[i]
+        if redis.call('ZCARD', key) > 4096 then
+            local cutoff = now - tonumber(ARGV[(i - 1) * 3 + 4]) * 1000
+            local expired = redis.pcall('ZCOUNT', key, '-inf', cutoff)
+            if type(expired) == 'number' and expired > 4096 then
+                local live = redis.call('ZCARD', key) - expired
+                local temporary = key .. ':__usage_copy:acl'
+                if live > 256
+                    and redis.acl_check_cmd('WATCH', key)
+                    and redis.acl_check_cmd('UNWATCH')
+                    and redis.acl_check_cmd('MULTI')
+                    and redis.acl_check_cmd('EXEC')
+                    and redis.acl_check_cmd('EVAL', 'return 1', 0)
+                    and redis.acl_check_cmd('EXISTS', temporary)
+                    and redis.acl_check_cmd('ZRANGE', key, 0, 511, 'WITHSCORES')
+                    and redis.acl_check_cmd('ZADD', temporary, 0, 'acl')
+                    and redis.acl_check_cmd('PTTL', key)
+                    and redis.acl_check_cmd('PEXPIRE', temporary, 60000)
+                    and redis.acl_check_cmd('PERSIST', temporary)
+                    and redis.acl_check_cmd('UNLINK', key, temporary)
+                    and redis.acl_check_cmd('RENAME', temporary, key) then
+                    deferred[#deferred + 1] = i
+                    deferred[#deferred + 1] = expired
+                    deferred[#deferred + 1] = live
+                end
+            end
+        end
+    end
+    if #deferred > 1 then return deferred end
+end
+
+local function replace_with_survivors(key, live)
+    if not redis.acl_check_cmd then return false end
+    local temporary = key .. ':__usage_trim'
+    local exists = redis.pcall('EXISTS', temporary)
+    local ttl = redis.pcall('PTTL', key)
+    if exists ~= 0 or type(ttl) ~= 'number' or ttl == 0 or ttl < -1 then
+        return false
+    end
+    local rows = redis.call('ZRANGE', key, -live, -1, 'WITHSCORES')
+    local args = {}
+    for i = 1, #rows, 2 do
+        args[#args + 1] = rows[i + 1]
+        args[#args + 1] = rows[i]
+    end
+    -- Validate every write before detaching the original. The temporary key
+    -- is fully built first; restricted ACLs keep the original cleanup path.
+    if not redis.acl_check_cmd('ZADD', temporary, unpack(args))
+        or not redis.acl_check_cmd('UNLINK', key)
+        or not redis.acl_check_cmd('UNLINK', temporary)
+        or not redis.acl_check_cmd('RENAME', temporary, key)
+        or (ttl > 0 and not redis.acl_check_cmd('PEXPIRE', temporary, ttl)) then
+        return false
+    end
+    if type(redis.pcall('ZADD', temporary, unpack(args))) ~= 'number' then
+        return false
+    end
+    if ttl > 0 and redis.pcall('PEXPIRE', temporary, ttl) ~= 1 then
+        redis.call('UNLINK', temporary)
+        return false
+    end
+    if type(redis.pcall('UNLINK', key)) ~= 'number' then
+        redis.call('UNLINK', temporary)
+        return false
+    end
+    redis.call('RENAME', temporary, key)
+    return true
+end
+
+local function prune_window(key, cutoff)
+    local cardinality = redis.call('ZCARD', key)
+    if cardinality == 0 then return 0 end
+    if cardinality > 256 then
+        local earliest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
+        if #earliest >= 2 and tonumber(earliest[2]) > cutoff then
+            return cardinality
+        end
+        local latest = redis.call('ZRANGE', key, -1, -1, 'WITHSCORES')
+        if #latest >= 2 and tonumber(latest[2]) <= cutoff then
+            -- The entire window is expired. Redis can free the detached object
+            -- off its command thread while this key is reused.
+            local result = redis.pcall('UNLINK', key)
+            if type(result) == 'number' then return 0 end
+        elseif cardinality > 1024 then
+            local expired = redis.pcall('ZCOUNT', key, '-inf', cutoff)
+            if type(expired) == 'number' then
+                local live = cardinality - expired
+                if live > 0 and live <= 256 and expired > live * 4
+                    and replace_with_survivors(key, live) then
+                    return live
+                end
+            end
+        end
+    end
+    -- Preserve the existing path for large live windows and restricted ACLs.
+    -- Partial deferred deletion could resurrect entries on out-of-order calls.
+    return cardinality - redis.call('ZREMRANGEBYSCORE', key, '-inf', cutoff)
+end
+
+local current_counts = {}
 for i = 1, count do
     local window_ms = tonumber(ARGV[(i - 1) * 3 + 4]) * 1000
-    local cutoff = now - window_ms
-    redis.call('ZREMRANGEBYSCORE', KEYS[i], '-inf', cutoff)
+    current_counts[i] = prune_window(KEYS[i], now - window_ms)
 end
 
 for i = 1, count do
@@ -68,7 +176,7 @@ for i = 1, count do
     local window_ms = tonumber(ARGV[(i - 1) * 3 + 4]) * 1000
     local already_consumed = redis.call('ZSCORE', KEYS[i], event_id)
     if not already_consumed then
-        local current = redis.call('ZCARD', KEYS[i])
+        local current = current_counts[i]
         if current >= limit then
             local earliest = redis.call('ZRANGE', KEYS[i], 0, 0, 'WITHSCORES')
             local retry_after = 1
@@ -362,30 +470,17 @@ impl RedisRuntimeRunner {
         &self,
         input: UsageLimitInput<'_>,
     ) -> Result<UsageLimitCheck, DataLayerError> {
-        let script = script(USAGE_LIMIT_CHECK_AND_CONSUME_SCRIPT);
-        let mut invocation = script.prepare_invoke();
-        for rule in input.rules {
-            invocation.key(self.keyspace.key(rule.key));
-        }
-        invocation.arg(input.now_unix_ms as i64);
-        invocation.arg(input.event_id);
-        for rule in input.rules {
-            invocation.arg(rule.limit as i64);
-            invocation.arg(rule.window_seconds as i64);
-            invocation.arg(rule.retention_seconds as i64);
-        }
+        let keys = input
+            .rules
+            .iter()
+            .map(|rule| self.keyspace.key(rule.key))
+            .collect::<Vec<_>>();
         let raw = run_lane_with_timeout(
             &self.connections,
             RedisConnectionLane::Fast,
-            self.command_timeout_ms,
+            Some(self.command_timeout_ms.unwrap_or(30_000)),
             "runtime usage limit check",
-            async {
-                let mut connection = self.connections.connection(RedisConnectionLane::Fast);
-                invocation
-                    .invoke_async::<Vec<i64>>(&mut connection)
-                    .await
-                    .map_redis_err()
-            },
+            super::usage_cleanup::check_and_consume(&self.connections, &keys, &input),
         )
         .await?;
         match raw.first().copied() {
@@ -537,6 +632,72 @@ impl RedisRuntimeRunner {
         command.arg(&key).arg(min_score).arg("+inf");
         self.query(RedisConnectionLane::Admin, "runtime score range", command)
             .await
+    }
+
+    pub(crate) async fn score_window_u64_stats_by_min(
+        &self,
+        keys: &[String],
+        min_score: f64,
+    ) -> Result<Vec<Option<ScoreWindowU64Stats>>, DataLayerError> {
+        let script = script(SCORE_WINDOW_STATS_SCRIPT);
+        let mut output = Vec::with_capacity(keys.len());
+        for batch in keys.chunks(SCORE_WINDOW_STATS_PIPELINE_KEY_LIMIT) {
+            let values: Vec<(u8, String, u64)> = run_lane_with_timeout(
+                &self.connections,
+                RedisConnectionLane::Admin,
+                self.command_timeout_ms,
+                "runtime score window stats",
+                async {
+                    let mut connection = self.connections.connection(RedisConnectionLane::Admin);
+                    let mut pipeline = redis::pipe();
+                    for key in batch {
+                        pipeline
+                            .cmd("EVALSHA")
+                            .arg(script.get_hash())
+                            .arg(1)
+                            .arg(self.keyspace.key(key))
+                            .arg(min_score)
+                            .arg(SCORE_WINDOW_AGGREGATION_MEMBER_LIMIT);
+                    }
+                    match pipeline.query_async(&mut connection).await {
+                        Err(err) if err.kind() == redis::ErrorKind::NoScriptError => {
+                            script
+                                .prepare_invoke()
+                                .load_async(&mut connection)
+                                .await
+                                .map_redis_err()?;
+                            pipeline.query_async(&mut connection).await.map_redis_err()
+                        }
+                        result => result.map_redis_err(),
+                    }
+                },
+            )
+            .await?;
+            if values.len() != batch.len() {
+                return Err(DataLayerError::UnexpectedValue(
+                    "runtime score window stats result count mismatch".to_string(),
+                ));
+            }
+            for (aggregated, sum, positive_count) in values {
+                output.push(match aggregated {
+                    0 => None,
+                    1 => Some(ScoreWindowU64Stats {
+                        sum: sum.parse().map_err(|_| {
+                            DataLayerError::UnexpectedValue(
+                                "runtime score window stats returned an invalid sum".to_string(),
+                            )
+                        })?,
+                        positive_count,
+                    }),
+                    _ => {
+                        return Err(DataLayerError::UnexpectedValue(
+                            "runtime score window stats returned an invalid status".to_string(),
+                        ))
+                    }
+                });
+            }
+        }
+        Ok(output)
     }
 
     pub(crate) async fn score_remove_by_score(

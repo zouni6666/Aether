@@ -8,6 +8,7 @@ use aether_data::repository::users::StoredUserGroup;
 use aether_data_contracts::repository::billing::UserDailyQuotaAvailabilityRecord;
 use aether_data_contracts::repository::quota::StoredProviderQuotaSnapshot;
 use aether_data_contracts::repository::usage::UsageCounterHealthSnapshot;
+use aether_gateway_frontdoor::HttpConnectionBudget;
 use aether_runtime::ConcurrencyGate;
 use aether_runtime_state::{RuntimeSemaphore, RuntimeState};
 use dashmap::DashMap;
@@ -35,6 +36,7 @@ use super::{
 };
 
 const MIN_REQUEST_BODY_READ_TIMEOUT_MS: u64 = 1_000;
+const DEFAULT_REQUEST_BODY_READ_TIMEOUT_MS: u64 = 120_000;
 const MAX_REQUEST_BODY_READ_TIMEOUT_MS: u64 = 600_000;
 const REQUEST_BODY_READ_TIMEOUT_MS_ENV: &str = "AETHER_GATEWAY_REQUEST_BODY_READ_TIMEOUT_MS";
 const DEFAULT_REQUEST_BODY_BUFFER_BUDGET_MB: usize = 256;
@@ -193,7 +195,9 @@ fn optional_env_duration_ms(key: &str, min_ms: u64, max_ms: u64) -> Option<Durat
 }
 
 fn parse_optional_duration_ms(raw: Option<&str>, min_ms: u64, max_ms: u64) -> Option<Duration> {
-    let parsed = raw?.trim().parse::<u64>().ok()?;
+    let parsed = raw
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_REQUEST_BODY_READ_TIMEOUT_MS);
     if parsed == 0 {
         return None;
     }
@@ -388,6 +392,7 @@ pub struct AppState {
     pub(crate) video_task_poller: Option<VideoTaskPollerConfig>,
     pub(crate) frontdoor_runtime_guards: Arc<FrontdoorRuntimeGuardConfig>,
     pub(crate) request_body_buffer_budget: Arc<Semaphore>,
+    pub(crate) http_connection_budget: Option<Arc<HttpConnectionBudget>>,
     pub(crate) request_gate: Option<Arc<ConcurrencyGate>>,
     pub(crate) websocket_connection_gate: Option<Arc<ConcurrencyGate>>,
     pub(crate) auth_snapshot_load_gate: Option<Arc<ConcurrencyGate>>,
@@ -456,6 +461,8 @@ pub struct AppState {
         Arc<DashMap<String, LocalExecutionRuntimeMissDiagnostic>>,
     pub(crate) admin_monitoring_error_stats_reset_at: Arc<StdMutex<Option<u64>>>,
     pub(crate) provider_delete_tasks: Arc<StdMutex<HashMap<String, LocalProviderDeleteTaskState>>>,
+    pub(crate) pool_quota_probe_replenish:
+        Arc<crate::maintenance::PoolQuotaProbeReplenishCoordinator>,
     #[cfg(test)]
     pub(crate) turnstile_siteverify_url_override: Option<String>,
     #[cfg(test)]
@@ -533,20 +540,22 @@ mod tests {
     };
 
     #[test]
-    fn request_body_read_timeout_parser_defaults_to_disabled() {
-        assert_eq!(
-            parse_optional_duration_ms(
-                None,
-                MIN_REQUEST_BODY_READ_TIMEOUT_MS,
-                MAX_REQUEST_BODY_READ_TIMEOUT_MS,
-            ),
-            None
-        );
+    fn request_body_read_timeout_parser_uses_a_finite_default() {
+        for value in [None, Some(""), Some("invalid"), Some("-1")] {
+            assert_eq!(
+                parse_optional_duration_ms(
+                    value,
+                    MIN_REQUEST_BODY_READ_TIMEOUT_MS,
+                    MAX_REQUEST_BODY_READ_TIMEOUT_MS,
+                ),
+                Some(Duration::from_millis(DEFAULT_REQUEST_BODY_READ_TIMEOUT_MS)),
+            );
+        }
     }
 
     #[test]
-    fn request_body_read_timeout_parser_disables_zero_and_invalid_values() {
-        for value in ["", "invalid", "-1", "0", " 0 "] {
+    fn request_body_read_timeout_parser_only_disables_explicit_zero() {
+        for value in ["0", " 0 "] {
             assert_eq!(
                 parse_optional_duration_ms(
                     Some(value),

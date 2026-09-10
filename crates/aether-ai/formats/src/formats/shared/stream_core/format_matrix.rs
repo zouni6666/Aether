@@ -423,9 +423,25 @@ impl TerminalStreamParser {
         {
             return Some(Self::OpenAIImage(OpenAiImageStreamTerminalState::default()));
         }
-        ProviderStreamParser::for_api_format(provider_api_format).map(Self::Standard)
+        let provider = match ProviderStreamParser::for_api_format(provider_api_format)? {
+            ProviderStreamParser::OpenAIChat(_) => {
+                ProviderStreamParser::OpenAIChat(OpenAIChatProviderState::terminal_observation())
+            }
+            ProviderStreamParser::OpenAIResponses(_) => ProviderStreamParser::OpenAIResponses(
+                OpenAIResponsesProviderState::terminal_observation(),
+            ),
+            ProviderStreamParser::Gemini(_) => {
+                ProviderStreamParser::Gemini(GeminiProviderState::terminal_observation())
+            }
+            provider @ ProviderStreamParser::Claude(_) => provider,
+        };
+        Some(Self::Standard(provider))
     }
 }
+
+#[cfg(test)]
+#[path = "terminal_observation_tests.rs"]
+mod terminal_observation_tests;
 
 enum ProviderStreamParser {
     OpenAIChat(OpenAIChatProviderState),

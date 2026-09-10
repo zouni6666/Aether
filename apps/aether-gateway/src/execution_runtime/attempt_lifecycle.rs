@@ -674,8 +674,10 @@ impl ExecutionAttemptLifecycle {
         let billing_void = settlement.billing.is_void();
         let usage_runtime = Arc::clone(&state.usage_runtime);
         let usage_data = Arc::clone(state.usage_lifecycle_data_state());
+        let usage_producer = usage_runtime.track_producer();
         self.stage_guard
             .await_detachable_stage(self.trace_id.as_str(), "usage_terminal", async move {
+                let _usage_producer = usage_producer;
                 usage_runtime
                     .record_stream_terminal(
                         usage_data.as_ref(),

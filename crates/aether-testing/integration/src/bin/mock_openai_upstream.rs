@@ -441,6 +441,7 @@ async fn chat_completions(State(app): State<App>, request: axum::extract::Reques
             completion
                 .take()
                 .expect("request completion guard should be present"),
+            false,
         );
     }
 
@@ -457,6 +458,14 @@ async fn chat_completions(State(app): State<App>, request: axum::extract::Reques
     };
     let stream = request_wants_stream(&body);
     if stream {
+        let include_usage = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| {
+                value
+                    .pointer("/stream_options/include_usage")
+                    .and_then(serde_json::Value::as_bool)
+            })
+            .unwrap_or(false);
         record_response_header_created(&app, request_started.started_at.elapsed());
         return build_chat_sse_response(
             app,
@@ -464,6 +473,7 @@ async fn chat_completions(State(app): State<App>, request: axum::extract::Reques
             completion
                 .take()
                 .expect("request completion guard should be present"),
+            include_usage,
         );
     }
     // A stream truncation profile only applies after the request is known to be streaming.
@@ -609,6 +619,7 @@ fn build_chat_sse_response(
     app: App,
     profile: RequestProfile,
     completion: RequestCompletionGuard,
+    include_usage: bool,
 ) -> Response {
     let response_created_at = Instant::now();
     let config = app.config.clone();
@@ -659,6 +670,21 @@ fn build_chat_sse_response(
         yield Ok::<Bytes, std::io::Error>(Bytes::from(
             "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
         ));
+        if include_usage {
+            let payload = json!({
+                "id": "chatcmpl-mock",
+                "object": "chat.completion.chunk",
+                "created": current_unix_secs(),
+                "model": "mock-model",
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": config.chunks.max(1),
+                    "total_tokens": config.chunks.max(1) + 1
+                }
+            });
+            yield Ok::<Bytes, std::io::Error>(Bytes::from(format!("data: {payload}\n\n")));
+        }
         yield Ok::<Bytes, std::io::Error>(Bytes::from("data: [DONE]\n\n"));
         if let Some(completion) = completion.take() {
             completion.complete();
@@ -1465,7 +1491,11 @@ mod tests {
     ) {
         let response = client
             .post(url)
-            .json(&json!({"stream": true, "model": "mock-test"}))
+            .json(&json!({
+                "stream": true,
+                "model": "mock-test",
+                "stream_options": {"include_usage": true}
+            }))
             .send()
             .await
             .expect("headers should arrive before the body error");
@@ -1505,6 +1535,78 @@ mod tests {
             !body.contains("[DONE]"),
             "truncated stream must not emit [DONE]"
         );
+        assert!(
+            !body.contains("\"usage\""),
+            "truncated stream must not emit terminal usage"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_stream_usage_is_opt_in_and_precedes_done() {
+        for chunks in [0, 3] {
+            for (include_usage, assume_stream) in [
+                (None, false),
+                (Some(false), false),
+                (Some(true), false),
+                (Some(true), true),
+            ] {
+                let config = Config {
+                    chunks,
+                    chunk_delay: Duration::ZERO,
+                    assume_stream,
+                    ..Default::default()
+                };
+                let app = App {
+                    metrics: Arc::new(Metrics::for_binds(&config.binds)),
+                    bind_label: Arc::from(config.binds[0].to_string()),
+                    config,
+                };
+                let mut payload = json!({"stream": true, "model": "mock-test"});
+                if let Some(include_usage) = include_usage {
+                    payload["stream_options"] = json!({"include_usage": include_usage});
+                }
+                let request = axum::http::Request::builder()
+                    .body(Body::from(payload.to_string()))
+                    .unwrap();
+                let response = chat_completions(State(app), request).await;
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+                let body = std::str::from_utf8(&body).unwrap();
+                let frames = body
+                    .split("\n\n")
+                    .filter_map(|frame| frame.strip_prefix("data: "))
+                    .collect::<Vec<_>>();
+                assert_eq!(frames.last(), Some(&"[DONE]"));
+                let payloads = frames[..frames.len() - 1]
+                    .iter()
+                    .map(|frame| serde_json::from_str::<serde_json::Value>(frame).unwrap())
+                    .collect::<Vec<_>>();
+                let usage_chunks = payloads
+                    .iter()
+                    .filter(|payload| payload.get("usage").is_some())
+                    .collect::<Vec<_>>();
+                if include_usage == Some(true) && !assume_stream {
+                    assert_eq!(usage_chunks.len(), 1);
+                    assert_eq!(payloads.last(), Some(usage_chunks[0]));
+                    assert_eq!(usage_chunks[0]["object"], "chat.completion.chunk");
+                    assert_eq!(usage_chunks[0]["choices"], json!([]));
+                    assert_eq!(
+                        usage_chunks[0]["usage"],
+                        json!({
+                            "prompt_tokens": 1,
+                            "completion_tokens": chunks.max(1),
+                            "total_tokens": chunks.max(1) + 1
+                        })
+                    );
+                    assert_eq!(
+                        payloads[payloads.len() - 2]["choices"][0]["finish_reason"],
+                        "stop"
+                    );
+                } else {
+                    assert!(usage_chunks.is_empty());
+                }
+            }
+        }
     }
 
     async fn wait_for_completed(metrics: &Metrics, expected: u64) {

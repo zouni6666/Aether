@@ -1937,6 +1937,7 @@ pub(crate) async fn start_admin_system_rollback_task(
 }
 
 fn request_process_restart() -> ! {
+    let _ = aether_runtime::shutdown_logging(std::time::Duration::from_secs(2));
     std::process::exit(RESTART_EXIT_CODE);
 }
 

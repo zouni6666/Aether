@@ -1,8 +1,14 @@
+mod capture_memory;
 mod compression;
 mod metadata_policy;
 mod policy;
 mod types;
 
+#[doc(hidden)]
+pub use capture_memory::{
+    mark_usage_capture_memory_omitted, usage_json_heap_estimate, UsageCaptureMemoryBudget,
+    UsageCaptureRetention,
+};
 pub use compression::{read_decompressed_usage_json, MAX_DECOMPRESSED_USAGE_JSON_BYTES};
 pub use metadata_policy::*;
 pub use policy::*;

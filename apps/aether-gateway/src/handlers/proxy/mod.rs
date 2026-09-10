@@ -1035,11 +1035,10 @@ pub(crate) async fn proxy_request(
     ConnectInfo(remote_addr): ConnectInfo<std::net::SocketAddr>,
     request: Request,
 ) -> Result<Response<Body>, GatewayError> {
-    crate::request_lifecycle::run_request(Box::pin(proxy_request_inner(
-        state,
-        remote_addr,
-        request,
-    )))
+    crate::request_lifecycle::run_request_with_usage(
+        state.usage_runtime.clone(),
+        Box::pin(proxy_request_inner(state, remote_addr, request)),
+    )
     .await
 }
 
@@ -3267,6 +3266,113 @@ mod tests {
                 }
             )
         ));
+    }
+
+    #[tokio::test]
+    async fn request_body_buffer_allows_parallel_compressed_uploads() {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(br#"{"model":"test"}"#).unwrap();
+        let encoded = Bytes::from(encoder.finish().unwrap());
+        let budget_bytes = 2 * crate::state::REQUEST_BODY_BUFFER_PERMIT_BYTES;
+        let budget = Arc::new(Semaphore::new(2));
+        let policy = RequestBodyBufferPolicy::for_tests_with_budget(
+            budget_bytes as u64,
+            Duration::from_secs(1),
+            Duration::from_millis(50),
+            budget_bytes,
+            Arc::clone(&budget),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+        headers.insert(header::CONTENT_LENGTH, HeaderValue::from(encoded.len()));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+        let first_policy = policy.clone();
+        let mut first_headers = headers.clone();
+        let first_encoded = encoded.clone();
+        let first = async move {
+            let stream = async_stream::stream! {
+                let middle = first_encoded.len() / 2;
+                yield Ok::<_, std::io::Error>(first_encoded.slice(..middle));
+                let _ = started_tx.send(());
+                let _ = finish_rx.await;
+                yield Ok(first_encoded.slice(middle..));
+            };
+            buffer_and_normalize_request_body(
+                &mut Some(Body::from_stream(stream)),
+                &mut first_headers,
+                "test owns body",
+                "trace-compressed-first",
+                &Method::POST,
+                "/v1/responses",
+                "test",
+                first_policy,
+            )
+            .await
+        };
+        let second = async move {
+            started_rx.await.unwrap();
+            let result = buffer_and_normalize_request_body(
+                &mut Some(Body::from(encoded)),
+                &mut headers,
+                "test owns body",
+                "trace-compressed-second",
+                &Method::POST,
+                "/v1/responses",
+                "test",
+                policy,
+            )
+            .await;
+            let _ = finish_tx.send(());
+            result
+        };
+        let (first, second) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(first, second)
+        })
+        .await
+        .expect("concurrent compressed requests should finish");
+        assert_eq!(first.unwrap().as_ref(), br#"{"model":"test"}"#);
+        assert_eq!(second.unwrap().as_ref(), br#"{"model":"test"}"#);
+        assert_eq!(budget.available_permits(), 2);
+    }
+
+    #[tokio::test]
+    async fn request_body_buffer_rejects_decompression_growth_when_budget_is_busy() {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&vec![b'a'; 100_000]).unwrap();
+        let encoded = encoder.finish().unwrap();
+        let budget_bytes = 2 * crate::state::REQUEST_BODY_BUFFER_PERMIT_BYTES;
+        let budget = Arc::new(Semaphore::new(2));
+        let held = Arc::clone(&budget).acquire_owned().await.unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+        headers.insert(header::CONTENT_LENGTH, HeaderValue::from(encoded.len()));
+        let result = buffer_and_normalize_request_body(
+            &mut Some(Body::from(encoded)),
+            &mut headers,
+            "test owns body",
+            "trace-decompression-overload",
+            &Method::POST,
+            "/v1/responses",
+            "test",
+            RequestBodyBufferPolicy::for_tests_with_budget(
+                budget_bytes as u64,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                budget_bytes,
+                Arc::clone(&budget),
+            ),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            result,
+            RequestBodyBufferError::Overloaded { timeout_ms: 0, .. }
+        ));
+        assert_eq!(result.http_status(), http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(budget.available_permits(), 1);
+        drop(held);
+        assert_eq!(budget.available_permits(), 2);
     }
 
     #[tokio::test]

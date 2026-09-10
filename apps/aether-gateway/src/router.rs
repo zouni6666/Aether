@@ -18,6 +18,7 @@ use tower::{Service as _, ServiceExt};
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::warn;
 
+use aether_gateway_frontdoor::{http_connection_limit, HttpConnectionBudget};
 use aether_runtime::{prometheus_response, ConcurrencyError};
 use aether_runtime_state::RuntimeSemaphoreError;
 
@@ -244,9 +245,23 @@ pub(crate) enum RequestAdmissionError {
 pub async fn serve_tcp(bind: &str) -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let router = build_router()?;
+    let configured_connection_limit = std::env::var("AETHER_GATEWAY_MAX_HTTP_CONNECTIONS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok());
+    // This compatibility entry point has no configured request capacities or FD probe.
+    let connection_budget = Arc::new(HttpConnectionBudget::new(http_connection_limit(
+        configured_connection_limit,
+        2048,
+        2048,
+        None,
+    )));
     let mut make_service = router.into_make_service_with_connect_info::<std::net::SocketAddr>();
     loop {
-        let (io, remote_addr) = listener.accept().await?;
+        let (io, remote_addr) = connection_budget.accept(&listener).await;
+        let Ok(io) = connection_budget.try_admit(io) else {
+            tokio::task::yield_now().await;
+            continue;
+        };
         let tower_service = make_service
             .call(remote_addr)
             .await

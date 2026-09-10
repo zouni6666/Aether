@@ -234,7 +234,9 @@ impl Drop for AttemptCancellationGuard {
             );
             return;
         };
+        let usage_producer = state.usage_runtime.track_producer();
         handle.spawn(async move {
+            let _usage_producer = usage_producer;
             settle_cancelled_attempt(state, armed, error_type, error_message).await;
         });
     }

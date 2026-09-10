@@ -45,7 +45,54 @@ fn merge_extra_data(
 
 #[derive(Debug, Default)]
 pub struct InMemoryRequestCandidateRepository {
-    by_id: RwLock<BTreeMap<String, StoredRequestCandidate>>,
+    rows: RwLock<CandidateRows>,
+}
+
+#[derive(Debug, Default)]
+struct CandidateRows {
+    by_id: BTreeMap<String, StoredRequestCandidate>,
+    by_request: BTreeMap<String, BTreeSet<String>>,
+    by_created: BTreeSet<(std::cmp::Reverse<u64>, String)>,
+}
+
+impl CandidateRows {
+    fn remove(&mut self, id: &str) -> Option<StoredRequestCandidate> {
+        let row = self.by_id.remove(id)?;
+        self.by_created
+            .remove(&(std::cmp::Reverse(row.created_at_unix_ms), row.id.clone()));
+        if let Some(ids) = self.by_request.get_mut(&row.request_id) {
+            ids.remove(id);
+            if ids.is_empty() {
+                self.by_request.remove(&row.request_id);
+            }
+        }
+        Some(row)
+    }
+
+    fn insert(&mut self, row: StoredRequestCandidate) -> &StoredRequestCandidate {
+        // Keep all indexes behind one lock and sanitize every insertion. Reads
+        // can clone these records without rebuilding their diagnostic JSON.
+        let row = sanitize_stored_candidate(row);
+        self.remove(&row.id);
+        self.by_request
+            .entry(row.request_id.clone())
+            .or_default()
+            .insert(row.id.clone());
+        self.by_created
+            .insert((std::cmp::Reverse(row.created_at_unix_ms), row.id.clone()));
+        self.by_id
+            .entry(row.id.clone())
+            .insert_entry(row)
+            .into_mut()
+    }
+
+    fn for_request(&self, request_id: &str) -> impl Iterator<Item = &StoredRequestCandidate> {
+        self.by_request
+            .get(request_id)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.by_id.get(id))
+    }
 }
 
 impl InMemoryRequestCandidateRepository {
@@ -53,12 +100,12 @@ impl InMemoryRequestCandidateRepository {
     where
         I: IntoIterator<Item = StoredRequestCandidate>,
     {
-        let mut by_id = BTreeMap::new();
-        for item in items.into_iter().map(sanitize_stored_candidate) {
-            by_id.insert(item.id.clone(), item);
+        let mut rows = CandidateRows::default();
+        for item in items {
+            rows.insert(item);
         }
         Self {
-            by_id: RwLock::new(by_id),
+            rows: RwLock::new(rows),
         }
     }
 }
@@ -70,13 +117,11 @@ impl RequestCandidateReadRepository for InMemoryRequestCandidateRepository {
         request_id: &str,
     ) -> Result<Vec<StoredRequestCandidate>, DataLayerError> {
         let mut rows = self
-            .by_id
+            .rows
             .read()
             .expect("request candidate repository lock")
-            .values()
-            .filter(|row| row.request_id == request_id)
+            .for_request(request_id)
             .cloned()
-            .map(sanitize_stored_candidate)
             .collect::<Vec<_>>();
         rows.sort_by(|left, right| {
             left.candidate_index
@@ -95,17 +140,14 @@ impl RequestCandidateReadRepository for InMemoryRequestCandidateRepository {
             return Ok(Vec::new());
         }
 
-        let mut rows = self
-            .by_id
-            .read()
-            .expect("request candidate repository lock")
-            .values()
+        let rows = self.rows.read().expect("request candidate repository lock");
+        Ok(rows
+            .by_created
+            .iter()
+            .take(limit)
+            .filter_map(|(_, id)| rows.by_id.get(id))
             .cloned()
-            .map(sanitize_stored_candidate)
-            .collect::<Vec<_>>();
-        rows.sort_by_key(|entry| std::cmp::Reverse(entry.created_at_unix_ms));
-        rows.truncate(limit);
-        Ok(rows)
+            .collect())
     }
 
     async fn list_by_provider_id(
@@ -118,17 +160,31 @@ impl RequestCandidateReadRepository for InMemoryRequestCandidateRepository {
         }
 
         let mut rows = self
-            .by_id
+            .rows
             .read()
             .expect("request candidate repository lock")
+            .by_id
             .values()
             .filter(|row| row.provider_id.as_deref() == Some(provider_id))
             .cloned()
-            .map(sanitize_stored_candidate)
             .collect::<Vec<_>>();
         rows.sort_by_key(|entry| std::cmp::Reverse(entry.created_at_unix_ms));
         rows.truncate(limit);
         Ok(rows)
+    }
+
+    async fn list_recent_runtime(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<StoredRequestCandidate>, DataLayerError> {
+        let rows = self.rows.read().expect("request candidate repository lock");
+        Ok(rows
+            .by_created
+            .iter()
+            .take(limit)
+            .filter_map(|(_, id)| rows.by_id.get(id))
+            .map(StoredRequestCandidate::runtime_snapshot)
+            .collect())
     }
 
     async fn list_finalized_by_endpoint_ids_since(
@@ -143,9 +199,10 @@ impl RequestCandidateReadRepository for InMemoryRequestCandidateRepository {
 
         let endpoint_ids = endpoint_ids.iter().cloned().collect::<BTreeSet<_>>();
         let mut rows = self
-            .by_id
+            .rows
             .read()
             .expect("request candidate repository lock")
+            .by_id
             .values()
             .filter(|row| {
                 row.endpoint_id
@@ -160,7 +217,6 @@ impl RequestCandidateReadRepository for InMemoryRequestCandidateRepository {
                     )
             })
             .cloned()
-            .map(sanitize_stored_candidate)
             .collect::<Vec<_>>();
         rows.sort_by_key(|entry| std::cmp::Reverse(entry.created_at_unix_ms));
         rows.truncate(limit);
@@ -179,9 +235,10 @@ impl RequestCandidateReadRepository for InMemoryRequestCandidateRepository {
         let endpoint_ids = endpoint_ids.iter().cloned().collect::<BTreeSet<_>>();
         let mut counts = BTreeMap::<(String, &'static str), u64>::new();
         for row in self
-            .by_id
+            .rows
             .read()
             .expect("request candidate repository lock")
+            .by_id
             .values()
         {
             let Some(endpoint_id) = row.endpoint_id.as_ref() else {
@@ -243,9 +300,10 @@ impl RequestCandidateReadRepository for InMemoryRequestCandidateRepository {
         let mut buckets = BTreeMap::<(String, u32), PublicHealthTimelineBucket>::new();
 
         for row in self
-            .by_id
+            .rows
             .read()
             .expect("request candidate repository lock")
+            .by_id
             .values()
         {
             let Some(endpoint_id) = row.endpoint_id.as_ref() else {
@@ -319,19 +377,17 @@ impl RequestCandidateWriteRepository for InMemoryRequestCandidateRepository {
         candidate.sanitize_for_persistence();
         candidate.validate()?;
 
-        let mut by_id = self
-            .by_id
+        let mut rows = self
+            .rows
             .write()
             .expect("request candidate repository lock");
-        let existing = by_id
-            .values()
+        let existing = rows
+            .for_request(&candidate.request_id)
             .find(|row| {
-                row.request_id == candidate.request_id
-                    && row.candidate_index == candidate.candidate_index
+                row.candidate_index == candidate.candidate_index
                     && row.retry_index == candidate.retry_index
             })
-            .cloned()
-            .map(sanitize_stored_candidate);
+            .cloned();
 
         let preserve_existing_lifecycle = existing.as_ref().is_some_and(|row| {
             request_candidate_lifecycle_would_regress(row.status, candidate.status)
@@ -449,10 +505,7 @@ impl RequestCandidateWriteRepository for InMemoryRequestCandidateRepository {
                     .or_else(|| existing.as_ref().and_then(|row| row.finished_at_unix_ms))
             },
         };
-        let stored = sanitize_stored_candidate(stored);
-
-        by_id.insert(stored.id.clone(), stored.clone());
-        Ok(stored)
+        Ok(rows.insert(stored).clone())
     }
 
     async fn delete_created_before(
@@ -464,11 +517,12 @@ impl RequestCandidateWriteRepository for InMemoryRequestCandidateRepository {
             return Ok(0);
         }
 
-        let mut by_id = self
-            .by_id
+        let mut rows = self
+            .rows
             .write()
             .expect("request candidate repository lock");
-        let mut ids = by_id
+        let mut ids = rows
+            .by_id
             .values()
             .filter(|row| row.created_at_unix_ms < created_before_unix_secs * 1000)
             .map(|row| (row.created_at_unix_ms, row.id.clone()))
@@ -477,7 +531,7 @@ impl RequestCandidateWriteRepository for InMemoryRequestCandidateRepository {
 
         let mut deleted = 0usize;
         for (_, id) in ids.into_iter().take(limit) {
-            if by_id.remove(&id).is_some() {
+            if rows.remove(&id).is_some() {
                 deleted += 1;
             }
         }
@@ -547,6 +601,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn request_index_tracks_replaced_ids_and_removes_empty_requests() {
+        let repository = InMemoryRequestCandidateRepository::seed([
+            sample_candidate("same-id", "old-request", 100),
+            sample_candidate("same-id", "new-request", 200),
+            sample_candidate("other-id", "new-request", 300),
+        ]);
+        assert!(repository
+            .list_by_request_id("old-request")
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            repository
+                .list_by_request_id("new-request")
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(repository.delete_created_before(1, 1).await.unwrap(), 1);
+        let remaining = repository.list_by_request_id("new-request").await.unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, "other-id");
+        assert_eq!(repository.delete_created_before(1, 1).await.unwrap(), 1);
+        let rows = repository.rows.read().unwrap();
+        assert!(rows.by_id.is_empty());
+        assert!(rows.by_request.is_empty());
+        assert!(rows.by_created.is_empty());
+    }
+
+    #[tokio::test]
+    async fn recent_index_preserves_equal_timestamp_order_and_replaced_dates() {
+        let repository = InMemoryRequestCandidateRepository::seed([
+            sample_candidate("b", "req-b", 400),
+            sample_candidate("a", "req-a", 200),
+            sample_candidate("c", "req-c", 200),
+            sample_candidate("b", "req-b", 100),
+        ]);
+        let recent = repository.list_recent(2).await.unwrap();
+        assert_eq!(
+            recent.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["a", "c"]
+        );
+        assert_eq!(repository.list_recent(0).await.unwrap().len(), 0);
+        assert_eq!(repository.rows.read().unwrap().by_created.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn runtime_reads_keep_metadata_without_diagnostic_payloads() {
+        let mut candidate = sample_candidate("candidate", "request", 100);
+        candidate.extra_data = Some(json!({"upstream_response": {"body": "x".repeat(32_768)}}));
+        candidate.error_message = Some("diagnostic detail".into());
+        candidate.required_capabilities = Some(json!({"vision": true}));
+        candidate.concurrent_requests = Some(17);
+        let repository = InMemoryRequestCandidateRepository::seed([candidate]);
+        let full = repository.list_recent(1).await.unwrap();
+        let runtime = repository.list_recent_runtime(1).await.unwrap();
+        assert_eq!(
+            runtime,
+            full.iter()
+                .map(StoredRequestCandidate::runtime_snapshot)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(runtime[0].concurrent_requests, Some(17));
+        assert!(runtime[0].extra_data.is_none());
+        assert!(runtime[0].error_message.is_none());
+        assert!(runtime[0].required_capabilities.is_none());
+        assert!(full[0].extra_data.is_some());
+        assert_eq!(repository.list_recent(1).await.unwrap(), full);
+        assert!(repository.list_recent_runtime(0).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn lists_recent_request_candidates_in_descending_created_order() {
         let repository = InMemoryRequestCandidateRepository::seed(vec![
             sample_candidate("cand-1", "req-1", 100),
@@ -602,10 +729,11 @@ mod tests {
 
         {
             let stored = repository
-                .by_id
+                .rows
                 .read()
                 .expect("request candidate repository lock");
             let candidate = stored
+                .by_id
                 .get("cand-raw")
                 .expect("seeded candidate should exist");
             assert_eq!(
@@ -628,10 +756,10 @@ mod tests {
         bypassed_candidate.id = "cand-bypassed".to_string();
         bypassed_candidate.request_id = "req-bypassed".to_string();
         repository
-            .by_id
+            .rows
             .write()
             .expect("request candidate repository lock")
-            .insert(bypassed_candidate.id.clone(), bypassed_candidate);
+            .insert(bypassed_candidate);
 
         let rows = repository
             .list_recent(10)

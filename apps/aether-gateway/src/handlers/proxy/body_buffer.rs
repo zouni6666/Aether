@@ -225,6 +225,9 @@ impl RequestBodyBufferError {
                 RequestBodyNormalizationError::RequestBodyTooLarge { .. } => {
                     "request_body_too_large"
                 }
+                RequestBodyNormalizationError::BodyBufferOverloaded { .. } => {
+                    "request_body_buffer_overloaded"
+                }
             },
             Self::TooLarge { .. } => "request_body_too_large",
             Self::Overloaded { .. } => "request_body_buffer_overloaded",
@@ -292,15 +295,37 @@ pub(super) async fn buffer_and_normalize_request_body(
         .await
         .map_err(RequestBodyBufferError::from)?;
     let elapsed_ms = buffered.elapsed().as_millis() as u64;
+    let retained_input_capacity = buffered
+        .requested_bytes()
+        .saturating_sub(buffered.bytes().len());
     let normalized = buffered
-        .try_map(|body| {
-            crate::headers::normalize_request_body_headers_and_bytes_with_limit(
+        .try_map_with_budget(|body, memory| {
+            crate::headers::normalize_request_body_headers_and_bytes_with_budget(
                 headers,
                 body,
                 policy.effective_max_bytes(),
+                &mut |requested_bytes| {
+                    let requested_bytes = requested_bytes.saturating_add(retained_input_capacity);
+                    memory.try_reserve_bytes(requested_bytes).map_err(|_| {
+                        RequestBodyNormalizationError::BodyBufferOverloaded {
+                            requested_bytes,
+                            budget_bytes: policy.budget_bytes(),
+                        }
+                    })
+                },
             )
         })
-        .map_err(RequestBodyBufferError::Normalization)?;
+        .map_err(|error| match error {
+            RequestBodyNormalizationError::BodyBufferOverloaded {
+                requested_bytes,
+                budget_bytes,
+            } => RequestBodyBufferError::Overloaded {
+                requested_bytes,
+                budget_bytes,
+                timeout_ms: 0,
+            },
+            error => RequestBodyBufferError::Normalization(error),
+        })?;
     info!(
         event_name = "frontdoor_request_body_buffer_completed",
         log_type = "event",

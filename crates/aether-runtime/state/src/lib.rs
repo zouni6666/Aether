@@ -1,6 +1,7 @@
 mod error;
 mod memory;
 pub mod redis;
+mod score_window;
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -17,6 +18,7 @@ use async_trait::async_trait;
 pub use error::DataLayerError;
 use memory::MemoryRuntimeBackend;
 pub use memory::MemoryRuntimeStateConfig;
+pub use score_window::{ScoreWindowU64Stats, SCORE_WINDOW_AGGREGATION_MEMBER_LIMIT};
 use tokio::task::JoinHandle;
 use tracing::warn;
 use uuid::Uuid;
@@ -621,6 +623,32 @@ impl RuntimeState {
         }
     }
 
+    /// Aggregate at most 512 timestamped `prefix:u64` members per key without
+    /// transferring their history. `None` requires an exact full-range fallback;
+    /// it never represents an empty or cached window.
+    pub async fn score_window_u64_stats_by_min(
+        &self,
+        keys: &[String],
+        min_score: f64,
+    ) -> Result<Vec<Option<ScoreWindowU64Stats>>, DataLayerError> {
+        if !min_score.is_finite() {
+            return Err(DataLayerError::InvalidInput(
+                "runtime window minimum score must be finite".to_string(),
+            ));
+        }
+        match self.backend.as_ref() {
+            RuntimeStateBackend::Memory(memory) => {
+                Ok(memory.score_window_u64_stats_by_min(keys, min_score).await)
+            }
+            RuntimeStateBackend::Redis(redis) => {
+                redis
+                    .runtime
+                    .score_window_u64_stats_by_min(keys, min_score)
+                    .await
+            }
+        }
+    }
+
     pub async fn score_remove_by_score(
         &self,
         key: &str,
@@ -1046,6 +1074,26 @@ pub struct RuntimeQueueEntry {
     pub fields: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeQueueReclaimPage {
+    /// Resume the next reclaim scan here; `0-0` marks the end of the current scan.
+    pub next_start_id: String,
+    pub entries: Vec<RuntimeQueueEntry>,
+    pub deleted_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeQueueTransferOutcome {
+    Transferred {
+        destination_id: String,
+        acked: usize,
+        deleted: usize,
+    },
+    /// No pending entry was present. This does not assert that it was archived:
+    /// another consumer, deletion, or retention policy may have removed it.
+    NotPending,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RuntimeQueueStats {
     pub stream_length: u64,
@@ -1085,6 +1133,45 @@ fn validate_runtime_queue_reclaim_config(
     Ok(())
 }
 
+pub(crate) fn validate_runtime_queue_transfer(
+    source: &str,
+    group: &str,
+    entry_id: &str,
+    destination: &str,
+    destination_fields: &BTreeMap<String, String>,
+) -> Result<(), DataLayerError> {
+    validate_runtime_queue_name(source, "runtime queue source stream")?;
+    validate_runtime_queue_name(group, "runtime queue group")?;
+    validate_runtime_queue_name(destination, "runtime queue destination stream")?;
+    if source == destination {
+        return Err(DataLayerError::InvalidInput(
+            "runtime queue transfer source and destination must differ".to_string(),
+        ));
+    }
+    if destination_fields.is_empty() {
+        return Err(DataLayerError::InvalidInput(
+            "runtime queue transfer destination fields cannot be empty".to_string(),
+        ));
+    }
+    let canonical_u64 = |value: &str| {
+        !value.is_empty()
+            && value.bytes().all(|byte| byte.is_ascii_digit())
+            && (value.len() == 1 || !value.starts_with('0'))
+            && value.parse::<u64>().is_ok()
+    };
+    if !entry_id
+        .split_once('-')
+        .is_some_and(|(milliseconds, sequence)| {
+            canonical_u64(milliseconds) && canonical_u64(sequence)
+        })
+    {
+        return Err(DataLayerError::InvalidInput(
+            "runtime queue transfer entry id must be a canonical u64-u64 stream id".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[async_trait]
 pub trait RuntimeQueueStore: Send + Sync {
     async fn ensure_consumer_group(
@@ -1118,6 +1205,39 @@ pub trait RuntimeQueueStore: Send + Sync {
         start_id: &str,
         config: RuntimeQueueReclaimConfig,
     ) -> Result<Vec<RuntimeQueueEntry>, DataLayerError>;
+
+    /// Existing queue backends can retain their complete-scan behavior without implementing paging.
+    async fn claim_stale_page(
+        &self,
+        stream: &str,
+        group: &str,
+        consumer: &str,
+        start_id: &str,
+        config: RuntimeQueueReclaimConfig,
+    ) -> Result<RuntimeQueueReclaimPage, DataLayerError> {
+        Ok(RuntimeQueueReclaimPage {
+            next_start_id: "0-0".to_string(),
+            entries: self
+                .claim_stale(stream, group, consumer, start_id, config)
+                .await?,
+            deleted_ids: Vec::new(),
+        })
+    }
+
+    /// Atomically append caller-supplied fields, acknowledge the pending source entry, and
+    /// delete that source ID. Repeated calls must not append when the entry is no longer pending.
+    /// `None` means unsupported and has no side effects; callers may explicitly retain their
+    /// existing non-atomic fallback for third-party queue implementations.
+    async fn try_transfer_pending_to_stream(
+        &self,
+        _source: &str,
+        _group: &str,
+        _entry_id: &str,
+        _destination: &str,
+        _destination_fields: &BTreeMap<String, String>,
+    ) -> Result<Option<RuntimeQueueTransferOutcome>, DataLayerError> {
+        Ok(None)
+    }
 
     async fn ack(&self, stream: &str, group: &str, ids: &[String])
         -> Result<usize, DataLayerError>;
@@ -1242,6 +1362,20 @@ impl RuntimeQueueStore for RuntimeState {
         start_id: &str,
         config: RuntimeQueueReclaimConfig,
     ) -> Result<Vec<RuntimeQueueEntry>, DataLayerError> {
+        Ok(self
+            .claim_stale_page(stream, group, consumer, start_id, config)
+            .await?
+            .entries)
+    }
+
+    async fn claim_stale_page(
+        &self,
+        stream: &str,
+        group: &str,
+        consumer: &str,
+        start_id: &str,
+        config: RuntimeQueueReclaimConfig,
+    ) -> Result<RuntimeQueueReclaimPage, DataLayerError> {
         validate_runtime_queue_name(stream, "runtime queue stream")?;
         validate_runtime_queue_name(group, "runtime queue group")?;
         validate_runtime_queue_name(consumer, "runtime queue consumer")?;
@@ -1250,30 +1384,74 @@ impl RuntimeQueueStore for RuntimeState {
         match self.backend.as_ref() {
             RuntimeStateBackend::Memory(memory) => {
                 memory
-                    .queue_claim_stale(stream, group, consumer, start_id, config)
+                    .queue_claim_stale_page(stream, group, consumer, start_id, config)
                     .await
             }
-            RuntimeStateBackend::Redis(redis) => Ok(redis
-                .stream
-                .claim_stale(
-                    &RedisStreamName(stream.to_string()),
-                    &RedisConsumerGroup(group.to_string()),
-                    &RedisConsumerName(consumer.to_string()),
-                    start_id,
-                    RedisStreamReclaimConfig {
-                        min_idle_ms: config.min_idle_ms,
-                        count: config.count,
-                    },
-                )
-                .await?
-                .entries
-                .into_iter()
-                .map(|entry| RuntimeQueueEntry {
-                    id: entry.id,
-                    fields: entry.fields,
+            RuntimeStateBackend::Redis(redis) => {
+                let page = redis
+                    .stream
+                    .claim_stale(
+                        &RedisStreamName(stream.to_string()),
+                        &RedisConsumerGroup(group.to_string()),
+                        &RedisConsumerName(consumer.to_string()),
+                        start_id,
+                        RedisStreamReclaimConfig {
+                            min_idle_ms: config.min_idle_ms,
+                            count: config.count,
+                        },
+                    )
+                    .await?;
+                Ok(RuntimeQueueReclaimPage {
+                    next_start_id: page.next_start_id,
+                    entries: page
+                        .entries
+                        .into_iter()
+                        .map(|entry| RuntimeQueueEntry {
+                            id: entry.id,
+                            fields: entry.fields,
+                        })
+                        .collect(),
+                    deleted_ids: page.deleted_ids,
                 })
-                .collect()),
+            }
         }
+    }
+
+    async fn try_transfer_pending_to_stream(
+        &self,
+        source: &str,
+        group: &str,
+        entry_id: &str,
+        destination: &str,
+        destination_fields: &BTreeMap<String, String>,
+    ) -> Result<Option<RuntimeQueueTransferOutcome>, DataLayerError> {
+        validate_runtime_queue_transfer(source, group, entry_id, destination, destination_fields)?;
+        let outcome = match self.backend.as_ref() {
+            RuntimeStateBackend::Memory(memory) => {
+                memory
+                    .queue_transfer_pending_to_stream(
+                        source,
+                        group,
+                        entry_id,
+                        destination,
+                        destination_fields,
+                    )
+                    .await?
+            }
+            RuntimeStateBackend::Redis(redis) => {
+                redis
+                    .stream
+                    .try_transfer_pending_to_stream(
+                        source,
+                        group,
+                        entry_id,
+                        destination,
+                        destination_fields,
+                    )
+                    .await?
+            }
+        };
+        Ok(Some(outcome))
     }
 
     async fn ack(
@@ -1816,6 +1994,26 @@ mod tests {
     use std::path::PathBuf;
     use std::process::{Child, Command, Stdio};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn redis_test_connection(url: &str) -> ::redis::aio::MultiplexedConnection {
+        ::redis::Client::open(url)
+            .expect("test Redis client")
+            .get_multiplexed_async_connection()
+            .await
+            .expect("test Redis connection")
+    }
+
+    mod stream_receive {
+        include!("redis/stream_receive_tests.rs");
+    }
+
+    mod dead_letter_transfer {
+        include!("redis/dead_letter_transfer_tests.rs");
+    }
+
+    mod usage_limit_cleanup {
+        include!("redis/usage_limit_cleanup_tests.rs");
+    }
 
     #[tokio::test]
     async fn memory_kv_expires_entries() {
@@ -2723,6 +2921,131 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn redis_large_stream_batches_preserve_fields_across_read_reclaim_and_ack() {
+        let Some(redis) = TestRedisServer::start().await else {
+            return;
+        };
+        for protocol in ["resp2", "resp3"] {
+            let runtime = RuntimeState::redis(
+                RedisClientConfig {
+                    url: format!("{}?protocol={protocol}", redis.redis_url),
+                    key_prefix: Some(format!("large-batch-{protocol}")),
+                },
+                Some(5_000),
+            )
+            .await
+            .expect("large batch runtime should connect");
+            let stream = "usage:large-batch";
+            let group = "workers";
+            RuntimeQueueStore::ensure_consumer_group(&runtime, stream, group, "0-0")
+                .await
+                .unwrap();
+            let payload = format!(
+                "{}\r\n\"escaped\"\\\u{4e2d}\u{6587}",
+                "x".repeat(512 * 1024)
+            );
+            let mut expected = BTreeMap::new();
+            for sequence in 0..24 {
+                let fields = BTreeMap::from([
+                    ("payload".to_string(), payload.clone()),
+                    ("sequence".to_string(), sequence.to_string()),
+                    ("legacy_marker".to_string(), "preserve exactly".to_string()),
+                ]);
+                let id =
+                    RuntimeQueueStore::append_fields_with_maxlen(&runtime, stream, &fields, None)
+                        .await
+                        .unwrap();
+                expected.insert(id, sequence.to_string());
+            }
+            let mut readers = tokio::task::JoinSet::new();
+            for index in 0..3 {
+                let runtime = runtime.clone();
+                readers.spawn(async move {
+                    RuntimeQueueStore::read_group(
+                        &runtime,
+                        stream,
+                        group,
+                        &format!("reader-{index}"),
+                        8,
+                        Some(1),
+                    )
+                    .await
+                    .unwrap()
+                });
+            }
+            let mut delivered = std::collections::BTreeSet::new();
+            while let Some(entries) = readers.join_next().await {
+                let entries = entries.unwrap();
+                assert_eq!(entries.len(), 8);
+                for entry in entries {
+                    assert_eq!(entry.fields.len(), 3);
+                    assert_eq!(entry.fields["payload"].as_bytes(), payload.as_bytes());
+                    assert_eq!(entry.fields["sequence"], expected[&entry.id]);
+                    assert_eq!(entry.fields["legacy_marker"], "preserve exactly");
+                    assert!(delivered.insert(entry.id));
+                }
+            }
+            assert_eq!(delivered.len(), 24);
+            let stats = RuntimeQueueStore::stats(&runtime, stream, Some(group))
+                .await
+                .unwrap();
+            assert_eq!(stats.group_pending, 24);
+            assert_eq!(stats.group_lag, Some(0));
+
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let mut reclaimed = std::collections::BTreeSet::new();
+            while reclaimed.len() < 24 {
+                let entries = RuntimeQueueStore::claim_stale(
+                    &runtime,
+                    stream,
+                    group,
+                    "retry-consumer",
+                    "0-0",
+                    RuntimeQueueReclaimConfig {
+                        min_idle_ms: 1,
+                        count: 5,
+                    },
+                )
+                .await
+                .unwrap();
+                assert!(!entries.is_empty());
+                assert!(entries.len() <= 5);
+                let mut ids = Vec::new();
+                for entry in entries {
+                    assert_eq!(entry.fields.len(), 3);
+                    assert_eq!(entry.fields["payload"].as_bytes(), payload.as_bytes());
+                    assert_eq!(entry.fields["sequence"], expected[&entry.id]);
+                    assert_eq!(entry.fields["legacy_marker"], "preserve exactly");
+                    assert!(reclaimed.insert(entry.id.clone()));
+                    ids.push(entry.id);
+                }
+                assert_eq!(
+                    RuntimeQueueStore::ack(&runtime, stream, group, &ids)
+                        .await
+                        .unwrap(),
+                    ids.len()
+                );
+                assert_eq!(
+                    RuntimeQueueStore::delete(&runtime, stream, &ids)
+                        .await
+                        .unwrap(),
+                    ids.len()
+                );
+            }
+            assert_eq!(reclaimed, delivered);
+            let stats = RuntimeQueueStore::stats(&runtime, stream, Some(group))
+                .await
+                .unwrap();
+            assert_eq!(stats.stream_length, 0);
+            assert_eq!(stats.group_pending, 0);
+            assert_eq!(stats.group_lag, Some(0));
+            eprintln!(
+                "verified {protocol}: 24 large records, 3 readers, read/reclaim/ack complete"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn redis_connection_manager_recovers_after_restart() {
         let Some(mut redis) = TestRedisServer::start().await else {
             return;
@@ -2774,6 +3097,269 @@ mod tests {
             return;
         };
         assert_kv_score_and_queue_contract(&redis_runtime).await;
+    }
+
+    #[tokio::test]
+    async fn runtime_backends_share_bounded_score_window_aggregation() {
+        let memory = RuntimeState::memory(MemoryRuntimeStateConfig::default());
+        assert_bounded_score_window_aggregation(&memory).await;
+
+        let Some((_server, runtime)) = redis_runtime_for_test("score-window").await else {
+            return;
+        };
+        assert_bounded_score_window_aggregation(&runtime).await;
+    }
+
+    async fn assert_bounded_score_window_aggregation(runtime: &RuntimeState) {
+        let keys = (0..35)
+            .map(|index| format!("window:{index}"))
+            .collect::<Vec<_>>();
+        for (member, score) in [
+            ("expired:999", 99.999),
+            ("boundary:7", 100.0),
+            ("recent:9007199254740993", 101.0),
+            ("nested:prefix:+00012", 102.0),
+            ("zero:0", 103.0),
+            ("invalid:1.5", 104.0),
+            ("invalid:-1", 105.0),
+            ("invalid:18446744073709551616", 106.0),
+            ("invalid: 12", 107.0),
+            ("missing-separator", 108.0),
+        ] {
+            runtime
+                .score_set(&keys[0], member, score)
+                .await
+                .expect("seed values");
+        }
+        runtime
+            .score_set(&keys[1], "max:18446744073709551615", 100.0)
+            .await
+            .expect("seed max");
+        runtime
+            .score_set(&keys[2], "max:18446744073709551615", 100.0)
+            .await
+            .expect("seed overflow");
+        runtime
+            .score_set(&keys[2], "additional:2", 100.0)
+            .await
+            .expect("seed overflow addition");
+        for index in 0..SCORE_WINDOW_AGGREGATION_MEMBER_LIMIT {
+            runtime
+                .score_set(&keys[3], &format!("{index}:3"), 100.0)
+                .await
+                .expect("seed bounded window");
+        }
+        runtime
+            .score_set(&keys[3], "expired:9999", 0.0)
+            .await
+            .expect("seed expired sample");
+        let stats = runtime
+            .score_window_u64_stats_by_min(&keys, 100.0)
+            .await
+            .expect("aggregate");
+        assert_eq!(
+            stats.len(),
+            keys.len(),
+            "pipeline batches preserve key order"
+        );
+        assert_eq!(
+            stats[0],
+            Some(ScoreWindowU64Stats {
+                sum: 9_007_199_254_741_012,
+                positive_count: 3
+            })
+        );
+        assert_eq!(
+            stats[1],
+            Some(ScoreWindowU64Stats {
+                sum: u64::MAX,
+                positive_count: 1
+            })
+        );
+        assert_eq!(
+            stats[2],
+            Some(ScoreWindowU64Stats {
+                sum: u64::MAX,
+                positive_count: 2
+            })
+        );
+        assert_eq!(
+            stats[3],
+            Some(ScoreWindowU64Stats {
+                sum: 1536,
+                positive_count: 512
+            })
+        );
+        assert!(stats[4..]
+            .iter()
+            .all(|stats| *stats == Some(ScoreWindowU64Stats::default())));
+
+        runtime
+            .score_set(&keys[3], "overflowing-window:11", 101.0)
+            .await
+            .expect("exceed server limit");
+        let stats = runtime
+            .score_window_u64_stats_by_min(&keys[3..4], 100.0)
+            .await
+            .expect("bounded fallback");
+        assert_eq!(
+            stats,
+            vec![None],
+            "oversized windows require the full exact read"
+        );
+        let members = runtime
+            .score_range_by_min(&keys[3], 100.0)
+            .await
+            .expect("full window");
+        assert_eq!(
+            ScoreWindowU64Stats::from_members(members.iter().map(String::as_str)).sum,
+            1547
+        );
+        runtime
+            .score_remove(&keys[3], "overflowing-window:11")
+            .await
+            .expect("remove newest");
+        assert_eq!(
+            runtime
+                .score_window_u64_stats_by_min(&keys[3..4], 100.0)
+                .await
+                .expect("read after remove")[0]
+                .unwrap()
+                .sum,
+            1536
+        );
+        runtime
+            .score_set(&keys[3], "0:3", 99.0)
+            .await
+            .expect("move sample outside window");
+        assert_eq!(
+            runtime
+                .score_window_u64_stats_by_min(&keys[3..4], 100.0)
+                .await
+                .expect("read changed score")[0]
+                .unwrap()
+                .sum,
+            1533
+        );
+        assert!(runtime
+            .score_window_u64_stats_by_min(&[], 100.0)
+            .await
+            .expect("empty query")
+            .is_empty());
+        assert!(runtime
+            .score_window_u64_stats_by_min(&keys, f64::NAN)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn redis_score_window_aggregation_reloads_scripts_without_caching_old_cost() {
+        let Some((server, runtime)) = redis_runtime_for_test("score-window-reload").await else {
+            return;
+        };
+        let keys = vec!["reload:cost".to_string()];
+        runtime
+            .score_set(&keys[0], "first:7", 100.0)
+            .await
+            .expect("first cost");
+        assert_eq!(
+            runtime
+                .score_window_u64_stats_by_min(&keys, 100.0)
+                .await
+                .expect("first aggregate")[0]
+                .unwrap()
+                .sum,
+            7
+        );
+        let client = ::redis::Client::open(server.redis_url.as_str()).expect("test Redis client");
+        let mut connection = client
+            .get_multiplexed_async_connection()
+            .await
+            .expect("test connection");
+        ::redis::cmd("SCRIPT")
+            .arg("FLUSH")
+            .query_async::<()>(&mut connection)
+            .await
+            .expect("flush scripts");
+        runtime
+            .score_set(&keys[0], "second:11", 101.0)
+            .await
+            .expect("new cost");
+        assert_eq!(
+            runtime
+                .score_window_u64_stats_by_min(&keys, 100.0)
+                .await
+                .expect("reload aggregate")[0]
+                .unwrap()
+                .sum,
+            18
+        );
+        assert_eq!(
+            runtime
+                .score_window_u64_stats_by_min(&keys, 101.0)
+                .await
+                .expect("changed window")[0]
+                .unwrap()
+                .sum,
+            11
+        );
+        runtime
+            .key_expire(&keys[0], Duration::ZERO)
+            .await
+            .expect("expire window");
+        assert_eq!(
+            runtime
+                .score_window_u64_stats_by_min(&keys, 100.0)
+                .await
+                .expect("expired aggregate"),
+            vec![Some(ScoreWindowU64Stats::default())]
+        );
+    }
+
+    #[tokio::test]
+    async fn redis_score_window_aggregation_observes_completed_concurrent_writes() {
+        let Some((_server, runtime)) = redis_runtime_for_test("score-window-concurrent").await
+        else {
+            return;
+        };
+        let writer_runtime = runtime.clone();
+        let (written_tx, mut written_rx) = tokio::sync::mpsc::channel(8);
+        let writer = tokio::spawn(async move {
+            for index in 1..=128_u64 {
+                writer_runtime
+                    .score_set("concurrent:cost", &format!("{index}:2"), 100.0)
+                    .await
+                    .expect("concurrent write");
+                written_tx.send(index).await.expect("notify reader");
+            }
+        });
+        let keys = vec!["concurrent:cost".to_string()];
+        while let Some(written) = written_rx.recv().await {
+            let stats = runtime
+                .score_window_u64_stats_by_min(&keys, 100.0)
+                .await
+                .expect("concurrent aggregate")[0]
+                .unwrap();
+            assert!(
+                stats.positive_count >= written,
+                "completed writes must not be hidden by a stale aggregate"
+            );
+            assert_eq!(
+                stats.sum,
+                stats.positive_count * 2,
+                "one script observes one consistent window"
+            );
+        }
+        writer.await.expect("writer task");
+        assert_eq!(
+            runtime
+                .score_window_u64_stats_by_min(&keys, 100.0)
+                .await
+                .expect("final aggregate")[0]
+                .unwrap()
+                .sum,
+            256
+        );
     }
 
     #[tokio::test]

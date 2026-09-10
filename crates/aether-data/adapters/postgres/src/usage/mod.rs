@@ -34,7 +34,7 @@ use sqlx::{
     PgPool, Postgres, QueryBuilder, Row,
 };
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use uuid::Uuid;
 
 use crate::{
@@ -58,6 +58,9 @@ use aether_data_contracts::repository::usage::{
 use aether_data_contracts::DataLayerError;
 
 pub mod cleanup;
+mod preparation;
+
+use preparation::prepare_usage_in_background;
 
 // Legacy inline body columns on public.usage are deprecated. Keep the threshold at zero so
 // newly captured bodies always spill to usage_body_blobs and resolve through usage_http_audits.
@@ -2121,12 +2124,9 @@ impl PreparedPendingUsage {
             ));
         }
 
-        // Keep the capture input separate from the accounting row.  The persistence sanitizer
-        // intentionally removes HTTP bodies/headers/states, but the pending batch still needs
-        // those values to populate the canonical audit/blob tables.
-        let capture_usage = usage.clone();
-        let usage = sanitize_usage_for_persistence(usage);
-        let prepared = prepare_usage_upsert_context(&capture_usage)?;
+        // Prepare captures before the accounting sanitizer removes HTTP bodies/headers/states.
+        let (usage, prepared) = prepare_usage_for_persistence(usage);
+        let prepared = prepared?;
         let input_tokens = usage
             .input_tokens
             .map(to_i32)
@@ -8450,10 +8450,10 @@ ORDER BY "usage".user_id ASC
         usage: UpsertUsageRecord,
     ) -> Result<StoredRequestUsageAudit, DataLayerError> {
         usage.validate()?;
-        // `usage` is the sanitized accounting projection; prepare the auxiliary capture and
-        // snapshots from the original event so typed `none` markers can clear prior facts.
-        let capture_usage = usage.clone();
-        let usage = sanitize_usage_for_persistence(usage);
+        // Move the event before cloning or compressing captures, and do not hold a connection
+        // while preparing them. Stale lifecycle updates still ignore preparation errors below.
+        let (usage, prepared) =
+            prepare_usage_in_background(move || Ok(prepare_usage_for_persistence(usage))).await?;
         self.tx_runner
             .run_read_write(|tx| {
                 Box::pin(async move {
@@ -8519,7 +8519,7 @@ ORDER BY "usage".user_id ASC
                         clear_provider_request_body,
                         clear_response_body,
                         clear_client_response_body,
-                    } = prepare_usage_upsert_context(&capture_usage)?;
+                    } = prepared?;
                     let capture_update_allowed = recovers_terminal_failure
                         || usage_capture_update_allowed(
                             previous_usage.as_ref().map(|stored| {
@@ -8938,33 +8938,36 @@ ORDER BY "usage".user_id ASC
             return Ok(());
         }
 
-        let mut request_id_counts = BTreeMap::<String, usize>::new();
-        for usage in &usages {
-            *request_id_counts
-                .entry(usage.request_id.clone())
-                .or_default() += 1;
-        }
-
-        // Duplicate request IDs must retain the caller's exact sequential merge order. They are
-        // uncommon in lifecycle batches, so keep them on the canonical single-row path.
-        let mut batch_rows = Vec::<(usize, PreparedPendingUsage)>::new();
-        let mut fallback_rows = Vec::<(usize, UpsertUsageRecord)>::new();
-        for (sequence, usage) in usages.into_iter().enumerate() {
-            let original_usage = usage.clone();
-            let prepared = PreparedPendingUsage::try_from_usage(usage)?;
-            if request_id_counts
-                .get(&prepared.usage.request_id)
-                .copied()
-                .unwrap_or_default()
-                == 1
-            {
-                batch_rows.push((sequence, prepared));
-            } else {
-                // Preserve capture markers for the canonical fallback; that path performs the
-                // sanitized bind only after preparing the auxiliary audit/blob state.
-                fallback_rows.push((sequence, original_usage));
+        let (batch_rows, mut fallback_rows) = prepare_usage_in_background(move || {
+            let mut request_id_counts = BTreeMap::<String, usize>::new();
+            for usage in &usages {
+                *request_id_counts
+                    .entry(usage.request_id.clone())
+                    .or_default() += 1;
             }
-        }
+
+            // Duplicate request IDs must retain the caller's exact sequential merge order.
+            let mut batch_rows = Vec::<(usize, PreparedPendingUsage)>::new();
+            let mut fallback_rows = Vec::<(usize, UpsertUsageRecord)>::new();
+            for (sequence, usage) in usages.into_iter().enumerate() {
+                let duplicate = request_id_counts
+                    .get(&usage.request_id)
+                    .copied()
+                    .unwrap_or_default()
+                    > 1;
+                let original_usage = duplicate.then(|| usage.clone());
+                let prepared = PreparedPendingUsage::try_from_usage(usage)?;
+                if let Some(original_usage) = original_usage {
+                    // Preserve capture markers for the canonical fallback, including validation
+                    // of every row before starting the batch transaction.
+                    fallback_rows.push((sequence, original_usage));
+                } else {
+                    batch_rows.push((sequence, prepared));
+                }
+            }
+            Ok((batch_rows, fallback_rows))
+        })
+        .await?;
 
         let mut inserted_request_ids = BTreeSet::<String>::new();
         if !batch_rows.is_empty() {
@@ -10294,7 +10297,7 @@ RETURNING
 
     pub async fn rebuild_api_key_usage_stats(&self) -> Result<u64, DataLayerError> {
         self.tx_runner
-            .run_read_write(|tx| {
+            .run(crate::PostgresTransactionOptions::maintenance(), |tx| {
                 Box::pin(async move {
                     sqlx::query(RESET_API_KEY_USAGE_STATS_SQL)
                         .execute(&mut **tx)
@@ -10313,7 +10316,7 @@ RETURNING
 
     pub async fn rebuild_provider_api_key_usage_stats(&self) -> Result<u64, DataLayerError> {
         self.tx_runner
-            .run_read_write(|tx| {
+            .run(crate::PostgresTransactionOptions::maintenance(), |tx| {
                 Box::pin(async move {
                     sqlx::query(RESET_PROVIDER_API_KEY_USAGE_STATS_SQL)
                         .execute(&mut **tx)
@@ -12359,24 +12362,35 @@ fn prepare_usage_body_storage(value: Option<&Value>) -> Result<UsageBodyStorage,
             detached_blob_bytes: None,
         });
     };
-    let bytes = serde_json::to_vec(value).map_err(|err| {
-        DataLayerError::UnexpectedValue(format!("failed to serialize usage json: {err}"))
-    })?;
-    if bytes.len() == MAX_INLINE_USAGE_BODY_BYTES {
-        return Ok(UsageBodyStorage {
-            inline_json: Some(String::from_utf8(bytes).map_err(|err| {
-                DataLayerError::UnexpectedValue(format!(
-                    "failed to encode inline usage body as utf-8: {err}"
-                ))
-            })?),
-            detached_blob_bytes: None,
-        });
-    }
-
     let mut encoder = GzEncoder::new(Vec::new(), Compression::new(6));
-    encoder.write_all(&bytes).map_err(|err| {
-        DataLayerError::UnexpectedValue(format!("failed to compress usage json: {err}"))
-    })?;
+    if MAX_INLINE_USAGE_BODY_BYTES == 0 {
+        // Coalesce serde's punctuation/escape writes without allocating a full JSON buffer.
+        let mut writer = BufWriter::with_capacity(8 * 1024, &mut encoder);
+        serde_json::to_writer(&mut writer, value).map_err(|err| {
+            let operation = if err.is_io() { "compress" } else { "serialize" };
+            DataLayerError::UnexpectedValue(format!("failed to {operation} usage json: {err}"))
+        })?;
+        writer.into_inner().map_err(|err| {
+            DataLayerError::UnexpectedValue(format!("failed to compress usage json: {err}"))
+        })?;
+    } else {
+        let bytes = serde_json::to_vec(value).map_err(|err| {
+            DataLayerError::UnexpectedValue(format!("failed to serialize usage json: {err}"))
+        })?;
+        if bytes.len() == MAX_INLINE_USAGE_BODY_BYTES {
+            return Ok(UsageBodyStorage {
+                inline_json: Some(String::from_utf8(bytes).map_err(|err| {
+                    DataLayerError::UnexpectedValue(format!(
+                        "failed to encode inline usage body as utf-8: {err}"
+                    ))
+                })?),
+                detached_blob_bytes: None,
+            });
+        }
+        encoder.write_all(&bytes).map_err(|err| {
+            DataLayerError::UnexpectedValue(format!("failed to compress usage json: {err}"))
+        })?;
+    }
     let detached_blob_bytes = encoder.finish().map_err(|err| {
         DataLayerError::UnexpectedValue(format!("failed to finish usage json compression: {err}"))
     })?;
@@ -12429,11 +12443,40 @@ fn project_usage_request_metadata(
     }
 }
 
+fn prepare_usage_for_persistence(
+    mut usage: UpsertUsageRecord,
+) -> (
+    UpsertUsageRecord,
+    Result<PreparedUsageUpsert, DataLayerError>,
+) {
+    // Capture controls and accounting metadata have different sanitizers. Move the
+    // large payloads out before copying the metadata needed by both projections.
+    let request_body = usage.request_body.take();
+    let provider_request_body = usage.provider_request_body.take();
+    let response_body = usage.response_body.take();
+    let client_response_body = usage.client_response_body.take();
+    let request_headers = usage.request_headers.take();
+    let provider_request_headers = usage.provider_request_headers.take();
+    let response_headers = usage.response_headers.take();
+    let client_response_headers = usage.client_response_headers.take();
+    let mut capture = usage.clone();
+    capture.request_body = request_body;
+    capture.provider_request_body = provider_request_body;
+    capture.response_body = response_body;
+    capture.client_response_body = client_response_body;
+    capture.request_headers = request_headers;
+    capture.provider_request_headers = provider_request_headers;
+    capture.response_headers = response_headers;
+    capture.client_response_headers = client_response_headers;
+    capture.capture_retention = std::mem::take(&mut usage.capture_retention);
+    let capture = sanitize_usage_capture_controls_for_persistence(capture);
+    let prepared = prepare_usage_upsert_context(&capture);
+    (sanitize_usage_for_persistence(usage), prepared)
+}
+
 fn prepare_usage_upsert_context(
     usage: &UpsertUsageRecord,
 ) -> Result<PreparedUsageUpsert, DataLayerError> {
-    let usage = sanitize_usage_capture_controls_for_persistence(usage.clone());
-    let usage = &usage;
     let replace_client_request_body_facts = request_body_capture_replaces_derived_facts(
         usage.request_body.as_ref(),
         usage.request_body_state,

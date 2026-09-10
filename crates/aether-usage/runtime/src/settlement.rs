@@ -36,8 +36,19 @@ pub async fn reconcile_usage_policy_cost_for_event(
     writer: &dyn UsageSettlementWriter,
     event: &UsageEvent,
 ) -> Result<(), DataLayerError> {
+    reconcile_usage_policy_cost_for_event_with_result(writer, event)
+        .await
+        .map(|_| ())
+}
+
+pub(crate) struct ReconciledUsagePolicyCost(ReconcileUsagePolicyCostInput);
+
+pub(crate) async fn reconcile_usage_policy_cost_for_event_with_result(
+    writer: &dyn UsageSettlementWriter,
+    event: &UsageEvent,
+) -> Result<Option<ReconciledUsagePolicyCost>, DataLayerError> {
     if !writer.has_usage_settlement_writer() {
-        return Ok(());
+        return Ok(None);
     }
     let terminal_state = match event.event_type {
         UsageEventType::Completed => UsagePolicyCostReservationState::Finalized,
@@ -49,16 +60,16 @@ pub async fn reconcile_usage_policy_cost_for_event(
         UsageEventType::Failed | UsageEventType::Cancelled => {
             UsagePolicyCostReservationState::Released
         }
-        UsageEventType::Pending | UsageEventType::Streaming => return Ok(()),
+        UsageEventType::Pending | UsageEventType::Streaming => return Ok(None),
     };
     if plan_usage_reservation_reconciliation_is_deferred(event.data.request_metadata.as_ref()) {
-        return Ok(());
+        return Ok(None);
     }
     let Some(subject_id) = event.data.user_id.as_deref().and_then(non_empty_trimmed) else {
-        return Ok(());
+        return Ok(None);
     };
     let Some(reservation_token) = event_usage_policy_reservation_token(event) else {
-        return Ok(());
+        return Ok(None);
     };
     let actual_cost_units = if terminal_state == UsagePolicyCostReservationState::Finalized {
         let actual_cost_usd = event.data.actual_total_cost_usd.ok_or_else(|| {
@@ -75,22 +86,39 @@ pub async fn reconcile_usage_policy_cost_for_event(
         0
     };
 
-    let _ = writer
-        .reconcile_usage_policy_cost(ReconcileUsagePolicyCostInput {
-            request_id: event.request_id.clone(),
-            subject_id: subject_id.to_string(),
-            reservation_token: reservation_token.to_string(),
-            actual_cost_units,
-            terminal_state,
-            finalized_at_unix_secs: event.timestamp_ms / 1_000,
-        })
-        .await?;
-    Ok(())
+    let input = ReconcileUsagePolicyCostInput {
+        request_id: event.request_id.clone(),
+        subject_id: subject_id.to_string(),
+        reservation_token: reservation_token.to_string(),
+        actual_cost_units,
+        terminal_state,
+        finalized_at_unix_secs: event.timestamp_ms / 1_000,
+    };
+    let stored = writer.reconcile_usage_policy_cost(input.clone()).await?;
+    // A successful call alone is insufficient: None or a different existing terminal
+    // reservation must not suppress reconciliation of the subsequent stored usage row.
+    let matches = stored.is_some_and(|stored| {
+        stored.request_id == input.request_id
+            && stored.subject_id == input.subject_id
+            && stored.reservation_token == input.reservation_token
+            && stored.actual_cost_units == Some(input.actual_cost_units)
+            && stored.state == input.terminal_state
+            && stored.finalized_at_unix_secs == Some(input.finalized_at_unix_secs)
+    });
+    Ok(matches.then_some(ReconciledUsagePolicyCost(input)))
 }
 
 pub async fn settle_usage_if_needed(
     writer: &dyn UsageSettlementWriter,
     usage: &StoredRequestUsageAudit,
+) -> Result<(), DataLayerError> {
+    settle_usage_with_reconciled_cost(writer, usage, None).await
+}
+
+pub(crate) async fn settle_usage_with_reconciled_cost(
+    writer: &dyn UsageSettlementWriter,
+    usage: &StoredRequestUsageAudit,
+    reconciled: Option<ReconciledUsagePolicyCost>,
 ) -> Result<(), DataLayerError> {
     if !writer.has_usage_settlement_writer() {
         return Ok(());
@@ -132,17 +160,21 @@ pub async fn settle_usage_if_needed(
             } else {
                 (UsagePolicyCostReservationState::Released, 0)
             };
-            let _ = writer
-                .reconcile_usage_policy_cost(ReconcileUsagePolicyCostInput {
-                    request_id: usage.request_id.clone(),
-                    subject_id: subject_id.to_string(),
-                    reservation_token: reservation_token.to_string(),
-                    actual_cost_units,
-                    terminal_state,
-                    finalized_at_unix_secs: finalized_at_unix_secs
-                        .unwrap_or(usage.updated_at_unix_secs),
-                })
-                .await?;
+            let input = ReconcileUsagePolicyCostInput {
+                request_id: usage.request_id.clone(),
+                subject_id: subject_id.to_string(),
+                reservation_token: reservation_token.to_string(),
+                actual_cost_units,
+                terminal_state,
+                finalized_at_unix_secs: finalized_at_unix_secs
+                    .unwrap_or(usage.updated_at_unix_secs),
+            };
+            if !reconciled
+                .as_ref()
+                .is_some_and(|previous| previous.0 == input)
+            {
+                let _ = writer.reconcile_usage_policy_cost(input).await?;
+            }
         }
     }
 
@@ -243,6 +275,10 @@ fn finite_cost(value: f64) -> Result<f64, DataLayerError> {
 
 #[cfg(test)]
 mod tests {
+    mod reconciliation_reuse {
+        include!("settlement_reuse_tests.rs");
+    }
+
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
     use std::time::Duration;

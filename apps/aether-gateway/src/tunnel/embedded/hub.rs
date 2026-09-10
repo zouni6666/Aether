@@ -1932,7 +1932,7 @@ impl HubRouter {
         ) {
             Ok(payload) => payload,
             Err(error) => {
-                warn!(proxy_conn_id = proxy_conn_id, error = %error, "failed to decode heartbeat payload");
+                warn!(proxy_conn_id = proxy_conn_id, error = %crate::error::redact_error_detail(&error), "failed to decode heartbeat payload");
                 return;
             }
         };

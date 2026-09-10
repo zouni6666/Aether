@@ -253,7 +253,7 @@ pub(super) async fn build_admin_create_api_key_response(
             {
                 tracing::error!(
                     api_key_id = %created.api_key_id,
-                    error = ?error,
+                    error = %crate::error::redact_error_debug(&error),
                     "standalone API key wallet provisioning cleanup failed"
                 );
                 return Err(error);
@@ -266,7 +266,7 @@ pub(super) async fn build_admin_create_api_key_response(
             {
                 tracing::error!(
                     api_key_id = %created.api_key_id,
-                    error = ?cleanup_error,
+                    error = %crate::error::redact_error_debug(&cleanup_error),
                     "standalone API key wallet provisioning cleanup failed"
                 );
             }

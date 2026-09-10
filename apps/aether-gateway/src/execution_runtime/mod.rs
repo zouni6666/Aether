@@ -20,6 +20,7 @@ mod response_header_rules;
 mod server;
 pub(crate) mod stream;
 mod stream_pump;
+mod stream_read_timeout;
 pub(crate) mod submission;
 pub(crate) mod sync;
 pub(crate) mod transport;

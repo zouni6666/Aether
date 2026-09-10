@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, reactive, type App } from 'vue'
 import RoutingProfiles from '../RoutingProfiles.vue'
 import { createEmptyRoutingGroupConfig, getModelScheduling, savePerModelRoutingConfig } from '@/features/routing/utils/routingPolicy'
+import { createSchedulingPolicy, readSchedulingPolicies, writeSchedulingPolicies } from '@/features/routing/utils/schedulingPolicies'
 import type { RoutingGroupRecord, RoutingGroupUpdateRequest } from '@/api/routing-profiles'
 
 const routingApi = vi.hoisted(() => ({
@@ -11,17 +12,19 @@ const routingApi = vi.hoisted(() => ({
   deleteRoutingGroup: vi.fn(),
 }))
 const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }))
+const globalModelsApi = vi.hoisted(() => ({ getGlobalModels: vi.fn() }))
 const route = reactive({ name: 'RoutingProfileDetail', params: { groupId: 'strategy-a' } })
 
 vi.mock('@/api/routing-profiles', () => routingApi)
-vi.mock('@/api/global-models', () => ({ getGlobalModels: vi.fn().mockResolvedValue({ models: [] }) }))
+vi.mock('@/api/global-models', () => globalModelsApi)
 vi.mock('@/composables/useToast', () => ({ useToast: () => toast }))
 vi.mock('vue-router', () => ({ useRoute: () => route, useRouter: () => ({ replace: vi.fn(), push: vi.fn() }) }))
 vi.mock('@/utils/logger', () => ({ log: { error: vi.fn(), warn: vi.fn() } }))
 vi.mock('@/features/routing/components', async () => ({
   RoutingFailoverPolicyEditor: (await import('@/features/routing/components/RoutingFailoverPolicyEditor.vue')).default,
-  RoutingPriorityPolicyEditor: { render: () => null },
+  RoutingSchedulingPolicyEditor: (await import('@/features/routing/components/RoutingSchedulingPolicyEditor.vue')).default,
 }))
+vi.mock('@/features/routing/components/RoutingPriorityPolicyEditor.vue', () => ({ default: { render: () => null } }))
 
 const mounted: Array<{ app: App, root: HTMLElement }> = []
 
@@ -86,6 +89,15 @@ async function editJson(root: HTMLElement, section: string, value: string) {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  vi.stubGlobal('ResizeObserver', class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  })
+  globalModelsApi.getGlobalModels.mockResolvedValue({ models: [
+    { id: 'id-a', name: 'model-a', display_name: '模型 A' },
+    { id: 'id-b', name: 'model-b', display_name: '模型 B' },
+  ] })
   route.name = 'RoutingProfileDetail'
   route.params.groupId = 'strategy-a'
 })
@@ -95,6 +107,7 @@ afterEach(() => {
     app.unmount()
     root.remove()
   }
+  vi.unstubAllGlobals()
 })
 
 describe('RoutingProfiles failover persistence', () => {
@@ -144,13 +157,10 @@ describe('RoutingProfiles failover persistence', () => {
     expect(routingApi.updateRoutingGroup.mock.calls[0][1].config_json.default_policy.failover_rules.success_failover_patterns).toEqual([])
   })
 
-  it('preserves global failover edits while saving an independently edited model', async () => {
+  it('saves scoped scheduling and global failover edits together without a per-model save', async () => {
     const strategy = group('strategy-a')
     strategy.config_json = savePerModelRoutingConfig(strategy.config_json, 'model-a')
     const root = await mountPage([strategy])
-    const configured = [...root.querySelectorAll<HTMLButtonElement>('button')].find(control => control.textContent?.trim() === '已配置')
-    configured?.click()
-    await nextTick()
     const loadBalance = [...root.querySelectorAll<HTMLButtonElement>('button')].find(control => control.textContent?.trim() === '负载均衡')
     if (!loadBalance) throw new Error('Missing model scheduling control')
     loadBalance.click()
@@ -159,9 +169,6 @@ describe('RoutingProfiles failover persistence', () => {
     button(root, '添加错误终止规则').click()
     await nextTick()
     await input(root, '终止规则 1 状态码', '429')
-    expect(button(root, '保存').disabled).toBe(true)
-    element<HTMLButtonElement>(root, 'button[title="保存到草稿"]').click()
-    await nextTick()
     expect(button(root, '保存').disabled).toBe(false)
     button(root, '保存').click()
     await flush()
@@ -170,6 +177,71 @@ describe('RoutingProfiles failover persistence', () => {
     expect(saved.default_policy.max_transfer_count).toBe(5)
     expect(saved.default_policy.failover_rules.error_stop_patterns).toEqual([{ pattern: '', status_codes: [429] }])
     expect(getModelScheduling(saved, 'model-a').scheduling_mode).toBe('load_balance')
+    expect(toast.error).not.toHaveBeenCalled()
+  })
+
+  it('blocks saving an empty scope and persists all selected models in one strategy', async () => {
+    const root = await mountPage()
+    const byText = (text: string) => {
+      const found = [...root.querySelectorAll<HTMLButtonElement>('button')].find(control => control.textContent?.trim() === text)
+      if (!found) throw new Error(`Missing control: ${text}`)
+      return found
+    }
+    button(root, '区分模型').click()
+    await flush()
+    expect(button(root, '保存').disabled).toBe(true)
+    element<HTMLInputElement>(document.body, 'input[aria-label="选择模型 model-a"]').click()
+    await flush()
+    button(document.body, '清空已选').click()
+    await flush()
+    expect(button(root, '保存').disabled).toBe(true)
+    for (const model of ['model-a', 'model-b']) {
+      element<HTMLInputElement>(document.body, `input[aria-label="选择模型 ${model}"]`).click()
+      await nextTick()
+    }
+    const done = [...document.querySelectorAll<HTMLButtonElement>('[aria-label="全局模型选择列表"] button')]
+      .find(control => control.textContent?.trim() === '完成选择')
+    done?.click()
+    await flush()
+    byText('负载均衡').click()
+    await nextTick()
+    expect(button(root, '保存').disabled).toBe(false)
+    button(root, '保存').click()
+    await flush()
+    const saved = routingApi.updateRoutingGroup.mock.calls[0][1].config_json
+    expect(saved.model_policies.map((policy: { model: string }) => policy.model)).toEqual(['model-a', 'model-b'])
+    expect(saved.rules).toHaveLength(1)
+    expect(getModelScheduling(saved, 'model-a').scheduling_mode).toBe('load_balance')
+    expect(getModelScheduling(saved, 'model-b').scheduling_mode).toBe('load_balance')
+    expect(getModelScheduling(saved, 'other-model').scheduling_mode).toBe('cache_affinity')
+    expect(root.querySelectorAll('section[aria-label^="调度配置 "]')).toHaveLength(1)
+    expect(button(root, '保存').disabled).toBe(true)
+  })
+
+  it('saves one all-model configuration after switching from multiple model-specific configurations', async () => {
+    const strategy = group('strategy-a')
+    const first = { ...createSchedulingPolicy(strategy.config_json), models: ['model-a'], schedulingMode: 'fixed_order' as const }
+    const second = { ...createSchedulingPolicy(strategy.config_json), models: ['model-b'], schedulingMode: 'load_balance' as const }
+    strategy.config_json = writeSchedulingPolicies(strategy.config_json, [first, second])
+    const root = await mountPage([strategy])
+    expect(button(root, '区分模型').getAttribute('aria-pressed')).toBe('true')
+    expect(root.querySelectorAll('section[aria-label^="调度配置 "]')).toHaveLength(2)
+    button(root, '全部模型').click()
+    await flush()
+    expect(root.querySelectorAll('section[aria-label^="调度配置 "]')).toHaveLength(1)
+    expect(root.querySelector('[aria-label="添加调度配置"]')).toBeNull()
+    expect(button(root, '保存').disabled).toBe(false)
+    button(root, '保存').click()
+    await flush()
+    expect(routingApi.updateRoutingGroup).toHaveBeenCalledOnce()
+    const saved = routingApi.updateRoutingGroup.mock.calls[0][1].config_json
+    expect(readSchedulingPolicies(saved)).toHaveLength(1)
+    expect(readSchedulingPolicies(saved)[0]).toMatchObject({ scope: 'all', models: [], schedulingMode: 'fixed_order' })
+    expect(saved.rules).toEqual([])
+    expect(saved.model_policies.map((policy: { model: string }) => policy.model)).toEqual(['*'])
+    expect(getModelScheduling(saved, 'model-b').scheduling_mode).toBe('fixed_order')
+    expect(getModelScheduling(saved, 'future-model').scheduling_mode).toBe('fixed_order')
+    expect(button(root, '保存').disabled).toBe(true)
     expect(toast.error).not.toHaveBeenCalled()
   })
 })

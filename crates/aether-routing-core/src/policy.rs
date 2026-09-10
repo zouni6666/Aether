@@ -317,6 +317,123 @@ mod tests {
     use super::*;
 
     #[test]
+    fn all_model_scheduling_and_rankings_apply_to_future_models() {
+        let config: RoutingGroupConfig = serde_json::from_value(json!({
+            "default_policy": {
+                "priority_mode": "global_key",
+                "scheduling_mode": "load_balance"
+            },
+            "model_policies": [{
+                "model": "*",
+                "provider_priority_overrides": { "provider-a": 7 }
+            }],
+            "rules": []
+        }))
+        .expect("all-model scheduling config should deserialize");
+
+        for model in ["existing-model", "future-model"] {
+            let policy = resolve_routing_policy(
+                &config,
+                RoutingPolicyInput {
+                    group_id: Some("group-1"),
+                    group_version: Some(1),
+                    selection_source: "explicit",
+                    requested_model: model,
+                    resolved_model: model,
+                    api_format: "openai:chat",
+                    user_id: None,
+                    api_key_id: None,
+                    headers: &json!({}),
+                    body: &json!({}),
+                    phase: RoutingRulePhase::ClientRequest,
+                },
+            )
+            .expect("all-model scheduling policy should resolve");
+            assert_eq!(policy.priority_mode, RoutingSetPriorityMode::GlobalKey);
+            assert_eq!(policy.scheduling_mode, RoutingSchedulingMode::LoadBalance);
+            assert_eq!(
+                policy
+                    .ranking_overlay
+                    .provider_priority_overrides
+                    .get("provider-a"),
+                Some(&7)
+            );
+            assert!(policy.matched_rules.is_empty());
+        }
+    }
+
+    #[test]
+    fn shared_scheduling_rule_applies_only_to_selected_models() {
+        let config: RoutingGroupConfig = serde_json::from_value(json!({
+            "default_policy": {
+                "priority_mode": "provider",
+                "scheduling_mode": "cache_affinity"
+            },
+            "model_policies": [
+                { "model": "model-a", "provider_priority_overrides": { "provider-a": 7 } },
+                { "model": "model-b", "provider_priority_overrides": { "provider-a": 7 } }
+            ],
+            "rules": [{
+                "id": "ui_scheduling_policy:shared",
+                "priority": 10000,
+                "enabled": true,
+                "phase": "client_request",
+                "conditions": { "any": [
+                    { "field": "model", "op": "eq", "value": "model-a" },
+                    { "field": "model", "op": "eq", "value": "model-b" }
+                ] },
+                "actions": [{
+                    "type": "set_scheduling",
+                    "priority_mode": "global_key",
+                    "scheduling_mode": "fixed_order"
+                }],
+                "stop_processing": false
+            }]
+        }))
+        .expect("shared scheduling config should deserialize");
+
+        for model in ["model-a", "model-b", "other-model"] {
+            let policy = resolve_routing_policy(
+                &config,
+                RoutingPolicyInput {
+                    group_id: Some("group-1"),
+                    group_version: Some(1),
+                    selection_source: "explicit",
+                    requested_model: model,
+                    resolved_model: model,
+                    api_format: "openai:chat",
+                    user_id: None,
+                    api_key_id: None,
+                    headers: &json!({}),
+                    body: &json!({}),
+                    phase: RoutingRulePhase::ClientRequest,
+                },
+            )
+            .expect("shared scheduling policy should resolve");
+            if model == "other-model" {
+                assert_eq!(policy.priority_mode, RoutingSetPriorityMode::Provider);
+                assert_eq!(policy.scheduling_mode, RoutingSchedulingMode::CacheAffinity);
+                assert!(policy
+                    .ranking_overlay
+                    .provider_priority_overrides
+                    .is_empty());
+                assert!(policy.matched_rules.is_empty());
+            } else {
+                assert_eq!(policy.priority_mode, RoutingSetPriorityMode::GlobalKey);
+                assert_eq!(policy.scheduling_mode, RoutingSchedulingMode::FixedOrder);
+                assert_eq!(
+                    policy
+                        .ranking_overlay
+                        .provider_priority_overrides
+                        .get("provider-a"),
+                    Some(&7)
+                );
+                assert_eq!(policy.matched_rules.len(), 1);
+            }
+        }
+    }
+
+    #[test]
     fn resolves_model_policy_and_matching_rule() {
         let config = RoutingGroupConfig {
             default_policy: RoutingDefaultPolicy::default(),

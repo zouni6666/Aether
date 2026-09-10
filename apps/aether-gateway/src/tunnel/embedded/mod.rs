@@ -30,6 +30,7 @@ use dashmap::DashMap;
 use sha2::{Digest as _, Sha256};
 use tracing::warn;
 
+use crate::error::{redact_error_debug, redact_error_detail};
 use crate::{data::GatewayDataState, middleware};
 
 pub use control_plane::ControlPlaneClient;
@@ -2207,7 +2208,7 @@ pub async fn ws_proxy(
     {
         Ok(binding) => binding,
         Err(error) => {
-            warn!(node_id = %node_id, error = %error, "proxy connection rejected: tunnel security key lookup unavailable");
+            warn!(node_id = %node_id, error = %redact_error_detail(&error), "proxy connection rejected: tunnel security key lookup unavailable");
             return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
         }
     };
@@ -2255,7 +2256,7 @@ pub async fn ws_proxy(
                         requested_generation.clone(),
                     ),
                     Err(error) => {
-                        warn!(node_id = %node_id, ?error, "proxy connection rejected: invalid secure tunnel handshake");
+                        warn!(node_id = %node_id, error = %redact_error_debug(&error), "proxy connection rejected: invalid secure tunnel handshake");
                         return error.status_code().into_response();
                     }
                 }
@@ -2282,7 +2283,7 @@ pub async fn ws_proxy(
                 {
                     Ok(credential) => credential,
                     Err(error) => {
-                        warn!(node_id = %node_id, ?error, "proxy connection rejected: invalid management token");
+                        warn!(node_id = %node_id, error = %redact_error_debug(&error), "proxy connection rejected: invalid management token");
                         return error.status_code().into_response();
                     }
                 };

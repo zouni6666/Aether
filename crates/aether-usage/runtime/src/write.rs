@@ -581,6 +581,7 @@ fn build_lifecycle_usage_event_from_record(
             execution_path: record.execution_path,
             local_execution_runtime_miss_reason: record.local_execution_runtime_miss_reason,
             request_metadata: record.request_metadata,
+            capture_retention: record.capture_retention,
             ..UsageEventData::default()
         },
     }
@@ -1534,6 +1535,7 @@ fn build_lifecycle_usage_record_owned(
     };
 
     Ok(UpsertUsageRecord {
+        capture_retention: Default::default(),
         request_id,
         user_id,
         api_key_id,
@@ -1631,6 +1633,7 @@ fn build_lifecycle_usage_record_impl(
     };
 
     Ok(UpsertUsageRecord {
+        capture_retention: Default::default(),
         request_id: seed.request_id.clone(),
         user_id: seed.user_id.clone(),
         api_key_id: seed.api_key_id.clone(),

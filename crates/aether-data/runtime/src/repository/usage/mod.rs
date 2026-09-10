@@ -57,6 +57,7 @@ mod tests {
     #[test]
     fn strip_deprecated_usage_display_fields_clears_legacy_display_columns() {
         let usage = strip_deprecated_usage_display_fields(UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-1".to_string(),
             user_id: Some("user-1".to_string()),
             api_key_id: Some("key-1".to_string()),

@@ -996,7 +996,7 @@ impl<'a> RequestedModelAttemptPageCursor<'a> {
             );
 
             if page_is_exact_auth_api_key_concurrency_limited(&page) {
-                if self.wait_for_auth_api_key_concurrency_retry().await {
+                if self.wait_for_auth_api_key_concurrency_retry().await? {
                     continue;
                 }
                 self.persist_final_auth_api_key_concurrency_skips(page.skipped_candidates)
@@ -1087,20 +1087,23 @@ impl<'a> RequestedModelAttemptPageCursor<'a> {
         }
     }
 
-    async fn wait_for_auth_api_key_concurrency_retry(&mut self) -> bool {
+    async fn wait_for_auth_api_key_concurrency_retry(&mut self) -> Result<bool, GatewayError> {
         let now = Instant::now();
         let deadline = *self
             .auth_api_key_concurrency_wait_deadline
             .get_or_insert(now + AUTH_API_KEY_CONCURRENCY_WAIT_BUDGET);
-        if now >= deadline {
-            return false;
+        if !crate::scheduler::candidate::wait_for_auth_api_key_concurrency_retry(
+            self.state.app(),
+            Some(&self.auth_snapshot),
+            deadline,
+            AUTH_API_KEY_CONCURRENCY_RETRY_DELAY,
+        )
+        .await?
+        {
+            return Ok(false);
         }
-
-        let sleep_duration =
-            AUTH_API_KEY_CONCURRENCY_RETRY_DELAY.min(deadline.saturating_duration_since(now));
-        tokio::time::sleep(sleep_duration).await;
         self.page_cursor.restart_scan();
-        true
+        Ok(true)
     }
 
     async fn persist_final_auth_api_key_concurrency_skips(
@@ -2287,6 +2290,103 @@ mod tests {
         candidate: SkippedLocalExecutionCandidate,
     ) -> SkippedLocalExecutionCandidate {
         candidate
+    }
+
+    #[tokio::test]
+    async fn auth_concurrency_wait_paged_scan_retries_once_at_original_deadline() {
+        let now = current_unix_ms();
+        let active = serde_json::from_value(json!({
+            "id": "active-candidate",
+            "request_id": "active-request",
+            "api_key_id": "api-key-1",
+            "candidate_index": 0,
+            "retry_index": 0,
+            "status": "pending",
+            "is_cached": false,
+            "created_at_unix_ms": now,
+            "started_at_unix_ms": now
+        }))
+        .expect("active candidate should build");
+        let repository = Arc::new(InMemoryRequestCandidateRepository::seed([active]));
+        let app = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_request_candidate_repository_for_tests(repository),
+            );
+        let mut auth_snapshot = sample_auth_snapshot();
+        auth_snapshot.api_key_concurrent_limit = Some(1);
+        let page_cursor = LocalCandidatePreselectionPageCursor::new(
+            PlannerAppState::new(&app),
+            &crate::system_features::ModelDirectivePolicySnapshot::default(),
+            "openai:chat",
+            "gpt-5",
+            None,
+            true,
+            None,
+            &auth_snapshot,
+            None,
+            None,
+            None,
+            false,
+            LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModel,
+            true,
+            Some("trace-auth-wait"),
+        )
+        .await;
+        let mut cursor = RequestedModelAttemptPageCursor {
+            state: PlannerAppState::new(&app),
+            trace_id: "trace-auth-wait".to_string(),
+            client_api_format: "openai:chat".to_string(),
+            requested_model: "gpt-5".to_string(),
+            auth_snapshot,
+            client_session_affinity: None,
+            required_capabilities: None,
+            routing_policy: None,
+            sticky_session_token: None,
+            request_auth_channel: None,
+            skipped_user_id: "user-1".to_string(),
+            skipped_api_key_id: "api-key-1".to_string(),
+            skipped_required_capabilities: None,
+            skipped_error_context: "test auth wait",
+            record_runtime_miss_diagnostic: false,
+            resolution_mode: LocalCandidateResolutionMode::Standard,
+            decorate_skipped_candidate: Arc::new(identity_skipped_candidate),
+            page_cursor,
+            pending_items: VecDeque::new(),
+            skipped_provider_ids: BTreeSet::new(),
+            skipped_endpoint_ids: BTreeSet::new(),
+            skipped_credential_ids: BTreeSet::new(),
+            candidate_count: 0,
+            next_candidate_index: 0,
+            remembered_affinity: false,
+            scheduler_cache_affinity_enabled: false,
+            auth_api_key_concurrency_wait_deadline: None,
+            deferred_error: None,
+        };
+
+        let started = Instant::now();
+        let mut scan_restarts = 0;
+        while cursor
+            .wait_for_auth_api_key_concurrency_retry()
+            .await
+            .expect("auth wait should succeed")
+        {
+            scan_restarts += 1;
+        }
+        assert_eq!(
+            scan_restarts, 1,
+            "blocked polls must not restart page scans"
+        );
+        assert!(started.elapsed() >= AUTH_API_KEY_CONCURRENCY_WAIT_BUDGET);
+        let original_deadline = cursor.auth_api_key_concurrency_wait_deadline;
+        assert!(!cursor
+            .wait_for_auth_api_key_concurrency_retry()
+            .await
+            .expect("expired auth wait should succeed"));
+        assert_eq!(
+            cursor.auth_api_key_concurrency_wait_deadline,
+            original_deadline
+        );
     }
 
     #[tokio::test]

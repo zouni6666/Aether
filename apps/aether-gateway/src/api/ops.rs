@@ -174,7 +174,7 @@ async fn authorize_operational_request(
             }
         }
         Err(err) => {
-            warn!(error = ?err, "operational admin session authentication failed");
+            warn!(error = %crate::error::redact_error_debug(&err), "operational admin session authentication failed");
             return operational_error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "operational authentication unavailable",

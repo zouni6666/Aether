@@ -673,6 +673,7 @@ mod tests {
 
     fn usage_with_http_capture() -> UpsertUsageRecord {
         UpsertUsageRecord {
+            capture_retention: Default::default(),
             request_id: "req-sensitive-capture".to_string(),
             user_id: Some("user-1".to_string()),
             api_key_id: Some("key-1".to_string()),

@@ -270,7 +270,9 @@ impl Drop for SyncAttemptTerminalGuard {
         let candidate_started_unix_ms = self.candidate_started_unix_ms;
         let candidate_started_at = self.candidate_started_at;
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let usage_producer = state.usage_runtime.track_producer();
             handle.spawn(async move {
+                let _usage_producer = usage_producer;
                 record_sync_attempt_forced_terminal_state(
                     state,
                     plan,

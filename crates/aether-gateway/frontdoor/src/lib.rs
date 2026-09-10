@@ -1,10 +1,14 @@
 pub mod body;
+mod connection;
 pub mod middleware;
 mod request_id;
 
 pub use body::{
-    BodyBufferError, BodyBufferPolicy, BodyBufferReservation, BufferedBody,
+    BodyBufferBudget, BodyBufferError, BodyBufferPolicy, BodyBufferReservation, BufferedBody,
     DEFAULT_BODY_BUFFER_PERMIT_BYTES,
+};
+pub use connection::{
+    http_connection_limit, AdmittedConnection, HttpConnectionBudget, HttpConnectionBudgetSnapshot,
 };
 
 pub use middleware::access_log::{

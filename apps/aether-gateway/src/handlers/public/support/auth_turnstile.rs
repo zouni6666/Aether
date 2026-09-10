@@ -222,28 +222,28 @@ async fn read_auth_turnstile_config(
         .read_system_config_json_value("turnstile_enabled")
         .await
         .map_err(|err| {
-            warn!(error = ?err, "turnstile enabled config lookup failed");
+            warn!(error = %crate::error::redact_error_debug(&err), "turnstile enabled config lookup failed");
             AuthTurnstileFailure::ServiceUnavailable("人机验证服务暂不可用，请稍后重试")
         })?;
     let site_key = state
         .read_system_config_json_value("turnstile_site_key")
         .await
         .map_err(|err| {
-            warn!(error = ?err, "turnstile site key config lookup failed");
+            warn!(error = %crate::error::redact_error_debug(&err), "turnstile site key config lookup failed");
             AuthTurnstileFailure::ServiceUnavailable("人机验证服务暂不可用，请稍后重试")
         })?;
     let secret_key = state
         .read_system_config_json_value("turnstile_secret_key")
         .await
         .map_err(|err| {
-            warn!(error = ?err, "turnstile secret key config lookup failed");
+            warn!(error = %crate::error::redact_error_debug(&err), "turnstile secret key config lookup failed");
             AuthTurnstileFailure::ServiceUnavailable("人机验证服务暂不可用，请稍后重试")
         })?;
     let allowed_hostnames = state
         .read_system_config_json_value("turnstile_allowed_hostnames")
         .await
         .map_err(|err| {
-            warn!(error = ?err, "turnstile hostname config lookup failed");
+            warn!(error = %crate::error::redact_error_debug(&err), "turnstile hostname config lookup failed");
             AuthTurnstileFailure::ServiceUnavailable("人机验证服务暂不可用，请稍后重试")
         })?;
 
@@ -252,7 +252,7 @@ async fn read_auth_turnstile_config(
             decrypt_or_migrate_system_config_secret(state, "turnstile_secret_key", value)
                 .await
                 .map_err(|error| {
-                    warn!(error = ?error, "turnstile secret key migration failed");
+                    warn!(error = %crate::error::redact_error_debug(&error), "turnstile secret key migration failed");
                     AuthTurnstileFailure::ServiceUnavailable("人机验证服务暂不可用，请稍后重试")
                 })?,
         ),

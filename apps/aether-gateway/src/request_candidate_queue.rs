@@ -643,6 +643,24 @@ impl RequestCandidateQueueRuntime {
         }
     }
 
+    pub(crate) fn pending_writes(&self) -> usize {
+        [
+            self.metrics.pending_current.load(Ordering::Acquire),
+            self.metrics
+                .priority_pending_current
+                .load(Ordering::Acquire),
+            self.metrics.active_pending_current.load(Ordering::Acquire),
+            self.metrics
+                .terminal_pending_current
+                .load(Ordering::Acquire),
+            self.metrics
+                .terminal_barrier_pending
+                .load(Ordering::Acquire),
+        ]
+        .into_iter()
+        .fold(0_usize, usize::saturating_add)
+    }
+
     pub(crate) fn metric_samples(&self) -> Vec<MetricSample> {
         vec![
             MetricSample::new(

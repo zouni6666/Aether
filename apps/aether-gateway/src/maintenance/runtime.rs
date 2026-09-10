@@ -84,7 +84,8 @@ pub(crate) use pool_quota_probe::{
     perform_pool_quota_probe_once, perform_pool_quota_probe_once_for_provider_with_config,
     perform_pool_quota_probe_once_with_config, pool_quota_probe_target_count,
     select_pool_quota_probe_key_ids, spawn_pool_quota_probe_replenish_for_request,
-    spawn_pool_quota_probe_worker, PoolQuotaProbeRunSummary, PoolQuotaProbeWorkerConfig,
+    spawn_pool_quota_probe_worker, PoolQuotaProbeReplenishCoordinator, PoolQuotaProbeRunSummary,
+    PoolQuotaProbeWorkerConfig,
 };
 pub(crate) use pool_score_rebuild::{
     ensure_provider_key_pool_scores_for_keys, perform_pool_score_rebuild_once,

@@ -623,6 +623,10 @@ fn append_body_capture_metadata_entry(
     );
 }
 
+pub(crate) fn mark_usage_event_capture_truncated(metadata: &mut Option<Value>, key: &str) {
+    aether_data_contracts::repository::usage::mark_usage_capture_memory_omitted(metadata, key);
+}
+
 fn upsert_body_capture_metadata_value_entry(
     metadata: &mut Option<Value>,
     key: &str,

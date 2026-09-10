@@ -53,8 +53,13 @@ fn build_command() -> clap::Command {
         .subcommand_negates_reqs(true)
 }
 
+fn main() -> anyhow::Result<()> {
+    let _log_shutdown = aether_runtime::LogShutdownGuard::new();
+    run()
+}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn run() -> anyhow::Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
         .map_err(|_| anyhow::anyhow!("Failed to install rustls CryptoProvider"))?;

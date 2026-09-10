@@ -4,5 +4,6 @@ export { default as RoutingFailoverPolicyEditor } from './RoutingFailoverPolicyE
 export { default as RoutingGroupList } from './RoutingGroupList.vue'
 export { default as RoutingModelPolicyEditor } from './RoutingModelPolicyEditor.vue'
 export { default as RoutingPriorityPolicyEditor } from './RoutingPriorityPolicyEditor.vue'
+export { default as RoutingSchedulingPolicyEditor } from './RoutingSchedulingPolicyEditor.vue'
 export { default as RoutingRuleEditor } from './RoutingRuleEditor.vue'
 export { default as RoutingTraceViewer } from './RoutingTraceViewer.vue'

@@ -19,9 +19,14 @@ use aether_data::repository::management_tokens::{
 };
 use aether_data::repository::proxy_nodes::{InMemoryProxyNodeRepository, StoredProxyNode};
 use aether_data::repository::proxy_nodes::{ProxyNodeReadRepository, ProxyNodeWriteRepository};
+use aether_data::repository::routing_profiles::InMemoryRoutingGroupRepository;
 use aether_data::repository::users::{
     InMemoryUserReadRepository, StoredUserAuthRecord, UserReadRepository,
 };
+use aether_data_contracts::repository::routing_profiles::{
+    StoredRoutingGroup, StoredRoutingGroupBinding, StoredRoutingGroupVersion,
+};
+use aether_routing_core::RoutingGroupConfig;
 use sha2::{Digest, Sha256};
 
 use super::{GatewayDataConfig, GatewayDataState};
@@ -142,6 +147,24 @@ impl GatewayDataState {
             provider_catalog_repository;
         let usage_reader: Arc<dyn UsageReadRepository> = usage_repository.clone();
         let usage_writer: Arc<dyn UsageWriteRepository> = usage_repository;
+        let routing_groups = Arc::new(InMemoryRoutingGroupRepository::seed(
+            [StoredRoutingGroup {
+                id: "system-default".to_string(),
+                name: "system-default".to_string(),
+                description: Some("pressure harness routing strategy".to_string()),
+                enabled: true,
+                is_system_default: true,
+                sort_order: 0,
+                config_json: serde_json::to_value(RoutingGroupConfig::default())
+                    .expect("default routing config should serialize"),
+                version: 1,
+                created_at: 1,
+                updated_at: 1,
+                published_at: Some(1),
+            }],
+            std::iter::empty::<StoredRoutingGroupBinding>(),
+            std::iter::empty::<StoredRoutingGroupVersion>(),
+        ));
 
         Self {
             config: GatewayDataConfig::disabled().with_encryption_key(encryption_key),
@@ -174,8 +197,8 @@ impl GatewayDataState {
             pool_score_writer: None,
             provider_quota_reader: None,
             provider_quota_writer: None,
-            routing_group_reader: None,
-            routing_group_writer: None,
+            routing_group_reader: Some(routing_groups.clone()),
+            routing_group_writer: Some(routing_groups),
             usage_reader: Some(usage_reader),
             usage_writer: Some(usage_writer),
             user_reader: None,

@@ -67,6 +67,21 @@ GROUP BY
   FLOOR(EXTRACT(EPOCH FROM (created_at - TO_TIMESTAMP($2))) / $4)::BIGINT
 "#;
 
+const RUNTIME_CANDIDATE_COLUMNS: &str = r#"
+SELECT
+  id, request_id, user_id, api_key_id,
+  NULL::text AS username, NULL::text AS api_key_name,
+  candidate_index, retry_index, provider_id, endpoint_id, key_id, status,
+  NULL::text AS skip_reason, is_cached, status_code,
+  NULL::text AS error_type, NULL::text AS error_message,
+  latency_ms, concurrent_requests,
+  NULL::jsonb AS extra_data, NULL::jsonb AS required_capabilities,
+  CAST(EXTRACT(EPOCH FROM created_at) * 1000 AS BIGINT) AS created_at_unix_ms,
+  CAST(EXTRACT(EPOCH FROM started_at) * 1000 AS BIGINT) AS started_at_unix_ms,
+  CAST(EXTRACT(EPOCH FROM finished_at) * 1000 AS BIGINT) AS finished_at_unix_ms
+FROM request_candidates
+"#;
+
 const UPSERT_SQL_TEMPLATE: &str = r#"
 INSERT INTO request_candidates (
   id,
@@ -562,11 +577,28 @@ impl SqlxRequestCandidateReadRepository {
         &self,
         limit: usize,
     ) -> Result<Vec<StoredRequestCandidate>, DataLayerError> {
+        self.list_recent_with_columns(limit, candidate_columns())
+            .await
+    }
+
+    pub async fn list_recent_runtime(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<StoredRequestCandidate>, DataLayerError> {
+        self.list_recent_with_columns(limit, RUNTIME_CANDIDATE_COLUMNS)
+            .await
+    }
+
+    async fn list_recent_with_columns(
+        &self,
+        limit: usize,
+        columns: &'static str,
+    ) -> Result<Vec<StoredRequestCandidate>, DataLayerError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
 
-        let mut builder = QueryBuilder::<Postgres>::new(candidate_columns());
+        let mut builder = QueryBuilder::<Postgres>::new(columns);
         builder.push(" ORDER BY created_at DESC");
         push_limit(
             &mut builder,
@@ -1066,6 +1098,13 @@ impl RequestCandidateReadRepository for SqlxRequestCandidateReadRepository {
         limit: usize,
     ) -> Result<Vec<StoredRequestCandidate>, DataLayerError> {
         Self::list_recent(self, limit).await
+    }
+
+    async fn list_recent_runtime(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<StoredRequestCandidate>, DataLayerError> {
+        Self::list_recent_runtime(self, limit).await
     }
 
     async fn list_finalized_by_endpoint_ids_since(
@@ -1698,5 +1737,68 @@ VALUES ($1, $2, 0, 0, 'pending', $3, $4, $5::json, $6::json, $7, NOW())
             .execute(repository.pool())
             .await
             .expect("candidate NUL test rows should clean up");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires isolated AETHER_TEST_DATABASE_URL; uses a connection-local table"]
+    async fn live_postgres_candidate_runtime_projection_preserves_metadata_and_admin_rows() {
+        let database_url =
+            std::env::var("AETHER_TEST_DATABASE_URL").expect("isolated test database");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"
+CREATE TEMP TABLE request_candidates (
+  id text, request_id text, user_id text, api_key_id text,
+  username text, api_key_name text, candidate_index integer, retry_index integer,
+  provider_id text, endpoint_id text, key_id text, status text, skip_reason text,
+  is_cached boolean, status_code integer, error_type text, error_message text,
+  latency_ms integer, concurrent_requests integer, extra_data jsonb, required_capabilities jsonb,
+  created_at timestamptz, started_at timestamptz, finished_at timestamptz
+)
+"#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for index in 0..3 {
+            sqlx::query(
+                r#"
+INSERT INTO request_candidates VALUES (
+  $1, $2, 'user', 'api-key', NULL, NULL, $3, 0,
+  'provider', 'endpoint', 'key', 'failed', NULL, false, 500,
+  'upstream_error', 'admin diagnostic', 20, 17, $4, '{"vision": true}'::jsonb,
+  TO_TIMESTAMP(100 + $3), TO_TIMESTAMP(101 + $3), TO_TIMESTAMP(102 + $3)
+)
+"#,
+            )
+            .bind(format!("candidate-{index}"))
+            .bind(format!("request-{index}"))
+            .bind(index)
+            .bind(json!({"upstream_response": {"body": "x".repeat(32_768)}}))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let repository = SqlxRequestCandidateReadRepository::new(pool.clone());
+        let full = repository.list_recent(2).await.unwrap();
+        let runtime = repository.list_recent_runtime(2).await.unwrap();
+        assert_eq!(
+            runtime,
+            full.iter()
+                .map(|row| row.runtime_snapshot())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(runtime[0].id, "candidate-2");
+        assert_eq!(runtime[0].concurrent_requests, Some(17));
+        assert!(runtime[0].extra_data.is_none());
+        assert!(runtime[0].error_message.is_none());
+        assert!(full[0].extra_data.is_some());
+        assert_eq!(repository.list_recent(2).await.unwrap(), full);
+        assert!(repository.list_recent_runtime(0).await.unwrap().is_empty());
+        pool.close().await;
     }
 }
