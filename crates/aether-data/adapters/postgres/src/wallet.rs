@@ -3460,7 +3460,7 @@ FOR UPDATE
                     }
 
                     // A payment order may only credit a wallet owned by the
-                    // same live user. Lock the wallet and joined API-key row
+                    // same live user. Lock the wallet and associated API-key row
                     // before any gateway binding, entitlement, wallet, or
                     // order mutation. Reject legacy rows with an ambiguous
                     // owner shape instead of guessing an owner.
@@ -3484,12 +3484,10 @@ FOR UPDATE
                     let Some(wallet_owner_row) = sqlx::query(
                         r#"
 SELECT
-  w.user_id AS wallet_user_id,
-  w.api_key_id AS wallet_api_key_id,
-  api_keys.user_id AS api_key_user_id
-FROM wallets AS w
-LEFT JOIN api_keys ON api_keys.id = w.api_key_id
-WHERE w.id = $1
+  user_id AS wallet_user_id,
+  api_key_id AS wallet_api_key_id
+FROM wallets
+WHERE id = $1
 LIMIT 1
 FOR UPDATE
                         "#,
@@ -3515,8 +3513,21 @@ FOR UPDATE
                         row_get(&wallet_owner_row, "wallet_user_id")?;
                     let wallet_api_key_id: Option<String> =
                         row_get(&wallet_owner_row, "wallet_api_key_id")?;
+                    // PostgreSQL cannot lock the nullable side of a LEFT JOIN.
+                    // Read API-key ownership under its own lock while retaining
+                    // the wallet lock so both identities remain stable.
                     let api_key_user_id: Option<String> =
-                        row_get(&wallet_owner_row, "api_key_user_id")?;
+                        if let Some(api_key_id) = wallet_api_key_id.as_deref() {
+                            sqlx::query_scalar(
+                                "SELECT user_id FROM api_keys WHERE id = $1 FOR UPDATE",
+                            )
+                            .bind(api_key_id)
+                            .fetch_optional(&mut **tx)
+                            .await
+                            .map_postgres_err()?
+                        } else {
+                            None
+                        };
                     let wallet_owner_matches = match (
                         wallet_user_id.as_deref(),
                         wallet_api_key_id.as_deref(),
@@ -8478,9 +8489,9 @@ VALUES ($1, $2, 'gift', 'gift_initial', $3, 0, $3, 0, 0, 0, $3, 'system_task', $
 #[cfg(test)]
 mod tests {
     use aether_data_contracts::repository::wallet::{
-        CreateManualWalletRechargeInput, CreditAdminPaymentOrderInput, RedeemWalletCodeInput,
-        RedeemWalletCodeOutcome, WalletLookupKey, WalletMutationOutcome, WalletReadRepository,
-        WalletWriteRepository,
+        CreateManualWalletRechargeInput, CreditAdminPaymentOrderInput, ProcessPaymentCallbackInput,
+        ProcessPaymentCallbackOutcome, RedeemWalletCodeInput, RedeemWalletCodeOutcome,
+        WalletLookupKey, WalletMutationOutcome, WalletReadRepository, WalletWriteRepository,
     };
     use sqlx::Row;
 
@@ -8559,8 +8570,10 @@ mod tests {
             .await
             .expect("test database should connect");
         for table in [
+            "api_keys",
             "wallets",
             "payment_orders",
+            "payment_callbacks",
             "wallet_transactions",
             "user_plan_entitlements",
             "redeem_code_batches",
@@ -8610,7 +8623,7 @@ mod tests {
             })
         });
         sqlx::query(
-            "INSERT INTO payment_orders (id, order_no, wallet_id, user_id, amount_usd, pay_amount, pay_currency, payment_method, payment_provider, order_kind, product_id, product_snapshot, status, created_at, expires_at) VALUES ($1, $2, $3, $4, 5, 5, 'USD', 'stripe', 'stripe', $5, $6, $7, 'pending', NOW(), NOW() + INTERVAL '1 hour')",
+            "INSERT INTO payment_orders (id, order_no, wallet_id, user_id, amount_usd, pay_amount, pay_currency, payment_method, payment_provider, payment_channel, order_kind, product_id, product_snapshot, status, created_at, expires_at) VALUES ($1, $2, $3, $4, 5, 5, 'USD', 'stripe', 'stripe', 'card', $5, $6, $7, 'pending', NOW(), NOW() + INTERVAL '1 hour')",
         )
         .bind(&order_id)
         .bind(format!("order-{order_id}"))
@@ -8623,6 +8636,200 @@ mod tests {
         .await
         .expect("pending payment order should be created");
         order_id
+    }
+
+    fn payment_callback_input(order_id: &str) -> ProcessPaymentCallbackInput {
+        ProcessPaymentCallbackInput {
+            payment_method: "stripe".to_string(),
+            payment_provider: Some("stripe".to_string()),
+            payment_channel: Some("card".to_string()),
+            callback_key: format!("stripe:event-{order_id}"),
+            order_no: Some(format!("order-{order_id}")),
+            gateway_order_id: Some(format!("gateway-{order_id}")),
+            amount_usd: 5.0,
+            pay_amount: Some(5.0),
+            pay_currency: Some("USD".to_string()),
+            exchange_rate: Some(1.0),
+            payload_hash: "payment-callback-regression".to_string(),
+            payload: serde_json::json!({"status": "success"}),
+            signature_valid: true,
+        }
+    }
+
+    async fn make_api_key_wallet(pool: &sqlx::PgPool, wallet_id: &str, user_id: &str) -> String {
+        let api_key_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO api_keys (id, user_id, key_hash, created_at, updated_at) VALUES ($1, $2, $1, NOW(), NOW())",
+        )
+        .bind(&api_key_id)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .expect("test API key should be created");
+        sqlx::query("UPDATE wallets SET user_id = NULL, api_key_id = $2 WHERE id = $1")
+            .bind(wallet_id)
+            .bind(&api_key_id)
+            .execute(pool)
+            .await
+            .expect("test wallet should belong to the API key");
+        api_key_id
+    }
+
+    async fn assert_payment_callback_credits_once(api_key_wallet: bool) {
+        let pool = isolated_wallet_test_pool().await;
+        let (wallet_id, user_id) = seed_wallet(&pool).await;
+        if api_key_wallet {
+            make_api_key_wallet(&pool, &wallet_id, &user_id).await;
+        }
+        let order_id = seed_pending_order(&pool, &wallet_id, &user_id, "wallet_recharge").await;
+        let repository = SqlxWalletRepository::new(pool.clone());
+        let input = payment_callback_input(&order_id);
+        let outcome = repository
+            .process_payment_callback(input.clone())
+            .await
+            .expect("verified payment callback should commit");
+        let ProcessPaymentCallbackOutcome::Applied {
+            order, duplicate, ..
+        } = outcome
+        else {
+            panic!("pending payment order should be credited: {outcome:?}");
+        };
+        assert!(!duplicate);
+        assert_eq!(order.status, "credited");
+        assert_eq!(order.wallet_id, wallet_id);
+        assert_eq!(order.amount_usd, 5.0);
+        assert!(order.credited_at_unix_secs.is_some());
+        assert_eq!(
+            repository
+                .process_payment_callback(input.clone())
+                .await
+                .expect("duplicate callback should succeed"),
+            ProcessPaymentCallbackOutcome::DuplicateProcessed {
+                order_id: Some(order_id.clone()),
+            }
+        );
+        let another_event = ProcessPaymentCallbackInput {
+            callback_key: format!("stripe:another-event-{order_id}"),
+            ..input
+        };
+        assert!(matches!(
+            repository
+                .process_payment_callback(another_event)
+                .await
+                .expect("another event for a credited order should succeed"),
+            ProcessPaymentCallbackOutcome::AlreadyCredited { .. }
+        ));
+        let wallet = repository
+            .find(WalletLookupKey::WalletId(&wallet_id))
+            .await
+            .expect("wallet should be readable")
+            .expect("wallet should persist");
+        assert_eq!(wallet.balance, 15.0);
+        assert_eq!(wallet.gift_balance, 3.0);
+        assert_eq!(wallet.total_recharged, 25.0);
+        let transactions = sqlx::query(
+            "SELECT reason_code, CAST(amount AS DOUBLE PRECISION) AS amount, CAST(balance_before AS DOUBLE PRECISION) AS balance_before, CAST(balance_after AS DOUBLE PRECISION) AS balance_after, link_id FROM wallet_transactions WHERE wallet_id = $1",
+        )
+        .bind(&wallet_id)
+        .fetch_all(&pool)
+        .await
+        .expect("payment transactions should be readable");
+        assert_eq!(transactions.len(), 1);
+        assert_eq!(
+            transactions[0].get::<String, _>("reason_code"),
+            "topup_gateway"
+        );
+        assert_eq!(transactions[0].get::<f64, _>("amount"), 5.0);
+        assert_eq!(transactions[0].get::<f64, _>("balance_before"), 13.0);
+        assert_eq!(transactions[0].get::<f64, _>("balance_after"), 18.0);
+        assert_eq!(transactions[0].get::<String, _>("link_id"), order_id);
+        let processed_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM payment_callbacks WHERE payment_order_id = $1 AND status = 'processed'",
+        )
+        .bind(&order_id)
+        .fetch_one(&pool)
+        .await
+        .expect("processed callbacks should persist");
+        assert_eq!(processed_count, 2);
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AETHER_TEST_DATABASE_URL and PostgreSQL bootstrap schema"]
+    async fn live_payment_callback_user_wallet_credits_once() {
+        assert_payment_callback_credits_once(false).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AETHER_TEST_DATABASE_URL and PostgreSQL bootstrap schema"]
+    async fn live_payment_callback_api_key_wallet_credits_once() {
+        assert_payment_callback_credits_once(true).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AETHER_TEST_DATABASE_URL and PostgreSQL bootstrap schema"]
+    async fn live_payment_callback_rejects_wrong_or_missing_wallet_owner() {
+        for owner_case in ["wrong_user", "wrong_api_key_user", "missing_api_key"] {
+            let pool = isolated_wallet_test_pool().await;
+            let (wallet_id, user_id) = seed_wallet(&pool).await;
+            let order_id = seed_pending_order(&pool, &wallet_id, &user_id, "wallet_recharge").await;
+            let other_user_id = uuid::Uuid::new_v4().to_string();
+            if owner_case == "wrong_user" {
+                sqlx::query("UPDATE wallets SET user_id = $2 WHERE id = $1")
+                    .bind(&wallet_id)
+                    .bind(&other_user_id)
+                    .execute(&pool)
+                    .await
+                    .expect("wallet owner should change for the rejection test");
+            } else {
+                let api_key_id = make_api_key_wallet(&pool, &wallet_id, &other_user_id).await;
+                if owner_case == "missing_api_key" {
+                    sqlx::query("DELETE FROM api_keys WHERE id = $1")
+                        .bind(api_key_id)
+                        .execute(&pool)
+                        .await
+                        .expect("test API key should be removed");
+                }
+            }
+            let repository = SqlxWalletRepository::new(pool.clone());
+            assert_eq!(
+                repository
+                    .process_payment_callback(payment_callback_input(&order_id))
+                    .await
+                    .expect("owner mismatch should return a durable rejection"),
+                ProcessPaymentCallbackOutcome::Failed {
+                    duplicate: false,
+                    error: "payment order wallet owner mismatch".to_string(),
+                },
+                "owner case: {owner_case}"
+            );
+            let wallet = repository
+                .find(WalletLookupKey::WalletId(&wallet_id))
+                .await
+                .expect("wallet should be readable")
+                .expect("wallet should persist");
+            assert_eq!(wallet.balance, 10.0);
+            assert_eq!(wallet.total_recharged, 20.0);
+            let order = repository
+                .find_admin_payment_order(&order_id)
+                .await
+                .expect("order should be readable")
+                .expect("order should persist");
+            assert_eq!(order.status, "pending");
+            assert!(order.gateway_order_id.is_none());
+            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM wallet_transactions")
+                .fetch_one(&pool)
+                .await
+                .expect("transactions should be readable");
+            assert_eq!(count, 0);
+            let callback_status: String =
+                sqlx::query_scalar("SELECT status FROM payment_callbacks")
+                    .fetch_one(&pool)
+                    .await
+                    .expect("rejected callback should persist");
+            assert_eq!(callback_status, "failed");
+            pool.close().await;
+        }
     }
 
     #[tokio::test]

@@ -178,6 +178,7 @@
             </div>
             <RoutingPriorityPolicyEditor
               :config="schedulingPolicyEditorConfig(config, entry)"
+              :provider-model-ids="entry.scope === 'selected' ? providerModelIds(entry) : undefined"
               :show-priority-mode="false"
               :show-scheduling-mode="false"
               subtitle="所选模型共用此排序，仅对各模型可用的候选生效"
@@ -292,6 +293,11 @@ function otherModelOwners(entryId: string): Record<string, number> {
   return Object.fromEntries(entries.value.flatMap((entry, index) => entry.id !== entryId && entry.scope === 'selected'
     ? entry.models.map(model => [model, index + 1])
     : []))
+}
+
+function providerModelIds(entry: SchedulingPolicy): string[] {
+  const names = new Set(entry.models)
+  return props.globalModels.filter(model => names.has(model.name)).map(model => model.id)
 }
 
 function publish(): void {

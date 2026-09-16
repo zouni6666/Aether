@@ -369,6 +369,7 @@ const props = defineProps<{
   config: RoutingGroupConfig
   model?: string
   modelId?: string
+  providerModelIds?: string[]
   priorityMode?: RoutingPriorityMode
   schedulingMode?: RoutingSchedulingMode
   showPriorityMode?: boolean
@@ -445,7 +446,10 @@ const poolProviderIds = computed(() => {
 
 const providerRows = computed<ProviderPriorityRow[]>(() => {
   const overrides = targetModelPolicy.value.provider_priority_overrides
+  // 多选模型取提供商并集；空数组表示模型尚未解析，不能回退到全部提供商。
+  const modelIds = props.providerModelIds === undefined ? null : new Set(props.providerModelIds)
   return providers.value
+    .filter(provider => !modelIds || provider.global_model_ids?.some(id => modelIds.has(id)))
     .map(provider => ({
       id: provider.id,
       name: provider.name,

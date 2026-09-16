@@ -98,6 +98,9 @@ describe('CrossTabRefreshCoordinator', () => {
   })
 
   afterEach(() => {
+    vi.clearAllTimers()
+    vi.restoreAllMocks()
+    vi.useRealTimers()
     localStorage.clear()
     channelRegistry.clear()
   })
@@ -139,7 +142,14 @@ describe('CrossTabRefreshCoordinator', () => {
     second.destroy()
   })
 
-  it('treats peer failure as a retry hint and verifies the session locally', async () => {
+  it.each([0, 1])('treats peer failure as a retry hint with %i ms between clock reads', async (clockStepMs) => {
+    vi.useFakeTimers()
+    let timestamp = Date.now()
+    vi.spyOn(Date, 'now').mockImplementation(() => {
+      const current = timestamp
+      timestamp += clockStepMs
+      return current
+    })
     const refreshError = new Error('refresh failed')
     const firstAttempt = createDeferred<string>()
     const firstExecutor = vi
@@ -161,12 +171,14 @@ describe('CrossTabRefreshCoordinator', () => {
     await Promise.resolve()
     const secondRun = second.run(secondExecutor)
 
+    const firstOutcome = expect(firstRun).rejects.toThrow('refresh failed')
+    const secondOutcome = expect(secondRun).resolves.toBe('verified-in-second-tab')
     firstAttempt.reject(refreshError)
 
-    await expect(firstRun).rejects.toThrow('refresh failed')
-    await expect(secondRun).resolves.toBe('verified-in-second-tab')
-    expect(firstExecutor.mock.calls.length).toBeGreaterThanOrEqual(2)
-    expect(firstExecutor.mock.calls.length).toBeLessThanOrEqual(3)
+    await vi.runAllTimersAsync()
+    await firstOutcome
+    await secondOutcome
+    expect(firstExecutor).toHaveBeenCalledTimes(clockStepMs === 0 ? 3 : 2)
     expect(secondExecutor).toHaveBeenCalledTimes(1)
 
     first.destroy()

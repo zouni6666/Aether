@@ -132,6 +132,13 @@ export interface PaymentOrder {
   expires_at: string | null
 }
 
+export interface WalletRechargeOrdersResponse extends WalletBalanceResponse {
+  items: PaymentOrder[]
+  total: number
+  limit: number
+  offset: number
+}
+
 export interface RefundRequest {
   id: string
   refund_no: string
@@ -235,18 +242,8 @@ export const walletApi = {
     return response.data
   },
 
-  async listRechargeOrders(params?: { limit?: number; offset?: number }): Promise<{
-    items: PaymentOrder[]
-    total: number
-    limit: number
-    offset: number
-  }> {
-    const response = await apiClient.get<{
-    items: PaymentOrder[]
-    total: number
-    limit: number
-    offset: number
-  }>('/api/wallet/recharge', { params })
+  async listRechargeOrders(params?: { limit?: number; offset?: number }): Promise<WalletRechargeOrdersResponse> {
+    const response = await apiClient.get<WalletRechargeOrdersResponse>('/api/wallet/recharge', { params })
     return response.data
   },
 

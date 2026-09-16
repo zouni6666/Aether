@@ -745,7 +745,7 @@ import {
   walletTransactionReasonLabel,
 } from '@/utils/walletDisplay'
 
-const { success, error: showError } = useToast()
+const { success, info, error: showError } = useToast()
 
 const ENABLE_WALLET_ACTION_FORMS = true
 
@@ -787,6 +787,10 @@ const loadedTabs = new Set<string>()
 const tabLoadPromises = new Map<string, Promise<void>>()
 let refundEligibilityLoaded = false
 let todayCostPollTimer: ReturnType<typeof setInterval> | null = null
+let orderPollTimer: ReturnType<typeof setTimeout> | null = null
+let orderLoadVersion = 0
+let unmounted = false
+const pendingOrders = new Map<string, PaymentOrder>()
 
 const rechargeForm = reactive({
   amount_usd: 10,
@@ -922,6 +926,8 @@ onMounted(async () => {
       loadTransactions(),
       loadRechargeOptions(),
     ])
+    if (unmounted) return
+    await loadOrders()
     syncTodayCostPolling()
   } finally {
     loadingInitial.value = false
@@ -929,7 +935,10 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  unmounted = true
+  orderLoadVersion += 1
   stopTodayCostPolling()
+  stopOrderPolling()
   document.removeEventListener('visibilitychange', handleVisibilityChange)
 })
 
@@ -943,7 +952,8 @@ watch(refundableOrders, () => {
 })
 
 async function refreshWallet() {
-  await Promise.all([loadBalance(), loadOrders(), loadTransactions()])
+  await loadOrders()
+  await Promise.all([loadBalance(), loadTransactions()])
 }
 
 async function loadBalance() {
@@ -991,7 +1001,7 @@ async function loadTodayCost() {
 }
 
 function syncTodayCostPolling() {
-  if (activeTab.value === 'transactions' && !document.hidden) {
+  if (!unmounted && activeTab.value === 'transactions' && !document.hidden) {
     startTodayCostPolling()
   } else {
     stopTodayCostPolling()
@@ -1013,22 +1023,96 @@ function stopTodayCostPolling() {
 
 function handleVisibilityChange() {
   syncTodayCostPolling()
+  if (document.hidden) {
+    stopOrderPolling()
+  } else if (!loadingInitial.value) {
+    void reloadOrders(true)
+  }
 }
 
-async function loadOrders() {
-  loadingOrders.value = true
+function isAwaitingCredit(order: PaymentOrder): boolean {
+  return order.status === 'paid'
+    || (order.status === 'pending'
+      && (!order.expires_at || new Date(order.expires_at).getTime() > Date.now()))
+}
+
+function stopOrderPolling() {
+  if (orderPollTimer === null) return
+  clearTimeout(orderPollTimer)
+  orderPollTimer = null
+}
+
+function scheduleOrderPolling() {
+  stopOrderPolling()
+  if (unmounted || document.hidden || ![...pendingOrders.values()].some(isAwaitingCredit)) return
+  orderPollTimer = setTimeout(() => {
+    orderPollTimer = null
+    void reloadOrders(true)
+  }, 5_000)
+}
+
+function loadOrders() {
+  return reloadOrders(false)
+}
+
+async function reloadOrders(silent: boolean) {
+  if (unmounted) return
+  stopOrderPolling()
+  const version = ++orderLoadVersion
+  loadingOrders.value = !silent
   try {
     const offset = (orderPage.value - 1) * orderPageSize.value
     const resp = await walletApi.listRechargeOrders({ limit: orderPageSize.value, offset })
+    if (unmounted || version !== orderLoadVersion) return
+    const orders = [...resp.items]
+    const visibleIds = new Set(orders.map(order => order.id))
+    const missingOrders = [...pendingOrders.values()].filter(order =>
+      isAwaitingCredit(order) && !visibleIds.has(order.id)
+    )
+    const details = await Promise.allSettled(missingOrders.map(order => walletApi.getRechargeOrder(order.id)))
+    if (unmounted || version !== orderLoadVersion) return
+    for (const detail of details) {
+      if (detail.status === 'fulfilled') orders.push(detail.value.order)
+      else log.error('加载待到账订单失败:', detail.reason)
+    }
+    const newlyCredited = orders.filter(order =>
+      order.status === 'credited' && pendingOrders.has(order.id)
+    )
+    for (const order of orders) {
+      if (isAwaitingCredit(order)) pendingOrders.set(order.id, order)
+      else if (order.status !== 'credited') pendingOrders.delete(order.id)
+      if (latestRecharge.value?.order.id === order.id) latestRecharge.value.order = order
+    }
+
+    // Order lists include the wallet snapshot, but omit the daily package quota.
+    const { items: _items, total: _total, limit: _limit, offset: _offset, ...balance } = resp
+    const currentPackageBalance = packageBalance.value
+    const currentWalletBalance = Number(balance.wallet?.balance ?? balance.balance ?? 0)
+    walletBalance.value = {
+      ...walletBalance.value,
+      ...balance,
+      wallet_balance: Math.max(0, currentWalletBalance),
+      total_available_balance: balance.unlimited ? null : Math.max(0, currentWalletBalance + currentPackageBalance),
+    }
     rechargeOrders.value = resp.items
     orderTotal.value = resp.total
     loadedTabs.add('orders')
     syncRefundOrderSelection()
+    if (newlyCredited.length > 0) {
+      // Read after the credited status so a pre-credit list snapshot cannot win.
+      await Promise.all([loadBalance(), loadTransactions()])
+      for (const order of newlyCredited) pendingOrders.delete(order.id)
+      if (!unmounted && version === orderLoadVersion) success('充值已到账，余额已更新')
+    }
   } catch (error) {
+    if (unmounted || version !== orderLoadVersion) return
     log.error('加载充值订单失败:', error)
-    showError(parseApiError(error, '加载充值订单失败'))
+    if (!silent) showError(parseApiError(error, '加载充值订单失败'))
   } finally {
-    loadingOrders.value = false
+    if (!unmounted && version === orderLoadVersion) {
+      loadingOrders.value = false
+      scheduleOrderPolling()
+    }
   }
 }
 
@@ -1164,8 +1248,11 @@ async function submitRecharge() {
       payment_channel: option.payment_channel,
       idempotency_key: rechargeForm.idempotency_key,
     })
+    if (isAwaitingCredit(latestRecharge.value.order)) {
+      pendingOrders.set(latestRecharge.value.order.id, latestRecharge.value.order)
+    }
     success('充值订单创建成功')
-    await Promise.all([loadOrders(), loadBalance()])
+    await loadOrders()
     activeTab.value = 'orders'
     submitPaymentInstructions(latestRecharge.value.payment_instructions)
     rechargeForm.idempotency_key = ''
@@ -1234,8 +1321,8 @@ function isSafariBrowser(): boolean {
 }
 
 async function handleStripePaymentSuccess() {
-  success('支付已完成，正在刷新钱包余额')
-  await Promise.all([loadBalance(), loadOrders(), loadTransactions(), loadTodayCost()])
+  info('支付已提交，正在等待充值到账')
+  await loadOrders()
   activeTab.value = 'orders'
 }
 

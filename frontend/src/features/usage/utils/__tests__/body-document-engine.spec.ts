@@ -1,12 +1,31 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { gzipSync } from 'node:zlib'
 import { BodyDocumentEngine, decodeBody } from '../body-document-engine'
 import { JSON_PAGE_SIZE, JSON_TEXT_CHUNK_SIZE } from '../json-viewer'
+import type { BodyWorkerRequest } from '../body-document-protocol'
 
 function bytes(value: string) { return new TextEncoder().encode(value).buffer }
 function gzip(value: string) { return Uint8Array.from(gzipSync(value)).buffer }
 
 describe('body document decoding', () => {
+  it('loads and copies complete captured bodies through the worker entry point', async () => {
+    const postMessage = vi.fn()
+    vi.stubGlobal('postMessage', postMessage)
+    vi.stubGlobal('onmessage', undefined)
+    try {
+      await import('../body-document.worker')
+      const dispatch = globalThis.onmessage as unknown as (event: { data: BodyWorkerRequest }) => Promise<void>
+      const value = { messages: [{ role: 'user', content: `${'x'.repeat(100_000)}BODY-END` }] }
+      const text = JSON.stringify(value)
+      await dispatch({ data: { id: 1, action: 'load', bytes: gzip(text), encoding: 'gzip' } })
+      expect(postMessage).toHaveBeenLastCalledWith({ id: 1, ok: true, result: { byteLength: bytes(text).byteLength } })
+      await dispatch({ data: { id: 2, action: 'copy' } })
+      expect(postMessage).toHaveBeenLastCalledWith({ id: 2, ok: true, result: JSON.stringify(value, null, 2) })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it.each(['gzip', 'json'] as const)('decodes %s off the UI protocol with a byte count', async encoding => {
     const text = JSON.stringify({ text: '你好🙂', count: 0, enabled: false })
     const decoded = await decodeBody(encoding === 'gzip' ? gzip(text) : bytes(text), encoding)

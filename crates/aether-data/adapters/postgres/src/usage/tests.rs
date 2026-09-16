@@ -3467,6 +3467,18 @@ fn usage_sql_reads_http_audits_for_single_record_fetches() {
     assert!(super::FIND_BY_ID_SQL.contains("LEFT JOIN usage_http_audits"));
     assert!(super::FIND_BY_REQUEST_ID_SQL.contains("http_request_body_ref"));
     assert!(super::FIND_BY_ID_SQL.contains("http_client_response_body_ref"));
+    for sql in [super::FIND_BY_REQUEST_ID_SQL, super::FIND_BY_ID_SQL] {
+        for field in [
+            "request_body",
+            "provider_request_body",
+            "response_body",
+            "client_response_body",
+        ] {
+            assert!(sql.contains(&format!(
+                "usage_http_audits.{field}_state AS http_{field}_state"
+            )));
+        }
+    }
 }
 
 #[test]
