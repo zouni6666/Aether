@@ -717,7 +717,7 @@ fn canonical_tools_to_gemini(canonical: &CanonicalRequest) -> Option<Value> {
     let mut url_context = false;
 
     for tool in &canonical.tools {
-        match normalize_gemini_builtin_tool_name(&tool.name) {
+        match canonical_tool_builtin_gemini_name(tool) {
             Some("googleSearch") => {
                 google_search = true;
                 continue;
@@ -978,6 +978,25 @@ fn compact_gemini_contents(contents: Vec<Value>) -> Vec<Value> {
         }));
     }
     compact
+}
+
+/// Promote a canonical tool to a Gemini builtin only when it is a bare marker.
+///
+/// Clients declare ordinary function tools whose names collide with the builtin
+/// spellings — Claude Code ships a client-side `WebSearch` tool with a full
+/// `input_schema`. Matching on the name alone dropped those declarations and
+/// replaced them with server-side grounding, so the model could never call the
+/// tool the client actually implements. A declared schema means the caller
+/// expects to execute the call itself, so such tools stay function declarations.
+fn canonical_tool_builtin_gemini_name(tool: &CanonicalToolDefinition) -> Option<&'static str> {
+    if tool
+        .parameters
+        .as_ref()
+        .is_some_and(|parameters| !parameters.is_null())
+    {
+        return None;
+    }
+    normalize_gemini_builtin_tool_name(&tool.name)
 }
 
 fn normalize_gemini_builtin_tool_name(name: &str) -> Option<&'static str> {
@@ -1322,5 +1341,57 @@ mod tests {
 
         assert!(to_raw(&canonical, "gemini-2.5-pro", false).is_none());
         assert!(to_raw(&canonical, "gemini-3-flash-preview", false).is_some());
+    }
+
+    #[test]
+    fn client_declared_web_search_tool_stays_a_function_declaration() {
+        let canonical = CanonicalRequest {
+            model: "gemini-3-flash-preview".to_string(),
+            tools: vec![CanonicalToolDefinition {
+                name: "WebSearch".to_string(),
+                description: Some("Search the web".to_string()),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                })),
+                strict: None,
+                extensions: BTreeMap::new(),
+            }],
+            ..CanonicalRequest::default()
+        };
+
+        let tools = canonical_tools_to_gemini(&canonical).expect("tools should be emitted");
+        let tools = tools.as_array().expect("tools should be an array");
+
+        assert!(
+            tools.iter().all(|tool| tool.get("googleSearch").is_none()),
+            "a client tool named WebSearch must not become server-side grounding: {tools:?}"
+        );
+        assert_eq!(
+            tools[0]["functionDeclarations"][0]["name"], "WebSearch",
+            "the client declaration must survive: {tools:?}"
+        );
+    }
+
+    #[test]
+    fn schemaless_builtin_tool_name_still_maps_to_google_search() {
+        let canonical = CanonicalRequest {
+            model: "gemini-3-flash-preview".to_string(),
+            tools: vec![CanonicalToolDefinition {
+                name: "google_search".to_string(),
+                description: None,
+                parameters: None,
+                strict: None,
+                extensions: BTreeMap::new(),
+            }],
+            ..CanonicalRequest::default()
+        };
+
+        let tools = canonical_tools_to_gemini(&canonical).expect("tools should be emitted");
+        let tools = tools.as_array().expect("tools should be an array");
+
+        assert_eq!(tools.len(), 1, "{tools:?}");
+        assert_eq!(tools[0]["googleSearch"], json!({}));
     }
 }

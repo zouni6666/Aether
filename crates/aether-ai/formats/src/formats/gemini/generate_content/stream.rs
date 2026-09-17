@@ -2,6 +2,9 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Map, Value};
 
+use crate::formats::gemini::generate_content::response::{
+    gemini_candidate_grounding, gemini_grounding_citations,
+};
 use crate::formats::shared::response::{build_generated_tool_call_id, canonicalize_tool_arguments};
 use crate::formats::shared::sse::encode_json_sse;
 use crate::formats::shared::stream_core::common::*;
@@ -36,6 +39,10 @@ pub struct GeminiProviderState {
     content_parts: BTreeMap<usize, CanonicalContentPart>,
     tool_calls: BTreeMap<usize, GeminiProviderToolState>,
     tool_results: BTreeMap<usize, GeminiProviderToolResultState>,
+    /// Last `groundingMetadata` seen. Gemini resends it cumulatively, so the
+    /// newest copy is the complete one; citations are emitted once at finish,
+    /// when the answer text they index into is whole.
+    grounding: Option<Value>,
 }
 
 impl GeminiProviderState {
@@ -66,6 +73,31 @@ impl GeminiProviderState {
             event: CanonicalStreamEvent::Start,
         });
         self.started = true;
+    }
+
+    /// Turn the grounding metadata collected over the stream into citations.
+    ///
+    /// The offsets Gemini reports index into the finished answer, so this can
+    /// only run once the text is complete — hence a single frame just ahead of
+    /// `Finish` rather than a delta per chunk.
+    fn push_citations_frame(&mut self, id: &str, model: &str, out: &mut Vec<CanonicalStreamFrame>) {
+        let Some(grounding) = self.grounding.take() else {
+            return;
+        };
+        let text = self
+            .text_parts
+            .values()
+            .map(String::as_str)
+            .collect::<String>();
+        let citations = gemini_grounding_citations(&grounding, &text);
+        if citations.is_empty() {
+            return;
+        }
+        out.push(CanonicalStreamFrame {
+            id: id.to_string(),
+            model: model.to_string(),
+            event: CanonicalStreamEvent::Citations(citations),
+        });
     }
 
     fn unknown_frame(&self, report_context: &Value, payload: Value) -> CanonicalStreamFrame {
@@ -120,6 +152,11 @@ impl GeminiProviderState {
                 response_model.as_str(),
                 event_object.get("usageMetadata"),
             );
+            if !self.terminal_observation_only {
+                if let Some(grounding) = gemini_candidate_grounding(candidate_object) {
+                    self.grounding = Some(grounding.clone());
+                }
+            }
             let Some(content) = candidate_object.get("content").and_then(Value::as_object) else {
                 if let Some(payload) = terminal_error {
                     out.push(self.unknown_frame(report_context, payload));
@@ -361,6 +398,7 @@ impl GeminiProviderState {
                 if has_tool_calls && finish_reason.as_deref().is_none_or(|value| value == "stop") {
                     finish_reason = Some("tool_calls".to_string());
                 }
+                self.push_citations_frame(&id, &model, &mut out);
                 out.push(CanonicalStreamFrame {
                     id,
                     model,
@@ -385,14 +423,17 @@ impl GeminiProviderState {
         }
         self.finished = true;
         let (id, model) = self.identity(report_context);
-        Ok(vec![CanonicalStreamFrame {
+        let mut out = Vec::new();
+        self.push_citations_frame(&id, &model, &mut out);
+        out.push(CanonicalStreamFrame {
             id,
             model,
             event: CanonicalStreamEvent::Finish {
                 finish_reason: None,
                 usage: None,
             },
-        }])
+        });
+        Ok(out)
     }
 }
 
@@ -674,6 +715,9 @@ impl GeminiClientEmitter {
                 None,
                 None,
             ),
+            // Only Gemini produces citations today, and a Gemini-to-Gemini
+            // stream keeps its own `groundingMetadata` on the passthrough path.
+            CanonicalStreamEvent::Citations(_) => Ok(Vec::new()),
             CanonicalStreamEvent::UnknownEvent(_) => Ok(Vec::new()),
             CanonicalStreamEvent::Finish {
                 finish_reason,

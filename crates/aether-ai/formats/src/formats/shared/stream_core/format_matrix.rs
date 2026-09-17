@@ -875,6 +875,104 @@ mod tests {
         format!("event: {event}\n").into_bytes()
     }
 
+    /// Gemini runs `googleSearch` inside Google, so a grounded streaming answer
+    /// carries its evidence as `groundingMetadata` on the final chunk and never
+    /// as a tool call. Each client family has to receive it in its own citation
+    /// shape, or the answer streams out unverifiable.
+    #[test]
+    fn streams_gemini_grounding_to_every_client_as_native_citations() {
+        let text = "今天是 2026 年";
+        let first = json!({
+            "responseId": "resp_grounded",
+            "modelVersion": "gemini-3.8-flash",
+            "candidates": [{
+                "index": 0,
+                "content": {"role": "model", "parts": [{"text": text}]}
+            }]
+        });
+        let last = json!({
+            "responseId": "resp_grounded",
+            "modelVersion": "gemini-3.8-flash",
+            "candidates": [{
+                "index": 0,
+                "finishReason": "STOP",
+                "content": {"role": "model", "parts": [{"text": text}]},
+                "groundingMetadata": {
+                    "webSearchQueries": ["current UTC date"],
+                    "groundingChunks": [{
+                        "web": {"uri": "https://time.gov/", "title": "time.gov"}
+                    }],
+                    "groundingSupports": [{
+                        "segment": {"startIndex": 0, "endIndex": 15},
+                        "groundingChunkIndices": [0]
+                    }]
+                }
+            }]
+        });
+
+        for (client_api_format, marker) in [
+            ("openai:chat", "\"annotations\":[{\"type\":\"url_citation\""),
+            (
+                "openai:responses",
+                "event: response.output_text.annotation.added\n",
+            ),
+            ("claude:messages", "\"type\":\"citations_delta\""),
+        ] {
+            let context = report_context("gemini:generate_content", client_api_format);
+            let mut matrix = StreamingStandardFormatMatrix::default();
+            let mut output = matrix
+                .transform_line(&context, data_line(first.clone()))
+                .expect("text chunk");
+            output.extend(
+                matrix
+                    .transform_line(&context, data_line(last.clone()))
+                    .expect("grounded chunk"),
+            );
+            output.extend(matrix.finish(&context).expect("finish"));
+            let sse = String::from_utf8(output).expect("valid SSE");
+
+            assert!(
+                sse.contains(marker),
+                "{client_api_format} missing citations: {sse}"
+            );
+            assert!(
+                sse.contains("https://time.gov/"),
+                "{client_api_format} missing source url: {sse}"
+            );
+        }
+    }
+
+    /// The citation frame is emitted once the answer is whole, so a provider
+    /// that closes the stream without a `finishReason` must still deliver it.
+    #[test]
+    fn streams_gemini_grounding_even_when_the_provider_never_sends_a_finish_reason() {
+        let context = report_context("gemini:generate_content", "openai:chat");
+        let mut matrix = StreamingStandardFormatMatrix::default();
+        let mut output = matrix
+            .transform_line(
+                &context,
+                data_line(json!({
+                    "responseId": "resp_grounded",
+                    "modelVersion": "gemini-3.8-flash",
+                    "candidates": [{
+                        "index": 0,
+                        "content": {"role": "model", "parts": [{"text": "grounded"}]},
+                        "groundingMetadata": {
+                            "groundingChunks": [{"web": {"uri": "https://time.gov/"}}]
+                        }
+                    }]
+                })),
+            )
+            .expect("grounded chunk");
+        output.extend(matrix.finish(&context).expect("finish"));
+        let sse = String::from_utf8(output).expect("valid SSE");
+
+        assert!(
+            sse.contains("url_citation") && sse.contains("https://time.gov/"),
+            "{sse}"
+        );
+    }
+
     #[test]
     fn terminal_observer_marks_malformed_gemini_function_call_as_failure() {
         let context = report_context("gemini:generate_content", "openai:responses");

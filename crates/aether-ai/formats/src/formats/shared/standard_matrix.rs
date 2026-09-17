@@ -1952,6 +1952,66 @@ mod tests {
     }
 
     #[test]
+    fn claude_client_web_search_tool_survives_conversion_to_gemini() {
+        let request = json!({
+            "model": "gemini-3-flash-preview",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "find the release notes"}],
+            "tools": [
+                {
+                    "name": "WebSearch",
+                    "description": "Search the web and use the results to inform responses",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"]
+                    }
+                },
+                {
+                    "name": "Read",
+                    "description": "Read a file",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"file_path": {"type": "string"}},
+                        "required": ["file_path"]
+                    }
+                }
+            ]
+        });
+
+        let converted = build_standard_request_body(
+            &request,
+            "claude:messages",
+            "gemini-3-flash-preview",
+            "google",
+            "gemini:generate_content",
+            "/v1/messages",
+            false,
+            None,
+            None,
+        )
+        .expect("claude messages should convert to gemini");
+
+        let tools = converted["tools"]
+            .as_array()
+            .expect("tools should be an array");
+        assert!(
+            tools.iter().all(|tool| tool.get("googleSearch").is_none()
+                && tool.get("googleSearchRetrieval").is_none()),
+            "a client-declared WebSearch tool must not become server-side grounding: {tools:?}"
+        );
+
+        let declared: Vec<&str> = tools
+            .iter()
+            .filter_map(|tool| tool.get("functionDeclarations"))
+            .filter_map(Value::as_array)
+            .flatten()
+            .filter_map(|declaration| declaration.get("name").and_then(Value::as_str))
+            .collect();
+        assert_eq!(declared, vec!["WebSearch", "Read"], "{tools:?}");
+    }
+
+    #[test]
     fn builds_claude_request_from_openai_chat_with_thinking_and_data_url_image() {
         let request = json!({
             "model": "gpt-5",

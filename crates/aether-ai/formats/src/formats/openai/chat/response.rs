@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::{
     formats::context::FormatContext,
@@ -12,6 +12,53 @@ use crate::{
         OPENAI_RESPONSES_EXTENSION_NAMESPACE, OPENAI_RESPONSES_LEGACY_EXTENSION_NAMESPACE,
     },
 };
+
+/// Reasoning text carried by one Chat Completions `message` or streaming
+/// `delta`, paired with the provider's reasoning block index where one exists.
+///
+/// The field name is not standardized.  DeepSeek-style upstreams send
+/// `reasoning_content`; OpenRouter sends `reasoning` alongside a structured
+/// `reasoning_details` array.  OpenRouter repeats the same text in both of its
+/// fields, so exactly one source is read per object and `reasoning_details`
+/// wins because only it carries the block index.
+pub(crate) fn openai_chat_reasoning_texts(
+    object: &Map<String, Value>,
+) -> Vec<(Option<usize>, String)> {
+    if let Some(details) = object.get("reasoning_details").and_then(Value::as_array) {
+        let texts = details
+            .iter()
+            .filter_map(Value::as_object)
+            .filter_map(|detail| {
+                // `reasoning.encrypted` carries opaque provider state rather
+                // than readable text, so it has nothing to hand downstream.
+                if detail.get("type").and_then(Value::as_str) == Some("reasoning.encrypted") {
+                    return None;
+                }
+                let text = detail
+                    .get("text")
+                    .or_else(|| detail.get("summary"))
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.is_empty())?;
+                let index = detail
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .map(|index| index as usize);
+                Some((index, text.to_string()))
+            })
+            .collect::<Vec<_>>();
+        if !texts.is_empty() {
+            return texts;
+        }
+    }
+    // A provider may null out one spelling while filling the other, so skip
+    // past any key that is present but carries no string.
+    ["reasoning_content", "reasoning"]
+        .iter()
+        .find_map(|key| object.get(*key).and_then(Value::as_str))
+        .filter(|text| !text.is_empty())
+        .map(|text| vec![(None, text.to_string())])
+        .unwrap_or_default()
+}
 
 pub fn from(body: &Value, _ctx: &FormatContext) -> Option<CanonicalResponse> {
     from_raw(body)
@@ -40,21 +87,18 @@ pub fn from_raw(body_json: &Value) -> Option<CanonicalResponse> {
             .iter()
             .any(|block| matches!(block, CanonicalContentBlock::Thinking { .. }))
         {
-            if let Some(reasoning_content) = message
-                .get("reasoning_content")
-                .and_then(Value::as_str)
-                .filter(|value| !value.trim().is_empty())
-            {
-                content.insert(
-                    0,
-                    CanonicalContentBlock::Thinking {
-                        text: reasoning_content.to_string(),
-                        signature: None,
-                        encrypted_content: None,
-                        extensions: BTreeMap::new(),
-                    },
-                );
-            }
+            let thinking = openai_chat_reasoning_texts(message)
+                .into_iter()
+                .map(|(_, text)| text)
+                .filter(|text| !text.trim().is_empty())
+                .map(|text| CanonicalContentBlock::Thinking {
+                    text,
+                    signature: None,
+                    encrypted_content: None,
+                    extensions: BTreeMap::new(),
+                })
+                .collect::<Vec<_>>();
+            content.splice(0..0, thinking);
         }
         let stop_reason =
             openai_finish_reason_to_canonical(choice.get("finish_reason").and_then(Value::as_str));
@@ -178,4 +222,162 @@ pub fn to_raw(canonical: &CanonicalResponse) -> Value {
         response["service_tier"] = service_tier;
     }
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::canonical::CanonicalContentBlock;
+
+    fn thinking_texts(response: &CanonicalResponse) -> Vec<String> {
+        response
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                CanonicalContentBlock::Thinking { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn openrouter_reasoning_details_become_thinking_blocks() {
+        let response = from_raw(&json!({
+            "id": "gen-openrouter-123",
+            "model": "stealth/ox-alpha",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "done",
+                    "reasoning": "step onestep two",
+                    "reasoning_details": [
+                        {"type": "reasoning.text", "text": "step one", "index": 0},
+                        {"type": "reasoning.text", "text": "step two", "index": 1}
+                    ]
+                },
+                "finish_reason": "stop"
+            }]
+        }))
+        .expect("openrouter response should convert");
+
+        // `reasoning` repeats the same text the details already carry, so the
+        // details win and the provider's own segmentation survives.
+        assert_eq!(thinking_texts(&response), vec!["step one", "step two"]);
+    }
+
+    #[test]
+    fn openrouter_reasoning_string_becomes_a_thinking_block() {
+        let response = from_raw(&json!({
+            "id": "gen-openrouter-123",
+            "model": "stealth/ox-alpha",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "done",
+                    "reasoning": "thought about it"
+                },
+                "finish_reason": "stop"
+            }]
+        }))
+        .expect("openrouter response should convert");
+
+        assert_eq!(thinking_texts(&response), vec!["thought about it"]);
+    }
+
+    #[test]
+    fn deepseek_reasoning_content_still_becomes_a_thinking_block() {
+        let response = from_raw(&json!({
+            "id": "chatcmpl-deepseek",
+            "model": "deepseek-reasoner",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "42",
+                    "reasoning_content": "let me work it out"
+                },
+                "finish_reason": "stop"
+            }]
+        }))
+        .expect("deepseek response should convert");
+
+        assert_eq!(thinking_texts(&response), vec!["let me work it out"]);
+    }
+
+    #[test]
+    fn deepseek_reasoning_content_wins_over_a_bare_reasoning_field() {
+        let response = from_raw(&json!({
+            "id": "chatcmpl-deepseek",
+            "model": "deepseek-reasoner",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "42",
+                    "reasoning_content": "the real one",
+                    "reasoning": "the other spelling"
+                },
+                "finish_reason": "stop"
+            }]
+        }))
+        .expect("deepseek response should convert");
+
+        assert_eq!(thinking_texts(&response), vec!["the real one"]);
+    }
+
+    #[test]
+    fn blank_reasoning_content_produces_no_thinking_block() {
+        let response = from_raw(&json!({
+            "id": "chatcmpl-deepseek",
+            "model": "deepseek-reasoner",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "42", "reasoning_content": "   "},
+                "finish_reason": "stop"
+            }]
+        }))
+        .expect("deepseek response should convert");
+
+        assert!(thinking_texts(&response).is_empty());
+    }
+
+    #[test]
+    fn plain_openai_response_without_reasoning_is_unchanged() {
+        let response = from_raw(&json!({
+            "id": "chatcmpl-openai",
+            "model": "gpt-4o",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "hello"},
+                "finish_reason": "stop"
+            }]
+        }))
+        .expect("openai response should convert");
+
+        assert!(thinking_texts(&response).is_empty());
+    }
+
+    #[test]
+    fn encrypted_reasoning_details_carry_no_thinking_text() {
+        let response = from_raw(&json!({
+            "id": "gen-openrouter-123",
+            "model": "stealth/ox-alpha",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "done",
+                    "reasoning_details": [
+                        {"type": "reasoning.encrypted", "data": "b3BhcXVl", "index": 0}
+                    ]
+                },
+                "finish_reason": "stop"
+            }]
+        }))
+        .expect("openrouter response should convert");
+
+        assert!(thinking_texts(&response).is_empty());
+    }
 }

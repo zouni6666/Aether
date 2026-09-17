@@ -74,6 +74,14 @@ pub enum CanonicalStreamEvent {
         name: Option<String>,
         content: String,
     },
+    /// Provider-neutral source citations for the answer text streamed so far.
+    ///
+    /// Emitted once, just before `Finish`, by providers that ground an answer
+    /// server-side and report the evidence as metadata instead of a tool call.
+    /// Each entry carries `url` plus optional `title`, `cited_text` and
+    /// `start_index`/`end_index` character offsets; every target renders them
+    /// into its own family's citation shape.
+    Citations(Vec<Value>),
     UnknownEvent(Value),
     Finish {
         finish_reason: Option<String>,

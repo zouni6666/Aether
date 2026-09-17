@@ -120,11 +120,18 @@ pub fn build_antigravity_safe_v1internal_request(
     AntigravityRequestEnvelopeSupport::Supported(envelope)
 }
 
-/// Antigravity's private v1internal Gemini surface still uses the legacy
-/// `googleSearchRetrieval` spelling. The public Gemini converter emits the
-/// newer `googleSearch` spelling, which the private backend rejects when it is
-/// combined with function declarations. Normalize only at this transport
-/// boundary so public Gemini requests retain their native shape.
+/// Antigravity's private v1internal Gemini surface takes the same
+/// `googleSearch` grounding tool as the public one. Only the snake_case alias
+/// needs folding into the canonical camelCase key.
+///
+/// This used to rewrite `googleSearch` into the Gemini 1.5-era
+/// `googleSearchRetrieval` spelling. Gemini 3 rejects that: the model emits a
+/// `google_search` call the backend cannot bind to any declared tool, and the
+/// turn dies with `MALFORMED_FUNCTION_CALL`, e.g.
+/// `Malformed function call: call:google_search{query:current UTC date}`
+/// observed against `daily-cloudcode-pa.googleapis.com` with
+/// `tools: [{"googleSearchRetrieval": {}}]` and no function declarations.
+/// CLIProxyAPI sends `googleSearch` to the same v1internal surface.
 fn normalize_antigravity_builtin_tool_names(request: &mut Map<String, Value>) {
     let Some(tools) = request.get_mut("tools").and_then(Value::as_array_mut) else {
         return;
@@ -135,14 +142,9 @@ fn normalize_antigravity_builtin_tool_names(request: &mut Map<String, Value>) {
             continue;
         };
 
-        if let Some(payload) = tool_object.remove("googleSearch") {
-            tool_object
-                .entry("googleSearchRetrieval".to_string())
-                .or_insert(payload);
-        }
         if let Some(payload) = tool_object.remove("google_search") {
             tool_object
-                .entry("googleSearchRetrieval".to_string())
+                .entry("googleSearch".to_string())
                 .or_insert(payload);
         }
     }
@@ -220,6 +222,43 @@ mod tests {
             client_version: None,
             session_id: None,
         }
+    }
+
+    #[test]
+    fn search_only_request_keeps_the_modern_google_search_spelling() {
+        // Reproduces the live failure: a grounding-only request (no function
+        // declarations) that went out as `googleSearchRetrieval` came back as
+        // `Malformed function call: call:google_search{query:current UTC date}`
+        // from daily-cloudcode-pa.googleapis.com.
+        let request_body = json!({
+            "contents": [
+                { "role": "user", "parts": [{ "text": "today's UTC date?" }] }
+            ],
+            "tools": [{ "googleSearch": {} }]
+        });
+
+        let envelope = match build_antigravity_safe_v1internal_request(
+            &sample_auth(),
+            "request-ant-search-1",
+            "gemini-3.8-flash-high",
+            &request_body,
+            AntigravityEnvelopeRequestType::Agent,
+        ) {
+            AntigravityRequestEnvelopeSupport::Supported(envelope) => envelope,
+            AntigravityRequestEnvelopeSupport::Unsupported(reason) => {
+                panic!("search-only envelope should be supported: {reason:?}")
+            }
+        };
+
+        let tools = envelope["request"]["tools"]
+            .as_array()
+            .expect("tools should survive");
+        assert_eq!(tools.len(), 1, "{tools:?}");
+        assert_eq!(tools[0]["googleSearch"], json!({}));
+        assert!(
+            tools[0].get("googleSearchRetrieval").is_none(),
+            "the Gemini 1.5 spelling must not be reintroduced: {tools:?}"
+        );
     }
 
     #[test]
@@ -328,12 +367,9 @@ mod tests {
             .get("include_server_side_tool_invocations")
             .is_none());
         assert!(envelope["request"]["tools"][0]
-            .get("googleSearch")
+            .get("googleSearchRetrieval")
             .is_none());
-        assert_eq!(
-            envelope["request"]["tools"][0]["googleSearchRetrieval"],
-            json!({})
-        );
+        assert_eq!(envelope["request"]["tools"][0]["googleSearch"], json!({}));
         assert_eq!(
             envelope["request"]["tools"][1]["functionDeclarations"][0]["name"],
             "run_command"
@@ -471,7 +507,7 @@ mod tests {
             .get("google_search")
             .is_none());
         assert_eq!(
-            envelope["request"]["tools"][0]["googleSearchRetrieval"],
+            envelope["request"]["tools"][0]["googleSearch"],
             json!({
                 "dynamicRetrievalConfig": {
                     "mode": "MODE_UNSPECIFIED"

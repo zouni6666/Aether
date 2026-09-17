@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Map, Value};
 
+use crate::formats::shared::citations::canonical_citations_to_claude_citations;
 use crate::formats::shared::response::{
     build_generated_tool_call_id, canonicalize_tool_arguments,
     remove_empty_pages_from_tool_arguments,
@@ -773,6 +774,33 @@ impl ClaudeClientEmitter {
                 name,
                 content,
             } => self.emit_tool_result_block(index, tool_use_id, name, content),
+            CanonicalStreamEvent::Citations(citations) => {
+                let citations = canonical_citations_to_claude_citations(&citations);
+                if citations.is_empty() {
+                    return Ok(Vec::new());
+                }
+                // Citations belong to the answer text. If a tool call or a
+                // thinking block closed it, open a fresh text block rather than
+                // hang the evidence off an unrelated one.
+                let mut out = self.ensure_text_block()?;
+                let Some(ClaudeOpenBlock::Text { block_index }) = self.open_block else {
+                    return Ok(out);
+                };
+                for citation in citations {
+                    out.extend(encode_json_sse(
+                        Some("content_block_delta"),
+                        &json!({
+                            "type": "content_block_delta",
+                            "index": block_index,
+                            "delta": {
+                                "type": "citations_delta",
+                                "citation": citation,
+                            }
+                        }),
+                    )?);
+                }
+                Ok(out)
+            }
             CanonicalStreamEvent::UnknownEvent(_) => Ok(Vec::new()),
             CanonicalStreamEvent::Finish {
                 finish_reason,

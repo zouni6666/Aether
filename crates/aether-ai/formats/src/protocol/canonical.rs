@@ -16,6 +16,7 @@ pub use crate::protocol::stream::{CanonicalStreamEvent, CanonicalStreamFrame};
 
 pub(crate) const OPENAI_RESPONSES_EXTENSION_NAMESPACE: &str = "openai_responses";
 pub(crate) const OPENAI_RESPONSES_LEGACY_EXTENSION_NAMESPACE: &str = "openai_cli";
+pub(crate) const CLAUDE_EXTENSION_NAMESPACE: &str = "claude";
 const AETHER_EXTENSION_NAMESPACE: &str = "aether";
 const CLAUDE_MESSAGES_REQUEST_SOURCE_MARKER: &str = "claude_messages_request";
 const CLAUDE_SYSTEM_SOURCE_MARKER: &str = "claude_system";
@@ -5879,7 +5880,11 @@ pub(crate) fn canonical_block_to_claude(
             let mut out = Map::new();
             out.insert("type".to_string(), Value::String("text".to_string()));
             out.insert("text".to_string(), Value::String(text.clone()));
-            out.extend(namespace_extension_object(extensions, "claude", &out));
+            out.extend(namespace_extension_object(
+                extensions,
+                CLAUDE_EXTENSION_NAMESPACE,
+                &out,
+            ));
             Some(Some(Value::Object(out)))
         }
         CanonicalContentBlock::Thinking {
@@ -5899,7 +5904,11 @@ pub(crate) fn canonical_block_to_claude(
                     Value::String("redacted_thinking".to_string()),
                 );
                 out.insert("data".to_string(), Value::String(data.clone()));
-                out.extend(namespace_extension_object(extensions, "claude", &out));
+                out.extend(namespace_extension_object(
+                    extensions,
+                    CLAUDE_EXTENSION_NAMESPACE,
+                    &out,
+                ));
                 return Some(Some(Value::Object(out)));
             }
             if !matches!(role, CanonicalRole::Assistant) {
@@ -5920,7 +5929,11 @@ pub(crate) fn canonical_block_to_claude(
             if let Some(signature) = signature.as_ref().filter(|value| !value.is_empty()) {
                 out.insert("signature".to_string(), Value::String(signature.clone()));
             }
-            out.extend(namespace_extension_object(extensions, "claude", &out));
+            out.extend(namespace_extension_object(
+                extensions,
+                CLAUDE_EXTENSION_NAMESPACE,
+                &out,
+            ));
             Some(Some(Value::Object(out)))
         }
         CanonicalContentBlock::Image {
@@ -5945,7 +5958,11 @@ pub(crate) fn canonical_block_to_claude(
                 "source".to_string(),
                 claude_source_value(media_type.as_deref(), data.as_deref(), url.as_deref())?,
             );
-            out.extend(namespace_extension_object(extensions, "claude", &out));
+            out.extend(namespace_extension_object(
+                extensions,
+                CLAUDE_EXTENSION_NAMESPACE,
+                &out,
+            ));
             Some(Some(Value::Object(out)))
         }
         CanonicalContentBlock::File {
@@ -5968,7 +5985,11 @@ pub(crate) fn canonical_block_to_claude(
                 "source".to_string(),
                 claude_source_value(media_type.as_deref(), data.as_deref(), file_url.as_deref())?,
             );
-            out.extend(namespace_extension_object(extensions, "claude", &out));
+            out.extend(namespace_extension_object(
+                extensions,
+                CLAUDE_EXTENSION_NAMESPACE,
+                &out,
+            ));
             Some(Some(Value::Object(out)))
         }
         CanonicalContentBlock::Audio {
@@ -5988,7 +6009,11 @@ pub(crate) fn canonical_block_to_claude(
                     None,
                 )?,
             );
-            out.extend(namespace_extension_object(extensions, "claude", &out));
+            out.extend(namespace_extension_object(
+                extensions,
+                CLAUDE_EXTENSION_NAMESPACE,
+                &out,
+            ));
             Some(Some(Value::Object(out)))
         }
         CanonicalContentBlock::ToolUse {
@@ -6006,7 +6031,11 @@ pub(crate) fn canonical_block_to_claude(
             );
             out.insert("name".to_string(), Value::String(name.clone()));
             out.insert("input".to_string(), input);
-            out.extend(namespace_extension_object(extensions, "claude", &out));
+            out.extend(namespace_extension_object(
+                extensions,
+                CLAUDE_EXTENSION_NAMESPACE,
+                &out,
+            ));
             Some(Some(Value::Object(out)))
         }
         CanonicalContentBlock::ToolResult {
@@ -6035,7 +6064,11 @@ pub(crate) fn canonical_block_to_claude(
             if *is_error {
                 out.insert("is_error".to_string(), Value::Bool(true));
             }
-            out.extend(namespace_extension_object(extensions, "claude", &out));
+            out.extend(namespace_extension_object(
+                extensions,
+                CLAUDE_EXTENSION_NAMESPACE,
+                &out,
+            ));
             Some(Some(Value::Object(out)))
         }
         CanonicalContentBlock::Unknown {

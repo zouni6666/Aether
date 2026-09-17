@@ -3594,6 +3594,108 @@ mod tests {
             .any(|field| field.field == "messages"));
     }
 
+    /// Gemini runs `googleSearch` server-side, so the only trace of the search
+    /// is `groundingMetadata`. Clients on the other formats have to receive it
+    /// as their own native citations or the answer arrives unverifiable.
+    #[test]
+    fn gemini_grounding_reaches_every_cross_format_client_as_citations() {
+        let gemini = grounded_gemini_response();
+
+        for target in ["openai:chat", "openai:responses"] {
+            let converted =
+                convert_response_pure("gemini:generate_content", target, &gemini).expect(target);
+            let body = serde_json::to_string(&converted.value).expect("serialize");
+            let annotations = find_first_array(&converted.value, "annotations")
+                .unwrap_or_else(|| panic!("{target} dropped the grounding metadata: {body}"));
+            assert_eq!(
+                annotations,
+                &json!([{
+                    "type": "url_citation",
+                    "url": "https://time.gov/",
+                    "title": "time.gov",
+                    "start_index": 0,
+                    "end_index": 9,
+                }]),
+                "{target} annotations"
+            );
+        }
+
+        let converted =
+            convert_response_pure("gemini:generate_content", "claude:messages", &gemini)
+                .expect("claude:messages");
+        let body = serde_json::to_string(&converted.value).expect("serialize");
+        let citations = find_first_array(&converted.value, "citations")
+            .unwrap_or_else(|| panic!("claude:messages dropped the grounding metadata: {body}"));
+        assert_eq!(
+            citations,
+            &json!([{
+                "type": "web_search_result_location",
+                "url": "https://time.gov/",
+                "title": "time.gov",
+                "cited_text": "今天是 2026",
+            }])
+        );
+    }
+
+    /// The grounded span is reported in UTF-8 bytes but every target counts
+    /// characters, so a multi-byte answer must not shift the citation.
+    #[test]
+    fn gemini_grounding_offsets_are_converted_from_bytes_to_characters() {
+        let converted = convert_response_pure(
+            "gemini:generate_content",
+            "openai:chat",
+            &grounded_gemini_response(),
+        )
+        .expect("convert");
+        let annotation =
+            &find_first_array(&converted.value, "annotations").expect("annotations")[0];
+
+        // "今天是 2026 " is 15 bytes but 9 characters.
+        assert_eq!(annotation["end_index"], json!(9));
+    }
+
+    fn grounded_gemini_response() -> serde_json::Value {
+        json!({
+            "responseId": "resp_grounded",
+            "modelVersion": "gemini-3.8-flash",
+            "candidates": [{
+                "index": 0,
+                "finishReason": "STOP",
+                "groundingMetadata": {
+                    "webSearchQueries": ["current UTC date"],
+                    "groundingChunks": [{
+                        "web": {"uri": "https://time.gov/", "title": "time.gov"}
+                    }],
+                    "groundingSupports": [{
+                        "segment": {"startIndex": 0, "endIndex": 15},
+                        "groundingChunkIndices": [0]
+                    }]
+                },
+                "content": {"parts": [{"text": "今天是 2026 年"}]}
+            }]
+        })
+    }
+
+    fn find_first_array<'a>(
+        value: &'a serde_json::Value,
+        key: &str,
+    ) -> Option<&'a serde_json::Value> {
+        match value {
+            serde_json::Value::Object(object) => {
+                if let Some(found) = object.get(key).filter(|found| found.is_array()) {
+                    return Some(found);
+                }
+                object
+                    .values()
+                    .find_map(|value| find_first_array(value, key))
+            }
+            serde_json::Value::Array(items) => {
+                items.iter().find_map(|item| find_first_array(item, key))
+            }
+            _ => None,
+        }
+    }
+
     #[test]
     fn runtime_responses_to_gemini_rejects_mixed_tools_for_gemini_two() {
         let body = json!({
