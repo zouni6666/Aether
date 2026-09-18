@@ -23,6 +23,17 @@ use crate::formats::shared::standard_normalize::{
     is_claude_messages_shaped_body_on_openai_chat_endpoint,
 };
 
+/// Tool schema preservation is a format-conversion policy, shared by the
+/// standard matrix and provider-aware Chat/Responses entry points.
+pub(super) fn preserves_gemini_tool_schemas(
+    provider_type: &str,
+    provider_api_format: &str,
+) -> bool {
+    provider_type.trim().eq_ignore_ascii_case("antigravity")
+        && aether_ai_formats::normalize_api_format_alias(provider_api_format)
+            == "gemini:generate_content"
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn build_standard_request_body(
     body_json: &Value,
@@ -131,6 +142,8 @@ pub fn build_standard_request_body_with_model_directives_and_request_headers_and
         .with_mapped_model(mapped_model)
         .with_request_path(request_path)
         .with_upstream_stream(upstream_is_stream);
+    format_context.preserve_gemini_tool_schemas =
+        preserves_gemini_tool_schemas(provider_type, provider_api_format);
     if let Some(history_scope) = user_api_key_id {
         format_context = format_context.with_history_scope(history_scope);
     }
@@ -139,6 +152,23 @@ pub fn build_standard_request_body_with_model_directives_and_request_headers_and
         client_api_format,
         provider_api_format,
     );
+    // Keep the specialized OpenAI builders' compatibility/history preprocessing
+    // when routing them through the provider-aware schema-preserving path.
+    let antigravity_chat_body = if format_context.preserve_gemini_tool_schemas
+        && matches!(
+            aether_ai_formats::normalize_api_format_alias(source_api_format.as_ref()).as_str(),
+            "openai:chat" | "openai:responses" | "openai:responses:compact"
+        ) {
+        Some(
+            crate::formats::shared::standard_normalize::chat_compatible_body_for_standard_source(
+                body_json,
+                source_api_format.as_ref(),
+                user_api_key_id,
+            )?,
+        )
+    } else {
+        None
+    };
     // DeepSeek and xAI replay opaque provider state. Preserve their native
     // Responses input items: canonical conversion can lose reasoning IDs and
     // encrypted-only items even when source and destination formats are equal.
@@ -152,9 +182,13 @@ pub fn build_standard_request_body_with_model_directives_and_request_headers_and
         Value::Object(object)
     } else {
         convert_request(
-            source_api_format.as_ref(),
+            if antigravity_chat_body.is_some() {
+                "openai:chat"
+            } else {
+                source_api_format.as_ref()
+            },
             provider_api_format,
-            body_json,
+            antigravity_chat_body.as_deref().unwrap_or(body_json),
             &format_context,
         )
         .ok()?

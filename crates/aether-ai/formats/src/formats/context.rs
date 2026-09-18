@@ -10,6 +10,8 @@ pub struct FormatContext {
     pub upstream_is_stream: bool,
     pub report_context: Option<Value>,
     pub history_scope: Option<String>,
+    /// Defer tool schema lowering to the private provider transport boundary.
+    pub preserve_gemini_tool_schemas: bool,
 }
 
 impl FormatContext {
@@ -45,6 +47,7 @@ impl FormatContext {
             upstream_is_stream: false,
             report_context: self.report_context.clone(),
             history_scope: self.history_scope.clone(),
+            preserve_gemini_tool_schemas: false,
         }
     }
 

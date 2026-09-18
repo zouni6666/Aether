@@ -31,10 +31,11 @@ pub fn from(body: &Value, ctx: &FormatContext) -> Option<CanonicalRequest> {
 }
 
 pub fn to(request: &CanonicalRequest, ctx: &FormatContext) -> Option<Value> {
-    to_raw(
+    to_raw_with_schema_policy(
         request,
         ctx.mapped_model_or(request.model.as_str()),
         ctx.upstream_is_stream,
+        ctx.preserve_gemini_tool_schemas,
     )
 }
 
@@ -187,7 +188,21 @@ pub fn to_raw(
     mapped_model: &str,
     upstream_is_stream: bool,
 ) -> Option<Value> {
-    let mut output = canonical_to_gemini_request_body(canonical, mapped_model, upstream_is_stream)?;
+    to_raw_with_schema_policy(canonical, mapped_model, upstream_is_stream, false)
+}
+
+fn to_raw_with_schema_policy(
+    canonical: &CanonicalRequest,
+    mapped_model: &str,
+    upstream_is_stream: bool,
+    preserve_tool_schemas: bool,
+) -> Option<Value> {
+    let mut output = canonical_to_gemini_request_body(
+        canonical,
+        mapped_model,
+        upstream_is_stream,
+        preserve_tool_schemas,
+    )?;
     apply_gemini_request_extensions(&mut output, &canonical.extensions)?;
     if !canonical_has_raw_gemini_tools(canonical) {
         enable_server_side_tool_invocations_for_mixed_tools(&mut output, mapped_model)?;
@@ -244,7 +259,8 @@ pub fn ensure_server_side_tool_invocations_for_mixed_tools(output: &mut Value) -
 }
 
 pub(crate) fn canonical_has_mixed_gemini_tools(canonical: &CanonicalRequest) -> bool {
-    canonical_tools_to_gemini(canonical)
+    // Only tool kinds matter here; do not lower/expand schemas just to count them.
+    canonical_tools_to_gemini(canonical, true)
         .and_then(|tools| tools.as_array().cloned())
         .is_some_and(|tools| gemini_tools_are_mixed(&tools))
 }
@@ -275,6 +291,7 @@ fn canonical_to_gemini_request_body(
     canonical: &CanonicalRequest,
     mapped_model: &str,
     _upstream_is_stream: bool,
+    preserve_tool_schemas: bool,
 ) -> Option<Value> {
     let mut output = Map::new();
     if !mapped_model.trim().is_empty() {
@@ -297,7 +314,7 @@ fn canonical_to_gemini_request_body(
     {
         output.insert("generationConfig".to_string(), generation_config);
     }
-    if let Some(tools) = canonical_tools_to_gemini(canonical) {
+    if let Some(tools) = canonical_tools_to_gemini(canonical, preserve_tool_schemas) {
         output.insert("tools".to_string(), tools);
     }
     if let Some(tool_config) = canonical_tool_choice_to_gemini(canonical.tool_choice.as_ref()) {
@@ -701,7 +718,10 @@ fn apply_response_format_to_gemini_generation_config(
     }
 }
 
-fn canonical_tools_to_gemini(canonical: &CanonicalRequest) -> Option<Value> {
+fn canonical_tools_to_gemini(
+    canonical: &CanonicalRequest,
+    preserve_tool_schemas: bool,
+) -> Option<Value> {
     let mut declarations = Vec::new();
     let mut tools = Vec::new();
     let mut google_search = canonical
@@ -747,7 +767,10 @@ fn canonical_tools_to_gemini(canonical: &CanonicalRequest) -> Option<Value> {
             google_search = true;
             continue;
         }
-        declarations.push(canonical_tool_to_gemini_declaration(tool));
+        declarations.push(canonical_tool_to_gemini_declaration(
+            tool,
+            preserve_tool_schemas,
+        ));
     }
     let mut emitted_google_search = false;
     let mut emitted_code_execution = false;
@@ -877,7 +900,10 @@ fn gemini_unhandled_builtin_tool_portion(tool_object: &Map<String, Value>) -> Op
     (!builtin.is_empty()).then_some(Value::Object(builtin))
 }
 
-fn canonical_tool_to_gemini_declaration(tool: &CanonicalToolDefinition) -> Value {
+fn canonical_tool_to_gemini_declaration(
+    tool: &CanonicalToolDefinition,
+    preserve_tool_schema: bool,
+) -> Value {
     let mut declaration = Map::new();
     declaration.insert("name".to_string(), Value::String(tool.name.clone()));
     if let Some(description) = &tool.description {
@@ -898,7 +924,7 @@ fn canonical_tool_to_gemini_declaration(tool: &CanonicalToolDefinition) -> Value
             .clone()
             .or_else(|| tool.parameters.clone())
             .map(|mut schema| {
-                if raw_parameters.is_none() {
+                if raw_parameters.is_none() && !preserve_tool_schema {
                     clean_gemini_schema(&mut schema);
                 }
                 schema
@@ -1217,43 +1243,46 @@ mod tests {
 
     #[test]
     fn canonical_tool_declaration_sanitizes_json_schema_for_gemini() {
-        let declaration = canonical_tool_to_gemini_declaration(&CanonicalToolDefinition {
-            name: "inspect".to_string(),
-            description: None,
-            parameters: Some(json!({
-                "$defs": {
-                    "Target": {
-                        "type": "object",
-                        "properties": {
-                            "secret": {
-                                "type": "string",
-                                "encrypted": true
-                            }
+        let declaration = canonical_tool_to_gemini_declaration(
+            &CanonicalToolDefinition {
+                name: "inspect".to_string(),
+                description: None,
+                parameters: Some(json!({
+                    "$defs": {
+                        "Target": {
+                            "type": "object",
+                            "properties": {
+                                "secret": {
+                                    "type": "string",
+                                    "encrypted": true
+                                }
+                            },
+                            "required": ["secret"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "type": "object",
+                    "properties": {
+                        "target": {
+                            "oneOf": [
+                                {"$ref": "#/$defs/Target"},
+                                {"type": "null"}
+                            ]
                         },
-                        "required": ["secret"],
-                        "additionalProperties": false
+                        "mode": {
+                            "type": ["string", "null"],
+                            "enum": [1, "fast"]
+                        },
+                        "value": {
+                            "type": ["string", "integer"]
+                        }
                     }
-                },
-                "type": "object",
-                "properties": {
-                    "target": {
-                        "oneOf": [
-                            {"$ref": "#/$defs/Target"},
-                            {"type": "null"}
-                        ]
-                    },
-                    "mode": {
-                        "type": ["string", "null"],
-                        "enum": [1, "fast"]
-                    },
-                    "value": {
-                        "type": ["string", "integer"]
-                    }
-                }
-            })),
-            strict: None,
-            extensions: BTreeMap::new(),
-        });
+                })),
+                strict: None,
+                extensions: BTreeMap::new(),
+            },
+            false,
+        );
 
         assert_eq!(
             declaration["parameters"],
@@ -1361,17 +1390,20 @@ mod tests {
             ..CanonicalRequest::default()
         };
 
-        let tools = canonical_tools_to_gemini(&canonical).expect("tools should be emitted");
-        let tools = tools.as_array().expect("tools should be an array");
+        for preserve_tool_schemas in [false, true] {
+            let tools = canonical_tools_to_gemini(&canonical, preserve_tool_schemas)
+                .expect("tools should be emitted");
+            let tools = tools.as_array().expect("tools should be an array");
 
-        assert!(
-            tools.iter().all(|tool| tool.get("googleSearch").is_none()),
-            "a client tool named WebSearch must not become server-side grounding: {tools:?}"
-        );
-        assert_eq!(
-            tools[0]["functionDeclarations"][0]["name"], "WebSearch",
-            "the client declaration must survive: {tools:?}"
-        );
+            assert!(
+                tools.iter().all(|tool| tool.get("googleSearch").is_none()),
+                "a client tool named WebSearch must not become server-side grounding: {tools:?}"
+            );
+            assert_eq!(
+                tools[0]["functionDeclarations"][0]["name"], "WebSearch",
+                "the client declaration must survive: {tools:?}"
+            );
+        }
     }
 
     #[test]
@@ -1388,10 +1420,13 @@ mod tests {
             ..CanonicalRequest::default()
         };
 
-        let tools = canonical_tools_to_gemini(&canonical).expect("tools should be emitted");
-        let tools = tools.as_array().expect("tools should be an array");
+        for preserve_tool_schemas in [false, true] {
+            let tools = canonical_tools_to_gemini(&canonical, preserve_tool_schemas)
+                .expect("tools should be emitted");
+            let tools = tools.as_array().expect("tools should be an array");
 
-        assert_eq!(tools.len(), 1, "{tools:?}");
-        assert_eq!(tools[0]["googleSearch"], json!({}));
+            assert_eq!(tools.len(), 1, "{tools:?}");
+            assert_eq!(tools[0]["googleSearch"], json!({}));
+        }
     }
 }

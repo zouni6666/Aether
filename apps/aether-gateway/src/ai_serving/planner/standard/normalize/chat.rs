@@ -4,7 +4,7 @@ use crate::ai_serving::transport::apply_standard_provider_request_body_rules_wit
 use crate::ai_serving::{
     apply_codex_openai_responses_chat_body_edits,
     apply_openai_responses_compact_special_body_edits,
-    build_cross_format_openai_chat_request_body_with_model_directives as surface_build_cross_format_openai_chat_request_body,
+    build_cross_format_openai_chat_request_body_with_provider_context as surface_build_cross_format_openai_chat_request_body,
     build_local_openai_chat_request_body_with_model_directives as surface_build_local_openai_chat_request_body,
     GatewayProviderTransportSnapshot,
 };
@@ -73,9 +73,11 @@ pub(crate) fn build_cross_format_openai_chat_request_body(
     let provider_request_body = surface_build_cross_format_openai_chat_request_body(
         body_json,
         mapped_model,
+        provider_type,
         provider_api_format,
         upstream_is_stream,
         enable_model_directives,
+        user_api_key_id,
     )?;
     let mut provider_request_body =
         apply_standard_provider_request_body_rules_with_request_headers(
@@ -108,6 +110,42 @@ pub(crate) fn build_cross_format_openai_chat_request_body(
         &provider_request_body,
     )?;
     Some(provider_request_body)
+}
+
+#[cfg(test)]
+mod antigravity_schema_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn antigravity_chat_route_preserves_tool_schema_and_alternate_responses_shape() {
+        let schema = json!({"type": "object", "properties": {"mode": {"const": "fast"}}});
+        let body = json!({"model": "client", "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "probe", "parameters": schema}}]});
+        let responses_body = json!({"model": "client", "input": "hi",
+            "tools": [{"type": "function", "name": "probe", "parameters": schema}]});
+        for input in [body, responses_body] {
+            for provider in ["antigravity", "gemini"] {
+                let output = build_cross_format_openai_chat_request_body(
+                    &input,
+                    "claude-test",
+                    provider,
+                    "gemini:generate_content",
+                    true,
+                    false,
+                    None,
+                    None,
+                    &http::HeaderMap::new(),
+                    false,
+                )
+                .unwrap();
+                let parameters = &output["tools"][0]["functionDeclarations"][0]["parameters"];
+                assert_eq!(parameters == &schema, provider == "antigravity");
+                assert!(output.get("stream").is_none());
+                assert_eq!(output["contents"][0]["parts"][0]["text"], "hi");
+            }
+        }
+    }
 }
 
 pub(crate) fn build_cross_format_openai_chat_upstream_url(

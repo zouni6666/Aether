@@ -65,7 +65,7 @@ fn chat_compatible_body_for_openai_chat_endpoint(body_json: &Value) -> Option<Co
     Some(Cow::Borrowed(body_json))
 }
 
-fn chat_compatible_body_for_standard_source<'a>(
+pub(crate) fn chat_compatible_body_for_standard_source<'a>(
     body_json: &'a Value,
     client_api_format: &str,
     history_scope: Option<&str>,
@@ -164,6 +164,40 @@ pub fn build_cross_format_openai_chat_request_body(
         provider_api_format,
         upstream_is_stream,
         false,
+    )
+}
+
+/// Provider-aware entry point for gateway Chat planners. Keep private schema
+/// conversion policy in the format crate while retaining legacy behavior elsewhere.
+pub fn build_cross_format_openai_chat_request_body_with_provider_context(
+    body_json: &Value,
+    mapped_model: &str,
+    provider_type: &str,
+    provider_api_format: &str,
+    upstream_is_stream: bool,
+    enable_model_directives: bool,
+    history_scope: Option<&str>,
+) -> Option<Value> {
+    if super::standard_matrix::preserves_gemini_tool_schemas(provider_type, provider_api_format) {
+        return super::standard_matrix::build_standard_request_body_with_model_directives(
+            body_json,
+            "openai:chat",
+            mapped_model,
+            provider_type,
+            provider_api_format,
+            "",
+            upstream_is_stream,
+            None,
+            history_scope,
+            enable_model_directives,
+        );
+    }
+    build_cross_format_openai_chat_request_body_with_model_directives(
+        body_json,
+        mapped_model,
+        provider_api_format,
+        upstream_is_stream,
+        enable_model_directives,
     )
 }
 
@@ -342,6 +376,44 @@ pub fn build_cross_format_openai_responses_request_body_with_model_directives(
     )
 }
 
+/// Provider-aware Responses entry point; preserve history scoping and defer
+/// private tool schema lowering without exposing provider policy to the gateway.
+#[allow(clippy::too_many_arguments)]
+pub fn build_cross_format_openai_responses_request_body_with_provider_context(
+    body_json: &Value,
+    mapped_model: &str,
+    client_api_format: &str,
+    provider_type: &str,
+    provider_api_format: &str,
+    upstream_is_stream: bool,
+    enable_model_directives: bool,
+    history_scope: Option<&str>,
+) -> Option<Value> {
+    if super::standard_matrix::preserves_gemini_tool_schemas(provider_type, provider_api_format) {
+        return super::standard_matrix::build_standard_request_body_with_model_directives(
+            body_json,
+            client_api_format,
+            mapped_model,
+            provider_type,
+            provider_api_format,
+            "",
+            upstream_is_stream,
+            None,
+            history_scope,
+            enable_model_directives,
+        );
+    }
+    build_cross_format_openai_responses_request_body_with_model_directives_and_history_scope(
+        body_json,
+        mapped_model,
+        client_api_format,
+        provider_api_format,
+        upstream_is_stream,
+        enable_model_directives,
+        history_scope,
+    )
+}
+
 pub fn build_cross_format_openai_responses_request_body_with_model_directives_and_history_scope(
     body_json: &Value,
     mapped_model: &str,
@@ -432,6 +504,145 @@ mod tests {
         build_local_openai_responses_request_body_with_model_directives,
     };
     use serde_json::{json, Value};
+
+    #[test]
+    fn provider_context_builders_preserve_private_schemas_and_legacy_routes() {
+        use crate::api::{
+            build_cross_format_openai_chat_request_body_with_provider_context as chat,
+            build_cross_format_openai_responses_request_body_with_provider_context as responses,
+        };
+        let schema = json!({"type":"object", "properties":{"mode":{"const":"fast"}}});
+        let chat_input = json!({"model":"client", "messages":[{"role":"user","content":"hi"}],
+            "tools":[{"type":"function","function":{"name":"probe","parameters":schema}}]});
+        let responses_input = json!({"model":"client", "input":"hi",
+            "tools":[{"type":"function","name":"probe","parameters":schema}]});
+        for provider in ["antigravity", " AnTiGrAvItY ", "gemini", "openai"] {
+            for target in [
+                "gemini:generate_content",
+                "claude:messages",
+                "openai:responses",
+            ] {
+                for stream in [false, true] {
+                    for directives in [false, true] {
+                        for input in [&chat_input, &responses_input] {
+                            let actual = chat(
+                                input,
+                                "claude-test",
+                                provider,
+                                target,
+                                stream,
+                                directives,
+                                Some("seam-test"),
+                            );
+                            let expected =
+                                if super::super::standard_matrix::preserves_gemini_tool_schemas(
+                                    provider, target,
+                                ) {
+                                    super::super::standard_matrix::build_standard_request_body_with_model_directives(
+                                    input, "openai:chat", "claude-test", provider, target, "", stream, None, Some("seam-test"), directives)
+                                } else {
+                                    super::build_cross_format_openai_chat_request_body_with_model_directives(
+                                    input, "claude-test", target, stream, directives)
+                                };
+                            assert!(actual.is_some(), "chat {provider} {target}");
+                            assert_eq!(actual, expected);
+                            if target == "gemini:generate_content" {
+                                assert_eq!(
+                                    actual.unwrap()["tools"][0]["functionDeclarations"][0]
+                                        ["parameters"]
+                                        == schema,
+                                    provider.trim().eq_ignore_ascii_case("antigravity")
+                                );
+                            }
+                        }
+                        let actual = responses(
+                            &responses_input,
+                            "claude-test",
+                            "openai:responses",
+                            provider,
+                            target,
+                            stream,
+                            directives,
+                            Some("seam-test"),
+                        );
+                        let expected =
+                            if super::super::standard_matrix::preserves_gemini_tool_schemas(
+                                provider, target,
+                            ) {
+                                super::super::standard_matrix::build_standard_request_body_with_model_directives(
+                                &responses_input, "openai:responses", "claude-test", provider, target, "", stream, None, Some("seam-test"), directives)
+                            } else {
+                                super::build_cross_format_openai_responses_request_body_with_model_directives_and_history_scope(
+                                &responses_input, "claude-test", "openai:responses", target, stream, directives, Some("seam-test"))
+                            };
+                        // Same-format Responses uses the local builder, not this cross-format API.
+                        assert_eq!(
+                            actual.is_some(),
+                            target != "openai:responses",
+                            "responses {provider} {target}"
+                        );
+                        assert_eq!(actual, expected);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn provider_context_builders_keep_scoped_responses_history() {
+        use crate::api::{
+            build_cross_format_openai_chat_request_body_with_provider_context as chat,
+            build_cross_format_openai_responses_request_body_with_provider_context as responses,
+            record_converted_response_history,
+        };
+        let response_id = "resp_provider_context_seam_history";
+        let scope = "provider-context-seam-history";
+        record_converted_response_history(&json!({
+            "needs_conversion":true, "client_api_format":"openai:responses",
+            "provider_api_format":"openai:chat", "api_key_id":scope,
+            "original_request_body":{"model":"client", "input":"first"}
+        }), &json!({"id":response_id, "status":"completed", "output":[{
+            "type":"message", "role":"assistant", "content":[{"type":"output_text", "text":"remembered"}]
+        }]})).expect("seed scoped history");
+        let input = json!({"model":"client", "previous_response_id":response_id, "input":"second"});
+        for use_chat in [false, true] {
+            let build = |history_scope| {
+                if use_chat {
+                    chat(
+                        &input,
+                        "claude-test",
+                        "antigravity",
+                        "gemini:generate_content",
+                        true,
+                        false,
+                        history_scope,
+                    )
+                } else {
+                    responses(
+                        &input,
+                        "claude-test",
+                        "openai:responses",
+                        "antigravity",
+                        "gemini:generate_content",
+                        true,
+                        false,
+                        history_scope,
+                    )
+                }
+            };
+            if use_chat {
+                // The legacy Chat alternate-shape path does not hydrate scoped
+                // Responses history. Preserve that behavior during this refactor.
+                assert!(build(Some(scope)).is_none());
+                continue;
+            }
+            let output = build(Some(scope)).expect("expand scoped history");
+            assert_eq!(output["contents"][0]["parts"][0]["text"], "first");
+            assert_eq!(output["contents"][1]["parts"][0]["text"], "remembered");
+            assert_eq!(output["contents"][2]["parts"][0]["text"], "second");
+            assert!(build(Some("different-seam-key")).is_none());
+        }
+    }
 
     fn object_keys(value: &Value) -> Vec<&str> {
         value

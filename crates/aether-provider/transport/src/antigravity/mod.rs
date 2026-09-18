@@ -1,6 +1,7 @@
 mod auth;
 mod policy;
 mod request;
+mod schema;
 mod url;
 
 pub use auth::{

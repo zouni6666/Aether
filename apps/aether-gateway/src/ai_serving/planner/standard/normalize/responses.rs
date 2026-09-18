@@ -3,7 +3,7 @@ use serde_json::Value;
 use crate::ai_serving::transport::apply_standard_provider_request_body_rules_with_request_headers;
 use crate::ai_serving::{
     apply_openai_responses_compact_special_body_edits,
-    build_cross_format_openai_responses_request_body_with_model_directives_and_history_scope as surface_build_cross_format_openai_responses_request_body,
+    build_cross_format_openai_responses_request_body_with_provider_context as surface_build_cross_format_openai_responses_request_body,
     build_local_openai_responses_request_body_with_model_directives as surface_build_local_openai_responses_request_body,
     GatewayProviderTransportSnapshot,
 };
@@ -218,6 +218,7 @@ pub(crate) fn build_cross_format_openai_responses_request_body_with_codex_model_
         body_json,
         mapped_model,
         client_api_format,
+        provider_type,
         provider_api_format,
         upstream_is_stream,
         enable_model_directives,
@@ -272,6 +273,41 @@ pub(crate) fn build_local_openai_responses_upstream_url(
         compact,
         parts.uri.query(),
     )
+}
+
+#[cfg(test)]
+mod antigravity_schema_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn antigravity_responses_route_preserves_tool_schema_without_changing_public_gemini() {
+        let schema = json!({"type": "object", "properties": {"mode": {"const": "fast"}}});
+        let input = json!({"model": "client", "input": "hi",
+            "tools": [{"type": "function", "name": "probe", "parameters": schema}]});
+        for provider in ["antigravity", "gemini"] {
+            let output =
+                build_cross_format_openai_responses_request_body_with_codex_model_capabilities(
+                    &input,
+                    "claude-test",
+                    "openai:responses",
+                    "gemini:generate_content",
+                    true,
+                    false,
+                    provider,
+                    None,
+                    &http::HeaderMap::new(),
+                    Some("antigravity-schema-test"),
+                    None,
+                    false,
+                )
+                .unwrap();
+            let parameters = &output["tools"][0]["functionDeclarations"][0]["parameters"];
+            assert_eq!(parameters == &schema, provider == "antigravity");
+            assert!(output.get("stream").is_none());
+            assert_eq!(output["contents"][0]["parts"][0]["text"], "hi");
+        }
+    }
 }
 
 pub(crate) fn build_cross_format_openai_responses_upstream_url(

@@ -1,0 +1,24 @@
+{
+  "type": "object",
+  "required": ["code"],
+  "properties": {
+    "code": {"type": "string", "description": "TypeScript function body."},
+    "payloads": {"type": "object", "patternProperties": {"^.*$": {"type": "string"}}},
+    "resultFormat": {"anyOf": [
+      {"type": "string", "const": "auto"},
+      {"type": "string", "const": "yaml"},
+      {"type": "string", "const": "json"},
+      {"type": "string", "const": "text"}
+    ]},
+    "tokenBudget": {"type": "number", "minimum": 1},
+    "agentBudget": {"type": "number", "minimum": 1},
+    "timeoutMs": {"type": "number", "minimum": 1},
+    "display": {"anyOf": [
+      {"type": "object", "properties": {
+        "name": {"type": "string"},
+        "description": {"type": "string"}
+      }},
+      {"type": "string"}
+    ]}
+  }
+}

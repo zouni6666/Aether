@@ -224,9 +224,11 @@ pub use crate::formats::{
         standard_normalize::{
             build_cross_format_openai_chat_request_body,
             build_cross_format_openai_chat_request_body_with_model_directives,
+            build_cross_format_openai_chat_request_body_with_provider_context,
             build_cross_format_openai_responses_request_body,
             build_cross_format_openai_responses_request_body_with_model_directives,
             build_cross_format_openai_responses_request_body_with_model_directives_and_history_scope,
+            build_cross_format_openai_responses_request_body_with_provider_context,
             build_local_openai_chat_request_body,
             build_local_openai_chat_request_body_with_model_directives,
             build_local_openai_responses_request_body,
