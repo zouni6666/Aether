@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use crate::formats::{
     context::FormatContext,
     openai::responses::{
-        openai_responses_message_item_id, openai_responses_reasoning_text_fields,
+        openai_responses_message_item_id, openai_responses_reasoning_text_parts,
         openai_responses_synthetic_reasoning_item_id,
         response::ensure_modern_openai_responses_response_fields,
     },
@@ -206,12 +206,12 @@ pub fn build_openai_responses_response_with_content(
         if trimmed.is_empty() {
             continue;
         }
-        let (content, summary) = openai_responses_reasoning_text_fields(std::iter::once(trimmed));
+        let content = openai_responses_reasoning_text_parts(std::iter::once(trimmed));
         output.push(json!({
             "type": "reasoning",
             "id": openai_responses_synthetic_reasoning_item_id(response_id, index),
             "status": "completed",
-            "summary": summary,
+            "summary": [],
             "content": content,
         }));
     }
@@ -310,8 +310,7 @@ mod tests {
             "reasoning_text"
         );
         assert_eq!(response["output"][0]["content"][0]["text"], "raw thinking");
-        assert_eq!(response["output"][0]["summary"][0]["type"], "summary_text");
-        assert_eq!(response["output"][0]["summary"][0]["text"], "raw thinking");
+        assert_eq!(response["output"][0]["summary"], json!([]));
         assert_eq!(response["output"][1]["content"][0]["text"], "answer");
     }
 
@@ -357,8 +356,7 @@ mod tests {
         assert_eq!(item["type"], "reasoning");
         assert_eq!(item["content"][0]["type"], "reasoning_text");
         assert_eq!(item["content"][0]["text"], "compare the decimals");
-        assert_eq!(item["summary"][0]["type"], "summary_text");
-        assert_eq!(item["summary"][0]["text"], "compare the decimals");
+        assert_eq!(item["summary"], json!([]));
         assert!(!item.get("content").unwrap().is_null());
         assert_eq!(converted["output"][1]["type"], "message");
         assert_eq!(

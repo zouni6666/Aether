@@ -493,6 +493,15 @@ fn usage_matches_summary_query(
             return false;
         }
     }
+    if let Some(user_ids) = query.user_ids.as_deref() {
+        if !item
+            .user_id
+            .as_ref()
+            .is_some_and(|user_id| user_ids.contains(user_id))
+        {
+            return false;
+        }
+    }
     if let Some(provider_name) = query.provider_name.as_deref() {
         if item.provider_name != provider_name {
             return false;
@@ -517,6 +526,15 @@ fn usage_matches_time_series_query(
     }
     if let Some(user_id) = query.user_id.as_deref() {
         if item.user_id.as_deref() != Some(user_id) {
+            return false;
+        }
+    }
+    if let Some(user_ids) = query.user_ids.as_deref() {
+        if !item
+            .user_id
+            .as_ref()
+            .is_some_and(|user_id| user_ids.contains(user_id))
+        {
             return false;
         }
     }
@@ -888,6 +906,15 @@ fn usage_matches_leaderboard_query(
     }
     if let Some(user_id) = query.user_id.as_deref() {
         if item.user_id.as_deref() != Some(user_id) {
+            return false;
+        }
+    }
+    if let Some(user_ids) = query.user_ids.as_deref() {
+        if !item
+            .user_id
+            .as_ref()
+            .is_some_and(|user_id| user_ids.contains(user_id))
+        {
             return false;
         }
     }

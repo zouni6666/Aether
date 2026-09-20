@@ -7,7 +7,7 @@ use crate::formats::openai::chat::response::openai_chat_reasoning_texts;
 use crate::formats::openai::namespace::NamespaceToolAliases;
 use crate::formats::openai::responses::{
     encode_gemini_tool_signature_carrier_with_direction, openai_responses_message_item_id,
-    openai_responses_reasoning_text_fields, openai_responses_synthetic_reasoning_item_id,
+    openai_responses_reasoning_text_parts, openai_responses_synthetic_reasoning_item_id,
     response::{
         ensure_modern_openai_responses_response_fields, openai_responses_current_timestamp,
     },
@@ -1213,39 +1213,12 @@ impl OpenAIResponsesProviderState {
         if item.get("type").and_then(Value::as_str) != Some("reasoning") {
             return;
         }
+        let completed_reasoning = reasoning_item_text(item);
         if self.terminal_only {
-            if item
-                .get("summary")
-                .and_then(Value::as_array)
-                .is_some_and(|summary| {
-                    summary.iter().any(|part| {
-                        part.get("type").and_then(Value::as_str) == Some("summary_text")
-                            && part
-                                .get("text")
-                                .and_then(Value::as_str)
-                                .is_some_and(|text| !text.is_empty())
-                    })
-                })
-            {
+            if !completed_reasoning.is_empty() {
                 self.ensure_started(report_context, out);
             }
             return;
-        }
-        let mut completed_reasoning = String::new();
-        for raw_summary in item
-            .get("summary")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            let Some(summary) = raw_summary.as_object() else {
-                continue;
-            };
-            if summary.get("type").and_then(Value::as_str) == Some("summary_text") {
-                if let Some(text) = summary.get("text").and_then(Value::as_str) {
-                    completed_reasoning.push_str(text);
-                }
-            }
         }
         if !completed_reasoning.is_empty() {
             self.emit_missing_reasoning(report_context, out, &completed_reasoning);
@@ -1663,7 +1636,8 @@ impl OpenAIResponsesProviderState {
                     .unwrap_or_default();
                 if !piece.is_empty() {
                     let summary_index = value
-                        .get("summary_index")
+                        .get("content_index")
+                        .or_else(|| value.get("summary_index"))
                         .and_then(Value::as_u64)
                         .map(|value| value as usize)
                         .unwrap_or(0);
@@ -1698,7 +1672,8 @@ impl OpenAIResponsesProviderState {
                     .unwrap_or_default();
                 if !text.is_empty() {
                     let summary_index = value
-                        .get("summary_index")
+                        .get("content_index")
+                        .or_else(|| value.get("summary_index"))
                         .and_then(Value::as_u64)
                         .map(|value| value as usize)
                         .unwrap_or(0);
@@ -2093,6 +2068,29 @@ impl OpenAIResponsesProviderState {
             },
         }])
     }
+}
+
+/// Reads a Responses reasoning item's raw chain-of-thought.
+///
+/// Raw thinking lives on `content` (`reasoning_text` parts); `summary` is the
+/// summarised view and is only consulted when `content` carries nothing, so
+/// items produced by other Aether versions still yield their thinking.
+fn reasoning_item_text(item: &Map<String, Value>) -> String {
+    let mut text = reasoning_item_parts_text(item.get("content"), "reasoning_text");
+    if text.is_empty() {
+        text = reasoning_item_parts_text(item.get("summary"), "summary_text");
+    }
+    text
+}
+
+fn reasoning_item_parts_text(raw: Option<&Value>, expected_type: &str) -> String {
+    raw.and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some(expected_type))
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect::<String>()
 }
 
 #[derive(Default)]
@@ -2677,12 +2675,14 @@ impl OpenAIResponsesClientEmitter {
     }
 
     fn reasoning_item_value(&self) -> Value {
-        let (content, summary) = openai_responses_reasoning_text_fields(self.reasoning_texts());
+        let content = openai_responses_reasoning_text_parts(self.reasoning_texts());
         json!({
             "type": "reasoning",
             "id": self.reasoning_item_id(),
             "status": "completed",
-            "summary": summary,
+            // Raw thinking goes on `content` only. Mirroring it onto `summary`
+            // makes Codex (which renders both channels) print it twice.
+            "summary": [],
             "content": content,
         })
     }
@@ -2694,29 +2694,17 @@ impl OpenAIResponsesClientEmitter {
         let item_id = self.reasoning_item_id();
         let output_index = self.reasoning_output_index.unwrap_or(0);
         let part_index = self.current_reasoning_summary_index();
-        let mut out = self.encode_response_event(
+        self.encode_response_event(
             "response.reasoning_text.delta",
             json!({
                 "type": "response.reasoning_text.delta",
                 "response_id": self.response_id(),
-                "item_id": item_id.clone(),
+                "item_id": item_id,
                 "output_index": output_index,
                 "content_index": part_index,
                 "delta": text,
             }),
-        )?;
-        out.extend(self.encode_response_event(
-            "response.reasoning_summary_text.delta",
-            json!({
-                "type": "response.reasoning_summary_text.delta",
-                "response_id": self.response_id(),
-                "item_id": item_id,
-                "output_index": output_index,
-                "summary_index": part_index,
-                "delta": text,
-            }),
-        )?);
-        Ok(out)
+        )
     }
 
     fn encode_reasoning_text_done_events(
@@ -2726,7 +2714,7 @@ impl OpenAIResponsesClientEmitter {
         part_index: usize,
         part_text: &str,
     ) -> Result<Vec<u8>, AiSurfaceFinalizeError> {
-        let mut out = self.encode_response_event(
+        self.encode_response_event(
             "response.reasoning_text.done",
             json!({
                 "type": "response.reasoning_text.done",
@@ -2736,33 +2724,7 @@ impl OpenAIResponsesClientEmitter {
                 "content_index": part_index,
                 "text": part_text,
             }),
-        )?;
-        out.extend(self.encode_response_event(
-            "response.reasoning_summary_text.done",
-            json!({
-                "type": "response.reasoning_summary_text.done",
-                "response_id": self.response_id(),
-                "item_id": item_id,
-                "output_index": output_index,
-                "summary_index": part_index,
-                "text": part_text,
-            }),
-        )?);
-        out.extend(self.encode_response_event(
-            "response.reasoning_summary_part.done",
-            json!({
-                "type": "response.reasoning_summary_part.done",
-                "response_id": self.response_id(),
-                "item_id": item_id,
-                "output_index": output_index,
-                "summary_index": part_index,
-                "part": {
-                    "type": "summary_text",
-                    "text": part_text,
-                }
-            }),
-        )?);
-        Ok(out)
+        )
     }
 
     fn ensure_message_output_index(&mut self) -> usize {
@@ -2827,21 +2789,6 @@ impl OpenAIResponsesClientEmitter {
             self.reasoning_item_started = true;
         }
         if !self.reasoning_part_started {
-            let summary_index = self.current_reasoning_summary_index();
-            out.extend(self.encode_response_event(
-                "response.reasoning_summary_part.added",
-                json!({
-                    "type": "response.reasoning_summary_part.added",
-                    "response_id": self.response_id(),
-                    "item_id": item_id,
-                    "output_index": output_index,
-                    "summary_index": summary_index,
-                    "part": {
-                        "type": "summary_text",
-                        "text": "",
-                    }
-                }),
-            )?);
             self.reasoning_part_started = true;
         }
         Ok(out)
@@ -4291,7 +4238,7 @@ mod tests {
                     data = Some(value);
                 }
             }
-            if event_name != Some("response.reasoning_summary_text.done") {
+            if event_name != Some("response.reasoning_text.done") {
                 continue;
             }
             let Some(data) = data else {
@@ -4300,13 +4247,17 @@ mod tests {
             let Ok(value) = serde_json::from_str::<Value>(data) else {
                 continue;
             };
-            let Some(summary_index) = value.get("summary_index").and_then(Value::as_u64) else {
+            let Some(part_index) = value
+                .get("content_index")
+                .or_else(|| value.get("summary_index"))
+                .and_then(Value::as_u64)
+            else {
                 continue;
             };
             let Some(text) = value.get("text").and_then(Value::as_str) else {
                 continue;
             };
-            parts.push((summary_index, text.to_string()));
+            parts.push((part_index, text.to_string()));
         }
         parts
     }
@@ -4527,7 +4478,8 @@ mod tests {
         }
 
         let sse = String::from_utf8(bytes).expect("sse should be utf8");
-        assert!(sse.contains("event: response.reasoning_summary_text.delta\n"));
+        assert!(sse.contains("event: response.reasoning_text.delta\n"));
+        assert!(!sse.contains("event: response.reasoning_summary_text.delta\n"));
         assert!(sse.contains("\"delta\":\"Let\""));
         assert!(sse.contains("\"delta\":\" me think.\""));
     }
@@ -6596,20 +6548,19 @@ mod tests {
         );
 
         let sse = String::from_utf8(bytes).expect("sse should be utf8");
-        assert!(sse.contains("event: response.reasoning_summary_part.added\n"));
         assert!(sse.contains("event: response.reasoning_text.delta\n"));
-        assert!(sse.contains("event: response.reasoning_summary_text.delta\n"));
         assert!(sse.contains("event: response.reasoning_text.done\n"));
-        assert!(sse.contains("event: response.reasoning_summary_text.done\n"));
-        assert!(sse.contains("event: response.reasoning_summary_part.done\n"));
         assert!(sse.contains("\"type\":\"reasoning_text\""));
+        // Raw chain-of-thought must not be duplicated onto the summary channel:
+        // Codex renders both, so emitting both makes the thinking panel repeat.
+        assert!(!sse.contains("event: response.reasoning_summary_text.delta\n"));
+        assert!(!sse.contains("event: response.reasoning_summary_text.done\n"));
+        assert!(!sse.contains("event: response.reasoning_summary_part.added\n"));
+        assert!(!sse.contains("event: response.reasoning_summary_part.done\n"));
         let reasoning_item_id = openai_responses_synthetic_reasoning_item_id("resp_456", 0);
         assert!(sse.contains(&format!("\"item_id\":\"{reasoning_item_id}\"")));
         assert!(sse.contains("\"type\":\"reasoning\""));
-        assert_eq!(
-            response_sequence_numbers(&sse),
-            (1..=11).collect::<Vec<_>>()
-        );
+        assert_eq!(response_sequence_numbers(&sse), (1..=7).collect::<Vec<_>>());
     }
 
     #[test]
@@ -6676,6 +6627,75 @@ mod tests {
             response_reasoning_text_done_parts(&sse),
             vec![(0, "alpha".to_string()), (1, "beta".to_string())]
         );
+    }
+
+    /// Regression: raw thinking must reach the client exactly once.
+    ///
+    /// Codex renders both the `content` (`reasoning_text`) and `summary`
+    /// (`summary_text`) channels, so emitting the same chain-of-thought on both
+    /// made its thinking panel print every line twice.
+    #[test]
+    fn openai_responses_client_emitter_sends_raw_thinking_once() {
+        let mut emitter = OpenAIResponsesClientEmitter::default();
+        let mut bytes = emitter
+            .emit(CanonicalStreamFrame {
+                id: "resp_once".to_string(),
+                model: "gpt-5.4".to_string(),
+                event: CanonicalStreamEvent::Start,
+            })
+            .expect("start should encode");
+        for text in ["Let", " me", " think."] {
+            bytes.extend(
+                emitter
+                    .emit(CanonicalStreamFrame {
+                        id: "resp_once".to_string(),
+                        model: "gpt-5.4".to_string(),
+                        event: CanonicalStreamEvent::ReasoningDelta(text.to_string()),
+                    })
+                    .expect("reasoning delta should encode"),
+            );
+        }
+        bytes.extend(
+            emitter
+                .emit(CanonicalStreamFrame {
+                    id: "resp_once".to_string(),
+                    model: "gpt-5.4".to_string(),
+                    event: CanonicalStreamEvent::ReasoningSummaryDone,
+                })
+                .expect("reasoning boundary should encode"),
+        );
+        bytes.extend(
+            emitter
+                .emit(CanonicalStreamFrame {
+                    id: "resp_once".to_string(),
+                    model: "gpt-5.4".to_string(),
+                    event: CanonicalStreamEvent::Finish {
+                        finish_reason: Some("stop".to_string()),
+                        usage: None,
+                    },
+                })
+                .expect("finish should encode"),
+        );
+
+        let sse = String::from_utf8(bytes).expect("sse should be utf8");
+        // Each thinking chunk is streamed on exactly one channel. The same delta
+        // used to be mirrored onto `reasoning_summary_text.delta`, so clients that
+        // render both channels (Codex) printed every chunk twice.
+        assert_eq!(
+            sse.matches("event: response.reasoning_text.delta\n")
+                .count(),
+            3,
+            "one delta event per thinking chunk: {sse}"
+        );
+        assert!(!sse.contains("event: response.reasoning_summary_text.delta\n"));
+        assert!(!sse.contains("event: response.reasoning_summary_text.done\n"));
+        assert!(!sse.contains("\"type\":\"summary_text\""));
+        // The completed item carries the thinking on `content`, not `summary`.
+        assert!(
+            sse.contains("\"content\":[{\"type\":\"reasoning_text\",\"text\":\"Let me think.\"}]"),
+            "{sse}"
+        );
+        assert!(sse.contains("\"summary\":[]"), "{sse}");
     }
 
     #[test]

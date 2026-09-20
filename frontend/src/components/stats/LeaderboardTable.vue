@@ -8,17 +8,17 @@
           @update:model-value="emitMetric"
         >
           <SelectTrigger class="h-8 text-xs w-28">
-            <SelectValue placeholder="指标" />
+            <SelectValue :placeholder="t('stats.metric.placeholder')" />
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="requests">
-              请求数
+              {{ t('stats.metric.requests') }}
             </SelectItem>
             <SelectItem value="tokens">
-              Tokens
+              {{ t('stats.metric.tokens') }}
             </SelectItem>
             <SelectItem value="cost">
-              成本
+              {{ t('stats.metric.cost') }}
             </SelectItem>
           </SelectContent>
         </Select>
@@ -36,25 +36,31 @@
       class="p-6"
     >
       <EmptyState
-        title="暂无数据"
-        description="当前时间范围内没有统计结果"
+        :title="t('stats.empty.title')"
+        :description="t('stats.empty.description')"
       />
     </div>
     <Table v-else>
       <TableHeader>
         <TableRow>
           <TableHead class="w-16">
-            排名
+            {{ t('stats.column.rank') }}
           </TableHead>
-          <TableHead>名称</TableHead>
-          <TableHead class="text-right">
-            请求数
+          <TableHead>{{ t('stats.column.name') }}</TableHead>
+          <TableHead
+            v-if="showMemberCount"
+            class="text-right"
+          >
+            {{ t('stats.column.members') }}
           </TableHead>
           <TableHead class="text-right">
-            Tokens
+            {{ t('stats.metric.requests') }}
           </TableHead>
           <TableHead class="text-right">
-            成本
+            {{ t('stats.metric.tokens') }}
+          </TableHead>
+          <TableHead class="text-right">
+            {{ t('stats.metric.cost') }}
           </TableHead>
         </TableRow>
       </TableHeader>
@@ -62,11 +68,22 @@
         <TableRow
           v-for="item in items"
           :key="item.id"
+          :class="selectable ? 'cursor-pointer hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring' : undefined"
+          :tabindex="selectable ? 0 : undefined"
+          @click="selectable && emit('select', item)"
+          @keydown.enter.prevent="selectable && emit('select', item)"
+          @keydown.space.prevent="selectable && emit('select', item)"
         >
           <TableCell class="font-medium">
             {{ item.rank }}
           </TableCell>
           <TableCell>{{ item.name }}</TableCell>
+          <TableCell
+            v-if="showMemberCount"
+            class="text-right"
+          >
+            {{ item.active_member_count ?? 0 }} / {{ item.member_count ?? 0 }}
+          </TableCell>
           <TableCell class="text-right">
             {{ item.requests }}
           </TableCell>
@@ -102,6 +119,7 @@ import {
   TableRow
 } from '@/components/ui'
 import { formatCurrency, formatTokens } from '@/utils/format'
+import { useI18n } from '@/i18n'
 import type { LeaderboardItem } from '@/api/admin'
 
 interface Props {
@@ -110,16 +128,23 @@ interface Props {
   metric: 'requests' | 'tokens' | 'cost'
   loading?: boolean
   showMetricSelect?: boolean
+  showMemberCount?: boolean
+  selectable?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
   loading: false,
-  showMetricSelect: true
+  showMetricSelect: true,
+  showMemberCount: false,
+  selectable: false
 })
 
 const emit = defineEmits<{
   (e: 'update:metric', value: 'requests' | 'tokens' | 'cost'): void
+  (e: 'select', value: LeaderboardItem): void
 }>()
+
+const { t } = useI18n()
 
 const metric = computed(() => props.metric)
 

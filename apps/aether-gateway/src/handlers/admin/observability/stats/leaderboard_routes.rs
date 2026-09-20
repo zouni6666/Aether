@@ -1,7 +1,9 @@
+use super::super::resolve_usage_user_group_scope;
 use super::leaderboard::{
-    build_admin_stats_leaderboard_response, build_api_key_leaderboard_items_from_summaries,
-    build_model_leaderboard_items_from_summaries, build_user_leaderboard_items_from_summaries,
-    compare_leaderboard_items, load_user_leaderboard_metadata, AdminStatsLeaderboardNameMode,
+    build_admin_stats_leaderboard_response, build_admin_stats_user_group_leaderboard_response,
+    build_api_key_leaderboard_items_from_summaries, build_model_leaderboard_items_from_summaries,
+    build_user_leaderboard_items_from_summaries, compare_leaderboard_items,
+    load_user_leaderboard_metadata, AdminStatsLeaderboardItem, AdminStatsLeaderboardNameMode,
 };
 use super::range::{parse_bounded_u32, parse_nonnegative_usize};
 use super::resolve_admin_usage_time_range;
@@ -14,6 +16,7 @@ use aether_admin::observability::stats::{
 };
 use aether_data_contracts::repository::usage::{UsageLeaderboardGroupBy, UsageLeaderboardQuery};
 use axum::{body::Body, http, response::Response};
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
     state: &AdminAppState<'_>,
@@ -79,6 +82,7 @@ pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
                 created_until_unix_secs,
                 group_by: UsageLeaderboardGroupBy::Model,
                 user_id: filters.user_id,
+                user_ids: None,
                 provider_name: filters.provider_name,
                 model: filters.model,
             })
@@ -156,6 +160,7 @@ pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
                 created_until_unix_secs,
                 group_by: UsageLeaderboardGroupBy::ApiKey,
                 user_id: filters.user_id,
+                user_ids: None,
                 provider_name: filters.provider_name,
                 model: filters.model,
             })
@@ -209,6 +214,154 @@ pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
     if request_context
         .decision()
         .and_then(|decision| decision.route_kind.as_deref())
+        == Some("leaderboard_user_groups")
+        && request_context.method() == http::Method::GET
+        && matches!(
+            request_context.path(),
+            "/api/admin/stats/leaderboard/user-groups"
+                | "/api/admin/stats/leaderboard/user-groups/"
+        )
+    {
+        let time_range = match resolve_admin_usage_time_range(query) {
+            Ok(value) => value,
+            Err(detail) => return Ok(Some(admin_stats_bad_request_response(detail))),
+        };
+        let metric = match AdminStatsLeaderboardMetric::parse(query) {
+            Ok(value) => value,
+            Err(detail) => return Ok(Some(admin_stats_bad_request_response(detail))),
+        };
+        let order = match AdminStatsSortOrder::parse(query) {
+            Ok(value) => value,
+            Err(detail) => return Ok(Some(admin_stats_bad_request_response(detail))),
+        };
+        let limit = match query_param_value(query, "limit")
+            .map(|value| parse_bounded_u32("limit", &value, 1, 100))
+            .transpose()
+        {
+            Ok(Some(value)) => value as usize,
+            Ok(None) => 10,
+            Err(detail) => return Ok(Some(admin_stats_bad_request_response(detail))),
+        };
+        let offset = match query_param_value(query, "offset")
+            .map(|value| parse_nonnegative_usize("offset", &value))
+            .transpose()
+        {
+            Ok(Some(value)) => value,
+            Ok(None) => 0,
+            Err(detail) => return Ok(Some(admin_stats_bad_request_response(detail))),
+        };
+        let empty_counts = BTreeMap::new();
+        if !state.has_usage_data_reader() || !state.has_user_data_reader() {
+            return Ok(Some(build_admin_stats_user_group_leaderboard_response(
+                metric,
+                Some(&time_range),
+                &[],
+                &empty_counts,
+                &empty_counts,
+                offset,
+                limit,
+            )));
+        }
+        let include_inactive = query_param_bool(query, "include_inactive", false);
+        let exclude_admin = query_param_bool(query, "exclude_admin", false);
+        let filters = AdminStatsUsageFilter::from_query(query);
+        if filters.user_id.is_some() {
+            return Ok(Some(admin_stats_bad_request_response(
+                "user_id is not supported for the user group leaderboard".to_string(),
+            )));
+        }
+        let Some((created_from_unix_secs, created_until_unix_secs)) = time_range.to_unix_bounds()
+        else {
+            return Ok(Some(build_admin_stats_user_group_leaderboard_response(
+                metric,
+                Some(&time_range),
+                &[],
+                &empty_counts,
+                &empty_counts,
+                offset,
+                limit,
+            )));
+        };
+
+        let summaries = state
+            .summarize_usage_leaderboard(&UsageLeaderboardQuery {
+                created_from_unix_secs,
+                created_until_unix_secs,
+                group_by: UsageLeaderboardGroupBy::User,
+                user_id: None,
+                user_ids: None,
+                provider_name: filters.provider_name,
+                model: filters.model,
+            })
+            .await?;
+        let user_ids = summaries
+            .iter()
+            .map(|item| item.group_key.clone())
+            .collect::<Vec<_>>();
+        let user_metadata = load_user_leaderboard_metadata(state, &user_ids).await?;
+        let user_usage = build_user_leaderboard_items_from_summaries(
+            &summaries,
+            &user_metadata,
+            state.has_auth_user_data_reader(),
+            state.has_user_data_reader(),
+            include_inactive,
+            exclude_admin,
+        )
+        .into_iter()
+        .map(|item| (item.id.clone(), item))
+        .collect::<BTreeMap<_, _>>();
+
+        let mut leaderboard = Vec::new();
+        let mut member_counts = BTreeMap::new();
+        let mut active_member_counts = BTreeMap::new();
+        for group in state.list_user_groups().await? {
+            let members = state.list_user_group_members(&group.id).await?;
+            let member_count = members.iter().filter(|member| !member.is_deleted).count();
+            let active_member_count = members
+                .iter()
+                .filter(|member| !member.is_deleted && member.is_active)
+                .count();
+            let scoped_user_ids = members
+                .iter()
+                .filter(|member| !member.is_deleted)
+                .filter(|member| include_inactive || member.is_active)
+                .filter(|member| !exclude_admin || !member.role.eq_ignore_ascii_case("admin"))
+                .map(|member| member.user_id.as_str())
+                .collect::<BTreeSet<_>>();
+            let mut item = AdminStatsLeaderboardItem {
+                id: group.id.clone(),
+                name: group.name,
+                requests: 0,
+                tokens: 0,
+                cost: 0.0,
+            };
+            for user_id in scoped_user_ids {
+                if let Some(user) = user_usage.get(user_id) {
+                    item.requests = item.requests.saturating_add(user.requests);
+                    item.tokens = item.tokens.saturating_add(user.tokens);
+                    item.cost += user.cost;
+                }
+            }
+            member_counts.insert(group.id.clone(), member_count);
+            active_member_counts.insert(group.id, active_member_count);
+            leaderboard.push(item);
+        }
+        leaderboard.sort_by(|left, right| compare_leaderboard_items(metric, order, left, right));
+
+        return Ok(Some(build_admin_stats_user_group_leaderboard_response(
+            metric,
+            Some(&time_range),
+            &leaderboard,
+            &member_counts,
+            &active_member_counts,
+            offset,
+            limit,
+        )));
+    }
+
+    if request_context
+        .decision()
+        .and_then(|decision| decision.route_kind.as_deref())
         == Some("leaderboard_users")
         && request_context.method() == http::Method::GET
         && matches!(
@@ -253,6 +406,13 @@ pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
         let include_inactive = query_param_bool(query, "include_inactive", false);
         let exclude_admin = query_param_bool(query, "exclude_admin", false);
         let filters = AdminStatsUsageFilter::from_query(query);
+        let scoped_user_ids =
+            match resolve_usage_user_group_scope(state, query, include_inactive, exclude_admin)
+                .await?
+            {
+                Ok(value) => value,
+                Err(detail) => return Ok(Some(admin_stats_bad_request_response(detail))),
+            };
         let Some((created_from_unix_secs, created_until_unix_secs)) = time_range.to_unix_bounds()
         else {
             return Ok(Some(admin_stats_leaderboard_empty_response(
@@ -266,6 +426,7 @@ pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
                 created_until_unix_secs,
                 group_by: UsageLeaderboardGroupBy::User,
                 user_id: filters.user_id,
+                user_ids: scoped_user_ids,
                 provider_name: filters.provider_name,
                 model: filters.model,
             })

@@ -126,6 +126,30 @@ impl<'a> AdminAppState<'a> {
         self.app.list_user_group_members(group_id).await
     }
 
+    pub(crate) async fn resolve_usage_user_group_member_ids(
+        &self,
+        group_id: &str,
+        include_inactive: bool,
+        exclude_admin: bool,
+    ) -> Result<Option<Vec<String>>, GatewayError> {
+        if self.find_user_group_by_id(group_id).await?.is_none() {
+            return Ok(None);
+        }
+
+        let mut user_ids = self
+            .list_user_group_members(group_id)
+            .await?
+            .into_iter()
+            .filter(|member| !member.is_deleted)
+            .filter(|member| include_inactive || member.is_active)
+            .filter(|member| !exclude_admin || !member.role.eq_ignore_ascii_case("admin"))
+            .map(|member| member.user_id)
+            .collect::<Vec<_>>();
+        user_ids.sort();
+        user_ids.dedup();
+        Ok(Some(user_ids))
+    }
+
     pub(crate) async fn replace_user_group_members(
         &self,
         group_id: &str,

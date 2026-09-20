@@ -77,6 +77,7 @@ pub(super) async fn maybe_build_local_admin_stats_cost_response(
                 granularity: UsageTimeSeriesGranularity::Day,
                 tz_offset_minutes: time_range.tz_offset_minutes,
                 user_id: None,
+                user_ids: None,
                 provider_name: None,
                 model: None,
             })

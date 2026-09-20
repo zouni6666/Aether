@@ -3251,13 +3251,15 @@ fn usage_sql_canonical_openai_cache_case_preserves_effective_and_total_tokens() 
         aggregate_audit_summary
             .matches("WHEN effective_input_tokens = 0 AND total_input_context = 0")
             .count(),
-        2
+        1,
+        "the shared daily aggregate query should define the legacy token fallback once"
     );
     assert_eq!(
         aggregate_audit_summary
             .matches("+ output_tokens + cache_creation_tokens + cache_read_tokens")
             .count(),
-        2
+        1,
+        "the shared daily aggregate query should define canonical total tokens once"
     );
     assert!(!aggregate_audit_summary.contains("SUM(input_tokens + output_tokens)"));
 

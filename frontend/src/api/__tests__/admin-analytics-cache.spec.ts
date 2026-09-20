@@ -82,4 +82,35 @@ describe('adminApi analytics cache options', () => {
     })
     expect(getMock).toHaveBeenNthCalledWith(4, '/api/admin/stats/errors/distribution', { params })
   })
+
+  it('requests the user group leaderboard with scoped cache parameters', async () => {
+    const groupParams = {
+      ...params,
+      metric: 'cost' as const,
+      offset: 10,
+      limit: 10,
+      include_inactive: true,
+    }
+    getMock.mockResolvedValueOnce({
+      data: { items: [], total: 0, metric: 'cost', attribution: 'current_membership' },
+    })
+
+    await expect(adminApi.getLeaderboardUserGroups(groupParams)).resolves.toMatchObject({
+      attribution: 'current_membership',
+    })
+
+    expect(buildCacheKeyMock).toHaveBeenCalledWith(
+      'admin:stats:leaderboard:user-groups',
+      groupParams
+    )
+    expect(cachedRequestMock).toHaveBeenCalledWith(
+      'admin:stats:leaderboard:user-groups',
+      expect.any(Function),
+      20 * 1000
+    )
+    expect(getMock).toHaveBeenCalledWith('/api/admin/stats/leaderboard/user-groups', {
+      params: groupParams,
+    })
+  })
+
 })

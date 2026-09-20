@@ -841,6 +841,53 @@ pub fn build_admin_stats_leaderboard_response(
     .into_response()
 }
 
+pub fn build_admin_stats_user_group_leaderboard_response(
+    metric: AdminStatsLeaderboardMetric,
+    time_range: Option<&AdminStatsTimeRange>,
+    leaderboard: &[AdminStatsLeaderboardItem],
+    member_counts: &std::collections::BTreeMap<String, usize>,
+    active_member_counts: &std::collections::BTreeMap<String, usize>,
+    offset: usize,
+    limit: usize,
+) -> Response<Body> {
+    let total = leaderboard.len();
+    let items: Vec<_> = leaderboard
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(limit)
+        .map(|(index, item)| {
+            let rank = compute_dense_rank(metric, leaderboard, index);
+            let value = match metric {
+                AdminStatsLeaderboardMetric::Requests => json!(item.requests),
+                AdminStatsLeaderboardMetric::Tokens => json!(item.tokens),
+                AdminStatsLeaderboardMetric::Cost => json!(round_to(item.cost, 6)),
+            };
+            json!({
+                "rank": rank,
+                "id": item.id,
+                "name": item.name,
+                "value": value,
+                "requests": item.requests,
+                "tokens": item.tokens,
+                "cost": round_to(item.cost, 6),
+                "member_count": member_counts.get(&item.id).copied().unwrap_or(0),
+                "active_member_count": active_member_counts.get(&item.id).copied().unwrap_or(0),
+            })
+        })
+        .collect();
+
+    Json(json!({
+        "items": items,
+        "total": total,
+        "metric": metric.as_str(),
+        "start_date": time_range.map(|value| value.start_date.to_string()),
+        "end_date": time_range.map(|value| value.end_date.to_string()),
+        "attribution": "current_membership",
+    }))
+    .into_response()
+}
+
 pub fn build_admin_stats_comparison_response(
     current_usage: &[StoredRequestUsageAudit],
     comparison_usage: &[StoredRequestUsageAudit],

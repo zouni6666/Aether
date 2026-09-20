@@ -1857,6 +1857,33 @@ fn usage_leaderboard_sql_fragments(
     }
 }
 
+fn push_usage_user_scope(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    column: &str,
+    user_id: Option<&str>,
+    user_ids: Option<&[String]>,
+) {
+    if let Some(user_id) = user_id {
+        builder
+            .push(" AND ")
+            .push(column)
+            .push(" = ")
+            .push_bind(user_id.to_string());
+    }
+    if let Some(user_ids) = user_ids {
+        if user_ids.is_empty() {
+            builder.push(" AND FALSE");
+        } else {
+            builder.push(" AND ").push(column).push(" IN (");
+            let mut separated = builder.separated(", ");
+            for user_id in user_ids {
+                separated.push_bind(user_id.clone());
+            }
+            separated.push_unseparated(")");
+        }
+    }
+}
+
 const LIST_RECENT_USAGE_AUDITS_PREFIX: &str =
     include_str!("queries/list_recent_usage_audits_prefix.sql");
 
@@ -3625,14 +3652,15 @@ OR (\"usage\".error_message IS NOT NULL AND BTRIM(\"usage\".error_message) <> ''
         start_day_utc: DateTime<Utc>,
         end_day_utc: DateTime<Utc>,
         user_id: Option<&str>,
+        user_ids: Option<&[String]>,
     ) -> Result<StoredUsageAuditSummary, DataLayerError> {
         if start_day_utc >= end_day_utc {
             return Ok(StoredUsageAuditSummary::default());
         }
 
-        let row = if let Some(user_id) = user_id {
-            sqlx::query(
-                r#"
+        let scoped_to_users = user_id.is_some() || user_ids.is_some();
+        let mut builder = QueryBuilder::<Postgres>::new(
+            r#"
 SELECT
   COALESCE(SUM(total_requests), 0)::BIGINT AS total_requests,
   COALESCE(SUM(input_tokens), 0)::BIGINT AS input_tokens,
@@ -3657,57 +3685,27 @@ SELECT
   COALESCE(SUM(cache_read_cost), 0)::DOUBLE PRECISION AS cache_read_cost_usd,
   COALESCE(SUM(response_time_sum_ms), 0)::DOUBLE PRECISION AS total_response_time_ms,
   COALESCE(SUM(error_requests), 0)::BIGINT AS error_requests
-FROM stats_user_daily
-WHERE user_id = $1
-  AND date >= $2
-  AND date < $3
-"#,
-            )
-            .bind(user_id)
-            .bind(start_day_utc)
-            .bind(end_day_utc)
-            .fetch_one(&self.pool)
-            .await
-            .map_postgres_err()?
+FROM "#,
+        );
+        builder.push(if scoped_to_users {
+            "stats_user_daily"
         } else {
-            sqlx::query(
-                r#"
-SELECT
-  COALESCE(SUM(total_requests), 0)::BIGINT AS total_requests,
-  COALESCE(SUM(input_tokens), 0)::BIGINT AS input_tokens,
-  COALESCE(SUM(output_tokens), 0)::BIGINT AS output_tokens,
-  COALESCE(SUM(
-    CASE
-      WHEN effective_input_tokens = 0 AND total_input_context = 0 AND input_tokens > 0
-      THEN input_tokens
-      ELSE effective_input_tokens
-    END
-    + output_tokens + cache_creation_tokens + cache_read_tokens
-  ), 0)::BIGINT AS recorded_total_tokens,
-  COALESCE(SUM(cache_creation_tokens), 0)::BIGINT AS cache_creation_tokens,
-  COALESCE(SUM(cache_creation_ephemeral_5m_tokens), 0)::BIGINT
-    AS cache_creation_ephemeral_5m_tokens,
-  COALESCE(SUM(cache_creation_ephemeral_1h_tokens), 0)::BIGINT
-    AS cache_creation_ephemeral_1h_tokens,
-  COALESCE(SUM(cache_read_tokens), 0)::BIGINT AS cache_read_tokens,
-  COALESCE(SUM(total_cost), 0)::DOUBLE PRECISION AS total_cost_usd,
-  COALESCE(SUM(actual_total_cost), 0)::DOUBLE PRECISION AS actual_total_cost_usd,
-  COALESCE(SUM(cache_creation_cost), 0)::DOUBLE PRECISION AS cache_creation_cost_usd,
-  COALESCE(SUM(cache_read_cost), 0)::DOUBLE PRECISION AS cache_read_cost_usd,
-  COALESCE(SUM(response_time_sum_ms), 0)::DOUBLE PRECISION AS total_response_time_ms,
-  COALESCE(SUM(error_requests), 0)::BIGINT AS error_requests
-FROM stats_daily
-WHERE date >= $1
-  AND date < $2
-"#,
-            )
-            .bind(start_day_utc)
-            .bind(end_day_utc)
+            "stats_daily"
+        });
+        builder
+            .push(" WHERE date >= ")
+            .push_bind(start_day_utc)
+            .push(" AND date < ")
+            .push_bind(end_day_utc);
+        if scoped_to_users {
+            push_usage_user_scope(&mut builder, "user_id", user_id, user_ids);
+        }
+
+        let row = builder
+            .build()
             .fetch_one(&self.pool)
             .await
-            .map_postgres_err()?
-        };
-
+            .map_postgres_err()?;
         decode_usage_audit_summary_row(&row)
     }
 
@@ -3716,6 +3714,7 @@ WHERE date >= $1
         created_from_unix_secs: u64,
         created_until_unix_secs: u64,
         user_id: Option<&str>,
+        user_ids: Option<&[String]>,
         provider_name: Option<&str>,
         model: Option<&str>,
     ) -> Result<StoredUsageAuditSummary, DataLayerError> {
@@ -3770,12 +3769,7 @@ FROM usage_billing_facts AS "usage"
             .push("\"usage\".created_at < TO_TIMESTAMP(")
             .push_bind(created_until_unix_secs as f64)
             .push("::double precision)");
-        if let Some(user_id) = user_id {
-            builder.push(if has_where { " AND " } else { " WHERE " });
-            builder
-                .push("\"usage\".user_id = ")
-                .push_bind(user_id.to_string());
-        }
+        push_usage_user_scope(&mut builder, "\"usage\".user_id", user_id, user_ids);
         if let Some(provider_name) = provider_name {
             builder.push(if has_where { " AND " } else { " WHERE " });
             has_where = true;
@@ -3808,6 +3802,7 @@ FROM usage_billing_facts AS "usage"
                     query.created_from_unix_secs,
                     query.created_until_unix_secs,
                     query.user_id.as_deref(),
+                    query.user_ids.as_deref(),
                     query.provider_name.as_deref(),
                     query.model.as_deref(),
                 )
@@ -3819,6 +3814,7 @@ FROM usage_billing_facts AS "usage"
                     query.created_from_unix_secs,
                     query.created_until_unix_secs,
                     query.user_id.as_deref(),
+                    query.user_ids.as_deref(),
                     None,
                     None,
                 )
@@ -3834,6 +3830,7 @@ FROM usage_billing_facts AS "usage"
                     query.created_from_unix_secs,
                     query.created_until_unix_secs,
                     query.user_id.as_deref(),
+                    query.user_ids.as_deref(),
                     None,
                     None,
                 )
@@ -3848,6 +3845,7 @@ FROM usage_billing_facts AS "usage"
                     dashboard_utc_to_unix_secs(raw_start),
                     dashboard_utc_to_unix_secs(raw_end),
                     query.user_id.as_deref(),
+                    query.user_ids.as_deref(),
                     None,
                     None,
                 )
@@ -3861,6 +3859,7 @@ FROM usage_billing_facts AS "usage"
                     aggregate_start,
                     aggregate_end,
                     query.user_id.as_deref(),
+                    query.user_ids.as_deref(),
                 )
                 .await?,
             );
@@ -3872,6 +3871,7 @@ FROM usage_billing_facts AS "usage"
                     dashboard_utc_to_unix_secs(raw_start),
                     dashboard_utc_to_unix_secs(raw_end),
                     query.user_id.as_deref(),
+                    query.user_ids.as_deref(),
                     None,
                     None,
                 )
@@ -6815,13 +6815,12 @@ FROM usage_billing_facts AS "usage"
             .push("\"usage\".created_at < TO_TIMESTAMP(")
             .push_bind(query.created_until_unix_secs as f64)
             .push("::double precision)");
-        if let Some(user_id) = query.user_id.as_deref() {
-            builder.push(if has_where { " AND " } else { " WHERE " });
-            has_where = true;
-            builder
-                .push("\"usage\".user_id = ")
-                .push_bind(user_id.to_string());
-        }
+        push_usage_user_scope(
+            &mut builder,
+            "\"usage\".user_id",
+            query.user_id.as_deref(),
+            query.user_ids.as_deref(),
+        );
         if let Some(provider_name) = query.provider_name.as_deref() {
             builder.push(if has_where { " AND " } else { " WHERE " });
             has_where = true;
@@ -6861,62 +6860,45 @@ FROM usage_billing_facts AS "usage"
         start_day_utc: DateTime<Utc>,
         end_day_utc: DateTime<Utc>,
         user_id: Option<&str>,
+        user_ids: Option<&[String]>,
     ) -> Result<Vec<StoredUsageTimeSeriesBucket>, DataLayerError> {
         if start_day_utc >= end_day_utc {
             return Ok(Vec::new());
         }
 
-        let rows = if let Some(user_id) = user_id {
-            sqlx::query(
-                r#"
+        let scoped_to_users = user_id.is_some() || user_ids.is_some();
+        let mut builder = QueryBuilder::<Postgres>::new(
+            r#"
 SELECT
   TO_CHAR(date, 'YYYY-MM-DD') AS bucket_key,
-  total_requests::BIGINT AS total_requests,
-  input_tokens::BIGINT AS input_tokens,
-  output_tokens::BIGINT AS output_tokens,
-  cache_creation_tokens::BIGINT AS cache_creation_tokens,
-  cache_read_tokens::BIGINT AS cache_read_tokens,
-  CAST(total_cost AS DOUBLE PRECISION) AS total_cost_usd,
-  CAST(response_time_sum_ms AS DOUBLE PRECISION) AS total_response_time_ms
-FROM stats_user_daily
-WHERE user_id = $1
-  AND date >= $2
-  AND date < $3
-ORDER BY date ASC
-"#,
-            )
-            .bind(user_id)
-            .bind(start_day_utc)
-            .bind(end_day_utc)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?
+  COALESCE(SUM(total_requests), 0)::BIGINT AS total_requests,
+  COALESCE(SUM(input_tokens), 0)::BIGINT AS input_tokens,
+  COALESCE(SUM(output_tokens), 0)::BIGINT AS output_tokens,
+  COALESCE(SUM(cache_creation_tokens), 0)::BIGINT AS cache_creation_tokens,
+  COALESCE(SUM(cache_read_tokens), 0)::BIGINT AS cache_read_tokens,
+  COALESCE(SUM(CAST(total_cost AS DOUBLE PRECISION)), 0) AS total_cost_usd,
+  COALESCE(SUM(CAST(response_time_sum_ms AS DOUBLE PRECISION)), 0)
+    AS total_response_time_ms
+FROM "#,
+        );
+        builder.push(if scoped_to_users {
+            "stats_user_daily"
         } else {
-            sqlx::query(
-                r#"
-SELECT
-  TO_CHAR(date, 'YYYY-MM-DD') AS bucket_key,
-  total_requests::BIGINT AS total_requests,
-  input_tokens::BIGINT AS input_tokens,
-  output_tokens::BIGINT AS output_tokens,
-  cache_creation_tokens::BIGINT AS cache_creation_tokens,
-  cache_read_tokens::BIGINT AS cache_read_tokens,
-  CAST(total_cost AS DOUBLE PRECISION) AS total_cost_usd,
-  CAST(response_time_sum_ms AS DOUBLE PRECISION) AS total_response_time_ms
-FROM stats_daily
-WHERE date >= $1
-  AND date < $2
-ORDER BY date ASC
-"#,
-            )
-            .bind(start_day_utc)
-            .bind(end_day_utc)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?
-        };
+            "stats_daily"
+        });
+        builder
+            .push(" WHERE date >= ")
+            .push_bind(start_day_utc)
+            .push(" AND date < ")
+            .push_bind(end_day_utc);
+        if scoped_to_users {
+            push_usage_user_scope(&mut builder, "user_id", user_id, user_ids);
+        }
+        builder.push(" GROUP BY date ORDER BY date ASC");
+
+        let mut rows = builder.build().fetch(&self.pool);
         let mut items = Vec::new();
-        for row in rows {
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
             items.push(decode_usage_time_series_bucket_row(&row)?);
         }
         Ok(items)
@@ -7002,6 +6984,7 @@ WHERE is_complete IS TRUE
                                     granularity: UsageTimeSeriesGranularity::Day,
                                     tz_offset_minutes: 0,
                                     user_id: query.user_id.clone(),
+                                    user_ids: query.user_ids.clone(),
                                     provider_name: None,
                                     model: None,
                                 },
@@ -7016,6 +6999,7 @@ WHERE is_complete IS TRUE
                             aggregate_start,
                             aggregate_end,
                             query.user_id.as_deref(),
+                            query.user_ids.as_deref(),
                         )
                         .await?,
                     );
@@ -7028,6 +7012,7 @@ WHERE is_complete IS TRUE
                                 granularity: UsageTimeSeriesGranularity::Day,
                                 tz_offset_minutes: 0,
                                 user_id: query.user_id.clone(),
+                                user_ids: query.user_ids.clone(),
                                 provider_name: None,
                                 model: None,
                             },
@@ -7045,6 +7030,7 @@ WHERE is_complete IS TRUE
                                     granularity: UsageTimeSeriesGranularity::Day,
                                     tz_offset_minutes: 0,
                                     user_id: query.user_id.clone(),
+                                    user_ids: query.user_ids.clone(),
                                     provider_name: None,
                                     model: None,
                                 },
@@ -7058,7 +7044,8 @@ WHERE is_complete IS TRUE
             }
         }
 
-        if query.user_id.is_none() && query.tz_offset_minutes % 60 == 0 {
+        if query.user_id.is_none() && query.user_ids.is_none() && query.tz_offset_minutes % 60 == 0
+        {
             if let Some(cutoff_utc) = self.read_stats_hourly_cutoff().await? {
                 let start_utc = dashboard_unix_secs_to_utc(query.created_from_unix_secs);
                 let end_utc = dashboard_unix_secs_to_utc(query.created_until_unix_secs);
@@ -7075,6 +7062,7 @@ WHERE is_complete IS TRUE
                                     granularity: query.granularity,
                                     tz_offset_minutes: query.tz_offset_minutes,
                                     user_id: None,
+                                    user_ids: None,
                                     provider_name: None,
                                     model: None,
                                 },
@@ -7102,6 +7090,7 @@ WHERE is_complete IS TRUE
                                 granularity: query.granularity,
                                 tz_offset_minutes: query.tz_offset_minutes,
                                 user_id: None,
+                                user_ids: None,
                                 provider_name: None,
                                 model: None,
                             },
@@ -7119,6 +7108,7 @@ WHERE is_complete IS TRUE
                                     granularity: query.granularity,
                                     tz_offset_minutes: query.tz_offset_minutes,
                                     user_id: None,
+                                    user_ids: None,
                                     provider_name: None,
                                     model: None,
                                 },
@@ -7158,6 +7148,7 @@ WHERE "usage".created_at >= TO_TIMESTAMP($1::double precision)
   AND ($3::varchar IS NULL OR "usage".user_id = $3)
   AND ($4::varchar IS NULL OR "usage".provider_name = $4)
   AND ($5::varchar IS NULL OR "usage".model = $5)
+  AND ($6::text[] IS NULL OR "usage".user_id::text = ANY($6))
 GROUP BY group_key
 ORDER BY group_key ASC
 "#,
@@ -7171,6 +7162,7 @@ ORDER BY group_key ASC
             .bind(query.user_id.as_deref())
             .bind(query.provider_name.as_deref())
             .bind(query.model.as_deref())
+            .bind(query.user_ids.clone())
             .fetch(&self.pool);
         let mut items = Vec::new();
         while let Some(row) = rows.try_next().await.map_postgres_err()? {
@@ -7314,11 +7306,12 @@ WHERE date >=
                         .push_bind(end_day_utc)
                         .push(" AND provider_name = ")
                         .push_bind(provider_name.to_string());
-                    if let Some(user_id) = query.user_id.as_deref() {
-                        builder
-                            .push(" AND user_id = ")
-                            .push_bind(user_id.to_string());
-                    }
+                    push_usage_user_scope(
+                        &mut builder,
+                        "user_id",
+                        query.user_id.as_deref(),
+                        query.user_ids.as_deref(),
+                    );
                     builder.push(" GROUP BY user_id ORDER BY user_id ASC");
                     builder
                 } else if let Some(model) = query.model.as_deref() {
@@ -7340,11 +7333,12 @@ WHERE date >=
                         .push_bind(end_day_utc)
                         .push(" AND model = ")
                         .push_bind(model.to_string());
-                    if let Some(user_id) = query.user_id.as_deref() {
-                        builder
-                            .push(" AND user_id = ")
-                            .push_bind(user_id.to_string());
-                    }
+                    push_usage_user_scope(
+                        &mut builder,
+                        "user_id",
+                        query.user_id.as_deref(),
+                        query.user_ids.as_deref(),
+                    );
                     builder.push(" GROUP BY user_id ORDER BY user_id ASC");
                     builder
                 } else {
@@ -7368,11 +7362,12 @@ WHERE date >=
                         .push(" AND date < ")
                         .push_bind(end_day_utc)
                         .push(" AND user_id IS NOT NULL");
-                    if let Some(user_id) = query.user_id.as_deref() {
-                        builder
-                            .push(" AND user_id = ")
-                            .push_bind(user_id.to_string());
-                    }
+                    push_usage_user_scope(
+                        &mut builder,
+                        "user_id",
+                        query.user_id.as_deref(),
+                        query.user_ids.as_deref(),
+                    );
                     builder.push(" GROUP BY user_id ORDER BY user_id ASC");
                     builder
                 };

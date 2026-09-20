@@ -11,3 +11,31 @@ pub(crate) use self::stats::{
 };
 pub(crate) use self::stats::{AdminStatsTimeRange, AdminStatsUsageFilter};
 pub(crate) use self::usage::maybe_build_local_admin_usage_response;
+
+pub(crate) async fn resolve_usage_user_group_scope(
+    state: &crate::handlers::admin::request::AdminAppState<'_>,
+    query: Option<&str>,
+    include_inactive: bool,
+    exclude_admin: bool,
+) -> Result<Result<Option<Vec<String>>, String>, crate::GatewayError> {
+    let group_id = crate::handlers::admin::shared::query_param_value(query, "user_group_id");
+    let Some(group_id) = group_id else {
+        return Ok(Ok(None));
+    };
+    if crate::handlers::admin::shared::query_param_value(query, "user_id").is_some() {
+        return Ok(Err(
+            "user_id and user_group_id cannot be used together".to_string()
+        ));
+    }
+    if !state.has_user_data_reader() {
+        return Ok(Err("user group data is unavailable".to_string()));
+    }
+
+    match state
+        .resolve_usage_user_group_member_ids(&group_id, include_inactive, exclude_admin)
+        .await?
+    {
+        Some(user_ids) => Ok(Ok(Some(user_ids))),
+        None => Ok(Err("user_group_id does not exist".to_string())),
+    }
+}

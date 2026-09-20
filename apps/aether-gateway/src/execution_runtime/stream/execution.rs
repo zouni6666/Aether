@@ -11880,7 +11880,11 @@ mod tests {
             .expect("response body should read");
         let body = String::from_utf8(body.to_vec()).expect("response body should be utf8");
         assert!(
-            body.contains("event: response.reasoning_summary_text.delta\n"),
+            body.contains("event: response.reasoning_text.delta\n"),
+            "{body}"
+        );
+        assert!(
+            !body.contains("event: response.reasoning_summary_text.delta\n"),
             "{body}"
         );
         assert!(

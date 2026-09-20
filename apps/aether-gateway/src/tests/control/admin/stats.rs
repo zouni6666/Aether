@@ -9,7 +9,8 @@ use aether_data::repository::auth::{
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use aether_data::repository::usage::InMemoryUsageReadRepository;
 use aether_data::repository::users::{
-    InMemoryUserReadRepository, StoredUserAuthRecord, StoredUserSummary,
+    InMemoryUserReadRepository, StoredUserAuthRecord, StoredUserSummary, UpsertUserGroupRecord,
+    UserReadRepository,
 };
 use aether_data_contracts::repository::usage::StoredRequestUsageAudit;
 use async_trait::async_trait;
@@ -1931,6 +1932,135 @@ async fn gateway_handles_admin_stats_leaderboard_users_without_legacy_username_f
     assert_eq!(payload["total"], 1);
     assert_eq!(payload["items"][0]["id"], "user-missing");
     assert_eq!(payload["items"][0]["name"], "user-missing");
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_aggregates_admin_stats_by_current_user_group_membership() {
+    let (_upstream_url, upstream_hits, upstream_handle) =
+        start_stats_upstream("/api/admin/stats/leaderboard/user-groups").await;
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
+        sample_usage_row(
+            "usage-group-a",
+            "req-group-a",
+            Some("user-1"),
+            Some("key-1"),
+            Some("key-1"),
+            "OpenAI",
+            "gpt-5",
+            60,
+            20,
+            0.4,
+            0.4,
+            DAY_1_UNIX_SECS,
+        ),
+        sample_usage_row(
+            "usage-group-b",
+            "req-group-b",
+            Some("user-2"),
+            Some("key-2"),
+            Some("key-2"),
+            "OpenAI",
+            "gpt-5",
+            40,
+            10,
+            0.35,
+            0.35,
+            DAY_1_UNIX_SECS + 10,
+        ),
+        sample_usage_row(
+            "usage-group-outside",
+            "req-group-outside",
+            Some("user-3"),
+            Some("key-3"),
+            Some("key-3"),
+            "OpenAI",
+            "gpt-5",
+            100,
+            50,
+            1.5,
+            1.5,
+            DAY_1_UNIX_SECS + 20,
+        ),
+    ]));
+    let user_repository = InMemoryUserReadRepository::seed_auth_users([
+        sample_auth_user("user-1", "alice", "user", true),
+        sample_auth_user("user-2", "bob", "user", true),
+        sample_auth_user("user-3", "carol", "user", true),
+    ]);
+    let group = user_repository
+        .create_user_group(UpsertUserGroupRecord {
+            name: "Engineering".to_string(),
+            description: None,
+            priority: 0,
+            allowed_providers: None,
+            allowed_providers_mode: "inherit".to_string(),
+            allowed_api_formats: None,
+            allowed_api_formats_mode: "inherit".to_string(),
+            allowed_models: None,
+            allowed_models_mode: "inherit".to_string(),
+            rate_limit: None,
+            rate_limit_mode: "inherit".to_string(),
+        })
+        .await
+        .expect("group creation should succeed")
+        .expect("group should be created");
+    user_repository
+        .replace_user_group_members(&group.id, &["user-1".to_string(), "user-2".to_string()])
+        .await
+        .expect("group members should be replaced");
+    let data_state = GatewayDataState::with_usage_reader_for_tests(usage_repository)
+        .with_user_reader(Arc::new(user_repository));
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(data_state),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+
+    let response = admin_request(client.get(format!(
+        "{gateway_url}/api/admin/stats/leaderboard/user-groups?start_date=2024-03-21&end_date=2024-03-21&metric=cost&tz_offset_minutes=0"
+    )))
+    .send()
+    .await
+    .expect("group leaderboard request should succeed");
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["attribution"], "current_membership");
+    assert_eq!(payload["total"], 1);
+    assert_eq!(payload["items"][0]["id"], group.id);
+    assert_eq!(payload["items"][0]["name"], "Engineering");
+    assert_eq!(payload["items"][0]["requests"], 2);
+    assert_eq!(payload["items"][0]["cost"], 0.75);
+    assert_eq!(payload["items"][0]["member_count"], 2);
+    assert_eq!(payload["items"][0]["active_member_count"], 2);
+
+    let response = admin_request(client.get(format!(
+        "{gateway_url}/api/admin/stats/leaderboard/users?start_date=2024-03-21&end_date=2024-03-21&metric=cost&tz_offset_minutes=0&user_group_id={}",
+        group.id
+    )))
+    .send()
+    .await
+    .expect("group member leaderboard request should succeed");
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["total"], 2);
+    assert!(payload["items"]
+        .as_array()
+        .is_some_and(|items| { items.iter().all(|item| item["id"] != "user-3") }));
+
+    let response = admin_request(client.get(format!(
+        "{gateway_url}/api/admin/stats/leaderboard/users?start_date=2024-03-21&end_date=2024-03-21&user_id=user-1&user_group_id={}",
+        group.id
+    )))
+    .send()
+    .await
+    .expect("conflicting scope request should complete");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

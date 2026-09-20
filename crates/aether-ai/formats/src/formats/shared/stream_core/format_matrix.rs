@@ -1053,7 +1053,7 @@ mod tests {
             "{sse}"
         );
         assert!(
-            sse.contains("event: response.reasoning_summary_text.delta\n"),
+            !sse.contains("event: response.reasoning_summary_text.delta\n"),
             "{sse}"
         );
         assert!(sse.contains("\"delta\":\"checking\""), "{sse}");

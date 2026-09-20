@@ -158,6 +158,28 @@ fn classifies_admin_stats_leaderboard_models_as_admin_proxy_route() {
 }
 
 #[test]
+fn classifies_admin_stats_leaderboard_user_groups_as_admin_proxy_route() {
+    let headers = headers(&[]);
+    let uri: Uri = "/api/admin/stats/leaderboard/user-groups"
+        .parse()
+        .expect("uri should parse");
+    let decision =
+        classify_control_route(&http::Method::GET, &uri, &headers).expect("route should classify");
+
+    assert_eq!(decision.route_class.as_deref(), Some("admin_proxy"));
+    assert_eq!(decision.route_family.as_deref(), Some("stats_manage"));
+    assert_eq!(
+        decision.route_kind.as_deref(),
+        Some("leaderboard_user_groups")
+    );
+    assert_eq!(
+        decision.auth_endpoint_signature.as_deref(),
+        Some("admin:stats")
+    );
+    assert!(!decision.is_execution_runtime_candidate());
+}
+
+#[test]
 fn classifies_admin_stats_leaderboard_users_as_admin_proxy_route() {
     let headers = headers(&[]);
     let uri: Uri = "/api/admin/stats/leaderboard/users"

@@ -134,6 +134,7 @@ export interface UsageByApiFormat {
 
 export interface UsageFilters {
   user_id?: string // UUID
+  user_group_id?: string // UUID
   provider_id?: string // UUID
   model?: string
   search?: string

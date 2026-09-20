@@ -8412,7 +8412,8 @@ mod tests {
         let rebuilt = canonical_to_openai_responses_request(&canonical, "gpt-5-upstream", false)
             .expect("openai responses request");
         assert_eq!(rebuilt["input"][0]["type"], "reasoning");
-        assert_eq!(rebuilt["input"][0]["summary"][0]["text"], "think");
+        assert_eq!(rebuilt["input"][0]["content"][0]["type"], "reasoning_text");
+        assert_eq!(rebuilt["input"][0]["content"][0]["text"], "think");
         assert_eq!(rebuilt["input"][0]["encrypted_content"], "enc_reasoning");
         assert_eq!(rebuilt["input"][1]["type"], "message");
         assert_eq!(rebuilt["input"][1]["content"][0]["text"], "done");

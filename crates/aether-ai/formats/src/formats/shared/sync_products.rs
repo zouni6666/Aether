@@ -9,7 +9,7 @@ use aether_ai_formats::formats::conversion::response::{
 };
 use aether_ai_formats::formats::openai::responses::response::ensure_modern_openai_responses_response_fields;
 use aether_ai_formats::formats::openai::responses::{
-    openai_responses_message_item_id, openai_responses_reasoning_text_fields,
+    openai_responses_message_item_id, openai_responses_reasoning_text_parts,
     openai_responses_synthetic_reasoning_item_id,
 };
 use aether_ai_formats::formats::registry::{convert_response, FormatContext, FormatError};
@@ -2471,7 +2471,7 @@ fn aggregate_openai_responses_stream_sync_response_from_validated_terminal(
                 reasoning_states
                     .entry(output_index)
                     .or_default()
-                    .summary_text
+                    .reasoning_text
                     .push_str(delta);
             }
             "response.reasoning_text.done" | "response.reasoning_summary_text.done" => {
@@ -2799,7 +2799,7 @@ struct OpenAIResponsesSyncMessageState {
 #[derive(Default)]
 struct OpenAIResponsesSyncReasoningState {
     item: Map<String, Value>,
-    summary_text: String,
+    reasoning_text: String,
 }
 
 #[derive(Default)]
@@ -3113,8 +3113,8 @@ fn merge_openai_responses_reasoning_text(
     if text.is_empty() {
         return;
     }
-    if state.summary_text.is_empty() || text.len() >= state.summary_text.len() {
-        state.summary_text = text.to_string();
+    if state.reasoning_text.is_empty() || text.len() >= state.reasoning_text.len() {
+        state.reasoning_text = text.to_string();
     }
 }
 
@@ -3297,15 +3297,16 @@ fn materialize_openai_responses_reasoning_item(
     });
     item.entry("status".to_string())
         .or_insert_with(|| Value::String("completed".to_string()));
-    if !state.summary_text.is_empty() {
-        let (content, summary) = openai_responses_reasoning_text_fields([&state.summary_text]);
-        if reasoning_item_field_missing_or_empty(item.get("content")) {
-            item.insert("content".to_string(), content);
-        }
-        if reasoning_item_field_missing_or_empty(item.get("summary")) {
-            item.insert("summary".to_string(), summary);
-        }
+    if !state.reasoning_text.is_empty()
+        && reasoning_item_field_missing_or_empty(item.get("content"))
+    {
+        let content = openai_responses_reasoning_text_parts([&state.reasoning_text]);
+        item.insert("content".to_string(), content);
     }
+    // Raw chain-of-thought lives on `content` only; never mirror it onto
+    // `summary`, or clients that render both channels show it twice.
+    item.entry("summary".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
     Value::Object(item)
 }
 
@@ -5728,7 +5729,9 @@ mod tests {
             .expect("modern response.done stream should aggregate");
 
         assert_eq!(result["output"][0]["type"], "reasoning");
-        assert_eq!(result["output"][0]["summary"][0]["text"], "Need care");
+        assert_eq!(result["output"][0]["summary"], json!([]));
+        assert_eq!(result["output"][0]["content"][0]["type"], "reasoning_text");
+        assert_eq!(result["output"][0]["content"][0]["text"], "Need care");
         assert!(result["output"].as_array().is_some());
         assert_eq!(result["output_text"], "");
         assert!(result["completed_at"].as_i64().is_some());
@@ -5754,7 +5757,7 @@ mod tests {
                 .as_object()
                 .expect("reasoning item should be an object")
                 .clone(),
-            summary_text: "must not replace provider-owned state".to_string(),
+            reasoning_text: "must not replace provider-owned state".to_string(),
         };
 
         let materialized = materialize_openai_responses_reasoning_item("resp_opaque_123", state);
@@ -5795,13 +5798,13 @@ mod tests {
     }
 
     #[test]
-    fn synthesizes_wire_compatible_id_for_local_reasoning_summary() {
+    fn synthesizes_wire_compatible_id_for_local_reasoning_text() {
         let state = OpenAIResponsesSyncReasoningState {
             item: json!({"type": "reasoning"})
                 .as_object()
                 .expect("reasoning item should be an object")
                 .clone(),
-            summary_text: "Need care".to_string(),
+            reasoning_text: "Need care".to_string(),
         };
 
         let materialized = materialize_openai_responses_reasoning_item("resp_summary_123", state);
@@ -5810,7 +5813,7 @@ mod tests {
             materialized["id"],
             openai_responses_synthetic_reasoning_item_id("resp_summary_123", 0)
         );
-        assert_eq!(materialized["summary"][0]["text"], "Need care");
+        assert_eq!(materialized["summary"], json!([]));
         assert_eq!(materialized["content"][0]["type"], "reasoning_text");
         assert_eq!(materialized["content"][0]["text"], "Need care");
     }

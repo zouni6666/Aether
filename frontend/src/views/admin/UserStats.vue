@@ -1,70 +1,117 @@
 <template>
   <div class="space-y-6 px-4 sm:px-6 lg:px-0">
-    <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+    <div class="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
       <div>
         <h1 class="text-lg font-semibold">
-          用户统计
+          {{ t('userStats.title') }}
         </h1>
         <p class="text-xs text-muted-foreground">
-          查看用户排行榜与使用趋势
+          {{ t('userStats.description') }}
         </p>
       </div>
-      <div class="flex flex-wrap items-center gap-3">
+      <div class="flex flex-wrap items-center gap-2">
+        <Select v-model="scope">
+          <SelectTrigger class="h-8 w-32 text-xs">
+            <SelectValue :placeholder="t('userStats.scope.placeholder')" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="user">
+              {{ t('userStats.scope.user') }}
+            </SelectItem>
+            <SelectItem value="user_group">
+              {{ t('userStats.scope.userGroup') }}
+            </SelectItem>
+          </SelectContent>
+        </Select>
+        <Select v-model="selectedEntityId">
+          <SelectTrigger class="h-8 w-52 text-xs">
+            <SelectValue :placeholder="scope === 'user' ? t('userStats.select.user') : t('userStats.select.userGroup')" />
+          </SelectTrigger>
+          <SelectContent
+            :search-threshold="0"
+            :search-placeholder="scope === 'user' ? t('userStats.search.user') : t('userStats.search.userGroup')"
+          >
+            <SelectItem
+              v-for="entity in allEntities"
+              :key="entity.id"
+              :value="entity.id"
+            >
+              {{ entity.name }}
+            </SelectItem>
+          </SelectContent>
+        </Select>
+        <Select v-model="compareEntityId">
+          <SelectTrigger class="h-8 w-52 text-xs">
+            <SelectValue :placeholder="t('userStats.compare.placeholder')" />
+          </SelectTrigger>
+          <SelectContent
+            :search-threshold="0"
+            :search-placeholder="scope === 'user' ? t('userStats.search.user') : t('userStats.search.userGroup')"
+          >
+            <SelectItem value="__none__">
+              {{ t('userStats.compare.none') }}
+            </SelectItem>
+            <SelectItem
+              v-for="entity in comparisonEntities"
+              :key="`compare-${entity.id}`"
+              :value="entity.id"
+            >
+              {{ entity.name }}
+            </SelectItem>
+          </SelectContent>
+        </Select>
         <TimeRangePicker
           v-model="timeRange"
           :allow-hourly="true"
         />
-        <Select
-          v-model="selectedUserId"
-        >
-          <SelectTrigger class="h-8 text-xs w-52">
-            <SelectValue placeholder="选择用户" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem
-              v-for="user in users"
-              :key="user.id"
-              :value="user.id"
-            >
-              {{ user.username || user.email }}
-            </SelectItem>
-          </SelectContent>
-        </Select>
-        <Select
-          v-model="compareUserId"
-        >
-          <SelectTrigger class="h-8 text-xs w-52">
-            <SelectValue placeholder="对比用户（可选）" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="__none__">
-              不对比
-            </SelectItem>
-            <SelectItem
-              v-for="user in users"
-              :key="`compare-${user.id}`"
-              :value="user.id"
-            >
-              {{ user.username || user.email }}
-            </SelectItem>
-          </SelectContent>
-        </Select>
       </div>
     </div>
 
-    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+    <div class="grid grid-cols-1 gap-4 lg:grid-cols-2">
       <LeaderboardTable
-        title="用户排行榜"
+        :title="scope === 'user' ? t('userStats.leaderboard.user') : t('userStats.leaderboard.userGroup')"
         :items="leaderboard"
         :metric="metric"
         :loading="leaderboardLoading"
+        :show-member-count="scope === 'user_group'"
+        selectable
         @update:metric="metric = $event"
-      />
+        @select="selectLeaderboardItem"
+      >
+        <template #pagination>
+          <div class="flex items-center justify-between border-t px-4 py-3 text-xs text-muted-foreground">
+            <span>{{ t('userStats.pagination.summary', { total: leaderboardTotal, page: currentPage }) }}</span>
+            <div class="flex gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                :disabled="leaderboardOffset === 0 || leaderboardLoading"
+                @click="changeLeaderboardPage(-1)"
+              >
+                {{ t('userStats.pagination.previous') }}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                :disabled="!hasNextLeaderboardPage || leaderboardLoading"
+                @click="changeLeaderboardPage(1)"
+              >
+                {{ t('userStats.pagination.next') }}
+              </Button>
+            </div>
+          </div>
+        </template>
+      </LeaderboardTable>
 
-      <Card class="p-4 space-y-3">
-        <h3 class="text-sm font-semibold">
-          用户摘要
-        </h3>
+      <Card class="space-y-3 p-4">
+        <div>
+          <h3 class="text-sm font-semibold">
+            {{ scope === 'user' ? t('userStats.summary.user') : t('userStats.summary.userGroup') }}
+          </h3>
+          <p class="mt-0.5 truncate text-xs text-muted-foreground">
+            {{ selectedEntityName || t('userStats.selectPrompt') }}
+          </p>
+        </div>
         <div
           v-if="summaryLoading"
           class="p-6"
@@ -77,44 +124,78 @@
         >
           <div>
             <div class="text-xs text-muted-foreground">
-              请求数
+              {{ t('stats.metric.requests') }}
             </div>
             <div class="font-semibold">
-              {{ userSummary?.total_requests ?? 0 }}
+              {{ usageSummary?.total_requests ?? 0 }}
             </div>
           </div>
           <div>
             <div class="text-xs text-muted-foreground">
-              Tokens
+              {{ t('stats.metric.tokens') }}
             </div>
             <div class="font-semibold">
-              {{ formatTokens(userSummary?.total_tokens ?? 0) }}
+              {{ formatTokens(usageSummary?.total_tokens ?? 0) }}
             </div>
           </div>
           <div>
             <div class="text-xs text-muted-foreground">
-              成本
+              {{ t('stats.metric.cost') }}
             </div>
             <div class="font-semibold">
-              {{ formatCurrency(userSummary?.total_cost ?? 0) }}
+              {{ formatCurrency(usageSummary?.total_cost ?? 0) }}
             </div>
           </div>
           <div>
             <div class="text-xs text-muted-foreground">
-              错误率
+              {{ t('stats.metric.errorRate') }}
             </div>
             <div class="font-semibold">
-              {{ userSummary?.error_rate ?? 0 }}%
+              {{ usageSummary?.error_rate ?? 0 }}%
             </div>
           </div>
+          <template v-if="scope === 'user_group'">
+            <div>
+              <div class="text-xs text-muted-foreground">
+                {{ t('userStats.members.current') }}
+              </div>
+              <div class="font-semibold">
+                {{ groupMemberCount }}
+              </div>
+            </div>
+            <div>
+              <div class="text-xs text-muted-foreground">
+                {{ t('userStats.members.active') }}
+              </div>
+              <div class="font-semibold">
+                {{ activeGroupMemberCount }}
+              </div>
+            </div>
+          </template>
         </div>
       </Card>
     </div>
 
-    <Card class="p-4 space-y-4">
-      <h3 class="text-sm font-semibold">
-        用户使用趋势
-      </h3>
+    <LeaderboardTable
+      v-if="scope === 'user_group'"
+      :title="t('userStats.memberLeaderboard')"
+      :items="memberLeaderboard"
+      :metric="metric"
+      :loading="memberLeaderboardLoading"
+      :show-metric-select="false"
+      selectable
+      @select="selectMember"
+    />
+
+    <Card class="space-y-4 p-4">
+      <div>
+        <h3 class="text-sm font-semibold">
+          {{ scope === 'user' ? t('userStats.trend.user') : t('userStats.trend.userGroup') }}
+        </h3>
+        <p class="mt-0.5 truncate text-xs text-muted-foreground">
+          {{ selectedEntityName || t('userStats.selectPrompt') }}
+        </p>
+      </div>
       <div
         v-if="seriesLoading"
         class="p-6"
@@ -131,10 +212,10 @@
 
     <Card
       v-if="comparisonSeries.length > 0"
-      class="p-4 space-y-4"
+      class="space-y-4 p-4"
     >
       <h3 class="text-sm font-semibold">
-        用户对比趋势
+        {{ scope === 'user' ? t('userStats.comparisonTrend.user') : t('userStats.comparisonTrend.userGroup') }}
       </h3>
       <div class="h-[280px]">
         <LineChart :data="comparisonChartData" />
@@ -144,27 +225,29 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
-import { Card, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import {
+  Button,
+  Card,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue
+} from '@/components/ui'
 import LineChart from '@/components/charts/LineChart.vue'
 import { LoadingState, TimeRangePicker } from '@/components/common'
 import { LeaderboardTable } from '@/components/stats'
 import { adminApi, type LeaderboardItem } from '@/api/admin'
-import { usersApi, type User } from '@/api/users'
+import { usersApi, type User, type UserGroup, type UserGroupMember } from '@/api/users'
 import { usageApi } from '@/api/usage'
 import { formatCurrency, formatTokens } from '@/utils/format'
+import { useI18n } from '@/i18n'
 import { getDateRangeFromPeriod } from '@/features/usage/composables'
 import type { DateRangeParams } from '@/features/usage/types'
 
-const timeRange = ref<DateRangeParams>(getDateRangeFromPeriod('last7days'))
-const metric = ref<'requests' | 'tokens' | 'cost'>('requests')
-
-const users = ref<User[]>([])
-const selectedUserId = ref<string | null>(null)
-const compareUserId = ref<string>('__none__')
-
-const leaderboard = ref<LeaderboardItem[]>([])
-const leaderboardLoading = ref(false)
+type StatsScope = 'user' | 'user_group'
+type SelectableEntity = { id: string; name: string }
 
 interface UsageSummary {
   total_requests: number
@@ -178,21 +261,73 @@ interface TimeSeriesItem {
   total_cost: number
 }
 
-const userSummary = ref<UsageSummary | null>(null)
-const summaryLoading = ref(false)
+const { t } = useI18n()
 
+const PAGE_SIZE = 10
+const timeRange = ref<DateRangeParams>(getDateRangeFromPeriod('last7days'))
+const metric = ref<'requests' | 'tokens' | 'cost'>('requests')
+const scope = ref<StatsScope>('user')
+
+const users = ref<User[]>([])
+const userGroups = ref<UserGroup[]>([])
+const selectedUserId = ref('')
+const selectedUserGroupId = ref('')
+const compareUserId = ref('__none__')
+const compareUserGroupId = ref('__none__')
+
+const leaderboard = ref<LeaderboardItem[]>([])
+const leaderboardTotal = ref(0)
+const leaderboardOffset = ref(0)
+const leaderboardLoading = ref(false)
+const memberLeaderboard = ref<LeaderboardItem[]>([])
+const memberLeaderboardLoading = ref(false)
+const groupMemberCount = ref(0)
+const activeGroupMemberCount = ref(0)
+const usageSummary = ref<UsageSummary | null>(null)
+const summaryLoading = ref(false)
 const series = ref<TimeSeriesItem[]>([])
 const comparisonSeries = ref<TimeSeriesItem[]>([])
 const seriesLoading = ref(false)
+
 let leaderboardRequestId = 0
-let summaryRequestId = 0
-let seriesRequestId = 0
-let leaderboardLoadPromise: Promise<void> | null = null
-let hasPendingLeaderboardLoad = false
+let panelRequestId = 0
 let leaderboardDebounceTimer: ReturnType<typeof setTimeout> | null = null
-let userPanelsLoadPromise: Promise<void> | null = null
-let hasPendingUserPanelsLoad = false
-let userPanelsDebounceTimer: ReturnType<typeof setTimeout> | null = null
+let panelDebounceTimer: ReturnType<typeof setTimeout> | null = null
+let ready = false
+
+const allEntities = computed<SelectableEntity[]>(() => scope.value === 'user'
+  ? users.value.map(user => ({ id: user.id, name: user.username || user.email || user.id }))
+  : userGroups.value.map(group => ({ id: group.id, name: group.name })))
+
+const selectedEntityId = computed({
+  get: () => scope.value === 'user' ? selectedUserId.value : selectedUserGroupId.value,
+  set: (value: string) => {
+    if (scope.value === 'user') selectedUserId.value = value
+    else selectedUserGroupId.value = value
+  }
+})
+
+const compareEntityId = computed({
+  get: () => scope.value === 'user' ? compareUserId.value : compareUserGroupId.value,
+  set: (value: string) => {
+    if (scope.value === 'user') compareUserId.value = value
+    else compareUserGroupId.value = value
+  }
+})
+
+const comparisonEntities = computed(() => allEntities.value.filter(
+  entity => entity.id !== selectedEntityId.value
+))
+const selectedEntityName = computed(() => allEntities.value.find(
+  entity => entity.id === selectedEntityId.value
+)?.name ?? '')
+const comparedEntityName = computed(() => allEntities.value.find(
+  entity => entity.id === compareEntityId.value
+)?.name ?? '')
+const currentPage = computed(() => Math.floor(leaderboardOffset.value / PAGE_SIZE) + 1)
+const hasNextLeaderboardPage = computed(
+  () => leaderboardOffset.value + leaderboard.value.length < leaderboardTotal.value
+)
 
 function buildTimeRangeParams() {
   return {
@@ -205,136 +340,149 @@ function buildTimeRangeParams() {
   }
 }
 
-async function loadUsers() {
-  users.value = await usersApi.getAllUsers()
-  if (!selectedUserId.value && users.value.length > 0) {
-    selectedUserId.value = users.value[0].id
+function scopeParams(id: string) {
+  return scope.value === 'user' ? { user_id: id } : { user_group_id: id }
+}
+
+function ensureSelectedEntity() {
+  const entities = allEntities.value
+  if (!entities.some(entity => entity.id === selectedEntityId.value)) {
+    selectedEntityId.value = entities[0]?.id ?? ''
   }
+  if (compareEntityId.value !== '__none__' && !entities.some(entity => entity.id === compareEntityId.value)) {
+    compareEntityId.value = '__none__'
+  }
+}
+
+async function loadEntities() {
+  const [loadedUsers, groupsResponse] = await Promise.all([
+    usersApi.getAllUsers(),
+    usersApi.listUserGroups()
+  ])
+  users.value = loadedUsers
+  userGroups.value = groupsResponse.items
+  ensureSelectedEntity()
 }
 
 async function loadLeaderboard() {
-  if (leaderboardLoadPromise) {
-    hasPendingLeaderboardLoad = true
-    return leaderboardLoadPromise
-  }
-  leaderboardLoadPromise = (async () => {
   const requestId = ++leaderboardRequestId
   leaderboardLoading.value = true
   try {
-    const response = await adminApi.getLeaderboardUsers({
+    const params = {
       ...buildTimeRangeParams(),
       metric: metric.value,
-      limit: 10
-    })
+      limit: PAGE_SIZE,
+      offset: leaderboardOffset.value
+    }
+    const response = scope.value === 'user'
+      ? await adminApi.getLeaderboardUsers(params)
+      : await adminApi.getLeaderboardUserGroups(params)
     if (requestId !== leaderboardRequestId) return
     leaderboard.value = response.items
+    leaderboardTotal.value = response.total
   } finally {
-    if (requestId === leaderboardRequestId) {
-      leaderboardLoading.value = false
-    }
+    if (requestId === leaderboardRequestId) leaderboardLoading.value = false
   }
-  })().finally(() => {
-    leaderboardLoadPromise = null
-    if (hasPendingLeaderboardLoad) {
-      hasPendingLeaderboardLoad = false
-      void loadLeaderboard()
-    }
-  })
-  return leaderboardLoadPromise
 }
 
-async function loadSummary() {
-  if (!selectedUserId.value) return
-  const requestId = ++summaryRequestId
+async function loadPanels() {
+  const selectedId = selectedEntityId.value
+  const requestId = ++panelRequestId
+  if (!selectedId) {
+    usageSummary.value = null
+    series.value = []
+    comparisonSeries.value = []
+    memberLeaderboard.value = []
+    groupMemberCount.value = 0
+    activeGroupMemberCount.value = 0
+    return
+  }
   summaryLoading.value = true
-  try {
-    const summary = await usageApi.getUsageStats({
-      ...buildTimeRangeParams(),
-      user_id: selectedUserId.value
-    })
-    if (requestId !== summaryRequestId) return
-    userSummary.value = { ...summary, error_rate: summary.error_rate ?? 0 }
-  } finally {
-    if (requestId === summaryRequestId) {
-      summaryLoading.value = false
-    }
-  }
-}
-
-async function loadSeries() {
-  if (!selectedUserId.value) return
-  const requestId = ++seriesRequestId
   seriesLoading.value = true
+  memberLeaderboardLoading.value = scope.value === 'user_group'
   try {
-    const baseParams = {
-      ...buildTimeRangeParams(),
-      user_id: selectedUserId.value
-    }
-    const shouldCompare = Boolean(compareUserId.value && compareUserId.value !== '__none__')
-    const comparePromise: Promise<TimeSeriesItem[]> = shouldCompare
+    const primaryParams = { ...buildTimeRangeParams(), ...scopeParams(selectedId) }
+    const shouldCompare = compareEntityId.value !== '__none__'
+    const comparisonPromise: Promise<TimeSeriesItem[]> = shouldCompare
       ? adminApi.getTimeSeries({
         ...buildTimeRangeParams(),
-        user_id: compareUserId.value
+        ...scopeParams(compareEntityId.value)
       })
       : Promise.resolve([])
+    const memberPromise: Promise<{ items: LeaderboardItem[] }> = scope.value === 'user_group'
+      ? adminApi.getLeaderboardUsers({
+        ...buildTimeRangeParams(),
+        metric: metric.value,
+        user_group_id: selectedId,
+        limit: PAGE_SIZE
+      })
+      : Promise.resolve({ items: [] })
+    const groupMembersPromise: Promise<UserGroupMember[]> = scope.value === 'user_group'
+      ? usersApi.listUserGroupMembers(selectedId)
+      : Promise.resolve([])
 
-    const [primarySeries, compareSeries] = await Promise.all([
-      adminApi.getTimeSeries(baseParams),
-      comparePromise
+    const [summary, primarySeries, compareSeries, members, groupMembers] = await Promise.all([
+      usageApi.getUsageStats(primaryParams),
+      adminApi.getTimeSeries(primaryParams),
+      comparisonPromise,
+      memberPromise,
+      groupMembersPromise
     ])
-
-    if (requestId !== seriesRequestId) return
+    if (requestId !== panelRequestId) return
+    usageSummary.value = { ...summary, error_rate: summary.error_rate ?? 0 }
     series.value = primarySeries
     comparisonSeries.value = compareSeries
+    memberLeaderboard.value = members.items
+    groupMemberCount.value = groupMembers.filter(member => !member.is_deleted).length
+    activeGroupMemberCount.value = groupMembers.filter(
+      member => !member.is_deleted && member.is_active
+    ).length
   } finally {
-    if (requestId === seriesRequestId) {
+    if (requestId === panelRequestId) {
+      summaryLoading.value = false
       seriesLoading.value = false
+      memberLeaderboardLoading.value = false
     }
   }
 }
 
-async function loadUserPanels() {
-  if (userPanelsLoadPromise) {
-    hasPendingUserPanelsLoad = true
-    return userPanelsLoadPromise
-  }
-  userPanelsLoadPromise = Promise.all([loadSummary(), loadSeries()])
-    .then(() => undefined)
-    .finally(() => {
-      userPanelsLoadPromise = null
-      if (hasPendingUserPanelsLoad) {
-        hasPendingUserPanelsLoad = false
-        void loadUserPanels()
-      }
-    })
-  return userPanelsLoadPromise
+function selectLeaderboardItem(item: LeaderboardItem) {
+  selectedEntityId.value = item.id
+}
+
+function selectMember(item: LeaderboardItem) {
+  scope.value = 'user'
+  selectedUserId.value = item.id
+}
+
+function changeLeaderboardPage(direction: -1 | 1) {
+  leaderboardOffset.value = Math.max(0, leaderboardOffset.value + direction * PAGE_SIZE)
+  void loadLeaderboard()
 }
 
 const seriesChartData = computed(() => ({
   labels: series.value.map(item => item.date),
-  datasets: [
-    {
-      label: '成本',
-      data: series.value.map(item => item.total_cost),
-      borderColor: 'rgb(59, 130, 246)',
-      tension: 0.25,
-      pointRadius: 2
-    }
-  ]
+  datasets: [{
+    label: t('stats.metric.cost'),
+    data: series.value.map(item => item.total_cost),
+    borderColor: 'rgb(59, 130, 246)',
+    tension: 0.25,
+    pointRadius: 2
+  }]
 }))
 
 const comparisonChartData = computed(() => ({
   labels: series.value.map(item => item.date),
   datasets: [
     {
-      label: '当前用户',
+      label: selectedEntityName.value || t('userStats.chart.current'),
       data: series.value.map(item => item.total_cost),
       borderColor: 'rgb(59, 130, 246)',
       tension: 0.25,
       pointRadius: 2
     },
     {
-      label: '对比用户',
+      label: comparedEntityName.value || t('userStats.chart.comparison'),
       data: comparisonSeries.value.map(item => item.total_cost),
       borderColor: 'rgb(234, 179, 8)',
       tension: 0.25,
@@ -344,50 +492,46 @@ const comparisonChartData = computed(() => ({
 }))
 
 function scheduleLeaderboardLoad() {
-  if (leaderboardDebounceTimer) {
-    clearTimeout(leaderboardDebounceTimer)
-  }
+  if (!ready) return
+  if (leaderboardDebounceTimer) clearTimeout(leaderboardDebounceTimer)
   leaderboardDebounceTimer = setTimeout(() => {
     leaderboardDebounceTimer = null
     void loadLeaderboard()
   }, 120)
 }
 
-function scheduleUserPanelsLoad() {
-  if (userPanelsDebounceTimer) {
-    clearTimeout(userPanelsDebounceTimer)
-  }
-  userPanelsDebounceTimer = setTimeout(() => {
-    userPanelsDebounceTimer = null
-    void loadUserPanels()
+function schedulePanelLoad() {
+  if (!ready) return
+  if (panelDebounceTimer) clearTimeout(panelDebounceTimer)
+  panelDebounceTimer = setTimeout(() => {
+    panelDebounceTimer = null
+    void loadPanels()
   }, 120)
 }
 
-watch([timeRange, metric], scheduleLeaderboardLoad, { deep: true })
-watch([timeRange, selectedUserId, compareUserId], scheduleUserPanelsLoad, { deep: true })
+watch(scope, () => {
+  leaderboardOffset.value = 0
+  ensureSelectedEntity()
+  scheduleLeaderboardLoad()
+  schedulePanelLoad()
+})
+watch([timeRange, metric], () => {
+  leaderboardOffset.value = 0
+  scheduleLeaderboardLoad()
+  schedulePanelLoad()
+}, { deep: true })
+watch([selectedEntityId, compareEntityId], schedulePanelLoad)
 
 onMounted(async () => {
-  await Promise.all([
-    loadLeaderboard(),
-    loadUsers()
-  ])
+  await loadEntities()
+  ready = true
+  await Promise.all([loadLeaderboard(), loadPanels()])
 })
 
 onUnmounted(() => {
-  if (leaderboardDebounceTimer) {
-    clearTimeout(leaderboardDebounceTimer)
-    leaderboardDebounceTimer = null
-  }
-  if (userPanelsDebounceTimer) {
-    clearTimeout(userPanelsDebounceTimer)
-    userPanelsDebounceTimer = null
-  }
-  hasPendingLeaderboardLoad = false
-  hasPendingUserPanelsLoad = false
-  leaderboardLoadPromise = null
-  userPanelsLoadPromise = null
+  if (leaderboardDebounceTimer) clearTimeout(leaderboardDebounceTimer)
+  if (panelDebounceTimer) clearTimeout(panelDebounceTimer)
   leaderboardRequestId += 1
-  summaryRequestId += 1
-  seriesRequestId += 1
+  panelRequestId += 1
 })
 </script>

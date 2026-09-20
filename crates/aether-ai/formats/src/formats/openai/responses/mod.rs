@@ -126,47 +126,39 @@ pub fn openai_responses_message_item_id(response_id: &str, output_index: usize) 
     )
 }
 
-/// Builds Responses reasoning `content` / `summary` arrays from raw thinking text.
+/// Builds the Responses reasoning `content` array from raw thinking text.
 ///
-/// OpenAI Responses semantics:
-/// - `content` holds raw chain-of-thought as `reasoning_text` parts. Desktop UIs
-///   (for example Codex) hide the thinking panel when `content` is null.
-/// - `summary` holds `summary_text` parts for skim / CLI clients. When the
-///   upstream only exposes raw thinking (DeepSeek `reasoning_content`, Gemini
-///   thoughts, Claude thinking), the same text is copied into both so neither
-///   client family loses the panel.
-pub(crate) fn openai_responses_reasoning_text_fields(
+/// Raw chain-of-thought belongs in `content` as `reasoning_text` parts. It is
+/// deliberately *not* mirrored into `summary`: OpenAI keeps the two channels
+/// distinct, and clients such as Codex render both, so duplicating the same
+/// text onto `summary` made the thinking panel print everything twice.
+pub(crate) fn openai_responses_reasoning_text_parts(
     texts: impl IntoIterator<Item = impl AsRef<str>>,
-) -> (Value, Value) {
-    let texts: Vec<String> = texts
-        .into_iter()
-        .map(|text| text.as_ref().to_string())
-        .filter(|text| !text.trim().is_empty())
-        .collect();
-    let content = texts
-        .iter()
-        .map(|text| json!({ "type": "reasoning_text", "text": text }))
-        .collect::<Vec<_>>();
-    let summary = texts
-        .iter()
-        .map(|text| json!({ "type": "summary_text", "text": text }))
-        .collect::<Vec<_>>();
-    (Value::Array(content), Value::Array(summary))
+) -> Value {
+    Value::Array(
+        texts
+            .into_iter()
+            .map(|text| text.as_ref().to_string())
+            .filter(|text| !text.trim().is_empty())
+            .map(|text| json!({ "type": "reasoning_text", "text": text }))
+            .collect(),
+    )
 }
 
 /// Writes raw thinking onto a Responses reasoning item without clobbering an
-/// existing structured summary or provider-owned content.
+/// existing provider-owned summary or content.
 pub(crate) fn apply_openai_responses_reasoning_text(item: &mut Map<String, Value>, text: &str) {
     if text.trim().is_empty() {
         return;
     }
-    let (content, summary) = openai_responses_reasoning_text_fields(std::iter::once(text));
     if reasoning_item_field_is_empty(item.get("content")) {
+        let content = openai_responses_reasoning_text_parts(std::iter::once(text));
         item.insert("content".to_string(), content);
     }
-    if reasoning_item_field_is_empty(item.get("summary")) {
-        item.insert("summary".to_string(), summary);
-    }
+    // `summary` stays a valid (empty) array so the item keeps its documented
+    // shape; a provider-supplied summary is preserved as-is.
+    item.entry("summary".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
 }
 
 fn reasoning_item_field_is_empty(value: Option<&Value>) -> bool {
@@ -540,21 +532,18 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_text_fields_put_raw_thinking_in_content_and_summary() {
-        let (content, summary) = super::openai_responses_reasoning_text_fields(["raw chain"]);
+    fn reasoning_text_parts_put_raw_thinking_in_content_only() {
+        let content = super::openai_responses_reasoning_text_parts(["raw chain"]);
         assert_eq!(
             content,
             json!([{ "type": "reasoning_text", "text": "raw chain" }])
-        );
-        assert_eq!(
-            summary,
-            json!([{ "type": "summary_text", "text": "raw chain" }])
         );
 
         let mut item = serde_json::Map::new();
         super::apply_openai_responses_reasoning_text(&mut item, "raw chain");
         assert_eq!(item["content"], content);
-        assert_eq!(item["summary"], summary);
+        // Never mirrored onto `summary`: clients rendering both would repeat it.
+        assert_eq!(item["summary"], json!([]));
 
         item.insert(
             "summary".to_string(),

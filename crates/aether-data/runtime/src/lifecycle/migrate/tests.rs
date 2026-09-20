@@ -2388,6 +2388,7 @@ INSERT INTO public.stats_daily_api_key (
             .expect("historical stats end should be nonnegative"),
         group_by: UsageLeaderboardGroupBy::ApiKey,
         user_id: Some("leaderboard-owner".to_string()),
+        user_ids: None,
         provider_name: None,
         model: None,
     };

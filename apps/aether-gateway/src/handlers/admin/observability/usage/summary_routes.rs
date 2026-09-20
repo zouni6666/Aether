@@ -1,3 +1,4 @@
+use super::super::resolve_usage_user_group_scope;
 use super::super::stats::resolve_admin_usage_time_range;
 use super::analytics::admin_usage_api_key_names;
 use super::analytics::admin_usage_provider_key_names;
@@ -710,11 +711,16 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
                     &Default::default(),
                 )));
             };
+            let user_ids = match resolve_usage_user_group_scope(state, query, false, false).await? {
+                Ok(value) => value,
+                Err(detail) => return Ok(Some(admin_usage_bad_request_response(detail))),
+            };
             let summary = state
                 .summarize_usage_audits(&UsageAuditSummaryQuery {
                     created_from_unix_secs,
                     created_until_unix_secs,
                     user_id: query_param_value(query, "user_id"),
+                    user_ids,
                     provider_name: query_param_value(query, "provider"),
                     model: query_param_value(query, "model"),
                 })

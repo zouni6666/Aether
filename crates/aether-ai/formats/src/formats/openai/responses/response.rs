@@ -786,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn responses_response_builder_puts_raw_thinking_in_content_and_summary() {
+    fn responses_response_builder_puts_raw_thinking_in_content_only() {
         let response = CanonicalResponse {
             id: "resp_think".to_string(),
             model: "deepseek-reasoner".to_string(),
@@ -814,8 +814,7 @@ mod tests {
         assert_eq!(item["type"], "reasoning");
         assert_eq!(item["content"][0]["type"], "reasoning_text");
         assert_eq!(item["content"][0]["text"], "first add one to one");
-        assert_eq!(item["summary"][0]["type"], "summary_text");
-        assert_eq!(item["summary"][0]["text"], "first add one to one");
+        assert_eq!(item["summary"], json!([]));
         assert!(!item["content"].is_null());
         assert_eq!(body["output"][1]["type"], "message");
         assert_eq!(body["output"][1]["content"][0]["text"], "2");

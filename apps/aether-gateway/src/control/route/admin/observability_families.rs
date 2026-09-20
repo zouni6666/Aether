@@ -599,6 +599,20 @@ pub(super) fn classify_admin_observability_family_route(
     } else if method == http::Method::GET
         && matches!(
             normalized_path,
+            "/api/admin/stats/leaderboard/user-groups"
+                | "/api/admin/stats/leaderboard/user-groups/"
+        )
+    {
+        Some(classified(
+            "admin_proxy",
+            "stats_manage",
+            "leaderboard_user_groups",
+            "admin:stats",
+            false,
+        ))
+    } else if method == http::Method::GET
+        && matches!(
+            normalized_path,
             "/api/admin/stats/leaderboard/users" | "/api/admin/stats/leaderboard/users/"
         )
     {
