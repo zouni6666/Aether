@@ -38,6 +38,7 @@ async fn gateway_executes_codex_cli_stream_via_local_decision_gate_after_oauth_r
         trace_id: String,
         url: String,
         model: String,
+        service_tier: String,
         content_encoding: String,
         stream: bool,
         accept: String,
@@ -383,6 +384,13 @@ async fn gateway_executes_codex_cli_stream_via_local_decision_gate_after_oauth_r
                             .and_then(|value| value.as_str())
                             .unwrap_or_default()
                             .to_string(),
+                        service_tier: payload
+                            .get("body")
+                            .and_then(|value| value.get("json_body"))
+                            .and_then(|value| value.get("service_tier"))
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
                         content_encoding: payload
                             .get("content_encoding")
                             .and_then(|value| value.as_str())
@@ -605,7 +613,7 @@ async fn gateway_executes_codex_cli_stream_via_local_decision_gate_after_oauth_r
         )
         .header(TRACE_ID_HEADER, "trace-codex-cli-stream-local-123")
         .body(
-            r#"{"model":"gpt-5.6-sol","instructions":"Use the configured tools.","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"compact"}]},{"type":"compaction_trigger"}],"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],"context_management":[{"type":"compaction","compact_threshold":128000}],"parallel_tool_calls":true,"prompt_cache_key":"thread-codex-stream-local-123","client_metadata":{"session_id":"session-codex-stream-local-123","thread_id":"thread-codex-stream-local-123"},"stream":true}"#,
+            r#"{"model":"gpt-5.6-sol","service_tier":"ultrafast","instructions":"Use the configured tools.","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"compact"}]},{"type":"compaction_trigger"}],"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],"context_management":[{"type":"compaction","compact_threshold":128000}],"parallel_tool_calls":true,"prompt_cache_key":"thread-codex-stream-local-123","client_metadata":{"session_id":"session-codex-stream-local-123","thread_id":"thread-codex-stream-local-123"},"stream":true}"#,
         )
         .send()
         .await
@@ -716,6 +724,7 @@ async fn gateway_executes_codex_cli_stream_via_local_decision_gate_after_oauth_r
         "https://chatgpt.com/backend-api/codex/responses"
     );
     assert_eq!(seen_execution_runtime_request.model, "gpt-5.6-sol");
+    assert_eq!(seen_execution_runtime_request.service_tier, "ultrafast");
     assert_eq!(seen_execution_runtime_request.content_encoding, "zstd");
     assert!(seen_execution_runtime_request.stream);
     assert_eq!(seen_execution_runtime_request.accept, "text/event-stream");

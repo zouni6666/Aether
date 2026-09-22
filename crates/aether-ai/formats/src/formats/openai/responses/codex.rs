@@ -91,12 +91,6 @@ impl CodexResponsesModelCapabilities {
             .iter()
             .any(|candidate| candidate == effort.trim())
     }
-
-    fn supports_service_tier(&self, service_tier: &str) -> bool {
-        self.supported_service_tiers
-            .iter()
-            .any(|candidate| candidate == service_tier)
-    }
 }
 
 fn codex_namespaced_model_suffix(model: &str) -> Option<&str> {
@@ -1212,18 +1206,6 @@ fn apply_codex_model_request_capabilities(
             if text.is_empty() {
                 body_object.remove("text");
             }
-        }
-    }
-
-    if !body_rules_handle_path(body_rules, "service_tier") {
-        let service_tier = body_object
-            .get("service_tier")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        if !service_tier.as_deref().is_some_and(|service_tier| {
-            service_tier != "default" && capabilities.supports_service_tier(service_tier)
-        }) {
-            body_object.remove("service_tier");
         }
     }
 }
@@ -2654,7 +2636,7 @@ mod tests {
         assert_eq!(body["reasoning"]["effort"], "high");
         assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
         assert_eq!(body["parallel_tool_calls"], false);
-        assert!(body.get("service_tier").is_none());
+        assert_eq!(body["service_tier"], "priority");
         assert!(body["text"].get("verbosity").is_none());
         assert_eq!(body["text"]["format"]["type"], "json_schema");
 

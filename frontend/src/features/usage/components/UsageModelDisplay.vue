@@ -8,8 +8,8 @@
       : undefined"
   >
     <div
-      class="flex min-w-0 max-w-full items-center gap-1"
-      :class="[modelRowClass, actualModel ? 'flex-wrap' : '']"
+      class="flex min-w-0 max-w-full flex-wrap items-center gap-1"
+      :class="modelRowClass"
     >
       <span
         class="min-w-0 truncate"
@@ -29,7 +29,7 @@
           :data-usage-model-badge="badge.key"
           :data-request-detail-model-badge="context === 'detail' ? badge.key : undefined"
           :variant="badge.variant"
-          class="h-4 shrink-0 whitespace-nowrap rounded-full px-1.5 text-[10px] leading-4"
+          class="h-4 max-w-full shrink-0 truncate rounded-full px-1.5 text-[10px] leading-4"
           :class="badge.className"
           :title="badge.title"
           :aria-label="badge.ariaLabel"
@@ -51,7 +51,7 @@
         :data-usage-model-badge="badge.key"
         :data-request-detail-model-badge="context === 'detail' ? badge.key : undefined"
         :variant="badge.variant"
-        class="h-4 shrink-0 whitespace-nowrap rounded-full px-1.5 text-[10px] leading-4"
+        class="h-4 max-w-full shrink-0 truncate rounded-full px-1.5 text-[10px] leading-4"
         :class="badge.className"
         :title="badge.title"
         :aria-label="badge.ariaLabel"
@@ -69,7 +69,7 @@ import { Badge } from '@/components/ui'
 import { isCyberPolicyError } from '../utils/cyberError'
 import { formatServiceTierFact } from '../utils/service-tier'
 
-type ModelBadgeKey = 'compact' | 'reasoning' | 'fast' | 'cyber' | 'reasoning_tokens'
+type ModelBadgeKey = 'compact' | 'reasoning' | 'fast' | 'service-tier' | 'cyber' | 'reasoning_tokens'
 
 interface ModelBadgePresentation {
   key: ModelBadgeKey
@@ -154,14 +154,16 @@ const modelBadges = computed<ModelBadgePresentation[]>(() => {
     })
   }
 
-  if (props.showServiceTierBadge && formatServiceTierFact(props.record.service_tier) === 'Fast') {
+  const serviceTier = formatServiceTierFact(props.record.service_tier)
+  if (props.showServiceTierBadge && serviceTier
+    && !['auto', 'default', 'standard'].includes(serviceTier.toLowerCase())) {
     badges.push({
-      key: 'fast',
-      label: 'Fast',
+      key: serviceTier === 'Fast' ? 'fast' : 'service-tier',
+      label: serviceTier,
       variant: 'outline-transparent',
       className: 'text-blue-500 dark:text-blue-300',
-      title: '上游请求档位：Fast\n计费档位：Fast',
-      ariaLabel: '上游请求档位：Fast，计费档位：Fast',
+      title: `上游请求档位：${serviceTier}\n计费档位：${serviceTier}`,
+      ariaLabel: `上游请求档位：${serviceTier}，计费档位：${serviceTier}`,
     })
   }
 

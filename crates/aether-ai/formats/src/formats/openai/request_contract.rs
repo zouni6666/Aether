@@ -229,7 +229,7 @@ fn validate_final_openai_provider_request_contract(
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     use super::{
         finalize_openai_provider_request,
@@ -584,6 +584,61 @@ mod tests {
             finalize_openai_provider_request(&mut body, finalization_for(model))
                 .expect("explicit effort support should be validated by the upstream");
             assert_eq!(body["reasoning"]["effort"], effort);
+        }
+    }
+
+    #[test]
+    fn codex_finalization_preserves_explicit_service_tiers() {
+        let capabilities = CodexResponsesModelCapabilities {
+            use_responses_lite: false,
+            supports_reasoning_summary_parameter: false,
+            default_reasoning_effort: None,
+            default_reasoning_summary: None,
+            supported_reasoning_efforts: Vec::new(),
+            supports_parallel_tool_calls: true,
+            support_verbosity: false,
+            default_verbosity: None,
+            supported_service_tiers: vec!["priority".to_string()],
+        };
+        for source_api_format in ["openai:responses", "openai:chat"] {
+            for provider_api_format in ["openai:responses", "openai:responses:compact"] {
+                for model_capabilities in [None, Some(&capabilities)] {
+                    for service_tier in [
+                        Some("ultrafast"),
+                        Some("priority"),
+                        Some("default"),
+                        Some("auto"),
+                        Some("flex"),
+                        Some("future-tier"),
+                        None,
+                    ] {
+                        let mut body = json!({"model": "gpt-5.6-sol", "input": []});
+                        if let Some(service_tier) = service_tier {
+                            body["service_tier"] = json!(service_tier);
+                        }
+                        finalize_openai_provider_request_with_codex_model_capabilities(
+                            &mut body,
+                            OpenAiProviderRequestFinalization {
+                                source_api_format,
+                                provider_api_format,
+                                provider_type: "codex",
+                                provider_model: "gpt-5.6-sol",
+                                source_model: "gpt-5.6-sol",
+                                body_rules: None,
+                                upstream_is_stream: true,
+                                require_body_stream_field: true,
+                            },
+                            model_capabilities,
+                        )
+                        .expect("explicit service tiers should be validated by the upstream");
+                        assert_eq!(
+                            body.get("service_tier").and_then(Value::as_str),
+                            service_tier,
+                            "{source_api_format} -> {provider_api_format}",
+                        );
+                    }
+                }
+            }
         }
     }
 

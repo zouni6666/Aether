@@ -9737,7 +9737,10 @@ mod tests {
                     headers: BTreeMap::from([("content-type".into(), "application/json".into())]),
                     content_type: Some("application/json".into()),
                     content_encoding: Some(encoding.into()),
-                    body: RequestBody::from_json(json!({"model": "gpt-4.1"})),
+                    body: RequestBody::from_json(json!({
+                        "model": "gpt-4.1",
+                        "service_tier": "ultrafast"
+                    })),
                     stream: false,
                     client_api_format: "openai:chat".into(),
                     provider_api_format: "openai:chat".into(),
@@ -9758,7 +9761,7 @@ mod tests {
                 result.body.and_then(|body| body.json_body),
                 Some(json!({
                     "content_encoding": encoding,
-                    "body": {"model": "gpt-4.1"},
+                    "body": {"model": "gpt-4.1", "service_tier": "ultrafast"},
                 }))
             );
         }

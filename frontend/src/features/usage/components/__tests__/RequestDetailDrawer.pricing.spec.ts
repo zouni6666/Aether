@@ -309,7 +309,11 @@ describe('RequestDetailDrawer settlement pricing', () => {
     })
   })
 
-  it('shows mapping, reasoning, Fast, and Cyber together in the model header', async () => {
+  it.each([
+    { tier: 'priority', label: 'Fast', badgeKey: 'fast' },
+    { tier: 'ultrafast', label: 'ultrafast', badgeKey: 'service-tier' },
+    { tier: 'future-tier', label: 'future-tier', badgeKey: 'service-tier' },
+  ])('shows mapping, reasoning, $tier, and Cyber together in the model header', async ({ tier, label, badgeKey }) => {
     apiMocks.getRequestDetail.mockResolvedValue({
       ...buildEmbeddingDetail(),
       id: 'usage-cyber-risk-demo',
@@ -322,13 +326,13 @@ describe('RequestDetailDrawer settlement pricing', () => {
         model: 'gpt-5',
         reasoning: { effort: 'xhigh' },
       },
-      service_tier: 'priority',
+      service_tier: tier,
       // A response-side tier must not be used for the Fast badge or billing.
       actual_service_tier: 'default',
       provider_request_body: {
         model: 'gpt-5.1',
         reasoning: { effort: 'max' },
-        service_tier: 'priority',
+        service_tier: tier,
       },
       status: 'failed',
       status_code: 400,
@@ -369,10 +373,8 @@ describe('RequestDetailDrawer settlement pricing', () => {
         .toContain('gpt-5.1')
       expect(document.body.querySelector('[data-request-detail-model-badge="reasoning"]')?.textContent)
         .toContain('xhigh -> max')
-      expect(document.body.querySelector('[data-request-detail-model-badge="fast"]')?.textContent)
-        .toContain('Fast')
-      expect(document.body.querySelector('[data-request-detail-model-badge="fast"]')?.textContent?.trim())
-        .toBe('Fast')
+      expect(document.body.querySelector(`[data-request-detail-model-badge="${badgeKey}"]`)?.textContent?.trim())
+        .toBe(label)
       expect(document.body.querySelector('[data-request-detail-model-badge="cyber"]')?.textContent)
         .toContain('Cyber')
       const modelLayout = document.body.querySelector(
@@ -386,8 +388,8 @@ describe('RequestDetailDrawer settlement pricing', () => {
         .toBe(true)
       expect(modelRow?.querySelector('[data-request-detail-model-badge="reasoning"]')?.textContent)
         .toContain('xhigh -> max')
-      expect(modelRow?.querySelector('[data-request-detail-model-badge="fast"]')?.textContent)
-        .toContain('Fast')
+      expect(modelRow?.querySelector(`[data-request-detail-model-badge="${badgeKey}"]`)?.textContent)
+        .toContain(label)
       expect(modelRow?.querySelector('[data-request-detail-model-badge="cyber"]')?.textContent)
         .toContain('Cyber')
       expect(modelLayout?.querySelector('[data-request-detail-model-badges-row]')).toBeNull()
@@ -395,7 +397,7 @@ describe('RequestDetailDrawer settlement pricing', () => {
       expect([...serviceTierFacts?.querySelectorAll('dt') ?? []].map(node => node.textContent?.trim()))
         .toEqual(['上游请求层级', '计费层级'])
       expect([...serviceTierFacts?.querySelectorAll('dd') ?? []].map(node => node.textContent?.trim()))
-        .toEqual(['Fast', 'Fast'])
+        .toEqual([label, label])
     })
   })
 

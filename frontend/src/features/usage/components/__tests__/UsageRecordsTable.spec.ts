@@ -560,6 +560,37 @@ describe('UsageRecordsTable', () => {
     },
   )
 
+  it.each(['ultrafast', 'flex', 'future-tier', ' UltraFast '])(
+    'shows the final provider request tier %s without a fixed badge allowlist',
+    (requested) => {
+      const root = mountUsageRecordsTable([buildRecord({
+        service_tier: requested,
+        actual_service_tier: 'default',
+      })])
+      const badges = [...root.querySelectorAll<HTMLElement>('[data-usage-model-badge="service-tier"]')]
+      expect(badges.length).toBeGreaterThan(0)
+      for (const badge of badges) {
+        expect(badge.textContent?.trim()).toBe(requested.trim())
+        expect(badge.title).toBe(`上游请求档位：${requested.trim()}\n计费档位：${requested.trim()}`)
+        expect(badge.getAttribute('aria-label')).toBe(
+          `上游请求档位：${requested.trim()}，计费档位：${requested.trim()}`,
+        )
+      }
+    },
+  )
+
+  it.each(['auto', 'default', 'standard', ' DEFAULT ', '', ' ', null])(
+    'does not show a badge for the default or absent request tier %s',
+    (requested) => {
+      const root = mountUsageRecordsTable([buildRecord({
+        service_tier: requested,
+        actual_service_tier: 'ultrafast',
+      })])
+      expect(root.querySelector('[data-usage-model-badge="service-tier"]')).toBeNull()
+      expect(root.querySelector('[data-usage-model-badge="fast"]')).toBeNull()
+    },
+  )
+
   it.each(['default', 'flex', null])(
     'ignores the response-side tier %s when the request tier is Fast',
     (actualServiceTier) => {
