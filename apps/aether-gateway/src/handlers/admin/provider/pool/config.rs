@@ -411,6 +411,7 @@ pub(crate) fn admin_provider_pool_config_from_config_value(
             unschedulable_rules: Vec::new(),
             lru_enabled: false,
             skip_exhausted_accounts: false,
+            reserve_minimum_quota: false,
             sticky_session_ttl_seconds: 3600,
             latency_window_seconds: 3600,
             latency_sample_limit: 50,
@@ -444,6 +445,10 @@ pub(crate) fn admin_provider_pool_config_from_config_value(
         unschedulable_rules,
         skip_exhausted_accounts: pool_advanced
             .get("skip_exhausted_accounts")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        reserve_minimum_quota: pool_advanced
+            .get("reserve_minimum_quota")
             .and_then(Value::as_bool)
             .unwrap_or(false),
         sticky_session_ttl_seconds: pool_advanced
@@ -574,6 +579,22 @@ mod tests {
         let config = admin_provider_pool_config(&provider).expect("pool config should exist");
 
         assert!(!config.skip_exhausted_accounts);
+        assert!(!config.reserve_minimum_quota);
+    }
+
+    #[test]
+    fn parses_reserve_minimum_quota_independently_of_skip_exhausted_accounts() {
+        for enabled in [false, true] {
+            let provider = sample_provider(json!({
+                "pool_advanced": {
+                    "reserve_minimum_quota": enabled,
+                    "skip_exhausted_accounts": false
+                }
+            }));
+            let config = admin_provider_pool_config(&provider).expect("pool config should exist");
+            assert_eq!(config.reserve_minimum_quota, enabled);
+            assert!(!config.skip_exhausted_accounts);
+        }
     }
 
     #[test]

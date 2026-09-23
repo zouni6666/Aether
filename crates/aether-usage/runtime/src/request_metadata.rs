@@ -1,13 +1,15 @@
 use aether_contracts::ExecutionPlan;
 use aether_data_contracts::repository::usage::{
     extract_provider_actual_service_tier_from_response,
-    extract_provider_reasoning_effort_from_body, extract_provider_service_tier_from_body,
-    normalize_provider_service_tier, resolve_provider_cache_ttl_minutes,
+    extract_provider_reasoning_effort_from_body, extract_provider_response_model_from_bodies,
+    extract_provider_service_tier_from_body, normalize_provider_service_tier,
+    resolve_provider_cache_ttl_minutes,
     sanitize_usage_request_metadata as project_usage_request_metadata,
     sanitize_usage_request_metadata_object as project_usage_request_metadata_object,
     sanitize_usage_request_metadata_ref as project_usage_request_metadata_ref,
-    UsageBodyCaptureState, PROVIDER_ACTUAL_SERVICE_TIER_METADATA_KEY,
-    PROVIDER_CACHE_TTL_MINUTES_METADATA_KEY, PROVIDER_REASONING_EFFORT_METADATA_KEY,
+    usage_body_capture_is_authoritative, UsageBodyCaptureState,
+    PROVIDER_ACTUAL_SERVICE_TIER_METADATA_KEY, PROVIDER_CACHE_TTL_MINUTES_METADATA_KEY,
+    PROVIDER_REASONING_EFFORT_METADATA_KEY, PROVIDER_RESPONSE_MODEL_METADATA_KEY,
     PROVIDER_SERVICE_TIER_METADATA_KEY, REQUESTED_REASONING_EFFORT_METADATA_KEY,
 };
 use serde_json::{Map, Value};
@@ -249,6 +251,83 @@ pub(crate) fn attach_provider_response_body_metadata(
     attach_provider_actual_service_tier_metadata(metadata, actual_service_tier.as_deref())
 }
 
+pub(crate) fn attach_provider_response_model_metadata(
+    metadata: Option<Value>,
+    request_body: Option<&Value>,
+    request_body_state: Option<UsageBodyCaptureState>,
+    request_api_format: Option<&str>,
+    response_body: Option<&Value>,
+    response_body_state: Option<UsageBodyCaptureState>,
+    provider_api_format: Option<&str>,
+) -> Option<Value> {
+    let both_bodies_are_authoritative =
+        usage_body_capture_is_authoritative(request_body, request_body_state)
+            && usage_body_capture_is_authoritative(response_body, response_body_state);
+    let response_model = extract_provider_response_model_from_bodies(
+        request_body,
+        request_body_state,
+        request_api_format,
+        response_body,
+        response_body_state,
+        provider_api_format,
+    );
+    if !both_bodies_are_authoritative && response_model.is_none() {
+        return metadata;
+    }
+
+    let mut object = match metadata {
+        Some(Value::Object(object)) => object,
+        _ => Map::new(),
+    };
+    // 完整终态 body 是最终候选的权威事实；相同、无效或缺失模型都要清除旧候选值。
+    if both_bodies_are_authoritative {
+        object.remove(PROVIDER_RESPONSE_MODEL_METADATA_KEY);
+    }
+    if let Some(response_model) = response_model {
+        object.insert(
+            PROVIDER_RESPONSE_MODEL_METADATA_KEY.to_string(),
+            Value::String(response_model),
+        );
+    }
+    (!object.is_empty()).then_some(Value::Object(object))
+}
+
+/// 终态候选无法完成比较时，显式清除旧响应模型，避免重试/故障转移残留。
+pub(crate) fn refresh_provider_response_model_metadata(
+    metadata: Option<Value>,
+    request_body: Option<&Value>,
+    request_body_state: Option<UsageBodyCaptureState>,
+    request_api_format: Option<&str>,
+    response_body: Option<&Value>,
+    response_body_state: Option<UsageBodyCaptureState>,
+    provider_api_format: Option<&str>,
+) -> Option<Value> {
+    let mut object = match metadata {
+        Some(Value::Object(object)) => object,
+        _ => Map::new(),
+    };
+    object.remove(PROVIDER_RESPONSE_MODEL_METADATA_KEY);
+
+    if usage_body_capture_is_authoritative(request_body, request_body_state)
+        && usage_body_capture_is_authoritative(response_body, response_body_state)
+    {
+        if let Some(response_model) = extract_provider_response_model_from_bodies(
+            request_body,
+            request_body_state,
+            request_api_format,
+            response_body,
+            response_body_state,
+            provider_api_format,
+        ) {
+            object.insert(
+                PROVIDER_RESPONSE_MODEL_METADATA_KEY.to_string(),
+                Value::String(response_model),
+            );
+        }
+    }
+    (!object.is_empty()).then_some(Value::Object(object))
+}
+
 /// Refreshes the response-derived tier for a terminal snapshot. Complete response objects are
 /// authoritative even when they contain no tier (which clears a stale candidate value). Capture
 /// placeholders/absent bodies are not authoritative, so a terminal summary already present in
@@ -312,6 +391,7 @@ pub(crate) fn attach_provider_actual_service_tier_metadata(
 #[cfg(test)]
 mod tests {
     use aether_contracts::{ExecutionPlan, RequestBody};
+    use aether_data_contracts::repository::usage::UsageBodyCaptureState;
     use serde_json::{json, Value};
     use std::collections::BTreeMap;
 
@@ -323,8 +403,9 @@ mod tests {
     use super::{
         attach_client_request_body_metadata, attach_provider_actual_service_tier_metadata,
         attach_provider_request_body_metadata, attach_provider_response_body_metadata,
-        build_usage_request_metadata_seed, merge_usage_request_metadata,
-        merge_usage_request_metadata_owned, refresh_provider_response_body_metadata,
+        attach_provider_response_model_metadata, build_usage_request_metadata_seed,
+        merge_usage_request_metadata, merge_usage_request_metadata_owned,
+        refresh_provider_response_body_metadata, refresh_provider_response_model_metadata,
         retain_first_byte_request_metadata, sanitize_usage_request_metadata,
         sanitize_usage_request_metadata_ref,
     };
@@ -800,6 +881,44 @@ mod tests {
                 "provider_actual_service_tier": "default"
             })
         );
+    }
+
+    #[test]
+    fn response_model_metadata_is_independent_from_mapping_and_clears_stale_values() {
+        let metadata = attach_provider_response_model_metadata(
+            Some(json!({"provider_response_model": "old-model", "trace_id": "trace-1"})),
+            Some(&json!({"model": "gpt-5"})),
+            Some(UsageBodyCaptureState::Inline),
+            Some("openai:chat"),
+            Some(&json!({"model": "gpt-5.1"})),
+            Some(UsageBodyCaptureState::Inline),
+            Some("openai:chat"),
+        )
+        .expect("response model should be attached");
+        assert_eq!(metadata["provider_response_model"], "gpt-5.1");
+        assert_eq!(metadata["trace_id"], "trace-1");
+
+        let metadata = refresh_provider_response_model_metadata(
+            Some(json!({"provider_response_model": "gpt-5.1"})),
+            Some(&json!({"model": "gpt-5"})),
+            Some(UsageBodyCaptureState::Inline),
+            Some("openai:chat"),
+            Some(&json!({"model": "gpt-5"})),
+            Some(UsageBodyCaptureState::Inline),
+            Some("openai:chat"),
+        );
+        assert!(metadata.is_none());
+
+        let metadata = refresh_provider_response_model_metadata(
+            Some(json!({"provider_response_model": "gpt-5.1"})),
+            None,
+            Some(UsageBodyCaptureState::Disabled),
+            Some("openai:chat"),
+            Some(&json!({"model": "gpt-5.2"})),
+            Some(UsageBodyCaptureState::Inline),
+            Some("openai:chat"),
+        );
+        assert!(metadata.is_none());
     }
 
     #[test]

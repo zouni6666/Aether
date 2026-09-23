@@ -2732,7 +2732,9 @@ async fn gateway_lists_admin_user_api_keys_locally_with_trusted_admin_principal(
             Some(1_711_000_100),
             Some(1_711_000_101),
         )
-        .expect("export activity timestamps should build")]),
+        .expect("export activity timestamps should build")
+        .with_ip_rules(Some(json!(["203.0.113.0/24"])))
+        .expect("export IP rules should build")]),
     );
     let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![
         sample_admin_user("user-1"),
@@ -2769,6 +2771,10 @@ async fn gateway_lists_admin_user_api_keys_locally_with_trusted_admin_principal(
     assert_eq!(payload["api_keys"][0]["key_display"], "sk...-1");
     assert_eq!(payload["api_keys"][0]["is_active"], true);
     assert_eq!(payload["api_keys"][0]["is_locked"], false);
+    assert_eq!(
+        payload["api_keys"][0]["ip_rules"],
+        json!(["203.0.113.0/24"])
+    );
     assert_eq!(payload["api_keys"][0]["total_requests"], 9);
     assert_eq!(payload["api_keys"][0]["total_cost_usd"], 1.5);
     assert_eq!(payload["api_keys"][0]["rate_limit"], 60);

@@ -1,11 +1,16 @@
 extern crate self as aether_ai_formats;
 
 pub mod api;
+pub mod codex_profile;
 pub mod contracts;
 pub mod formats;
 pub mod protocol;
 pub mod provider_compat;
 
+pub use codex_profile::{
+    codex_client_originator, codex_client_profile, codex_client_user_agent, codex_client_version,
+    set_codex_cli_version, set_codex_client_profile, CodexClientKind, CodexClientProfile,
+};
 pub use contracts::{ApiOperation, ClientSurface};
 
 pub use formats::context::{
@@ -50,7 +55,6 @@ pub use formats::openai::responses::codex::{
     codex_responses_lite_tool_is_client_executed, effective_codex_model_cards,
     parse_codex_auth_identity, project_codex_catalog_model_card,
     resolve_codex_responses_model_capabilities, CodexAuthIdentity, CodexResponsesModelCapabilities,
-    CODEX_CLIENT_ORIGINATOR, CODEX_CLIENT_USER_AGENT, CODEX_CLIENT_VERSION,
     CODEX_MODEL_CATALOG_METADATA_FIELD, CODEX_RESPONSES_LITE_HEADER,
 };
 pub use formats::openai::responses::request::{

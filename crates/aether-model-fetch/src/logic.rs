@@ -993,7 +993,7 @@ fn build_codex_models_url(base_url: &str, client_version: Option<&str>) -> Optio
     } else if !has_client_version {
         query_parts.push(format!(
             "client_version={}",
-            aether_ai_formats::CODEX_CLIENT_VERSION
+            aether_ai_formats::codex_client_version()
         ));
     }
     if !query_parts.is_empty() {
@@ -1354,6 +1354,7 @@ mod tests {
 
     #[test]
     fn build_models_fetch_url_uses_codex_backend_models_endpoint() {
+        let client_version = aether_ai_formats::codex_client_version();
         assert_eq!(
             build_models_fetch_url(
                 "codex",
@@ -1363,7 +1364,7 @@ mod tests {
             Some((
                 format!(
                     "https://chatgpt.com/backend-api/codex/models?client_version={}",
-                    aether_ai_formats::CODEX_CLIENT_VERSION
+                    client_version
                 ),
                 "openai:responses".to_string()
             ))

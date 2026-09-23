@@ -131,8 +131,13 @@ async fn schedule_pool_page_candidates(
         entry.1.insert(candidate.candidate.key_id.clone());
     }
 
-    let key_context_by_id =
-        read_pool_catalog_key_contexts_by_id(state, &candidates, provider_model_name).await;
+    let key_context_by_id = read_pool_catalog_key_contexts_by_id(
+        state,
+        &candidates,
+        provider_model_name,
+        effective_pool_config,
+    )
+    .await;
 
     let mut runtime_by_provider = BTreeMap::new();
     let mut pool_config_by_provider = BTreeMap::new();
@@ -1029,6 +1034,26 @@ impl<'a> PoolKeyCursor<'a> {
             return None;
         }
 
+        if pool_config.reserve_minimum_quota
+            && admin_provider_pool_pure::admin_pool_key_minimum_quota_reached(
+                &key,
+                self.group.candidate.provider_type.as_str(),
+                Some(self.group.candidate.selected_provider_model_name.as_str()),
+            )
+        {
+            self.seen_key_ids.insert(key.id.clone());
+            self.record_skip_reason(POOL_ACCOUNT_EXHAUSTED_SKIP_REASON);
+            self.skipped_candidates
+                .push(SkippedLocalExecutionCandidate {
+                    candidate: pool_candidate_from_catalog_key(&self.group, key),
+                    skip_reason: POOL_ACCOUNT_EXHAUSTED_SKIP_REASON,
+                    transport: None,
+                    ranking: self.group.ranking.clone(),
+                    extra_data: None,
+                });
+            return None;
+        }
+
         let candidate = pool_candidate_from_catalog_key(&self.group, key);
         self.build_eligible_candidate(candidate).await
     }
@@ -1429,15 +1454,23 @@ async fn read_pool_catalog_key_contexts_by_id(
     state: PlannerAppState<'_>,
     candidates: &[EligibleLocalExecutionCandidate],
     provider_model_name: Option<&str>,
+    effective_pool_config: Option<&AdminProviderPoolConfig>,
 ) -> BTreeMap<String, PoolCatalogKeyContext> {
     let mut key_ids = Vec::new();
     let mut provider_type_by_key_id = BTreeMap::<String, String>::new();
+    let mut reserve_minimum_quota_key_ids = BTreeSet::new();
 
     for candidate in candidates {
-        if pool_config_for_candidate(candidate).is_none() {
+        let Some(pool_config) = effective_pool_config
+            .cloned()
+            .or_else(|| pool_config_for_candidate(candidate))
+        else {
             continue;
-        }
+        };
         let key_id = candidate.candidate.key_id.clone();
+        if pool_config.reserve_minimum_quota {
+            reserve_minimum_quota_key_ids.insert(key_id.clone());
+        }
         if let Entry::Vacant(entry) = provider_type_by_key_id.entry(key_id.clone()) {
             entry.insert(candidate.transport.provider.provider_type.clone());
             key_ids.push(key_id);
@@ -1489,16 +1522,20 @@ async fn read_pool_catalog_key_contexts_by_id(
                 .get(&key.id)
                 .map(String::as_str)
                 .unwrap_or_default();
-            (
-                key.id.clone(),
-                build_pool_catalog_key_context(
-                    state,
-                    &provider_pool_service,
+            let mut context = build_pool_catalog_key_context(
+                state,
+                &provider_pool_service,
+                &key,
+                provider_type,
+                provider_model_name,
+            );
+            context.quota_exhausted |= reserve_minimum_quota_key_ids.contains(&key.id)
+                && admin_provider_pool_pure::admin_pool_key_minimum_quota_reached(
                     &key,
                     provider_type,
                     provider_model_name,
-                ),
-            )
+                );
+            (key.id.clone(), context)
         })
         .collect::<BTreeMap<_, _>>();
     // A key can disappear between the candidate-row and catalog reads. Keep
@@ -3962,6 +3999,91 @@ mod tests {
         assert!(skipped.iter().all(|candidate| {
             candidate.skip_reason == aether_pool_core::POOL_ACCOUNT_EXHAUSTED_SKIP_REASON
         }));
+    }
+
+    #[tokio::test]
+    async fn pool_key_cursor_reserve_minimum_quota_filters_pages_and_sticky_hits() {
+        for reserve_enabled in [false, true] {
+            for sticky in [false, true] {
+                for used_percent in [99.0, 98.0] {
+                    let provider_config = Some(json!({
+                        "pool_advanced": {
+                            "reserve_minimum_quota": reserve_enabled,
+                            "skip_exhausted_accounts": false
+                        }
+                    }));
+                    let provider =
+                        sample_codex_pool_provider("provider-pool", 0, provider_config.clone());
+                    let endpoint = sample_codex_pool_endpoint("provider-pool", "endpoint-1");
+                    let mut reserved = sample_codex_pool_key("provider-pool", "key-low");
+                    reserved.upstream_metadata = Some(json!({
+                        "codex": {"primary_used_percent": used_percent}
+                    }));
+                    let ready = sample_codex_pool_key("provider-pool", "key-ready");
+                    let rows = vec![
+                        sample_codex_pool_row("provider-pool", "endpoint-1", "key-low", 0),
+                        sample_codex_pool_row("provider-pool", "endpoint-1", "key-ready", 0),
+                    ];
+                    let data_state = GatewayDataState::with_provider_catalog_and_minimal_candidate_selection_for_tests(
+                        Arc::new(InMemoryProviderCatalogReadRepository::seed(
+                            vec![provider], vec![endpoint], vec![reserved, ready],
+                        )),
+                        Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(rows)),
+                    )
+                    .with_encryption_key_for_tests(aether_crypto::DEVELOPMENT_ENCRYPTION_KEY);
+                    let app = AppState::new()
+                        .expect("state should build")
+                        .with_data_state_for_tests(data_state);
+                    let group =
+                        sample_codex_pool_group("provider-pool", "endpoint-1", 0, provider_config);
+                    let pool_config =
+                        pool_config_for_candidate(&group).expect("pool config should parse");
+                    let sticky_token = sticky.then_some("reserve-session");
+                    if sticky {
+                        record_admin_provider_pool_success(
+                            app.runtime_state.as_ref(),
+                            "provider-pool",
+                            "key-low",
+                            &pool_config,
+                            sticky_token,
+                            0,
+                            None,
+                        )
+                        .await;
+                    }
+                    let mut cursor = PoolKeyCursor::new(
+                        PlannerAppState::new(&app),
+                        group,
+                        sticky_token,
+                        None,
+                        None,
+                    );
+                    cursor.window_size = 1;
+                    cursor.page_size = 1;
+                    let mut returned = Vec::new();
+                    while let Some(candidate) = cursor.next_key().await {
+                        returned.push(candidate.candidate.key_id);
+                    }
+                    let reserve_reached = reserve_enabled && used_percent >= 99.0;
+                    assert_eq!(
+                        returned.contains(&"key-low".to_string()),
+                        !reserve_reached,
+                        "reserve={reserve_enabled}, sticky={sticky}, used={used_percent}"
+                    );
+                    assert!(returned.contains(&"key-ready".to_string()));
+                    if reserve_reached {
+                        assert_eq!(
+                            cursor
+                                .skip_reason_counts
+                                .get(POOL_ACCOUNT_EXHAUSTED_SKIP_REASON),
+                            Some(&1)
+                        );
+                    } else if sticky {
+                        assert_eq!(returned.first().map(String::as_str), Some("key-low"));
+                    }
+                }
+            }
+        }
     }
 
     #[tokio::test]

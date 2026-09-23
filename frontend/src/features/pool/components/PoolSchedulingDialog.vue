@@ -72,6 +72,33 @@
         </div>
       </div>
 
+      <div
+        v-if="isCodex"
+        class="flex items-start justify-between gap-4 rounded-2xl border border-border/60 bg-card/70 p-4"
+      >
+        <div class="space-y-1">
+          <label
+            for="pool-reserve-minimum-quota"
+            class="text-sm font-medium"
+          >
+            保留最低额度
+          </label>
+          <p
+            id="pool-reserve-minimum-quota-description"
+            class="text-xs leading-5 text-muted-foreground"
+          >
+            账号剩余额度不高于 1% 时提前标记为额度耗尽并停止调度，待额度恢复后再使用。
+          </p>
+        </div>
+        <Switch
+          id="pool-reserve-minimum-quota"
+          v-model="reserveMinimumQuota"
+          aria-describedby="pool-reserve-minimum-quota-description"
+          :disabled="loading"
+          class="mt-0.5 shrink-0"
+        />
+      </div>
+
       <!-- Section 2: 策略调度 (非互斥, 可叠加组合 + 拖拽排序) -->
       <div class="space-y-4 rounded-2xl border border-border/60 bg-card/70 p-4">
         <div class="space-y-1">
@@ -437,6 +464,8 @@ const FALLBACK_PRESET_DEFS: PoolPresetMeta[] = [
 
 const { success, error: showError } = useToast()
 const loading = ref(false)
+const reserveMinimumQuota = ref(false)
+const isCodex = computed(() => normalizeProviderType(props.providerType) === 'codex')
 let dialogRevision = 0
 const presetDefs = ref<PoolPresetMeta[]>([])
 const presetDefsLoaded = ref(false)
@@ -850,6 +879,7 @@ watch([() => props.modelValue, () => props.providerId], async ([open]) => {
   const revision = ++dialogRevision
   loading.value = false
   if (!open) return
+  reserveMinimumQuota.value = props.currentConfig?.reserve_minimum_quota === true
   await ensurePresetDefsLoaded()
   if (!props.modelValue || dialogRevision !== revision) return
   presetList.value = normalizeMutexSelection(loadFromConfig(props.currentConfig))
@@ -883,6 +913,7 @@ async function handleSave() {
     const latestAdvanced = latestProvider.pool_advanced
     const mergedAdvanced = mergePoolAdvancedPatch(latestAdvanced, {
       scheduling_presets: schedulingPresets,
+      ...(isCodex.value ? { reserve_minimum_quota: reserveMinimumQuota.value } : {}),
     })
     const payload: Parameters<typeof updateProvider>[1] = {
       pool_advanced: mergedAdvanced as PoolAdvancedConfig,

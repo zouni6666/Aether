@@ -505,9 +505,12 @@ fn projects_uuid_prompt_cache_identity_into_missing_session_headers() {
     assert_eq!(headers.get("x-client-request-id"), None);
     assert_eq!(
         headers.get("user-agent").map(String::as_str),
-        Some(aether_ai_formats::CODEX_CLIENT_USER_AGENT)
+        Some(aether_ai_formats::codex_client_user_agent().as_str())
     );
-    assert_eq!(headers.get("originator"), Some(&"codex_cli_rs".to_string()));
+    assert_eq!(
+        headers.get("originator"),
+        Some(&aether_ai_formats::codex_client_originator())
+    );
     assert!(!headers.contains_key("version"));
     assert_eq!(headers.get("x-openai-fedramp"), Some(&"true".to_string()));
     assert_eq!(
@@ -615,9 +618,12 @@ fn injects_only_codex_client_headers_for_images_requests() {
     );
     assert_eq!(
         headers.get("user-agent").map(String::as_str),
-        Some(aether_ai_formats::CODEX_CLIENT_USER_AGENT)
+        Some(aether_ai_formats::codex_client_user_agent().as_str())
     );
-    assert_eq!(headers.get("originator"), Some(&"codex_cli_rs".to_string()));
+    assert_eq!(
+        headers.get("originator"),
+        Some(&aether_ai_formats::codex_client_originator())
+    );
     assert!(!headers.contains_key("version"));
     assert_eq!(headers.get("x-openai-fedramp"), Some(&"true".to_string()));
     for name in ["x-client-request-id", "session-id", "thread-id"] {
@@ -699,9 +705,12 @@ fn preserves_client_context_headers_and_enforces_codex_provider_identity() {
     );
     assert_eq!(
         headers.get("user-agent").map(String::as_str),
-        Some(aether_ai_formats::CODEX_CLIENT_USER_AGENT)
+        Some(aether_ai_formats::codex_client_user_agent().as_str())
     );
-    assert_eq!(headers.get("originator"), Some(&"codex_cli_rs".to_string()));
+    assert_eq!(
+        headers.get("originator"),
+        Some(&aether_ai_formats::codex_client_originator())
+    );
     assert_eq!(
         headers
             .keys()
@@ -763,9 +772,12 @@ fn compact_projects_uuid_prompt_cache_identity_into_session_headers() {
     assert_eq!(headers.get("x-client-request-id"), None);
     assert_eq!(
         headers.get("user-agent").map(String::as_str),
-        Some(aether_ai_formats::CODEX_CLIENT_USER_AGENT)
+        Some(aether_ai_formats::codex_client_user_agent().as_str())
     );
-    assert_eq!(headers.get("originator"), Some(&"codex_cli_rs".to_string()));
+    assert_eq!(
+        headers.get("originator"),
+        Some(&aether_ai_formats::codex_client_originator())
+    );
     assert!(!headers.contains_key("version"));
     assert_eq!(headers.get("x-openai-fedramp"), Some(&"true".to_string()));
     assert_eq!(

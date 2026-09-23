@@ -184,7 +184,7 @@ pub(crate) use aether_ai_formats::{
     openai_responses_request_operation, openai_responses_synthetic_reasoning_item_id,
     strip_incompatible_openai_responses_reasoning_items,
     strip_incompatible_openai_responses_reasoning_items_with_policy, ApiOperation, ClientSurface,
-    CODEX_CLIENT_VERSION, OPENAI_RESPONSES_OPERATION_COMPACT,
+    OPENAI_RESPONSES_OPERATION_COMPACT,
 };
 
 pub(crate) fn plan_kind_matches_api_operation(

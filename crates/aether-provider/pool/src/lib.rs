@@ -38,11 +38,11 @@ pub use providers::{
     XAI_BILLING_PATH, XAI_USER_PATH,
 };
 pub use quota::{
-    provider_pool_key_account_quota_exhausted, provider_pool_key_model_quota_exhausted,
-    provider_pool_key_model_quota_hard_blocked, provider_pool_key_quota_hard_blocked,
-    provider_pool_key_scheduling_label, provider_pool_member_quota_snapshot,
-    provider_pool_quota_metadata_provider_type, provider_pool_quota_metadata_updated_at,
-    provider_pool_quota_snapshot_updated_at,
+    provider_pool_key_account_quota_exhausted, provider_pool_key_minimum_quota_reached,
+    provider_pool_key_model_quota_exhausted, provider_pool_key_model_quota_hard_blocked,
+    provider_pool_key_quota_hard_blocked, provider_pool_key_scheduling_label,
+    provider_pool_member_quota_snapshot, provider_pool_quota_metadata_provider_type,
+    provider_pool_quota_metadata_updated_at, provider_pool_quota_snapshot_updated_at,
 };
 pub use quota_refresh::ProviderPoolQuotaRequestSpec;
 pub use service::ProviderPoolService;
@@ -725,6 +725,275 @@ mod tests {
             }],
         );
         assert!(unsupported.is_empty());
+    }
+
+    #[test]
+    fn codex_minimum_quota_respects_boundary_and_provider() {
+        for (used_percent, expected) in [
+            (98.9, false),
+            (98.99999, false),
+            (99.0, true),
+            (99.5, true),
+            (100.0, true),
+        ] {
+            let key = sample_key(Some(json!({
+                "codex": { "primary_used_percent": used_percent }
+            })));
+            assert_eq!(
+                provider_pool_key_minimum_quota_reached(&key, "codex", None),
+                expected,
+                "used_percent={used_percent}"
+            );
+            assert!(!provider_pool_key_minimum_quota_reached(&key, "kiro", None));
+        }
+        assert!(!provider_pool_key_minimum_quota_reached(
+            &sample_key(None),
+            "codex",
+            None
+        ));
+    }
+
+    #[test]
+    fn codex_minimum_quota_short_model_names_still_use_account_windows() {
+        for (used_percent, expected) in [(98.0, false), (99.0, true)] {
+            let key = sample_key(Some(json!({
+                "codex": { "primary_used_percent": used_percent }
+            })));
+            for model in ["o1", "o3", "", "   "] {
+                assert_eq!(
+                    provider_pool_key_minimum_quota_reached(&key, "codex", Some(model)),
+                    expected,
+                    "model={model:?}, used_percent={used_percent}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn codex_minimum_quota_respects_windows_and_reset() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_secs();
+        for (reset_at, expected) in [(now + 3600, true), (now - 60, false)] {
+            let mut key = sample_key(None);
+            key.status_snapshot = Some(json!({
+                "quota": {
+                    "provider_type": "codex",
+                    "updated_at": now - 600,
+                    "windows": [
+                        { "code": "5h", "used_ratio": 0.2 },
+                        { "code": "weekly", "used_ratio": 0.99, "reset_at": reset_at }
+                    ]
+                }
+            }));
+            for model in [None, Some("gpt-5.4")] {
+                assert_eq!(
+                    provider_pool_key_minimum_quota_reached(&key, "codex", model),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn codex_minimum_quota_checks_either_window_and_relative_resets() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_secs();
+        for prefix in ["primary", "secondary"] {
+            for (reset_seconds, expected) in [(3600, true), (60, false)] {
+                let key = sample_key(Some(json!({
+                    "codex": {
+                        "updated_at": now - 600,
+                        "allowed": true,
+                        "limit_reached": false,
+                        format!("{prefix}_used_percent"): 99.0,
+                        format!("{prefix}_reset_after_seconds"): reset_seconds
+                    }
+                })));
+                for model in [None, Some("gpt-5.4")] {
+                    assert_eq!(
+                        provider_pool_key_minimum_quota_reached(&key, "codex", model),
+                        expected,
+                        "prefix={prefix}, reset_seconds={reset_seconds}, model={model:?}"
+                    );
+                }
+                assert!(!provider_pool_key_account_quota_exhausted(&key, "codex"));
+            }
+        }
+    }
+
+    #[test]
+    fn codex_minimum_quota_uses_newest_source_with_or_without_model() {
+        for (snapshot_at, metadata_at, metadata_wins) in [
+            (Some(200), Some(100), false),
+            (Some(100), Some(200), true),
+            (None, None, false),
+            (Some(100), None, false),
+            (None, Some(100), true),
+        ] {
+            for snapshot_reached in [false, true] {
+                let mut key = sample_key(Some(json!({
+                    "codex": {
+                        "updated_at": metadata_at,
+                        "primary_used_percent": if snapshot_reached { 20.0 } else { 99.0 }
+                    }
+                })));
+                key.status_snapshot = Some(json!({
+                    "quota": {
+                        "provider_type": "codex",
+                        "observed_at": snapshot_at,
+                        "windows": [{
+                            "code": "5h",
+                            "used_ratio": if snapshot_reached { 0.99 } else { 0.2 },
+                            "is_exhausted": false
+                        }]
+                    }
+                }));
+                for model in [None, Some("gpt-5.4")] {
+                    assert_eq!(
+                        provider_pool_key_minimum_quota_reached(&key, "codex", model),
+                        snapshot_reached != metadata_wins,
+                        "snapshot_at={snapshot_at:?}, metadata_at={metadata_at:?}, model={model:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn codex_minimum_quota_isolates_model_buckets_and_checks_each_model_window() {
+        for explicit_model in [false, true] {
+            let mut key = sample_key(None);
+            key.status_snapshot = Some(json!({
+                "quota": {
+                    "provider_type": "codex",
+                    "windows": [
+                        { "code": "5h", "used_ratio": 0.2 },
+                        {
+                            "code": "spark_5h", "used_ratio": 0.99,
+                            "model": if explicit_model { Some("spark") } else { None },
+                            "is_exhausted": false
+                        },
+                        {
+                            "code": "spark_weekly", "used_ratio": 0.2,
+                            "model": if explicit_model { Some("spark") } else { None },
+                            "is_exhausted": false
+                        }
+                    ]
+                }
+            }));
+            assert!(provider_pool_key_minimum_quota_reached(
+                &key,
+                "codex",
+                Some("gpt-5.3-codex-spark")
+            ));
+            for model in [None, Some("gpt-5.4")] {
+                assert!(!provider_pool_key_minimum_quota_reached(
+                    &key, "codex", model
+                ));
+            }
+            assert_eq!(
+                provider_pool_key_model_quota_exhausted(&key, "codex", "gpt-5.3-codex-spark"),
+                Some(false)
+            );
+        }
+        for (account_percent, spark_percent) in [(99.0, 20.0), (20.0, 99.0)] {
+            let key = sample_key(Some(json!({
+                "codex": {
+                    "primary_used_percent": account_percent,
+                    "spark_primary_used_percent": spark_percent,
+                    "spark_secondary_used_percent": 20.0
+                }
+            })));
+            assert_eq!(
+                provider_pool_key_minimum_quota_reached(&key, "codex", Some("gpt-5.3-codex-spark")),
+                spark_percent == 99.0
+            );
+            assert_eq!(
+                provider_pool_key_minimum_quota_reached(&key, "codex", Some("gpt-5.4")),
+                account_percent == 99.0
+            );
+        }
+    }
+
+    #[test]
+    fn codex_minimum_quota_keeps_model_bucket_when_account_metadata_is_newer() {
+        for (snapshot_ratio, account_percent) in [(0.2, 99.0), (0.99, 20.0)] {
+            let mut key = sample_key(Some(json!({
+                "codex": { "updated_at": 200, "primary_used_percent": account_percent }
+            })));
+            key.status_snapshot = Some(json!({
+                "quota": {
+                    "provider_type": "codex",
+                    "observed_at": 100,
+                    "windows": [{ "code": "spark_5h", "used_ratio": snapshot_ratio }]
+                }
+            }));
+            assert_eq!(
+                provider_pool_key_minimum_quota_reached(&key, "codex", Some("gpt-5.3-codex-spark")),
+                snapshot_ratio == 0.99
+            );
+            assert_eq!(
+                provider_pool_key_minimum_quota_reached(&key, "codex", Some("gpt-5.4")),
+                account_percent == 99.0
+            );
+
+            key.upstream_metadata.as_mut().unwrap()["codex"]["spark_primary_used_percent"] =
+                json!(account_percent);
+            assert_eq!(
+                provider_pool_key_minimum_quota_reached(&key, "codex", Some("gpt-5.3-codex-spark")),
+                account_percent == 99.0,
+                "the newer observation for the same model bucket must win"
+            );
+        }
+    }
+
+    #[test]
+    fn codex_minimum_quota_supports_remaining_values_and_ignores_unknown_data() {
+        for (metrics, expected) in [
+            (json!({ "remaining_ratio": 0.01 }), true),
+            (json!({ "remaining_percent": "1" }), true),
+            (json!({ "remaining": 1, "limit": 100 }), true),
+            (json!({ "used_percent": "99" }), true),
+            (json!({ "used_ratio": null }), false),
+            (json!({ "used_ratio": "NaN" }), false),
+            (json!({ "remaining": 0, "limit": 0 }), false),
+            (json!({ "remaining_ratio": 0.01001 }), false),
+        ] {
+            let key = sample_key(Some(json!({
+                "codex": { "quota_by_model": { "spark": metrics } }
+            })));
+            assert_eq!(
+                provider_pool_key_minimum_quota_reached(&key, "codex", Some("gpt-5.3-codex-spark")),
+                expected,
+                "metrics={metrics}"
+            );
+            assert!(!provider_pool_key_minimum_quota_reached(
+                &key, "codex", None
+            ));
+        }
+        let disabled = sample_key(Some(json!({
+            "codex": { "primary_used_percent": 99.0, "primary_window_minutes": 0 }
+        })));
+        assert!(!provider_pool_key_minimum_quota_reached(
+            &disabled, "codex", None
+        ));
+
+        let mut mismatched = sample_key(None);
+        mismatched.status_snapshot = Some(json!({
+            "quota": {
+                "provider_type": "kiro",
+                "windows": [{ "code": "weekly", "used_ratio": 0.99 }]
+            }
+        }));
+        assert!(!provider_pool_key_minimum_quota_reached(
+            &mismatched,
+            "codex",
+            None
+        ));
     }
 
     #[test]

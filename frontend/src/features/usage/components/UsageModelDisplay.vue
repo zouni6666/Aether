@@ -16,11 +16,22 @@
         :class="modelClass"
         data-usage-model-source
       >{{ record.model }}</span>
-      <template v-if="actualModel">
-        <span
-          class="order-last basis-full min-w-0 break-all whitespace-normal text-muted-foreground"
-          data-usage-model-target
-        ><span class="mr-1">-&gt;</span>{{ actualModel }}</span>
+      <template v-if="hasModelFacts">
+        <div
+          class="order-last basis-full flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-muted-foreground"
+          data-usage-model-facts
+        >
+          <span
+            v-if="mappingModel"
+            class="min-w-0 break-all whitespace-normal"
+            data-usage-model-mapping
+          ><span class="mr-1 text-[10px] text-muted-foreground/70">映射模型</span>{{ mappingModel }}</span>
+          <span
+            v-if="responseModel"
+            class="min-w-0 break-all whitespace-normal"
+            data-usage-model-response
+          ><span class="mr-1 text-[10px] text-muted-foreground/70">响应模型</span>{{ responseModel }}</span>
+        </div>
       </template>
       <template v-if="!shouldStackBadges">
         <Badge
@@ -83,7 +94,7 @@ interface ModelBadgePresentation {
 interface UsageModelDisplayRecord {
   model: string
   target_model?: string | null
-  model_version?: string | null
+  response_model?: string | null
   request_type?: string | null
   requested_reasoning_effort?: string | null
   reasoning_effort?: string | null
@@ -113,14 +124,19 @@ const props = withDefaults(defineProps<{
   showReasoningBadge: true,
 })
 
-const actualModel = computed(() => {
+const mappingModel = computed(() => {
   const targetModel = normalizeText(props.record.target_model)
-  if (targetModel && targetModel !== props.record.model) return targetModel
-
-  const modelVersion = normalizeText(props.record.model_version)
-  if (modelVersion && modelVersion !== props.record.model) return modelVersion
+  if (targetModel && targetModel !== normalizeText(props.record.model)) return targetModel
   return null
 })
+
+const responseModel = computed(() => {
+  const response = normalizeText(props.record.response_model)
+  if (response && response !== normalizeText(props.record.model)) return response
+  return null
+})
+
+const hasModelFacts = computed(() => mappingModel.value !== null || responseModel.value !== null)
 
 const reasoningLabel = computed(() => {
   const requested = normalizeText(props.record.requested_reasoning_effort)
@@ -191,7 +207,7 @@ const modelBadges = computed<ModelBadgePresentation[]>(() => {
 })
 
 const shouldStackBadges = computed(() => (
-  actualModel.value === null && modelBadges.value.length >= 3
+  !hasModelFacts.value && modelBadges.value.length >= 3
 ))
 
 function normalizeText(value: string | null | undefined): string | null {

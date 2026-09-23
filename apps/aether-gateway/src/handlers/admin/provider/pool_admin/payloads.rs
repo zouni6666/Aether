@@ -1117,10 +1117,16 @@ pub(super) fn build_admin_pool_key_payload(
     let health_score = admin_pool_health_score(key);
     let circuit_breaker_open = false;
     let auth_semantics = provider_key_auth_semantics(key, provider_type);
-    let account_quota_exhausted = pool_config
-        .as_ref()
-        .is_some_and(|config| config.skip_exhausted_accounts)
-        && admin_provider_pool_pure::admin_pool_key_account_quota_exhausted(key, provider_type);
+    let account_quota_exhausted = pool_config.as_ref().is_some_and(|config| {
+        (config.skip_exhausted_accounts
+            && admin_provider_pool_pure::admin_pool_key_account_quota_exhausted(key, provider_type))
+            || (config.reserve_minimum_quota
+                && admin_provider_pool_pure::admin_pool_key_minimum_quota_reached(
+                    key,
+                    provider_type,
+                    None,
+                ))
+    });
     let auth_config = state.parse_catalog_auth_config_json(key);
     let oauth_expires_at =
         admin_pool_derive_oauth_expires_at(provider_type, key, auth_config.as_ref());

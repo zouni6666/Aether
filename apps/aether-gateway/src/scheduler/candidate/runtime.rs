@@ -40,10 +40,6 @@ pub(super) async fn read_candidate_runtime_selection_snapshot(
 ) -> Result<CandidateRuntimeSelectionSnapshot, GatewayError> {
     let provider_concurrent_limits = read_provider_concurrent_limits(state, candidates).await?;
     let provider_pool_state = read_provider_pool_state_map(state, candidates).await?;
-    let provider_skip_exhausted_accounts = provider_pool_state
-        .iter()
-        .map(|(provider_id, state)| (provider_id.clone(), state.skip_exhausted_accounts))
-        .collect::<BTreeMap<_, _>>();
     let pool_provider_ids = provider_pool_state
         .iter()
         .filter_map(|(provider_id, state)| state.pool_enabled.then_some(provider_id.clone()))
@@ -62,7 +58,7 @@ pub(super) async fn read_candidate_runtime_selection_snapshot(
     let key_account_quota_exhausted = read_key_account_quota_exhaustion_map(
         candidates,
         &provider_key_rpm_states,
-        &provider_skip_exhausted_accounts,
+        &provider_pool_state,
     );
     let key_oauth_invalid =
         read_key_oauth_invalid_map(candidates, &provider_key_rpm_states, now_unix_secs);
@@ -360,6 +356,7 @@ async fn read_provider_quota_block_map(
 struct ProviderPoolState {
     pool_enabled: bool,
     skip_exhausted_accounts: bool,
+    reserve_minimum_quota: bool,
 }
 
 async fn read_provider_pool_state_map(
@@ -391,11 +388,17 @@ async fn read_provider_pool_state_map(
                 .and_then(|value| value.get("skip_exhausted_accounts"))
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
+            let reserve_minimum_quota = pool_advanced
+                .and_then(serde_json::Value::as_object)
+                .and_then(|value| value.get("reserve_minimum_quota"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
             (
                 provider.id,
                 ProviderPoolState {
                     pool_enabled: pool_advanced.is_some(),
                     skip_exhausted_accounts,
+                    reserve_minimum_quota,
                 },
             )
         })
@@ -405,7 +408,7 @@ async fn read_provider_pool_state_map(
 fn read_key_account_quota_exhaustion_map(
     candidates: &[SchedulerMinimalCandidateSelectionCandidate],
     provider_key_rpm_states: &BTreeMap<String, StoredProviderCatalogKey>,
-    provider_skip_exhausted_accounts: &BTreeMap<String, bool>,
+    provider_pool_state: &BTreeMap<String, ProviderPoolState>,
 ) -> BTreeMap<String, bool> {
     candidates
         .iter()
@@ -431,11 +434,19 @@ fn read_key_account_quota_exhaustion_map(
                             candidate.provider_type.as_str(),
                             candidate.selected_provider_model_name.as_str(),
                         );
-                    let skip_configured = provider_skip_exhausted_accounts
+                    let pool_state = provider_pool_state
                         .get(candidate.provider_id.as_str())
                         .copied()
-                        .unwrap_or(false);
-                    hard_blocked || (skip_configured && account_exhausted)
+                        .unwrap_or_default();
+                    let reserve_reached = pool_state.reserve_minimum_quota
+                        && admin_provider_pool_pure::admin_pool_key_minimum_quota_reached(
+                            key,
+                            candidate.provider_type.as_str(),
+                            Some(candidate.selected_provider_model_name.as_str()),
+                        );
+                    hard_blocked
+                        || reserve_reached
+                        || (pool_state.skip_exhausted_accounts && account_exhausted)
                 });
             (candidate.key_id.clone(), exhausted)
         })
@@ -565,4 +576,65 @@ fn read_provider_key_rpm_reset_at_map(
             )
         })
         .collect::<BTreeMap<_, _>>()
+}
+
+#[cfg(test)]
+mod reserve_minimum_quota_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn reserve_minimum_quota_is_independent_of_skip_exhausted_accounts() {
+        let candidate = SchedulerMinimalCandidateSelectionCandidate {
+            provider_id: "provider-codex".to_string(),
+            provider_name: "codex".to_string(),
+            provider_type: "codex".to_string(),
+            provider_priority: 0,
+            endpoint_id: "endpoint-codex".to_string(),
+            endpoint_api_format: "openai:responses".to_string(),
+            key_id: "key-codex".to_string(),
+            key_name: "codex".to_string(),
+            key_auth_type: "oauth".to_string(),
+            key_internal_priority: 0,
+            key_global_priority_for_format: None,
+            key_capabilities: None,
+            model_id: "model-codex".to_string(),
+            global_model_id: "global-model-codex".to_string(),
+            global_model_name: "gpt-5".to_string(),
+            selected_provider_model_name: "gpt-5".to_string(),
+            supports_streaming: true,
+            mapping_matched_model: None,
+        };
+        let mut key = StoredProviderCatalogKey::new(
+            candidate.key_id.clone(),
+            candidate.provider_id.clone(),
+            "codex".to_string(),
+            "oauth".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build");
+        for reserve_enabled in [false, true] {
+            for used_percent in [99.0, 98.0] {
+                key.upstream_metadata =
+                    Some(json!({"codex": {"primary_used_percent": used_percent}}));
+                let exhausted = read_key_account_quota_exhaustion_map(
+                    std::slice::from_ref(&candidate),
+                    &BTreeMap::from([(key.id.clone(), key.clone())]),
+                    &BTreeMap::from([(
+                        candidate.provider_id.clone(),
+                        ProviderPoolState {
+                            pool_enabled: true,
+                            reserve_minimum_quota: reserve_enabled,
+                            skip_exhausted_accounts: false,
+                        },
+                    )]),
+                );
+                assert_eq!(
+                    exhausted.get(&key.id),
+                    Some(&(reserve_enabled && used_percent >= 99.0))
+                );
+            }
+        }
+    }
 }

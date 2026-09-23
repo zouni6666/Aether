@@ -1,3 +1,4 @@
+use aether_ai_formats::normalize_api_format_alias;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -6,6 +7,7 @@ pub const PROVIDER_REASONING_EFFORT_METADATA_KEY: &str = "provider_reasoning_eff
 pub const REQUESTED_REASONING_EFFORT_METADATA_KEY: &str = "requested_reasoning_effort";
 pub const PROVIDER_SERVICE_TIER_METADATA_KEY: &str = "provider_service_tier";
 pub const PROVIDER_ACTUAL_SERVICE_TIER_METADATA_KEY: &str = "provider_actual_service_tier";
+pub const PROVIDER_RESPONSE_MODEL_METADATA_KEY: &str = "provider_response_model";
 pub const PROVIDER_CACHE_TTL_MINUTES_METADATA_KEY: &str = "provider_cache_ttl_minutes";
 pub const ROUTING_CANDIDATE_SKIP_REASON_METADATA_KEY: &str = "routing_candidate_skip_reason";
 pub const ROUTING_FAILURE_DIAGNOSTIC_METADATA_KEY: &str = "routing_failure_diagnostic";
@@ -119,6 +121,141 @@ pub fn normalize_provider_service_tier(value: &str) -> Option<String> {
     Some(value.to_ascii_lowercase())
 }
 
+/// 清洗模型名称，保留大小写，只去除首尾空白。
+pub fn normalize_provider_response_model(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 256 {
+        return None;
+    }
+    Some(value.to_string())
+}
+
+fn extract_model_at_paths(value: &Value, paths: &[&[&str]]) -> Option<String> {
+    paths.iter().find_map(|path| {
+        let value = path
+            .iter()
+            .try_fold(value, |current, key| current.as_object()?.get(*key))?;
+        value.as_str().and_then(normalize_provider_response_model)
+    })
+}
+
+fn response_model_paths(provider_api_format: Option<&str>) -> &'static [&'static [&'static str]] {
+    match normalize_api_format_alias(provider_api_format.unwrap_or_default()).as_str() {
+        "gemini:generate_content" => {
+            // Gemini 原生响应使用 modelVersion；部分网关会改写为 model。
+            &[&["modelVersion"], &["model_version"], &["model"]]
+        }
+        "gemini:embedding" => {
+            // Gemini Embedding 可能返回 model、modelVersion 或 Vertex 的 deployedModelId。
+            &[
+                &["model"],
+                &["modelVersion"],
+                &["model_version"],
+                &["deployedModelId"],
+                &["deployed_model_id"],
+            ]
+        }
+        "gemini:interactions" => {
+            // Interactions 请求既可能叫 model，也可能叫 agent；响应优先读取 model。
+            &[
+                &["model"],
+                &["modelVersion"],
+                &["model_version"],
+                &["agent"],
+            ]
+        }
+        _ => &[&["model"]],
+    }
+}
+
+fn extract_model_from_known_response_wrappers(
+    response_body: &Value,
+    paths: &[&[&str]],
+) -> Option<String> {
+    // 只展开协议中已知的 response/chunks 包装，避免在候选内容、工具参数等任意嵌套
+    // 对象中搜索同名字段，误把 role="model" 一类内容当成响应模型。
+    extract_model_at_paths(response_body, paths)
+        .or_else(|| {
+            response_body
+                .get("response")
+                .and_then(|response| extract_model_at_paths(response, paths))
+        })
+        .or_else(|| {
+            response_body
+                .get("chunks")
+                .and_then(Value::as_array)
+                .and_then(|chunks| {
+                    chunks.iter().rev().find_map(|chunk| {
+                        extract_model_at_paths(chunk, paths).or_else(|| {
+                            chunk
+                                .get("response")
+                                .and_then(|response| extract_model_at_paths(response, paths))
+                        })
+                    })
+                })
+        })
+        .or_else(|| {
+            response_body
+                .get("response")
+                .and_then(|response| response.get("chunks"))
+                .and_then(Value::as_array)
+                .and_then(|chunks| {
+                    chunks.iter().rev().find_map(|chunk| {
+                        extract_model_at_paths(chunk, paths).or_else(|| {
+                            chunk
+                                .get("response")
+                                .and_then(|response| extract_model_at_paths(response, paths))
+                        })
+                    })
+                })
+        })
+}
+
+fn extract_provider_model_from_response_body(
+    response_body: &Value,
+    provider_api_format: Option<&str>,
+) -> Option<String> {
+    extract_model_from_known_response_wrappers(
+        response_body,
+        response_model_paths(provider_api_format),
+    )
+}
+
+fn extract_provider_model_from_request_body(
+    request_body: &Value,
+    request_api_format: Option<&str>,
+) -> Option<String> {
+    let paths: &[&[&str]] =
+        match normalize_api_format_alias(request_api_format.unwrap_or_default()).as_str() {
+            "gemini:interactions" => &[&["model"], &["agent"]],
+            _ => &[&["model"]],
+        };
+    extract_model_at_paths(request_body, paths)
+}
+
+/// 只有请求体和响应体都可作为完整事实时，才计算响应模型，避免用截断内容猜测。
+pub fn extract_provider_response_model_from_bodies(
+    request_body: Option<&Value>,
+    request_body_state: Option<UsageBodyCaptureState>,
+    request_api_format: Option<&str>,
+    response_body: Option<&Value>,
+    response_body_state: Option<UsageBodyCaptureState>,
+    provider_api_format: Option<&str>,
+) -> Option<String> {
+    if !usage_body_capture_is_authoritative(request_body, request_body_state)
+        || !usage_body_capture_is_authoritative(response_body, response_body_state)
+    {
+        return None;
+    }
+
+    let request_model =
+        extract_provider_model_from_request_body(request_body?, request_api_format)?;
+    let response_model =
+        extract_provider_model_from_response_body(response_body?, provider_api_format)?;
+
+    (request_model != response_model).then_some(response_model)
+}
+
 /// Resolves a provider processing tier exclusively from the final upstream request.
 ///
 /// A complete captured body is authoritative, including when it contains no tier. The metadata
@@ -129,7 +266,7 @@ pub fn resolve_provider_service_tier_from_request_capture(
     provider_request_body_state: Option<UsageBodyCaptureState>,
     request_metadata: Option<&Value>,
 ) -> Option<String> {
-    if request_body_capture_is_authoritative(provider_request_body, provider_request_body_state) {
+    if usage_body_capture_is_authoritative(provider_request_body, provider_request_body_state) {
         return extract_provider_service_tier_from_body(provider_request_body);
     }
 
@@ -153,7 +290,7 @@ pub fn resolve_provider_service_tier_from_request_capture(
         .and_then(normalize_provider_service_tier)
 }
 
-fn request_body_capture_is_authoritative(
+pub fn usage_body_capture_is_authoritative(
     request_body: Option<&Value>,
     request_body_state: Option<UsageBodyCaptureState>,
 ) -> bool {
@@ -184,7 +321,7 @@ fn resolve_reasoning_effort_from_request_capture(
     request_metadata: Option<&Value>,
     metadata_key: &str,
 ) -> Option<String> {
-    if request_body_capture_is_authoritative(request_body, request_body_state) {
+    if usage_body_capture_is_authoritative(request_body, request_body_state) {
         return extract_provider_reasoning_effort_from_body(request_body);
     }
 
@@ -699,6 +836,11 @@ impl StoredRequestUsageAudit {
             .or_else(|| {
                 extract_provider_actual_service_tier_from_response(self.response_body.as_ref())
             })
+    }
+
+    pub fn provider_response_model(&self) -> Option<String> {
+        self.request_metadata_string(PROVIDER_RESPONSE_MODEL_METADATA_KEY)
+            .and_then(normalize_provider_response_model)
     }
 
     pub fn provider_cache_ttl_minutes(&self) -> Option<i64> {
@@ -2646,7 +2788,8 @@ fn parse_timestamp(value: i64, field_name: &str) -> Result<u64, crate::DataLayer
 mod tests {
     use super::{
         canonical_usage_body_ref_for, extract_provider_actual_service_tier_from_response,
-        extract_provider_service_tier_from_body, normalize_provider_reasoning_effort,
+        extract_provider_response_model_from_bodies, extract_provider_service_tier_from_body,
+        normalize_provider_reasoning_effort, normalize_provider_response_model,
         normalize_provider_service_tier, resolve_provider_cache_ttl_minutes, usage_body_ref,
         StoredRequestUsageAudit, UpsertUsageRecord, UsageBodyCaptureState, UsageBodyCaptureStorage,
         UsageBodyField, UsageProviderPerformanceQuery, REALTIME_SESSION_METADATA_KEY,
@@ -2670,6 +2813,122 @@ mod tests {
             );
             assert_eq!(normalize(&"A".repeat(65)), None);
         }
+    }
+
+    #[test]
+    fn response_model_requires_authoritative_different_top_level_models() {
+        let request = json!({"model": " gpt-5 "});
+        let response = json!({"model": " gpt-5.1 "});
+        assert_eq!(
+            extract_provider_response_model_from_bodies(
+                Some(&request),
+                Some(UsageBodyCaptureState::Inline),
+                Some("openai:chat"),
+                Some(&response),
+                Some(UsageBodyCaptureState::Inline),
+                Some("openai:chat"),
+            ),
+            Some("gpt-5.1".to_string())
+        );
+        assert_eq!(
+            extract_provider_response_model_from_bodies(
+                Some(&request),
+                Some(UsageBodyCaptureState::Inline),
+                Some("openai:responses"),
+                Some(&json!({"model": "gpt-5"})),
+                Some(UsageBodyCaptureState::Inline),
+                Some("openai:responses"),
+            ),
+            None
+        );
+        assert_eq!(
+            extract_provider_response_model_from_bodies(
+                Some(&request),
+                Some(UsageBodyCaptureState::Truncated),
+                Some("openai:chat"),
+                Some(&response),
+                Some(UsageBodyCaptureState::Inline),
+                Some("openai:chat"),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn response_model_keeps_case_and_rejects_invalid_values() {
+        assert_eq!(
+            normalize_provider_response_model("  GPT-5.1  "),
+            Some("GPT-5.1".to_string())
+        );
+        assert_eq!(normalize_provider_response_model("  "), None);
+        assert_eq!(normalize_provider_response_model(&"x".repeat(257)), None);
+        assert_eq!(
+            extract_provider_response_model_from_bodies(
+                Some(&json!({"model": "gpt-5"})),
+                None,
+                Some("openai:chat"),
+                Some(&json!({"model": 42})),
+                None,
+                Some("openai:chat"),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn response_model_uses_provider_format_specific_nested_paths() {
+        let request = json!({"model": "gemini-2.5-flash"});
+        let response = json!({
+            "response": {
+                "modelVersion": "gemini-2.5-flash-001",
+                "candidates": [{"content": {"role": "model"}}]
+            }
+        });
+        assert_eq!(
+            extract_provider_response_model_from_bodies(
+                Some(&request),
+                Some(UsageBodyCaptureState::Inline),
+                Some("gemini:generate_content"),
+                Some(&response),
+                Some(UsageBodyCaptureState::Inline),
+                Some("gemini:generate_content"),
+            ),
+            Some("gemini-2.5-flash-001".to_string())
+        );
+
+        let wrapped_chunks = json!({
+            "chunks": [
+                {"response": {"modelVersion": "gemini-old"}},
+                {"response": {"modelVersion": "gemini-final"}}
+            ]
+        });
+        assert_eq!(
+            extract_provider_response_model_from_bodies(
+                Some(&request),
+                Some(UsageBodyCaptureState::Inline),
+                Some("gemini:generate_content"),
+                Some(&wrapped_chunks),
+                Some(UsageBodyCaptureState::Inline),
+                Some("gemini:generate_content"),
+            ),
+            Some("gemini-final".to_string())
+        );
+
+        let ambiguous = json!({
+            "metadata": {"model": "do-not-use"},
+            "candidates": [{"content": {"role": "model"}}]
+        });
+        assert_eq!(
+            extract_provider_response_model_from_bodies(
+                Some(&request),
+                Some(UsageBodyCaptureState::Inline),
+                Some("gemini:generate_content"),
+                Some(&ambiguous),
+                Some(UsageBodyCaptureState::Inline),
+                Some("gemini:generate_content"),
+            ),
+            None
+        );
     }
 
     #[test]

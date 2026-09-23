@@ -3611,6 +3611,8 @@ fn usage_sql_uses_json_null_placeholders_for_usage_payload_columns() {
         assert!(sql.contains("request_metadata->>'provider_reasoning_effort'"));
         assert!(sql.contains("request_metadata->>'provider_service_tier'"));
         assert!(sql.contains("request_metadata->>'provider_actual_service_tier'"));
+        assert!(sql.contains("request_metadata->>'provider_response_model'"));
+        assert!(sql.contains("'provider_response_model'"));
         assert!(sql.contains("request_metadata->>'websocket_mode'"));
         assert!(sql.contains("'websocket_mode'"));
         assert!(sql.contains("AS client_family"));

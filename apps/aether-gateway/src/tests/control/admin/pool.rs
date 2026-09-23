@@ -2365,6 +2365,78 @@ async fn gateway_marks_exhausted_codex_pool_key_as_blocked_when_flag_enabled() {
 }
 
 #[tokio::test]
+async fn gateway_reserve_minimum_quota_marks_and_filters_codex_pool_keys() {
+    for (reserve_enabled, used_percent, exhausted) in [
+        (true, 99.0, true),
+        (false, 99.0, false),
+        (true, 98.0, false),
+    ] {
+        let mut provider = sample_provider("provider-codex", "codex", 10);
+        provider.provider_type = "codex".to_string();
+        provider.config = Some(json!({
+            "pool_advanced": {
+                "reserve_minimum_quota": reserve_enabled,
+                "skip_exhausted_accounts": false,
+                "auto_remove_quota_exhausted_keys": true
+            }
+        }));
+        let mut key = sample_key(
+            "key-codex-reserved",
+            "provider-codex",
+            "openai:responses",
+            "oauth-placeholder",
+        );
+        key.auth_type = "oauth".to_string();
+        key.upstream_metadata = Some(json!({
+            "codex": {"primary_used_percent": used_percent}
+        }));
+        let state = AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(GatewayDataState::with_provider_catalog_reader_for_tests(
+                Arc::new(InMemoryProviderCatalogReadRepository::seed(
+                    vec![provider],
+                    Vec::new(),
+                    vec![key],
+                )),
+            ));
+        for status in ["all", "quota_exhausted", "available"] {
+            let response = local_admin_pool_response(
+                &state,
+                http::Method::GET,
+                &format!("/api/admin/pool/provider-codex/keys?page=1&page_size=50&status={status}"),
+                None,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let payload: serde_json::Value = serde_json::from_slice(
+                &to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("body should read"),
+            )
+            .expect("json body should parse");
+            let keys = payload["keys"].as_array().expect("keys should be array");
+            let visible = status == "all" || (status == "quota_exhausted") == exhausted;
+            assert_eq!(
+                keys.len(),
+                usize::from(visible),
+                "reserve={reserve_enabled}, used={used_percent}, status={status}"
+            );
+            if visible {
+                assert_eq!(keys[0]["key_id"], "key-codex-reserved");
+                assert_eq!(
+                    keys[0]["scheduling_reason"] == "account_quota_exhausted",
+                    exhausted
+                );
+                if exhausted {
+                    assert_eq!(keys[0]["scheduling_status"], "blocked");
+                    assert_eq!(keys[0]["scheduling_label"], "额度耗尽");
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn gateway_lists_inherited_fixed_provider_api_formats_for_pool_keys() {
     let mut provider = sample_provider("provider-codex", "codex", 10).with_transport_fields(
         true,

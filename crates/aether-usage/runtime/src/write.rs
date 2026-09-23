@@ -17,9 +17,10 @@ use crate::body_capture::{
 };
 use crate::request_metadata::{
     attach_client_request_body_metadata, attach_provider_actual_service_tier_metadata,
-    attach_provider_request_body_metadata, build_usage_request_metadata_seed,
-    merge_usage_request_metadata, merge_usage_request_metadata_owned,
-    refresh_provider_response_body_metadata, sanitize_usage_request_metadata,
+    attach_provider_request_body_metadata, attach_provider_response_model_metadata,
+    build_usage_request_metadata_seed, merge_usage_request_metadata,
+    merge_usage_request_metadata_owned, refresh_provider_response_body_metadata,
+    refresh_provider_response_model_metadata, sanitize_usage_request_metadata,
     sanitize_usage_request_metadata_ref,
 };
 use crate::{
@@ -724,6 +725,15 @@ fn build_terminal_usage_event_from_seed_impl(
         Some(model.as_str()),
         provider_request.as_ref(),
     );
+    let request_metadata = attach_provider_response_model_metadata(
+        request_metadata,
+        request_body.as_ref(),
+        body_states.request_body_state,
+        Some(client_contract.as_str()),
+        provider_response.as_ref(),
+        body_states.response_body_state,
+        Some(provider_contract.as_str()),
+    );
 
     let mut data = UsageEventData {
         user_id,
@@ -1047,6 +1057,15 @@ pub fn build_sync_terminal_usage_seed(
         context_seed.request_metadata,
         provider_response_full.as_ref(),
     );
+    let request_metadata = refresh_provider_response_model_metadata(
+        request_metadata,
+        context_seed.request_body.as_ref(),
+        context_seed.body_states.request_body_state,
+        Some(context_seed.client_contract.as_str()),
+        provider_response_full.as_ref(),
+        provider_response_body_state,
+        Some(context_seed.provider_contract.as_str()),
+    );
 
     TerminalUsageSeed {
         terminal_state,
@@ -1224,6 +1243,15 @@ pub fn build_stream_terminal_usage_seed(
     let request_metadata = refresh_provider_response_body_metadata(
         context_seed.request_metadata,
         provider_response_full.as_ref(),
+    );
+    let request_metadata = refresh_provider_response_model_metadata(
+        request_metadata,
+        context_seed.request_body.as_ref(),
+        context_seed.body_states.request_body_state,
+        Some(context_seed.client_contract.as_str()),
+        provider_response_full.as_ref(),
+        provider_response_body_state,
+        Some(context_seed.provider_contract.as_str()),
     );
     // The parser's terminal summary is authoritative when a response body is truncated or the
     // body and summary disagree; attach it after the body refresh so it wins.

@@ -716,7 +716,13 @@ export function useUsageData(options: UseUsageDataOptions) {
           ? (typeof record.actual_service_tier === 'string' && record.actual_service_tier.trim()
               ? record.actual_service_tier
               : null)
-          : existing.actual_service_tier
+          : existing.actual_service_tier,
+        // 终态列表快照是最终候选的权威事实；空值必须清除旧候选的响应模型。
+        response_model: statusProgressed
+          ? (typeof record.response_model === 'string' && record.response_model.trim()
+              ? record.response_model
+              : null)
+          : existing.response_model
       }
     })
   }

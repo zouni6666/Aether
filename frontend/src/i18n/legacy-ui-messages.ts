@@ -1662,6 +1662,8 @@ export const legacyUiEnglishMessages: Record<string, string> = {
   '依据窗口成本/Token 用量，缺失时回退配额使用率': 'Use window cost or token usage, falling back to quota utilization if unavailable',
   '调度策略元数据加载失败，请重试': 'Failed to load scheduling policy metadata. Try again.',
   '号池调度已保存': 'Pool scheduling saved',
+  '保留最低额度': 'Reserve minimum quota',
+  '账号剩余额度不高于 1% 时提前标记为额度耗尽并停止调度，待额度恢复后再使用。': 'Mark accounts as exhausted and stop scheduling when remaining quota is 1% or less, until quota recovers.',
   '自适应热池': 'Adaptive warm pool',
   '自动维护热池，缺口时异步补位。': 'Maintain a warm pool and replenish missing capacity asynchronously.',
   '账号自检': 'Account self-check',

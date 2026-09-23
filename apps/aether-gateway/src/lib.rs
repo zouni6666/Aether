@@ -37,6 +37,7 @@ mod bark_push;
 mod cache;
 mod client_session_affinity;
 mod clock;
+mod codex_profile;
 mod constants;
 mod control;
 mod data;
@@ -90,12 +91,12 @@ mod usage;
 mod video_tasks;
 mod wallet_runtime;
 
+pub use self::ai_serving::api::{codex_client_originator, codex_client_user_agent};
 pub(crate) use self::ai_serving::api::{
     AiControlPlanRequest, EXECUTION_RUNTIME_STREAM_DECISION_ACTION,
     EXECUTION_RUNTIME_SYNC_DECISION_ACTION, GEMINI_FILES_DOWNLOAD_PLAN_KIND,
     OPENAI_VIDEO_CONTENT_PLAN_KIND,
 };
-pub use self::ai_serving::api::{CODEX_CLIENT_ORIGINATOR, CODEX_CLIENT_USER_AGENT};
 pub(crate) use self::ai_serving::{
     AiExecutionDecision, AiExecutionPlanPayload, AiStreamAttempt, AiSyncAttempt,
 };

@@ -69,9 +69,14 @@ pub(crate) use aether_ai_formats::api::{
     OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND,
 };
 pub(crate) use aether_ai_formats::protocol::stream::CanonicalUsage as StreamingCanonicalUsage;
-/// Codex client identity headers re-exported for out-of-crate probe binaries,
-/// which must reach `aether_ai_formats` through this seam.
-pub use aether_ai_formats::{CODEX_CLIENT_ORIGINATOR, CODEX_CLIENT_USER_AGENT};
+/// Codex client identity accessors re-exported for out-of-crate probe binaries,
+/// which must reach the runtime profile through this seam.
+pub use aether_ai_formats::{codex_client_originator, codex_client_user_agent};
+/// Codex 动态客户端画像 API 只允许经此根缝进入 gateway，避免其它模块直接依赖 formats crate。
+pub(crate) use aether_ai_formats::{
+    codex_client_profile, codex_client_version, set_codex_cli_version, set_codex_client_profile,
+    CodexClientProfile,
+};
 pub(crate) use aether_ai_formats::{CODEX_RESPONSES_LITE_HEADER, UPSTREAM_IS_STREAM_KEY};
 
 pub(crate) fn parse_direct_request_body(

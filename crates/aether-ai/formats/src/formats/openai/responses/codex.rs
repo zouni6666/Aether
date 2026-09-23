@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
+use crate::codex_profile::codex_client_profile;
 use aether_ai_formats::provider_compat::proxy::rules::body_rules_handle_path;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -36,9 +37,6 @@ const CODEX_OPENAI_RESPONSES_COMPACT_BODY_FIELDS: &[&str] = &[
     "prompt_cache_key",
     "text",
 ];
-pub const CODEX_CLIENT_VERSION: &str = "0.153.4";
-pub const CODEX_CLIENT_USER_AGENT: &str = "codex_cli_rs/0.153.4";
-pub const CODEX_CLIENT_ORIGINATOR: &str = "codex_cli_rs";
 pub const CODEX_OPENAI_IMAGE_INTERNAL_MODEL: &str = "gpt-5.4-mini";
 pub const CODEX_OPENAI_IMAGE_DEFAULT_MODEL: &str = "gpt-image-2";
 pub const CODEX_OPENAI_IMAGE_DEFAULT_VARIATION_MODEL: &str = "dall-e-2";
@@ -2098,6 +2096,7 @@ pub fn apply_codex_openai_special_headers(
     };
 
     let auth_identity = parse_codex_auth_identity(decrypted_auth_config_raw);
+    let client_profile = codex_client_profile();
 
     remove_btree_header(provider_request_headers, "chatgpt-account-id");
     remove_btree_header(provider_request_headers, "x-openai-fedramp");
@@ -2112,12 +2111,12 @@ pub fn apply_codex_openai_special_headers(
     set_codex_client_header(
         provider_request_headers,
         "user-agent",
-        CODEX_CLIENT_USER_AGENT,
+        &client_profile.user_agent,
     );
     set_codex_client_header(
         provider_request_headers,
         "originator",
-        CODEX_CLIENT_ORIGINATOR,
+        &client_profile.originator,
     );
     if endpoint_kind == CodexOpenAiEndpointKind::Search {
         remove_btree_header(provider_request_headers, CODEX_RESPONSES_LITE_HEADER);
@@ -2175,17 +2174,18 @@ mod tests {
         build_codex_model_catalog_metadata, bundled_codex_model_cards, effective_codex_model_cards,
         parse_codex_auth_identity, project_codex_catalog_model_card,
         resolve_codex_responses_model_capabilities,
-        validate_codex_openai_responses_compact_request_contract, CODEX_CLIENT_ORIGINATOR,
-        CODEX_CLIENT_USER_AGENT, CODEX_CLIENT_VERSION, CODEX_OPENAI_IMAGE_INTERNAL_MODEL,
-        CODEX_OPENAI_RESPONSES_UNSUPPORTED_BODY_FIELDS, CODEX_RESPONSES_LITE_HEADER,
+        validate_codex_openai_responses_compact_request_contract,
+        CODEX_OPENAI_IMAGE_INTERNAL_MODEL, CODEX_OPENAI_RESPONSES_UNSUPPORTED_BODY_FIELDS,
+        CODEX_RESPONSES_LITE_HEADER,
     };
     use serde_json::{json, Value};
 
     #[test]
     fn codex_client_user_agent_matches_originator_and_version() {
+        let profile = crate::codex_client_profile();
         assert_eq!(
-            CODEX_CLIENT_USER_AGENT,
-            format!("{CODEX_CLIENT_ORIGINATOR}/{CODEX_CLIENT_VERSION}")
+            profile.user_agent,
+            format!("{}/{}", profile.originator, profile.codex_version)
         );
     }
 
@@ -2963,11 +2963,11 @@ mod tests {
         );
         assert_eq!(
             headers.get("user-agent").map(String::as_str),
-            Some(CODEX_CLIENT_USER_AGENT)
+            Some(crate::codex_client_user_agent().as_str())
         );
         assert_eq!(
             headers.get("originator").map(String::as_str),
-            Some(CODEX_CLIENT_ORIGINATOR)
+            Some(crate::codex_client_originator().as_str())
         );
         assert!(!headers.contains_key(CODEX_RESPONSES_LITE_HEADER));
         assert!(!headers.contains_key("openai-beta"));
@@ -3001,11 +3001,11 @@ mod tests {
         );
         assert_eq!(
             headers.get("user-agent").map(String::as_str),
-            Some(CODEX_CLIENT_USER_AGENT)
+            Some(crate::codex_client_user_agent().as_str())
         );
         assert_eq!(
             headers.get("originator").map(String::as_str),
-            Some(CODEX_CLIENT_ORIGINATOR)
+            Some(crate::codex_client_originator().as_str())
         );
         assert!(!headers.contains_key(CODEX_RESPONSES_LITE_HEADER));
     }

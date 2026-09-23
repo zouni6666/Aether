@@ -594,11 +594,12 @@ async fn provider_query_fetch_models_for_key(
         });
     }
 
+    let dynamic_client_version = crate::ai_serving::api::codex_client_version();
     let client_version = is_codex.then(|| {
         codex_catalog
             .as_ref()
             .map(|catalog| catalog.client_version.as_str())
-            .unwrap_or(crate::ai_serving::CODEX_CLIENT_VERSION)
+            .unwrap_or(dynamic_client_version.as_str())
     });
     let outcome =
         match fetch_models_from_transports_for_management(state.app(), &transports, client_version)

@@ -651,6 +651,7 @@ mod tests {
             unschedulable_rules: Vec::new(),
             lru_enabled: true,
             skip_exhausted_accounts: false,
+            reserve_minimum_quota: false,
             sticky_session_ttl_seconds: 120,
             latency_window_seconds: 600,
             latency_sample_limit: 10,

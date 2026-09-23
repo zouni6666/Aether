@@ -651,6 +651,10 @@ async function pollActiveRequests() {
         record.actual_service_tier = typeof update.actual_service_tier === 'string' && update.actual_service_tier.trim()
           ? update.actual_service_tier
           : null
+        // 活跃接口返回的是当前最终候选快照，服务端空值要清除旧响应模型。
+        record.response_model = typeof update.response_model === 'string' && update.response_model.trim()
+          ? update.response_model
+          : null
         // 管理员接口返回额外字段
         // 只有当返回的 provider 不是 pending/unknown/unknow 时才更新，避免覆盖已有的正确值
         if ('provider' in update && typeof update.provider === 'string') {
@@ -1150,6 +1154,7 @@ function handleDetailRequestState(update: {
   reasoningEffort?: string | null
   serviceTier?: string | null
   actualServiceTier?: string | null
+  responseModel?: string | null
   imageProgress?: ImageProgress | null
   errorMessage?: string | null
   updatedAt?: string | null
@@ -1290,6 +1295,11 @@ function handleDetailRequestState(update: {
   if ('actualServiceTier' in update) {
     record.actual_service_tier = typeof update.actualServiceTier === 'string'
       ? update.actualServiceTier
+      : null
+  }
+  if ('responseModel' in update) {
+    record.response_model = typeof update.responseModel === 'string'
+      ? update.responseModel
       : null
   }
   if ('imageProgress' in update) {

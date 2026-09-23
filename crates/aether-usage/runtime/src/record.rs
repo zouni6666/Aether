@@ -5,9 +5,9 @@ use aether_data_contracts::DataLayerError;
 
 use crate::request_metadata::{
     attach_client_request_body_metadata, attach_provider_request_body_metadata,
-    clear_client_request_body_metadata, clear_provider_request_body_metadata,
-    request_body_derived_facts_action, sanitize_usage_request_metadata,
-    RequestBodyDerivedFactsAction,
+    attach_provider_response_model_metadata, clear_client_request_body_metadata,
+    clear_provider_request_body_metadata, request_body_derived_facts_action,
+    sanitize_usage_request_metadata, RequestBodyDerivedFactsAction,
 };
 use crate::{UsageEvent, UsageEventType};
 
@@ -85,6 +85,16 @@ pub fn build_upsert_usage_record_from_event(
         }
         RequestBodyDerivedFactsAction::Preserve => {}
     }
+    // 响应模型必须在 body 被裁剪前从客户端请求体和上游响应体共同派生；缺少权威 body 时保留已派生事实。
+    data.request_metadata = attach_provider_response_model_metadata(
+        data.request_metadata,
+        data.request_body.as_ref(),
+        data.request_body_state,
+        data.api_format.as_deref(),
+        data.response_body.as_ref(),
+        data.response_body_state,
+        data.endpoint_api_format.as_deref(),
+    );
     let now_unix_secs = event.timestamp_ms / 1_000;
 
     Ok(UpsertUsageRecord {

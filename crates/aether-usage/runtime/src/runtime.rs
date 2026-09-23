@@ -21,9 +21,10 @@ use crate::executor::spawn_on_usage_background_runtime;
 use crate::queue::is_permanent_enqueue_error;
 use crate::request_metadata::{
     attach_client_request_body_metadata, attach_provider_request_body_metadata,
-    attach_provider_response_body_metadata, clear_client_request_body_metadata,
-    clear_provider_request_body_metadata, request_body_derived_facts_action,
-    retain_first_byte_request_metadata, RequestBodyDerivedFactsAction,
+    attach_provider_response_body_metadata, attach_provider_response_model_metadata,
+    clear_client_request_body_metadata, clear_provider_request_body_metadata,
+    request_body_derived_facts_action, retain_first_byte_request_metadata,
+    RequestBodyDerivedFactsAction,
 };
 use crate::settlement::{
     reconcile_usage_policy_cost_for_event_with_result, settle_usage_with_reconciled_cost,
@@ -5297,8 +5298,17 @@ fn preserve_request_facts_with_legacy_missing(
 
 fn preserve_provider_response_facts(event: &mut UsageEvent) {
     let metadata = event.data.request_metadata.take();
-    event.data.request_metadata =
+    let metadata =
         attach_provider_response_body_metadata(metadata, event.data.response_body.as_ref());
+    event.data.request_metadata = attach_provider_response_model_metadata(
+        metadata,
+        event.data.request_body.as_ref(),
+        event.data.request_body_state,
+        event.data.api_format.as_deref(),
+        event.data.response_body.as_ref(),
+        event.data.response_body_state,
+        event.data.endpoint_api_format.as_deref(),
+    );
 }
 
 impl UsageQueueHealthSnapshot {

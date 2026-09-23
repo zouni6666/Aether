@@ -15,9 +15,9 @@ use super::{BorrowedUsageEventEnvelope, UsageEvent, UsageEventData, USAGE_EVENT_
 use crate::body_capture::mark_usage_event_capture_truncated;
 use crate::request_metadata::{
     attach_client_request_body_metadata, attach_provider_request_body_metadata,
-    attach_provider_response_body_metadata, clear_client_request_body_metadata,
-    clear_provider_request_body_metadata, request_body_derived_facts_action,
-    RequestBodyDerivedFactsAction,
+    attach_provider_response_body_metadata, attach_provider_response_model_metadata,
+    clear_client_request_body_metadata, clear_provider_request_body_metadata,
+    request_body_derived_facts_action, RequestBodyDerivedFactsAction,
 };
 
 const DIAGNOSTIC_FIELDS: [&str; 8] = [
@@ -238,6 +238,15 @@ impl WireOverrides {
             RequestBodyDerivedFactsAction::Clear | RequestBodyDerivedFactsAction::Preserve => {}
         }
         metadata = attach_provider_response_body_metadata(metadata, data.response_body.as_ref());
+        metadata = attach_provider_response_model_metadata(
+            metadata,
+            request_body,
+            data.request_body_state,
+            data.api_format.as_deref(),
+            data.response_body.as_ref(),
+            data.response_body_state,
+            data.endpoint_api_format.as_deref(),
+        );
         // Billing reads raw-body TTL before metadata regardless of capture state.
         // Preserve that precedence independently of reasoning and tier authority.
         if let Some(cache_ttl) = body_cache_ttl {

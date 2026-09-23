@@ -461,10 +461,11 @@ describe('UsageRecordsTable', () => {
       .toBe('会话压缩')
   })
 
-  it('shows mapping, reasoning, Fast, and Cyber in the model area', () => {
+  it('shows mapping and response models as separately labelled facts', () => {
     const root = mountUsageRecordsTable([buildRecord({
       model: 'gpt-5',
       target_model: 'gpt-5.1',
+      response_model: 'gpt-5.2',
       requested_reasoning_effort: 'xhigh',
       reasoning_effort: 'max',
       service_tier: 'priority',
@@ -477,6 +478,8 @@ describe('UsageRecordsTable', () => {
 
     expect(root.textContent).toContain('gpt-5')
     expect(root.textContent).toContain('gpt-5.1')
+    expect(root.textContent).toContain('映射模型')
+    expect(root.textContent).toContain('响应模型')
     expect(root.textContent).toContain('xhigh -> max')
     expect(root.textContent).toContain('Fast')
     const reasoningBadge = root.querySelector<HTMLElement>('[data-usage-model-badge="reasoning"]')
@@ -510,13 +513,33 @@ describe('UsageRecordsTable', () => {
     expect(inlineLayout).not.toBeNull()
     const modelRow = inlineLayout?.firstElementChild
     expect(modelRow?.textContent).toContain('gpt-5')
-    expect(modelRow?.textContent).toContain('->')
-    expect(modelRow?.textContent).toContain('gpt-5.1')
-    expect(modelRow?.querySelector('[data-usage-model-target]')?.classList.contains('basis-full')).toBe(true)
-    expect(modelRow?.querySelector('[data-usage-model-target]')?.classList.contains('order-last')).toBe(true)
+    expect(modelRow?.querySelector('[data-usage-model-mapping]')?.textContent).toContain('映射模型')
+    expect(modelRow?.querySelector('[data-usage-model-response]')?.textContent).toContain('响应模型')
     expect(modelRow?.querySelector('[data-usage-model-badge="reasoning"]')?.textContent).toContain('xhigh -> max')
     expect(modelRow?.querySelector('[data-usage-model-badge="fast"]')?.textContent).toContain('Fast')
     expect(modelRow?.querySelector('[data-usage-model-badge="cyber"]')?.textContent).toContain('Cyber')
+  })
+
+  it('shows a response model without inventing a mapping arrow or using model_version', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      response_model: 'gpt-5.1',
+      model_version: 'legacy-version',
+      target_model: null,
+    })])
+
+    expect(root.querySelector('[data-usage-model-mapping]')).toBeNull()
+    expect(root.querySelector('[data-usage-model-response]')?.textContent).toContain('响应模型')
+    expect(root.textContent).not.toContain('legacy-version')
+    expect(root.textContent).not.toContain('->')
+  })
+
+  it('hides a response model when it matches the request model', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      response_model: 'gpt-5',
+      target_model: null,
+    })])
+
+    expect(root.querySelector('[data-usage-model-response]')).toBeNull()
   })
 
   it('stacks three model badges even without a model mapping', () => {

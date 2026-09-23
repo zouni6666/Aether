@@ -8,9 +8,10 @@ use serde_json::{Map, Value};
 use crate::repository::candidates::sanitize_request_candidate_skip_reason;
 
 use super::{
-    LIVE_SESSION_METADATA_KEY, PLAN_USAGE_RESERVATION_DEFERRED_METADATA_KEY,
-    PROVIDER_ACTUAL_SERVICE_TIER_METADATA_KEY, PROVIDER_CACHE_TTL_MINUTES_METADATA_KEY,
-    PROVIDER_REASONING_EFFORT_METADATA_KEY, PROVIDER_SERVICE_TIER_METADATA_KEY,
+    normalize_provider_response_model, LIVE_SESSION_METADATA_KEY,
+    PLAN_USAGE_RESERVATION_DEFERRED_METADATA_KEY, PROVIDER_ACTUAL_SERVICE_TIER_METADATA_KEY,
+    PROVIDER_CACHE_TTL_MINUTES_METADATA_KEY, PROVIDER_REASONING_EFFORT_METADATA_KEY,
+    PROVIDER_RESPONSE_MODEL_METADATA_KEY, PROVIDER_SERVICE_TIER_METADATA_KEY,
     REALTIME_SESSION_METADATA_KEY, REQUESTED_REASONING_EFFORT_METADATA_KEY,
     ROUTING_CANDIDATE_SKIP_REASON_METADATA_KEY, ROUTING_FAILURE_DIAGNOSTIC_METADATA_KEY,
     USAGE_AVAILABLE_METADATA_KEY, USAGE_PRICING_AVAILABLE_METADATA_KEY,
@@ -94,6 +95,12 @@ pub fn sanitize_usage_request_metadata_object(source: &Map<String, Value>) -> Op
     ] {
         insert_known_string(source, &mut target, key, sanitize_service_tier);
     }
+    insert_known_string(
+        source,
+        &mut target,
+        PROVIDER_RESPONSE_MODEL_METADATA_KEY,
+        normalize_provider_response_model,
+    );
     insert_bounded_u64(
         source,
         &mut target,
@@ -1277,6 +1284,23 @@ mod tests {
         ] {
             assert!(metadata.get(key).is_none(), "{key} must not be persisted");
         }
+    }
+
+    #[test]
+    fn persistence_projection_keeps_bounded_response_model_only_as_a_string() {
+        let metadata = sanitize_usage_request_metadata(Some(json!({
+            "provider_response_model": "  GPT-5.1  "
+        })))
+        .expect("response model should remain");
+        assert_eq!(metadata["provider_response_model"], "GPT-5.1");
+        assert!(sanitize_usage_request_metadata(Some(json!({
+            "provider_response_model": 42
+        })))
+        .is_none());
+        assert!(sanitize_usage_request_metadata(Some(json!({
+            "provider_response_model": "x".repeat(257)
+        })))
+        .is_none());
     }
 
     #[test]

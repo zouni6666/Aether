@@ -780,11 +780,11 @@ async fn register_codex_agent_identity_from_access_token_with_auth_api_base_url(
         ),
         (
             "user-agent".to_string(),
-            aether_ai_formats::CODEX_CLIENT_USER_AGENT.to_string(),
+            aether_ai_formats::codex_client_user_agent(),
         ),
         (
             "originator".to_string(),
-            aether_ai_formats::CODEX_CLIENT_ORIGINATOR.to_string(),
+            aether_ai_formats::codex_client_originator(),
         ),
     ]);
     if options.is_fedramp_account {
@@ -799,7 +799,7 @@ async fn register_codex_agent_identity_from_access_token_with_auth_api_base_url(
             content_type: Some("application/json".to_string()),
             json_body: Some(json!({
                 "abom": {
-                    "agent_version": aether_ai_formats::CODEX_CLIENT_VERSION,
+                    "agent_version": aether_ai_formats::codex_client_version(),
                     "agent_harness_id": CODEX_AGENT_IDENTITY_AGENT_HARNESS_ID,
                     "running_location": format!("cli-{}", std::env::consts::OS),
                 },

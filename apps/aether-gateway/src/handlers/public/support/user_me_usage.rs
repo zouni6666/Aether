@@ -567,6 +567,7 @@ fn build_users_me_usage_record_payload(
         "id": item.id,
         "model": item.model,
         "target_model": serde_json::Value::Null,
+        "response_model": item.provider_response_model(),
         "api_format": item.api_format,
         "endpoint_api_format": item.endpoint_api_format,
         "has_format_conversion": item.has_format_conversion,
@@ -681,6 +682,7 @@ fn build_users_me_usage_active_payload(item: &StoredRequestUsageAudit) -> serde_
         "client_ip": users_me_usage_metadata_string(item, "client_ip"),
         "user_agent": users_me_usage_metadata_string(item, "user_agent"),
         "target_model": item.target_model,
+        "response_model": item.provider_response_model(),
         "has_fallback": item.has_fallback(),
     });
     payload["end_to_end_time_ms"] = json!(users_me_usage_metadata_u64(item, "end_to_end_time_ms"));
@@ -1859,6 +1861,25 @@ mod tests {
         assert_eq!(payload["cache_creation_input_tokens"], 10);
         assert_eq!(payload["cache_creation_ephemeral_5m_input_tokens"], 4);
         assert_eq!(payload["cache_creation_ephemeral_1h_input_tokens"], 6);
+    }
+
+    #[test]
+    fn user_usage_payloads_expose_response_model_separately_from_mapping() {
+        let item = StoredRequestUsageAudit {
+            target_model: Some("provider-mapped-model".to_string()),
+            request_metadata: Some(json!({
+                "provider_response_model": "gpt-5.1"
+            })),
+            ..sample_usage("completed")
+        };
+
+        let record = build_users_me_usage_record_payload(&item, false, &BTreeMap::new(), false);
+        let active = build_users_me_usage_active_payload(&item);
+
+        for payload in [&record, &active] {
+            assert_eq!(payload["target_model"], "provider-mapped-model");
+            assert_eq!(payload["response_model"], "gpt-5.1");
+        }
     }
 
     #[test]

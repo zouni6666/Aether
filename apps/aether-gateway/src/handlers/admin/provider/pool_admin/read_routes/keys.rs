@@ -488,9 +488,16 @@ pub(super) fn admin_pool_key_visible_status_filter(
     ) {
         return status;
     }
-    if pool_config.is_some_and(|config| config.skip_exhausted_accounts)
-        && admin_provider_pool_pure::admin_pool_key_account_quota_exhausted(key, provider_type)
-    {
+    if pool_config.is_some_and(|config| {
+        (config.skip_exhausted_accounts
+            && admin_provider_pool_pure::admin_pool_key_account_quota_exhausted(key, provider_type))
+            || (config.reserve_minimum_quota
+                && admin_provider_pool_pure::admin_pool_key_minimum_quota_reached(
+                    key,
+                    provider_type,
+                    None,
+                ))
+    }) {
         return "quota_exhausted";
     }
     if !key.is_active {

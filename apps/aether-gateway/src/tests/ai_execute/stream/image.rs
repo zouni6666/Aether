@@ -421,7 +421,7 @@ async fn gateway_executes_codex_image_stream_via_local_decision_gate_after_oauth
     );
     assert_eq!(
         seen_execution_runtime_request.headers["user-agent"],
-        aether_ai_formats::CODEX_CLIENT_USER_AGENT
+        aether_ai_formats::codex_client_user_agent()
     );
     assert_eq!(
         seen_execution_runtime_request.headers["originator"],

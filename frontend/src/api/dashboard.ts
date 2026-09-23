@@ -219,6 +219,7 @@ export interface RequestDetail {
   has_format_conversion?: boolean | null
   model: string
   target_model?: string | null  // 映射后的目标模型名
+  response_model?: string | null  // 上游响应体实际返回的模型名
   requested_reasoning_effort?: string | null
   reasoning_effort?: string | null
   service_tier?: string | null

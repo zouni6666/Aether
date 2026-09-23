@@ -7,7 +7,7 @@
 #[path = "support/responses_ws_probe.rs"]
 mod responses_ws_probe;
 
-use aether_gateway::{CODEX_CLIENT_ORIGINATOR, CODEX_CLIENT_USER_AGENT};
+use aether_gateway::{codex_client_originator, codex_client_user_agent};
 use clap::Parser;
 use http::header::{AUTHORIZATION, USER_AGENT};
 use http::{HeaderMap, HeaderName, HeaderValue};
@@ -78,14 +78,12 @@ fn handshake_headers(access_token: &str, account_id: &str) -> Result<HeaderMap, 
     let mut headers = HeaderMap::new();
     headers.insert(AUTHORIZATION, bearer_authorization_value(access_token)?);
     headers.insert(HeaderName::from_static("chatgpt-account-id"), account_id);
-    headers.insert(
-        USER_AGENT,
-        HeaderValue::from_static(CODEX_CLIENT_USER_AGENT),
-    );
-    headers.insert(
-        HeaderName::from_static("originator"),
-        HeaderValue::from_static(CODEX_CLIENT_ORIGINATOR),
-    );
+    let user_agent = HeaderValue::from_str(&codex_client_user_agent())
+        .map_err(|_| ProbeFailure::MissingConfiguration)?;
+    headers.insert(USER_AGENT, user_agent);
+    let originator = HeaderValue::from_str(&codex_client_originator())
+        .map_err(|_| ProbeFailure::MissingConfiguration)?;
+    headers.insert(HeaderName::from_static("originator"), originator);
     Ok(headers)
 }
 
@@ -111,6 +109,18 @@ mod tests {
         assert!(headers.contains_key("chatgpt-account-id"));
         assert!(headers.contains_key(USER_AGENT));
         assert!(headers.contains_key("originator"));
+        assert_eq!(
+            headers
+                .get(USER_AGENT)
+                .and_then(|value| value.to_str().ok()),
+            Some(aether_gateway::codex_client_user_agent().as_str())
+        );
+        assert_eq!(
+            headers
+                .get("originator")
+                .and_then(|value| value.to_str().ok()),
+            Some(aether_gateway::codex_client_originator().as_str())
+        );
         assert_eq!(
             CodexResponsesProbeProfile::sent_header_names(),
             vec![

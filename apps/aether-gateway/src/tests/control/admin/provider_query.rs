@@ -560,12 +560,12 @@ async fn gateway_recovers_codex_slug_only_models_from_a_stale_legacy_cache_impl(
                     plan.url,
                     format!(
                         "https://chatgpt.com/backend-api/codex/models?client_version={}",
-                        aether_ai_formats::CODEX_CLIENT_VERSION
+                        aether_ai_formats::codex_client_version()
                     )
                 );
                 assert_eq!(
                     plan.headers.get("user-agent").map(String::as_str),
-                    Some(aether_ai_formats::CODEX_CLIENT_USER_AGENT)
+                    Some(aether_ai_formats::codex_client_user_agent().as_str())
                 );
                 assert_eq!(plan.provider_api_format, "openai:responses");
                 Json(json!({
@@ -764,7 +764,7 @@ async fn gateway_handles_admin_provider_query_models_falls_back_to_codex_preset_
                     plan.url,
                     format!(
                         "https://chatgpt.com/backend-api/codex/models?client_version={}",
-                        aether_ai_formats::CODEX_CLIENT_VERSION
+                        aether_ai_formats::codex_client_version()
                     )
                 );
                 Json(json!({

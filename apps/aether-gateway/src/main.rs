@@ -2513,6 +2513,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
+    match state.prewarm_codex_client_profile().await {
+        Ok(version) => {
+            info!(
+                codex_client_version = %version,
+                "prewarmed Codex client profile"
+            );
+        }
+        Err(err) => {
+            warn!(
+                error = %err,
+                "failed to refresh Codex client profile; built-in or cached profile remains active"
+            );
+        }
+    }
     match prewarm_direct_h2c_sender_cache_from_env_for_startup().await {
         Ok(Some(report)) => {
             if report.failed_targets > 0 {

@@ -65,6 +65,7 @@ pub(crate) struct AdminProviderPoolConfig {
     pub(crate) unschedulable_rules: Vec<AdminProviderPoolUnschedulableRule>,
     pub(crate) lru_enabled: bool,
     pub(crate) skip_exhausted_accounts: bool,
+    pub(crate) reserve_minimum_quota: bool,
     pub(crate) sticky_session_ttl_seconds: u64,
     pub(crate) latency_window_seconds: u64,
     pub(crate) latency_sample_limit: u64,

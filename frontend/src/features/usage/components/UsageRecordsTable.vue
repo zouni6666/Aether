@@ -1656,20 +1656,6 @@ function getApiFormatTooltip(record: UsageRecord): string {
   return displayFormat
 }
 
-// 获取实际使用的模型（优先 target_model，其次列表接口下发的 model_version）
-// 只有当实际模型与请求模型不同时才返回，用于显示映射箭头
-function getActualModel(record: UsageRecord): string | null {
-  // 优先显示模型映射
-  if (record.target_model && record.target_model !== record.model) {
-    return record.target_model
-  }
-  // 其次显示 Provider 返回的实际版本（如 Gemini 的 modelVersion）
-  if (record.model_version && record.model_version !== record.model) {
-    return record.model_version
-  }
-  return null
-}
-
 function getReasoningEffort(record: UsageRecord): string | null {
   const requested = record.requested_reasoning_effort?.trim()
   const actual = record.reasoning_effort?.trim()
@@ -1744,15 +1730,18 @@ function getServiceTierTitle(record: UsageRecord): string {
 
 // 获取模型列的 tooltip
 function getModelTooltip(record: UsageRecord): string {
-  const actualModel = getActualModel(record)
   const reasoningEffort = getReasoningEffort(record)
   const serviceTierTitle = getServiceTierTitle(record)
   const tierSuffix = serviceTierTitle ? `\n${serviceTierTitle}` : ''
   const cyberSuffix = hasCyberPolicyError(record) ? '\nCyber Policy: blocked' : ''
   const suffix = `${reasoningEffort ? `\nReasoning: ${reasoningEffort}` : ''}${tierSuffix}${cyberSuffix}`
-  if (actualModel) {
-    return `${record.model} -> ${actualModel}${suffix}`
-  }
-  return `${record.model}${suffix}`
+  const requestModel = record.model.trim()
+  const mappingModel = record.target_model?.trim()
+  const responseModel = record.response_model?.trim()
+  return [
+    requestModel,
+    mappingModel && mappingModel !== requestModel ? `映射模型: ${mappingModel}` : null,
+    responseModel && responseModel !== requestModel ? `响应模型: ${responseModel}` : null,
+  ].filter((line): line is string => Boolean(line)).join('\n') + suffix
 }
 </script>
