@@ -1795,6 +1795,8 @@ const legacyExactEnglishMessages: Record<string, string> = {
   '模拟缓存模式': 'Simulated cache mode',
   '启用后仅对 Kiro 请求模拟 prompt cache 读写计量。': 'When enabled, only Kiro requests simulate prompt cache read/write accounting.',
   'Codex 指纹收敛': 'Codex fingerprint convergence',
+  'Codex 指纹收敛（推荐开启）': 'Codex fingerprint convergence (recommended)',
+  '开启后，Aether 会根据当前账号身份为出站请求统一生成并写入以下标识，使同一 Codex 账号在上游看来始终是同一设备与会话：\n\n• 请求头：installation_id、session_id、thread_id、window_id、turn_id 等\n• 请求体（Responses 格式）：client_metadata 与 prompt_cache_key 中的对应字段\n\n关闭时保持客户端原始透传，不做任何改写。建议开启以提升上游指纹稳定性与会话连续性。': 'When enabled, Aether generates and writes consistent identifiers for outbound requests based on the current account identity, so the same Codex account always appears as the same device and session upstream:\n\n• Request headers: installation_id, session_id, thread_id, window_id, turn_id, etc.\n• Request body (Responses format): corresponding fields in client_metadata and prompt_cache_key\n\nWhen disabled, the original client values are passed through unchanged. Enabling is recommended for better upstream fingerprint stability and session continuity.',
   '统一同一 Codex 身份的设备与会话标识；关闭时保持现有透传行为。': 'Use consistent device and session identifiers for the same Codex identity. When disabled, preserve the existing pass-through behavior.',
   '请前往模块管理-敏感信息保护中配置详细规则。': 'Configure detailed rules in Modules - Sensitive information protection.',
   '验证失败': 'Validation failed',

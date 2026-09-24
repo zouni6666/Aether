@@ -10,7 +10,6 @@ pub(super) use http::StatusCode;
 pub(super) use serde_json::json;
 
 mod ai_execute;
-mod architecture;
 mod async_task;
 mod audit;
 mod concurrency;
@@ -44,6 +43,50 @@ pub(super) async fn start_server(app: Router) -> (String, tokio::task::JoinHandl
         .expect("server should run");
     });
     (format!("http://{addr}"), handle)
+}
+
+/// 在独立的大栈线程中运行需要深调用栈的异步测试。
+///
+/// 这些测试仍保留 16 MiB 栈空间；这里只统一线程和 runtime 的启动逻辑，
+/// 避免每个测试分区各自复制一份 helper，降低维护时误改测试执行语义的风险。
+pub(crate) fn run_async_test_on_large_stack<F, Fut>(
+    test_name: &'static str,
+    stack_size: usize,
+    make_future: F,
+) where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    run_async_test_on_large_stack_with_result(test_name, stack_size, make_future);
+}
+
+/// 与上面的 helper 相同，但允许深栈测试返回结果，供公共请求 helper 使用。
+pub(crate) fn run_async_test_on_large_stack_with_result<F, Fut, R>(
+    test_name: &'static str,
+    stack_size: usize,
+    make_future: F,
+) -> R
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = R> + 'static,
+    R: Send + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(test_name.to_string())
+        .stack_size(stack_size)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime should build");
+            runtime.block_on(make_future())
+        })
+        .expect("large-stack test thread should spawn");
+
+    match handle.join() {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
 }
 
 pub(super) const OPERATIONAL_ADMIN_DEVICE_ID: &str = "device-operational-admin";

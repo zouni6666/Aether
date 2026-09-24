@@ -61,6 +61,14 @@ class MemoryCache {
     this.keyVersions.set(key, (this.keyVersions.get(key) ?? 0) + 1)
   }
 
+  /** 删除匹配前缀的缓存及进行中请求，旧响应不再回填缓存。 */
+  deleteByPrefix(prefix: string): void {
+    const keys = new Set([...this.cache.keys(), ...this.inFlight.keys()])
+    for (const key of keys) {
+      if (key.startsWith(prefix)) this.delete(key)
+    }
+  }
+
   /**
    * 清空所有缓存
    */

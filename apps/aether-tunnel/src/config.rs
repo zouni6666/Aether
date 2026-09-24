@@ -885,7 +885,7 @@ impl Config {
         Ok(Duration::from_millis(self.tunnel_connect_timeout_ms))
     }
 
-    pub fn tunnel_ip_family(&self) -> crate::egress_proxy::IpFamily {
+    pub(crate) fn tunnel_ip_family(&self) -> crate::egress_proxy::IpFamily {
         if self.tunnel_ipv4_only {
             crate::egress_proxy::IpFamily::Ipv4Only
         } else if self.tunnel_ipv6_only {

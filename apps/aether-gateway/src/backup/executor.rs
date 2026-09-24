@@ -799,6 +799,7 @@ mod tests {
     use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng, Payload};
     use aes_gcm::Aes256Gcm;
     use aether_crypto::DEVELOPMENT_ENCRYPTION_KEY;
+    use base64::Engine as _;
     use bytes::Bytes;
     use chrono::{DateTime, Utc};
     use serde_json::json;
@@ -1243,8 +1244,18 @@ mod tests {
         assert_eq!(restored.key_id, None);
         assert_eq!(restored.export_version.as_deref(), Some("2.3"));
 
+        // 17 个互不相同的合法 base64-32 字节直接密钥：本段只验证“legacy 候选 >16 → TooManyLegacyKeys”，
+        // 不测口令强度、不解密。直接密钥走 decode_direct_fernet_key（生产已支持路径），跳过 PBKDF2，
+        // 避免本用例为计数语义再付 17×10 万次迭代；上半段 DEVELOPMENT_ENCRYPTION_KEY 真实 v1 兼容
+        // 与 wrong-legacy-secret 派生路径保持不变。
         let too_many: Vec<_> = (0..17)
-            .map(|index| BackupDecryptionKey::historical(format!("legacy-{index}")).unwrap())
+            .map(|index| {
+                let mut material = [0u8; 32];
+                material[0] = index as u8 + 1;
+                material[31] = index as u8 + 1;
+                let secret = base64::engine::general_purpose::STANDARD.encode(material);
+                BackupDecryptionKey::historical(secret).unwrap()
+            })
             .collect();
         assert!(matches!(
             restore_backup_json(

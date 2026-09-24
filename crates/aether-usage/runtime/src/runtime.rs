@@ -10055,6 +10055,24 @@ mod tests {
             2,
             "the later direct caller should receive its own bounded write attempt"
         );
+        // Direct persistence can finish before the submission worker joins the
+        // barrier handoff and accounts for its completed slot.
+        timeout(Duration::from_secs(1), async {
+            loop {
+                let snapshot = runtime.metrics_snapshot();
+                let submission = &runtime.lifecycle_submission.state;
+                if snapshot.terminal_submission_pending == 0
+                    && snapshot.ordered_lifecycle_pending == 0
+                    && snapshot.lifecycle_submission_pending == 0
+                    && submission.admission.available_permits() == submission.capacity
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("failed terminal submission accounting and admission should drain");
         let snapshot = runtime.metrics_snapshot();
         assert_eq!(snapshot.terminal_submission_pending, 0);
         assert_eq!(snapshot.ordered_lifecycle_pending, 0);
@@ -10162,24 +10180,43 @@ mod tests {
             .await;
 
         assert_eq!(remaining_policy_panics.load(Ordering::Acquire), 0);
-        let records = records.lock().expect("records lock");
-        assert_eq!(
-            records
-                .iter()
-                .filter(|record| record.request_id == healthy_request_id)
-                .count(),
-            2,
-            "the same terminal shard should continue processing healthy requests"
-        );
-        assert!(
-            records
-                .iter()
-                .filter(|record| record.request_id == failed_request_id)
-                .count()
-                == 1,
-            "only the later healthy attempt should persist for the panicked request"
-        );
-        drop(records);
+        {
+            let records = records.lock().expect("records lock");
+            assert_eq!(
+                records
+                    .iter()
+                    .filter(|record| record.request_id == healthy_request_id)
+                    .count(),
+                2,
+                "the same terminal shard should continue processing healthy requests"
+            );
+            assert!(
+                records
+                    .iter()
+                    .filter(|record| record.request_id == failed_request_id)
+                    .count()
+                    == 1,
+                "only the later healthy attempt should persist for the panicked request"
+            );
+        }
+        // The final direct attempt also submits a barrier whose worker may
+        // account for completion after the persistence call has returned.
+        timeout(Duration::from_secs(1), async {
+            loop {
+                let snapshot = runtime.metrics_snapshot();
+                let submission = &runtime.lifecycle_submission.state;
+                if snapshot.terminal_submission_pending == 0
+                    && snapshot.ordered_lifecycle_pending == 0
+                    && snapshot.lifecycle_submission_pending == 0
+                    && submission.admission.available_permits() == submission.capacity
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("panicked terminal submission accounting and admission should drain");
         let snapshot = runtime.metrics_snapshot();
         assert_eq!(snapshot.terminal_submission_pending, 0);
         assert_eq!(snapshot.ordered_lifecycle_pending, 0);

@@ -10,10 +10,11 @@ use crate::provider::{
     ProviderPoolMemberInput,
 };
 use crate::quota::{
-    provider_pool_current_unix_secs, provider_pool_json_bool, provider_pool_json_f64,
-    provider_pool_member_quota_snapshot, provider_pool_metadata_bucket,
-    provider_pool_model_quota_exhausted, provider_pool_quota_snapshot_exhausted_decision,
-    provider_pool_reset_deadline_elapsed, provider_pool_timestamp_unix_secs,
+    provider_pool_codex_metadata_has_account_quota, provider_pool_current_unix_secs,
+    provider_pool_json_bool, provider_pool_json_f64, provider_pool_member_quota_snapshot,
+    provider_pool_metadata_bucket, provider_pool_model_quota_exhausted,
+    provider_pool_quota_snapshot_exhausted_decision, provider_pool_reset_deadline_elapsed,
+    provider_pool_source_account_quota_exhausted, provider_pool_timestamp_unix_secs,
 };
 use crate::quota_refresh::ProviderPoolQuotaRequestSpec;
 
@@ -53,6 +54,9 @@ impl ProviderPoolAdapter for CodexProviderPoolAdapter {
             provider_pool_model_quota_exhausted(input.key, input.provider_type, model)
         }) {
             return exhausted;
+        }
+        if let Some(bucket) = codex_newer_account_quota_metadata(input.key, input.provider_type) {
+            return quota_exhausted_from_bucket(bucket);
         }
         if let Some(quota_snapshot) =
             provider_pool_member_quota_snapshot(input.key, input.provider_type)
@@ -108,15 +112,12 @@ fn codex_explicit_quota_block_active(
     key: &aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey,
     provider_type: &str,
 ) -> bool {
+    if let Some(bucket) = codex_newer_account_quota_metadata(key, provider_type) {
+        return codex_explicit_quota_block_from_bucket(bucket);
+    }
     let Some(quota_snapshot) = provider_pool_member_quota_snapshot(key, provider_type) else {
         return provider_pool_metadata_bucket(key.upstream_metadata.as_ref(), provider_type)
-            .is_some_and(|bucket| {
-                (provider_pool_json_bool(bucket.get("allowed")) == Some(false)
-                    || provider_pool_json_bool(bucket.get("limit_reached")) == Some(true))
-                    && !["primary", "secondary"]
-                        .into_iter()
-                        .any(|prefix| codex_window_reset_elapsed(bucket, prefix))
-            });
+            .is_some_and(codex_explicit_quota_block_from_bucket);
     };
     let explicitly_blocked = provider_pool_json_bool(quota_snapshot.get("allowed")) == Some(false)
         || provider_pool_json_bool(quota_snapshot.get("limit_reached")) == Some(true);
@@ -131,6 +132,35 @@ fn codex_explicit_quota_block_active(
     !provider_pool_current_unix_secs().is_some_and(|now_unix_secs| {
         provider_pool_reset_deadline_elapsed(quota_snapshot, observed_at, now_unix_secs)
     })
+}
+
+fn codex_explicit_quota_block_from_bucket(bucket: &Map<String, Value>) -> bool {
+    (provider_pool_json_bool(bucket.get("allowed")) == Some(false)
+        || provider_pool_json_bool(bucket.get("limit_reached")) == Some(true))
+        && !["primary", "secondary"]
+            .into_iter()
+            .any(|prefix| codex_window_reset_elapsed(bucket, prefix))
+}
+
+/// A successful refresh can update raw metadata before the status snapshot.
+/// Do not keep an old account-level block once a newer quota observation exists.
+/// Identity-only or model-only updates cannot clear an account quota decision.
+fn codex_newer_account_quota_metadata<'a>(
+    key: &'a aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey,
+    provider_type: &str,
+) -> Option<&'a Map<String, Value>> {
+    let snapshot = provider_pool_member_quota_snapshot(key, provider_type)?;
+    let metadata = provider_pool_metadata_bucket(key.upstream_metadata.as_ref(), provider_type)?;
+    if !provider_pool_codex_metadata_has_account_quota(metadata) {
+        return None;
+    }
+    let metadata_observed_at = provider_pool_timestamp_unix_secs(metadata.get("observed_at"))
+        .or_else(|| provider_pool_timestamp_unix_secs(metadata.get("updated_at")))?;
+    let snapshot_observed_at = provider_pool_timestamp_unix_secs(snapshot.get("observed_at"))
+        .or_else(|| provider_pool_timestamp_unix_secs(snapshot.get("updated_at")));
+    snapshot_observed_at
+        .is_none_or(|observed_at| metadata_observed_at >= observed_at)
+        .then_some(metadata)
 }
 
 fn build_codex_wham_headers(
@@ -322,11 +352,14 @@ pub(crate) fn quota_exhausted_from_bucket(bucket: &Map<String, Value>) -> bool {
     if provider_pool_json_bool(bucket.get("credits_unlimited")) == Some(true) {
         return false;
     }
+    let account_windows_exhausted = provider_pool_source_account_quota_exhausted(bucket);
     let has_window_data = provider_pool_json_f64(bucket.get("primary_used_percent")).is_some()
-        || provider_pool_json_f64(bucket.get("secondary_used_percent")).is_some();
+        || provider_pool_json_f64(bucket.get("secondary_used_percent")).is_some()
+        || account_windows_exhausted.is_some();
     if !has_window_data && provider_pool_json_bool(bucket.get("has_credits")) == Some(false) {
         return true;
     }
-    codex_window_used_percent_exhausted(bucket, "primary")
+    account_windows_exhausted == Some(true)
+        || codex_window_used_percent_exhausted(bucket, "primary")
         || codex_window_used_percent_exhausted(bucket, "secondary")
 }

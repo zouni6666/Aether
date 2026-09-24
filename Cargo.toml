@@ -92,6 +92,7 @@ aether-usage-core = { path = "crates/aether-usage/core" }
 aether-usage-runtime = { path = "crates/aether-usage/runtime" }
 aether-video-tasks-core = { path = "crates/aether-video-tasks-core" }
 aether-gateway = { path = "apps/aether-gateway" }
+aether-tunnel = { path = "apps/aether-tunnel" }
 aether-http = { path = "crates/aether-http" }
 aether-runtime = { path = "crates/aether-runtime/base" }
 aether-testkit = { path = "crates/aether-testing/testkit" }

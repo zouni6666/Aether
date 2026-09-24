@@ -711,7 +711,7 @@ export const legacyUiEnglishMessages: Record<string, string> = {
   '测试请求头必须是 JSON 对象': 'Test request headers must be a JSON object',
   '号池调度模式': 'Pool scheduling mode',
   'Responses WebSocket 模式': 'Responses WebSocket mode',
-  '允许此提供商处理标准 Responses API WebSocket 请求。仅在已验证兼容性后启用。': 'Allow this provider to handle standard Responses API WebSocket requests. Enable only after verifying compatibility.',
+  '允许此提供商处理标准 Responses API WebSocket 请求。': 'Allow this provider to handle standard Responses API WebSocket requests.',
   '发放成功后，冲突的旧套餐及其组合权益会整包失效。确定继续发放吗？': 'Granting this plan will replace conflicting plans and all their bundled benefits. Continue?',
   '确认替换旧套餐': 'Confirm plan replacement',
   '继续发放': 'Grant plan',

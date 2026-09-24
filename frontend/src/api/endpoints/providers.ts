@@ -1,5 +1,5 @@
 import client from '../client'
-import { buildCacheKey, cachedRequest, dedupedRequest } from '@/utils/cache'
+import { buildCacheKey, cache, cachedRequest, dedupedRequest } from '@/utils/cache'
 import type {
   ClaudeCodeAdvancedConfig,
   FailoverRulesConfig,
@@ -142,6 +142,15 @@ export async function updateProvider(
   requestOptions?: ProviderRequestOptions,
 ): Promise<ProviderWithEndpointsSummary> {
   const response = await client.patch<ProviderWithEndpointsSummary>(`/api/admin/providers/${providerId}`, data, requestOptions)
+  cache.delete(`providers:detail:${providerId}`)
+  if ('pool_advanced' in data) {
+    cache.delete('pool:overview')
+    for (const kind of ['keys', 'scores']) {
+      const prefix = `pool:${kind}:${providerId}`
+      cache.delete(prefix)
+      cache.deleteByPrefix(`${prefix}:`)
+    }
+  }
   return normalizeProviderSummary(response.data)
 }
 

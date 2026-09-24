@@ -11,6 +11,7 @@ aether-contracts.workspace = true
 aether-data-contracts.workspace = true
 aether-pool-core.workspace = true
 aether-provider-transport.workspace = true
+chrono.workspace = true
 serde_json.workspace = true
 url.workspace = true
 uuid.workspace = true

@@ -1,7 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub(super) fn collect_rust_files(root: &Path, files: &mut Vec<PathBuf>) {
+// 架构守卫在独立 integration test 中是顶层模块；helper 统一 pub(crate)，
+// 子模块经 `use super::*` / `use super::{...}` 访问（与原 lib 内布局一致）。
+pub(crate) fn collect_rust_files(root: &Path, files: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(root).expect("directory should be readable") {
         let entry = entry.expect("directory entry should be readable");
         let path = entry.path();
@@ -15,7 +17,7 @@ pub(super) fn collect_rust_files(root: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
-pub(super) fn assert_no_sqlx_queries(root_relative_path: &str) {
+pub(crate) fn assert_no_sqlx_queries(root_relative_path: &str) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(root_relative_path);
     let mut files = Vec::new();
     collect_rust_files(&root, &mut files);
@@ -80,7 +82,7 @@ fn sql_pool_scan_distinguishes_pool_types_from_repository_names() {
     ));
 }
 
-pub(super) fn assert_no_sensitive_log_patterns(root_relative_path: &str, patterns: &[&str]) {
+pub(crate) fn assert_no_sensitive_log_patterns(root_relative_path: &str, patterns: &[&str]) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(root_relative_path);
     let mut files = Vec::new();
     collect_rust_files(&root, &mut files);
@@ -109,7 +111,7 @@ pub(super) fn assert_no_sensitive_log_patterns(root_relative_path: &str, pattern
     );
 }
 
-pub(super) fn assert_no_module_dependency_patterns(root_relative_path: &str, patterns: &[&str]) {
+pub(crate) fn assert_no_module_dependency_patterns(root_relative_path: &str, patterns: &[&str]) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(root_relative_path);
     let mut files = Vec::new();
     collect_rust_files(&root, &mut files);
@@ -138,14 +140,14 @@ pub(super) fn assert_no_module_dependency_patterns(root_relative_path: &str, pat
     );
 }
 
-pub(super) fn workspace_file_exists(root_relative_path: &str) -> bool {
+pub(crate) fn workspace_file_exists(root_relative_path: &str) -> bool {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join(root_relative_path)
         .exists()
 }
 
-pub(super) fn workspace_files_with_extension(
+pub(crate) fn workspace_files_with_extension(
     root_relative_path: &str,
     extension: &str,
 ) -> Vec<PathBuf> {
@@ -162,7 +164,7 @@ pub(super) fn workspace_files_with_extension(
     files
 }
 
-pub(super) fn collect_workspace_rust_files(root_relative_path: &str) -> Vec<PathBuf> {
+pub(crate) fn collect_workspace_rust_files(root_relative_path: &str) -> Vec<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join(root_relative_path);
@@ -172,7 +174,7 @@ pub(super) fn collect_workspace_rust_files(root_relative_path: &str) -> Vec<Path
     files
 }
 
-pub(super) fn read_workspace_file(path: &str) -> String {
+pub(crate) fn read_workspace_file(path: &str) -> String {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
@@ -180,7 +182,7 @@ pub(super) fn read_workspace_file(path: &str) -> String {
     fs::read_to_string(workspace_root.join(path)).expect("source file should be readable")
 }
 
-pub(super) fn read_workspace_module_tree(path: &str) -> String {
+pub(crate) fn read_workspace_module_tree(path: &str) -> String {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()

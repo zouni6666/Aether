@@ -1395,6 +1395,8 @@ async function loadOverview(options: { cacheTtlMs?: number, silent?: boolean } =
 
 async function handleSchedulingSaved(updatedProvider: ProviderWithEndpointsSummary) {
   if (!selectedProviderId.value || updatedProvider.id !== selectedProviderId.value) return
+  // 保存前发出的详情读取不得覆盖这次保存返回的新配置。
+  providerDataRequestId += 1
   // 优先回写保存接口返回值，避免弹窗立即重开时读到旧配置。
   if (selectedProviderData.value) {
     Object.assign(selectedProviderData.value, updatedProvider)
@@ -1403,7 +1405,7 @@ async function handleSchedulingSaved(updatedProvider: ProviderWithEndpointsSumma
   }
   showSchedulingDialog.value = false
   showAdvancedDialog.value = false
-  await loadOverview({ silent: true })
+  await Promise.all([loadKeys({ silent: true }), loadOverview({ silent: true })])
 }
 
 // --- Provider Selection ---

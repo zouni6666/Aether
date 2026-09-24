@@ -1,20 +1,8 @@
 #![allow(clippy::large_enum_variant)]
 
-mod app;
-mod config;
-mod egress_proxy;
-mod hardware;
-mod net;
-mod registration;
-mod runtime;
-mod setup;
-mod state;
-mod target_filter;
-mod tunnel;
-mod upstream_client;
-
 use std::path::PathBuf;
 
+use aether_tunnel::{app, config, setup};
 use clap::{parser::ValueSource, CommandFactory, FromArgMatches, Parser};
 
 use config::{Config, ServerEntry, TunnelSecurity};

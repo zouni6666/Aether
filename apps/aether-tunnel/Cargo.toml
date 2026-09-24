@@ -46,5 +46,4 @@ webpki-roots = "0.26"
 uuid.workspace = true
 
 [dev-dependencies]
-aether-gateway = { workspace = true, features = ["testkit"] }
 tokio = { version = "1", features = ["test-util"] }

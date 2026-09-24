@@ -226,6 +226,13 @@ impl TunnelRequestMetrics {
     }
 }
 
+impl Default for TunnelRequestMetrics {
+    fn default() -> Self {
+        // 指标初始值全部为零，Default 与现有 new 语义完全一致。
+        Self::new()
+    }
+}
+
 const RECENT_TUNNEL_ERROR_CAPACITY: usize = 64;
 const TUNNEL_ERROR_CATEGORY_MAX_CHARS: usize = 48;
 const TUNNEL_ERROR_MESSAGE_MAX_CHARS: usize = 320;
@@ -531,6 +538,13 @@ impl TunnelMetrics {
             )
             .with_labels(labels),
         ]
+    }
+}
+
+impl Default for TunnelMetrics {
+    fn default() -> Self {
+        // 保留 recent_errors 的容量初始化，避免 Default 改变错误环形缓存行为。
+        Self::new()
     }
 }
 

@@ -116,6 +116,13 @@ impl RuntimeResourceMonitor {
     }
 }
 
+impl Default for RuntimeResourceMonitor {
+    fn default() -> Self {
+        // 默认构造与显式 new 保持一致，便于库目标和二进制目标共用监控器。
+        Self::new()
+    }
+}
+
 /// Collect hardware information and estimate max concurrency.
 ///
 /// Should be called once at startup -- hardware does not change at runtime.

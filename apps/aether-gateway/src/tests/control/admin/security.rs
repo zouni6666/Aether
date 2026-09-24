@@ -240,10 +240,24 @@ async fn send_admin_security_request(
     path: &str,
     body: Option<serde_json::Value>,
 ) -> (StatusCode, serde_json::Value, usize) {
+    let path = path.to_string();
+    crate::tests::run_async_test_on_large_stack_with_result(
+        "admin-security-router-request",
+        16 * 1024 * 1024,
+        move || send_admin_security_request_on_large_stack(gateway, method, path, body),
+    )
+}
+
+async fn send_admin_security_request_on_large_stack(
+    gateway: Router,
+    method: reqwest::Method,
+    path: String,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value, usize) {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
-        path,
+        &path,
         any(move |_request: Request| {
             let upstream_hits_inner = Arc::clone(&upstream_hits_clone);
             async move {
@@ -253,26 +267,52 @@ async fn send_admin_security_request(
         }),
     );
 
-    let (upstream_url, upstream_handle) = start_server(upstream).await;
-    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let (_upstream_url, upstream_handle) = start_server(upstream).await;
 
-    let client = reqwest::Client::new();
-    let mut request = client
-        .request(method, format!("{gateway_url}{path}"))
+    // 这些用例只验证本地安全路由和“不得转发”断言，不需要为 Gateway
+    // 再启动一个 TCP listener；send_request 会补齐 ConnectInfo，仍经过完整 Router。
+    let mut request_builder = Request::builder()
+        .method(method.as_str())
+        .uri(&path)
         .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
         .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
         .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
         .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123");
     if let Some(body) = body {
-        request = request.json(&body);
+        request_builder = request_builder.header(http::header::CONTENT_TYPE, "application/json");
+        let request = request_builder
+            .body(Body::from(body.to_string()))
+            .expect("request should build");
+        let response = send_request(gateway, request).await;
+        let status = response.status();
+        let payload = response
+            .into_body()
+            .collect()
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&payload).expect("json body should parse");
+        let upstream_count = *upstream_hits.lock().expect("mutex should lock");
+        upstream_handle.abort();
+        return (status, payload, upstream_count);
     }
 
-    let response = request.send().await.expect("request should succeed");
+    let request = request_builder
+        .body(Body::empty())
+        .expect("request should build");
+    let response = send_request(gateway, request).await;
     let status = response.status();
-    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    let payload = response
+        .into_body()
+        .collect()
+        .await
+        .expect("response body should collect")
+        .to_bytes();
+    let payload: serde_json::Value =
+        serde_json::from_slice(&payload).expect("json body should parse");
     let upstream_count = *upstream_hits.lock().expect("mutex should lock");
 
-    gateway_handle.abort();
     upstream_handle.abort();
 
     (status, payload, upstream_count)

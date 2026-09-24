@@ -15,11 +15,14 @@ aether-data-contracts.workspace = true
 aether-gateway = { workspace = true, features = ["testkit"] }
 aether-runtime.workspace = true
 aether-runtime-state.workspace = true
+aether-tunnel.workspace = true
 aether-testkit = { workspace = true, features = ["gateway", "postgres"] }
+arc-swap = "1"
 axum.workspace = true
 futures-util.workspace = true
 http.workspace = true
 reqwest.workspace = true
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

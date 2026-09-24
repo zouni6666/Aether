@@ -1194,7 +1194,7 @@ fn ai_serving_planner_separates_local_candidate_resolution_from_ranking() {
 
     let candidate_resolution =
         read_workspace_file("apps/aether-gateway/src/ai_serving/planner/candidate_resolution.rs");
-    let ranking_call = candidate_resolution
+    candidate_resolution
         .find("rank_eligible_local_execution_candidates(")
         .expect("candidate_resolution.rs should call core-backed local candidate ranking");
     assert!(
@@ -5045,7 +5045,9 @@ fn retired_api_format_occurrences_are_whitelisted() {
             .expect("file should be under workspace root")
             .to_string_lossy()
             .replace('\\', "/");
-        if relative == "apps/aether-gateway/src/tests/architecture/ai_serving.rs" {
+        if relative == "apps/aether-gateway/tests/architecture/ai_serving.rs"
+            || relative == "apps/aether-gateway/src/tests/architecture/ai_serving.rs"
+        {
             continue;
         }
 

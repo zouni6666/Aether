@@ -6,61 +6,7 @@ on:
     branches:
       - master
       - main
-    paths:
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "crates/**"
-      - "apps/**"
-      - "install.sh"
-      - "deploy.sh"
-      - "update.sh"
-      - "generate_keys.sh"
-      - ".env.example"
-      - "README.md"
-      - "Dockerfile.app"
-      - "docker-compose.yml"
-      - "docker-compose.single-node.yml"
-      - "docker-compose.local.yml"
-      - "docker-compose.release-local.yml"
-      - "tests/compose_database_config_test.py"
-      - "tests/install_*_test.sh"
-      - "tests/deploy_*_test.sh"
-      - "tests/update_*_test.sh"
-      - "tests/release_supply_chain_test.sh"
-      - "tests/tunnel_installer_config_security_test.sh"
-      - ".github/workflows/build-tunnel.yml"
-      - ".github/workflows/deploy-pages.yml"
-      - ".github/workflows/release.yml"
-      - ".github/workflows/rust-ci.yml"
-      - ".github/workflows/nightly.yml"
   pull_request:
-    paths:
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "crates/**"
-      - "apps/**"
-      - "install.sh"
-      - "deploy.sh"
-      - "update.sh"
-      - "generate_keys.sh"
-      - ".env.example"
-      - "README.md"
-      - "Dockerfile.app"
-      - "docker-compose.yml"
-      - "docker-compose.single-node.yml"
-      - "docker-compose.local.yml"
-      - "docker-compose.release-local.yml"
-      - "tests/compose_database_config_test.py"
-      - "tests/install_*_test.sh"
-      - "tests/deploy_*_test.sh"
-      - "tests/update_*_test.sh"
-      - "tests/release_supply_chain_test.sh"
-      - "tests/tunnel_installer_config_security_test.sh"
-      - ".github/workflows/build-tunnel.yml"
-      - ".github/workflows/deploy-pages.yml"
-      - ".github/workflows/release.yml"
-      - ".github/workflows/rust-ci.yml"
-      - ".github/workflows/nightly.yml"
 
 concurrency:
   group: rust-ci-${{ github.event_name }}-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -76,8 +22,58 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  changes:
+    name: Detect Rust CI scope
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.scope.outputs.rust }}
+      shell: ${{ steps.scope.outputs.shell }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+
+      - name: Classify changed paths
+        id: scope
+        shell: bash
+        run: |
+          # workflow_call（Nightly）仍须完整执行；普通 push/PR 只按源码和构建
+          # 指纹触发 Rust jobs，安装脚本、Compose、README 等由 shell scope 覆盖。
+          if [ "$GITHUB_EVENT_NAME" = "workflow_call" ]; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            echo "shell=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            git fetch --no-tags origin "$GITHUB_BASE_REF" --depth=1
+            changed_paths=$(git diff --name-only "origin/$GITHUB_BASE_REF...$GITHUB_SHA")
+          elif [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$GITHUB_EVENT_BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            changed_paths=$(git diff --name-only "$GITHUB_EVENT_BEFORE" "$GITHUB_SHA")
+          else
+            changed_paths=$(git ls-files)
+          fi
+
+          rust=false
+          shell=false
+          while IFS= read -r path; do
+            case "$path" in
+              Cargo.toml|Cargo.lock|rust-toolchain.toml|.cargo/*|*.rs|*/Cargo.toml|*/build.rs|*.sql|.github/workflows/*.yml|.github/workflows/*.yaml)
+                rust=true
+                ;;
+              *.sh|*.py|README.md|*/README.md|.env.example|Dockerfile*|docker-compose*.yml|docker-compose*.yaml)
+                shell=true
+                ;;
+            esac
+          done <<< "$changed_paths"
+
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
+          echo "shell=$shell" >> "$GITHUB_OUTPUT"
+
   shell_security:
     name: Shell security fixtures
+    needs: changes
+    if: ${{ needs.changes.outputs.shell == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -99,6 +95,8 @@ jobs:
 
   fmt:
     name: Format
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -114,6 +112,8 @@ jobs:
 
   clippy_gateway:
     name: Clippy (Gateway)
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -127,7 +127,9 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
-          shared-key: rust-ci-${{ runner.os }}
+          # Gateway lint 与 Gateway 测试都可能触发 mold/大型链接依赖，单独隔离缓存
+          # 指纹，避免不同 job 的构建产物互相驱逐或复用错误的链接参数。
+          shared-key: rust-ci-gateway-clippy-${{ runner.os }}
           workspaces: . -> target
 
       - name: Setup sccache
@@ -148,6 +150,8 @@ jobs:
 
   clippy_data:
     name: Clippy (Data)
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -182,6 +186,8 @@ jobs:
 
   clippy_rest:
     name: Clippy (Workspace Rest)
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -218,6 +224,7 @@ jobs:
     name: Clippy
     runs-on: ubuntu-latest
     needs:
+      - changes
       - clippy_gateway
       - clippy_data
       - clippy_rest
@@ -225,6 +232,10 @@ jobs:
     steps:
       - name: Verify clippy jobs
         run: |
+          if [ "${{ needs.changes.outputs.rust }}" != "true" ]; then
+            echo "Rust scope unchanged; clippy jobs skipped"
+            exit 0
+          fi
           if [ "${{ needs.clippy_gateway.result }}" != "success" ] || \
              [ "${{ needs.clippy_data.result }}" != "success" ] || \
              [ "${{ needs.clippy_rest.result }}" != "success" ]; then
@@ -234,12 +245,24 @@ jobs:
 
   test_gateway:
     name: Test (Gateway)
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
+    # 构建指纹提到 job 级：mold RUSTFLAGS / 栈 / sccache 对 lib、bins、integration 三步保持一致，
+    # 避免 step 级 env 漂移导致同 job 内 rustc 指纹不一致。
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      RUST_MIN_STACK: "16777216"
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          # 与 rust-toolchain.toml、fmt/clippy 钉在同一版本，避免浮动 stable 换指纹导致全量重编
+          toolchain: 1.95.0
 
       - name: Show Rust toolchain
         run: rustup show active-toolchain
@@ -247,7 +270,8 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
-          shared-key: rust-ci-${{ runner.os }}
+          # mold RUSTFLAGS 只在本 job 生效：独立 cache key，避免与无 mold 的 job 互相污染指纹
+          shared-key: rust-ci-gateway-test-${{ runner.os }}
           workspaces: . -> target
 
       - name: Setup sccache
@@ -263,36 +287,34 @@ jobs:
         run: pg_config --bindir >> "$GITHUB_PATH"
 
       - name: Test lib
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-          RUST_MIN_STACK: "16777216"
-          RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
         run: cargo nextest run -p aether-gateway --lib
 
       - name: Test bins
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-          RUST_MIN_STACK: "16777216"
-          RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
         run: cargo nextest run -p aether-gateway --bins
+
+      # 只运行独立 integration targets；显式列出目标，避免 --tests 再次执行 lib/bin 测试。
+      - name: Test integration targets
+        run: >-
+          cargo nextest run -p aether-gateway
+          --test admin_unsigned_identity_headers
+          --test architecture_guard
 
       - name: Show sccache stats
         if: always()
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
         run: sccache --show-stats
 
   test_data:
     name: Test (Data)
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.95.0
 
       - name: Show Rust toolchain
         run: rustup show active-toolchain
@@ -328,6 +350,8 @@ jobs:
 
   check_data_features:
     name: Check (Data Feature - ${{ matrix.feature }})
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -340,6 +364,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.95.0
 
       - name: Rust cache
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
@@ -365,12 +391,16 @@ jobs:
 
   test_rest:
     name: Test (Workspace Rest)
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.95.0
 
       - name: Show Rust toolchain
         run: rustup show active-toolchain
@@ -402,6 +432,8 @@ jobs:
 
   test_data_adapters:
     name: Test (Data Adapter - ${{ matrix.package }})
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -413,6 +445,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.95.0
 
       - name: Rust cache
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
@@ -441,12 +475,16 @@ jobs:
 
   check_integration_scenarios:
     name: Test (Integration Scenarios)
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.95.0
 
       - name: Rust cache
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
@@ -477,6 +515,7 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     needs:
+      - changes
       - test_gateway
       - test_data
       - check_data_features
@@ -487,6 +526,10 @@ jobs:
     steps:
       - name: Verify test jobs
         run: |
+          if [ "${{ needs.changes.outputs.rust }}" != "true" ]; then
+            echo "Rust scope unchanged; test jobs skipped"
+            exit 0
+          fi
           if [ "${{ needs.test_gateway.result }}" != "success" ] || \
              [ "${{ needs.test_data.result }}" != "success" ] || \
              [ "${{ needs.check_data_features.result }}" != "success" ] || \
@@ -499,6 +542,8 @@ jobs:
 
   data_db_smoke_postgres:
     name: Data DB Smoke (Postgres)
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -519,6 +564,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.95.0
 
       - name: Show Rust toolchain
         run: rustup show active-toolchain
@@ -586,11 +633,16 @@ jobs:
     name: Data DB Smoke
     runs-on: ubuntu-latest
     needs:
+      - changes
       - data_db_smoke_postgres
     if: ${{ always() }}
     steps:
       - name: Verify database smoke jobs
         run: |
+          if [ "${{ needs.changes.outputs.rust }}" != "true" ]; then
+            echo "Rust scope unchanged; database smoke jobs skipped"
+            exit 0
+          fi
           if [ "${{ needs.data_db_smoke_postgres.result }}" != "success" ]; then
             echo "Data DB smoke failed"
             exit 1
@@ -600,6 +652,7 @@ jobs:
     name: check
     runs-on: ubuntu-latest
     needs:
+      - changes
       - fmt
       - clippy
       - test
@@ -609,11 +662,25 @@ jobs:
     steps:
       - name: Verify required jobs
         run: |
-          if [ "${{ needs.fmt.result }}" != "success" ] || \
-             [ "${{ needs.clippy.result }}" != "success" ] || \
-             [ "${{ needs.test.result }}" != "success" ] || \
-             [ "${{ needs.data_db_smoke.result }}" != "success" ] || \
-             [ "${{ needs.shell_security.result }}" != "success" ]; then
+          rust="${{ needs.changes.outputs.rust }}"
+          shell="${{ needs.changes.outputs.shell }}"
+
+          if [ "$rust" != "true" ] && [ "$shell" != "true" ]; then
+            echo "No Rust or shell scope changed"
+            exit 0
+          fi
+
+          if [ "$rust" = "true" ] && {
+            [ "${{ needs.fmt.result }}" != "success" ] ||
+            [ "${{ needs.clippy.result }}" != "success" ] ||
+            [ "${{ needs.test.result }}" != "success" ] ||
+            [ "${{ needs.data_db_smoke.result }}" != "success" ];
+          }; then
+            echo "Rust CI failed"
+            exit 1
+          fi
+
+          if [ "$shell" = "true" ] && [ "${{ needs.shell_security.result }}" != "success" ]; then
             echo "Rust CI failed"
             exit 1
           fi

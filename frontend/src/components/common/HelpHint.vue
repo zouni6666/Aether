@@ -24,7 +24,7 @@ const open = ref(false)
     </button>
     <span
       role="tooltip"
-      class="pointer-events-none invisible absolute left-1/2 top-full z-[230] mt-2 w-max max-w-xs -translate-x-1/2 rounded-md border bg-popover px-3 py-2 text-xs leading-5 text-popover-foreground opacity-0 shadow-md transition-opacity group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100"
+      class="pointer-events-none invisible absolute left-1/2 top-full z-[230] mt-2 w-max max-w-xs -translate-x-1/2 whitespace-pre-line rounded-md border bg-popover px-3 py-2 text-xs leading-5 text-popover-foreground opacity-0 shadow-md transition-opacity group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100"
       :class="open ? 'visible opacity-100' : ''"
     >
       {{ props.text }}
