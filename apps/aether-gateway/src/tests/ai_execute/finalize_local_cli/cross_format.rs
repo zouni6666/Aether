@@ -893,8 +893,8 @@ async fn gateway_executes_openai_responses_cross_format_function_call_upstream_s
                 },
                 {
                     "type": "function_call",
-                    "id": "call_auto_1",
-                    "call_id": "call_auto_1",
+                    "id": "call_auto_0",
+                    "call_id": "call_auto_0",
                     "name": "get_weather",
                     "arguments": "{\"location\":\"Tokyo\"}"
                 }

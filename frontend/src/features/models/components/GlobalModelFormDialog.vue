@@ -5,6 +5,7 @@
     :description="isEditMode ? '修改模型配置和价格信息' : ''"
     :icon="isEditMode ? SquarePen : Layers"
     :size="isEditMode ? '4xl' : '3xl'"
+    :z-index="zIndex"
     @update:model-value="handleDialogUpdate"
   >
     <div
@@ -869,6 +870,8 @@ import {
 const props = defineProps<{
   open: boolean
   model?: GlobalModelResponse | null
+  // 嵌套在其他弹窗内部时使用更高的层级，避免被父弹窗遮挡
+  zIndex?: number
 }>()
 
 const emit = defineEmits<{

@@ -115,17 +115,72 @@ pub fn maybe_build_standard_cross_format_sync_product_from_normalized_payload(
         .as_deref()
         .unwrap_or(provider_api_format);
 
+    let aggregated_from_stream = aggregated_stream_body.is_some();
     let Some(provider_body_json) = aggregated_stream_body.or_else(|| body_json.cloned()) else {
         return Ok(None);
     };
+    let projection_fallback_body = aggregated_from_stream.then(|| provider_body_json.clone());
 
-    Ok(maybe_build_standard_cross_format_sync_product(
+    let product = maybe_build_standard_cross_format_sync_product(
+        report_kind,
+        provider_body_api_format,
+        client_api_format,
+        report_context,
+        provider_body_json,
+    );
+    if product.is_some() {
+        return Ok(product);
+    }
+    let Some(provider_body_json) = projection_fallback_body else {
+        return Ok(None);
+    };
+    Ok(project_validated_openai_responses_stream_sync_product(
         report_kind,
         provider_body_api_format,
         client_api_format,
         report_context,
         provider_body_json,
     ))
+}
+
+/// Forced-stream Responses upstreams (Codex, xAI) echo request metadata such as
+/// `parallel_tool_calls`, `tools` and encrypted reasoning back in the aggregated
+/// body, which the strict cross-format response check refuses. The aggregated
+/// body stays the provider body, so the client projection may drop those
+/// provider-only fields — mirroring the OpenAI Chat client path.
+fn project_validated_openai_responses_stream_sync_product(
+    report_kind: &str,
+    provider_api_format: &str,
+    client_api_format: &str,
+    report_context: &Value,
+    provider_body_json: Value,
+) -> Option<StandardCrossFormatSyncProduct> {
+    let provider_api_format = normalize_openai_responses_family_api_format(provider_api_format);
+    if !matches!(
+        provider_api_format.as_str(),
+        "openai:responses" | "openai:responses:compact"
+    ) {
+        return None;
+    }
+    let client_api_format = client_api_format.trim().to_ascii_lowercase();
+    if is_standard_chat_finalize_kind(report_kind) {
+        sync_chat_response_conversion_kind(&provider_api_format, &client_api_format)?;
+    } else if is_standard_cli_finalize_kind(report_kind) {
+        sync_cli_response_conversion_kind(&provider_api_format, &client_api_format)?;
+    } else {
+        return None;
+    }
+    let client_body_json = project_validated_openai_responses_stream_to_client(
+        &provider_body_json,
+        &client_api_format,
+        report_context,
+    )?;
+    let client_body_json =
+        client_body_with_report_context_model(client_body_json, report_context, &client_api_format);
+    Some(StandardCrossFormatSyncProduct {
+        client_body_json,
+        provider_body_json,
+    })
 }
 
 pub fn maybe_build_standard_same_format_sync_body_from_normalized_payload(
@@ -1475,6 +1530,14 @@ fn project_validated_openai_responses_stream_to_openai_chat(
     body_json: &Value,
     report_context: &Value,
 ) -> Option<Value> {
+    project_validated_openai_responses_stream_to_client(body_json, "openai:chat", report_context)
+}
+
+fn project_validated_openai_responses_stream_to_client(
+    body_json: &Value,
+    client_api_format: &str,
+    report_context: &Value,
+) -> Option<Value> {
     // The caller retains body_json as provider_body_json. This projection is therefore allowed
     // to omit provider-only response metadata, but never unknown canonical output blocks.
     if !matches!(
@@ -1490,7 +1553,12 @@ fn project_validated_openai_responses_stream_to_openai_chat(
     }
 
     apply_report_context_model_fallback(&mut canonical.model, report_context);
-    Some(canonical_to_openai_chat_response(&canonical))
+    match client_api_format {
+        "openai:chat" => Some(canonical_to_openai_chat_response(&canonical)),
+        "claude:messages" => Some(canonical_to_claude_response(&canonical)),
+        "gemini:generate_content" => canonical_to_gemini_response(&canonical, report_context),
+        _ => None,
+    }
 }
 
 fn openai_chat_response_can_use_single_response_canonical(body_json: &Value) -> bool {
@@ -7141,6 +7209,84 @@ mod tests {
             product.client_body_json["choices"][0]["message"]["content"],
             "stream projection"
         );
+    }
+
+    #[test]
+    fn standard_sync_finalize_projects_forced_responses_stream_to_gemini_and_claude_clients() {
+        // Shape of a forced-stream xAI / Codex upstream: the terminal response
+        // echoes request metadata and carries encrypted reasoning, which the
+        // strict cross-format check refuses.
+        let stream_body = concat!(
+            "data: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp_forced_123\",\"object\":\"response\",\"status\":\"in_progress\",\"model\":\"grok-4.7-build\",\"output\":[],\"parallel_tool_calls\":true,\"tool_choice\":\"auto\",\"tools\":[],\"temperature\":0.7}}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"rs_forced_123\",\"type\":\"reasoning\",\"status\":\"completed\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"greet briefly\"}],\"encrypted_content\":\"opaque-xai-reasoning\"}}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"sequence_number\":2,\"item_id\":\"msg_forced_123\",\"output_index\":1,\"content_index\":0,\"delta\":\"Hello there friend\"}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"sequence_number\":3,\"output_index\":1,\"item\":{\"id\":\"msg_forced_123\",\"type\":\"message\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello there friend\",\"annotations\":[]}]}}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"sequence_number\":4,\"output_index\":2,\"item\":{\"id\":\"fc_forced_123\",\"type\":\"function_call\",\"status\":\"completed\",\"call_id\":\"call_forced_123\",\"name\":\"search\",\"arguments\":\"{\\\"q\\\":\\\"aether\\\"}\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"sequence_number\":5,\"response\":{\"id\":\"resp_forced_123\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"grok-4.7-build\",\"output\":[],\"parallel_tool_calls\":true,\"tool_choice\":\"auto\",\"tools\":[{\"type\":\"function\",\"name\":\"search\",\"parameters\":{\"type\":\"object\"}}],\"text\":{\"format\":{\"type\":\"text\"}},\"reasoning\":{\"effort\":null,\"summary\":null},\"temperature\":0.7,\"top_p\":0.95,\"store\":false,\"usage\":{\"input_tokens\":1249,\"input_tokens_details\":{\"cached_tokens\":1152},\"output_tokens\":40,\"output_tokens_details\":{\"reasoning_tokens\":31},\"total_tokens\":1289}}}\n\n",
+        );
+        let encoded = base64::engine::general_purpose::STANDARD.encode(stream_body);
+
+        for (report_kind, client_api_format) in [
+            ("gemini_chat_sync_finalize", "gemini:generate_content"),
+            ("gemini_cli_sync_finalize", "gemini:generate_content"),
+            ("claude_chat_sync_finalize", "claude:messages"),
+            ("claude_cli_sync_finalize", "claude:messages"),
+        ] {
+            let report_context = json!({
+                "provider_api_format": "openai:responses",
+                "provider_stream_event_api_format": "openai:responses",
+                "client_api_format": client_api_format,
+                "model": "grok-4.7",
+                "mapped_model": "grok-4.7",
+                "needs_conversion": true,
+            });
+            let product = maybe_build_standard_sync_finalize_product_from_normalized_payload(
+                report_kind,
+                200,
+                Some(&report_context),
+                None,
+                Some(&encoded),
+            )
+            .expect("forced Responses stream should aggregate")
+            .unwrap_or_else(|| panic!("{report_kind} should receive a projection"));
+            let StandardSyncFinalizeNormalizedProduct::CrossFormat(product) = product else {
+                panic!("{report_kind}: Responses stream should stay a cross-format product")
+            };
+            assert_eq!(product.provider_body_json["parallel_tool_calls"], true);
+            let client = product.client_body_json.to_string();
+            assert!(
+                !client.contains("opaque-xai-reasoning") && !client.contains("response.created"),
+                "{report_kind}: provider-only data leaked into the client body: {client}"
+            );
+            if client_api_format == "gemini:generate_content" {
+                let parts = product.client_body_json["candidates"][0]["content"]["parts"]
+                    .as_array()
+                    .expect("gemini parts");
+                assert!(parts
+                    .iter()
+                    .any(|part| part["text"] == "Hello there friend"
+                        && part.get("thought").is_none()));
+                assert!(parts
+                    .iter()
+                    .any(|part| part["functionCall"]["name"] == "search"
+                        && part["functionCall"]["args"]["q"] == "aether"));
+                assert_eq!(
+                    product.client_body_json["usageMetadata"]["promptTokenCount"],
+                    1249
+                );
+            } else {
+                let content = product.client_body_json["content"]
+                    .as_array()
+                    .expect("claude content");
+                assert!(content
+                    .iter()
+                    .any(|block| block["type"] == "text" && block["text"] == "Hello there friend"));
+                assert!(content.iter().any(|block| block["type"] == "tool_use"
+                    && block["name"] == "search"
+                    && block["input"]["q"] == "aether"));
+                assert_eq!(product.client_body_json["stop_reason"], "tool_use");
+            }
+        }
     }
 
     #[test]

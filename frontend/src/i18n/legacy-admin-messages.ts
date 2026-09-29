@@ -613,6 +613,8 @@ export const legacyAdminEnglishMessages: Record<string, string> = {
   '系统调账': 'System adjustment',
   '退款扣减': 'Refund debit',
   '退款回补': 'Refund recredit',
+  '另一个标签页正在处理钱包批量调整，请稍后刷新状态再试。此次未发送新请求。': 'Another tab is processing a wallet batch adjustment. Refresh the status and try again later. No new request was sent from this tab.',
+  '当前浏览器无法保护跨标签页的钱包批量请求，请使用支持此功能的浏览器。请求未发送。': 'This browser cannot protect wallet batch requests across tabs. Use a browser that supports this feature. The request was not sent.',
   '兑换码批次已创建': 'Redemption code batch created',
   'CSV 已导出': 'CSV exported',
   '批次已停用': 'Batch disabled',

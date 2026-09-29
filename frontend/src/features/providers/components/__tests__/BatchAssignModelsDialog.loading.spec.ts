@@ -33,6 +33,32 @@ vi.mock('@/features/providers/composables/useUpstreamModelsCache', () => ({
     fetchModels: vi.fn(),
   }),
 }))
+vi.mock('@/features/models/components/GlobalModelFormDialog.vue', async () => {
+  const { defineComponent, h } = await import('vue')
+  return {
+    default: defineComponent({
+      name: 'GlobalModelFormDialogStub',
+      props: {
+        open: { type: Boolean, default: false },
+        model: { type: Object, default: null },
+        zIndex: { type: Number, default: undefined },
+      },
+      emits: ['update:open', 'success'],
+      setup(props, { emit }) {
+        return () => {
+          if (!props.open) return null
+          return h('div', { 'data-testid': 'global-model-form-dialog-stub' }, [
+            h('button', {
+              type: 'button',
+              'data-testid': 'global-model-form-dialog-stub-success',
+              onClick: () => emit('success'),
+            }, 'submit'),
+          ])
+        }
+      },
+    }),
+  }
+})
 vi.mock('@/components/ui/dialog/Dialog.vue', async () => {
   const { defineComponent, h } = await import('vue')
   return {
@@ -201,5 +227,66 @@ describe('BatchAssignModelsDialog loading', () => {
     await settle()
 
     expect(visibleModelIds(root)).toEqual(['gm-beta', 'gm-alpha'])
+  })
+})
+
+describe('BatchAssignModelsDialog create model entry', () => {
+  async function mountDialog() {
+    const root = document.createElement('div')
+    document.body.appendChild(root)
+    const app = createApp(defineComponent({
+      setup() {
+        return () => h(BatchAssignModelsDialog, {
+          open: true,
+          providerId: 'provider-1',
+        })
+      },
+    }))
+    app.mount(root)
+    mountedApps.push({ app, root })
+    await settle()
+    return root
+  }
+
+  it('opens the unified model dialog from the create button', async () => {
+    const root = await mountDialog()
+    expect(root.querySelector('[data-testid="global-model-form-dialog-stub"]')).toBeNull()
+
+    const createButton = root.querySelector('[data-testid="batch-assign-create-model"]') as HTMLButtonElement
+    expect(createButton).toBeTruthy()
+    createButton.click()
+    await settle()
+
+    expect(root.querySelector('[data-testid="global-model-form-dialog-stub"]')).not.toBeNull()
+  })
+
+  it('refreshes the global model list after a model is created', async () => {
+    globalModelMocks.getGlobalModels
+      .mockResolvedValueOnce({
+        models: [createGlobalModel('gm-old', 'old-model', 'Old Model')],
+        total: 1,
+      })
+      .mockResolvedValueOnce({
+        models: [
+          createGlobalModel('gm-old', 'old-model', 'Old Model'),
+          createGlobalModel('gm-new', 'new-model', 'New Model'),
+        ],
+        total: 2,
+      })
+
+    const root = await mountDialog()
+    expect(visibleModelIds(root)).toEqual(['gm-old'])
+
+    const createButton = root.querySelector('[data-testid="batch-assign-create-model"]') as HTMLButtonElement
+    createButton.click()
+    await settle()
+
+    const successButton = root.querySelector('[data-testid="global-model-form-dialog-stub-success"]') as HTMLButtonElement
+    expect(successButton).toBeTruthy()
+    successButton.click()
+    await settle()
+
+    expect(globalModelMocks.getGlobalModels).toHaveBeenCalledTimes(2)
+    expect(visibleModelIds(root)).toEqual(['gm-new', 'gm-old'])
   })
 })

@@ -323,6 +323,12 @@ impl GeminiProviderState {
                     self.observed_tool_calls = true;
                     continue;
                 }
+                // Gemini streams are incremental and every functionCall part is a
+                // complete call, so parallel calls arriving in separate chunks all
+                // sit at parts[0]. Key calls by arrival order, not part position.
+                // Ids cannot disambiguate: they are optional, and the Antigravity
+                // envelope synthesizes per-chunk ids that repeat across chunks.
+                let index = self.tool_calls.len();
                 let tool_state = self.tool_calls.entry(index).or_default();
                 tool_state.call_id = function_call
                     .get("id")
@@ -1524,6 +1530,80 @@ mod tests {
             })
             .expect("tool call start event");
         assert!(signature_index < call_index);
+    }
+
+    #[test]
+    fn gemini_provider_state_keeps_parallel_function_calls_from_separate_chunks() {
+        let mut state = GeminiProviderState::default();
+        let report_context = json!({});
+        let chunk = |call: Value| {
+            data_line(json!({
+                "responseId": "resp_parallel_123",
+                "modelVersion": "gemini-3.8-flash",
+                "candidates": [{
+                    "index": 0,
+                    "content": {"role": "model", "parts": [{"functionCall": call}]}
+                }]
+            }))
+        };
+        let mut frames = Vec::new();
+        for call in [
+            json!({"id": "call_a", "name": "get_weather", "args": {"city": "Paris"}}),
+            json!({"id": "call_b", "name": "get_weather", "args": {"city": "Tokyo"}}),
+            json!({"name": "get_time", "args": {"city": "Paris"}}),
+            json!({"name": "get_time", "args": {"city": "Tokyo"}}),
+        ] {
+            frames.extend(
+                state
+                    .push_line(&report_context, chunk(call))
+                    .expect("function call chunk should parse"),
+            );
+        }
+
+        let starts = frames
+            .iter()
+            .filter_map(|frame| match &frame.event {
+                CanonicalStreamEvent::ToolCallStart {
+                    index,
+                    call_id,
+                    name,
+                } => Some((*index, call_id.clone(), name.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(starts.len(), 4);
+        assert_eq!(
+            starts
+                .iter()
+                .map(|(index, _, _)| *index)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+        assert_eq!(starts[0].1, "call_a");
+        assert_eq!(starts[1].1, "call_b");
+        assert_eq!(
+            starts
+                .iter()
+                .map(|(_, _, name)| name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["get_weather", "get_weather", "get_time", "get_time"]
+        );
+        assert_ne!(starts[2].1, starts[3].1);
+
+        let mut arguments = BTreeMap::<usize, String>::new();
+        for frame in &frames {
+            if let CanonicalStreamEvent::ToolCallArgumentsDelta {
+                index,
+                arguments: delta,
+            } = &frame.event
+            {
+                arguments.entry(*index).or_default().push_str(delta);
+            }
+        }
+        assert_eq!(arguments[&0], "{\"city\":\"Paris\"}");
+        assert_eq!(arguments[&1], "{\"city\":\"Tokyo\"}");
+        assert_eq!(arguments[&2], "{\"city\":\"Paris\"}");
+        assert_eq!(arguments[&3], "{\"city\":\"Tokyo\"}");
     }
 
     #[test]

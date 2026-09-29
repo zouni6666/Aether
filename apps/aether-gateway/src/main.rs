@@ -4977,7 +4977,11 @@ mod tests {
             builder
                 .http1()
                 .timer(TokioTimer::new())
-                .header_read_timeout(std::time::Duration::from_millis(10))
+                // Keep hyper's own header timeout far from the 5ms first-request
+                // deadline: when a slow runner lets both expire before the next
+                // poll, `select!` may pick the connection branch and surface
+                // hyper's header-timeout error instead of the clean deadline close.
+                .header_read_timeout(std::time::Duration::from_secs(30))
                 .max_buf_size(super::MIN_GATEWAY_HTTP_HEADER_MAX_BYTES)
                 .max_headers(super::MIN_GATEWAY_HTTP_MAX_HEADERS);
             builder

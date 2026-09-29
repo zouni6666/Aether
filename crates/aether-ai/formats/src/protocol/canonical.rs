@@ -4935,13 +4935,22 @@ pub(crate) fn gemini_response_format_to_canonical(
     if response_mime_type != "application/json" {
         return None;
     }
-    let json_schema = gemini_value_by_case(generation_config, "responseSchema", "response_schema")
-        .map(|schema| {
-            json!({
-                "name": "response_schema",
-                "schema": schema,
-            })
-        });
+    let json_schema = gemini_value_by_case(
+        generation_config,
+        "responseJsonSchema",
+        "response_json_schema",
+    )
+    .cloned()
+    .or_else(|| {
+        gemini_value_by_case(generation_config, "responseSchema", "response_schema")
+            .map(gemini_openapi_schema_to_json_schema)
+    })
+    .map(|schema| {
+        json!({
+            "name": "response_schema",
+            "schema": schema,
+        })
+    });
     Some(CanonicalResponseFormat {
         format_type: if json_schema.is_some() {
             "json_schema".to_string()
@@ -4951,6 +4960,68 @@ pub(crate) fn gemini_response_format_to_canonical(
         json_schema,
         extensions: BTreeMap::new(),
     })
+}
+
+/// `parametersJsonSchema` is already standard JSON Schema; the legacy
+/// `parameters` field is Gemini's OpenAPI subset with upper-case type names.
+fn gemini_declaration_parameters_to_json_schema(declaration: &Map<String, Value>) -> Option<Value> {
+    gemini_value_by_case(
+        declaration,
+        "parametersJsonSchema",
+        "parameters_json_schema",
+    )
+    .cloned()
+    .or_else(|| {
+        declaration
+            .get("parameters")
+            .map(gemini_openapi_schema_to_json_schema)
+    })
+}
+
+/// Gemini's OpenAPI-style `Schema` spells types in upper case (`OBJECT`,
+/// `STRING`, ...); other protocols expect JSON Schema's lower-case names.
+pub(crate) fn gemini_openapi_schema_to_json_schema(schema: &Value) -> Value {
+    fn normalize(value: &mut Value) {
+        match value {
+            Value::Object(object) => {
+                for (key, child) in object.iter_mut() {
+                    if key == "type" {
+                        match child {
+                            Value::String(type_name) => lowercase_schema_type(type_name),
+                            Value::Array(type_names) => {
+                                for type_name in type_names.iter_mut() {
+                                    if let Value::String(type_name) = type_name {
+                                        lowercase_schema_type(type_name);
+                                    }
+                                }
+                            }
+                            other => normalize(other),
+                        }
+                    } else if key != "enum"
+                        && key != "const"
+                        && key != "default"
+                        && key != "example"
+                    {
+                        normalize(child);
+                    }
+                }
+            }
+            Value::Array(items) => items.iter_mut().for_each(normalize),
+            _ => {}
+        }
+    }
+    fn lowercase_schema_type(type_name: &mut String) {
+        if matches!(
+            type_name.as_str(),
+            "OBJECT" | "STRING" | "INTEGER" | "NUMBER" | "BOOLEAN" | "ARRAY" | "NULL"
+        ) {
+            *type_name = type_name.to_ascii_lowercase();
+        }
+    }
+
+    let mut schema = schema.clone();
+    normalize(&mut schema);
+    schema
 }
 
 pub(crate) type GeminiCanonicalTools = (
@@ -5126,12 +5197,18 @@ pub(crate) fn gemini_tools_to_canonical(value: Option<&Value>) -> Option<GeminiC
                     .get("description")
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned),
-                parameters: declaration_object.get("parameters").cloned(),
+                parameters: gemini_declaration_parameters_to_json_schema(declaration_object),
                 strict: None,
                 extensions: {
                     let mut extensions = gemini_extensions(
                         declaration_object,
-                        &["name", "description", "parameters"],
+                        &[
+                            "name",
+                            "description",
+                            "parameters",
+                            "parametersJsonSchema",
+                            "parameters_json_schema",
+                        ],
                     );
                     if let Some(parameters) = declaration_object.get("parameters").cloned() {
                         canonical_extension_object_mut(&mut extensions, "gemini")
@@ -7133,6 +7210,8 @@ const GEMINI_MAPPED_GENERATION_CONFIG_KEYS: &[&str] = &[
     "response_mime_type",
     "responseSchema",
     "response_schema",
+    "responseJsonSchema",
+    "response_json_schema",
     "responseModalities",
     "response_modalities",
 ];
@@ -9358,6 +9437,80 @@ mod tests {
         assert_eq!(rebuilt["cachedContent"], "cached/abc");
         assert_eq!(rebuilt["tools"], request["tools"]);
         assert_eq!(rebuilt["toolConfig"], request["toolConfig"]);
+    }
+
+    #[test]
+    fn gemini_request_adapter_reads_json_schema_fields_and_lowercases_openapi_types() {
+        let request = json!({
+            "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+            "tools": [{"functionDeclarations": [
+                {
+                    "name": "search",
+                    "parametersJsonSchema": {
+                        "type": "object",
+                        "properties": {"q": {"type": "string"}},
+                        "required": ["q"]
+                    }
+                },
+                {
+                    "name": "legacy",
+                    "parameters": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "type": {"type": "STRING", "enum": ["OBJECT", "STRING"]},
+                            "tags": {"type": "ARRAY", "items": {"type": "STRING"}}
+                        }
+                    }
+                }
+            ]}],
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "responseJsonSchema": {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                    "required": ["name"]
+                }
+            }
+        });
+
+        let canonical =
+            from_gemini_to_canonical_request(&request, "/v1beta/models/grok-4.7:generateContent")
+                .expect("canonical request");
+
+        assert_eq!(
+            canonical.tools[0].parameters,
+            Some(json!({
+                "type": "object",
+                "properties": {"q": {"type": "string"}},
+                "required": ["q"]
+            }))
+        );
+        assert_eq!(
+            canonical.tools[1].parameters,
+            Some(json!({
+                "type": "object",
+                "properties": {
+                    "type": {"type": "string", "enum": ["OBJECT", "STRING"]},
+                    "tags": {"type": "array", "items": {"type": "string"}}
+                }
+            }))
+        );
+        let response_format = canonical.response_format.as_ref().expect("response format");
+        assert_eq!(response_format.format_type, "json_schema");
+        assert_eq!(
+            response_format.json_schema.as_ref().expect("schema")["schema"]["required"],
+            json!(["name"])
+        );
+
+        let legacy_schema = super::gemini_response_format_to_canonical(Some(&json!({
+            "responseMimeType": "application/json",
+            "responseSchema": {"type": "OBJECT", "properties": {"n": {"type": "INTEGER"}}}
+        })))
+        .expect("legacy response format");
+        assert_eq!(
+            legacy_schema.json_schema.expect("legacy schema")["schema"],
+            json!({"type": "object", "properties": {"n": {"type": "integer"}}})
+        );
     }
 
     #[test]
