@@ -1,0 +1,132 @@
+name: Build VS Codex artifacts
+
+on:
+  push:
+    branches:
+      - codex/vscodex-deploy-6285a202
+    paths:
+      - .github/workflows/build-vscodex.yml
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Source revision matching the deployed Aether gateway
+        required: true
+        default: 6285a2028ed71ebe84d72a67e8c371d4f0c4c30c
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build-vscodex-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  VSCODEX_SOURCE_REF: 6285a2028ed71ebe84d72a67e8c371d4f0c4c30c
+
+jobs:
+  artifacts:
+    name: Test, package VSIX, and publish sidecar
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout matching gateway source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.source_ref || env.VSCODEX_SOURCE_REF }}
+
+      - name: Resolve artifact metadata
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          revision="$(git rev-parse HEAD)"
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "revision=${revision}" >> "${GITHUB_OUTPUT}"
+          echo "short=${revision:0:8}" >> "${GITHUB_OUTPUT}"
+          echo "image=ghcr.io/${owner}/aether-vscodex" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            aether-vscodex/package-lock.json
+            aether-vscodex/web/package-lock.json
+            aether-vscodex/vscode-extension/package-lock.json
+
+      - name: Install module dependencies
+        working-directory: aether-vscodex
+        run: npm ci
+
+      - name: Build and test the Web UI
+        working-directory: aether-vscodex/web
+        run: |
+          npm ci
+          npm run build
+          npm test
+
+      - name: Check and compile the VS Code extension
+        working-directory: aether-vscodex/vscode-extension
+        run: |
+          npm ci
+          npm run check
+          npm run build
+
+      - name: Run module tests
+        working-directory: aether-vscodex
+        run: npm test
+
+      - name: Package the VS Code extension
+        working-directory: aether-vscodex/vscode-extension
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          npx --yes @vscode/vsce@4.0.0 package --no-update-package-json --allow-missing-repository
+          mv "codex-remote-collab-${version}.vsix" "aether-vscodex-${version}.vsix"
+          unzip -l "aether-vscodex-${version}.vsix" | grep 'extension/node_modules/ws/index.js' >/dev/null
+
+      - name: Upload the VSIX
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: aether-vscodex-vsix-sha-${{ steps.source.outputs.short }}
+          path: aether-vscodex/vscode-extension/aether-vscodex-*.vsix
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish the sidecar
+        id: image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ./aether-vscodex
+          file: ./aether-vscodex/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.source.outputs.image }}:sha-${{ steps.source.outputs.short }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.source.outputs.revision }}
+          cache-from: type=gha,scope=vscodex
+          cache-to: type=gha,mode=max,scope=vscodex
+
+      - name: Summarize artifacts
+        env:
+          IMAGE: ${{ steps.source.outputs.image }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+          REVISION: ${{ steps.source.outputs.revision }}
+        shell: bash
+        run: |
+          printf 'Source: `%s`\n\nSidecar: `%s@%s`\n' "${REVISION}" "${IMAGE}" "${DIGEST}" >> "${GITHUB_STEP_SUMMARY}"
