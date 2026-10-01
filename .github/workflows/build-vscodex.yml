@@ -122,6 +122,28 @@ jobs:
           cache-from: type=gha,scope=vscodex
           cache-to: type=gha,mode=max,scope=vscodex
 
+      - name: Export the GitHub-built image
+        env:
+          IMAGE: ${{ steps.source.outputs.image }}:sha-${{ steps.source.outputs.short }}
+          SHORT: ${{ steps.source.outputs.short }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          directory="${RUNNER_TEMP}/vscodex-image"
+          mkdir -p "${directory}"
+          docker pull "${IMAGE}"
+          docker save "${IMAGE}" | gzip > "${directory}/aether-vscodex-sha-${SHORT}.tar.gz"
+          cd "${directory}"
+          sha256sum ./*.tar.gz > SHA256SUMS
+
+      - name: Upload the image archive
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: aether-vscodex-image-sha-${{ steps.source.outputs.short }}
+          path: ${{ runner.temp }}/vscodex-image/
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Summarize artifacts
         env:
           IMAGE: ${{ steps.source.outputs.image }}
