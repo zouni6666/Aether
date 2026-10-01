@@ -635,6 +635,13 @@ pub(crate) async fn resolve_local_openai_responses_candidate_payload_parts_with_
     {
         log_responses_to_chat_tool_conversion(trace_id, body_json, &base_provider_request_body);
     }
+    // This builder does not go through `apply_transport_request_body_semantics`, so the
+    // Claude Code body mimicry must be applied here for Responses -> claude_code requests.
+    crate::ai_serving::transport::claude_code::apply_claude_code_body_mimicry_for_transport(
+        &mut base_provider_request_body,
+        &transport,
+        provider_api_format,
+    );
     let provider_request_body = base_provider_request_body;
 
     if let Some(kiro_auth) = kiro_auth.as_ref() {

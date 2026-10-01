@@ -2041,24 +2041,16 @@ async fn gateway_refreshes_admin_provider_quota_locally_for_gemini_cli_with_trus
 #[tokio::test]
 async fn gateway_refresh_quota_reconciles_unsupported_fixed_provider_endpoints_before_clear_message(
 ) {
-    let cases = [
-        (
-            "provider-claude-code-reconcile",
-            "claude_code",
-            1usize,
-            "claude:messages",
-            "https://api.anthropic.com/v1",
-            "Claude Code 暂不支持自动刷新额度",
-        ),
-        (
-            "provider-vertex-ai-reconcile",
-            "vertex_ai",
-            2usize,
-            "gemini:generate_content",
-            "https://aiplatform.googleapis.com",
-            "Vertex AI 暂不支持自动刷新额度",
-        ),
-    ];
+    // Claude Code supports quota refresh now, so Vertex AI is the remaining fixed provider
+    // whose refresh is unsupported.
+    let cases = [(
+        "provider-vertex-ai-reconcile",
+        "vertex_ai",
+        2usize,
+        "gemini:generate_content",
+        "https://aiplatform.googleapis.com",
+        "Vertex AI 暂不支持自动刷新额度",
+    )];
 
     let providers = cases
         .iter()

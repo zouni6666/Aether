@@ -1,4 +1,13 @@
 export const legacyAdminEnglishMessages: Record<string, string> = {
+  '缺少 OAuth 认证信息，请先授权/刷新 Token': 'Missing OAuth credentials; please authorize or refresh the token first',
+  'Key 状态写入失败': 'Failed to save key status',
+  '找不到有效的 claude:messages 端点': 'No active claude:messages endpoint found',
+  '响应中未包含配额信息': 'The response contains no quota information',
+  '响应中未包含额度窗口': 'The response contains no quota windows',
+  'oauth/usage 请求执行失败': 'oauth/usage request failed',
+  'oauth/usage 返回 401，Token 可能已失效，请刷新 Token': 'oauth/usage returned 401. The token may have expired; please refresh it',
+  'oauth/usage 返回 403，该账号缺少 user:profile 权限（如 Setup Token），无法查询额度': 'oauth/usage returned 403. This account lacks the user:profile scope (e.g. a Setup Token), so quota cannot be queried',
+  'oauth/usage 被限流，请稍后重试': 'oauth/usage was rate limited; please retry later',
   '配置额度、流量限制、会员权益和组合套餐': 'Configure credit, usage limits, membership benefits, and bundled plans',
   '新建套餐': 'Create plan',
   '套餐列表': 'Plans',

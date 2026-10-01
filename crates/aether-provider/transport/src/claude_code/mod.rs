@@ -1,5 +1,6 @@
 mod auth;
 mod fingerprint;
+mod mimicry;
 mod policy;
 mod profile;
 mod request;
@@ -9,6 +10,10 @@ pub use auth::supports_local_claude_code_auth;
 pub use fingerprint::{
     generate_fingerprint, generate_random_fingerprint, header_fingerprint_from_fingerprint,
     sanitize_fingerprint,
+};
+pub use mimicry::{
+    apply_claude_code_body_mimicry, apply_claude_code_body_mimicry_for_transport,
+    ClaudeCodeBodyMimicryContext,
 };
 pub use policy::{
     local_claude_code_transport_unsupported_reason_with_network,

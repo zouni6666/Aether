@@ -140,7 +140,7 @@ fn finalize_openai_chat_provider_request_body(
         mapped_model,
         source_model,
     );
-    crate::ai_serving::finalize_openai_provider_request_with_codex_model_capabilities_and_reasoning_replay_policy(
+    let finalization_failure = crate::ai_serving::finalize_openai_provider_request_with_codex_model_capabilities_and_reasoning_replay_policy(
         provider_request_body,
         crate::ai_serving::OpenAiProviderRequestFinalization {
             source_api_format: "openai:chat",
@@ -170,7 +170,17 @@ fn finalize_openai_chat_provider_request_body(
             provider_api_format,
             "openai_chat_request_finalization",
         )
-    })
+    });
+    if finalization_failure.is_none() {
+        // This builder does not go through `apply_transport_request_body_semantics`, so the
+        // Claude Code body mimicry must be applied here for Chat -> claude_code requests.
+        crate::ai_serving::transport::claude_code::apply_claude_code_body_mimicry_for_transport(
+            provider_request_body,
+            transport,
+            provider_api_format,
+        );
+    }
+    finalization_failure
 }
 
 #[allow(clippy::too_many_arguments)]

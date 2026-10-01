@@ -406,6 +406,69 @@
                         </div>
                       </template>
                     </div>
+                    <!-- Claude Code 账号额度（5H / 周窗口） -->
+                    <div
+                      v-if="provider.provider_type === 'claude_code' && hasClaudeCodeQuotaDisplayData(key)"
+                      class="mt-2 p-2 rounded-md bg-muted/30"
+                    >
+                      <ProviderQuotaSectionHeader
+                        :title="legacyT('账号配额')"
+                        :loading="refreshingQuota"
+                        :updated-text="getClaudeCodeQuotaUpdatedAt(key) ? formatUpdatedAt(getClaudeCodeQuotaUpdatedAt(key) || 0) : null"
+                      />
+                      <div class="grid grid-cols-2 gap-3">
+                        <ProviderQuotaProgressRow
+                          v-for="item in getClaudeCodeQuotaItems(key)"
+                          :key="item.code"
+                          :label="item.label"
+                          :used-percent="item.usedPercent"
+                          :remaining-percent="item.remainingPercent"
+                          :meter-class="getQuotaRemainingClass(item.usedPercent)"
+                          :bar-class="getQuotaRemainingBarColor(item.usedPercent)"
+                        >
+                          <template #footer>
+                            <div
+                              v-if="item.resetSeconds !== null && item.remainingPercent < 100"
+                              class="text-[9px] text-muted-foreground/70 mt-0.5"
+                            >
+                              <template v-if="item.resetSeconds > 0">
+                                {{ formatResetTime(item.resetSeconds) }}{{ legacyT('后重置') }}
+                              </template>
+                              <template v-else>
+                                {{ legacyT('已重置') }}
+                              </template>
+                            </div>
+                          </template>
+                        </ProviderQuotaProgressRow>
+                      </div>
+                      <div
+                        v-if="getClaudeCodeResetCreditAvailableCount(key) !== null"
+                        class="mt-3 border-t border-border/60 pt-2"
+                      >
+                        <div class="flex flex-wrap items-center gap-x-1 gap-y-1 text-[10px] leading-4 text-muted-foreground">
+                          <span>{{ formatCodexResetCreditCountLabel(getClaudeCodeResetCreditAvailableCount(key)) }}</span>
+                          <template v-if="getVisibleClaudeCodeResetCreditItems(key).length > 0">
+                            <span aria-hidden="true">|</span>
+                            <span>{{ legacyT('临近过期') }}</span>
+                            <template
+                              v-for="(item, itemIndex) in getVisibleClaudeCodeResetCreditItems(key)"
+                              :key="`${item.displayKey}-${item.expiresAt}`"
+                            >
+                              <span
+                                :title="item.title"
+                                class="tabular-nums"
+                              >
+                                {{ item.displayKey }} {{ formatCodexResetCreditExpiresAt(item.expiresAt) }}
+                              </span>
+                              <span
+                                v-if="itemIndex < getVisibleClaudeCodeResetCreditItems(key).length - 1"
+                                aria-hidden="true"
+                              >·</span>
+                            </template>
+                          </template>
+                        </div>
+                      </div>
+                    </div>
                     <!-- Gemini CLI 上游模型配额 -->
                     <div
                       v-if="provider.provider_type === 'gemini_cli' && hasGeminiCliQuotaDisplayData(key)"
@@ -1000,6 +1063,7 @@ import {
 import { parseApiError } from '@/utils/errorParser'
 import { useEscapeKey } from '@/composables/useEscapeKey'
 import { getI18nLocale, useI18n } from '@/i18n'
+import type { MessageKey } from '@/i18n/messages'
 import Button from '@/components/ui/button.vue'
 import Card from '@/components/ui/card.vue'
 import { useToast } from '@/composables/useToast'
@@ -1918,7 +1982,7 @@ function quotaSnapshotHasDisplayData(quota: QuotaStatusSnapshot | null | undefin
 
 function getQuotaSnapshotForProvider(
   key: EndpointAPIKey,
-  providerType: 'codex' | 'kiro' | 'windsurf' | 'antigravity' | 'chatgpt_web' | 'gemini_cli' | 'grok' | 'xai',
+  providerType: 'codex' | 'kiro' | 'windsurf' | 'antigravity' | 'chatgpt_web' | 'gemini_cli' | 'claude_code' | 'grok' | 'xai',
 ): QuotaStatusSnapshot | null {
   const quota = key.status_snapshot?.quota
   if (!quota) return null
@@ -2795,6 +2859,24 @@ function shouldAutoRefreshGeminiCliQuota(): boolean {
   return false
 }
 
+function shouldAutoRefreshClaudeCodeQuota(): boolean {
+  if (provider.value?.provider_type !== 'claude_code') return false
+  const now = Math.floor(Date.now() / 1000)
+
+  for (const { key } of allKeys.value) {
+    if (!key.is_active) continue
+    if (isTokenExpiringSoon(key, now)) return true
+    if (!hasClaudeCodeQuotaDisplayData(key)) return true
+
+    const updatedAt = getClaudeCodeQuotaUpdatedAt(key)
+    if (typeof updatedAt !== 'number' || (now - updatedAt) > AUTO_QUOTA_REFRESH_STALE_SECONDS) {
+      return true
+    }
+  }
+
+  return false
+}
+
 function shouldAutoRefreshKiroQuota(): boolean {
   if (provider.value?.provider_type !== 'kiro') return false
   const now = Math.floor(Date.now() / 1000)
@@ -2990,12 +3072,14 @@ async function autoRefreshQuotaInBackground(): Promise<boolean> {
   if (refreshingQuota.value) return false
 
   const providerType = provider.value?.provider_type
-  if (providerType !== 'codex' && providerType !== 'gemini_cli' && providerType !== 'antigravity' && providerType !== 'kiro' && providerType !== 'windsurf' && providerType !== 'chatgpt_web' && providerType !== 'grok' && providerType !== 'xai') return false
+  if (providerType !== 'codex' && providerType !== 'claude_code' && providerType !== 'gemini_cli' && providerType !== 'antigravity' && providerType !== 'kiro' && providerType !== 'windsurf' && providerType !== 'chatgpt_web' && providerType !== 'grok' && providerType !== 'xai') return false
 
   // 检查是否需要刷新
   let shouldRefresh = false
   if (providerType === 'codex') {
     shouldRefresh = shouldAutoRefreshCodexQuota()
+  } else if (providerType === 'claude_code') {
+    shouldRefresh = shouldAutoRefreshClaudeCodeQuota()
   } else if (providerType === 'gemini_cli') {
     shouldRefresh = shouldAutoRefreshGeminiCliQuota()
   } else if (providerType === 'antigravity') {
@@ -3016,6 +3100,8 @@ async function autoRefreshQuotaInBackground(): Promise<boolean> {
   let hadCachedQuota = false
   if (providerType === 'codex') {
     hadCachedQuota = allKeys.value.some(({ key }) => key.is_active && hasCodexQuotaDisplayData(key))
+  } else if (providerType === 'claude_code') {
+    hadCachedQuota = allKeys.value.some(({ key }) => key.is_active && hasClaudeCodeQuotaDisplayData(key))
   } else if (providerType === 'gemini_cli') {
     hadCachedQuota = allKeys.value.some(({ key }) => key.is_active && hasGeminiCliQuotaDisplayData(key))
   } else if (providerType === 'antigravity') {
@@ -3562,6 +3648,90 @@ interface AntigravityQuotaItem {
   remainingPercent: number
   resetSeconds: number | null
   detail?: string
+}
+
+interface ClaudeCodeQuotaItem {
+  code: string
+  label: string
+  usedPercent: number
+  remainingPercent: number
+  resetSeconds: number | null
+}
+
+const CLAUDE_CODE_QUOTA_WINDOWS: Record<string, { labelKey: MessageKey, sortOrder: number }> = {
+  '5h': { labelKey: 'poolQuota.claudeCode.window5h', sortOrder: 0 },
+  weekly: { labelKey: 'poolQuota.claudeCode.weekly', sortOrder: 1 },
+  weekly_sonnet: { labelKey: 'poolQuota.claudeCode.weeklySonnet', sortOrder: 2 },
+  weekly_fable: { labelKey: 'poolQuota.claudeCode.weeklyFable', sortOrder: 3 },
+}
+
+function getClaudeCodeQuotaUpdatedAt(key: EndpointAPIKey): number | undefined {
+  const quota = getQuotaSnapshotForProvider(key, 'claude_code')
+  const quotaUpdatedAt = getQuotaSnapshotUpdatedAt(quota)
+  if (typeof quotaUpdatedAt === 'number') return quotaUpdatedAt
+  const updatedAt = Number(key.upstream_metadata?.claude_code?.updated_at ?? NaN)
+  return Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : undefined
+}
+
+function getClaudeCodeResetCreditsDisplay(key: EndpointAPIKey): QuotaResetCreditsSnapshot | null {
+  return getQuotaSnapshotForProvider(key, 'claude_code')?.reset_credits
+    ?? key.upstream_metadata?.claude_code?.reset_credits
+    ?? null
+}
+
+function getClaudeCodeResetCreditAvailableCount(key: EndpointAPIKey): number | null {
+  return getCodexResetCreditAvailableCountFromSnapshot(getClaudeCodeResetCreditsDisplay(key))
+}
+
+function getVisibleClaudeCodeResetCreditItems(key: EndpointAPIKey) {
+  return getVisibleCodexResetCreditItemsFromSnapshot(
+    getClaudeCodeResetCreditsDisplay(key),
+    undefined,
+    5,
+    legacyT('Claude 重置机会'),
+  )
+}
+
+function hasClaudeCodeQuotaDisplayData(key: EndpointAPIKey): boolean {
+  return getClaudeCodeQuotaItems(key).length > 0
+}
+
+function getClaudeCodeQuotaItems(key: EndpointAPIKey): ClaudeCodeQuotaItem[] {
+  const quota = getQuotaSnapshotForProvider(key, 'claude_code')
+  const windows = quota?.windows
+  if (!quota || !Array.isArray(windows)) return []
+
+  return windows
+    .map((window) => {
+      const code = String(window?.code || '').trim().toLowerCase()
+      if (!code) return null
+
+      const usedPercent = getQuotaWindowUsedPercent(window)
+      const remainingPercent = getQuotaWindowRemainingPercent(window)
+      if (usedPercent === undefined && remainingPercent === undefined) return null
+
+      const normalizedUsedPercent = usedPercent !== undefined
+        ? usedPercent
+        : Math.max(100 - (remainingPercent ?? 0), 0)
+      const normalizedRemainingPercent = remainingPercent !== undefined
+        ? remainingPercent
+        : Math.max(100 - normalizedUsedPercent, 0)
+      const presentation = CLAUDE_CODE_QUOTA_WINDOWS[code]
+
+      return {
+        item: {
+          code,
+          label: t(presentation?.labelKey ?? 'poolQuota.claudeCode.unknownWindow'),
+          usedPercent: normalizedUsedPercent,
+          remainingPercent: normalizedRemainingPercent,
+          resetSeconds: getQuotaWindowLiveResetSeconds(quota, window),
+        } satisfies ClaudeCodeQuotaItem,
+        sortOrder: presentation?.sortOrder ?? 9,
+      }
+    })
+    .filter((entry): entry is { item: ClaudeCodeQuotaItem, sortOrder: number } => entry !== null)
+    .sort((a, b) => a.sortOrder - b.sortOrder)
+    .map(entry => entry.item)
 }
 
 interface GeminiCliQuotaItem {

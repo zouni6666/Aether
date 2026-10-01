@@ -82,13 +82,13 @@ pub const CLAUDE_CODE_TRANSPORT_IDENTITY_2026_04: ClaudeCodeTransportIdentityPro
         version: ClaudeCodeTransportIdentityProfileVersion::V2026_04,
         transport_profile_id: "claude_code_nodejs",
         anthropic_version: "2023-06-01",
-        cli_version: "2.1.161",
+        cli_version: "2.1.284",
         stainless_lang: "js",
-        stainless_package_version: "0.94.0",
+        stainless_package_version: "0.112.1",
         stainless_os: "Linux",
         stainless_arch: "arm64",
         stainless_runtime: "node",
-        stainless_runtime_version: "v24.3.0",
+        stainless_runtime_version: "v26.3.0",
         stainless_retry_count: "0",
         stainless_timeout: "600",
         message_required_betas: MESSAGE_BETAS_2026_04,
@@ -286,14 +286,14 @@ mod tests {
         let profile = *current_claude_code_transport_identity_profile();
 
         assert_eq!(profile.version().as_str(), "2026-04");
-        assert_eq!(profile.cli_version(), "2.1.161");
+        assert_eq!(profile.cli_version(), "2.1.284");
         assert_eq!(profile.billing_cli_version(), profile.cli_version());
         assert_eq!(
             profile.user_agent(),
             format!("claude-cli/{} (external, cli)", profile.cli_version())
         );
-        assert_eq!(profile.stainless_package_version(), "0.94.0");
-        assert_eq!(profile.stainless_runtime_version(), "v24.3.0");
+        assert_eq!(profile.stainless_package_version(), "0.112.1");
+        assert_eq!(profile.stainless_runtime_version(), "v26.3.0");
     }
 
     #[test]

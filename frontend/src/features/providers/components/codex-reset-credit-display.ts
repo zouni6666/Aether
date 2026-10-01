@@ -272,6 +272,7 @@ export function getVisibleCodexResetCreditItems(
   snapshot: QuotaResetCreditsSnapshot | null | undefined,
   nowUnixSecs = Math.floor(Date.now() / 1000),
   limit = 5,
+  titleLabel = 'Codex 重置机会',
 ): CodexResetCreditDisplayItem[] {
   const credits = snapshot?.credits
   if (!snapshot || !Array.isArray(credits)) return []
@@ -295,7 +296,7 @@ export function getVisibleCodexResetCreditItems(
       return {
         ...item,
         displayKey,
-        title: `Codex 重置机会 ${displayKey}`,
+        title: `${titleLabel} ${displayKey}`,
       } satisfies CodexResetCreditDisplayItem
     })
 }

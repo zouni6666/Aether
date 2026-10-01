@@ -529,8 +529,22 @@ export interface GeminiCliUpstreamMetadata {
   quota_by_model?: Record<string, GeminiCliModelQuota> | null
 }
 
+export interface ClaudeCodeUpstreamMetadata {
+  updated_at?: number
+  five_hour_used_percent?: number
+  five_hour_reset_at?: number
+  seven_day_used_percent?: number
+  seven_day_reset_at?: number
+  seven_day_sonnet_used_percent?: number
+  seven_day_sonnet_reset_at?: number
+  seven_day_fable_used_percent?: number
+  seven_day_fable_reset_at?: number
+  reset_credits?: QuotaResetCreditsSnapshot
+}
+
 export interface UpstreamMetadata {
   codex?: CodexUpstreamMetadata
+  claude_code?: ClaudeCodeUpstreamMetadata
   antigravity?: AntigravityUpstreamMetadata
   kiro?: KiroUpstreamMetadata
   windsurf?: WindsurfUpstreamMetadata

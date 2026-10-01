@@ -404,6 +404,200 @@ pub fn parse_antigravity_quota_summary_response(
     (!parsed_groups.is_empty()).then_some(serde_json::Value::Array(parsed_groups))
 }
 
+/// Windows reported by `GET /api/oauth/usage`, as `(response key, metadata prefix)`.
+pub const CLAUDE_CODE_USAGE_WINDOWS: [(&str, &str); 4] = [
+    ("five_hour", "five_hour"),
+    ("seven_day", "seven_day"),
+    ("seven_day_sonnet", "seven_day_sonnet"),
+    ("seven_day_overage_included", "seven_day_fable"),
+];
+
+/// Parses the Anthropic OAuth usage response into the `claude_code` metadata bucket.
+///
+/// Each window carries `utilization` (percent, 0-100) and `resets_at` (RFC 3339).
+/// Windows that are absent or `null` (e.g. plans without a Sonnet/Fable window) are
+/// skipped; `None` is returned when no window is present at all.
+pub fn parse_claude_code_oauth_usage_response(
+    value: &serde_json::Value,
+    updated_at_unix_secs: u64,
+) -> Option<serde_json::Value> {
+    let root = value.as_object()?;
+    let mut bucket = serde_json::Map::new();
+    for (response_key, prefix) in CLAUDE_CODE_USAGE_WINDOWS {
+        let Some(window) = root
+            .get(response_key)
+            .and_then(serde_json::Value::as_object)
+        else {
+            continue;
+        };
+        let utilization = window
+            .get("utilization")
+            .and_then(|value| match value {
+                serde_json::Value::Number(number) => number.as_f64(),
+                serde_json::Value::String(text) => text.trim().parse::<f64>().ok(),
+                _ => None,
+            })
+            .filter(|value| value.is_finite());
+        let reset_at = window
+            .get("resets_at")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|text| chrono::DateTime::parse_from_rfc3339(text.trim()).ok())
+            .and_then(|time| u64::try_from(time.timestamp()).ok());
+        if utilization.is_none() && reset_at.is_none() {
+            continue;
+        }
+        if let Some(utilization) = utilization {
+            bucket.insert(
+                format!("{prefix}_used_percent"),
+                serde_json::json!(utilization.clamp(0.0, 100.0)),
+            );
+        }
+        if let Some(reset_at) = reset_at {
+            bucket.insert(format!("{prefix}_reset_at"), serde_json::json!(reset_at));
+        }
+    }
+    if bucket.is_empty() {
+        return None;
+    }
+    // Explicit null so a refresh overwrites (rather than keeps) credits that were used up.
+    bucket.insert(
+        "reset_credits".to_string(),
+        parse_claude_code_reset_credits(root, updated_at_unix_secs)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    bucket.insert(
+        "updated_at".to_string(),
+        serde_json::json!(updated_at_unix_secs),
+    );
+    Some(serde_json::Value::Object(bucket))
+}
+
+/// Projects the `cedar_ember` block (returned with `?cedar_ember=1`) into the same
+/// `reset_credits` shape codex uses. Upstream grant/organization ids are never copied; each
+/// usable grant becomes one entry, and `available_count` sums their remaining resets.
+fn parse_claude_code_reset_credits(
+    root: &serde_json::Map<String, serde_json::Value>,
+    now_unix_secs: u64,
+) -> Option<serde_json::Value> {
+    let grants = root
+        .get("cedar_ember")
+        .and_then(serde_json::Value::as_object)?
+        .get("grants")
+        .and_then(serde_json::Value::as_array)?;
+    let parse_time = |grant: &serde_json::Map<String, serde_json::Value>, field: &str| {
+        grant
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .and_then(|text| chrono::DateTime::parse_from_rfc3339(text.trim()).ok())
+            .and_then(|time| u64::try_from(time.timestamp()).ok())
+    };
+    let mut available_count = 0u64;
+    let mut credits = Vec::new();
+    for grant in grants.iter().filter_map(serde_json::Value::as_object) {
+        let resets_left = grant
+            .get("resets_left")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let has_clears = grant
+            .get("clears")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|clears| !clears.is_empty());
+        let paused = grant
+            .get("paused")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let starts_at = parse_time(grant, "starts_at");
+        let expires_at = parse_time(grant, "ends_at");
+        if resets_left == 0
+            || !has_clears
+            || paused
+            || starts_at.is_some_and(|value| value > now_unix_secs)
+            || expires_at.is_some_and(|value| value <= now_unix_secs)
+        {
+            continue;
+        }
+        available_count += resets_left;
+        let Some(expires_at) = expires_at else {
+            continue;
+        };
+        credits.push(serde_json::json!({
+            "display_key": format!("Key-{}", credits.len() + 1),
+            "status": "available",
+            "expires_at": expires_at,
+            "remaining_seconds": expires_at - now_unix_secs,
+        }));
+    }
+    if available_count == 0 {
+        return None;
+    }
+    Some(serde_json::json!({
+        "available_count": available_count,
+        "updated_at": now_unix_secs,
+        "detail_source": "claude_oauth_usage",
+        "detail_status": "ok",
+        "credits": credits,
+    }))
+}
+
+/// Parses the `anthropic-ratelimit-unified-*` response headers into a partial `claude_code`
+/// metadata bucket (same field names as [`parse_claude_code_oauth_usage_response`]).
+///
+/// Utilization headers are 0-1 fractions and are stored as percent; reset headers are Unix
+/// seconds (millisecond values are normalized). Returns `None` when no window is reported.
+pub fn parse_claude_code_usage_headers(
+    headers: &BTreeMap<String, String>,
+    updated_at_unix_secs: u64,
+) -> Option<serde_json::Value> {
+    let normalized = headers
+        .iter()
+        .map(|(key, value)| (key.trim().to_ascii_lowercase(), value.trim().to_string()))
+        .collect::<BTreeMap<_, _>>();
+    let mut bucket = serde_json::Map::new();
+    for (header_window, prefix) in [
+        ("5h", "five_hour"),
+        ("7d", "seven_day"),
+        ("7d_oi", "seven_day_fable"),
+    ] {
+        let header = |suffix: &str| {
+            normalized
+                .get(&format!(
+                    "anthropic-ratelimit-unified-{header_window}-{suffix}"
+                ))
+                .map(String::as_str)
+        };
+        if let Some(utilization) = header("utilization")
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| value.is_finite())
+        {
+            bucket.insert(
+                format!("{prefix}_used_percent"),
+                serde_json::json!((utilization * 100.0).clamp(0.0, 100.0)),
+            );
+        }
+        if let Some(reset_at) = header("reset")
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(|value| {
+                if value > 100_000_000_000 {
+                    value / 1_000
+                } else {
+                    value
+                }
+            })
+            .filter(|value| *value > 0)
+        {
+            bucket.insert(format!("{prefix}_reset_at"), serde_json::json!(reset_at));
+        }
+    }
+    if bucket.is_empty() {
+        return None;
+    }
+    bucket.insert(
+        "updated_at".to_string(),
+        serde_json::json!(updated_at_unix_secs),
+    );
+    Some(serde_json::Value::Object(bucket))
+}
+
 pub fn parse_gemini_cli_retrieve_user_quota_response(
     value: &serde_json::Value,
     updated_at_unix_secs: u64,
@@ -7702,5 +7896,165 @@ mod tests {
         let serialized = parsed.to_string();
         assert!(!serialized.contains("upstream-secret"));
         assert!(!serialized.contains("user:password"));
+    }
+}
+
+#[cfg(test)]
+mod claude_code_quota_tests {
+    use super::{parse_claude_code_oauth_usage_response, parse_claude_code_usage_headers};
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn parses_cedar_ember_grants_into_reset_credits() {
+        let parsed = parse_claude_code_oauth_usage_response(
+            &json!({
+                "five_hour": {"utilization": 65.0, "resets_at": "2027-01-15T08:00:00Z"},
+                "cedar_ember": {
+                    "eligible": true,
+                    "grants": [
+                        {"id": "launch", "resets_left": 2, "clears": ["five_hour"],
+                         "ends_at": "2027-01-20T00:00:00Z"},
+                        {"id": "later", "resets_left": 1, "clears": ["five_hour"],
+                         "starts_at": "2027-02-01T00:00:00Z"},
+                        {"id": "paused", "resets_left": 1, "clears": ["five_hour"], "paused": true},
+                        {"id": "spent", "resets_left": 0, "clears": ["five_hour"]},
+                        {"id": "expired", "resets_left": 1, "clears": ["five_hour"],
+                         "ends_at": "2027-01-01T00:00:00Z"}
+                    ]
+                }
+            }),
+            1_800_000_000,
+        )
+        .expect("usage should parse");
+
+        let credits = &parsed["reset_credits"];
+        assert_eq!(credits["available_count"], json!(2));
+        assert_eq!(credits["credits"].as_array().map(Vec::len), Some(1));
+        assert_eq!(credits["credits"][0]["display_key"], json!("Key-1"));
+        assert_eq!(credits["credits"][0]["expires_at"], json!(1_800_403_200u64));
+        assert!(credits["credits"][0].get("id").is_none());
+        assert!(!credits.to_string().contains("launch"));
+    }
+
+    #[test]
+    fn real_cedar_ember_response_survives_metadata_redaction() {
+        // Shape captured from a live Claude Pro account (unrelated fields trimmed).
+        let parsed = parse_claude_code_oauth_usage_response(
+            &json!({
+                "five_hour": {"utilization": 32.0, "resets_at": "2026-09-29T19:19:59.933008+00:00"},
+                "cedar_ember": {
+                    "eligible": true,
+                    "at_limit": false,
+                    "grants": [{
+                        "id": "opus55-launch-promax-20260921",
+                        "label": "Claude Opus 5.5 launch",
+                        "resets_total": 1,
+                        "resets_left": 1,
+                        "starts_at": "2026-09-22T16:00:00+00:00",
+                        "ends_at": "2026-10-22T16:00:00+00:00",
+                        "clears": ["five_hour", "seven_day"],
+                        "paused": false,
+                        "usable_now": true,
+                        "use_requires_limit": false
+                    }],
+                    "next_grant_id": "opus55-launch-promax-20260921"
+                }
+            }),
+            1_790_699_000,
+        )
+        .expect("usage should parse");
+        assert_eq!(parsed["reset_credits"]["available_count"], json!(1));
+
+        let safe = crate::provider::redaction::admin_provider_upstream_metadata_safe_json(Some(
+            &json!({ "claude_code": parsed }),
+        ));
+        assert_eq!(
+            safe["claude_code"]["reset_credits"]["available_count"],
+            json!(1),
+            "redaction dropped reset_credits: {safe}"
+        );
+    }
+
+    #[test]
+    fn cedar_ember_null_or_empty_omits_reset_credits() {
+        let parsed = parse_claude_code_oauth_usage_response(
+            &json!({"five_hour": {"utilization": 1.0}, "cedar_ember": null}),
+            1,
+        )
+        .expect("usage should parse");
+        assert!(parsed["reset_credits"].is_null());
+    }
+
+    #[test]
+    fn parses_unified_ratelimit_headers_into_percent_and_reset() {
+        let headers = BTreeMap::from([
+            (
+                "Anthropic-Ratelimit-Unified-5h-Utilization".to_string(),
+                "0.42".to_string(),
+            ),
+            (
+                "anthropic-ratelimit-unified-5h-reset".to_string(),
+                "1800003600".to_string(),
+            ),
+            (
+                "anthropic-ratelimit-unified-7d-utilization".to_string(),
+                "1.0".to_string(),
+            ),
+            (
+                "anthropic-ratelimit-unified-7d-reset".to_string(),
+                "1800400000000".to_string(),
+            ),
+            (
+                "anthropic-ratelimit-unified-7d_oi-utilization".to_string(),
+                "0.1".to_string(),
+            ),
+        ]);
+        let parsed =
+            parse_claude_code_usage_headers(&headers, 1_800_000_000).expect("headers should parse");
+
+        assert_eq!(parsed["five_hour_used_percent"], json!(42.0));
+        assert_eq!(parsed["five_hour_reset_at"], json!(1_800_003_600u64));
+        assert_eq!(parsed["seven_day_used_percent"], json!(100.0));
+        // Millisecond timestamps are normalized to seconds.
+        assert_eq!(parsed["seven_day_reset_at"], json!(1_800_400_000u64));
+        assert_eq!(parsed["seven_day_fable_used_percent"], json!(10.0));
+        assert!(parsed.get("seven_day_fable_reset_at").is_none());
+        assert_eq!(parsed["updated_at"], json!(1_800_000_000u64));
+    }
+
+    #[test]
+    fn unified_ratelimit_headers_absent_yield_none() {
+        let headers =
+            BTreeMap::from([("content-type".to_string(), "application/json".to_string())]);
+        assert!(parse_claude_code_usage_headers(&headers, 1).is_none());
+    }
+
+    #[test]
+    fn parses_windows_and_skips_null_ones() {
+        let parsed = parse_claude_code_oauth_usage_response(
+            &json!({
+                "five_hour": {"utilization": 37.5, "resets_at": "2027-01-15T08:00:00.000000+00:00"},
+                "seven_day": {"utilization": 12, "resets_at": "2027-01-20T00:00:00Z"},
+                "seven_day_sonnet": null,
+                "seven_day_overage_included": {"utilization": 3.0, "resets_at": null}
+            }),
+            1_800_000_000,
+        )
+        .expect("usage windows should parse");
+
+        assert_eq!(parsed["updated_at"], json!(1_800_000_000u64));
+        assert_eq!(parsed["five_hour_used_percent"], json!(37.5));
+        assert_eq!(parsed["five_hour_reset_at"], json!(1_800_000_000u64));
+        assert_eq!(parsed["seven_day_used_percent"], json!(12.0));
+        assert!(parsed.get("seven_day_sonnet_used_percent").is_none());
+        assert_eq!(parsed["seven_day_fable_used_percent"], json!(3.0));
+        assert!(parsed.get("seven_day_fable_reset_at").is_none());
+    }
+
+    #[test]
+    fn returns_none_without_any_window() {
+        assert!(parse_claude_code_oauth_usage_response(&json!({}), 1).is_none());
+        assert!(parse_claude_code_oauth_usage_response(&json!({"five_hour": null}), 1).is_none());
     }
 }

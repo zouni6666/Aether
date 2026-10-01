@@ -551,6 +551,24 @@ async fn sync_grok_quota_from_report_context(
 
 async fn apply_local_sync_report_effect(state: &AppState, payload: &GatewaySyncReportRequest) {
     apply_local_gemini_file_mapping_report_effect(state, payload).await;
+    if claude_code_quota_headers_reportable(payload.status_code) {
+        if let Err(err) = sync_claude_code_quota_from_response_headers(
+            state,
+            payload.report_context.as_ref(),
+            &payload.headers,
+        )
+        .await
+        {
+            warn!(
+                event_name = "claude_code_realtime_quota_sync_failed",
+                log_type = "ops",
+                report_kind = %payload.report_kind,
+                report_request_id = %short_request_id(report_request_id(payload.report_context.as_ref())),
+                error = ?err,
+                "gateway failed to persist claude_code realtime quota from sync response headers"
+            );
+        }
+    }
     if (200..300).contains(&payload.status_code) {
         if let Err(err) = sync_codex_quota_from_response_headers(
             state,
@@ -638,6 +656,24 @@ async fn apply_local_stream_report_effect(state: &AppState, payload: &GatewayStr
                 report_request_id = %short_request_id(report_request_id(payload.report_context.as_ref())),
                 error = ?err,
                 "gateway failed to persist codex realtime quota from stream response headers"
+            );
+        }
+    }
+    if claude_code_quota_headers_reportable(payload.status_code) {
+        if let Err(err) = sync_claude_code_quota_from_response_headers(
+            state,
+            payload.report_context.as_ref(),
+            &payload.headers,
+        )
+        .await
+        {
+            warn!(
+                event_name = "claude_code_realtime_quota_sync_failed",
+                log_type = "ops",
+                report_kind = %payload.report_kind,
+                report_request_id = %short_request_id(report_request_id(payload.report_context.as_ref())),
+                error = ?err,
+                "gateway failed to persist claude_code realtime quota from stream response headers"
             );
         }
     }
@@ -894,6 +930,134 @@ async fn sync_codex_quota_from_response_headers(
         observed_credential_generation,
     )
     .await
+}
+
+fn claude_code_quota_headers_reportable(status_code: u16) -> bool {
+    // Real limit 429s carry the unified headers (fingerprint-rejection 429s do not, and then
+    // the parser finds nothing to record).
+    (200..300).contains(&status_code) || status_code == 429
+}
+
+/// Passive sampling of Anthropic's `anthropic-ratelimit-unified-*` response headers into the
+/// `claude_code` quota metadata, so the 5H / weekly windows stay fresh between active refreshes.
+async fn sync_claude_code_quota_from_response_headers(
+    state: &AppState,
+    report_context: Option<&Value>,
+    headers: &BTreeMap<String, String>,
+) -> Result<bool, GatewayError> {
+    let observed_at_unix_secs = report_context_u64(
+        report_context,
+        "provider_response_headers_observed_at_unix_ms",
+    )
+    .map(|value| value / 1_000)
+    .filter(|value| *value > 0)
+    .unwrap_or_else(current_unix_secs);
+    let parsed = report_context_provider_response_headers(report_context)
+        .and_then(|headers| {
+            admin_provider_quota_pure::parse_claude_code_usage_headers(
+                &headers,
+                observed_at_unix_secs,
+            )
+        })
+        .or_else(|| {
+            admin_provider_quota_pure::parse_claude_code_usage_headers(
+                headers,
+                observed_at_unix_secs,
+            )
+        });
+    let Some(parsed) = parsed else {
+        return Ok(false);
+    };
+    let Some(key_id) = report_context_key_id(report_context) else {
+        return Ok(false);
+    };
+
+    for attempt in 0..RUNTIME_METADATA_CAS_MAX_ATTEMPTS {
+        let Some(key) = state
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&key_id))
+            .await?
+            .into_iter()
+            .next()
+        else {
+            return Ok(false);
+        };
+        let Some(provider) = state
+            .read_provider_catalog_providers_by_ids(std::slice::from_ref(&key.provider_id))
+            .await?
+            .into_iter()
+            .next()
+        else {
+            return Ok(false);
+        };
+        if !provider
+            .provider_type
+            .trim()
+            .eq_ignore_ascii_case("claude_code")
+        {
+            return Ok(false);
+        }
+
+        let expected_namespace_value =
+            upstream_metadata_namespace_value(key.upstream_metadata.as_ref(), "claude_code");
+        let mut bucket = expected_namespace_value
+            .as_ref()
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        // Never let an older observation overwrite a newer active refresh.
+        if bucket
+            .get("updated_at")
+            .and_then(admin_provider_quota_pure::coerce_json_u64)
+            .is_some_and(|stored| stored > observed_at_unix_secs)
+        {
+            return Ok(false);
+        }
+        let Some(patch) = parsed.as_object() else {
+            return Ok(false);
+        };
+        // Headers can describe only some windows; absent windows keep their stored value.
+        for (field, value) in patch {
+            bucket.insert(field.clone(), value.clone());
+        }
+        let next_bucket = Value::Object(bucket);
+        if expected_namespace_value.as_ref() == Some(&next_bucket) {
+            return Ok(false);
+        }
+
+        let updated_upstream_metadata = merge_metadata_object(
+            key.upstream_metadata.as_ref(),
+            "claude_code",
+            next_bucket.clone(),
+        );
+        let updated_status_snapshot = sync_provider_key_quota_status_snapshot(
+            key.status_snapshot.as_ref(),
+            provider.provider_type.as_str(),
+            updated_upstream_metadata.as_ref(),
+            "response_headers",
+        );
+        let updated = state
+            .update_provider_catalog_key_runtime_metadata(
+                &ProviderCatalogKeyRuntimeMetadataUpdate {
+                    key_id: key_id.clone(),
+                    namespace: "claude_code".to_string(),
+                    expected_upstream_metadata_value: expected_namespace_value,
+                    upstream_metadata_value: next_bucket,
+                    status_snapshot_patch: quota_status_snapshot_patch(
+                        updated_status_snapshot.as_ref(),
+                    ),
+                    updated_at_unix_secs: Some(observed_at_unix_secs),
+                },
+            )
+            .await?;
+        if updated {
+            return Ok(true);
+        }
+        if attempt + 1 < RUNTIME_METADATA_CAS_MAX_ATTEMPTS {
+            let backoff_us = 50_u64.saturating_mul((attempt + 1) as u64).min(1_000);
+            tokio::time::sleep(Duration::from_micros(backoff_us)).await;
+        }
+    }
+    Ok(false)
 }
 
 async fn sync_codex_websocket_quota_from_stream_payload(

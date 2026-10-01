@@ -1189,7 +1189,7 @@ mod tests {
         );
         assert_eq!(
             build_body(compat_behavior)["system"][0]["text"],
-            "x-anthropic-billing-header: cc_version=2.1.161.abc; cc_entrypoint=cli;"
+            "x-anthropic-billing-header: cc_version=2.1.284.abc; cc_entrypoint=cli;"
         );
 
         let mut legacy = sample_transport("claude_code");

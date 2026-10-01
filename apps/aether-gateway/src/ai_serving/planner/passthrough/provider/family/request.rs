@@ -314,6 +314,20 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
         return Ok(None);
     }
 
+    // Same-format requests skip `apply_transport_request_body_semantics`, so the opt-in
+    // Claude Code body mimicry has to be applied here as well.
+    if crate::ai_serving::transport::claude_code::apply_claude_code_body_mimicry_for_transport(
+        &mut base_provider_request_body,
+        &transport,
+        prepared.provider_api_format.as_str(),
+    ) {
+        compatibility_edits.push(SameFormatProviderCompatibilityEdit {
+            field: "body".to_string(),
+            action: SameFormatProviderCompatibilityEditAction::ProviderCompatibilityRewrite,
+            detail: "applied Claude Code body mimicry for provider compatibility".to_string(),
+        });
+    }
+
     let antigravity_auth = if prepared.is_antigravity {
         let mut antigravity_support = classify_local_antigravity_request_support(
             &transport,

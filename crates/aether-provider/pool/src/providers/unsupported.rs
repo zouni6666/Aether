@@ -28,12 +28,6 @@ impl ProviderPoolAdapter for UnsupportedQuotaProviderPoolAdapter {
     }
 }
 
-pub const CLAUDE_CODE_PROVIDER_POOL_ADAPTER: UnsupportedQuotaProviderPoolAdapter =
-    UnsupportedQuotaProviderPoolAdapter::new(
-        "claude_code",
-        "Claude Code 暂不支持自动刷新额度：上游没有稳定可用的账号额度查询接口",
-    );
-
 pub const VERTEX_AI_PROVIDER_POOL_ADAPTER: UnsupportedQuotaProviderPoolAdapter =
     UnsupportedQuotaProviderPoolAdapter::new(
         "vertex_ai",

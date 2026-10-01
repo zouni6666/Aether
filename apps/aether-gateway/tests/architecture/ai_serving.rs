@@ -1453,7 +1453,7 @@ fn ai_serving_planner_separates_local_candidate_resolution_from_ranking() {
         "KiroProviderPoolAdapter",
         "ChatGptWebProviderPoolAdapter",
         "XaiProviderPoolAdapter",
-        "CLAUDE_CODE_PROVIDER_POOL_ADAPTER",
+        "ClaudeCodeProviderPoolAdapter",
         "VERTEX_AI_PROVIDER_POOL_ADAPTER",
         "provider_types_for_capability",
         "supports_quota_refresh",
@@ -1537,8 +1537,14 @@ fn ai_serving_planner_separates_local_candidate_resolution_from_ranking() {
             "crates/aether-provider/pool/src/providers/unsupported.rs",
             vec![
                 "UnsupportedQuotaProviderPoolAdapter",
-                "CLAUDE_CODE_PROVIDER_POOL_ADAPTER",
                 "VERTEX_AI_PROVIDER_POOL_ADAPTER",
+            ],
+        ),
+        (
+            "crates/aether-provider/pool/src/providers/claude_code.rs",
+            vec![
+                "ClaudeCodeProviderPoolAdapter",
+                "build_claude_code_pool_quota_request",
             ],
         ),
     ] {

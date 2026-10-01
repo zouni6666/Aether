@@ -1,6 +1,8 @@
 use serde_json::{Map, Value};
 
-use crate::claude_code::sanitize_claude_code_request_body;
+use crate::claude_code::{
+    apply_claude_code_body_mimicry_for_transport, sanitize_claude_code_request_body,
+};
 use crate::snapshot::GatewayProviderTransportSnapshot;
 use crate::vertex::is_vertex_transport_context;
 
@@ -40,6 +42,11 @@ pub fn apply_transport_request_body_semantics(
             .trim()
             .eq_ignore_ascii_case("claude_code")
     {
+        apply_claude_code_body_mimicry_for_transport(
+            provider_request_body,
+            transport,
+            provider_api_format.as_str(),
+        );
         sanitize_claude_code_request_body(provider_request_body);
     }
     aether_ai_formats::apply_xai_upstream_payload_edits(
@@ -450,5 +457,38 @@ mod tests {
 
         assert!(error.message().contains("cannot be mapped"));
         assert!(body.get("input").is_some());
+    }
+
+    #[test]
+    fn claude_code_body_mimicry_is_applied_by_default_to_claude_code_only() {
+        let pi_body = || {
+            json!({
+                "model": "claude-sonnet-5-5",
+                "max_tokens": 1024,
+                "system": "You are an expert coding assistant operating inside pi.",
+                "messages": [{"role": "user", "content": "hello world, please help"}]
+            })
+        };
+
+        let transport = sample_transport("claude_code", "https://api.anthropic.com");
+        let mut body = pi_body();
+        apply_transport_request_body_semantics(&mut body, &transport, "claude:messages")
+            .expect("semantics should apply");
+        assert_eq!(body["system"].as_array().map(Vec::len), Some(3));
+        assert!(body["metadata"]["user_id"].as_str().is_some());
+        assert_eq!(body["messages"].as_array().map(Vec::len), Some(3));
+
+        // Running the semantics twice (cross-format planners do) must not stack the rewrite.
+        let once = body.clone();
+        apply_transport_request_body_semantics(&mut body, &transport, "claude:messages")
+            .expect("semantics should apply");
+        assert_eq!(body, once);
+
+        // Non-claude_code providers are never touched.
+        let other = sample_transport("custom", "https://example.com");
+        let mut untouched = pi_body();
+        apply_transport_request_body_semantics(&mut untouched, &other, "claude:messages")
+            .expect("semantics should apply");
+        assert_eq!(untouched, pi_body());
     }
 }

@@ -252,11 +252,11 @@ mod tests {
         assert_eq!(built.get("x-app").map(String::as_str), Some("cli"));
         assert_eq!(
             built.get("x-stainless-package-version").map(String::as_str),
-            Some("0.94.0")
+            Some("0.112.1")
         );
         assert_eq!(
             built.get("x-stainless-runtime-version").map(String::as_str),
-            Some("v24.3.0")
+            Some("v26.3.0")
         );
         assert_eq!(
             built.get("x-stainless-timeout").map(String::as_str),
@@ -264,7 +264,7 @@ mod tests {
         );
         assert_eq!(
             built.get("user-agent").map(String::as_str),
-            Some("claude-cli/2.1.161 (external, cli)")
+            Some("claude-cli/2.1.284 (external, cli)")
         );
         assert_eq!(
             built.get("authorization").map(String::as_str),
@@ -367,7 +367,7 @@ mod tests {
 
         assert_eq!(
             body["system"][0]["text"],
-            "x-anthropic-billing-header: cc_version=2.1.161.abc; cc_entrypoint=cli;"
+            "x-anthropic-billing-header: cc_version=2.1.284.abc; cc_entrypoint=cli;"
         );
     }
 }

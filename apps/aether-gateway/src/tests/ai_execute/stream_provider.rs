@@ -1585,7 +1585,7 @@ async fn gateway_executes_claude_code_cli_stream_via_local_decision_gate_with_lo
     );
     assert_eq!(
         seen_execution_runtime_request.user_agent,
-        "claude-cli/2.1.161 (external, cli)"
+        "claude-cli/2.1.284 (external, cli)"
     );
     assert_eq!(
         seen_execution_runtime_request.endpoint_tag,

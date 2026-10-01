@@ -3,6 +3,7 @@ use std::pin::Pin;
 
 use super::antigravity::refresh_antigravity_provider_quota_locally;
 use super::chatgpt_web::refresh_chatgpt_web_provider_quota_locally;
+use super::claude_code::refresh_claude_code_provider_quota_locally;
 use super::codex::refresh_codex_provider_quota_locally;
 use super::gemini_cli::refresh_gemini_cli_provider_quota_locally;
 use super::grok::refresh_grok_provider_quota_locally;
@@ -35,6 +36,10 @@ const PROVIDER_QUOTA_REFRESH_HANDLERS: &[(&str, ProviderQuotaRefreshHandler)] = 
     (
         "chatgpt_web",
         refresh_chatgpt_web_provider_quota_locally_boxed,
+    ),
+    (
+        "claude_code",
+        refresh_claude_code_provider_quota_locally_boxed,
     ),
     ("codex", refresh_codex_provider_quota_locally_boxed),
     (
@@ -105,6 +110,22 @@ fn refresh_codex_provider_quota_locally_boxed<'a>(
     proxy_override: Option<ProxySnapshot>,
 ) -> ProviderQuotaRefreshFuture<'a> {
     Box::pin(refresh_codex_provider_quota_locally(
+        state,
+        provider,
+        endpoint,
+        keys,
+        proxy_override,
+    ))
+}
+
+fn refresh_claude_code_provider_quota_locally_boxed<'a>(
+    state: &'a AdminAppState<'a>,
+    provider: &'a StoredProviderCatalogProvider,
+    endpoint: &'a StoredProviderCatalogEndpoint,
+    keys: Vec<StoredProviderCatalogKey>,
+    proxy_override: Option<ProxySnapshot>,
+) -> ProviderQuotaRefreshFuture<'a> {
+    Box::pin(refresh_claude_code_provider_quota_locally(
         state,
         provider,
         endpoint,

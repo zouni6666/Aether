@@ -2028,14 +2028,30 @@ async fn gateway_returns_openai_chat_error_for_local_cross_format_claude_cli_syn
         "claude-code-upstream"
     );
     assert_eq!(seen_execution_runtime_request.body["max_tokens"], 64);
+    // claude_code providers get the Claude Code body shape: billing header + identity +
+    // generic prompt, with the client's own system moved into the message history.
+    let system = seen_execution_runtime_request.body["system"]
+        .as_array()
+        .expect("claude_code system should be rewritten into blocks");
+    assert_eq!(system.len(), 3);
+    assert!(system[0]["text"]
+        .as_str()
+        .is_some_and(|text| text.starts_with("x-anthropic-billing-header: cc_version=")));
     assert_eq!(
-        seen_execution_runtime_request.body["system"],
-        "You are terse."
+        system[1]["text"],
+        "You are Claude Code, Anthropic's official CLI for Claude."
     );
     assert_eq!(
         seen_execution_runtime_request.body["messages"],
-        json!([{"role":"user","content":"Say hello"}])
+        json!([
+            {"role":"user","content":[{"type":"text","text":"[System Instructions]\nYou are terse."}]},
+            {"role":"assistant","content":[{"type":"text","text":"Understood. I will follow these instructions."}]},
+            {"role":"user","content":"Say hello"}
+        ])
     );
+    assert!(seen_execution_runtime_request.body["metadata"]["user_id"]
+        .as_str()
+        .is_some_and(|user_id| user_id.contains("\"session_id\"")));
     assert_eq!(
         seen_execution_runtime_request.client_api_format,
         "openai:chat"

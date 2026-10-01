@@ -1420,6 +1420,7 @@ export const legacyUiEnglishMessages: Record<string, string> = {
   '批量导入': 'Bulk import',
   '继续确认重置': 'Continue checking reset',
   '临近过期': 'Expiring soon',
+  'Claude 重置机会': 'Claude quota reset',
   '暂无密钥配置': 'No keys configured',
   '暂无账号配置': 'No accounts configured',
   '点击上方"添加密钥"按钮创建第一个密钥': 'Add your first key to get started',

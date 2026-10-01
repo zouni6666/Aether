@@ -16,26 +16,26 @@ pub use presets::{
 pub use provider::{ProviderPoolAdapter, ProviderPoolMemberInput};
 pub use providers::{
     build_antigravity_pool_quota_request, build_antigravity_pool_quota_summary_request,
-    build_chatgpt_web_pool_quota_request, build_codex_pool_quota_request,
-    build_codex_pool_reset_credit_consume_request, build_codex_pool_reset_credits_request,
-    build_gemini_cli_pool_quota_request, build_kiro_pool_quota_request,
-    build_windsurf_pool_model_configs_request,
+    build_chatgpt_web_pool_quota_request, build_claude_code_pool_quota_request,
+    build_codex_pool_quota_request, build_codex_pool_reset_credit_consume_request,
+    build_codex_pool_reset_credits_request, build_gemini_cli_pool_quota_request,
+    build_kiro_pool_quota_request, build_windsurf_pool_model_configs_request,
     build_windsurf_pool_model_configs_request_with_base_url, build_windsurf_pool_quota_request,
     build_windsurf_pool_quota_request_with_base_url, build_windsurf_pool_rate_limit_request,
     build_windsurf_pool_rate_limit_request_with_base_url, build_xai_pool_billing_request,
     build_xai_pool_user_request, enrich_chatgpt_web_quota_metadata, grok_mode_id_for_model,
     grok_pool_tier_from_quota_bucket, grok_quota_window_key_for_model,
     grok_supported_quota_windows_for_tier, normalize_chatgpt_web_image_quota_limit,
-    AntigravityProviderPoolAdapter, ChatGptWebProviderPoolAdapter, CodexProviderPoolAdapter,
-    DefaultProviderPoolAdapter, GeminiCliProviderPoolAdapter, GrokProviderPoolAdapter,
-    KiroPoolQuotaAuthInput, KiroProviderPoolAdapter, UnsupportedQuotaProviderPoolAdapter,
-    XaiProviderPoolAdapter, ANTIGRAVITY_FETCH_AVAILABLE_MODELS_PATH,
-    ANTIGRAVITY_RETRIEVE_USER_QUOTA_SUMMARY_PATH, CHATGPT_WEB_CONVERSATION_INIT_PATH,
-    CHATGPT_WEB_DEFAULT_BASE_URL, CODEX_WHAM_RESET_CREDITS_CONSUME_URL,
-    CODEX_WHAM_RESET_CREDITS_URL, CODEX_WHAM_USAGE_URL, GEMINI_CLI_RETRIEVE_USER_QUOTA_PATH,
-    GEMINI_CLI_USER_AGENT, KIRO_USAGE_LIMITS_PATH, KIRO_USAGE_SDK_VERSION,
-    WINDSURF_MODEL_CONFIGS_PATH, WINDSURF_RATE_LIMIT_PATH, WINDSURF_USER_STATUS_PATH,
-    XAI_BILLING_PATH, XAI_USER_PATH,
+    AntigravityProviderPoolAdapter, ChatGptWebProviderPoolAdapter, ClaudeCodeProviderPoolAdapter,
+    CodexProviderPoolAdapter, DefaultProviderPoolAdapter, GeminiCliProviderPoolAdapter,
+    GrokProviderPoolAdapter, KiroPoolQuotaAuthInput, KiroProviderPoolAdapter,
+    UnsupportedQuotaProviderPoolAdapter, XaiProviderPoolAdapter,
+    ANTIGRAVITY_FETCH_AVAILABLE_MODELS_PATH, ANTIGRAVITY_RETRIEVE_USER_QUOTA_SUMMARY_PATH,
+    CHATGPT_WEB_CONVERSATION_INIT_PATH, CHATGPT_WEB_DEFAULT_BASE_URL,
+    CODEX_WHAM_RESET_CREDITS_CONSUME_URL, CODEX_WHAM_RESET_CREDITS_URL, CODEX_WHAM_USAGE_URL,
+    GEMINI_CLI_RETRIEVE_USER_QUOTA_PATH, GEMINI_CLI_USER_AGENT, KIRO_USAGE_LIMITS_PATH,
+    KIRO_USAGE_SDK_VERSION, WINDSURF_MODEL_CONFIGS_PATH, WINDSURF_RATE_LIMIT_PATH,
+    WINDSURF_USER_STATUS_PATH, XAI_BILLING_PATH, XAI_USER_PATH,
 };
 pub use quota::{
     provider_pool_codex_metadata_has_account_quota, provider_pool_key_account_quota_exhausted,
@@ -104,6 +104,7 @@ mod tests {
             [
                 "antigravity",
                 "chatgpt_web",
+                "claude_code",
                 "codex",
                 "gemini_cli",
                 "grok",
@@ -112,15 +113,28 @@ mod tests {
                 "xai"
             ]
         );
+        assert!(service.supports_quota_refresh("claude_code"));
         assert!(service.supports_quota_refresh("codex"));
         assert!(service.supports_quota_refresh("antigravity"));
         assert!(service.supports_quota_refresh("grok"));
         assert!(service.supports_quota_refresh("gemini_cli"));
         assert!(service.supports_quota_refresh("windsurf"));
         assert!(service.supports_quota_refresh("xai"));
+        let claude_spec = build_claude_code_pool_quota_request(
+            "key-1",
+            ("authorization".to_string(), "Bearer access".to_string()),
+        );
+        assert_eq!(claude_spec.method, "GET");
         assert_eq!(
-            service.quota_refresh_unsupported_message("claude_code"),
-            "Claude Code 暂不支持自动刷新额度：上游没有稳定可用的账号额度查询接口"
+            claude_spec.url,
+            "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1"
+        );
+        assert_eq!(
+            claude_spec
+                .headers
+                .get("anthropic-beta")
+                .map(String::as_str),
+            Some("oauth-2025-04-20")
         );
         assert_eq!(
             service.quota_refresh_unsupported_message("vertex_ai"),

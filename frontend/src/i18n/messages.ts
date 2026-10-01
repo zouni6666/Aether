@@ -6,6 +6,11 @@ import { legacyGuideEnglishMessages } from './legacy-guide-messages'
 export const messages = {
   'zh-CN': {
     'common.loading': '加载中...',
+    'poolQuota.claudeCode.window5h': '5H',
+    'poolQuota.claudeCode.weekly': '周',
+    'poolQuota.claudeCode.weeklySonnet': '周 Sonnet',
+    'poolQuota.claudeCode.weeklyFable': '周 Fable',
+    'poolQuota.claudeCode.unknownWindow': '额度',
     'common.confirmRead': '确认已读',
     'common.confirming': '确认中...',
     'common.copy': '复制',
@@ -491,6 +496,11 @@ export const messages = {
   },
   'en-US': {
     'common.loading': 'Loading...',
+    'poolQuota.claudeCode.window5h': '5H',
+    'poolQuota.claudeCode.weekly': 'Weekly',
+    'poolQuota.claudeCode.weeklySonnet': 'Weekly Sonnet',
+    'poolQuota.claudeCode.weeklyFable': 'Weekly Fable',
+    'poolQuota.claudeCode.unknownWindow': 'Quota',
     'common.confirmRead': 'Confirm read',
     'common.confirming': 'Confirming...',
     'common.copy': 'Copy',
@@ -3066,6 +3076,9 @@ const legacyDynamicPatterns: Array<[RegExp, (match: RegExpMatchArray) => string]
   [/^(1[0-2]|[1-9])月$/u, match => new Intl.DateTimeFormat('en-US', { month: 'short', timeZone: 'UTC' }).format(new Date(Date.UTC(2020, Number(match[1]) - 1, 1)))],
   [/^总可用：(.+)$/u, match => `Total available: ${match[1]}`],
   [/^余额：(.+)$/u, match => `Balance: ${match[1]}`],
+  [/^oauth\/usage 返回状态码 (\d+)$/u, match => `oauth/usage returned status ${match[1]}`],
+  [/^共 (\d+) 次机会$/u, match => `${match[1]} ${match[1] === '1' ? 'chance' : 'chances'} in total`],
+  [/^已处理 (\d+) 个 Key$/u, match => `Processed ${match[1]} ${match[1] === '1' ? 'key' : 'keys'}`],
   [/^(.+) 秒$/u, match => `${translateLegacyText(match[1], 'en-US')}s`],
   [/^(.+) 分钟$/u, match => `${translateLegacyText(match[1], 'en-US')} min`],
   [/^(.+) 小时$/u, match => `${translateLegacyText(match[1], 'en-US')} h`],

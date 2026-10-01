@@ -1713,6 +1713,7 @@ fn provider_quota_url_has_allowed_origin(provider_name: &str, value: &str) -> bo
                 | "daily-cloudcode-pa.sandbox.googleapis.com"
         ),
         "gemini_cli" => host == "cloudcode-pa.googleapis.com",
+        "claude_code" => host == "api.anthropic.com",
         "chatgpt_web" | "codex" => host == "chatgpt.com",
         "grok" => host == "grok.com",
         "xai" => host == "cli-chat-proxy.grok.com",

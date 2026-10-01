@@ -117,11 +117,11 @@ mod tests {
         let map = header_fingerprint_from_fingerprint(&fp).expect("header fingerprint");
 
         assert_eq!(map["identity_profile_version"], "2026-04");
-        assert_eq!(map["cli_version"], "2.1.161");
-        assert_eq!(map["billing_cli_version"], "2.1.161");
-        assert_eq!(map["stainless_package_version"], "0.94.0");
-        assert_eq!(map["stainless_runtime_version"], "v24.3.0");
-        assert_eq!(map["user_agent"], "claude-cli/2.1.161 (external, cli)");
+        assert_eq!(map["cli_version"], "2.1.284");
+        assert_eq!(map["billing_cli_version"], "2.1.284");
+        assert_eq!(map["stainless_package_version"], "0.112.1");
+        assert_eq!(map["stainless_runtime_version"], "v26.3.0");
+        assert_eq!(map["user_agent"], "claude-cli/2.1.284 (external, cli)");
         assert_eq!(
             fp["transport_profile"]["extra"]["claude_code_identity_profile_version"],
             "2026-04"
@@ -144,9 +144,9 @@ mod tests {
 
         let sanitized = sanitize_fingerprint(&raw, "test-key");
         let map = header_fingerprint_from_fingerprint(&sanitized).expect("header fingerprint");
-        assert_eq!(map["stainless_package_version"], "0.94.0");
-        assert_eq!(map["stainless_runtime_version"], "v24.3.0");
-        assert_eq!(map["user_agent"], "claude-cli/2.1.161 (external, cli)");
+        assert_eq!(map["stainless_package_version"], "0.112.1");
+        assert_eq!(map["stainless_runtime_version"], "v26.3.0");
+        assert_eq!(map["user_agent"], "claude-cli/2.1.284 (external, cli)");
         assert_eq!(map["vscode_session_id"], "existing-session");
     }
 

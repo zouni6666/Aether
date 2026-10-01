@@ -2294,6 +2294,111 @@ fn build_gemini_cli_quota_status_snapshot(
     }))
 }
 
+fn build_claude_code_quota_status_snapshot(
+    upstream_metadata: Option<&Value>,
+    source: &str,
+) -> Option<Value> {
+    let metadata = provider_quota_metadata_bucket(upstream_metadata, "claude_code")?;
+    let observed_at_unix_secs = provider_quota_timestamp_unix_secs(metadata.get("updated_at"));
+    // (metadata prefix, window code, window minutes, account-wide?). Display labels are
+    // resolved by the frontend from `code` so they follow the UI locale.
+    let definitions: [(&str, &str, u64, bool); 4] = [
+        ("five_hour", "5h", 300, true),
+        ("seven_day", "weekly", 10_080, true),
+        ("seven_day_sonnet", "weekly_sonnet", 10_080, false),
+        ("seven_day_fable", "weekly_fable", 10_080, false),
+    ];
+    let mut windows = Vec::new();
+    for (prefix, code, window_minutes, account_wide) in definitions {
+        let used_percent = metadata
+            .get(&format!("{prefix}_used_percent"))
+            .and_then(Value::as_f64);
+        let reset_at =
+            provider_quota_timestamp_unix_secs(metadata.get(&format!("{prefix}_reset_at")));
+        // A window whose reset time already passed no longer describes current usage.
+        let expired = reset_at
+            .zip(observed_at_unix_secs)
+            .is_some_and(|(reset_at, observed_at)| reset_at <= observed_at);
+        let Some(used_percent) = used_percent else {
+            continue;
+        };
+        let used_ratio = if expired {
+            0.0
+        } else {
+            (used_percent / 100.0).clamp(0.0, 1.0)
+        };
+        let reset_seconds = reset_at
+            .zip(observed_at_unix_secs)
+            .map(|(reset_at, observed_at)| reset_at.saturating_sub(observed_at));
+        let mut window = json!({
+            "code": code,
+            "scope": if account_wide { "account" } else { "model" },
+            "unit": "percent",
+            "used_ratio": used_ratio,
+            "remaining_ratio": 1.0 - used_ratio,
+            "reset_at": reset_at,
+            "reset_seconds": reset_seconds,
+            "window_minutes": window_minutes,
+            "is_exhausted": used_ratio >= 1.0 - 1e-6,
+        });
+        if !account_wide {
+            window["quota_group"] = json!(code);
+        }
+        windows.push(window);
+    }
+    if windows.is_empty() {
+        return None;
+    }
+
+    let account_windows = windows
+        .iter()
+        .filter(|window| window.get("scope").and_then(Value::as_str) == Some("account"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let blocking_windows = account_windows
+        .iter()
+        .filter(|window| window.get("is_exhausted").and_then(Value::as_bool) == Some(true))
+        .cloned()
+        .collect::<Vec<_>>();
+    let exhausted = !blocking_windows.is_empty();
+    // The account is usable again only once every exhausted window resets.
+    let reset_at = if exhausted {
+        blocking_windows
+            .iter()
+            .filter_map(|window| provider_quota_timestamp_unix_secs(window.get("reset_at")))
+            .max()
+    } else {
+        None
+    };
+    let reset_seconds = if exhausted {
+        blocking_windows
+            .iter()
+            .filter_map(|window| window.get("reset_seconds").and_then(Value::as_u64))
+            .max()
+    } else {
+        None
+    };
+
+    Some(json!({
+        "version": 2,
+        "provider_type": "claude_code",
+        "code": if exhausted { "exhausted" } else { "ok" },
+        "freshness": "fresh",
+        "source": source,
+        "observed_at": observed_at_unix_secs,
+        "exhausted": exhausted,
+        "usage_ratio": quota_windows_usage_ratio(&account_windows),
+        "updated_at": observed_at_unix_secs,
+        "reset_at": reset_at,
+        "reset_seconds": reset_seconds,
+        "reset_credits": build_codex_reset_credits_status_snapshot(
+            metadata,
+            observed_at_unix_secs,
+        ),
+        "windows": windows,
+    }))
+}
+
 fn build_codex_reset_credits_status_snapshot(
     metadata: &Map<String, Value>,
     observed_at_unix_secs: Option<u64>,
@@ -2423,6 +2528,7 @@ pub(crate) fn sync_provider_key_quota_status_snapshot(
         "antigravity" => build_antigravity_quota_status_snapshot(upstream_metadata, source),
         "grok" => build_grok_quota_status_snapshot(upstream_metadata, source),
         "gemini_cli" => build_gemini_cli_quota_status_snapshot(upstream_metadata, source),
+        "claude_code" => build_claude_code_quota_status_snapshot(upstream_metadata, source),
         _ => None,
     }?;
     if normalized_provider_type == "codex" {
@@ -3735,6 +3841,59 @@ mod tests {
         assert_eq!(window.get("remaining_value"), Some(&json!(19.0)));
         assert_eq!(window.get("limit_value"), Some(&json!(19.0)));
         assert_eq!(window.get("used_value"), Some(&json!(0.0)));
+    }
+
+    #[test]
+    fn provider_key_status_snapshot_payload_backfills_claude_code_usage_windows() {
+        let mut key = sample_catalog_key();
+        key.upstream_metadata = Some(json!({
+            "claude_code": {
+                "updated_at": 1_800_000_000u64,
+                "five_hour_used_percent": 100.0,
+                "five_hour_reset_at": 1_800_003_600u64,
+                "seven_day_used_percent": 40.0,
+                "seven_day_reset_at": 1_800_400_000u64,
+                "seven_day_sonnet_used_percent": 10.0,
+                "seven_day_sonnet_reset_at": 1_800_400_000u64,
+                "reset_credits": {
+                    "available_count": 2,
+                    "updated_at": 1_800_000_000u64,
+                    "detail_source": "claude_oauth_usage",
+                    "credits": [{
+                        "display_key": "Key-1",
+                        "status": "available",
+                        "expires_at": 1_800_144_000u64
+                    }]
+                }
+            }
+        }));
+
+        let payload = provider_key_status_snapshot_payload(&key, "claude_code");
+        let quota = payload
+            .get("quota")
+            .and_then(Value::as_object)
+            .expect("quota snapshot should be object");
+        assert_eq!(quota.get("provider_type"), Some(&json!("claude_code")));
+        // An exhausted 5h window blocks the whole account until it resets.
+        assert_eq!(quota.get("exhausted"), Some(&json!(true)));
+        assert_eq!(quota.get("reset_at"), Some(&json!(1_800_003_600u64)));
+        let windows = quota
+            .get("windows")
+            .and_then(Value::as_array)
+            .expect("windows should exist");
+        assert_eq!(windows.len(), 3);
+        assert_eq!(windows[0]["code"], json!("5h"));
+        assert_eq!(windows[0]["scope"], json!("account"));
+        assert_eq!(windows[0]["window_minutes"], json!(300));
+        assert_eq!(windows[1]["code"], json!("weekly"));
+        assert_eq!(windows[1]["used_ratio"], json!(0.4));
+        assert_eq!(windows[2]["code"], json!("weekly_sonnet"));
+        assert_eq!(windows[2]["scope"], json!("model"));
+        assert_eq!(quota["reset_credits"]["available_count"], json!(2));
+        assert_eq!(
+            quota["reset_credits"]["credits"][0]["remaining_seconds"],
+            json!(144_000u64)
+        );
     }
 
     #[test]

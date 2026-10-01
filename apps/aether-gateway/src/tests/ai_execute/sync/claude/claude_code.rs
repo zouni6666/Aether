@@ -567,11 +567,11 @@ async fn gateway_executes_claude_code_cli_sync_via_local_decision_gate_with_loca
     assert_eq!(seen_execution_runtime_request.x_stainless_helper_method, "");
     assert_eq!(
         seen_execution_runtime_request.x_stainless_package_version,
-        "0.94.0"
+        "0.112.1"
     );
     assert_eq!(
         seen_execution_runtime_request.user_agent,
-        "claude-cli/2.1.161 (external, cli)"
+        "claude-cli/2.1.284 (external, cli)"
     );
     assert_eq!(
         seen_execution_runtime_request.endpoint_tag,

@@ -410,6 +410,10 @@ async fn gateway_authorizes_claude_cookie_without_persisting_cookie_impl() {
                             "email_address": "claude@example.com"
                         }
                     }),
+                    // Newly authorized accounts get their 5H/weekly quota fetched right away.
+                    quota if quota.starts_with("claude-code-quota:") => {
+                        json!({"five_hour": {"utilization": 10.0}})
+                    }
                     unexpected => panic!("unexpected execution plan: {unexpected}"),
                 };
                 Json(json!({
@@ -811,7 +815,15 @@ async fn gateway_batch_authorizes_claude_cookies_as_redacted_task_impl() {
     }
 
     let plans = execution_plans.lock().expect("mutex should lock");
-    assert_eq!(plans.len(), 6);
+    // Post-authorization quota refreshes are fire-and-forget, so their count is not
+    // deterministic here; only the OAuth flow plans are asserted.
+    assert_eq!(
+        plans
+            .iter()
+            .filter(|plan| !plan.request_id.starts_with("claude-code-quota:"))
+            .count(),
+        6
+    );
     assert_eq!(
         plans
             .iter()
