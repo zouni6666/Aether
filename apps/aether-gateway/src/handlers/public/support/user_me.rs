@@ -32,6 +32,9 @@ use user_me_usage::*;
 #[path = "user_me_catalog.rs"]
 mod user_me_catalog;
 use user_me_catalog::*;
+#[path = "user_me_routing_groups.rs"]
+mod user_me_routing_groups;
+use user_me_routing_groups::*;
 #[path = "user_me_preferences.rs"]
 mod user_me_preferences;
 use user_me_preferences::*;

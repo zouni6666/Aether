@@ -1,8 +1,8 @@
 export interface ActivityHeatmapDay {
   date: string
   requests: number
-  total_tokens: number
-  total_cost: number
+  total_tokens?: number
+  total_cost?: number
   actual_total_cost?: number
 }
 

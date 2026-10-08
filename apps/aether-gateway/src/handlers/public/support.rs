@@ -166,6 +166,23 @@ async fn build_local_public_support_response(
         return None;
     }
 
+    if decision.route_family.as_deref() == Some("health_user") {
+        if let Err(response) =
+            resolve_authenticated_local_user(state, request_context, headers).await
+        {
+            return Some(response);
+        }
+        return Some(
+            crate::handlers::shared::health_monitor::build_health_v2_response(
+                state,
+                &request_context.request_path,
+                request_context.request_query_string.as_deref(),
+                crate::handlers::shared::health_monitor::HealthAudience::Authenticated,
+            )
+            .await,
+        );
+    }
+
     if decision.route_family.as_deref() == Some("auth") {
         return maybe_build_local_auth_response(
             state,
@@ -306,6 +323,17 @@ async fn build_local_public_support_response(
     }
 
     if decision.route_family.as_deref() == Some("public_catalog") {
+        if decision.route_kind.as_deref() == Some("health_v2") {
+            return Some(
+                crate::handlers::shared::health_monitor::build_health_v2_response(
+                    state,
+                    &request_context.request_path,
+                    request_context.request_query_string.as_deref(),
+                    crate::handlers::shared::health_monitor::HealthAudience::Public,
+                )
+                .await,
+            );
+        }
         if decision.route_kind.as_deref() == Some("site_info")
             && request_context.request_path == "/api/public/site-info"
         {

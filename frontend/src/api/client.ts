@@ -39,15 +39,19 @@ function loadMockRuntime(): Promise<MockRuntime> {
 /**
  * 判断请求是否为公共端点
  */
+function requestPath(url?: string): string {
+  if (!url) return ''
+  try { return new URL(url, 'http://aether.local').pathname } catch { return '' }
+}
+
 function isPublicEndpoint(url?: string, method?: string): boolean {
-  if (!url) return false
+  const path = requestPath(url)
+  const isHealthCheck = ['/health', '/v1/health', '/_gateway/health'].includes(path) &&
+                       method?.toLowerCase() === 'get'
 
-  const isHealthCheck = url.includes('/health') &&
-                       method?.toLowerCase() === 'get' &&
-                       !url.includes('/api/admin')
-
-  return url.includes('/public') ||
-         url.includes('.json') ||
+  return path === '/api/public' || path.startsWith('/api/public/') ||
+         path === '/public' || path.startsWith('/public/') ||
+         (!path.startsWith('/api/') && path.endsWith('.json')) ||
          isHealthCheck
 }
 
@@ -55,12 +59,11 @@ function isPublicEndpoint(url?: string, method?: string): boolean {
  * 判断是否为认证相关请求
  */
 function isAuthRequest(url?: string): boolean {
-  return url?.includes('/auth/login') || url?.includes('/auth/refresh') || url?.includes('/auth/logout') || false
+  return ['/api/auth/login', '/api/auth/refresh', '/api/auth/logout'].includes(requestPath(url))
 }
 
 function isProtectedOperationalEndpoint(url?: string): boolean {
-  if (!url) return false
-  const path = url.split('?', 1)[0]
+  const path = requestPath(url)
   return path === '/_gateway/metrics' ||
          path.startsWith('/_gateway/audit/') ||
          path.startsWith('/_gateway/async-tasks/')
@@ -148,7 +151,7 @@ class ApiClient {
     // 请求拦截器 - 仅处理认证
     this.client.interceptors.request.use(
       (config) => {
-        const carriesSessionCredentials = config.url?.includes('/api/') ||
+        const carriesSessionCredentials = requestPath(config.url).startsWith('/api/') ||
           isProtectedOperationalEndpoint(config.url)
 
         if (carriesSessionCredentials) {

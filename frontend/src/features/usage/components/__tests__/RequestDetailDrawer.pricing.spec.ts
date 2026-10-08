@@ -113,6 +113,48 @@ function buildFastTierDetail(): RequestDetail {
 }
 
 describe('RequestDetailDrawer settlement pricing', () => {
+  it.each([
+    { billingMultiplier: 0, billingCost: 0 },
+    { billingMultiplier: undefined, billingCost: undefined },
+    { billingMultiplier: 2, billingCost: null },
+  ])('preserves zero, missing, and explicitly unavailable billing facts in list updates: %o', async ({ billingMultiplier, billingCost }) => {
+    apiMocks.getRequestDetail.mockResolvedValue({
+      ...buildEmbeddingDetail(),
+      billing_multiplier: billingMultiplier,
+      billing_cost: billingCost,
+      routing_group_id: 'group-1',
+      routing_group_name: '历史分组',
+      actual_cost: 0.000005,
+    } satisfies RequestDetail)
+    const updates = vi.fn()
+    let isOpen!: Ref<boolean>
+    const root = document.createElement('div')
+    document.body.appendChild(root)
+    const app = createApp({
+      setup() {
+        isOpen = ref(false)
+        return () => h(RequestDetailDrawer, {
+          isOpen: isOpen.value,
+          requestId: 'usage-embedding-1',
+          onRequestState: updates,
+        })
+      },
+    })
+    app.mount(root)
+    mountedApps.push({ app, root })
+    isOpen.value = true
+    await nextTick()
+    await vi.waitFor(() => expect(updates).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'usage-embedding-1',
+      cost: 0.00001,
+      actualCost: 0.000005,
+      billingMultiplier,
+      billingCost,
+      routingGroupId: 'group-1',
+      routingGroupName: '历史分组',
+    })))
+  })
+
   it('labels an unmetered OpenAI Live WebSocket detail without rendering zero usage as billing', async () => {
     apiMocks.getRequestDetail.mockResolvedValue({
       ...buildEmbeddingDetail(),
@@ -632,6 +674,53 @@ describe('RequestDetailDrawer settlement pricing', () => {
     await vi.waitFor(() => {
       expect(document.body.querySelector('[data-usage-model-response]')).toBeNull()
       expect(document.body.querySelector('[data-usage-model-mapping]')).toBeNull()
+    })
+  })
+
+  it('shows the Gemini thinkingConfig reasoning effort in the model header', async () => {
+    apiMocks.getRequestDetail.mockResolvedValue({
+      ...buildEmbeddingDetail(),
+      id: 'usage-gemini-thinking',
+      request_id: 'usage-gemini-thinking',
+      model: 'gemini-3.8-flash',
+      request_type: 'chat',
+      requested_reasoning_effort: 'xhigh',
+      reasoning_effort: 'high',
+      request_body: {
+        generationConfig: {
+          thinkingConfig: { includeThoughts: true, thinkingLevel: 'HIGH' },
+        },
+      },
+      provider_request_body: {
+        generationConfig: { thinkingConfig: { thinkingBudget: 8192 } },
+      },
+    })
+
+    let isOpen!: Ref<boolean>
+    const Host = defineComponent({
+      setup() {
+        isOpen = ref(false)
+        return () => h(RequestDetailDrawer, {
+          isOpen: isOpen.value,
+          requestId: 'usage-gemini-thinking',
+        })
+      },
+    })
+
+    const root = document.createElement('div')
+    document.body.appendChild(root)
+    const app = createApp(Host)
+    app.mount(root)
+    mountedApps.push({ app, root })
+
+    isOpen.value = true
+    await nextTick()
+
+    await vi.waitFor(() => {
+      expect(document.body.querySelector('[data-request-detail-model-display]')?.textContent)
+        .toContain('gemini-3.8-flash')
+      expect(document.body.querySelector('[data-request-detail-model-badge="reasoning"]')?.textContent?.trim())
+        .toBe('xhigh -> high')
     })
   })
 

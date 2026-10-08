@@ -27,7 +27,16 @@ use crate::lifecycle::bootstrap::postgres::{
     EMPTY_DATABASE_SNAPSHOT_CUTOFF_VERSION, EMPTY_DATABASE_SNAPSHOT_SQL,
 };
 
+mod customer_billing_upgrade;
+mod dashboard_user_anonymization;
+mod legacy_overview_upgrade;
+mod migration_deadlines;
+mod overview_dirty_events;
+mod overview_fact_metadata;
+mod overview_migration_safety;
 mod policy_nulls;
+mod provider_expenses;
+mod scoped_provider_creation;
 
 /// A clean PostgreSQL database is bootstrapped from the schema snapshot first;
 /// migrations after the privacy/security frontier are intentionally left
@@ -1575,7 +1584,21 @@ fn pending_migrations_from_applied_skips_versions_already_applied() {
             20260901000000,
             20260903000000,
             20260908000000,
+            20260911000000,
+            20260917000000,
+            20260917000100,
+            20260918000000,
+            20260918000100,
+            20260919000000,
+            20260920000000,
+            20260920120000,
+            20260921010000,
+            20260921020000,
+            20260921020100,
             20260923000000,
+            20261001000000,
+            20261004000000,
+            20261007000000,
         ]
     );
 }
@@ -1874,6 +1897,169 @@ WHERE id = 'metadata-migration-key'
         .execute(&pool)
         .await
         .expect("provider migration fixture should clean up");
+}
+
+#[tokio::test]
+async fn overview_migrations_support_fresh_and_legacy_install() {
+    for legacy in [false, true] {
+        let Some(server) = ManagedPostgresServer::try_start()
+            .await
+            .expect("overview PostgreSQL should start or skip")
+        else {
+            return;
+        };
+        if legacy {
+            let mut connection = PgConnection::connect(server.database_url()).await.unwrap();
+            connection.ensure_migrations_table().await.unwrap();
+            for migration in POSTGRES_MIGRATOR
+                .iter()
+                .filter(|migration| migration.version < 20260911000000)
+            {
+                connection.apply(migration).await.unwrap();
+            }
+            sqlx::raw_sql(
+                r#"
+INSERT INTO users(id, username, email_verified)
+VALUES ('overview-legacy-owner', 'overview-legacy-owner', false);
+INSERT INTO api_keys(id, user_id, key_hash)
+VALUES ('overview-legacy-key', 'overview-legacy-owner', repeat('e', 64));
+INSERT INTO usage(id, request_id, user_id, api_key_id, provider_name, model,
+                  status, billing_status, created_at)
+VALUES ('overview-legacy-request', 'overview-legacy-request',
+        'overview-legacy-owner', 'overview-legacy-key', 'test', 'test',
+        'completed', 'settled', '2020-01-01 12:34:00+00');
+"#,
+            )
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        }
+        let pool = PgPool::connect(server.database_url()).await.unwrap();
+        prepare_and_apply_clean_postgres_database(&pool).await;
+        for table in [
+            "usage_attribution_snapshots",
+            "stats_bucket_state",
+            "stats_overview_hourly",
+            "stats_overview_daily",
+        ] {
+            assert!(table_exists(&pool, table).await.unwrap());
+        }
+        assert!(!column_exists(&pool, "api_keys", "credential_kind")
+            .await
+            .unwrap());
+        assert!(
+            !column_exists(&pool, "usage_attribution_snapshots", "credential_kind")
+                .await
+                .unwrap()
+        );
+        assert!(column_exists(&pool, "stats_bucket_state", "last_failed_at")
+            .await
+            .unwrap());
+        let precision:(i32,i32)=sqlx::query_as("SELECT numeric_precision::integer,numeric_scale::integer FROM information_schema.columns WHERE table_schema='public' AND table_name='usage_settlement_snapshots' AND column_name='wallet_debit_amount_usd'").fetch_one(&pool).await.unwrap();
+        assert_eq!(precision, (20, 8));
+        if legacy {
+            let facts:(Option<String>,Option<String>,String,Option<String>)=sqlx::query_as("SELECT actor_user_id,credential_owner_id,attribution_source,wallet_debit_amount::text FROM usage_analytics_facts_v1 WHERE request_id='overview-legacy-request'").fetch_one(&pool).await.unwrap();
+            assert_eq!(
+                facts,
+                (
+                    Some("overview-legacy-owner".into()),
+                    Some("overview-legacy-owner".into()),
+                    "user_account".into(),
+                    None
+                )
+            );
+        }
+        let repo = aether_data_postgres::SqlxUsageReadRepository::new(pool.clone());
+        let target = chrono::DateTime::parse_from_rfc3339("2026-09-17T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        for _ in 0..2 {
+            let counts: (i64, i64, i64, i64) = sqlx::query_as(
+                r#"
+SELECT (SELECT COUNT(*) FROM usage_attribution_snapshots),
+       (SELECT COUNT(*) FROM stats_bucket_state),
+       (SELECT COUNT(*) FROM stats_overview_hourly),
+       (SELECT COUNT(*) FROM stats_overview_daily)
+"#,
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(counts, (0, 0, 0, 0));
+            assert_eq!(repo.rebuild_overview_buckets(target, 8).await.unwrap(), 0);
+            super::run_migrations(&pool).await.unwrap();
+        }
+
+        sqlx::raw_sql(
+            r#"
+INSERT INTO users(id, username, email_verified)
+VALUES ('overview-new-owner', 'overview-new-owner', false);
+INSERT INTO api_keys(id, user_id, key_hash)
+VALUES ('overview-new-key', 'overview-new-owner', repeat('f', 64));
+INSERT INTO usage(id, request_id, user_id, api_key_id, provider_name, model,
+                  status, billing_status, created_at, request_metadata)
+VALUES ('overview-new-request', 'overview-new-request',
+        'overview-new-owner', 'overview-new-key', 'test', 'test',
+        'completed', 'settled', '2026-09-15 12:34:00+00',
+        '{"analytics_attribution":{"is_standalone":false}}'::json);
+"#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let identity: (String, String, String, String) = sqlx::query_as(
+            r#"
+SELECT actor_user_id, credential_owner_id, attribution_kind,
+       attribution_source
+FROM usage_attribution_snapshots WHERE request_id = 'overview-new-request'
+"#,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            identity,
+            (
+                "overview-new-owner".into(),
+                "overview-new-owner".into(),
+                "employee".into(),
+                "user_account".into(),
+            )
+        );
+        assert_eq!(repo.rebuild_overview_buckets(target, 8).await.unwrap(), 2);
+        assert_eq!(repo.rebuild_overview_buckets(target, 8).await.unwrap(), 0);
+        let counts: (i64, i64, i64, i64, i64) = sqlx::query_as(
+            r#"
+SELECT (SELECT COUNT(*) FROM usage_attribution_snapshots),
+       (SELECT COUNT(*) FROM usage_attribution_snapshots
+        WHERE request_id = 'overview-legacy-request'),
+       (SELECT COUNT(*) FROM stats_bucket_state),
+       (SELECT COUNT(*) FROM stats_overview_hourly),
+       (SELECT COUNT(*) FROM stats_overview_daily)
+"#,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(counts, (1, 0, 2, 1, 1));
+        let unexpected_bucket_count: i64 = query_scalar(
+            r#"
+SELECT COUNT(*) FROM stats_bucket_state
+WHERE projection_version <> 'overview-v2'
+   OR (granularity, bucket_start) NOT IN (
+       ('day', '2026-09-15 00:00:00+00'::timestamptz),
+       ('hour', '2026-09-15 12:00:00+00'::timestamptz)
+   )
+   OR coverage_status <> 'complete'
+   OR source_revision <> built_revision
+"#,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(unexpected_bucket_count, 0);
+        pool.close().await;
+    }
 }
 
 #[tokio::test]
@@ -2813,9 +2999,7 @@ WHERE request_id = 'billing-facts-cache-create'
 }
 
 #[tokio::test]
-async fn postgres_migrations_repair_invalid_concurrent_cleanup_index() {
-    const MIGRATION_VERSION: i64 = 20260715000000;
-
+async fn postgres_migrations_repair_invalid_concurrent_indexes() {
     let Some(server) = ManagedPostgresServer::try_start()
         .await
         .expect("postgres migration retry test should start or skip")
@@ -2827,11 +3011,6 @@ async fn postgres_migrations_repair_invalid_concurrent_cleanup_index() {
         .await
         .expect("pool should connect");
     prepare_and_apply_clean_postgres_database(&pool).await;
-
-    query("DROP INDEX CONCURRENTLY public.idx_usage_legacy_body_ref_cleanup_created_at")
-        .execute(&pool)
-        .await
-        .expect("snapshot cleanup index should exist");
     query("CREATE TABLE public.concurrent_index_failure_fixture (value integer NOT NULL)")
         .execute(&pool)
         .await
@@ -2841,62 +3020,89 @@ async fn postgres_migrations_repair_invalid_concurrent_cleanup_index() {
         .await
         .expect("duplicate failure fixtures should be inserted");
 
-    query(
-        "CREATE UNIQUE INDEX CONCURRENTLY idx_usage_legacy_body_ref_cleanup_created_at ON public.concurrent_index_failure_fixture (value)",
-    )
-    .execute(&pool)
-    .await
-    .expect_err("duplicate values should leave a failed concurrent index build");
-
-    let invalid_index_exists: bool = query_scalar(
-        r#"
+    for (migration_version, index_name, table_name) in [
+        (
+            20260715000000_i64,
+            "idx_usage_legacy_body_ref_cleanup_created_at",
+            "public.usage",
+        ),
+        (
+            20260918000000,
+            "idx_usage_settlement_dashboard_cover_v2",
+            "public.usage_settlement_snapshots",
+        ),
+        (
+            20260920000000,
+            "idx_payment_orders_status_credited_user",
+            "public.payment_orders",
+        ),
+        (
+            20260921020100,
+            "ix_usage_analytics_actor_metadata",
+            "public.usage",
+        ),
+    ] {
+        query(&format!("DROP INDEX CONCURRENTLY public.{index_name}"))
+            .execute(&pool)
+            .await
+            .expect("migrated index should exist");
+        query(&format!("CREATE UNIQUE INDEX CONCURRENTLY {index_name} ON public.concurrent_index_failure_fixture (value)"))
+            .execute(&pool)
+            .await
+            .expect_err("duplicate values should leave a failed concurrent index build");
+        let invalid_index_exists: bool = query_scalar(
+            r#"
 SELECT EXISTS (
-    SELECT 1
-    FROM pg_catalog.pg_class AS index_relation
-    JOIN pg_catalog.pg_namespace AS index_namespace
-      ON index_namespace.oid = index_relation.relnamespace
-    JOIN pg_catalog.pg_index AS index_state
-      ON index_state.indexrelid = index_relation.oid
-    WHERE index_namespace.nspname = 'public'
-      AND index_relation.relname = 'idx_usage_legacy_body_ref_cleanup_created_at'
-      AND NOT index_state.indisvalid
-)
-"#,
+    SELECT 1 FROM pg_catalog.pg_index
+    WHERE indexrelid = to_regclass($1) AND NOT indisvalid
+)"#,
+        )
+        .bind(format!("public.{index_name}"))
+        .fetch_one(&pool)
+        .await
+        .expect("failed concurrent index state should be readable");
+        assert!(invalid_index_exists);
+
+        query("DELETE FROM public._sqlx_migrations WHERE version = $1")
+            .bind(migration_version)
+            .execute(&pool)
+            .await
+            .expect("index migration stamp should be reset");
+        super::run_migrations(&pool)
+            .await
+            .expect("migration retry should replace the invalid index");
+        let valid_index_exists: bool = query_scalar(
+            r#"
+SELECT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_index
+    WHERE indexrelid = to_regclass($1) AND indrelid = $2::regclass AND indisvalid
+)"#,
+        )
+        .bind(format!("public.{index_name}"))
+        .bind(table_name)
+        .fetch_one(&pool)
+        .await
+        .expect("rebuilt index state should be readable");
+        assert!(valid_index_exists);
+    }
+    let index_definition: String = query_scalar(
+        "SELECT pg_get_indexdef('public.idx_usage_settlement_dashboard_cover_v2'::regclass)",
     )
     .fetch_one(&pool)
     .await
-    .expect("failed concurrent index state should be readable");
-    assert!(invalid_index_exists);
-
-    query("DELETE FROM public._sqlx_migrations WHERE version = $1")
-        .bind(MIGRATION_VERSION)
-        .execute(&pool)
-        .await
-        .expect("cleanup index migration stamp should be reset");
-    super::run_migrations(&pool)
-        .await
-        .expect("migration retry should replace the invalid index");
-
-    let valid_usage_index_exists: bool = query_scalar(
-        r#"
-SELECT EXISTS (
-    SELECT 1
-    FROM pg_catalog.pg_class AS index_relation
-    JOIN pg_catalog.pg_namespace AS index_namespace
-      ON index_namespace.oid = index_relation.relnamespace
-    JOIN pg_catalog.pg_index AS index_state
-      ON index_state.indexrelid = index_relation.oid
-    WHERE index_namespace.nspname = 'public'
-      AND index_relation.relname = 'idx_usage_legacy_body_ref_cleanup_created_at'
-      AND index_state.indrelid = 'public.usage'::regclass
-      AND index_state.indisvalid
-)
-"#,
+    .expect("replacement index should be installed");
+    assert!(index_definition.contains("billing_status"));
+    assert!(index_definition.contains("allocation_status"));
+    let old_cover_exists: bool = query_scalar(
+        "SELECT to_regclass('public.idx_usage_settlement_dashboard_cover') IS NOT NULL",
     )
     .fetch_one(&pool)
     .await
-    .expect("rebuilt cleanup index state should be readable");
-    assert!(valid_usage_index_exists);
+    .expect("old covering index state should be readable");
+    assert!(
+        !old_cover_exists,
+        "successful migration must retire the redundant old cover"
+    );
 }
 
 #[tokio::test]

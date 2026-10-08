@@ -13,6 +13,7 @@ use crate::task_runtime::{spawn_fire_and_forget, TASK_KEY_USAGE_SYNC_REPORT};
 use crate::{AppState, GatewayError};
 
 mod context;
+pub(crate) mod failure;
 pub(crate) use context::{
     attach_internal_gateway_report_capability, resolve_bound_internal_gateway_report_context,
 };
@@ -677,6 +678,7 @@ mod tests {
                 ),
                 ("upstream_response".to_string(), json!({"id": "resp-123"})),
                 ("error_flow".to_string(), json!({"stage": "upstream"})),
+                ("analytics_failure".to_string(), json!({"origin": "upstream", "stage": "response", "reason": "upstream_response_error", "schema_version": 1})),
                 (
                     "client_response_headers".to_string(),
                     json!({"content-type": "application/json"}),
@@ -858,6 +860,27 @@ mod tests {
             .await
             .expect("capability lookup should succeed");
             assert!(resolved.is_none(), "cross-operation use must be rejected");
+        }
+
+        for (field, value) in [
+            (
+                "analytics_attribution",
+                json!({"is_standalone": false, "actor_user_id": "forged-employee"}),
+            ),
+            ("analytics_measurement", json!({"source": "reported"})),
+            ("usage_token_source", json!("estimated")),
+        ] {
+            let mut forged = minted.clone();
+            forged[field] = value;
+            let resolved = resolve_bound_internal_gateway_report_context(
+                &state,
+                "trace-capability-fields-123",
+                "openai_video_create_sync_finalize",
+                Some(&forged),
+            )
+            .await
+            .expect("capability lookup should succeed");
+            assert!(resolved.is_none(), "unbound {field} must be rejected");
         }
 
         let valid = resolve_bound_internal_gateway_report_context(

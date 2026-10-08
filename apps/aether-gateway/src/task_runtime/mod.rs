@@ -25,6 +25,10 @@ pub(crate) const TASK_KEY_USAGE_COUNTER_FLUSH: &str = "usage.counter.flush.worke
 pub(crate) const TASK_KEY_VIDEO_TASK_POLLER: &str = "video.task.poller";
 pub(crate) const TASK_KEY_MODEL_FETCH_WORKER: &str = "model.fetch.worker";
 pub(crate) const TASK_KEY_CODEX_CLIENT_PROFILE: &str = "maintenance.codex.client.profile";
+pub(crate) const TASK_KEY_CLAUDE_CODE_CLIENT_PROFILE: &str =
+    "maintenance.claude_code.client.profile";
+pub(crate) const TASK_KEY_XAI_CLIENT_PROFILE: &str = "maintenance.xai.client.profile";
+pub(crate) const TASK_KEY_GEMINI_CLI_CLIENT_PROFILE: &str = "maintenance.gemini_cli.client.profile";
 pub(crate) const TASK_KEY_PROVIDER_QUOTA_RESET: &str = "provider.quota.reset.worker";
 pub(crate) const TASK_KEY_ACCOUNT_SELF_CHECK: &str = "account.self_check.worker";
 pub(crate) const TASK_KEY_POOL_SCORE_REBUILD: &str = "pool.score.rebuild.worker";
@@ -207,6 +211,30 @@ const TASK_DEFINITIONS: &[TaskDefinition] = &[
         TASK_KEY_CODEX_CLIENT_PROFILE,
         TaskKind::Scheduled,
         "daily",
+        true,
+        true,
+        RETRY_ONCE,
+    ),
+    TaskDefinition::new(
+        TASK_KEY_CLAUDE_CODE_CLIENT_PROFILE,
+        TaskKind::Scheduled,
+        "daily",
+        true,
+        true,
+        RETRY_ONCE,
+    ),
+    TaskDefinition::new(
+        TASK_KEY_GEMINI_CLI_CLIENT_PROFILE,
+        TaskKind::Scheduled,
+        "daily",
+        true,
+        true,
+        RETRY_ONCE,
+    ),
+    TaskDefinition::new(
+        TASK_KEY_XAI_CLIENT_PROFILE,
+        TaskKind::Scheduled,
+        "interval",
         true,
         true,
         RETRY_ONCE,
@@ -946,5 +974,31 @@ mod worker_boot_run_id_tests {
         assert_eq!(events.len(), 2);
         assert!(events.iter().all(|event| event.event_type == "worker_boot"));
         assert!(events.iter().all(|event| event.payload_json.is_none()));
+    }
+}
+
+#[cfg(test)]
+mod client_profile_task_tests {
+    use super::*;
+
+    #[test]
+    fn all_cli_client_profile_tasks_are_registered_once() {
+        for (key, trigger) in [
+            (TASK_KEY_CODEX_CLIENT_PROFILE, "daily"),
+            (TASK_KEY_CLAUDE_CODE_CLIENT_PROFILE, "daily"),
+            (TASK_KEY_XAI_CLIENT_PROFILE, "interval"),
+            (TASK_KEY_GEMINI_CLI_CLIENT_PROFILE, "daily"),
+        ] {
+            let definitions: Vec<_> = task_definitions()
+                .iter()
+                .filter(|definition| definition.key == key)
+                .collect();
+            assert_eq!(definitions.len(), 1, "task {key} must be registered once");
+            let definition = definitions[0];
+            assert_eq!(definition.kind, TaskKind::Scheduled);
+            assert_eq!(definition.trigger, trigger);
+            assert!(definition.singleton);
+            assert!(definition.persist_history);
+        }
     }
 }

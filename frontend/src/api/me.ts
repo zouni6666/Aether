@@ -27,6 +27,13 @@ export interface Profile {
   feature_settings?: FeatureSettingsMap | null
 }
 
+export interface UserRoutingGroup {
+  id: string
+  name: string
+  billing_multiplier: number
+  is_default: boolean
+}
+
 export interface UserPreferences {
   avatar_url?: string
   bio?: string
@@ -66,7 +73,11 @@ export interface UsageRecordDetail {
   output_tokens: number
   total_tokens: number
   cost: number  // 官方费率
-  actual_cost?: number  // 倍率消耗（仅管理员可见）
+  actual_cost?: number  // 提供商 Key 成本（仅管理员可见）；旧记录也用于兼容历史扣费
+  billing_multiplier?: number | null
+  routing_group_id?: string | null
+  routing_group_name?: string | null
+  billing_cost?: number | null
   rate_multiplier?: number  // 成本倍率（仅管理员可见）
   response_time_ms?: number | null
   first_byte_time_ms?: number | null
@@ -196,6 +207,8 @@ export interface ApiKey {
   allowed_providers?: ProviderConfig[]
   force_capabilities?: Record<string, boolean> | null  // 强制能力配置
   feature_settings?: FeatureSettingsMap | null
+  routing_group_id?: string | null
+  routing_group_name?: string | null
 }
 
 export type InstallTargetCli = 'claude_code' | 'codex_cli' | 'gemini_cli'
@@ -278,7 +291,12 @@ export const meApi = {
     return response.data
   },
 
-  async createApiKey(data: { name: string; rate_limit?: number | null; concurrent_limit?: number | null; ip_rules?: string[] | null; feature_settings?: FeatureSettingsMap | null }): Promise<ApiKey> {
+  async getRoutingGroups(): Promise<{ items: UserRoutingGroup[]; total: number }> {
+    const response = await apiClient.get<{ items: UserRoutingGroup[]; total: number }>('/api/users/me/routing-groups')
+    return response.data
+  },
+
+  async createApiKey(data: { name: string; rate_limit?: number | null; concurrent_limit?: number | null; ip_rules?: string[] | null; feature_settings?: FeatureSettingsMap | null; routing_group_id?: string | null }): Promise<ApiKey> {
     const response = await apiClient.post<ApiKey>('/api/users/me/api-keys', data)
     return response.data
   },
@@ -318,7 +336,7 @@ export const meApi = {
 
   async updateApiKey(
     keyId: string,
-    data: { name?: string; rate_limit?: number | null; concurrent_limit?: number | null; ip_rules?: string[] | null; feature_settings?: FeatureSettingsMap | null | undefined }
+    data: { name?: string; rate_limit?: number | null; concurrent_limit?: number | null; ip_rules?: string[] | null; feature_settings?: FeatureSettingsMap | null | undefined; routing_group_id?: string | null }
   ): Promise<ApiKey & { message: string }> {
     const response = await apiClient.put<ApiKey & { message: string }>(
       `/api/users/me/api-keys/${keyId}`,
@@ -370,6 +388,10 @@ export const meApi = {
       cost: number
       actual_cost?: number | null
       rate_multiplier?: number | null
+      billing_multiplier?: number | null
+      routing_group_id?: string | null
+      routing_group_name?: string | null
+      billing_cost?: number | null
       response_time_ms: number | null
       first_byte_time_ms: number | null
       end_to_end_time_ms?: number | null
@@ -417,6 +439,10 @@ export const meApi = {
       cost: number
       actual_cost?: number | null
       rate_multiplier?: number | null
+      billing_multiplier?: number | null
+      routing_group_id?: string | null
+      routing_group_name?: string | null
+      billing_cost?: number | null
       response_time_ms: number | null
       first_byte_time_ms: number | null
       end_to_end_time_ms?: number | null

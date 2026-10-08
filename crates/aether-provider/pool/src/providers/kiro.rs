@@ -158,7 +158,7 @@ fn normalize_region(value: &str) -> &str {
 fn normalize_kiro_version(value: &str) -> &str {
     let value = value.trim();
     if value.is_empty() {
-        "0.3.210"
+        aether_provider_transport::client_identity::DEFAULT_KIRO_VERSION
     } else {
         value
     }

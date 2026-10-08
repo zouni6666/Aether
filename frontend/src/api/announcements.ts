@@ -50,6 +50,15 @@ export interface UpdateAnnouncementRequest {
 }
 
 export const announcementApi = {
+  async getUserAnnouncements(params?: {
+    unread_only?: boolean
+    limit?: number
+    offset?: number
+  }): Promise<AnnouncementListResponse> {
+    const response = await apiClient.get<AnnouncementListResponse>('/api/announcements/users/me', { params })
+    return response.data
+  },
+
   // 获取公告列表
   async getAnnouncements(params?: {
     active_only?: boolean

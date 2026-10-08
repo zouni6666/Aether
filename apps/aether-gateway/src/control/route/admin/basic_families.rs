@@ -7,6 +7,35 @@ pub(super) fn classify_admin_basic_family_route(
     normalized_path: &str,
     normalized_path_no_trailing: &str,
 ) -> Option<ClassifiedRoute> {
+    let finance_path = normalized_path_no_trailing;
+    if (method == http::Method::GET
+        && matches!(
+            finance_path,
+            "/api/admin/billing/provider-accounts" | "/api/admin/billing/provider-expenses"
+        ))
+        || (method == http::Method::POST && finance_path == "/api/admin/billing/provider-expenses")
+        || (method == http::Method::POST
+            && finance_path
+                .strip_prefix("/api/admin/billing/provider-expenses/")
+                .and_then(|v| v.strip_suffix("/void"))
+                .is_some_and(|id| !id.is_empty() && !id.contains('/')))
+    {
+        return Some(classified(
+            "admin_proxy",
+            "billing_manage",
+            if finance_path.ends_with("/provider-accounts") {
+                "provider_accounts"
+            } else if method == http::Method::GET {
+                "provider_expenses"
+            } else if finance_path.ends_with("/void") {
+                "void_provider_expense"
+            } else {
+                "create_provider_expense"
+            },
+            "admin:billing",
+            false,
+        ));
+    }
     if method == http::Method::GET
         && matches!(
             normalized_path,

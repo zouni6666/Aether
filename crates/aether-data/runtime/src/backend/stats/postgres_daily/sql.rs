@@ -2404,6 +2404,18 @@ WHERE created_at >= $1
   AND provider_name NOT IN ('unknown', 'pending')
 "#;
 
+// Keep customer consumption separate from the upstream procurement-cost rollup.
+pub(super) const UPDATE_STATS_DAILY_BILLING_COST_SQL: &str = r#"
+UPDATE stats_daily SET billing_cost=(
+  SELECT round(COALESCE(sum(billable_amount),0),8)
+  FROM usage_analytics_facts_v1
+  WHERE created_at >= $1 AND created_at < $2
+    AND status NOT IN ('pending','streaming')
+    AND provider_name NOT IN ('unknown','pending')
+)
+WHERE date=$1
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::{

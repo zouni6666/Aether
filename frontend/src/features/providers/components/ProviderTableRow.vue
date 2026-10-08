@@ -11,6 +11,17 @@
     >
       <slot name="drag-handle" />
     </TableCell>
+    <TableCell
+      v-if="$slots.priority"
+      class="w-px whitespace-nowrap px-2 py-3.5 text-center"
+      @click.stop
+      @mousedown.stop
+      @pointerdown.stop
+    >
+      <div class="flex justify-center">
+        <slot name="priority" />
+      </div>
+    </TableCell>
     <TableCell class="py-3.5">
       <div class="space-y-0.5">
         <div class="flex items-center gap-1.5">
@@ -136,18 +147,22 @@
       >{{ legacyT('暂无端点') }}</span>
     </TableCell>
     <TableCell class="py-3.5 text-center">
-      <Badge
-        :variant="provider.is_active ? 'success' : 'secondary'"
-        class="text-xs"
-      >
-        {{ legacyT(provider.is_active ? '活跃' : '停用') }}
-      </Badge>
+      <div class="flex flex-col items-center gap-1.5">
+        <slot name="scheduling" />
+        <Badge
+          :variant="provider.is_active ? 'success' : 'secondary'"
+          class="whitespace-nowrap text-xs"
+        >
+          {{ legacyT(provider.is_active ? '全局启用' : '全局停用') }}
+        </Badge>
+      </div>
     </TableCell>
     <TableCell
       class="py-3.5"
       @click.stop
     >
       <div class="flex items-center justify-center gap-0.5">
+        <slot name="group-action" />
         <Button
           variant="ghost"
           size="icon"
@@ -179,7 +194,7 @@
           variant="ghost"
           size="icon"
           class="h-7 w-7 text-muted-foreground/70 hover:text-foreground"
-          :title="legacyT(provider.is_active ? '停用提供商' : '启用提供商')"
+          :title="legacyT(provider.is_active ? '全局停用提供商' : '全局启用提供商')"
           @click="$emit('toggleStatus', provider)"
         >
           <Power class="h-3.5 w-3.5" />

@@ -346,6 +346,10 @@ pub struct UsageSettlementInput {
     pub billing_status: String,
     pub total_cost_usd: f64,
     pub actual_total_cost_usd: f64,
+    /// Customer charge after all captured billing factors, independent of upstream cost.
+    /// Missing values retain the legacy charge based on `actual_total_cost_usd`.
+    #[serde(default)]
+    pub billing_cost_usd: Option<f64>,
     pub finalized_at_unix_secs: Option<u64>,
 }
 
@@ -364,6 +368,14 @@ impl UsageSettlementInput {
         if !self.total_cost_usd.is_finite() || !self.actual_total_cost_usd.is_finite() {
             return Err(crate::DataLayerError::InvalidInput(
                 "settlement cost must be finite".to_string(),
+            ));
+        }
+        if self
+            .billing_cost_usd
+            .is_some_and(|value| !value.is_finite() || value < 0.0)
+        {
+            return Err(crate::DataLayerError::InvalidInput(
+                "settlement billing_cost_usd must be finite and non-negative".to_string(),
             ));
         }
         Ok(())
@@ -511,14 +523,17 @@ pub fn settlement_billing_status_for_usage_status(status: &str) -> &'static str 
 }
 
 pub fn settlement_billable_cost_usd(input: &UsageSettlementInput) -> f64 {
-    input.actual_total_cost_usd.max(0.0)
+    input
+        .billing_cost_usd
+        .unwrap_or(input.actual_total_cost_usd)
+        .max(0.0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        validate_wallet_settlement_values, ReconcileUsagePolicyCostInput,
-        ReserveUsagePolicyCostInput, ReserveUsagePolicyRequestInput,
+        settlement_billable_cost_usd, validate_wallet_settlement_values,
+        ReconcileUsagePolicyCostInput, ReserveUsagePolicyCostInput, ReserveUsagePolicyRequestInput,
         UsagePolicyCostReservationState, UsagePolicyCostWindow, UsagePolicyRequestWindow,
         UsageSettlementInput,
     };
@@ -535,9 +550,48 @@ mod tests {
             billing_status: "pending".to_string(),
             total_cost_usd: 0.1,
             actual_total_cost_usd: 0.1,
+            billing_cost_usd: None,
             finalized_at_unix_secs: None,
         };
         assert!(input.validate().is_err());
+    }
+
+    #[test]
+    fn explicit_customer_charge_is_validated_independently_of_upstream_cost() {
+        let mut input: UsageSettlementInput = serde_json::from_value(serde_json::json!({
+            "request_id": "billing-charge",
+            "user_id": "user-1",
+            "api_key_id": null,
+            "provider_id": "provider-1",
+            "status": "completed",
+            "billing_status": "pending",
+            "total_cost_usd": 2.0,
+            "actual_total_cost_usd": 0.5,
+            "finalized_at_unix_secs": null,
+        }))
+        .expect("legacy settlement input should deserialize");
+        assert_eq!(input.billing_cost_usd, None);
+        assert_eq!(settlement_billable_cost_usd(&input), 0.5);
+        assert!(input.validate().is_ok());
+
+        for charge in [3.0, 0.0] {
+            input.billing_cost_usd = Some(charge);
+            assert!(input.validate().is_ok());
+            assert_eq!(settlement_billable_cost_usd(&input), charge);
+            assert_eq!(input.actual_total_cost_usd, 0.5);
+            assert_eq!(
+                serde_json::from_value::<UsageSettlementInput>(
+                    serde_json::to_value(&input).unwrap()
+                )
+                .unwrap(),
+                input
+            );
+        }
+
+        for charge in [-0.01, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            input.billing_cost_usd = Some(charge);
+            assert!(input.validate().is_err());
+        }
     }
 
     #[test]

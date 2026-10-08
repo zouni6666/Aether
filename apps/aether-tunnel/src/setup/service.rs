@@ -340,7 +340,12 @@ fn render_systemd_unit(
     validate_service_unit_path(working_dir, "working directory")?;
 
     let exe_path = systemd_quote(exe_path);
-    let working_dir = systemd_quote(working_dir);
+    // systemd treats a quoted WorkingDirectory value as part of the path
+    // (systemd-analyze reports `path is not absolute: "/etc/aether-tunnel"`),
+    // so this directive must stay unquoted. The directive takes the rest of
+    // the line as the path, so values with spaces stay intact, and
+    // validate_service_unit_path rejects newline/specifier injection.
+    let working_dir = working_dir.to_string();
     let config_env = systemd_quote(&format!("AETHER_TUNNEL_CONFIG={config_path}"));
     Ok(format!(
         "[Unit]\n\
@@ -980,7 +985,8 @@ mod tests {
         assert!(unit.contains(
             r#"Environment="AETHER_TUNNEL_CONFIG=/var/lib/aether tunnel/config\\\\node.toml""#
         ));
-        assert!(unit.contains(r#"WorkingDirectory="/var/lib/aether tunnel""#));
+        assert!(unit.contains("WorkingDirectory=/var/lib/aether tunnel\n"));
+        assert!(!unit.contains("WorkingDirectory=\""));
         assert_eq!(systemd_quote("a\\b\"c"), r#""a\\b\"c""#);
     }
 

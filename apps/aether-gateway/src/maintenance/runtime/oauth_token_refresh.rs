@@ -155,14 +155,17 @@ pub(crate) async fn perform_oauth_token_refresh_once(
                 Ok(None) => {
                     summary.skipped = summary.skipped.saturating_add(1);
                 }
-                Err(_) => {
+                Err(err) => {
                     summary.failed = summary.failed.saturating_add(1);
                     warn!(
                         event_name = "oauth_token_refresh_failed",
                         log_type = "ops",
                         worker = "oauth_token_refresh",
                         provider_id = %provider.id,
+                        provider_type = %provider.provider_type,
+                        endpoint_id = %endpoint.id,
                         key_id = %key.id,
+                        error = %crate::error::redact_error_debug(&err),
                         "gateway oauth token auto refresh failed"
                     );
                 }
@@ -440,6 +443,7 @@ mod tests {
         agent_identity_needs_task_recovery, auth_config_has_refresh_token,
         is_nonfatal_legacy_catalog_credential_error, oauth_refresh_candidate,
     };
+    use crate::error::redact_error_debug;
     use crate::GatewayError;
 
     #[test]
@@ -542,5 +546,19 @@ mod tests {
                 "endpoint proxy credential encryption is unavailable".to_string(),
             )
         ));
+    }
+
+    #[test]
+    fn oauth_refresh_failure_detail_preserves_context_without_credentials() {
+        let error = GatewayError::Internal(
+            r#"oauth request failed: status=503 token="refresh-secret" retry=2"#.to_string(),
+        );
+
+        let detail = redact_error_debug(&error);
+
+        assert!(detail.contains("oauth request failed"));
+        assert!(detail.contains("status=503"));
+        assert!(detail.contains("[REDACTED]"));
+        assert!(!detail.contains("refresh-secret"));
     }
 }

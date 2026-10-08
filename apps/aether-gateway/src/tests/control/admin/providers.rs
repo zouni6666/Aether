@@ -42,6 +42,90 @@ const ADMIN_PROVIDERS_DATA_UNAVAILABLE_DETAIL: &str = "Admin provider catalog da
 
 mod health;
 
+#[tokio::test]
+async fn gateway_creates_provider_in_selected_routing_group_and_rejects_stale_saves() {
+    use aether_data::repository::routing_profiles::InMemoryRoutingGroupRepository;
+    use aether_data_contracts::repository::routing_profiles::{
+        CreateRoutingGroupRecord, RoutingGroupReadRepository, RoutingGroupWriteRepository,
+    };
+    let groups = Arc::new(InMemoryRoutingGroupRepository::default());
+    for id in ["selected", "other"] {
+        groups
+            .create_routing_group(CreateRoutingGroupRecord {
+                id: id.into(),
+                name: id.into(),
+                description: None,
+                enabled: true,
+                is_system_default: id == "selected",
+                sort_order: 0,
+                config_json: json!({}),
+                version: 1,
+                created_at: 1,
+                updated_at: 1,
+                published_at: None,
+            })
+            .await
+            .unwrap();
+    }
+    let providers = Arc::new(
+        InMemoryProviderCatalogReadRepository::default().with_routing_groups(groups.clone()),
+    );
+    let gateway = build_router_with_state(
+        AppState::new().unwrap().with_data_state_for_tests(
+            GatewayDataState::with_provider_catalog_repository_for_tests(providers.clone())
+                .with_routing_group_repository_for_tests(groups.clone()),
+        ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+    let request = |name: &str, group: &str| {
+        client
+            .post(format!("{gateway_url}/api/admin/providers/"))
+            .header(GATEWAY_HEADER, "rust-phase3b")
+            .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+            .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+            .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+            .json(&json!({"name": name, "routing_group_id": group}))
+    };
+    let missing = request("missing", "gone").send().await.unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    assert!(providers.list_providers(false).await.unwrap().is_empty());
+
+    let response = request("scoped", "selected").send().await.unwrap();
+    let status = response.status();
+    let payload: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{payload}");
+    let provider_id = payload["id"].as_str().unwrap();
+    for group in groups.list_routing_groups().await.unwrap() {
+        assert_eq!(group.version, if group.id == "selected" { 1 } else { 2 });
+        assert_eq!(
+            group.config_json["disabled_providers"],
+            if group.id == "selected" {
+                json!(null)
+            } else {
+                json!([provider_id])
+            }
+        );
+    }
+    let response = client
+        .patch(format!("{gateway_url}/api/admin/routing/groups/other"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({"expected_version": 1, "config_json": {"disabled_providers": []}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::CONFLICT,
+        "{}",
+        response.text().await.unwrap()
+    );
+    gateway_handle.abort();
+}
+
 async fn provider_health_summary(
     endpoints: &[StoredProviderCatalogEndpoint],
     keys: &[StoredProviderCatalogKey],

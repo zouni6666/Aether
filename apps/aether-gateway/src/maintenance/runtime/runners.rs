@@ -669,8 +669,24 @@ pub(super) async fn run_pending_cleanup_once(app: &AppState) -> Result<(), DataL
 pub(super) async fn run_stats_hourly_aggregation_once(
     data: &GatewayDataState,
 ) -> Result<bool, DataLayerError> {
-    let Some(summary) = perform_stats_hourly_aggregation_once(data).await? else {
-        return Ok(false);
+    let legacy = perform_stats_hourly_aggregation_once(data).await;
+    let overview_progress = match super::stats_hourly::perform_overview_rebuild_once(data).await {
+        Ok(progress) => progress,
+        Err(error) => {
+            warn!(event_name = "overview_rebuild_failed", error = ?error,
+                "overview rebuild deferred; legacy statistics remain available");
+            0
+        }
+    };
+    if overview_progress > 0 {
+        info!(
+            event_name = "overview_rebuild_progress",
+            progress = overview_progress,
+            "overview dirty projections rebuilt"
+        );
+    }
+    let Some(summary) = legacy? else {
+        return Ok(overview_progress > 0);
     };
 
     info!(

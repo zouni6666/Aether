@@ -8,7 +8,8 @@ use uuid::Uuid;
 use crate::DataLayerError;
 use aether_data_contracts::repository::announcements::{
     AnnouncementListQuery, AnnouncementReadRepository, AnnouncementWriteRepository,
-    CreateAnnouncementRecord, StoredAnnouncement, StoredAnnouncementPage, UpdateAnnouncementRecord,
+    CreateAnnouncementRecord, StoredAnnouncement, StoredAnnouncementPage, StoredUserAnnouncement,
+    StoredUserAnnouncementPage, UpdateAnnouncementRecord, UserAnnouncementListQuery,
 };
 
 #[derive(Debug, Default)]
@@ -103,6 +104,65 @@ impl AnnouncementReadRepository for InMemoryAnnouncementReadRepository {
             .collect();
 
         Ok(StoredAnnouncementPage { items, total })
+    }
+
+    async fn list_user_announcements(
+        &self,
+        user_id: &str,
+        query: &UserAnnouncementListQuery,
+    ) -> Result<StoredUserAnnouncementPage, DataLayerError> {
+        query.validate()?;
+        let announcements = self
+            .announcements
+            .read()
+            .expect("announcement repository lock");
+        let reads = self
+            .announcement_reads
+            .read()
+            .expect("announcement reads repository lock");
+        let mut unread_count = 0;
+        let mut items = announcements
+            .iter()
+            .filter(|announcement| {
+                announcement.is_active
+                    && announcement
+                        .start_time_unix_secs
+                        .is_none_or(|value| value <= query.now_unix_secs)
+                    && announcement
+                        .end_time_unix_secs
+                        .is_none_or(|value| value >= query.now_unix_secs)
+            })
+            .filter_map(|announcement| {
+                let is_read = reads.contains(&(user_id.to_string(), announcement.id.clone()));
+                if !is_read {
+                    unread_count += 1;
+                }
+                (!query.unread_only || !is_read).then_some((announcement, is_read))
+            })
+            .collect::<Vec<_>>();
+        items.sort_by(|(left, _), (right, _)| {
+            right
+                .is_pinned
+                .cmp(&left.is_pinned)
+                .then_with(|| right.priority.cmp(&left.priority))
+                .then_with(|| right.created_at_unix_ms.cmp(&left.created_at_unix_ms))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        let total = items.len() as u64;
+        let items = items
+            .into_iter()
+            .skip(query.offset)
+            .take(query.limit)
+            .map(|(announcement, is_read)| StoredUserAnnouncement {
+                announcement: announcement.clone(),
+                is_read,
+            })
+            .collect();
+        Ok(StoredUserAnnouncementPage {
+            items,
+            total,
+            unread_count,
+        })
     }
 
     async fn count_unread_active_announcements(
@@ -294,8 +354,94 @@ mod tests {
     use super::InMemoryAnnouncementReadRepository;
     use crate::repository::announcements::{
         AnnouncementReadRepository, AnnouncementWriteRepository, CreateAnnouncementRecord,
-        StoredAnnouncement, UpdateAnnouncementRecord,
+        StoredAnnouncement, UpdateAnnouncementRecord, UserAnnouncementListQuery,
     };
+
+    #[tokio::test]
+    async fn personal_announcement_page_preserves_global_unread_and_visibility() {
+        let now = 1_800_000_000;
+        let announcements = [
+            ("pinned", true, true, 0, None, None),
+            ("normal-a", true, false, 20, Some(now), Some(now)),
+            ("normal-b", true, false, 20, None, None),
+            ("draft", false, false, 99, None, None),
+            ("future", true, false, 99, Some(now + 1), None),
+            ("expired", true, false, 99, None, Some(now - 1)),
+        ]
+        .into_iter()
+        .map(|(id, active, pinned, priority, start, end)| {
+            StoredAnnouncement::new(
+                id.into(),
+                id.into(),
+                "content".into(),
+                "info".into(),
+                priority,
+                active,
+                pinned,
+                false,
+                None,
+                None,
+                start,
+                end,
+                now,
+                now,
+            )
+            .unwrap()
+        });
+        let repository = InMemoryAnnouncementReadRepository::seed_with_reads(
+            announcements,
+            [("reader".into(), "pinned".into())],
+        );
+        let mut query = UserAnnouncementListQuery {
+            unread_only: false,
+            offset: 0,
+            limit: 1,
+            now_unix_secs: now as u64,
+        };
+        let first = repository
+            .list_user_announcements("reader", &query)
+            .await
+            .unwrap();
+        assert_eq!((first.total, first.unread_count), (3, 2));
+        assert_eq!(first.items[0].announcement.id, "pinned");
+        assert!(first.items[0].is_read);
+        query.unread_only = true;
+        query.offset = 1;
+        let second = repository
+            .list_user_announcements("reader", &query)
+            .await
+            .unwrap();
+        assert_eq!((second.total, second.unread_count), (2, 2));
+        assert_eq!(second.items[0].announcement.id, "normal-b");
+        assert!(!second.items[0].is_read);
+        query.offset = i64::MAX as usize;
+        let empty = repository
+            .list_user_announcements("reader", &query)
+            .await
+            .unwrap();
+        assert!(empty.items.is_empty());
+        assert_eq!((empty.total, empty.unread_count), (2, 2));
+        let other = repository
+            .list_user_announcements("other", &query)
+            .await
+            .unwrap();
+        assert_eq!((other.total, other.unread_count), (3, 3));
+        repository
+            .mark_announcement_as_read("reader", "normal-a", now as u64)
+            .await
+            .unwrap();
+        query.offset = 0;
+        let after_read = repository
+            .list_user_announcements("reader", &query)
+            .await
+            .unwrap();
+        assert_eq!((after_read.total, after_read.unread_count), (1, 1));
+        query.limit = 101;
+        assert!(repository
+            .list_user_announcements("reader", &query)
+            .await
+            .is_err());
+    }
 
     #[tokio::test]
     async fn reads_seeded_announcements() {

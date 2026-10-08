@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use aether_routing_core::RoutingExecutionPolicy;
@@ -16,6 +16,15 @@ use crate::GatewayError;
 
 tokio::task_local! {
     static CANCEL_ON_CLIENT_DISCONNECT: Arc<AtomicBool>;
+    static REQUEST_ACTIVITY: Arc<Mutex<Option<aether_runtime::AdmissionPermit>>>;
+}
+
+/// Begin observing only after routing chose local AI execution. The surrounding
+/// request/body lifecycle keeps this holder alive through disconnect draining.
+pub(crate) fn track_request_activity(permit: aether_runtime::AdmissionPermit) {
+    let _ = REQUEST_ACTIVITY.try_with(|activity| {
+        *activity.lock().unwrap_or_else(|error| error.into_inner()) = Some(permit);
+    });
 }
 
 pub(crate) fn configure_client_disconnect(policy: RoutingExecutionPolicy) {
@@ -59,23 +68,35 @@ where
     let diagnostics = Arc::new(RequestDiagnostics::default());
     let cancel_for_response = Arc::clone(&cancel);
     let producer_for_request = producer.clone();
-    let future = CANCEL_ON_CLIENT_DISCONNECT.scope(
-        Arc::clone(&cancel),
-        scope_request_diagnostics_with(Some(Arc::clone(&diagnostics)), async move {
-            let response = future.await?;
-            let complete_on_disconnect = !cancel_for_response.load(Ordering::Acquire);
-            if !complete_on_disconnect && producer.is_none() {
-                return Ok(response);
-            }
-            Ok(response.map(|body| {
-                Body::new(CompleteOnDisconnectBody {
-                    body: Some(body),
-                    diagnostics,
-                    complete_on_disconnect,
-                    producer,
-                })
-            }))
-        }),
+    let activity = Arc::new(Mutex::new(None));
+    let activity_for_response = Arc::clone(&activity);
+    let future = REQUEST_ACTIVITY.scope(
+        activity,
+        CANCEL_ON_CLIENT_DISCONNECT.scope(
+            Arc::clone(&cancel),
+            scope_request_diagnostics_with(Some(Arc::clone(&diagnostics)), async move {
+                let response = future.await?;
+                let complete_on_disconnect = !cancel_for_response.load(Ordering::Acquire);
+                if !complete_on_disconnect
+                    && producer.is_none()
+                    && activity_for_response
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .is_none()
+                {
+                    return Ok(response);
+                }
+                Ok(response.map(|body| {
+                    Body::new(CompleteOnDisconnectBody {
+                        body: Some(body),
+                        diagnostics,
+                        complete_on_disconnect,
+                        producer,
+                        activity: Some(activity_for_response),
+                    })
+                }))
+            }),
+        ),
     );
     CompleteOnDisconnectRequest {
         future: Some(Box::pin(future)),
@@ -142,6 +163,7 @@ struct CompleteOnDisconnectBody {
     complete_on_disconnect: bool,
     // Drop the body first so its terminal handoff registers before this guard ends.
     producer: Option<Arc<UsageProducerGuard>>,
+    activity: Option<Arc<Mutex<Option<aether_runtime::AdmissionPermit>>>>,
 }
 
 impl HttpBody for CompleteOnDisconnectBody {
@@ -159,6 +181,7 @@ impl HttpBody for CompleteOnDisconnectBody {
         if matches!(result, Poll::Ready(None | Some(Err(_)))) {
             self.body.take();
             self.producer.take();
+            self.activity.take();
         }
         result
     }
@@ -185,10 +208,12 @@ impl Drop for CompleteOnDisconnectBody {
         };
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let producer = self.producer.take();
+            let activity = self.activity.take();
             runtime.spawn(scope_request_diagnostics_with(
                 Some(Arc::clone(&self.diagnostics)),
                 async move {
                     let _producer = producer;
+                    let _activity = activity;
                     drain_body(body).await;
                 },
             ));
@@ -341,10 +366,13 @@ mod tests {
     #[tokio::test]
     async fn usage_shutdown_waits_for_a_disconnected_request_before_headers() {
         let usage = Arc::new(UsageRuntime::disabled());
+        let activity = Arc::new(crate::request_activity::RequestActivity::default());
+        let activity_permit = activity.begin().into_admission_permit();
         let (started_tx, started_rx) = oneshot::channel();
         let (release_tx, release_rx) = oneshot::channel::<()>();
         let request = tokio::spawn(run_request_with_usage(usage.clone(), async move {
             configure_client_disconnect(RoutingExecutionPolicy::default());
+            track_request_activity(activity_permit);
             started_tx.send(()).unwrap();
             release_rx.await.unwrap();
             Ok(Response::new(Body::empty()))
@@ -354,49 +382,79 @@ mod tests {
         assert!(request.await.unwrap_err().is_cancelled());
         assert!(usage.shutdown(Duration::from_millis(30)).await.is_err());
         assert_eq!(usage.metrics_snapshot().producers_in_flight, 1);
+        assert_eq!(activity.active(), 1);
         release_tx.send(()).unwrap();
         usage.shutdown(Duration::from_secs(1)).await.unwrap();
         assert_eq!(usage.metrics_snapshot().producers_in_flight, 0);
+        assert_eq!(activity.active(), 0);
+    }
+
+    #[tokio::test]
+    async fn request_activity_releases_when_the_handler_fails_before_headers() {
+        let activity = Arc::new(crate::request_activity::RequestActivity::default());
+        let permit = activity.begin().into_admission_permit();
+        let result = run_request(async move {
+            track_request_activity(permit);
+            Err(GatewayError::Internal("test failure".into()))
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(activity.active(), 0);
     }
 
     #[tokio::test]
     async fn usage_shutdown_waits_for_disconnected_body_drain() {
         let usage = Arc::new(UsageRuntime::disabled());
+        let activity = Arc::new(crate::request_activity::RequestActivity::default());
+        let activity_permit = activity.begin().into_admission_permit();
         let (sender, receiver) = mpsc::channel::<Result<Bytes, io::Error>>(1);
         let response = run_request_with_usage(usage.clone(), async move {
             configure_client_disconnect(RoutingExecutionPolicy::default());
-            Ok(Response::new(Body::from_stream(stream::unfold(
+            track_request_activity(activity_permit);
+            let response = Response::new(Body::from_stream(stream::unfold(
                 receiver,
                 |mut receiver| async { receiver.recv().await.map(|item| (item, receiver)) },
-            ))))
+            )));
+            Ok(response)
         })
         .await
         .unwrap();
         drop(response);
+        assert_eq!(
+            activity.active(),
+            1,
+            "background drain still owns the request"
+        );
         assert!(usage.shutdown(Duration::from_millis(30)).await.is_err());
         sender.send(Ok(Bytes::from_static(b"last"))).await.unwrap();
         drop(sender);
         usage.shutdown(Duration::from_secs(1)).await.unwrap();
         assert_eq!(usage.metrics_snapshot().producers_in_flight, 0);
+        assert_eq!(activity.active(), 0);
     }
 
     #[tokio::test]
     async fn tracked_bodies_release_shutdown_on_cancellation_or_eof() {
         for cancel_on_client_disconnect in [false, true] {
             let usage = Arc::new(UsageRuntime::disabled());
+            let activity = Arc::new(crate::request_activity::RequestActivity::default());
+            let activity_permit = activity.begin().into_admission_permit();
             let (sender, receiver) = mpsc::channel::<Result<Bytes, io::Error>>(1);
             let response = run_request_with_usage(usage.clone(), async move {
                 configure_client_disconnect(RoutingExecutionPolicy {
                     cancel_on_client_disconnect,
                     ..Default::default()
                 });
-                Ok(Response::new(Body::from_stream(stream::unfold(
+                track_request_activity(activity_permit);
+                let response = Response::new(Body::from_stream(stream::unfold(
                     receiver,
                     |mut receiver| async { receiver.recv().await.map(|item| (item, receiver)) },
-                ))))
+                )));
+                Ok(response)
             })
             .await
             .unwrap();
+            assert_eq!(activity.active(), 1);
             let mut body = response.into_body();
             if cancel_on_client_disconnect {
                 drop(body);
@@ -407,13 +465,17 @@ mod tests {
                 assert_eq!(usage.metrics_snapshot().producers_in_flight, 0);
             }
             usage.shutdown(Duration::from_secs(1)).await.unwrap();
+            assert_eq!(activity.active(), 0);
         }
     }
 
     #[tokio::test]
     async fn connected_response_preserves_headers_size_hint_and_trailers() {
-        let response = run_request(async {
+        let activity = Arc::new(crate::request_activity::RequestActivity::default());
+        let activity_permit = activity.begin().into_admission_permit();
+        let response = run_request(async move {
             configure_client_disconnect(RoutingExecutionPolicy::default());
+            track_request_activity(activity_permit);
             Ok(Response::builder()
                 .status(201)
                 .header("x-test", "unchanged")
@@ -429,11 +491,14 @@ mod tests {
             response.into_body().collect().await.unwrap().to_bytes(),
             "hello"
         );
+        assert_eq!(activity.active(), 0);
 
         let mut trailers = HeaderMap::new();
         trailers.insert("x-finished", "yes".parse().unwrap());
+        let activity_permit = activity.begin().into_admission_permit();
         let response = run_request(async move {
             configure_client_disconnect(RoutingExecutionPolicy::default());
+            track_request_activity(activity_permit);
             let frames = stream::iter([
                 Ok::<_, io::Error>(Frame::data(Bytes::from_static(b"hello"))),
                 Ok(Frame::trailers(trailers)),

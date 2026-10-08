@@ -6,6 +6,11 @@ use aether_ai_serving::{
     provider_stream_event_api_format_for_provider_type as ai_provider_stream_event_api_format_for_provider_type,
     AiExecutionReportContextParts, AiRequestOrigin, STICKY_KEY_ATTEMPTS_REPORT_FIELD,
 };
+use aether_data_contracts::repository::usage::{
+    BillingMultiplierSnapshot, BILLING_MULTIPLIER_SNAPSHOT_METADATA_KEY,
+    ROUTING_GROUP_BILLING_MULTIPLIER_METADATA_KEY, ROUTING_GROUP_ID_METADATA_KEY,
+    ROUTING_GROUP_NAME_METADATA_KEY,
+};
 use aether_routing_core::ResolvedRoutingPolicy;
 use aether_runtime_state::RuntimeLockLease;
 use aether_scheduler_core::{ClientSessionAffinity, SchedulerRankingOutcome};
@@ -87,6 +92,46 @@ pub(crate) fn build_local_execution_report_context(
         parts.original_request_body_base64,
     );
     let mut extra_fields = parts.extra_fields;
+    // Always overwrite caller-supplied extras with the planner's immutable policy snapshot.
+    let billing_multiplier = parts
+        .routing_policy
+        .map(|policy| policy.billing_multiplier)
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .unwrap_or(1.0);
+    extra_fields.insert(
+        ROUTING_GROUP_BILLING_MULTIPLIER_METADATA_KEY.to_string(),
+        Value::from(billing_multiplier),
+    );
+    extra_fields.insert(
+        BILLING_MULTIPLIER_SNAPSHOT_METADATA_KEY.to_string(),
+        serde_json::to_value(
+            BillingMultiplierSnapshot::from_factors(BTreeMap::from([(
+                "routing_group".to_string(),
+                billing_multiplier,
+            )]))
+            .expect("validated routing multiplier must produce a billing snapshot"),
+        )
+        .expect("validated billing snapshot must serialize"),
+    );
+    for (field, value) in [
+        (
+            ROUTING_GROUP_ID_METADATA_KEY,
+            parts
+                .routing_policy
+                .and_then(|policy| policy.group_id.as_deref()),
+        ),
+        (
+            ROUTING_GROUP_NAME_METADATA_KEY,
+            parts
+                .routing_policy
+                .and_then(|policy| policy.group_name.as_deref()),
+        ),
+    ] {
+        extra_fields.remove(field);
+        if let Some(value) = value {
+            extra_fields.insert(field.to_string(), Value::String(value.to_string()));
+        }
+    }
     if let Some(value) = parts
         .client_session_affinity
         .and_then(client_session_affinity_report_context_value)
@@ -341,6 +386,27 @@ mod tests {
             Some("codex".to_string()),
             Some("account=account-1;session=session-1".to_string()),
         );
+        let mut routing_policy = aether_routing_core::resolve_routing_policy(
+            &aether_routing_core::RoutingGroupConfig {
+                billing_multiplier: 0.25,
+                ..Default::default()
+            },
+            aether_routing_core::RoutingPolicyInput {
+                group_id: Some("group-1"),
+                group_version: Some(7),
+                selection_source: "system_default",
+                requested_model: "gpt-5",
+                resolved_model: "gpt-5",
+                api_format: "openai:chat",
+                user_id: None,
+                api_key_id: None,
+                headers: &json!({}),
+                body: &json!({}),
+                phase: aether_routing_core::RoutingRulePhase::ClientRequest,
+            },
+        )
+        .expect("routing policy should resolve");
+        routing_policy.group_name = Some("请求时的分组".to_string());
 
         let report_context =
             build_local_execution_report_context(LocalExecutionReportContextParts {
@@ -379,16 +445,35 @@ mod tests {
                 original_request_body_json: Some(&json!({"model": "gpt-5"})),
                 original_request_body_base64: None,
                 client_session_affinity: Some(&client_session_affinity),
-                routing_policy: None,
+                routing_policy: Some(&routing_policy),
                 scheduler_affinity_epoch: None,
                 sticky_key_attempts: None,
                 client_requested_stream: false,
                 upstream_is_stream: false,
                 has_envelope: false,
                 needs_conversion: false,
-                extra_fields: Map::new(),
+                extra_fields: Map::from_iter([
+                    (
+                        "billing_multiplier_snapshot".to_string(),
+                        json!({
+                            "version": 1, "factors": {"routing_group": 99.0}, "multiplier": 99.0
+                        }),
+                    ),
+                    ("routing_group_billing_multiplier".to_string(), json!(99)),
+                    ("routing_group_id".to_string(), json!("forged-group")),
+                    ("routing_group_name".to_string(), json!("forged-name")),
+                ]),
             });
 
+        assert_eq!(report_context["routing_group_billing_multiplier"], 0.25);
+        assert_eq!(
+            report_context["billing_multiplier_snapshot"],
+            json!({
+                "version": 1, "factors": {"routing_group": 0.25}, "multiplier": 0.25
+            })
+        );
+        assert_eq!(report_context["routing_group_id"], "group-1");
+        assert_eq!(report_context["routing_group_name"], "请求时的分组");
         assert_eq!(
             report_context["client_ip"],
             Value::String("203.0.113.8".to_string())

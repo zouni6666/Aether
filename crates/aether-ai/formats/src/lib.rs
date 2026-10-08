@@ -1,6 +1,7 @@
 extern crate self as aether_ai_formats;
 
 pub mod api;
+pub mod client_profile;
 pub mod codex_profile;
 pub mod contracts;
 pub mod formats;

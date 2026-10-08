@@ -22,3 +22,19 @@ pub(super) async fn perform_stats_hourly_aggregation_once(
     })
     .await
 }
+
+pub(super) async fn perform_overview_rebuild_once(
+    data: &GatewayDataState,
+) -> Result<usize, DataLayerError> {
+    if !data.has_stats_hourly_aggregation_backend()
+        || !system_config_bool(data, "enable_stats_aggregation", true).await?
+    {
+        return Ok(0);
+    }
+    let now_utc = Utc::now();
+    data.rebuild_overview_buckets(&StatsHourlyAggregationInput {
+        target_hour_utc: stats_hourly_aggregation_target_hour(now_utc),
+        aggregated_at: now_utc,
+    })
+    .await
+}

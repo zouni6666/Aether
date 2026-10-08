@@ -11,6 +11,7 @@ import type {
   EnhancedModelStatsItem
 } from '../types'
 import { createDefaultStats } from '../types'
+import { mergeUsageBillingSnapshot } from '../utils/usageBilling'
 import { log } from '@/utils/logger'
 import { getErrorStatus } from '@/types/api-error'
 import { isUsageProviderVisible, normalizeUsageProviderStats } from '../utils/providerStats'
@@ -36,6 +37,15 @@ export interface PaginationParams {
 }
 
 export interface FilterParams {
+  provider_id?: string
+  api_key_id?: string
+  request_id?: string
+  attribution_kind?: string
+  endpoint_kind?: string
+  request_type?: string
+  is_stream?: boolean
+  has_format_conversion?: boolean
+  slow_threshold_ms?: number
   search?: string
   user_id?: string
   model?: string
@@ -399,6 +409,12 @@ export function useUsageData(options: UseUsageDataOptions) {
 
       if (isAdminPage.value) {
         // 管理员页面：使用管理员 API
+        for (const key of ['provider_id', 'api_key_id', 'request_id', 'attribution_kind', 'endpoint_kind', 'request_type'] as const) {
+          if (filters?.[key]) params[key] = filters[key]
+        }
+        for (const key of ['is_stream', 'has_format_conversion', 'slow_threshold_ms'] as const) {
+          if (filters?.[key] !== undefined) params[key] = filters[key]
+        }
         if (filters?.user_id) {
           params.user_id = filters.user_id
         }
@@ -595,8 +611,10 @@ export function useUsageData(options: UseUsageDataOptions) {
         { preferNext: nextTimingIsAuthoritative },
       )
 
+      const mergedCost = mergeSparseRecordMetric(existing.cost, record.cost) ?? record.cost
       return {
         ...record,
+        ...mergeUsageBillingSnapshot(existing, { ...record, cost: mergedCost }, statusProgressed),
         // 保留详情抽屉/活跃轮询已经拿到的完整指标，避免列表刷新用 0 或空值回退。
         status: mergedStatus,
         provider: statusProgressed
@@ -619,7 +637,7 @@ export function useUsageData(options: UseUsageDataOptions) {
             record.cache_creation_ephemeral_1h_input_tokens
           ) ?? record.cache_creation_ephemeral_1h_input_tokens,
         cache_read_input_tokens: mergeSparseRecordMetric(existing.cache_read_input_tokens, record.cache_read_input_tokens) ?? record.cache_read_input_tokens,
-        cost: mergeSparseRecordMetric(existing.cost, record.cost) ?? record.cost,
+        cost: mergedCost,
         actual_cost: mergeSparseRecordMetric(existing.actual_cost, record.actual_cost) ?? record.actual_cost,
         response_time_ms: responseTiming.response_time_ms,
         first_byte_time_ms: mergeUsageRecordFirstByteTimeMs(

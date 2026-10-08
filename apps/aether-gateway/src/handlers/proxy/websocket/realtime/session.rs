@@ -136,6 +136,7 @@ pub(super) async fn prepare_realtime_websocket(
         state,
         &candidate.admission_plan,
         context.trace_id.as_str(),
+        None,
     )
     .await
     {

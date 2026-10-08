@@ -376,6 +376,12 @@ async fn handle_live_http(
         state,
         &attempt.plan,
         request_context.trace_id.as_str(),
+        Some(
+            attempt
+                .report_context
+                .as_ref()
+                .unwrap_or(&serde_json::Value::Null),
+        ),
     )
     .await
     {

@@ -47,10 +47,15 @@ pub struct MatchedRoutingRule {
     pub phase: RoutingRulePhase,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResolvedRoutingPolicy {
+    #[serde(default = "crate::model::default_billing_multiplier")]
+    pub billing_multiplier: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
+    /// Display name captured alongside the selected group by the gateway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_version: Option<i64>,
     pub selection_source: String,
@@ -80,17 +85,24 @@ pub fn resolve_routing_policy(
         .map_err(|error| RoutingPolicyError::InvalidConfig(error.to_string()))?;
 
     let mut policy = ResolvedRoutingPolicy {
+        billing_multiplier: config.billing_multiplier,
         group_id: input.group_id.map(str::to_string),
+        group_name: None,
         group_version: input.group_version,
         selection_source: input.selection_source.to_string(),
         requested_model: input.requested_model.to_string(),
         resolved_model: input.resolved_model.to_string(),
-        priority_mode: config.default_policy.priority_mode,
+        // Legacy global_key values remain readable, but routing groups now
+        // always rank providers before their keys.
+        priority_mode: RoutingSetPriorityMode::Provider,
         scheduling_mode: config.default_policy.scheduling_mode,
         keep_priority_on_conversion: config.default_policy.keep_priority_on_conversion,
         sticky_key_attempts: config.default_policy.sticky_key_attempts,
         execution_policy: config.default_policy.execution_policy.clone(),
-        ranking_overlay: RankingOverlay::default(),
+        ranking_overlay: RankingOverlay {
+            disabled_providers: config.disabled_providers.clone(),
+            ..RankingOverlay::default()
+        },
         mutation_plan: MutationPlan::default(),
         pool_policy_overrides: BTreeMap::new(),
         matched_rules: Vec::new(),
@@ -99,6 +111,11 @@ pub fn resolve_routing_policy(
     for model_policy in matching_model_policies(config, input.requested_model, input.resolved_model)
     {
         apply_model_policy(&mut policy, model_policy);
+    }
+    for model_policy in
+        matching_provider_enablement_policies(config, input.requested_model, input.resolved_model)
+    {
+        apply_provider_enable_overrides(&mut policy, model_policy);
     }
 
     let condition_context = RoutingConditionContext {
@@ -203,14 +220,13 @@ fn apply_action(
             policy.ranking_overlay.allowed_keys = key_ids.clone();
         }
         RoutingAction::SetScheduling {
-            priority_mode,
+            // Keep accepting the legacy field without re-enabling key-first
+            // scheduling through a model rule.
+            priority_mode: _,
             scheduling_mode,
             keep_priority_on_conversion,
             sticky_key_attempts,
         } => {
-            if let Some(priority_mode) = priority_mode {
-                policy.priority_mode = *priority_mode;
-            }
             if let Some(scheduling_mode) = scheduling_mode {
                 policy.scheduling_mode = *scheduling_mode;
             }
@@ -280,6 +296,57 @@ fn matching_model_policies<'a>(
         .collect()
 }
 
+fn matching_provider_enablement_policies<'a>(
+    config: &'a RoutingGroupConfig,
+    requested_model: &str,
+    resolved_model: &str,
+) -> Vec<&'a RoutingModelPolicy> {
+    let mut matches = matching_model_policies(config, requested_model, resolved_model)
+        .into_iter()
+        .filter(|policy| !policy.provider_enabled_overrides.is_empty())
+        .collect::<Vec<_>>();
+    // Enablement is a layered exception map: broad defaults first, then
+    // prefixes, then exact model entries. Other model-policy fields retain
+    // their historical configured-order merge semantics.
+    matches.sort_by_key(|policy| model_pattern_specificity(&policy.model));
+    matches
+}
+
+fn apply_provider_enable_overrides(
+    policy: &mut ResolvedRoutingPolicy,
+    model_policy: &RoutingModelPolicy,
+) {
+    for (provider_id, enabled) in &model_policy.provider_enabled_overrides {
+        if *enabled {
+            policy
+                .ranking_overlay
+                .disabled_providers
+                .retain(|disabled| disabled != provider_id);
+        } else if !policy
+            .ranking_overlay
+            .disabled_providers
+            .iter()
+            .any(|disabled| disabled == provider_id)
+        {
+            policy
+                .ranking_overlay
+                .disabled_providers
+                .push(provider_id.clone());
+        }
+    }
+}
+
+fn model_pattern_specificity(pattern: &str) -> (u8, usize) {
+    let pattern = pattern.trim();
+    if pattern == "*" {
+        (0, 0)
+    } else if let Some(prefix) = pattern.strip_suffix('*') {
+        (1, prefix.len())
+    } else {
+        (2, 0)
+    }
+}
+
 fn model_allowed(patterns: &[String], requested_model: &str) -> bool {
     patterns.is_empty()
         || patterns
@@ -317,6 +384,264 @@ mod tests {
     use super::*;
 
     #[test]
+    fn legacy_key_scheduling_keeps_overrides_but_resolves_to_provider_ordering() {
+        let config: RoutingGroupConfig = serde_json::from_value(json!({
+            "default_policy": { "priority_mode": "global_key" },
+            "model_policies": [{
+                "model": "*",
+                "provider_priority_overrides": { "provider-a": 7 },
+                "key_priority_overrides": { "key-a": 2 },
+                "key_priority_overrides_by_format": { "openai:chat": { "key-a": 3 } },
+                "pool_priority_overrides": { "provider-pool": 4 }
+            }],
+            "rules": [{
+                "id": "legacy-key-client", "phase": "client_request",
+                "actions": [{ "type": "set_scheduling", "priority_mode": "global_key", "scheduling_mode": "fixed_order" }]
+            }]
+        }))
+        .expect("legacy key scheduling must stay readable");
+        let stored = serde_json::to_value(&config).unwrap();
+        assert_eq!(stored["default_policy"]["priority_mode"], "global_key");
+        assert_eq!(
+            stored["rules"][0]["actions"][0]["priority_mode"],
+            "global_key"
+        );
+        assert_eq!(
+            serde_json::from_value::<RoutingGroupConfig>(stored).unwrap(),
+            config
+        );
+
+        for phase in [
+            RoutingRulePhase::ClientRequest,
+            RoutingRulePhase::ProviderRequest,
+        ] {
+            let policy = resolve_routing_policy(
+                &config,
+                RoutingPolicyInput {
+                    group_id: Some("legacy-group"),
+                    group_version: Some(1),
+                    selection_source: "explicit",
+                    requested_model: "model-a",
+                    resolved_model: "model-a",
+                    api_format: "openai:chat",
+                    user_id: None,
+                    api_key_id: None,
+                    headers: &json!({}),
+                    body: &json!({}),
+                    phase,
+                },
+            )
+            .unwrap();
+            assert_eq!(policy.priority_mode, RoutingSetPriorityMode::Provider);
+            assert_eq!(
+                policy.scheduling_mode,
+                if phase == RoutingRulePhase::ClientRequest {
+                    RoutingSchedulingMode::FixedOrder
+                } else {
+                    RoutingSchedulingMode::CacheAffinity
+                }
+            );
+            assert_eq!(
+                policy.matched_rules.len(),
+                usize::from(phase == RoutingRulePhase::ClientRequest)
+            );
+            assert_eq!(
+                policy.ranking_overlay.provider_priority_overrides["provider-a"],
+                7
+            );
+            assert_eq!(policy.ranking_overlay.key_priority_overrides["key-a"], 2);
+            assert_eq!(
+                policy.ranking_overlay.pool_priority_overrides["provider-pool"],
+                4
+            );
+            assert_eq!(
+                policy
+                    .ranking_overlay
+                    .key_priority_for_format("key-a", "openai:chat", 99),
+                3
+            );
+        }
+        assert_eq!(
+            config.default_policy.priority_mode,
+            RoutingSetPriorityMode::GlobalKey
+        );
+    }
+
+    #[test]
+    fn legacy_group_exclusions_cannot_be_bypassed_by_allowlists_or_rule_actions() {
+        let config: RoutingGroupConfig = serde_json::from_value(json!({
+            "disabled_providers": ["provider-disabled"],
+            "model_policies": [{
+                "model": "model-allowlist",
+                "allowed_providers": ["provider-disabled", "provider-enabled"]
+            }],
+            "rules": [{
+                "id": "replace-provider-allowlist",
+                "conditions": { "field": "model", "op": "eq", "value": "rule-allowlist" },
+                "actions": [{
+                    "type": "restrict_providers",
+                    "provider_ids": ["provider-disabled", "provider-enabled"]
+                }, {
+                    "type": "set_provider_priority",
+                    "provider_id": "provider-disabled",
+                    "priority": 0
+                }]
+            }, {
+                "id": "clear-provider-allowlist",
+                "conditions": { "field": "model", "op": "eq", "value": "rule-unrestricted" },
+                "actions": [{ "type": "restrict_providers", "provider_ids": [] }]
+            }]
+        }))
+        .expect("group provider exclusions should deserialize");
+
+        // The field survives the same round trip used when persisting or
+        // publishing strategy configuration.
+        let stored_config = serde_json::to_value(&config).unwrap();
+        assert_eq!(
+            stored_config["disabled_providers"],
+            json!(["provider-disabled"])
+        );
+        let config: RoutingGroupConfig = serde_json::from_value(stored_config).unwrap();
+
+        for model in [
+            "future-model",
+            "model-allowlist",
+            "rule-allowlist",
+            "rule-unrestricted",
+        ] {
+            let policy = resolve_routing_policy(
+                &config,
+                RoutingPolicyInput {
+                    group_id: Some("group-1"),
+                    group_version: Some(1),
+                    selection_source: "explicit",
+                    requested_model: model,
+                    resolved_model: model,
+                    api_format: "openai:chat",
+                    user_id: None,
+                    api_key_id: None,
+                    headers: &json!({}),
+                    body: &json!({}),
+                    phase: RoutingRulePhase::ClientRequest,
+                },
+            )
+            .expect("policy with group provider exclusions should resolve");
+
+            assert!(
+                !policy.ranking_overlay.provider_allowed("provider-disabled"),
+                "{model} must retain the group exclusion"
+            );
+            assert!(policy.ranking_overlay.provider_allowed("provider-enabled"));
+            let has_allowlist = matches!(model, "model-allowlist" | "rule-allowlist");
+            assert_eq!(
+                policy.ranking_overlay.provider_allowed("provider-unlisted"),
+                !has_allowlist,
+                "{model} should preserve its normal allowlist behavior"
+            );
+        }
+    }
+
+    #[test]
+    fn model_provider_enablement_is_scoped_and_specific_overrides_win() {
+        let mut config: RoutingGroupConfig = serde_json::from_value(json!({
+            "disabled_providers": ["provider-root"],
+            "model_policies": [
+                {
+                    "model": "*",
+                    "provider_enabled_overrides": {
+                        "provider-model": false,
+                        "provider-specific": false
+                    }
+                },
+                {
+                    "model": "model-*",
+                    "provider_enabled_overrides": {
+                        "provider-model": true,
+                        "provider-specific": true
+                    }
+                },
+                {
+                    "model": "model-exact",
+                    "provider_enabled_overrides": {
+                        "provider-specific": false,
+                        "provider-exact": true,
+                        "provider-root": true
+                    }
+                }
+            ]
+        }))
+        .unwrap();
+
+        // Persisted order need not put broad defaults first. Only the new
+        // enablement map follows specificity; priorities retain their old order.
+        config.model_policies.reverse();
+        config.model_policies[0]
+            .provider_priority_overrides
+            .insert("provider-model".into(), 1);
+        config.model_policies[2]
+            .provider_priority_overrides
+            .insert("provider-model".into(), 9);
+
+        let for_model = |model: &str| {
+            resolve_routing_policy(
+                &config,
+                RoutingPolicyInput {
+                    group_id: Some("group-1"),
+                    group_version: Some(1),
+                    selection_source: "test",
+                    requested_model: model,
+                    resolved_model: model,
+                    api_format: "openai:chat",
+                    user_id: None,
+                    api_key_id: None,
+                    headers: &json!({}),
+                    body: &json!({}),
+                    phase: RoutingRulePhase::ClientRequest,
+                },
+            )
+            .unwrap()
+        };
+
+        let exact = for_model("model-exact");
+        assert!(exact.ranking_overlay.provider_allowed("provider-model"));
+        assert_eq!(
+            exact.ranking_overlay.provider_priority_overrides["provider-model"],
+            9
+        );
+        assert!(!exact.ranking_overlay.provider_allowed("provider-specific"));
+        assert!(exact.ranking_overlay.provider_allowed("provider-exact"));
+        assert!(exact.ranking_overlay.provider_allowed("provider-root"));
+
+        let wildcard_prefix = for_model("model-other");
+        assert!(wildcard_prefix
+            .ranking_overlay
+            .provider_allowed("provider-model"));
+        assert!(wildcard_prefix
+            .ranking_overlay
+            .provider_allowed("provider-specific"));
+        assert!(!wildcard_prefix
+            .ranking_overlay
+            .provider_allowed("provider-root"));
+
+        let unrelated = for_model("other-model");
+        assert!(!unrelated.ranking_overlay.provider_allowed("provider-model"));
+        assert!(!unrelated
+            .ranking_overlay
+            .provider_allowed("provider-specific"));
+        assert!(!unrelated.ranking_overlay.provider_allowed("provider-root"));
+
+        let encoded = serde_json::to_value(&config).unwrap();
+        assert_eq!(
+            encoded["model_policies"][2]["provider_enabled_overrides"]["provider-model"],
+            false
+        );
+        assert_eq!(
+            serde_json::from_value::<RoutingGroupConfig>(encoded).unwrap(),
+            config
+        );
+    }
+
+    #[test]
     fn all_model_scheduling_and_rankings_apply_to_future_models() {
         let config: RoutingGroupConfig = serde_json::from_value(json!({
             "default_policy": {
@@ -330,6 +655,7 @@ mod tests {
             "rules": []
         }))
         .expect("all-model scheduling config should deserialize");
+        assert!(config.disabled_providers.is_empty());
 
         for model in ["existing-model", "future-model"] {
             let policy = resolve_routing_policy(
@@ -349,7 +675,7 @@ mod tests {
                 },
             )
             .expect("all-model scheduling policy should resolve");
-            assert_eq!(policy.priority_mode, RoutingSetPriorityMode::GlobalKey);
+            assert_eq!(policy.priority_mode, RoutingSetPriorityMode::Provider);
             assert_eq!(policy.scheduling_mode, RoutingSchedulingMode::LoadBalance);
             assert_eq!(
                 policy
@@ -419,7 +745,7 @@ mod tests {
                     .is_empty());
                 assert!(policy.matched_rules.is_empty());
             } else {
-                assert_eq!(policy.priority_mode, RoutingSetPriorityMode::GlobalKey);
+                assert_eq!(policy.priority_mode, RoutingSetPriorityMode::Provider);
                 assert_eq!(policy.scheduling_mode, RoutingSchedulingMode::FixedOrder);
                 assert_eq!(
                     policy
@@ -436,6 +762,9 @@ mod tests {
     #[test]
     fn resolves_model_policy_and_matching_rule() {
         let config = RoutingGroupConfig {
+            user_visible: false,
+            billing_multiplier: 1.0,
+            disabled_providers: vec![],
             default_policy: RoutingDefaultPolicy::default(),
             model_policies: vec![RoutingModelPolicy {
                 model: "gpt-5".to_string(),
@@ -504,6 +833,9 @@ mod tests {
     #[test]
     fn default_policy_applies_to_models_without_an_override() {
         let config = RoutingGroupConfig {
+            user_visible: false,
+            billing_multiplier: 2.5,
+            disabled_providers: vec![],
             default_policy: RoutingDefaultPolicy {
                 priority_mode: RoutingSetPriorityMode::GlobalKey,
                 scheduling_mode: RoutingSchedulingMode::LoadBalance,
@@ -538,10 +870,11 @@ mod tests {
         )
         .expect("the specially configured model should resolve");
 
-        assert_eq!(special.priority_mode, RoutingSetPriorityMode::GlobalKey);
+        assert_eq!(special.priority_mode, RoutingSetPriorityMode::Provider);
         assert_eq!(special.scheduling_mode, RoutingSchedulingMode::LoadBalance);
         assert!(special.keep_priority_on_conversion);
         assert_eq!(special.sticky_key_attempts, 3);
+        assert_eq!(special.billing_multiplier, 2.5);
         assert_eq!(
             special.ranking_overlay.allowed_providers,
             vec!["provider-special"]
@@ -572,10 +905,11 @@ mod tests {
         )
         .expect("an unconfigured model should keep using the default policy");
 
-        assert_eq!(ordinary.priority_mode, RoutingSetPriorityMode::GlobalKey);
+        assert_eq!(ordinary.priority_mode, RoutingSetPriorityMode::Provider);
         assert_eq!(ordinary.scheduling_mode, RoutingSchedulingMode::LoadBalance);
         assert!(ordinary.keep_priority_on_conversion);
         assert_eq!(ordinary.sticky_key_attempts, 3);
+        assert_eq!(ordinary.billing_multiplier, 2.5);
         assert!(ordinary.ranking_overlay.allowed_providers.is_empty());
         assert!(ordinary.ranking_overlay.allowed_keys.is_empty());
         assert!(ordinary

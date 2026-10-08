@@ -1,4 +1,8 @@
-use std::sync::{OnceLock, RwLock};
+use std::sync::{LazyLock, OnceLock};
+
+use crate::client_profile::ClientProfileStore;
+
+static OS_INFO: LazyLock<os_info::Info> = LazyLock::new(os_info::get);
 
 /// 当前支持的 Codex 客户端类型。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,7 +36,19 @@ impl CodexClientProfile {
         Ok(Self {
             client_kind: CodexClientKind::Cli,
             codex_version: version.to_owned(),
-            user_agent: format!("{}/{}", originator, version),
+            // 按 CLI 格式使用当前网关的公开平台信息。无客户端终端时使用官方
+            // unknown 标识，不复制调用方终端后缀、安装标识或个人身份。
+            user_agent: format!(
+                "{}/{} ({} {}; {}) unknown",
+                originator,
+                version,
+                OS_INFO.os_type(),
+                OS_INFO.version(),
+                OS_INFO.architecture().unwrap_or(std::env::consts::ARCH),
+            )
+            .chars()
+            .map(|ch| if matches!(ch, ' '..='~') { ch } else { '_' })
+            .collect(),
             originator,
         })
     }
@@ -40,31 +56,25 @@ impl CodexClientProfile {
 
 impl Default for CodexClientProfile {
     fn default() -> Self {
-        // 远程发布检查不可用时仍保持现有线上行为，避免启动或请求被版本服务拖住。
-        Self::cli("0.153.4").expect("built-in Codex CLI profile must be valid")
+        // 最新已核验稳定版本；后台版本刷新继续作为版本真源。
+        Self::cli("0.159.3").expect("built-in Codex CLI profile must be valid")
     }
 }
 
-static ACTIVE_PROFILE: OnceLock<RwLock<CodexClientProfile>> = OnceLock::new();
+static ACTIVE_PROFILE: OnceLock<ClientProfileStore<CodexClientProfile>> = OnceLock::new();
 
-fn active_profile() -> &'static RwLock<CodexClientProfile> {
-    ACTIVE_PROFILE.get_or_init(|| RwLock::new(CodexClientProfile::default()))
+fn active_profile() -> &'static ClientProfileStore<CodexClientProfile> {
+    ACTIVE_PROFILE.get_or_init(|| ClientProfileStore::new(CodexClientProfile::default()))
 }
 
 /// 返回当前画像的独立快照，调用方不会持有全局锁。
 pub fn codex_client_profile() -> CodexClientProfile {
-    active_profile()
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
+    (*active_profile().snapshot()).clone()
 }
 
 /// 原子替换当前画像，并返回替换前的画像。
 pub fn set_codex_client_profile(profile: CodexClientProfile) -> CodexClientProfile {
-    let mut current = active_profile()
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    std::mem::replace(&mut *current, profile)
+    (*active_profile().publish(profile)).clone()
 }
 
 /// 发布一份新的 CLI 画像。
@@ -97,7 +107,12 @@ mod tests {
         let profile = CodexClientProfile::cli("0.200.1").expect("valid version");
         assert_eq!(profile.client_kind, CodexClientKind::Cli);
         assert_eq!(profile.originator, "codex_cli_rs");
-        assert_eq!(profile.user_agent, "codex_cli_rs/0.200.1");
+        assert!(profile.user_agent.starts_with("codex_cli_rs/0.200.1 ("));
+        assert!(profile.user_agent.ends_with(") unknown"));
+        let architecture = super::OS_INFO
+            .architecture()
+            .unwrap_or(std::env::consts::ARCH);
+        assert!(profile.user_agent.contains(&format!("; {architecture})")));
     }
 
     #[test]

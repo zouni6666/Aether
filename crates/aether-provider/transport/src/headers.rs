@@ -81,7 +81,7 @@ pub fn should_skip_request_header(name: &str) -> bool {
 }
 
 fn is_untrusted_forwarding_metadata_header(normalized_name: &str) -> bool {
-    matches!(normalized_name, "forwarded" | "via")
+    matches!(normalized_name, "forwarded" | "via" | "x-envoy-internal")
         || normalized_name.starts_with("x-forwarded-")
         || normalized_name.starts_with("x_forwarded_")
         || normalized_name.starts_with("x-real-")
@@ -186,6 +186,7 @@ pub(crate) fn remove_declared_connection_headers(
     ));
     headers.retain(|name, _| {
         !name.eq_ignore_ascii_case("connection")
+            && !name.eq_ignore_ascii_case("x-envoy-internal")
             && !is_declared_connection_header(name, &all_declared)
     });
 }
@@ -455,6 +456,7 @@ mod tests {
             "X-Rewrite-URL",
             "X-Override-URL",
             "X-Envoy-Original-Path",
+            "X-Envoy-Internal",
         ] {
             assert!(should_skip_request_header(header));
             assert!(should_skip_upstream_passthrough_header(header));

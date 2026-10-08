@@ -15,7 +15,9 @@ describe('admin usage initial loading', () => {
 
     expect(mountedBlock).toBeTruthy()
     expect(mountedBlock).toContain('const adminUsersPromise = loadAdminUsers()')
-    expect(mountedBlock).toContain('Promise.all([heatmapPromise, adminUsersPromise])')
+    expect(mountedBlock).toContain('await adminUsersPromise')
+    const adminBlock = mountedBlock?.split('} else {')[0]
+    expect(adminBlock).not.toContain('loadHeatmapData')
     expect(mountedBlock?.indexOf('const adminUsersPromise = loadAdminUsers()'))
       .toBeLessThan(mountedBlock?.indexOf('await loadRecords(') ?? -1)
     expect(mountedBlock).not.toContain('await loadAdminUsers()')

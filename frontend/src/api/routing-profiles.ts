@@ -67,6 +67,7 @@ export interface RoutingGroupCreateRequest {
 }
 
 export interface RoutingGroupUpdateRequest {
+  expected_version?: number
   name?: string
   description?: string | null
   enabled?: boolean

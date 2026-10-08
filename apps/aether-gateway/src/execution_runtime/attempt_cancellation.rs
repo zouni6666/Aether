@@ -181,6 +181,12 @@ async fn settle_cancelled_attempt(
         usage_data.request_metadata.take(),
         request_diagnostics.as_ref(),
     );
+    usage_data.request_metadata = crate::usage::reporting::failure::with_analytics_failure(
+        usage_data.request_metadata.as_ref(),
+        "unknown",
+        "finalize",
+        "request_task_cancelled",
+    );
     usage_data.status_code = Some(CLIENT_CANCELLED_STATUS_CODE);
     usage_data.error_message = Some(error_message.to_string());
     usage_data.error_category = Some("cancelled".to_string());

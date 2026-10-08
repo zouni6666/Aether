@@ -160,7 +160,17 @@ impl AppState {
             .data
             .update_routing_group(id, patch)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+            .map_err(|err| match err {
+                aether_data_contracts::DataLayerError::InvalidInput(ref message)
+                    if message == "routing_group_version_conflict" =>
+                {
+                    GatewayError::Client {
+                        status: axum::http::StatusCode::CONFLICT,
+                        message: "策略分组已被修改，请刷新后重试".to_string(),
+                    }
+                }
+                _ => GatewayError::Internal(err.to_string()),
+            })?;
         if updated.is_some() {
             self.invalidate_provider_routing_caches();
         }

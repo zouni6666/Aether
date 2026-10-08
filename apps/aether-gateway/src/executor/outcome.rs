@@ -111,6 +111,12 @@ pub(crate) fn record_failed_usage_for_deferred_response<'a>(
             return;
         };
         let mut data = build_usage_event_data_seed(&context.plan, context.report_context.as_ref());
+        data.request_metadata = crate::usage::reporting::failure::with_analytics_failure(
+            data.request_metadata.as_ref(),
+            "upstream",
+            "response",
+            "candidates_exhausted",
+        );
         data.status_code = Some(status_code);
         data.error_message =
             Some("all local candidates failed; returning preserved upstream error".to_string());
@@ -390,6 +396,15 @@ pub(crate) async fn record_failed_usage_for_exhausted_request(
         None => Map::new(),
     };
     request_metadata.insert("trace_id".to_string(), Value::String(request_id.clone()));
+    if !request_metadata.contains_key("analytics_failure") {
+        request_metadata.insert(
+            "analytics_failure".into(),
+            json!({
+                "origin": if upstream_status_code.is_some() { "upstream" } else { "gateway" },
+                "stage": "routing", "reason": "candidates_exhausted", "schema_version": 1,
+            }),
+        );
+    }
     apply_runtime_miss_usage_routing(
         &mut data,
         &mut request_metadata,
@@ -471,6 +486,9 @@ pub(crate) async fn record_failed_usage_for_runtime_miss_request(
     }
 
     let mut request_metadata = Map::new();
+    request_metadata.insert("analytics_failure".into(), json!({
+        "origin": "gateway", "stage": "routing", "reason": "execution_route_unavailable", "schema_version": 1,
+    }));
     request_metadata.insert(
         "trace_id".to_string(),
         Value::String(request_id.to_string()),

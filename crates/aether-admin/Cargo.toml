@@ -17,6 +17,7 @@ aether-provider-transport.workspace = true
 axum.workspace = true
 base64.workspace = true
 chrono.workspace = true
+chrono-tz.workspace = true
 http.workspace = true
 reqwest.workspace = true
 regex.workspace = true

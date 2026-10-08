@@ -8,13 +8,21 @@ const props = withDefaults(defineProps<{
   side?: 'top' | 'right' | 'bottom' | 'left'
   sideOffset?: number
   alignOffset?: number
+  collisionPadding?: number
+  ariaLabel?: string
 }>(), {
   class: undefined,
   align: 'center',
   side: 'bottom',
   sideOffset: 4,
   alignOffset: 0,
+  collisionPadding: 0,
+  ariaLabel: undefined,
 })
+
+const emit = defineEmits<{
+  openAutoFocus: [event: Event]
+}>()
 </script>
 
 <template>
@@ -33,6 +41,9 @@ const props = withDefaults(defineProps<{
       :side="props.side"
       :side-offset="props.sideOffset"
       :align-offset="props.alignOffset"
+      :collision-padding="props.collisionPadding"
+      :aria-label="props.ariaLabel"
+      @open-auto-focus="emit('openAutoFocus', $event)"
     >
       <slot />
     </PopoverContent>

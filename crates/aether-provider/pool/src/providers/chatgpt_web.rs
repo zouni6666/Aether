@@ -20,11 +20,10 @@ use crate::quota_refresh::ProviderPoolQuotaRequestSpec;
 pub const CHATGPT_WEB_DEFAULT_BASE_URL: &str = "https://chatgpt.com";
 pub const CHATGPT_WEB_CONVERSATION_INIT_PATH: &str = "/backend-api/conversation/init";
 
-const CHATGPT_WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0";
-const CHATGPT_WEB_CLIENT_VERSION: &str = "prod-be885abbfcfe7b1f511e88b3003d9ee44757fbad";
-const CHATGPT_WEB_BUILD_NUMBER: &str = "5955942";
-const CHATGPT_WEB_SEC_CH_UA: &str =
-    r#""Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24""#;
+use aether_provider_transport::client_identity::{
+    CHATGPT_WEB_BUILD_NUMBER, CHATGPT_WEB_CLIENT_VERSION, CHATGPT_WEB_SEC_CH_UA,
+    CHATGPT_WEB_USER_AGENT,
+};
 #[derive(Debug, Clone, Default)]
 pub struct ChatGptWebProviderPoolAdapter;
 

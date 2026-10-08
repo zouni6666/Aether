@@ -99,7 +99,11 @@ CREATE TABLE IF NOT EXISTS public.usage (
     wallet_gift_balance_after double precision,
     finalized_at bigint,
     created_at_unix_ms bigint DEFAULT 0 NOT NULL,
-    updated_at_unix_secs bigint DEFAULT 0 NOT NULL
+    updated_at_unix_secs bigint DEFAULT 0 NOT NULL,
+    failure_origin text,
+    failure_stage text,
+    failure_reason text,
+    failure_schema_version integer
 );
 
 ALTER TABLE ONLY public.usage ADD CONSTRAINT usage_pkey PRIMARY KEY (request_id);
@@ -204,6 +208,14 @@ CREATE INDEX IF NOT EXISTS ix_usage_counter_deltas_request_kind ON public.usage_
 CREATE TABLE IF NOT EXISTS public.usage_settlement_snapshots (
     request_id character varying(128) NOT NULL,
     billing_status character varying(64) NOT NULL,
+    quota_covered_amount_usd numeric(20,8),
+    wallet_consumed_amount_usd numeric(20,8),
+    wallet_debit_amount_usd numeric(20,8),
+    wallet_recharge_debit_usd numeric(20,8),
+    wallet_gift_debit_usd numeric(20,8),
+    wallet_overdraft_usd numeric(20,8),
+    allocation_schema_version integer,
+    allocation_status text,
     wallet_id character varying(64),
     wallet_balance_before double precision,
     wallet_balance_after double precision,

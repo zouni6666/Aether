@@ -1,5 +1,5 @@
-use super::super::super::stats::resolve_admin_usage_time_range;
 use super::super::analytics::admin_usage_aggregation_by_user_json;
+use super::super::summary_routes::resolve_record_time_bounds;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::query_param_value;
 use crate::GatewayError;
@@ -159,12 +159,11 @@ pub(super) async fn build_admin_usage_aggregation_stats_response(
         Ok(value) => value,
         Err(detail) => return Ok(admin_usage_bad_request_response(detail)),
     };
-    let time_range = match resolve_admin_usage_time_range(query) {
+    let time_bounds = match resolve_record_time_bounds(query) {
         Ok(value) => value,
         Err(detail) => return Ok(admin_usage_bad_request_response(detail)),
     };
-    let Some((created_from_unix_secs, created_until_unix_secs)) = time_range.to_unix_bounds()
-    else {
+    let Some((created_from_unix_secs, created_until_unix_secs)) = time_bounds else {
         return Ok(Json(json!([])).into_response());
     };
     let group_by_query = match group_by.as_str() {

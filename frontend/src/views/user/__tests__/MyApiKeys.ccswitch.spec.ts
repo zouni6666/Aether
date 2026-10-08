@@ -10,6 +10,7 @@ const toastMock = vi.hoisted(() => ({
 
 const meApiMock = vi.hoisted(() => ({
   getApiKeys: vi.fn(),
+  getRoutingGroups: vi.fn(),
   createApiKey: vi.fn(),
   getFullApiKey: vi.fn(),
   getClientConfig: vi.fn(),
@@ -96,6 +97,7 @@ async function mountMyApiKeys() {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  meApiMock.getRoutingGroups.mockResolvedValue({ items: [], total: 0 })
   meApiMock.getClientConfig.mockResolvedValue({
     base_url: 'https://aether.example.com',
     site_name: 'Aether Local',
@@ -218,6 +220,9 @@ describe('MyApiKeys CC Switch import', () => {
       ?.click()
     await flushPromises()
 
+    expect(meApiMock.createApiKey).toHaveBeenCalledOnce()
+    expect(meApiMock.createApiKey.mock.calls[0]?.[0]).toMatchObject({ name: 'new key' })
+    expect(meApiMock.createApiKey.mock.calls[0]?.[0]).not.toHaveProperty('credential_kind')
     document.querySelector<HTMLButtonElement>('[data-testid="ccswitch-open-created-key"]')?.click()
     await flushPromises()
 
@@ -238,5 +243,107 @@ describe('MyApiKeys CC Switch import', () => {
 
     expect(meApiMock.toggleApiKey).toHaveBeenCalledWith('user-key-1', false)
     expect(toastMock.success).toHaveBeenCalledWith('密钥已禁用')
+  })
+})
+
+describe('MyApiKeys routing groups', () => {
+  async function setName(name: string) {
+    const input = document.querySelector<HTMLInputElement>('#key-name')!
+    input.value = name
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+  }
+
+  async function save(label: '创建' | '保存') {
+    const button = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.trim() === label)
+    expect(button).toBeDefined()
+    button!.click()
+    await flushPromises()
+  }
+
+  async function chooseGroup(label: string) {
+    const trigger = document.querySelector<HTMLButtonElement>('#key-routing-group')!
+    trigger.focus()
+    trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }))
+    await flushPromises()
+    const option = Array.from(document.querySelectorAll<HTMLElement>('[role="listbox"] [role="option"]'))
+      .find(option => option.textContent?.trim().startsWith(label))
+    expect(option).toBeDefined()
+    option!.focus()
+    option!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await flushPromises()
+  }
+
+  it('creates a key with an explicitly selected visible group', async () => {
+    meApiMock.getApiKeys.mockResolvedValue([apiKey()])
+    meApiMock.getRoutingGroups.mockResolvedValue({
+      items: [{ id: 'economy', name: '经济分组', billing_multiplier: 0.5, is_default: false }], total: 1,
+    })
+    meApiMock.createApiKey.mockResolvedValue(apiKey({ id: 'new-key', key: 'sk-new' }))
+    await mountMyApiKeys()
+    document.querySelector<HTMLButtonElement>('[title="创建新 API Key"]')!.click()
+    await flushPromises()
+    await setName('test group')
+    await chooseGroup('经济分组')
+    expect(document.querySelector('#key-routing-group')?.textContent).toContain('0.5 倍')
+    await save('创建')
+    expect(meApiMock.createApiKey).toHaveBeenCalledWith(expect.objectContaining({ name: 'test group', routing_group_id: 'economy' }))
+  })
+
+  it('creates a key following default when no groups are available', async () => {
+    meApiMock.getApiKeys.mockResolvedValue([apiKey()])
+    meApiMock.createApiKey.mockResolvedValue(apiKey({ id: 'new-key', key: 'sk-new' }))
+    await mountMyApiKeys()
+    document.querySelector<HTMLButtonElement>('[title="创建新 API Key"]')!.click()
+    await flushPromises()
+    expect(document.body.textContent).toContain('暂无可选策略分组')
+    await setName('default group')
+    await save('创建')
+    expect(meApiMock.createApiKey).toHaveBeenCalledWith(expect.objectContaining({ routing_group_id: null }))
+  })
+
+  it.each(['hidden', 'failed'] as const)('preserves an existing binding when group options are %s and the name is edited', async (state) => {
+    meApiMock.getApiKeys.mockResolvedValue([apiKey({ routing_group_id: 'retained', routing_group_name: '原有分组' })])
+    meApiMock.updateApiKey.mockResolvedValue(apiKey())
+    if (state === 'failed') meApiMock.getRoutingGroups.mockRejectedValue(new Error('offline'))
+    await mountMyApiKeys()
+    expect(document.body.textContent?.match(/策略分组：原有分组/g)).toHaveLength(2)
+    document.querySelector<HTMLButtonElement>('[title="编辑"]')!.click()
+    await flushPromises()
+    expect(document.querySelector('#key-routing-group')?.textContent).toContain('原有分组')
+    if (state === 'failed') expect(document.body.textContent).toContain('策略分组加载失败')
+    await setName('renamed')
+    await save('保存')
+    expect(meApiMock.updateApiKey).toHaveBeenCalledWith('user-key-1', expect.objectContaining({ name: 'renamed' }))
+    expect(meApiMock.updateApiKey.mock.calls[0]?.[1]).not.toHaveProperty('routing_group_id')
+  })
+
+  it('allows clearing an unavailable binding to follow default explicitly', async () => {
+    meApiMock.getApiKeys.mockResolvedValue([apiKey({ routing_group_id: 'retained', routing_group_name: '原有分组' })])
+    meApiMock.updateApiKey.mockResolvedValue(apiKey())
+    await mountMyApiKeys()
+    document.querySelector<HTMLButtonElement>('[title="编辑"]')!.click()
+    await flushPromises()
+    await chooseGroup('跟随默认')
+    await save('保存')
+    expect(meApiMock.updateApiKey).toHaveBeenCalledWith('user-key-1', expect.objectContaining({ routing_group_id: null }))
+  })
+
+  it('can retry loading options without replacing the key binding', async () => {
+    meApiMock.getApiKeys.mockResolvedValue([apiKey({ routing_group_id: 'retained', routing_group_name: '原有分组' })])
+    meApiMock.getRoutingGroups.mockRejectedValueOnce(new Error('offline')).mockResolvedValue({
+      items: [{ id: 'economy', name: '经济分组', billing_multiplier: 0.5, is_default: false }], total: 1,
+    })
+    meApiMock.updateApiKey.mockResolvedValue(apiKey())
+    await mountMyApiKeys()
+    document.querySelector<HTMLButtonElement>('[title="编辑"]')!.click()
+    await flushPromises()
+    Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find(button => button.textContent?.trim() === '重试')!.click()
+    await flushPromises()
+    expect(document.querySelector('#key-routing-group')?.textContent).toContain('原有分组')
+    await chooseGroup('经济分组')
+    await save('保存')
+    expect(meApiMock.updateApiKey).toHaveBeenCalledWith('user-key-1', expect.objectContaining({ routing_group_id: 'economy' }))
   })
 })

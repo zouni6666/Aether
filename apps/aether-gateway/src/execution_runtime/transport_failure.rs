@@ -130,6 +130,9 @@ pub(crate) async fn build_transport_error_stop_response(
             None => serde_json::Map::new(),
         };
         request_metadata.insert("transport_error".to_string(), Value::Bool(true));
+        request_metadata.insert("analytics_failure".into(), json!({
+            "origin": "transport", "stage": "connect", "reason": "upstream_transport_error", "schema_version": 1,
+        }));
         request_metadata.insert(
             "transport_error_type".to_string(),
             Value::String(error_type.to_string()),

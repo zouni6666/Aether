@@ -1,8 +1,14 @@
 <template>
   <div class="flex flex-col items-center justify-center py-16 text-center">
     <div class="mb-2 text-muted-foreground">
-      {{ legacyT(hasActiveFilters ? '未找到匹配当前筛选条件的提供商' : '暂无提供商，点击右上角添加') }}
+      {{ legacyT(hasActiveFilters ? '未找到匹配当前筛选条件的提供商' : title || '暂无提供商，点击右上角添加') }}
     </div>
+    <p
+      v-if="!hasActiveFilters && description"
+      class="px-4 text-xs text-muted-foreground"
+    >
+      {{ legacyT(description) }}
+    </p>
     <Button
       v-if="hasActiveFilters"
       variant="outline"
@@ -20,6 +26,8 @@ import { useI18n } from '@/i18n'
 
 defineProps<{
   hasActiveFilters: boolean
+  title?: string
+  description?: string
 }>()
 
 defineEmits<{

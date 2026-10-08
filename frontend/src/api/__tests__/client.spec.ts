@@ -192,4 +192,59 @@ describe('apiClient auth state change event', () => {
       rawClient.defaults.adapter = previousAdapter
     }
   })
+
+  it('authenticates user and admin health while public status stays anonymous', async () => {
+    const rawClient = apiClient['client']
+    const previousAdapter = rawClient.defaults.adapter
+    const requests: InternalAxiosRequestConfig[] = []
+
+    rawClient.defaults.adapter = (async (config: InternalAxiosRequestConfig) => {
+      requests.push(config)
+      return { data: {}, status: 200, statusText: 'OK', headers: {}, config }
+    }) as AxiosAdapter
+
+    try {
+      apiClient.setToken('health-access-token')
+      await apiClient.get('/api/users/me/health/v2/summary')
+      await apiClient.get('/api/admin/endpoints/health/v2/objects')
+      await apiClient.get('/api/public/health/v2/summary')
+      await apiClient.get('/_gateway/health')
+
+      expect(requests.map(request => request.headers.Authorization)).toEqual([
+        'Bearer health-access-token',
+        'Bearer health-access-token',
+        undefined,
+        undefined,
+      ])
+      expect(requests[0].headers['X-Client-Device-Id']).toBeTruthy()
+    } finally {
+      rawClient.defaults.adapter = previousAdapter
+    }
+  })
+
+  it('keeps publication and protected JSON routes authenticated despite public-looking names or query strings', async () => {
+    const rawClient = apiClient['client']
+    const previousAdapter = rawClient.defaults.adapter
+    const requests: InternalAxiosRequestConfig[] = []
+    rawClient.defaults.adapter = (async (config: InternalAxiosRequestConfig) => {
+      requests.push(config)
+      return { data: {}, status: 200, statusText: 'OK', headers: {}, config }
+    }) as AxiosAdapter
+    try {
+      apiClient.setToken('publication-access-token')
+      await apiClient.get('/api/admin/endpoints/health/v2/publication')
+      await apiClient.put('/api/admin/endpoints/health/v2/publication', { enabled: false, objects: [] })
+      await apiClient.get('/api/admin/usage/records?search=/public/health.json')
+      await apiClient.get('/api/admin/reports.json')
+      await apiClient.get('/api/publicity')
+      await apiClient.get('/api/public/health/v2/summary?window=1h')
+      expect(requests.map(request => request.headers.Authorization)).toEqual([
+        'Bearer publication-access-token', 'Bearer publication-access-token',
+        'Bearer publication-access-token', 'Bearer publication-access-token',
+        'Bearer publication-access-token', undefined,
+      ])
+    } finally {
+      rawClient.defaults.adapter = previousAdapter
+    }
+  })
 })

@@ -8,6 +8,7 @@ pub(crate) async fn maybe_build_local_admin_endpoints_response(
     if let Some(response) = health::maybe_build_local_admin_endpoints_health_response(
         &request.state(),
         &request.request_context(),
+        request.request_body(),
     )
     .await?
     {

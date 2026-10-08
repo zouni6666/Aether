@@ -370,7 +370,7 @@ async fn selects_by_provider_priority_when_priority_mode_is_provider() {
 }
 
 #[tokio::test]
-async fn selects_by_global_key_priority_when_priority_mode_is_global_key() {
+async fn legacy_global_key_routing_default_selects_by_provider_priority() {
     let mut provider_first = sample_row();
     provider_first.provider_id = "provider-a".to_string();
     provider_first.provider_name = "provider-a".to_string();
@@ -402,6 +402,13 @@ async fn selects_by_global_key_priority_when_priority_mode_is_global_key() {
     )
     .await;
 
+    // Legacy configuration stays readable, but the routing-to-scheduler
+    // boundary normalizes it to the supported provider ordering mode.
+    assert_eq!(
+        ordering_config(&state).await.priority_mode,
+        aether_scheduler_core::SchedulerPriorityMode::Provider
+    );
+
     let selected = select_candidate(
         state.data.as_ref(),
         &state,
@@ -415,8 +422,8 @@ async fn selects_by_global_key_priority_when_priority_mode_is_global_key() {
     .expect("selection should succeed")
     .expect("candidate should exist");
 
-    assert_eq!(selected.provider_id, "provider-b");
-    assert_eq!(selected.key_id, "key-b");
+    assert_eq!(selected.provider_id, "provider-a");
+    assert_eq!(selected.key_id, "key-a");
 }
 
 #[tokio::test]

@@ -114,6 +114,7 @@ impl StoredWalletSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct AdminWalletListQuery {
+    pub user_id: Option<String>,
     pub status: Option<String>,
     pub owner_type: Option<String>,
     pub limit: usize,
@@ -3285,6 +3286,7 @@ mod tests {
             billing_status: "pending".to_string(),
             total_cost_usd: 0.1,
             actual_total_cost_usd: 0.1,
+            billing_cost_usd: None,
             finalized_at_unix_secs: None,
         };
         assert!(input.validate().is_err());

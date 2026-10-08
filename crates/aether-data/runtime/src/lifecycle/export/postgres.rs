@@ -1,5 +1,7 @@
 use super::*;
 
+mod dashboard_snapshot;
+
 pub async fn export_postgres_core_jsonl(
     pool: &crate::driver::postgres::PostgresPool,
     created_at_unix_secs: u64,
@@ -14,6 +16,10 @@ pub async fn export_postgres_jsonl(
 ) -> Result<String, DataLayerError> {
     let mut tx = pool.begin().await.map_sql_err()?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .map_sql_err()?;
+    sqlx::query("SET LOCAL TIME ZONE 'UTC'")
         .execute(&mut *tx)
         .await
         .map_sql_err()?;
@@ -51,6 +57,7 @@ pub async fn export_postgres_jsonl(
         }
     }
 
+    dashboard_snapshot::attach_manifest(&mut records)?;
     tx.commit().await.map_sql_err()?;
     encode_jsonl(&records)
 }
@@ -85,6 +92,11 @@ async fn import_postgres_plan_with_options(
 ) -> Result<usize, DataLayerError> {
     let identity_scope = IdentityImportScope::from_plan(plan)?;
     let mut tx = pool.begin().await.map_sql_err()?;
+    sqlx::query("SET LOCAL TIME ZONE 'UTC'")
+        .execute(&mut *tx)
+        .await
+        .map_sql_err()?;
+    dashboard_snapshot::prepare_restore(&mut tx, plan).await?;
     let identity_state = capture_postgres_identity_import_state(&mut tx, &identity_scope).await?;
     let mut imported = 0usize;
     let mut column_cache = BTreeMap::<String, PostgresImportColumns>::new();

@@ -1,6 +1,10 @@
 pub mod video;
 
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
+
+use crate::client_identity::VersionedClientIdentity;
+use aether_ai_formats::client_profile::ClientProfileStore;
 
 use aether_ai_formats::normalize_api_format_alias;
 use serde_json::Value;
@@ -10,7 +14,10 @@ use crate::snapshot::GatewayProviderTransportSnapshot;
 pub const XAI_PROVIDER_TYPE: &str = "xai";
 pub const XAI_CHAT_PROXY_BASE_URL: &str = "https://cli-chat-proxy.grok.com/v1";
 pub const XAI_API_BASE_URL: &str = "https://api.x.ai/v1";
-pub const XAI_CLIENT_VERSION: &str = "0.2.120";
+/// 内置的 Grok CLI 版本；网关后台任务会用官方发布版本覆盖它。
+///
+/// cli-chat-proxy 会对过旧的版本直接返回 426，因此这里只作为发布检查不可用时的兜底。
+pub const XAI_DEFAULT_CLIENT_VERSION: &str = "1.0.46";
 pub const XAI_TOKEN_AUTH_HEADER: &str = "x-xai-token-auth";
 pub const XAI_TOKEN_AUTH_VALUE: &str = "xai-grok-cli";
 pub const XAI_CLIENT_VERSION_HEADER: &str = "x-grok-client-version";
@@ -19,8 +26,31 @@ pub const XAI_CLIENT_IDENTIFIER_VALUE: &str = "grok-shell";
 pub const XAI_AUTHENTICATE_RESPONSE_HEADER: &str = "x-authenticateresponse";
 pub const XAI_AUTHENTICATE_RESPONSE_VALUE: &str = "authenticate-response";
 
+static ACTIVE_CLIENT_VERSION: OnceLock<ClientProfileStore<VersionedClientIdentity>> =
+    OnceLock::new();
+
+fn active_client_version() -> &'static ClientProfileStore<VersionedClientIdentity> {
+    ACTIVE_CLIENT_VERSION.get_or_init(|| {
+        ClientProfileStore::new(
+            VersionedClientIdentity::new(XAI_DEFAULT_CLIENT_VERSION, "xai-grok-workspace", "")
+                .expect("valid built-in Grok identity"),
+        )
+    })
+}
+
+/// 返回当前发布的 Grok CLI 版本快照。
+pub fn xai_client_version() -> String {
+    active_client_version().snapshot().version.clone()
+}
+
+/// 原子替换当前 Grok CLI 身份，返回替换前的版本。
+pub fn set_xai_client_version(version: &str) -> Result<String, &'static str> {
+    let profile = VersionedClientIdentity::new(version, "xai-grok-workspace", "")?;
+    Ok(active_client_version().publish(profile).version.clone())
+}
+
 pub fn xai_cli_user_agent() -> String {
-    format!("xai-grok-workspace/{XAI_CLIENT_VERSION}")
+    active_client_version().snapshot().user_agent.clone()
 }
 
 pub fn is_xai_provider_transport(transport: &GatewayProviderTransportSnapshot) -> bool {
@@ -91,10 +121,11 @@ pub fn should_attach_cli_identity_headers(
 }
 
 pub fn insert_cli_identity_headers(headers: &mut BTreeMap<String, String>) {
-    let user_agent = xai_cli_user_agent();
+    let client_version = xai_client_version();
+    let user_agent = format!("xai-grok-workspace/{client_version}");
     for (name, value) in [
         (XAI_TOKEN_AUTH_HEADER, XAI_TOKEN_AUTH_VALUE),
-        (XAI_CLIENT_VERSION_HEADER, XAI_CLIENT_VERSION),
+        (XAI_CLIENT_VERSION_HEADER, client_version.as_str()),
         ("user-agent", user_agent.as_str()),
         (XAI_CLIENT_IDENTIFIER_HEADER, XAI_CLIENT_IDENTIFIER_VALUE),
         (
@@ -440,5 +471,32 @@ mod tests {
             "bearer",
             Some(r#"{"api_key":"xai-key","using_api":true}"#)
         ));
+    }
+
+    #[test]
+    fn cli_identity_headers_follow_published_client_version() {
+        use super::{
+            insert_cli_identity_headers, set_xai_client_version, xai_client_version,
+            XAI_CLIENT_VERSION_HEADER,
+        };
+
+        let previous = xai_client_version();
+        assert!(set_xai_client_version("").is_err());
+        assert!(set_xai_client_version("1.0 .1").is_err());
+        assert_eq!(xai_client_version(), previous);
+
+        set_xai_client_version(" 9.8.7 ").expect("valid version");
+        let mut headers = BTreeMap::new();
+        insert_cli_identity_headers(&mut headers);
+        set_xai_client_version(&previous).expect("restore version");
+
+        assert_eq!(
+            headers.get(XAI_CLIENT_VERSION_HEADER).map(String::as_str),
+            Some("9.8.7")
+        );
+        assert_eq!(
+            headers.get("user-agent").map(String::as_str),
+            Some("xai-grok-workspace/9.8.7")
+        );
     }
 }

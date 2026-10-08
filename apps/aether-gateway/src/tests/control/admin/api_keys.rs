@@ -616,6 +616,7 @@ async fn gateway_handles_admin_api_keys_create_locally_with_trusted_admin_princi
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["name"], json!("standalone-key"));
     assert_eq!(payload["is_standalone"], json!(true));
+    assert!(payload.get("credential_kind").is_none());
     assert_eq!(payload["rate_limit"], serde_json::Value::Null);
     assert_eq!(payload["concurrent_limit"], serde_json::Value::Null);
     assert_eq!(payload["allowed_providers"], json!(["openai"]));
@@ -646,6 +647,7 @@ async fn gateway_handles_admin_api_keys_create_locally_with_trusted_admin_princi
         list_response.json().await.expect("list json should parse");
     assert_eq!(list_payload["total"], json!(1));
     assert_eq!(list_payload["api_keys"][0]["name"], json!("standalone-key"));
+    assert!(list_payload["api_keys"][0].get("credential_kind").is_none());
 
     gateway_handle.abort();
     upstream_handle.abort();
@@ -702,6 +704,7 @@ async fn gateway_handles_admin_api_keys_update_locally_with_trusted_admin_princi
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["id"], json!("key-123"));
     assert_eq!(payload["name"], json!("renamed-key"));
+    assert!(payload.get("credential_kind").is_none());
     assert_eq!(payload["rate_limit"], serde_json::Value::Null);
     assert_eq!(payload["concurrent_limit"], json!(12));
     assert_eq!(payload["allowed_providers"], json!(["gemini"]));

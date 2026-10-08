@@ -1,0 +1,187 @@
+# Future-only dashboard aggregates. Trigger functions and activation data live in
+# migration 20260919000000_add_future_dashboard_summary.sql; no history is backfilled.
+
+[table.dashboard_activity_hour]
+domain = "stats"
+primary_key = ["bucket_start", "shard"]
+
+[[table.dashboard_activity_hour.columns]]
+name = "bucket_start"
+type = "timestamp"
+
+[[table.dashboard_activity_hour.columns]]
+name = "shard"
+type = "int32"
+driver.postgres.type = "smallint"
+
+[[table.dashboard_activity_hour.columns]]
+name = "request_count"
+type = "int64"
+
+[table.dashboard_stats_state]
+domain = "stats"
+primary_key = ["singleton"]
+
+[[table.dashboard_stats_state.columns]]
+name = "singleton"
+type = "bool"
+default = true
+
+[[table.dashboard_stats_state.columns]]
+name = "stats_since"
+type = "timestamp"
+
+[[table.dashboard_stats_state.columns]]
+name = "contributions_cleanup_cursor"
+type = "text"
+length = 100
+nullable = true
+
+[table.dashboard_activity_minute]
+domain = "stats"
+primary_key = ["bucket_start", "shard"]
+
+[[table.dashboard_activity_minute.columns]]
+name = "bucket_start"
+type = "timestamp"
+
+[[table.dashboard_activity_minute.columns]]
+name = "shard"
+type = "int32"
+driver.postgres.type = "smallint"
+
+[[table.dashboard_activity_minute.columns]]
+name = "request_count"
+type = "int64"
+
+[table.dashboard_request_contributions]
+domain = "stats"
+primary_key = ["request_id"]
+
+[[table.dashboard_request_contributions.columns]]
+name = "request_id"
+type = "text"
+length = 100
+
+[[table.dashboard_request_contributions.columns]]
+name = "created_at"
+type = "timestamp"
+
+[[table.dashboard_request_contributions.columns]]
+name = "actor_user_id"
+type = "text"
+nullable = true
+length = 255
+
+[[table.dashboard_request_contributions.columns]]
+name = "metrics"
+type = "json"
+
+[table.dashboard_stats_total]
+domain = "stats"
+primary_key = ["shard"]
+
+[[table.dashboard_stats_total.columns]]
+name = "shard"
+type = "int32"
+driver.postgres.type = "smallint"
+
+[[table.dashboard_stats_total.columns]]
+name = "metrics"
+type = "json"
+default = { raw = "'{}'::jsonb" }
+
+[table.dashboard_stats_minute]
+domain = "stats"
+primary_key = ["bucket_start","shard"]
+
+[[table.dashboard_stats_minute.columns]]
+name = "bucket_start"
+type = "timestamp"
+
+[[table.dashboard_stats_minute.columns]]
+name = "shard"
+type = "int32"
+driver.postgres.type = "smallint"
+
+[[table.dashboard_stats_minute.columns]]
+name = "metrics"
+type = "json"
+default = { raw = "'{}'::jsonb" }
+
+[table.dashboard_actor_minute]
+domain = "stats"
+primary_key = ["bucket_start","shard","actor_user_id"]
+
+[[table.dashboard_actor_minute.columns]]
+name = "bucket_start"
+type = "timestamp"
+
+[[table.dashboard_actor_minute.columns]]
+name = "shard"
+type = "int32"
+driver.postgres.type = "smallint"
+
+[[table.dashboard_actor_minute.columns]]
+name = "actor_user_id"
+type = "text"
+length = 255
+
+[[table.dashboard_actor_minute.columns]]
+name = "request_count"
+type = "int64"
+
+[table.dashboard_stats_pending]
+domain = "stats"
+primary_key = ["transaction_id","request_id"]
+
+[[table.dashboard_stats_pending.columns]]
+name = "transaction_id"
+type = "int64"
+
+[[table.dashboard_stats_pending.columns]]
+name = "request_id"
+type = "text"
+length = 100
+
+[[table.dashboard_stats_pending.columns]]
+name = "deleted_fact"
+type = "json"
+nullable = true
+
+[table.dashboard_user_events_minute]
+domain = "stats"
+primary_key = ["bucket_start","shard"]
+
+[[table.dashboard_user_events_minute.columns]]
+name = "bucket_start"
+type = "timestamp"
+
+[[table.dashboard_user_events_minute.columns]]
+name = "shard"
+type = "int32"
+driver.postgres.type = "smallint"
+
+[[table.dashboard_user_events_minute.columns]]
+name = "created_count"
+type = "int64"
+default = 0
+
+[[table.dashboard_user_events_minute.columns]]
+name = "deleted_count"
+type = "int64"
+default = 0
+
+# Transaction-local events only; no committed rows are exported or restored.
+[table.dashboard_user_anonymization_pending]
+domain = "stats"
+primary_key = ["transaction_id", "user_id"]
+
+[[table.dashboard_user_anonymization_pending.columns]]
+name = "transaction_id"
+type = "int64"
+
+[[table.dashboard_user_anonymization_pending.columns]]
+name = "user_id"
+type = "text"
+length = 255

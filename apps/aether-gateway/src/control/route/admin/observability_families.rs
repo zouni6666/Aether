@@ -7,6 +7,15 @@ pub(super) fn classify_admin_observability_family_route(
     normalized_path: &str,
     normalized_path_no_trailing: &str,
 ) -> Option<ClassifiedRoute> {
+    if let Some(kind) = classify_overview_route(method, normalized_path_no_trailing) {
+        return Some(classified(
+            "admin_proxy",
+            "overview_manage",
+            kind,
+            "admin:stats",
+            false,
+        ));
+    }
     if method == http::Method::POST
         && matches!(
             normalized_path,
@@ -725,5 +734,34 @@ pub(super) fn classify_admin_observability_family_route(
         ))
     } else {
         None
+    }
+}
+
+fn classify_overview_route(method: &http::Method, path: &str) -> Option<&'static str> {
+    if method != http::Method::GET {
+        return None;
+    }
+    match path.strip_prefix("/api/admin/overview/")? {
+        "dashboard" => Some("dashboard"),
+        "dashboard/summary" => Some("dashboard_summary"),
+        "dashboard/total" => Some("dashboard_total"),
+        "dashboard/charts" => Some("dashboard_charts"),
+        "summary" => Some("summary"),
+        "timeseries" => Some("timeseries"),
+        "breakdown" => Some("breakdown"),
+        "users" => Some("users"),
+        "consumption" => Some("consumption"),
+        "costs" => Some("costs"),
+        "operations/live" => Some("operations_live"),
+        "operations/performance" => Some("operations_performance"),
+        "operations/resources" => Some("operations_resources"),
+        detail
+            if detail
+                .strip_prefix("users/")
+                .is_some_and(|id| !id.is_empty() && !id.contains('/')) =>
+        {
+            Some("user_detail")
+        }
+        _ => None,
     }
 }

@@ -250,7 +250,7 @@ import { parseApiError } from '@/utils/errorParser'
 import {
   entitlementsWillReplaceExisting,
   isPlanEntitlementReplacementCandidate,
-  usagePolicyEntitlementLabels,
+  billingEntitlementLabels,
 } from '@/utils/billingEntitlements'
 import { formatTokens, formatRateLimitInheritable, formatRateLimitSimple, isRateLimitInherited, isRateLimitUnlimited } from '@/utils/format'
 import { log } from '@/utils/logger'
@@ -563,21 +563,7 @@ function formatPlanDuration(plan: BillingPlan): string {
 }
 
 function entitlementLabels(items: BillingEntitlement[] | undefined): string[] {
-  return (items || []).flatMap((item) => {
-    if (item.type === 'wallet_credit') {
-      return `${legacyT('附赠余额')} $${Number(item.amount_usd || 0).toFixed(2)}`
-    }
-    if (item.type === 'daily_quota') {
-      return `${legacyT('每日额度')} $${Number(item.daily_quota_usd || 0).toFixed(2)}`
-    }
-    if (item.type === 'membership_group') {
-      return legacyT('会员权益')
-    }
-    if (item.type === 'usage_policy') {
-      return usagePolicyEntitlementLabels(item)
-    }
-    return []
-  })
+  return billingEntitlementLabels(items, legacyT)
 }
 
 function hasPackageEntitlement(items: BillingEntitlement[] | undefined): boolean {

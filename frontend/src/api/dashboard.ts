@@ -250,6 +250,10 @@ export interface RequestDetail {
   output_cost?: number
   total_cost?: number
   actual_cost?: number
+  billing_multiplier?: number | null
+  routing_group_id?: string | null
+  routing_group_name?: string | null
+  billing_cost?: number | null
   cache_creation_cost?: number
   cache_read_cost?: number
   image_output_cost?: number

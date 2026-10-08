@@ -576,6 +576,31 @@ pub trait BillingReadRepository: Send + Sync {
         Ok(AdminBillingMutationOutcome::Unavailable)
     }
 
+    async fn list_provider_expenses(
+        &self,
+        query: &super::ProviderExpenseQuery,
+    ) -> Result<Option<super::ProviderExpensePage>, crate::DataLayerError> {
+        let _ = query;
+        Ok(None)
+    }
+    async fn create_provider_expense(
+        &self,
+        input: &super::ProviderExpenseInput,
+    ) -> Result<AdminBillingMutationOutcome<super::ProviderExpenseRecord>, crate::DataLayerError>
+    {
+        let _ = input;
+        Ok(AdminBillingMutationOutcome::Unavailable)
+    }
+    async fn void_provider_expense(
+        &self,
+        id: &str,
+        operator: Option<&str>,
+    ) -> Result<AdminBillingMutationOutcome<super::ProviderExpenseRecord>, crate::DataLayerError>
+    {
+        let _ = (id, operator);
+        Ok(AdminBillingMutationOutcome::Unavailable)
+    }
+
     async fn list_billing_plans(
         &self,
         include_disabled: bool,
@@ -632,6 +657,18 @@ pub trait BillingReadRepository: Send + Sync {
     ) -> Result<Option<Vec<UserPlanEntitlementRecord>>, crate::DataLayerError> {
         let _ = user_id;
         Ok(None)
+    }
+
+    async fn list_user_plan_entitlements_with_history(
+        &self,
+        user_id: &str,
+        include_inactive: bool,
+    ) -> Result<Option<Vec<UserPlanEntitlementRecord>>, crate::DataLayerError> {
+        if include_inactive {
+            Ok(None)
+        } else {
+            self.list_user_plan_entitlements(user_id).await
+        }
     }
 
     async fn revoke_user_plan_entitlement(

@@ -203,3 +203,50 @@ fn admin_billing_plan_write_routes_buffer_request_body() {
         );
     }
 }
+
+#[test]
+fn provider_finance_routes_require_admin_billing_and_buffer_expense_input() {
+    let headers = headers(&[]);
+    for (method, path, kind) in [
+        (
+            http::Method::GET,
+            "/api/admin/billing/provider-accounts",
+            "provider_accounts",
+        ),
+        (
+            http::Method::GET,
+            "/api/admin/billing/provider-expenses",
+            "provider_expenses",
+        ),
+        (
+            http::Method::POST,
+            "/api/admin/billing/provider-expenses",
+            "create_provider_expense",
+        ),
+        (
+            http::Method::POST,
+            "/api/admin/billing/provider-expenses/entry-1/void",
+            "void_provider_expense",
+        ),
+    ] {
+        let uri: Uri = path.parse().unwrap();
+        let decision = classify_control_route(&method, &uri, &headers).unwrap();
+        assert_eq!(decision.route_family.as_deref(), Some("billing_manage"));
+        assert_eq!(decision.route_kind.as_deref(), Some(kind));
+        assert_eq!(
+            decision.auth_endpoint_signature.as_deref(),
+            Some("admin:billing")
+        );
+        let context = GatewayPublicRequestContext::from_request_parts(
+            "expense-test",
+            &method,
+            &uri,
+            &headers,
+            Some(decision),
+        );
+        assert_eq!(
+            local_proxy_route_requires_buffered_body(&context),
+            kind == "create_provider_expense"
+        );
+    }
+}

@@ -1,0 +1,88 @@
+[table.provider_expenses]
+domain = "wallet_billing"
+primary_key = ["id"]
+
+[[table.provider_expenses.columns]]
+name = "id"
+type = "text"
+
+[[table.provider_expenses.columns]]
+name = "client_request_id"
+type = "text"
+
+[[table.provider_expenses.columns]]
+name = "provider_id"
+type = "text"
+
+[[table.provider_expenses.columns]]
+name = "provider_name"
+type = "text"
+
+[[table.provider_expenses.columns]]
+name = "kind"
+type = "text"
+
+[[table.provider_expenses.columns]]
+name = "amount"
+type = "decimal_money"
+driver.postgres.type = "numeric(20,8)"
+
+[[table.provider_expenses.columns]]
+name = "currency"
+type = "text"
+
+[[table.provider_expenses.columns]]
+name = "paid_at"
+type = "timestamp"
+
+[[table.provider_expenses.columns]]
+name = "period_start"
+type = "timestamp"
+nullable = true
+
+[[table.provider_expenses.columns]]
+name = "period_end"
+type = "timestamp"
+nullable = true
+
+[[table.provider_expenses.columns]]
+name = "note"
+type = "text"
+nullable = true
+
+[[table.provider_expenses.columns]]
+name = "external_reference"
+type = "text"
+nullable = true
+
+[[table.provider_expenses.columns]]
+name = "created_by"
+type = "text"
+nullable = true
+
+[[table.provider_expenses.columns]]
+name = "created_at"
+type = "timestamp"
+default = { raw = "NOW()" }
+
+[[table.provider_expenses.columns]]
+name = "voided_at"
+type = "timestamp"
+nullable = true
+
+[[table.provider_expenses.columns]]
+name = "voided_by"
+type = "text"
+nullable = true
+
+[[table.provider_expenses.uniques]]
+name = "provider_expenses_client_request_id_key"
+columns = ["client_request_id"]
+
+[[table.provider_expenses.indexes]]
+name = "ix_provider_expenses_paid_at"
+columns = ["paid_at", "id"]
+
+[[table.provider_expenses.indexes]]
+name = "ix_provider_expenses_provider_paid_at"
+columns = ["provider_id", "paid_at"]

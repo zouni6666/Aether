@@ -119,10 +119,9 @@ export function buildNavigation(options: {
       items: [
         { name: t('nav.dashboard'), href: '/admin/dashboard', icon: Home },
         { name: t('nav.operations'), href: '/admin/operations', icon: Activity },
-        { name: t('nav.healthMonitor'), href: '/admin/health-monitor', icon: Activity },
-        { name: t('nav.userStats'), href: '/admin/user-stats', icon: BarChart3 },
+        { name: t('nav.userStats'), href: '/admin/user-stats', icon: Users },
         { name: t('nav.costAnalysis'), href: '/admin/cost-analysis', icon: Gauge },
-        { name: t('nav.performanceAnalysis'), href: '/admin/performance-analysis', icon: Activity },
+        { name: t('nav.healthMonitor'), href: '/admin/health-monitor', icon: Activity },
         ...activeModuleItems(modules, 'overview'),
       ]
     },
@@ -132,7 +131,6 @@ export function buildNavigation(options: {
         { name: t('nav.userManagement'), href: '/admin/users', icon: Users },
         { name: t('nav.providers'), href: '/admin/providers', icon: FolderTree },
         { name: t('nav.modelManagement'), href: '/admin/models', icon: Layers },
-        { name: t('nav.routing'), href: '/admin/routing', icon: SlidersHorizontal },
         { name: t('nav.pool'), href: '/admin/pool', icon: Database },
         { name: t('nav.standaloneKeys'), href: '/admin/keys', icon: Key },
         { name: t('nav.walletManagement'), href: '/admin/wallets', icon: Wallet },
@@ -182,18 +180,6 @@ export function buildBreadcrumbs(options: {
       { label: t('nav.group.system') },
       { label: t('nav.moduleManagement'), href: '/admin/modules' },
       { label: BUILTIN_TOOL_BREADCRUMBS[route.path] }
-    ]
-  }
-
-  if (route.path.startsWith('/admin/routing/') && route.path !== '/admin/routing') {
-    return [
-      { label: t('nav.group.management') },
-      { label: t('nav.routing'), href: '/admin/routing' },
-      {
-        label: route.name === 'RoutingProfileCreate'
-          ? t('breadcrumb.routingCreate')
-          : t('breadcrumb.routingConfig')
-      }
     ]
   }
 

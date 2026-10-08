@@ -928,6 +928,26 @@ columns = ["processed_at", "created_at", "id"]
 name = "ix_usage_counter_deltas_request_kind"
 columns = ["request_id", "kind", "target_id"]
 
+[[table.usage.columns]]
+name = "failure_origin"
+type = "text"
+nullable = true
+
+[[table.usage.columns]]
+name = "failure_stage"
+type = "text"
+nullable = true
+
+[[table.usage.columns]]
+name = "failure_reason"
+type = "text"
+nullable = true
+
+[[table.usage.columns]]
+name = "failure_schema_version"
+type = "int32"
+nullable = true
+
 [table.usage_settlement_snapshots]
 domain = "usage"
 order = 20
@@ -942,6 +962,52 @@ length = 128
 name = "billing_status"
 type = "text"
 length = 64
+
+[[table.usage_settlement_snapshots.columns]]
+name = "quota_covered_amount_usd"
+type = "decimal_money"
+nullable = true
+driver.postgres.type = "numeric(20,8)"
+
+[[table.usage_settlement_snapshots.columns]]
+name = "wallet_consumed_amount_usd"
+type = "decimal_money"
+nullable = true
+driver.postgres.type = "numeric(20,8)"
+
+[[table.usage_settlement_snapshots.columns]]
+name = "wallet_debit_amount_usd"
+type = "decimal_money"
+nullable = true
+driver.postgres.type = "numeric(20,8)"
+
+[[table.usage_settlement_snapshots.columns]]
+name = "wallet_recharge_debit_usd"
+type = "decimal_money"
+nullable = true
+driver.postgres.type = "numeric(20,8)"
+
+[[table.usage_settlement_snapshots.columns]]
+name = "wallet_gift_debit_usd"
+type = "decimal_money"
+nullable = true
+driver.postgres.type = "numeric(20,8)"
+
+[[table.usage_settlement_snapshots.columns]]
+name = "wallet_overdraft_usd"
+type = "decimal_money"
+nullable = true
+driver.postgres.type = "numeric(20,8)"
+
+[[table.usage_settlement_snapshots.columns]]
+name = "allocation_schema_version"
+type = "int32"
+nullable = true
+
+[[table.usage_settlement_snapshots.columns]]
+name = "allocation_status"
+type = "text"
+nullable = true
 
 [[table.usage_settlement_snapshots.columns]]
 name = "wallet_id"

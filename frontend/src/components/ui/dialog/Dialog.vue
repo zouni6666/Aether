@@ -22,21 +22,28 @@
         />
       </Transition>
 
-      <div class="relative flex h-full items-end justify-center overflow-hidden text-center sm:items-center sm:p-0 pointer-events-none">
+      <div
+        class="relative flex h-full overflow-hidden pointer-events-none"
+        :class="isDrawer ? 'items-stretch justify-end' : 'items-end justify-center text-center sm:items-center sm:p-0'"
+      >
         <!-- 对话框内容 -->
         <Transition
+          :appear="isDrawer"
           enter-active-class="duration-300 ease-out"
-          enter-from-class="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
-          enter-to-class="opacity-100 translate-y-0 sm:scale-100"
+          :enter-from-class="isDrawer ? 'translate-x-full' : 'opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95'"
+          :enter-to-class="isDrawer ? 'translate-x-0' : 'opacity-100 translate-y-0 sm:scale-100'"
           leave-active-class="duration-200 ease-in"
-          leave-from-class="opacity-100 translate-y-0 sm:scale-100"
-          leave-to-class="opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95"
+          :leave-from-class="isDrawer ? 'translate-x-0' : 'opacity-100 translate-y-0 sm:scale-100'"
+          :leave-to-class="isDrawer ? 'translate-x-full' : 'opacity-0 translate-y-4 sm:translate-y-0 sm:scale-95'"
         >
           <div
             v-if="isOpen"
-            class="relative flex max-h-[100dvh] w-full transform flex-col overflow-hidden rounded-t-xl border border-x-0 border-b-0 border-border bg-background text-left shadow-2xl transition-all pointer-events-auto sm:my-8 sm:w-full sm:max-h-[calc(100dvh-4rem)] sm:rounded-lg sm:border"
+            class="relative flex max-h-[100dvh] w-full transform flex-col overflow-hidden border-border bg-background text-left shadow-2xl transition-all pointer-events-auto"
             :style="{ zIndex: contentZIndex }"
-            :class="maxWidthClass"
+            :class="[maxWidthClass, isDrawer ? 'h-full border-l' : 'rounded-t-xl border border-x-0 border-b-0 sm:my-8 sm:w-full sm:max-h-[calc(100dvh-4rem)] sm:rounded-lg sm:border']"
+            role="dialog"
+            aria-modal="true"
+            :aria-label="title"
             @click.stop
           >
             <!-- Header 区域：优先使用 slot，否则使用 title prop -->
@@ -100,6 +107,7 @@ import { DIALOG_CONTEXT_KEY } from './context'
 const props = defineProps<{
   open?: boolean
   modelValue?: boolean
+  placement?: 'center' | 'right'
   size?: 'sm' | 'md' | 'lg' | 'xl' | '2xl' | '3xl' | '4xl' | '5xl' | '6xl' | '7xl'
   maxWidth?: 'sm' | 'md' | 'lg' | 'xl' | '2xl' | '3xl' | '4xl' | '5xl' | '6xl' | '7xl'
   title?: string
@@ -122,6 +130,7 @@ provide(DIALOG_CONTEXT_KEY, true)
 
 // 获取 slots 以便在模板中使用
 const slots = useSlots()
+const isDrawer = computed(() => props.placement === 'right')
 
 // 统一处理 open 状态
 const isOpen = computed(() => {
@@ -170,6 +179,7 @@ const maxWidthClass = computed(() => {
 
 const contentBodyClass = computed(() => [
   'min-h-0 min-w-0 overflow-y-auto overscroll-contain',
+  isDrawer.value ? 'flex-1' : '',
   props.noPadding ? '' : 'px-4 py-3 sm:px-6',
 ].filter(Boolean).join(' '))
 

@@ -18,10 +18,7 @@
 --   Runs before 20260403000000_baseline.sql so that fresh databases have a
 --   complete schema by the time baseline (a no-op handoff point) and all
 --   later ADD COLUMN IF NOT EXISTS migrations execute.
-SET statement_timeout = 0;
-
-SET lock_timeout = 0;
-
+-- Keep the migration runner's statement and lock deadlines in effect.
 SET idle_in_transaction_session_timeout = 0;
 
 SET client_encoding = 'UTF8';
@@ -904,6 +901,7 @@ CREATE TABLE IF NOT EXISTS public.stats_daily (
     cache_read_tokens bigint DEFAULT '0'::bigint NOT NULL,
     total_cost numeric(20,8) DEFAULT '0'::double precision NOT NULL,
     actual_total_cost numeric(20,8) DEFAULT '0'::double precision NOT NULL,
+    billing_cost numeric(20,8),
     input_cost numeric(20,8) DEFAULT '0'::double precision NOT NULL,
     output_cost numeric(20,8) DEFAULT '0'::double precision NOT NULL,
     cache_creation_cost numeric(20,8) DEFAULT '0'::double precision NOT NULL,

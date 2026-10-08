@@ -635,7 +635,7 @@ WHERE user_entitlement_id = $1
     let mut remaining_cost = total_cost_usd;
     let mut debited = 0.0;
     for (grant, balance_before) in grants_with_remaining {
-        if remaining_cost <= 0.000_000_01 || balance_before <= 0.0 {
+        if remaining_cost <= 0.0 || balance_before <= 0.0 {
             continue;
         }
         let amount = remaining_cost.min(balance_before);
@@ -1163,6 +1163,12 @@ WHERE retain_until <= TO_TIMESTAMP($1::double precision)
                         provider_monthly_used_usd: None,
                         finalized_at_unix_secs: Some(finalized_at as u64),
                     };
+                    let mut quota_covered = 0.0_f64;
+                    let mut wallet_consumed = 0.0_f64;
+                    let mut wallet_debit = 0.0_f64;
+                    let mut recharge_debit = 0.0_f64;
+                    let mut gift_debit = 0.0_f64;
+                    let mut overdraft = 0.0_f64;
 
                     if final_billing_status == "settled" {
                         let api_key_id = input
@@ -1305,6 +1311,7 @@ LIMIT 1
                                     settlement.billing_status = final_billing_status.clone();
                                     0.0
                                 } else {
+                                    quota_covered = quota.debited_usd;
                                     (billable_cost_usd - quota.debited_usd).max(0.0)
                                 }
                             } else {
@@ -1325,7 +1332,7 @@ LIMIT 1
                             return Ok(Some(settlement));
                         }
 
-                        if wallet_debit_cost_usd > SETTLEMENT_EPSILON_USD {
+                        if wallet_debit_cost_usd > 0.0 {
                             if let Some(wallet_row) = wallet_row {
                                 let wallet_id: String =
                                     wallet_row.try_get("id").map_postgres_err()?;
@@ -1346,10 +1353,15 @@ LIMIT 1
                                         before_gift,
                                         wallet_debit_cost_usd,
                                     );
+                                    recharge_debit = debit_plan.recharge_deduction;
+                                    gift_debit = debit_plan.gift_deduction;
+                                    overdraft = debit_plan.recharge_overdraft;
+                                    wallet_debit = recharge_debit + gift_debit + overdraft;
                                     (after_recharge, after_gift) =
                                         debit_plan.after_balances(before_recharge, before_gift);
                                 }
                                 let total_consumed_after = total_consumed + wallet_debit_cost_usd;
+                                wallet_consumed = wallet_debit_cost_usd;
                                 validate_wallet_settlement_values(
                                     after_recharge,
                                     after_gift,
@@ -1418,6 +1430,29 @@ WHERE id = $1
                     }
 
                     sync_usage_settlement_snapshot(&mut **tx, &settlement).await?;
+                    if final_billing_status == "settled" {
+                        sqlx::query(
+                            r#"UPDATE usage_settlement_snapshots SET
+                          quota_covered_amount_usd = $2::text::numeric(20,8),
+                          wallet_consumed_amount_usd = $3::text::numeric(20,8),
+                          wallet_debit_amount_usd = $4::text::numeric(20,8),
+                          wallet_recharge_debit_usd = $5::text::numeric(20,8),
+                          wallet_gift_debit_usd = $6::text::numeric(20,8),
+                          wallet_overdraft_usd = $7::text::numeric(20,8),
+                          allocation_schema_version = 1, allocation_status = 'complete'
+                          WHERE request_id = $1"#,
+                        )
+                        .bind(&input.request_id)
+                        .bind(format!("{quota_covered:.8}"))
+                        .bind(format!("{wallet_consumed:.8}"))
+                        .bind(format!("{wallet_debit:.8}"))
+                        .bind(format!("{recharge_debit:.8}"))
+                        .bind(format!("{gift_debit:.8}"))
+                        .bind(format!("{overdraft:.8}"))
+                        .execute(&mut **tx)
+                        .await
+                        .map_postgres_err()?;
+                    }
                     sqlx::query(FINALIZE_USAGE_BILLING_SQL)
                         .bind(&input.request_id)
                         .bind(&final_billing_status)
@@ -1472,6 +1507,85 @@ mod tests {
             .expect("isolated settlement table should be created");
         }
         (pool, schema)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AETHER_TEST_DATABASE_URL and PostgreSQL migrations"]
+    async fn live_composite_billing_settlement_preserves_provider_cost_and_is_idempotent() {
+        use super::*;
+
+        let (pool, schema) = isolated_settlement_test_pool().await;
+        let result = AssertUnwindSafe(async {
+            for table in ["wallets", "usage", "usage_settlement_snapshots", "usage_counter_deltas"] {
+                sqlx::query(&format!("CREATE TABLE {table} (LIKE public.{table} INCLUDING ALL)"))
+                    .execute(&pool).await.expect("settlement fixture table should be created");
+            }
+            let repository = SqlxSettlementRepository::new(pool.clone());
+            for (scenario, charge, quota_covered) in [
+                ("wallet", 20.0, 0.0),
+                ("quota_and_wallet", 20.0, 7.0),
+                ("zero_charge", 0.0, 0.0),
+            ] {
+                sqlx::query("INSERT INTO users (id, username, email_verified) VALUES ($1, $1, false)")
+                    .bind(scenario).execute(&pool).await.expect("user should insert");
+                sqlx::query("INSERT INTO wallets (id, user_id, balance, gift_balance, total_consumed, limit_mode, created_at, updated_at) VALUES ($1, $1, 100, 0, 0, 'finite', NOW(), NOW())")
+                    .bind(scenario).execute(&pool).await.expect("wallet should insert");
+                // A zero-charge request must leave an active quota untouched too.
+                if scenario != "wallet" {
+                    let grant = serde_json::json!([{
+                        "type": "daily_quota", "daily_quota_usd": 7.0,
+                        "reset_timezone": "UTC", "allow_wallet_overage": true,
+                    }]);
+                    sqlx::query("INSERT INTO billing_plans (id, title, price_amount, duration_unit, duration_value, entitlements_json, created_at, updated_at) VALUES ($1, $1, 10, 'month', 1, $2, NOW(), NOW())")
+                        .bind(scenario).bind(&grant).execute(&pool).await.expect("plan should insert");
+                    sqlx::query("INSERT INTO user_plan_entitlements (id, user_id, plan_id, payment_order_id, starts_at, expires_at, entitlements_snapshot, created_at, updated_at) VALUES ($1, $1, $1, $1, NOW() - INTERVAL '1 hour', NOW() + INTERVAL '1 day', $2, NOW(), NOW())")
+                        .bind(scenario).bind(&grant).execute(&pool).await.expect("entitlement should insert");
+                }
+                let multiplier = charge / 10.0;
+                let metadata = serde_json::json!({"billing_multiplier_snapshot": {
+                    "version": 1, "factors": {"routing_group": multiplier}, "multiplier": multiplier,
+                }});
+                sqlx::query("INSERT INTO usage (id, request_id, user_id, provider_id, provider_name, model, status, billing_status, total_cost_usd, actual_total_cost_usd, request_metadata) VALUES ($1, $1, $1, 'provider', 'Provider', 'model', 'completed', 'pending', 10, 5, $2)")
+                    .bind(scenario).bind(metadata).execute(&pool).await.expect("usage should insert");
+                let input = UsageSettlementInput {
+                    request_id: scenario.to_string(), user_id: Some(scenario.to_string()),
+                    api_key_id: None, api_key_is_standalone: false,
+                    provider_id: Some("provider".to_string()),
+                    status: "completed".to_string(), billing_status: "pending".to_string(),
+                    total_cost_usd: 10.0, actual_total_cost_usd: 5.0,
+                    billing_cost_usd: Some(charge), finalized_at_unix_secs: None,
+                };
+                let settled = repository.settle_usage(input.clone()).await.unwrap().unwrap();
+                assert_eq!(settled.billing_status, "settled", "{scenario}");
+                assert_eq!(settled.wallet_balance_before, Some(100.0));
+                assert_eq!(settled.wallet_balance_after, Some(100.0 - (charge - quota_covered)));
+                assert_eq!(repository.settle_usage(input).await.unwrap(), Some(settled), "replayed {scenario}");
+
+                let wallet: (f64, f64) = sqlx::query_as("SELECT (balance + gift_balance)::double precision, total_consumed::double precision FROM wallets WHERE id = $1")
+                    .bind(scenario).fetch_one(&pool).await.unwrap();
+                assert_eq!(wallet, (100.0 - (charge - quota_covered), charge - quota_covered), "{scenario}");
+                let quota: (i64, f64) = sqlx::query_as("SELECT COUNT(*), COALESCE(SUM(amount_usd), 0)::double precision FROM entitlement_usage_ledgers WHERE request_id = $1")
+                    .bind(scenario).fetch_one(&pool).await.unwrap();
+                assert_eq!(quota, (if quota_covered > 0.0 { 1 } else { 0 }, quota_covered), "{scenario}");
+                let allocation: (f64, f64, f64, String) = sqlx::query_as("SELECT quota_covered_amount_usd::double precision, wallet_consumed_amount_usd::double precision, wallet_debit_amount_usd::double precision, allocation_status FROM usage_settlement_snapshots WHERE request_id = $1")
+                    .bind(scenario).fetch_one(&pool).await.unwrap();
+                assert_eq!(allocation, (quota_covered, charge - quota_covered, charge - quota_covered, "complete".to_string()), "{scenario}");
+                let costs: (f64, f64) = sqlx::query_as("SELECT total_cost_usd::double precision, actual_total_cost_usd::double precision FROM usage WHERE request_id = $1")
+                    .bind(scenario).fetch_one(&pool).await.unwrap();
+                assert_eq!(costs, (10.0, 5.0), "base and upstream cost must remain unchanged");
+                let provider_cost: (i64, f64) = sqlx::query_as("SELECT COUNT(*), COALESCE(SUM(total_cost_usd_delta), 0)::double precision FROM usage_counter_deltas WHERE request_id = $1 AND kind = 'provider_monthly' AND target_id = 'provider'")
+                    .bind(scenario).fetch_one(&pool).await.unwrap();
+                assert_eq!(provider_cost, (1, 5.0), "upstream cost must be recorded once even for a zero-charge request");
+            }
+        }).catch_unwind().await;
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&pool)
+            .await
+            .expect("isolated settlement schema should be removed");
+        pool.close().await;
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
     }
 
     #[tokio::test]

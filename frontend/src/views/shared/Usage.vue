@@ -6,6 +6,7 @@
       defer
     >
       <button
+        v-if="!hasScopedRecordFilters"
         class="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition"
         :title="statsExpanded ? '收起用量分析' : '展开用量分析'"
         @click="statsExpanded = !statsExpanded"
@@ -23,14 +24,17 @@
 
     <!-- 用量分析面板（可折叠） -->
     <div
-      v-if="statsExpanded"
+      v-if="statsExpanded && !hasScopedRecordFilters"
       class="space-y-4"
     >
       <!-- 活跃度热图 + 请求间隔时间线 -->
-      <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+      <div
+        v-if="!isAdminPage"
+        class="grid grid-cols-1 xl:grid-cols-2 gap-4"
+      >
         <ActivityHeatmapCard
           :data="activityHeatmapData"
-          :title="isAdminPage ? '总体活跃天数' : '我的活跃天数'"
+          title="我的活跃天数"
           :is-loading="isLoadingHeatmap"
           :has-error="heatmapError"
         />
@@ -42,7 +46,6 @@
         />
       </div>
 
-      <!-- 分析统计 -->
       <!-- 管理员：模型 + 提供商 + API格式（3列） -->
       <div
         v-if="isAdminPage"
@@ -75,6 +78,41 @@
           :is-admin="false"
         />
       </div>
+    </div>
+
+    <div
+      v-if="hasScopedRecordFilters"
+      class="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground"
+    >
+      <span>{{ overviewT('请求筛选结果', 'Filtered requests') }}</span>
+      <Button
+        variant="ghost"
+        size="sm"
+        class="h-8"
+        @click="clearRecordFilters"
+      >
+        <X class="mr-1 h-3 w-3" />{{ overviewT('清除筛选', 'Clear filters') }}
+      </Button>
+    </div>
+
+    <div
+      v-if="isAdminPage && deepLinkFilters.length"
+      class="flex flex-wrap gap-2 text-xs"
+    >
+      <span
+        v-for="filter in deepLinkFilters"
+        :key="filter.key"
+        class="inline-flex max-w-full items-center gap-1 rounded border px-2 py-1"
+      >
+        <span class="min-w-0 break-all">{{ filter.label }}: {{ filter.value }}</span>
+        <button
+          type="button"
+          class="flex h-5 w-5 shrink-0 items-center justify-center hover:text-primary"
+          :aria-label="`${overviewT('清除', 'Clear')} ${filter.label}`"
+          :title="`${overviewT('清除', 'Clear')} ${filter.label}`"
+          @click="clearDeepLinkFilter(filter.key)"
+        ><X class="h-3 w-3" /></button>
+      </span>
     </div>
 
     <!-- 使用记录 -->
@@ -124,7 +162,7 @@
       :is-open="detailModalOpen"
       :request-id="selectedRequestId"
       :summary-record="selectedRequestSummary"
-      @close="detailModalOpen = false"
+      @close="closeRequestDetail"
       @request-state="handleDetailRequestState"
     />
   </div>
@@ -132,7 +170,8 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { mergeUsageBillingSnapshot } from '@/features/usage/utils/usageBilling'
+import { useRoute, useRouter } from 'vue-router'
 import { useLocalStorage } from '@vueuse/core'
 import { useAuthStore } from '@/stores/auth'
 import { usageApi } from '@/api/usage'
@@ -140,7 +179,7 @@ import type { ImageProgress } from '@/api/requestTrace'
 import { usersApi } from '@/api/users'
 import { meApi } from '@/api/me'
 import { dashboardApi } from '@/api/dashboard'
-import { PanelTopClose, PanelTopOpen } from 'lucide-vue-next'
+import { PanelTopClose, PanelTopOpen, X } from 'lucide-vue-next'
 import {
   UsageModelTable,
   UsageProviderTable,
@@ -180,8 +219,14 @@ import type { UserOption } from '@/features/usage/components/UsageRecordsTable.v
 import { log } from '@/utils/logger'
 import type { ActivityHeatmap } from '@/types/activity'
 import { useToast } from '@/composables/useToast'
+import { queryString, rangeFromQuery, presetRange } from '@/features/overview/query'
+import { useOverviewI18n } from '@/features/overview/i18n'
+import { attributionLabel } from '@/features/overview/format'
+import { Button } from '@/components/ui'
 
 const route = useRoute()
+const router = useRouter()
+const { t: overviewT } = useOverviewI18n()
 const { warning } = useToast()
 const authStore = useAuthStore()
 
@@ -248,6 +293,36 @@ const filterProvider = ref('__all__')
 const filterApiFormat = ref('__all__')
 const filterStatus = ref<FilterStatusValue>('__all__')
 const filterClientFamily = ref('__all__')
+const filterProviderId = ref('')
+const filterApiKeyId = ref('')
+const filterRequestId = ref('')
+const filterAttribution = ref('')
+const filterEndpointKind = ref('')
+const filterRequestType = ref('')
+const filterIsStream = ref<boolean | undefined>()
+const filterFormatConversion = ref<boolean | undefined>()
+const filterSlowThreshold = ref<number | undefined>()
+const hasScopedRecordFilters = computed(() => isAdminPage.value && (
+  filterSearch.value.trim() !== '' || [filterUser.value, filterModel.value, filterProvider.value, filterApiFormat.value, filterStatus.value, filterClientFamily.value].some(value => value !== '__all__') ||
+  !!filterProviderId.value || !!filterApiKeyId.value || !!filterRequestId.value || !!filterAttribution.value || !!filterEndpointKind.value || !!filterRequestType.value || filterIsStream.value !== undefined || filterFormatConversion.value !== undefined || filterSlowThreshold.value !== undefined || hideUnknownRecords.value
+))
+function clearRecordFilters() {
+  const fields = ['search', 'user_id', 'model', 'provider', 'api_format', 'status', 'client_family', 'provider_id', 'api_key_id', 'request_id', 'attribution_kind', 'endpoint_kind', 'request_type', 'is_stream', 'has_format_conversion', 'slow_threshold_ms', 'detail_id', 'page']
+  hideUnknownRecords.value = false
+  void router.replace({ query: { ...route.query, ...Object.fromEntries(fields.map(key => [key, undefined])) } })
+}
+const deepLinkFilters = computed(() => [
+  { key: 'provider_id', label: overviewT('提供商 ID', 'Provider ID'), value: filterProviderId.value },
+  { key: 'api_key_id', label: overviewT('凭证 ID', 'Credential ID'), value: filterApiKeyId.value },
+  { key: 'request_id', label: overviewT('请求 ID', 'Request ID'), value: filterRequestId.value },
+  { key: 'attribution_kind', label: overviewT('归属', 'Attribution'), value: filterAttribution.value ? attributionLabel(filterAttribution.value) : '' },
+  { key: 'endpoint_kind', label: overviewT('端点类型', 'Endpoint kind'), value: filterEndpointKind.value },
+  { key: 'request_type', label: overviewT('请求类型', 'Request type'), value: filterRequestType.value },
+  { key: 'is_stream', label: overviewT('流式', 'Streaming'), value: filterIsStream.value === undefined ? '' : filterIsStream.value ? overviewT('是', 'Yes') : overviewT('否', 'No') },
+  { key: 'has_format_conversion', label: overviewT('格式转换', 'Format conversion'), value: filterFormatConversion.value === undefined ? '' : filterFormatConversion.value ? overviewT('是', 'Yes') : overviewT('否', 'No') },
+  { key: 'slow_threshold_ms', label: overviewT('响应时间', 'Response time'), value: filterSlowThreshold.value ? `>= ${filterSlowThreshold.value} ms` : '' },
+].filter(filter => filter.value !== ''))
+function clearDeepLinkFilter(key: string) { void router.replace({ query: { ...route.query, [key]: undefined, page: undefined } }) }
 
 // 用户列表（仅管理员页面使用）
 const availableUsers = ref<UserOption[]>([])
@@ -272,7 +347,7 @@ const isLoadingHeatmap = ref(false)
 const heatmapError = ref(false)
 const intervalTimelineHours = computed(() => getIntervalTimelineHours(timeRange.value))
 const intervalTimelineTitle = computed(() => {
-  const baseTitle = isAdminPage.value ? '请求间隔时间线' : '我的请求间隔'
+  const baseTitle = isAdminPage.value ? overviewT('全站最近请求间隔', 'Site-wide recent request intervals') : '我的请求间隔'
   return `${baseTitle}（${formatIntervalTimelineWindow(intervalTimelineHours.value)}）`
 })
 const ADMIN_ANALYTICS_REFRESH_INTERVAL = 60000
@@ -285,11 +360,7 @@ async function loadHeatmapData() {
   isLoadingHeatmap.value = true
   heatmapError.value = false
   try {
-    if (isAdminPage.value) {
-      activityHeatmapData.value = await usageApi.getActivityHeatmap()
-    } else {
-      activityHeatmapData.value = await meApi.getActivityHeatmap()
-    }
+    activityHeatmapData.value = await meApi.getActivityHeatmap()
   } catch (error) {
     log.error('加载热力图数据失败:', error)
     heatmapError.value = true
@@ -550,9 +621,10 @@ async function pollActiveRequests() {
         record.cache_creation_ephemeral_1h_input_tokens =
           update.cache_creation_ephemeral_1h_input_tokens ?? undefined
         record.cache_read_input_tokens = update.cache_read_input_tokens ?? undefined
+        Object.assign(record, mergeUsageBillingSnapshot(record, update))
         record.cost = update.cost
         record.actual_cost = update.actual_cost ?? undefined
-        record.rate_multiplier = update.rate_multiplier ?? undefined
+        record.rate_multiplier = update.rate_multiplier ?? record.rate_multiplier
         const responseTiming = mergeUsageRecordResponseTiming(
           {
             response_time_ms: record.response_time_ms,
@@ -905,15 +977,73 @@ const selectedRequestSummary = computed(() => (
   currentRecords.value.find(record => record.id === selectedRequestId.value) ?? null
 ))
 
+function currentRouteState() {
+  return JSON.stringify([timeRange.value, currentPage.value, pageSize.value, filterSearch.value, filterUser.value, filterModel.value, filterProvider.value, filterApiFormat.value, filterStatus.value, filterClientFamily.value, filterProviderId.value, filterApiKeyId.value, filterRequestId.value, filterAttribution.value, filterEndpointKind.value, filterRequestType.value, filterIsStream.value, filterFormatConversion.value, filterSlowThreshold.value])
+}
+
+function applyUsageRoute() {
+  const query = route.query ?? {}
+  const before = currentRouteState()
+  const from = queryString(query, 'from')
+  const to = queryString(query, 'to')
+  if (from && to && Number.isFinite(Date.parse(from)) && Date.parse(from) < Date.parse(to)) {
+    timeRange.value = { ...rangeFromQuery(query, presetRange('today')) }
+  } else if (queryString(query, 'start_date') || queryString(query, 'preset')) {
+    timeRange.value = queryString(query, 'preset')
+      ? getDateRangeFromPeriod(queryString(query, 'preset') as Parameters<typeof getDateRangeFromPeriod>[0])
+      : { start_date: queryString(query, 'start_date'), end_date: queryString(query, 'end_date'), timezone: queryString(query, 'timezone') || undefined }
+  }
+  filterSearch.value = queryString(query, 'search')
+  filterUser.value = queryString(query, 'user_id') || '__all__'
+  filterModel.value = queryString(query, 'model') || '__all__'
+  filterProvider.value = queryString(query, 'provider') || '__all__'
+  filterApiFormat.value = queryString(query, 'api_format') || '__all__'
+  const status = queryString(query, 'status')
+  filterStatus.value = (status === 'success' ? 'completed' : status || '__all__') as FilterStatusValue
+  filterClientFamily.value = queryString(query, 'client_family') || '__all__'
+  filterProviderId.value = queryString(query, 'provider_id')
+  filterApiKeyId.value = queryString(query, 'api_key_id')
+  filterRequestId.value = queryString(query, 'request_id')
+  filterAttribution.value = queryString(query, 'attribution_kind')
+  filterEndpointKind.value = queryString(query, 'endpoint_kind')
+  filterRequestType.value = queryString(query, 'request_type')
+  filterIsStream.value = ['true', 'false'].includes(queryString(query, 'is_stream')) ? queryString(query, 'is_stream') === 'true' : undefined
+  filterFormatConversion.value = ['true', 'false'].includes(queryString(query, 'has_format_conversion')) ? queryString(query, 'has_format_conversion') === 'true' : undefined
+  const slowThreshold = Number(queryString(query, 'slow_threshold_ms'))
+  filterSlowThreshold.value = Number.isFinite(slowThreshold) && slowThreshold > 0 ? slowThreshold : undefined
+  currentPage.value = Math.max(1, Number(queryString(query, 'page')) || 1)
+  pageSize.value = Math.min(100, Math.max(10, Number(queryString(query, 'page_size')) || 20))
+  const detail = queryString(query, 'detail_id')
+  selectedRequestId.value = detail || null
+  detailModalOpen.value = isAdminPage.value && !!detail
+  return before !== currentRouteState()
+}
+
+function syncUsageRoute() {
+  if (!isAdminPage.value) return
+  const filters = getCurrentFilters()
+  const next = { ...route.query, ...timeRange.value, ...filters, hideUnknownRecords: undefined, page: currentPage.value > 1 ? String(currentPage.value) : undefined, page_size: String(pageSize.value) }
+  if (timeRange.value.from) { next.start_date = undefined; next.end_date = undefined; next.preset = undefined }
+  else { next.from = undefined; next.to = undefined }
+  void router.replace({ query: Object.fromEntries(Object.entries(next).map(([key, value]) => [key, typeof value === 'boolean' ? String(value) : value])) })
+}
+
+let routeReady = false
+applyUsageRoute()
+watch(() => route.query, async () => {
+  if (applyUsageRoute() && routeReady && isAdminPage.value) {
+    await loadRecords({ page: currentPage.value, pageSize: pageSize.value }, getCurrentFilters(), timeRange.value)
+    await refreshAdminAnalyticsForSelectionChange()
+  }
+})
+watch([timeRange, currentPage, pageSize, filterSearch, filterUser, filterModel, filterProvider, filterApiFormat, filterStatus, filterClientFamily], () => { if (routeReady) syncUsageRoute() })
+
 // 初始化加载
 onMounted(async () => {
+  routeReady = true
   document.addEventListener('visibilitychange', handleVisibilityChange)
 
   if (isAdminPage.value) {
-    // 管理员页面优先启动热力图加载，避免被统计聚合链路阻塞。
-    const heatmapPromise = loadHeatmapData().catch(err => {
-      log.error('加载热力图数据失败:', err)
-    })
     const adminUsersPromise = loadAdminUsers()
 
     await loadRecords(
@@ -923,7 +1053,7 @@ onMounted(async () => {
     )
     void (async () => {
       await refreshAdminAnalytics({ force: true, preserveOnFailure: false })
-      await Promise.all([heatmapPromise, adminUsersPromise])
+      await adminUsersPromise
     })()
   } else {
     // 用户页面：loadStats 已包含记录加载，不需要单独调用 loadRecords
@@ -982,6 +1112,15 @@ async function handlePageSizeChange(size: number) {
 // 获取当前筛选参数
 function getCurrentFilters() {
   return {
+    provider_id: filterProviderId.value || undefined,
+    api_key_id: filterApiKeyId.value || undefined,
+    request_id: filterRequestId.value || undefined,
+    attribution_kind: filterAttribution.value || undefined,
+    endpoint_kind: filterEndpointKind.value || undefined,
+    request_type: filterRequestType.value || undefined,
+    is_stream: filterIsStream.value,
+    has_format_conversion: filterFormatConversion.value,
+    slow_threshold_ms: filterSlowThreshold.value,
     search: filterSearch.value.trim() || undefined,
     user_id: filterUser.value !== '__all__' ? filterUser.value : undefined,
     model: filterModel.value !== '__all__' ? filterModel.value : undefined,
@@ -1103,6 +1242,12 @@ function showRequestDetail(id: string) {
   if (!isAdminPage.value) return
   selectedRequestId.value = id
   detailModalOpen.value = true
+  void router.push({ query: { ...route.query, detail_id: id } })
+}
+
+function closeRequestDetail() {
+  detailModalOpen.value = false
+  void router.replace({ query: { ...route.query, detail_id: undefined } })
 }
 
 function sameImageProgress(left?: ImageProgress | null, right?: ImageProgress | null): boolean {
@@ -1134,6 +1279,10 @@ function handleDetailRequestState(update: {
   cacheReadInputTokens?: number | null
   cost?: number | null
   actualCost?: number | null
+  billingMultiplier?: number | null
+  billingCost?: number | null
+  routingGroupId?: string | null
+  routingGroupName?: string | null
   responseTimeMs?: number | null
   firstByteTimeMs?: number | null
   isStream?: boolean | null
@@ -1199,6 +1348,13 @@ function handleDetailRequestState(update: {
   if ('cacheReadInputTokens' in update && update.cacheReadInputTokens != null) {
     record.cache_read_input_tokens = update.cacheReadInputTokens
   }
+  Object.assign(record, mergeUsageBillingSnapshot(record, {
+    cost: update.cost,
+    billing_multiplier: update.billingMultiplier,
+    billing_cost: update.billingCost,
+    routing_group_id: update.routingGroupId,
+    routing_group_name: update.routingGroupName,
+  }))
   if ('cost' in update && update.cost != null) {
     record.cost = update.cost
   }

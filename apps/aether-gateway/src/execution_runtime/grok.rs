@@ -1114,6 +1114,7 @@ fn grok_canonical_usage(usage: GrokUsageEstimate) -> StreamingCanonicalUsage {
 
 fn grok_standardized_usage(usage: GrokUsageEstimate) -> StandardizedUsage {
     let mut standardized = StandardizedUsage::new();
+    standardized.token_source = Some(aether_contracts::UsageTokenSource::Estimated);
     standardized.input_tokens = i64::try_from(usage.input_tokens).unwrap_or(i64::MAX);
     standardized.output_tokens = i64::try_from(usage.output_tokens).unwrap_or(i64::MAX);
     standardized.reasoning_tokens = i64::try_from(usage.reasoning_tokens).unwrap_or(i64::MAX);
@@ -4574,6 +4575,101 @@ mod tests {
 
         assert!(!adapter.text.contains("<grok:render"));
         assert!(adapter.text.contains("[[1]](https://example.com/source"));
+    }
+
+    #[test]
+    fn grok_usage_reports_preserve_estimated_provenance_after_wire_roundtrip() {
+        use aether_usage_runtime::{
+            build_stream_terminal_usage_event, build_sync_terminal_usage_event,
+            GatewayStreamReportRequest, GatewaySyncReportRequest, UsageEventType,
+        };
+
+        for (format, report_prefix) in [
+            ("openai:chat", "openai_chat"),
+            ("openai:responses", "openai_responses"),
+        ] {
+            let mut plan = sample_plan(
+                serde_json::json!({
+                    "messages": [{"role": "user", "content": "hello"}]
+                }),
+                format,
+            );
+            plan.stream = false;
+            plan.provider_api_format = format.to_string();
+            // The trusted planner binds this hint to the Grok runtime adapter.
+            // Exercise its transport through the same serialized report as usage.
+            let context = serde_json::json!({
+                "provider_type": "grok",
+                "provider_api_format": format,
+                "client_api_format": format,
+                "usage_token_source": "estimated"
+            });
+            let collected = GrokCollected {
+                status_code: 200,
+                text: "hello back".to_string(),
+                thinking: "short reasoning".to_string(),
+                ..GrokCollected::default()
+            };
+            let expected = grok_usage_estimate(&plan, &collected);
+            let result = grok_execution_result(&plan, collected, Some(&context));
+            let sync_report = GatewaySyncReportRequest {
+                trace_id: plan.request_id.clone(),
+                report_kind: format!("{report_prefix}_sync_success"),
+                report_context: Some(context.clone()),
+                status_code: result.status_code,
+                headers: result.headers,
+                body_json: result.body.and_then(|body| body.json_body),
+                client_body_json: None,
+                body_base64: None,
+                telemetry: result.telemetry,
+            };
+            let sync_report: GatewaySyncReportRequest =
+                serde_json::from_slice(&serde_json::to_vec(&sync_report).unwrap()).unwrap();
+            let sync_event = build_sync_terminal_usage_event(
+                &plan,
+                sync_report.report_context.as_ref(),
+                &sync_report,
+            )
+            .unwrap();
+
+            plan.stream = true;
+            let stream_report = GatewayStreamReportRequest {
+                trace_id: plan.request_id.clone(),
+                report_kind: format!("{report_prefix}_stream_success"),
+                report_context: Some(context),
+                status_code: 200,
+                headers: BTreeMap::new(),
+                provider_body_base64: None,
+                provider_body_state: None,
+                client_body_base64: None,
+                client_body_state: None,
+                terminal_summary: Some(super::grok_stream_terminal_summary(&plan, expected)),
+                telemetry: None,
+            };
+            let stream_report: GatewayStreamReportRequest =
+                serde_json::from_slice(&serde_json::to_vec(&stream_report).unwrap()).unwrap();
+            let stream_event = build_stream_terminal_usage_event(
+                &plan,
+                stream_report.report_context.as_ref(),
+                &stream_report,
+            )
+            .unwrap();
+
+            // Sync honors the response's explicit total. The existing stream
+            // summary has no explicit total, so its fallback also adds reasoning.
+            let sync_total = expected.input_tokens + expected.output_tokens;
+            let stream_total = sync_total + expected.reasoning_tokens;
+            for (event, expected_total) in [(sync_event, sync_total), (stream_event, stream_total)]
+            {
+                assert_eq!(event.event_type, UsageEventType::Completed, "{format}");
+                assert_eq!(event.data.input_tokens, Some(expected.input_tokens));
+                assert_eq!(event.data.output_tokens, Some(expected.output_tokens));
+                assert_eq!(event.data.total_tokens, Some(expected_total));
+                let metadata = event.data.request_metadata.unwrap();
+                assert_eq!(metadata["analytics_measurement"]["source"], "estimated");
+                assert!(metadata.get("usage_token_source").is_none());
+            }
+        }
     }
 
     #[test]

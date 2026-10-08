@@ -104,6 +104,7 @@ ALTER TABLE ONLY public.payment_orders ADD CONSTRAINT uq_payment_orders_order_no
 CREATE INDEX IF NOT EXISTS idx_payment_orders_wallet_created ON public.payment_orders USING btree (wallet_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_payment_orders_user_created ON public.payment_orders USING btree (user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_payment_orders_status ON public.payment_orders USING btree (status);
+CREATE INDEX IF NOT EXISTS idx_payment_orders_status_credited_user ON public.payment_orders USING btree (status, credited_at, user_id);
 CREATE INDEX IF NOT EXISTS idx_payment_orders_gateway_order_id ON public.payment_orders USING btree (gateway_order_id);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_orders_payment_method_gateway_order_id ON public.payment_orders USING btree (payment_method, gateway_order_id);
 CREATE INDEX IF NOT EXISTS idx_payment_orders_kind_status ON public.payment_orders USING btree (order_kind, status);

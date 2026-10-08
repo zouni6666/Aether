@@ -140,7 +140,7 @@
                       variant="outline"
                       class="text-[10px] px-1.5 py-0"
                     >
-                      必读
+                      {{ popupReminderLabel }}
                     </Badge>
                     <Pin
                       v-if="announcement.is_pinned"
@@ -261,7 +261,7 @@
                   variant="outline"
                   class="text-[10px] shrink-0"
                 >
-                  必读
+                  {{ popupReminderLabel }}
                 </Badge>
                 <Pin
                   v-if="announcement.is_pinned"
@@ -446,7 +446,7 @@
           </div>
         </div>
 
-        <div class="flex items-center gap-6 p-3 border rounded-lg bg-muted/50">
+        <div class="flex flex-wrap items-center gap-x-6 gap-y-3 p-3 border rounded-lg bg-muted/50">
           <div class="flex items-center gap-2">
             <input
               id="pinned"
@@ -469,7 +469,7 @@
             <Label
               for="requires-ack"
               class="cursor-pointer text-sm"
-            >必读确认</Label>
+            >{{ popupReminderLabel }}</Label>
           </div>
           <div
             v-if="editingAnnouncement"
@@ -525,75 +525,21 @@
     />
 
     <!-- 公告详情对话框 -->
-    <Dialog
+    <AnnouncementDialog
       v-model="detailDialogOpen"
-      size="lg"
-    >
-      <template #header>
-        <div class="border-b border-border px-6 py-4">
-          <div class="flex items-center gap-3">
-            <div
-              class="flex h-9 w-9 items-center justify-center rounded-lg flex-shrink-0"
-              :class="getDialogIconClass(viewingAnnouncement?.type)"
-            >
-              <component
-                :is="getAnnouncementIcon(viewingAnnouncement.type)"
-                v-if="viewingAnnouncement"
-                class="h-5 w-5"
-                :class="getIconColor(viewingAnnouncement.type)"
-              />
-            </div>
-            <div class="flex-1 min-w-0">
-              <h3 class="text-lg font-semibold text-foreground leading-tight truncate">
-                {{ viewingAnnouncement?.title || '公告详情' }}
-              </h3>
-              <p class="text-xs text-muted-foreground">
-                系统公告
-              </p>
-            </div>
-          </div>
-        </div>
-      </template>
-
-      <div
-        v-if="viewingAnnouncement"
-        class="space-y-4"
-      >
-        <div class="flex items-center gap-3 text-xs text-gray-500 dark:text-muted-foreground">
-          <span>{{ viewingAnnouncement.author.username }}</span>
-          <span>·</span>
-          <span>{{ formatFullDate(viewingAnnouncement.created_at) }}</span>
-        </div>
-
-        <!-- eslint-disable vue/no-v-html -->
-        <div
-          translate="no"
-          class="prose prose-sm dark:prose-invert max-w-none"
-          v-html="renderMarkdown(viewingAnnouncement.content)"
-        />
-        <!-- eslint-enable vue/no-v-html -->
-      </div>
-
-      <template #footer>
-        <Button
-          variant="outline"
-          type="button"
-          class="h-10 px-5"
-          @click="detailDialogOpen = false"
-        >
-          关闭
-        </Button>
-      </template>
-    </Dialog>
+      :announcement="viewingAnnouncement"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { getI18nLocale } from '@/i18n'
 import { formatRelativeTime } from '@/utils/format'
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { announcementApi, type Announcement } from '@/api/announcements'
 import { useAuthStore } from '@/stores/auth'
+import { useAnnouncementStore } from '@/stores/announcements'
 import {
   Card,
   Button,
@@ -618,20 +564,24 @@ import SelectValue from '@/components/ui/select-value.vue'
 import SelectContent from '@/components/ui/select-content.vue'
 import SelectItem from '@/components/ui/select-item.vue'
 import { AlertDialog } from '@/components/common'
+import AnnouncementDialog from '@/components/common/AnnouncementDialog.vue'
 import { Bell, AlertCircle, AlertTriangle, Info, Pin, Wrench, Loader2, Plus, SquarePen, Trash2 } from 'lucide-vue-next'
 import { useToast } from '@/composables/useToast'
 import { log } from '@/utils/logger'
-import { marked } from 'marked'
-import { sanitizeMarkdown } from '@/utils/sanitize'
 
 const { success, error: showError } = useToast()
 const authStore = useAuthStore()
+const announcementStore = useAnnouncementStore()
+const route = useRoute()
+const router = useRouter()
 const isAdmin = computed(() => authStore.isAdmin)
+const popupReminderLabel = computed(() => getI18nLocale() === 'zh-CN' ? '弹窗提醒' : 'Popup reminder')
 
 const announcements = ref<Announcement[]>([])
 const loading = ref(false)
 const total = ref(0)
-const unreadCount = ref(0)
+const pageUnreadCount = ref(0)
+const unreadCount = computed(() => announcementStore.unreadCount ?? pageUnreadCount.value)
 const currentPage = ref(1)
 const pageSize = ref(20)
 
@@ -660,18 +610,34 @@ onMounted(() => {
   loadAnnouncements()
 })
 
+watch(() => route.query.create, value => {
+  if (value !== '1') return
+  if (isAdmin.value) openCreateDialog()
+  const query = { ...route.query }
+  delete query.create
+  void router.replace({ query })
+}, { immediate: true })
+
+watch([() => announcementStore.items, () => announcementStore.unreadCount], ([items, count]) => {
+  const readStates = new Map(items.map(item => [item.id, item.is_read]))
+  for (const announcement of announcements.value) {
+    if (count === 0 && isCurrentAnnouncement(announcement)) announcement.is_read = true
+    else if (readStates.has(announcement.id)) announcement.is_read = readStates.get(announcement.id)
+  }
+})
+
 async function loadAnnouncements(page = 1) {
   loading.value = true
   currentPage.value = page
   try {
-    const response = await announcementApi.getAnnouncements({
-      active_only: !authStore.canAccessAdmin, // 管理员和审计管理员可以看到所有公告
+    const params = {
       limit: pageSize.value,
       offset: (page - 1) * pageSize.value
-    })
+    }
+    const response = await announcementApi.getUserAnnouncements(params)
     announcements.value = response.items
     total.value = response.total
-    unreadCount.value = response.unread_count || 0
+    pageUnreadCount.value = response.unread_count || 0
   } catch (error) {
     log.error('加载公告失败:', error)
     showError('加载公告失败')
@@ -680,21 +646,27 @@ async function loadAnnouncements(page = 1) {
   }
 }
 
+function isCurrentAnnouncement(announcement: Announcement) {
+  const now = Date.now()
+  return announcement.is_active
+    && (!announcement.start_time || Date.parse(announcement.start_time) <= now)
+    && (!announcement.end_time || Date.parse(announcement.end_time) >= now)
+}
+
 async function viewAnnouncementDetail(announcement: Announcement) {
-  // 标记为已读
-  if (!announcement.is_read && !isAdmin.value) {
+  viewingAnnouncement.value = announcement
+  detailDialogOpen.value = true
+  if (!announcement.is_read && isCurrentAnnouncement(announcement)) {
     try {
-      await announcementApi.markAsRead(announcement.id)
-      announcement.is_read = true
-      unreadCount.value = Math.max(0, unreadCount.value - 1)
+      await announcementStore.markRead(announcement.id)
+      if (!announcement.is_read) {
+        announcement.is_read = true
+        pageUnreadCount.value = Math.max(0, pageUnreadCount.value - 1)
+      }
     } catch (error) {
       log.error('标记已读失败:', error)
     }
   }
-
-  // 显示详情对话框
-  viewingAnnouncement.value = announcement
-  detailDialogOpen.value = true
 }
 
 function openCreateDialog() {
@@ -732,6 +704,7 @@ async function toggleAnnouncementPin(announcement: Announcement, newStatus: bool
     })
     announcement.is_pinned = newStatus
     success(newStatus ? '已置顶' : '已取消置顶')
+    void announcementStore.refresh()
   } catch (error) {
     log.error('更新置顶状态失败:', error)
     showError('更新置顶状态失败')
@@ -745,6 +718,7 @@ async function toggleAnnouncementActive(announcement: Announcement, newStatus: b
     })
     announcement.is_active = newStatus
     success(newStatus ? '已启用' : '已禁用')
+    void announcementStore.refresh()
   } catch (error) {
     log.error('更新启用状态失败:', error)
     showError('更新启用状态失败')
@@ -769,6 +743,7 @@ async function saveAnnouncement() {
       success('公告创建成功')
     }
     dialogOpen.value = false
+    void announcementStore.refresh()
     loadAnnouncements(currentPage.value)
   } catch (error) {
     log.error('保存失败:', error)
@@ -791,6 +766,7 @@ async function deleteAnnouncement() {
     await announcementApi.deleteAnnouncement(deletingAnnouncement.value.id)
     success('公告已删除')
     deleteDialogOpen.value = false
+    void announcementStore.refresh()
     loadAnnouncements(currentPage.value)
   } catch (error) {
     log.error('删除失败:', error)
@@ -850,35 +826,6 @@ function getTypeLabel(type: string): string {
     default:
       return '信息'
   }
-}
-
-function getDialogIconClass(type?: string) {
-  switch (type) {
-    case 'important':
-      return 'bg-rose-100 dark:bg-rose-900/30'
-    case 'warning':
-      return 'bg-amber-100 dark:bg-amber-900/30'
-    case 'maintenance':
-      return 'bg-orange-100 dark:bg-orange-900/30'
-    default:
-      return 'bg-primary/10 dark:bg-primary/20'
-  }
-}
-
-function formatFullDate(dateString: string): string {
-  const date = new Date(dateString)
-  return date.toLocaleDateString(getI18nLocale(), {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit'
-  })
-}
-
-function renderMarkdown(content: string): string {
-  const rawHtml = marked(content) as string
-  return sanitizeMarkdown(rawHtml)
 }
 
 function getPlainText(content: string): string {

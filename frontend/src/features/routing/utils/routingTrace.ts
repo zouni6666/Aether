@@ -18,7 +18,9 @@ export interface RoutingCandidateTrace {
 
 export interface RoutingDecisionTrace {
   group_id?: string | null
+  group_name?: string | null
   group_version?: number | null
+  billing_multiplier?: number | null
   selection_source: string
   selected_rules: string[]
   original_model: string

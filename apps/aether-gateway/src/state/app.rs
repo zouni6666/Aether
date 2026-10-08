@@ -18,7 +18,7 @@ use super::super::async_task::{VideoTaskPollerConfig, VideoTaskService};
 use super::super::cache::{
     AuthApiKeyFeatureCacheKey, AuthApiKeyIdentityCacheKey, AuthApiKeyLastUsedCache,
     AuthContextCache, AuthSnapshotCache, DashboardResponseCache, DirectPlanBypassCache,
-    JsonValueCache, SchedulerAffinityCache, SystemConfigCache, ValueCache,
+    JsonValueCache, OverviewTotalCache, SchedulerAffinityCache, SystemConfigCache, ValueCache,
 };
 use super::super::data::GatewayDataState;
 use super::super::fallback_metrics;
@@ -388,6 +388,8 @@ pub struct AppState {
     pub(crate) runtime_state: Arc<RuntimeState>,
     pub(crate) internal_gateway_auth: Arc<crate::internal_gateway_auth::InternalGatewayAuthConfig>,
     pub(crate) usage_runtime: Arc<usage::UsageRuntime>,
+    pub(crate) request_activity: Arc<crate::request_activity::RequestActivity>,
+    pub(crate) execution_activity: Arc<crate::execution_activity::ExecutionActivity>,
     pub(crate) video_tasks: Arc<VideoTaskService>,
     pub(crate) video_task_poller: Option<VideoTaskPollerConfig>,
     pub(crate) frontdoor_runtime_guards: Arc<FrontdoorRuntimeGuardConfig>,
@@ -429,6 +431,7 @@ pub struct AppState {
     pub(crate) scheduler_affinity_cache: Arc<SchedulerAffinityCache>,
     pub(crate) scheduler_affinity_epoch: Arc<AtomicU64>,
     pub(crate) dashboard_response_cache: Arc<DashboardResponseCache>,
+    pub(crate) overview_total_cache: Arc<OverviewTotalCache>,
     pub(crate) system_config_cache: Arc<SystemConfigCache>,
     pub(crate) endpoint_response_header_rules_cache: Arc<JsonValueCache<String>>,
     pub(crate) candidate_row_page_cache: Arc<super::super::cache::CandidateRowPageCache>,

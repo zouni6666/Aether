@@ -727,12 +727,37 @@ interface MockManagedUserApiKey {
   is_locked: boolean
   is_standalone: false
   feature_settings?: Record<string, unknown> | null
+  routing_group_id?: string | null
   rate_limit?: number | null
   concurrent_limit?: number | null
   ip_rules?: string[] | null
   total_requests: number
   total_cost_usd: number
   force_capabilities?: Record<string, unknown> | null
+}
+
+const mockSelfUserApiKeys: MockManagedUserApiKey[] = MOCK_USER_API_KEYS.map((key, index) => ({
+  ...key,
+  fullKey: `sk-ae-demo-user-${index + 1}`,
+  is_locked: false,
+  is_standalone: false,
+  routing_group_id: null,
+}))
+
+function mockSelfUserApiKeyPayload(key: MockManagedUserApiKey) {
+  return {
+    ...publicMockManagedUserApiKey(key),
+    routing_group_id: key.routing_group_id ?? null,
+    routing_group_name: MOCK_ROUTING_GROUPS.find(group => group.id === key.routing_group_id)?.name ?? null,
+  }
+}
+
+function mockSelectableRoutingGroupId(value: unknown): string | null {
+  if (value == null) return null
+  const group = MOCK_ROUTING_GROUPS.find(group => group.id === value
+    && group.enabled && group.config_json.user_visible === true)
+  if (!group) throw { response: createMockResponse({ detail: '该策略分组不可选择' }, 403) }
+  return group.id
 }
 
 const mockManagedUserApiKeysByUserId = new Map<string, MockManagedUserApiKey[]>([
@@ -1418,7 +1443,19 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
 
   'GET /api/users/me/api-keys': async () => {
     await delay()
-    return createMockResponse(MOCK_USER_API_KEYS)
+    return createMockResponse(mockSelfUserApiKeys.map(mockSelfUserApiKeyPayload))
+  },
+
+  'GET /api/users/me/routing-groups': async () => {
+    await delay()
+    const items = MOCK_ROUTING_GROUPS.filter(group => group.enabled && group.config_json.user_visible === true)
+      .map(group => ({
+        id: group.id,
+        name: group.name,
+        billing_multiplier: group.config_json.billing_multiplier ?? 1,
+        is_default: group.is_system_default,
+      }))
+    return createMockResponse({ items, total: items.length })
   },
 
   'GET /api/users/me/client-config': async () => {
@@ -1435,18 +1472,25 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
   'POST /api/users/me/api-keys': async (config) => {
     await delay()
     const body = JSON.parse(config.data || '{}')
-    const newKey = {
+    const newKey: MockManagedUserApiKey = {
       id: `key-demo-${Date.now()}`,
-      key: `sk-aether-demo-${Math.random().toString(36).substring(2, 15)}`,
+      fullKey: `sk-aether-demo-${Math.random().toString(36).substring(2, 15)}`,
       key_display: 'sk-ae...demo',
       name: body.name || '新密钥（演示）',
       created_at: new Date().toISOString(),
       is_active: true,
+      is_locked: false,
       is_standalone: false,
+      routing_group_id: mockSelectableRoutingGroupId(body.routing_group_id),
+      feature_settings: body.feature_settings ?? null,
+      rate_limit: body.rate_limit ?? 0,
+      concurrent_limit: body.concurrent_limit ?? null,
+      ip_rules: body.ip_rules ?? null,
       total_requests: 0,
       total_cost_usd: 0
     }
-    return createMockResponse(newKey)
+    mockSelfUserApiKeys.unshift(newKey)
+    return createMockResponse({ ...mockSelfUserApiKeyPayload(newKey), key: newKey.fullKey })
   },
 
   'GET /api/users/me/usage': async () => {
@@ -3990,13 +4034,40 @@ registerDynamicRoute('DELETE', '/api/admin/api-keys/:keyId', async (_config, par
   return createMockResponse({ message: '删除成功（演示模式）' })
 })
 
+registerDynamicRoute('GET', '/api/users/me/api-keys/:keyId', async (config, params) => {
+  await delay()
+  const key = mockSelfUserApiKeys.find(key => key.id === params.keyId)
+  if (!key) throw { response: createMockResponse({ detail: 'API Key 不存在' }, 404) }
+  return createMockResponse(config.params?.include_key
+    ? { key: key.fullKey }
+    : mockSelfUserApiKeyPayload(key))
+})
+
+registerDynamicRoute('PUT', '/api/users/me/api-keys/:keyId', async (config, params) => {
+  await delay()
+  const key = mockSelfUserApiKeys.find(key => key.id === params.keyId)
+  if (!key) throw { response: createMockResponse({ detail: 'API Key 不存在' }, 404) }
+  const body = mockRequestObject(config)
+  const groupId = 'routing_group_id' in body && body.routing_group_id !== key.routing_group_id
+    ? mockSelectableRoutingGroupId(body.routing_group_id)
+    : key.routing_group_id
+  if (typeof body.name === 'string') key.name = body.name
+  if (typeof body.rate_limit === 'number') key.rate_limit = body.rate_limit
+  if (typeof body.concurrent_limit === 'number') key.concurrent_limit = body.concurrent_limit
+  if ('ip_rules' in body) key.ip_rules = body.ip_rules as string[] | null
+  if ('feature_settings' in body) key.feature_settings = body.feature_settings as Record<string, unknown> | null
+  key.routing_group_id = groupId
+  return createMockResponse({ ...mockSelfUserApiKeyPayload(key), message: 'API密钥已更新' })
+})
+
 // 用户 API Key 删除
 registerDynamicRoute('DELETE', '/api/users/me/api-keys/:keyId', async (_config, params) => {
   await delay()
-  const key = MOCK_USER_API_KEYS.find(k => k.id === params.keyId)
-  if (!key) {
+  const index = mockSelfUserApiKeys.findIndex(key => key.id === params.keyId)
+  if (index < 0) {
     throw { response: createMockResponse({ detail: 'API Key 不存在' }, 404) }
   }
+  mockSelfUserApiKeys.splice(index, 1)
   return createMockResponse({ message: '删除成功（演示模式）' })
 })
 

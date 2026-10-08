@@ -1,60 +1,23 @@
 <template>
   <section class="space-y-4">
     <div
-      v-if="showPriorityMode || showSchedulingMode"
-      class="grid gap-3"
-      :class="showPriorityMode ? 'lg:grid-cols-[1fr_1.4fr]' : ''"
+      v-if="showSchedulingMode"
+      class="space-y-1 text-sm"
     >
-      <div
-        v-if="showPriorityMode"
-        class="space-y-1 text-sm"
-      >
-        <span class="text-muted-foreground">优先级模式</span>
-        <div class="grid grid-cols-2 gap-1 rounded-lg bg-muted/40 p-1">
-          <button
-            type="button"
-            class="flex h-9 items-center justify-center gap-2 rounded-md px-3 text-sm font-medium transition-colors"
-            :class="effectivePriorityMode === 'provider'
-              ? 'bg-background text-foreground shadow-sm'
-              : 'text-muted-foreground hover:bg-background/60 hover:text-foreground'"
-            @click="updatePriorityMode('provider')"
-          >
-            <Layers class="h-4 w-4" />
-            Provider
-          </button>
-          <button
-            type="button"
-            class="flex h-9 items-center justify-center gap-2 rounded-md px-3 text-sm font-medium transition-colors"
-            :class="effectivePriorityMode === 'global_key'
-              ? 'bg-background text-foreground shadow-sm'
-              : 'text-muted-foreground hover:bg-background/60 hover:text-foreground'"
-            @click="updatePriorityMode('global_key')"
-          >
-            <Key class="h-4 w-4" />
-            Key
-          </button>
-        </div>
-      </div>
-
-      <div
-        v-if="showSchedulingMode"
-        class="space-y-1 text-sm"
-      >
-        <span class="text-muted-foreground">调度策略</span>
-        <div class="grid grid-cols-3 gap-1 rounded-lg bg-muted/40 p-1">
-          <button
-            v-for="mode in schedulingModes"
-            :key="mode.value"
-            type="button"
-            class="h-9 rounded-md px-3 text-sm font-medium transition-colors"
-            :class="effectiveSchedulingMode === mode.value
-              ? 'bg-background text-foreground shadow-sm'
-              : 'text-muted-foreground hover:bg-background/60 hover:text-foreground'"
-            @click="updateSchedulingMode(mode.value)"
-          >
-            {{ mode.label }}
-          </button>
-        </div>
+      <span class="text-muted-foreground">调度策略</span>
+      <div class="grid grid-cols-3 gap-1 rounded-lg bg-muted/40 p-1">
+        <button
+          v-for="mode in schedulingModes"
+          :key="mode.value"
+          type="button"
+          class="h-9 rounded-md px-3 text-sm font-medium transition-colors"
+          :class="effectiveSchedulingMode === mode.value
+            ? 'bg-background text-foreground shadow-sm'
+            : 'text-muted-foreground hover:bg-background/60 hover:text-foreground'"
+          @click="updateSchedulingMode(mode.value)"
+        >
+          {{ mode.label }}
+        </button>
       </div>
     </div>
 
@@ -62,7 +25,7 @@
       <div class="flex flex-col gap-3 border-b border-border/60 px-4 py-3 md:flex-row md:items-center md:justify-between">
         <div>
           <h3 class="text-sm font-medium">
-            {{ effectivePriorityMode === 'provider' ? '提供商排序' : 'Key 排序' }}
+            提供商排序
           </h3>
           <p class="mt-1 text-xs text-muted-foreground">
             {{ subtitle }}
@@ -70,7 +33,6 @@
         </div>
         <div class="flex flex-wrap items-center gap-2">
           <button
-            v-if="effectivePriorityMode === 'provider'"
             type="button"
             class="inline-flex h-8 items-center gap-2 rounded-md px-3 text-xs font-medium transition-colors"
             :class="providerMultiSelectEnabled
@@ -80,28 +42,40 @@
           >
             <ListChecks class="h-3.5 w-3.5" />
             {{ providerMultiSelectEnabled ? '退出多选' : '多选' }}
+            <span v-if="providerMultiSelectEnabled && selectedProviderIds.size">{{ selectedProviderIds.size }}</span>
           </button>
-          <Select
-            v-if="effectivePriorityMode === 'global_key'"
-            v-model="selectedApiFormat"
-          >
-            <SelectTrigger class="h-8 w-[180px] rounded-lg border-border/60 bg-background/80 px-3 text-xs">
-              <SelectValue placeholder="选择端点" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem
-                v-for="format in apiFormats"
-                :key="format"
-                :value="format"
-              >
-                {{ formatLabel(format) }}
-              </SelectItem>
-            </SelectContent>
-          </Select>
         </div>
       </div>
 
-      <div class="min-h-[180px] max-h-[420px] overflow-y-auto p-3">
+      <div class="space-y-3 border-b border-border/60 bg-muted/15 px-4 py-3">
+        <p class="text-xs leading-relaxed text-muted-foreground">
+          {{ schedulingDescription }}
+          优先级数字越小越先，可填写相同数字。移动或拖动会重新编号，未拆开的同级组保留。
+        </p>
+        <div class="flex flex-wrap items-center gap-3">
+          <label class="relative min-w-0 flex-1 sm:max-w-sm">
+            <Search class="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+            <input
+              v-model="searchQuery"
+              type="search"
+              aria-label="搜索调度提供商"
+              placeholder="搜索提供商名称"
+              class="h-9 w-full rounded-md border border-border bg-background pl-9 pr-3 text-sm"
+            >
+          </label>
+          <span class="text-xs text-muted-foreground">
+            {{ visibleRowCount }} / {{ totalRowCount }} 项
+          </span>
+        </div>
+        <p
+          v-if="searchQuery.trim()"
+          class="text-xs text-muted-foreground"
+        >
+          搜索仅用于定位；移动按完整列表执行，置顶和置底会越过隐藏项。
+        </p>
+      </div>
+
+      <div class="min-h-[180px] p-3">
         <div
           v-if="loading"
           class="py-10 text-center text-sm text-muted-foreground"
@@ -114,19 +88,18 @@
         >
           {{ loadError }}
         </div>
-
         <div
-          v-else-if="effectivePriorityMode === 'provider'"
+          v-else
           class="space-y-2"
         >
           <div
-            v-if="providerRows.length === 0"
+            v-if="filteredProviderRows.length === 0"
             class="rounded-lg border border-dashed border-border/70 px-4 py-8 text-center text-sm text-muted-foreground"
           >
-            暂无 Provider
+            {{ providerRows.length ? '没有匹配的提供商' : '暂无 Provider' }}
           </div>
           <div
-            v-for="(row, index) in providerRows"
+            v-for="row in filteredProviderRows"
             v-else
             :key="row.id"
             class="group grid min-h-[56px] items-center gap-3 rounded-lg border px-3 py-2 transition-colors"
@@ -150,26 +123,26 @@
             <div class="cursor-grab rounded p-1 text-muted-foreground/40 transition-colors group-hover:text-muted-foreground active:cursor-grabbing">
               <GripVertical class="h-4 w-4" />
             </div>
-            <div class="flex items-center gap-1">
+            <div class="order-last col-span-full flex items-center justify-end gap-1 sm:order-none sm:col-span-1">
               <button
+                v-for="action in providerMoveActions"
+                :key="action.label"
                 type="button"
                 class="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-30"
-                :disabled="providerMoveDisabled(row.id, index, -1)"
-                @click="moveProvider(row.id, -1)"
+                :aria-label="`${action.label} ${row.name}`"
+                :title="action.label"
+                :disabled="providerMoveDisabled(row.id, action.direction)"
+                @click="action.edge ? moveProviderToEdge(row.id, action.edge) : moveProvider(row.id, action.direction)"
               >
-                <ArrowUp class="h-4 w-4" />
-              </button>
-              <button
-                type="button"
-                class="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-30"
-                :disabled="providerMoveDisabled(row.id, index, 1)"
-                @click="moveProvider(row.id, 1)"
-              >
-                <ArrowDown class="h-4 w-4" />
+                <component
+                  :is="action.icon"
+                  class="h-4 w-4"
+                />
               </button>
             </div>
             <input
               :value="row.priority"
+              :aria-label="`${row.name} 优先级`"
               type="number"
               min="0"
               class="priority-input h-8 w-14 rounded-md border border-border bg-background px-2 text-center text-sm"
@@ -177,19 +150,36 @@
             >
             <div class="min-w-0">
               <div class="flex items-center gap-2">
-                <span class="truncate text-sm font-medium">{{ row.name }}</span>
+                <button
+                  type="button"
+                  class="truncate text-left text-sm font-medium hover:text-primary hover:underline"
+                  :aria-label="`查看提供商 ${row.name}`"
+                  @click="emit('inspect-provider', row.id)"
+                >
+                  {{ row.name }}
+                </button>
                 <span
                   v-if="poolProviderIds.has(row.id)"
                   class="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary"
-                >
-                  Pool
-                </span>
+                >Pool</span>
                 <span
                   v-if="!row.is_active"
                   class="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground"
-                >
-                  停用
+                >停用</span>
+                <span
+                  v-if="!isRoutingProviderEnabled(config, row.id, targetModelPolicy)"
+                  class="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground"
+                >本组禁用</span>
+              </div>
+              <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                <span v-if="row.active_keys != null">可用 Key {{ row.active_keys }} / {{ row.total_keys }}</span>
+                <span :class="row.health_score != null && row.health_score < 0.8 ? 'text-amber-600 dark:text-amber-400' : ''">
+                  {{ row.health_score == null ? '健康度暂无数据' : `健康度 ${Math.round(row.health_score * 100)}%` }}
                 </span>
+                <slot
+                  name="provider-status"
+                  :provider="providerById.get(row.id)"
+                />
               </div>
             </div>
             <div class="hidden max-w-[240px] flex-wrap justify-end gap-1 sm:flex">
@@ -198,91 +188,7 @@
                 :key="format"
                 :title="formatLabel(format)"
                 class="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground"
-              >
-                {{ formatShortLabel(format) }}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        <div
-          v-else
-          class="space-y-2"
-        >
-          <div
-            v-if="keyRows.length === 0"
-            class="rounded-lg border border-dashed border-border/70 px-4 py-8 text-center text-sm text-muted-foreground"
-          >
-            暂无 Key
-          </div>
-          <div
-            v-for="(row, index) in keyRows"
-            v-else
-            :key="row.id"
-            class="group grid min-h-[56px] items-center gap-3 rounded-lg border px-3 py-2 transition-colors sm:grid-cols-[auto_auto_56px_minmax(0,1fr)_auto]"
-            :class="draggedKeyId === row.id
-              ? 'border-primary/50 bg-primary/5 shadow-sm'
-              : dragOverKeyId === row.id
-                ? 'border-primary/30 bg-primary/5'
-                : 'border-border/50 bg-background hover:bg-muted/30'"
-            draggable="true"
-            @dragstart="handleKeyDragStart(row.id, $event)"
-            @dragend="handleKeyDragEnd"
-            @dragover.prevent="handleKeyDragOver(row.id)"
-            @dragleave="handleKeyDragLeave"
-            @drop="handleKeyDrop(row.id)"
-          >
-            <div class="cursor-grab rounded p-1 text-muted-foreground/40 transition-colors group-hover:text-muted-foreground active:cursor-grabbing">
-              <GripVertical class="h-4 w-4" />
-            </div>
-            <div class="flex items-center gap-1">
-              <button
-                type="button"
-                class="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-30"
-                :disabled="index === 0"
-                @click="moveKey(row.id, -1)"
-              >
-                <ArrowUp class="h-4 w-4" />
-              </button>
-              <button
-                type="button"
-                class="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-30"
-                :disabled="index === keyRows.length - 1"
-                @click="moveKey(row.id, 1)"
-              >
-                <ArrowDown class="h-4 w-4" />
-              </button>
-            </div>
-            <input
-              :value="row.priority"
-              type="number"
-              min="0"
-              class="priority-input h-8 w-14 rounded-md border border-border bg-background px-2 text-center text-sm"
-              @change="event => setKeyPriority(row.id, event)"
-            >
-            <div class="min-w-0">
-              <div class="flex items-center gap-2">
-                <span class="truncate text-sm font-medium">{{ row.name }}</span>
-                <span
-                  v-if="!row.is_active"
-                  class="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground"
-                >
-                  停用
-                </span>
-              </div>
-              <div class="mt-0.5 truncate font-mono text-xs text-muted-foreground">
-                {{ row.masked }} · {{ row.provider_name }}
-              </div>
-            </div>
-            <div class="hidden max-w-[240px] flex-wrap justify-end gap-1 sm:flex">
-              <span
-                v-for="format in row.api_formats.slice(0, 3)"
-                :key="format"
-                :title="formatLabel(format)"
-                class="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground"
-              >
-                {{ formatShortLabel(format) }}
-              </span>
+              >{{ formatShortLabel(format) }}</span>
             </div>
           </div>
         </div>
@@ -293,38 +199,29 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { ArrowDown, ArrowUp, GripVertical, Key, Layers, ListChecks } from 'lucide-vue-next'
+import { ArrowDown, ArrowUp, ChevronsDown, ChevronsUp, GripVertical, ListChecks, Search } from 'lucide-vue-next'
 
-import client from '@/api/client'
 import {
   Checkbox,
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
 } from '@/components/ui'
 import {
   getProvidersSummary,
   type ProviderWithEndpointsSummary,
 } from '@/api/endpoints'
-import { formatApiFormat, formatApiFormatShort, normalizeApiFormatAlias, sortApiFormats } from '@/api/endpoints/types/api-format'
+import { formatApiFormat, formatApiFormatShort } from '@/api/endpoints/types/api-format'
 import { parseApiError } from '@/utils/errorParser'
 import {
   DEFAULT_ROUTING_POLICY_MODEL,
   getDefaultModelPolicy,
   getModelPolicy,
-  normalizeRoutingGroupConfig,
-  normalizeRoutingApiFormatKey,
-  setModelKeyPriorityOverridesForFormat,
-  setModelPoolPriorityOverrides,
+  isRoutingProviderEnabled,
   setModelProviderPriorityOverrides,
   type RoutingDefaultPolicy,
   type RoutingGroupConfig,
-  type RoutingPriorityMode,
   type RoutingSchedulingMode,
 } from '../utils/routingPolicy'
 import { buildRoutingProviderSummaryQuery } from '../utils/providerQuery'
+import { normalizeProviderSchedulingConfig } from '../utils/schedulingPolicies'
 
 interface ProviderPriorityRow {
   id: string
@@ -332,37 +229,9 @@ interface ProviderPriorityRow {
   is_active: boolean
   api_formats: string[]
   priority: number
-}
-
-interface KeyPriorityRow {
-  id: string
-  kind: 'key' | 'pool'
-  target_id: string
-  name: string
-  masked: string
-  is_active: boolean
-  api_formats: string[]
-  priority: number
-  provider_id: string
-  provider_name: string
-  pool_key_count?: number
-  pool_active_key_count?: number
-}
-
-interface GlobalKeySource {
-  id: string
-  provider_id: string
-  provider_name: string
-  name: string
-  api_key_masked: string
-  internal_priority: number
-  global_priority_by_format: Record<string, number> | null
-  is_active: boolean
-  provider_active: boolean
-  api_formats: string[]
-  api_format: string
+  active_keys: number
+  total_keys: number
   health_score: number | null
-  request_count: number
 }
 
 const props = defineProps<{
@@ -370,17 +239,16 @@ const props = defineProps<{
   model?: string
   modelId?: string
   providerModelIds?: string[]
-  priorityMode?: RoutingPriorityMode
   schedulingMode?: RoutingSchedulingMode
-  showPriorityMode?: boolean
   showSchedulingMode?: boolean
   subtitle?: string
+  refreshRevision?: number
 }>()
 
 const emit = defineEmits<{
   'update:config': [value: RoutingGroupConfig]
-  'update:priority-mode': [value: RoutingPriorityMode]
   'update:scheduling-mode': [value: RoutingSchedulingMode]
+  'inspect-provider': [providerId: string]
 }>()
 
 const schedulingModes: Array<{ value: RoutingDefaultPolicy['scheduling_mode']; label: string }> = [
@@ -388,49 +256,44 @@ const schedulingModes: Array<{ value: RoutingDefaultPolicy['scheduling_mode']; l
   { value: 'load_balance', label: '负载均衡' },
   { value: 'fixed_order', label: '固定顺序' },
 ]
+const providerMoveActions = [
+  { label: '置顶', direction: -1, edge: 'start', icon: ChevronsUp },
+  { label: '上移', direction: -1, edge: null, icon: ArrowUp },
+  { label: '下移', direction: 1, edge: null, icon: ArrowDown },
+  { label: '置底', direction: 1, edge: 'end', icon: ChevronsDown },
+] as const
 
 const providers = ref<ProviderWithEndpointsSummary[]>([])
-const keysByFormat = ref<Record<string, GlobalKeySource[]>>({})
-const selectedApiFormat = ref('')
+const searchQuery = ref('')
 const loadingProviders = ref(false)
-const loadingKeys = ref(false)
 const loadError = ref<string | null>(null)
 const draggedProviderId = ref<string | null>(null)
 const dragOverProviderId = ref<string | null>(null)
-const draggedKeyId = ref<string | null>(null)
-const dragOverKeyId = ref<string | null>(null)
 const providerMultiSelectEnabled = ref(false)
 const selectedProviderIds = ref<Set<string>>(new Set())
 let providerLoadRequestId = 0
 
-const config = computed(() => normalizeRoutingGroupConfig(props.config))
+const config = computed(() => normalizeProviderSchedulingConfig(props.config))
 const targetModel = computed(() => props.model?.trim() || DEFAULT_ROUTING_POLICY_MODEL)
 const targetModelPolicy = computed(() => targetModel.value === DEFAULT_ROUTING_POLICY_MODEL
   ? getDefaultModelPolicy(config.value)
   : getModelPolicy(config.value, targetModel.value))
-const showPriorityMode = computed(() => props.showPriorityMode !== false)
 const showSchedulingMode = computed(() => props.showSchedulingMode !== false)
-const effectivePriorityMode = computed(() => props.priorityMode ?? config.value.default_policy.priority_mode)
 const effectiveSchedulingMode = computed(() => props.schedulingMode ?? config.value.default_policy.scheduling_mode)
 const subtitle = computed(() => props.subtitle ?? '默认作用于全部模型')
-const loading = computed(() => loadingProviders.value || loadingKeys.value)
-const apiFormats = computed(() => sortApiFormats(Object.keys(keysByFormat.value)))
+const schedulingDescription = computed(() => {
+  if (effectiveSchedulingMode.value === 'fixed_order') return '固定顺序：优先级决定候选的尝试次序，实际可用候选还受模型能力和 API 格式影响。'
+  if (effectiveSchedulingMode.value === 'load_balance') return '负载均衡：请求会分散到可用候选，列表优先级不代表实际尝试顺序。'
+  return '缓存亲和：会优先复用缓存命中的候选，实际顺序可能与列表不同。'
+})
+const loading = computed(() => loadingProviders.value)
 const providerGridClass = computed(() => providerMultiSelectEnabled.value
-  ? 'sm:grid-cols-[auto_auto_auto_56px_minmax(0,1fr)_auto]'
-  : 'sm:grid-cols-[auto_auto_56px_minmax(0,1fr)_auto]')
+  ? 'grid-cols-[auto_auto_56px_minmax(0,1fr)] sm:grid-cols-[auto_auto_auto_56px_minmax(0,1fr)_auto]'
+  : 'grid-cols-[auto_56px_minmax(0,1fr)] sm:grid-cols-[auto_auto_56px_minmax(0,1fr)_auto]')
 const providerById = computed(() => {
   const map = new Map<string, ProviderWithEndpointsSummary>()
   for (const provider of providers.value) {
     map.set(provider.id, provider)
-  }
-  return map
-})
-const providerIdByName = computed(() => {
-  const map = new Map<string, string>()
-  for (const provider of providers.value) {
-    if (!map.has(provider.name)) {
-      map.set(provider.name, provider.id)
-    }
   }
   return map
 })
@@ -444,81 +307,44 @@ const poolProviderIds = computed(() => {
   return set
 })
 
-const providerRows = computed<ProviderPriorityRow[]>(() => {
-  const overrides = targetModelPolicy.value.provider_priority_overrides
+const scopedProviders = computed(() => {
   // 多选模型取提供商并集；空数组表示模型尚未解析，不能回退到全部提供商。
   const modelIds = props.providerModelIds === undefined ? null : new Set(props.providerModelIds)
   return providers.value
     .filter(provider => !modelIds || provider.global_model_ids?.some(id => modelIds.has(id)))
+})
+
+const providerRows = computed<ProviderPriorityRow[]>(() => {
+  const overrides = targetModelPolicy.value.provider_priority_overrides
+  return scopedProviders.value
     .map(provider => ({
       id: provider.id,
       name: provider.name,
       is_active: provider.is_active,
       api_formats: provider.api_formats ?? [],
       priority: priorityValue(overrides[provider.id], provider.provider_priority),
+      active_keys: provider.active_keys,
+      total_keys: provider.total_keys,
+      health_score: provider.avg_health_score ?? null,
     }))
     .sort(comparePriorityRows)
 })
 
-const selectedFormatKey = computed(() => normalizeRoutingApiFormatKey(selectedApiFormat.value))
-const selectedFormatKeyOverrides = computed<Record<string, number>>(() => (
-  targetModelPolicy.value.key_priority_overrides_by_format[selectedFormatKey.value] ?? {}
-))
+// Search only affects presentation. All move operations use the complete candidate list.
+const filteredProviderRows = computed(() => providerRows.value.filter(row => matchesSearch(row.name)))
+const totalRowCount = computed(() => providerRows.value.length)
+const visibleRowCount = computed(() => filteredProviderRows.value.length)
 
-const keyRows = computed<KeyPriorityRow[]>(() => {
-  const format = selectedApiFormat.value
-  // 按格式覆盖优先；旧的不分格式覆盖仅作为兜底展示
-  const keyOverrides: Record<string, number> = {
-    ...targetModelPolicy.value.key_priority_overrides,
-    ...selectedFormatKeyOverrides.value,
-  }
-  const poolOverrides = targetModelPolicy.value.pool_priority_overrides
-  const normalRows: KeyPriorityRow[] = []
-  const poolGroups = new Map<string, GlobalKeySource[]>()
-
-  for (const key of keysByFormat.value[format] ?? []) {
-    const providerId = resolveProviderId(key)
-    if (isPoolManagedProvider(providerId)) {
-      if (!poolGroups.has(providerId)) {
-        poolGroups.set(providerId, [])
-      }
-      poolGroups.get(providerId)?.push(key)
-      continue
-    }
-    normalRows.push({
-      id: key.id,
-      kind: 'key',
-      target_id: key.id,
-      name: key.name,
-      masked: key.api_key_masked,
-      is_active: key.is_active && key.provider_active,
-      api_formats: key.api_formats,
-      priority: priorityValue(keyOverrides[key.id], fallbackKeyPriority(key, format)),
-      provider_id: providerId,
-      provider_name: key.provider_name,
-    })
-  }
-
-  const poolRows = Array.from(poolGroups.entries()).map(([providerId, keys]) =>
-    buildPoolRow(format, providerId, keys, poolOverrides)
-  )
-
-  return [...normalRows, ...poolRows].sort(comparePriorityRows)
-})
-
-watch(effectivePriorityMode, mode => {
-  if (mode === 'global_key') {
-    void loadGlobalKeys()
-    providerMultiSelectEnabled.value = false
-    selectedProviderIds.value = new Set()
-  }
-  void loadProviders()
-})
+function matchesSearch(value: string): boolean {
+  return value.toLocaleLowerCase().includes(searchQuery.value.trim().toLocaleLowerCase())
+}
 
 // 父组件异步解析全局模型 ID 后，重新加载对应模型的提供商列表。
 watch([targetModel, () => props.modelId], () => {
   void loadProviders()
 })
+
+watch(() => props.refreshRevision, () => { void loadProviders() })
 
 watch(providerRows, rows => {
   const visibleIds = new Set(rows.map(row => row.id))
@@ -528,23 +354,10 @@ watch(providerRows, rows => {
   }
 })
 
-watch(apiFormats, formats => {
-  if (!formats.includes(selectedApiFormat.value)) {
-    selectedApiFormat.value = formats[0] ?? ''
-  }
-})
-
-onMounted(() => {
-  void (async () => {
-    await loadProviders()
-    if (effectivePriorityMode.value === 'global_key') {
-      await loadGlobalKeys()
-    }
-  })()
-})
+onMounted(() => { void loadProviders() })
 
 function updateConfig(value: RoutingGroupConfig): void {
-  emit('update:config', normalizeRoutingGroupConfig(value))
+  emit('update:config', normalizeProviderSchedulingConfig(value))
 }
 
 function updateDefaultPolicy(patch: Partial<RoutingDefaultPolicy>): void {
@@ -555,14 +368,6 @@ function updateDefaultPolicy(patch: Partial<RoutingDefaultPolicy>): void {
       ...patch,
     },
   })
-}
-
-function updatePriorityMode(mode: RoutingPriorityMode): void {
-  if (props.priorityMode != null) {
-    emit('update:priority-mode', mode)
-    return
-  }
-  updateDefaultPolicy({ priority_mode: mode })
 }
 
 function updateSchedulingMode(mode: RoutingSchedulingMode): void {
@@ -581,7 +386,7 @@ async function loadProviders(): Promise<void> {
     const query = buildRoutingProviderSummaryQuery(
       targetModel.value,
       props.modelId,
-      effectivePriorityMode.value,
+      'provider',
     )
     if (!query) {
       providers.value = []
@@ -602,31 +407,6 @@ async function loadProviders(): Promise<void> {
   }
 }
 
-async function loadGlobalKeys(force = false): Promise<void> {
-  if (!force && Object.keys(keysByFormat.value).length > 0) return
-  loadingKeys.value = true
-  loadError.value = null
-  try {
-    const response = await client.get<Record<string, Record<string, unknown>[]>>(
-      '/api/admin/endpoints/keys/grouped-by-format',
-    )
-    const next: Record<string, GlobalKeySource[]> = {}
-    for (const [rawFormat, rawKeys] of Object.entries(response.data ?? {})) {
-      const format = normalizeFormat(rawFormat)
-      if (!format) continue
-      next[format] = normalizeGlobalKeys(format, rawKeys)
-    }
-    keysByFormat.value = next
-    if (!selectedApiFormat.value || !Object.keys(next).includes(selectedApiFormat.value)) {
-      selectedApiFormat.value = sortApiFormats(Object.keys(next))[0] ?? ''
-    }
-  } catch (err) {
-    loadError.value = parseApiError(err, '加载全局 Key 失败')
-  } finally {
-    loadingKeys.value = false
-  }
-}
-
 function setProviderPriority(providerId: string, event: Event): void {
   const priority = readPriorityInput(event)
   if (priority == null) return
@@ -641,7 +421,19 @@ function moveProvider(providerId: string, direction: -1 | 1): void {
   const rows = movingIds.length > 1
     ? moveRowsByGroup(providerRows.value, movingIds, direction)
     : moveRow(providerRows.value, providerId, direction)
-  updateProviderOverrides(Object.fromEntries(rows.map((row, index) => [row.id, index])))
+  updateReorderedProviders(rows, movingIds)
+}
+
+function moveProviderToEdge(providerId: string, edge: 'start' | 'end'): void {
+  const movingIds = providerMoveIds(providerId)
+  updateReorderedProviders(moveRowsToEdge(providerRows.value, movingIds, edge), movingIds)
+}
+
+function updateReorderedProviders(rows: ProviderPriorityRow[], movingIds: string[]): void {
+  updateProviderOverrides({
+    ...targetModelPolicy.value.provider_priority_overrides,
+    ...reorderedPriorities(rows, movingIds),
+  })
 }
 
 function updateProviderOverrides(overrides: Record<string, number>): void {
@@ -679,9 +471,10 @@ function providerMoveIds(providerId: string): string[] {
     .filter(id => selectedProviderIds.value.has(id))
 }
 
-function providerMoveDisabled(providerId: string, index: number, direction: -1 | 1): boolean {
+function providerMoveDisabled(providerId: string, direction: -1 | 1): boolean {
   const movingIds = providerMoveIds(providerId)
   if (movingIds.length <= 1) {
+    const index = providerRows.value.findIndex(row => row.id === providerId)
     return direction === -1 ? index === 0 : index === providerRows.value.length - 1
   }
   const movingSet = new Set(movingIds)
@@ -710,83 +503,6 @@ function providerRowClass(providerId: string): string {
 function isProviderDragged(providerId: string): boolean {
   const draggedId = draggedProviderId.value
   return Boolean(draggedId && providerMoveIds(draggedId).includes(providerId))
-}
-
-function setKeyPriority(keyId: string, event: Event): void {
-  const priority = readPriorityInput(event)
-  if (priority == null) return
-  const row = keyRows.value.find(item => item.id === keyId)
-  if (!row) return
-  if (row.kind === 'pool') {
-    updatePoolOverrides({
-      ...targetModelPolicy.value.pool_priority_overrides,
-      [row.target_id]: priority,
-    })
-  } else {
-    updateKeyOverrides({
-      ...selectedFormatKeyOverrides.value,
-      [row.target_id]: priority,
-    })
-  }
-}
-
-function moveKey(keyId: string, direction: -1 | 1): void {
-  const rows = moveRow(keyRows.value, keyId, direction)
-  updateVisibleKeyAndPoolOverrides(rows)
-}
-
-// Key 覆盖始终写入当前选中的 API 格式，不同格式互不影响
-function updateKeyOverrides(overrides: Record<string, number>): void {
-  updateConfig(setModelKeyPriorityOverridesForFormat(
-    config.value,
-    targetModel.value,
-    selectedApiFormat.value,
-    overrides,
-  ))
-}
-
-function updatePoolOverrides(overrides: Record<string, number>): void {
-  updateConfig(setModelPoolPriorityOverrides(config.value, targetModel.value, overrides))
-}
-
-function updateKeyAndPoolOverrides(
-  keyOverrides: Record<string, number>,
-  poolOverrides: Record<string, number>,
-): void {
-  const next = setModelPoolPriorityOverrides(
-    setModelKeyPriorityOverridesForFormat(
-      config.value,
-      targetModel.value,
-      selectedApiFormat.value,
-      keyOverrides,
-    ),
-    targetModel.value,
-    poolOverrides,
-  )
-  updateConfig(next)
-}
-
-function updateVisibleKeyAndPoolOverrides(rows: KeyPriorityRow[]): void {
-  const keyOverrides = { ...selectedFormatKeyOverrides.value }
-  const poolOverrides = { ...targetModelPolicy.value.pool_priority_overrides }
-
-  for (const row of keyRows.value) {
-    if (row.kind === 'pool') {
-      delete poolOverrides[row.target_id]
-    } else {
-      delete keyOverrides[row.target_id]
-    }
-  }
-
-  rows.forEach((row, index) => {
-    if (row.kind === 'pool') {
-      poolOverrides[row.target_id] = index
-    } else {
-      keyOverrides[row.target_id] = index
-    }
-  })
-
-  updateKeyAndPoolOverrides(keyOverrides, poolOverrides)
 }
 
 function handleProviderDragStart(providerId: string, event: DragEvent): void {
@@ -824,40 +540,8 @@ function handleProviderDrop(providerId: string): void {
   const rows = movingIds.length > 1
     ? reorderRowsByGroup(providerRows.value, movingIds, providerId)
     : reorderRows(providerRows.value, draggedId, providerId)
-  updateProviderOverrides(Object.fromEntries(rows.map((row, index) => [row.id, index])))
+  updateReorderedProviders(rows, movingIds)
   handleProviderDragEnd()
-}
-
-function handleKeyDragStart(keyId: string, event: DragEvent): void {
-  draggedKeyId.value = keyId
-  if (event.dataTransfer) {
-    event.dataTransfer.effectAllowed = 'move'
-    event.dataTransfer.setData('text/plain', keyId)
-  }
-}
-
-function handleKeyDragEnd(): void {
-  draggedKeyId.value = null
-  dragOverKeyId.value = null
-}
-
-function handleKeyDragOver(keyId: string): void {
-  dragOverKeyId.value = keyId
-}
-
-function handleKeyDragLeave(): void {
-  dragOverKeyId.value = null
-}
-
-function handleKeyDrop(keyId: string): void {
-  const draggedId = draggedKeyId.value
-  if (!draggedId || draggedId === keyId) {
-    handleKeyDragEnd()
-    return
-  }
-  const rows = reorderRows(keyRows.value, draggedId, keyId)
-  updateVisibleKeyAndPoolOverrides(rows)
-  handleKeyDragEnd()
 }
 
 function moveRow<T extends { id: string }>(rows: T[], id: string, direction: -1 | 1): T[] {
@@ -870,6 +554,26 @@ function moveRow<T extends { id: string }>(rows: T[], id: string, direction: -1 
   const [item] = next.splice(index, 1)
   next.splice(targetIndex, 0, item)
   return next
+}
+
+function moveRowsToEdge<T extends { id: string }>(rows: T[], movingIds: string[], edge: 'start' | 'end'): T[] {
+  const movingSet = new Set(movingIds)
+  const movingRows = rows.filter(row => movingSet.has(row.id))
+  const remainingRows = rows.filter(row => !movingSet.has(row.id))
+  return edge === 'start' ? [...movingRows, ...remainingRows] : [...remainingRows, ...movingRows]
+}
+
+function reorderedPriorities<T extends { id: string, priority: number }>(rows: T[], movingIds: string[]): Record<string, number> {
+  const movingSet = new Set(movingIds)
+  let priority = 0
+  return Object.fromEntries(rows.map((row, index) => {
+    const previous = rows[index - 1]
+    // Keep untouched, contiguous priority groups together. The moved rows form their own position.
+    if (previous && (previous.priority !== row.priority || movingSet.has(previous.id) !== movingSet.has(row.id))) {
+      priority += 1
+    }
+    return [row.id, priority]
+  }))
 }
 
 function moveRowsByGroup<T extends { id: string }>(rows: T[], movingIds: string[], direction: -1 | 1): T[] {
@@ -939,95 +643,6 @@ function priorityValue(override: number | undefined, fallback: number | null | u
   return 0
 }
 
-function fallbackKeyPriority(key: GlobalKeySource, format: string): number {
-  const normalizedFormat = normalizeFormat(format)
-  if (normalizedFormat && typeof key.global_priority_by_format?.[normalizedFormat] === 'number') {
-    return key.global_priority_by_format[normalizedFormat]
-  }
-  return key.internal_priority
-}
-
-function normalizeGlobalKeys(format: string, rawKeys: Record<string, unknown>[]): GlobalKeySource[] {
-  const deduped = new Map<string, GlobalKeySource>()
-  for (const raw of rawKeys) {
-    const id = String(raw.id || '').trim()
-    if (!id) continue
-    const providerName = String(raw.provider_name || '')
-    const providerId = String(raw.provider_id || '') || providerIdByName.value.get(providerName) || ''
-    const priorityMap = normalizePriorityMap(raw.global_priority_by_format as Record<string, unknown> | null | undefined)
-    const source: GlobalKeySource = {
-      id,
-      provider_id: providerId,
-      provider_name: providerName || providerById.value.get(providerId)?.name || 'Unknown Provider',
-      name: String(raw.name || 'Unnamed Key'),
-      api_key_masked: String(raw.api_key_masked || '***'),
-      internal_priority: toNumberOrNull(raw.internal_priority) ?? 0,
-      global_priority_by_format: Object.keys(priorityMap).length > 0 ? priorityMap : null,
-      is_active: raw.is_active !== false,
-      provider_active: raw.provider_active !== false,
-      api_formats: Array.isArray(raw.api_formats) ? raw.api_formats.map(item => normalizeFormat(String(item))).filter(Boolean) : [format],
-      api_format: format,
-      health_score: toNumberOrNull(raw.health_score),
-      request_count: toNumberOrNull(raw.request_count) ?? 0,
-    }
-    const existing = deduped.get(id)
-    if (!existing) {
-      deduped.set(id, source)
-      continue
-    }
-    deduped.set(id, {
-      ...existing,
-      ...source,
-      global_priority_by_format: {
-        ...(existing.global_priority_by_format ?? {}),
-        ...(source.global_priority_by_format ?? {}),
-      },
-      api_formats: Array.from(new Set([...existing.api_formats, ...source.api_formats])),
-    })
-  }
-  return Array.from(deduped.values())
-}
-
-function buildPoolRow(
-  format: string,
-  providerId: string,
-  keys: GlobalKeySource[],
-  overrides: Record<string, number>,
-): KeyPriorityRow {
-  const provider = providerById.value.get(providerId)
-  const activeKeyCount = keys.filter(key => key.is_active).length
-  return {
-    id: `pool:${providerId}:${format}`,
-    kind: 'pool',
-    target_id: providerId,
-    name: provider?.name || keys[0]?.provider_name || '未知 Provider',
-    masked: '[Pool]',
-    is_active: (provider?.is_active ?? keys.some(key => key.provider_active)) && activeKeyCount > 0,
-    api_formats: [format],
-    priority: priorityValue(
-      overrides[providerId],
-      provider?.pool_advanced?.global_priority ?? provider?.provider_priority ?? 999999,
-    ),
-    provider_id: providerId,
-    provider_name: provider?.name || keys[0]?.provider_name || 'Unknown Provider',
-    pool_key_count: keys.length,
-    pool_active_key_count: activeKeyCount,
-  }
-}
-
-function resolveProviderId(key: Pick<GlobalKeySource, 'provider_id' | 'provider_name'>): string {
-  if (key.provider_id) return key.provider_id
-  return providerIdByName.value.get(key.provider_name) || ''
-}
-
-function isPoolManagedProvider(providerId: string): boolean {
-  return providerId !== '' && poolProviderIds.value.has(providerId)
-}
-
-function normalizeFormat(value: string | null | undefined): string {
-  return normalizeApiFormatAlias(value).trim()
-}
-
 function formatLabel(format: string): string {
   return formatApiFormat(format)
 }
@@ -1036,24 +651,7 @@ function formatShortLabel(format: string): string {
   return formatApiFormatShort(format)
 }
 
-function normalizePriorityMap(value: Record<string, unknown> | null | undefined): Record<string, number> {
-  if (!value) return {}
-  const normalized: Record<string, number> = {}
-  for (const [rawFormat, rawPriority] of Object.entries(value)) {
-    const format = normalizeFormat(rawFormat)
-    const priority = toNumberOrNull(rawPriority)
-    if (!format || priority == null) continue
-    normalized[format] = priority
-  }
-  return normalized
-}
-
-function toNumberOrNull(value: unknown): number | null {
-  const numberValue = Number(value)
-  return Number.isFinite(numberValue) ? Math.trunc(numberValue) : null
-}
-
-function comparePriorityRows(left: ProviderPriorityRow | KeyPriorityRow, right: ProviderPriorityRow | KeyPriorityRow): number {
+function comparePriorityRows(left: ProviderPriorityRow, right: ProviderPriorityRow): number {
   return left.priority - right.priority
     || Number(right.is_active) - Number(left.is_active)
     || left.name.localeCompare(right.name)

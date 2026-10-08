@@ -3,6 +3,35 @@ use aether_data_contracts::repository::{candidates, usage};
 use usage::{StoredUsageDailySummary, UsageDailyHeatmapQuery};
 
 impl AppState {
+    pub(crate) async fn query_dashboard_analytics(
+        &self,
+        query: &usage::UsageDashboardAnalyticsQuery,
+    ) -> Result<usage::StoredUsageDashboardAnalytics, GatewayError> {
+        self.data
+            .query_dashboard_analytics(query)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn query_usage_analytics(
+        &self,
+        query: &usage::UsageAnalyticsQuery,
+    ) -> Result<usage::StoredUsageAnalytics, GatewayError> {
+        self.data
+            .query_usage_analytics(query)
+            .await
+            .map_err(|err| match err {
+                aether_data_contracts::DataLayerError::InvalidInput(message)
+                    if query.view == usage::UsageAnalyticsView::DashboardCharts =>
+                {
+                    GatewayError::Client {
+                        status: http::StatusCode::UNPROCESSABLE_ENTITY,
+                        message,
+                    }
+                }
+                err => GatewayError::Internal(err.to_string()),
+            })
+    }
     #[allow(dead_code)]
     pub(crate) async fn rebuild_api_key_usage_stats(&self) -> Result<u64, GatewayError> {
         self.data

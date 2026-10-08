@@ -39,6 +39,7 @@ const INTERNAL_REPORT_OBSERVATION_FIELDS: &[&str] = &[
     "client_response_headers",
     "upstream_response",
     "error_flow",
+    "analytics_failure",
     "transport_error",
     "input_tokens",
     "cache_creation_input_tokens",

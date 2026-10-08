@@ -39,6 +39,12 @@ export interface UsageRecord {
   total_tokens: number
   cost: number
   actual_cost?: number
+  /** Combined customer billing multiplier captured for this request. */
+  billing_multiplier?: number | null
+  routing_group_id?: string | null
+  routing_group_name?: string | null
+  /** Captured customer charge. Null means unavailable and must not be recalculated. */
+  billing_cost?: number | null
   response_time_ms?: number | null
   first_byte_time_ms?: number | null  // 首字时间 (TTFB)
   end_to_end_time_ms?: number | null  // 客户端从请求进入网关到完成的总耗时

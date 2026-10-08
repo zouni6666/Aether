@@ -996,6 +996,10 @@ const emit = defineEmits<{
     cacheReadInputTokens?: number | null
     cost?: number | null
     actualCost?: number | null
+    billingMultiplier?: number | null
+    billingCost?: number | null
+    routingGroupId?: string | null
+    routingGroupName?: string | null
     responseTimeMs?: number | null
     firstByteTimeMs?: number | null
     isStream?: boolean | null
@@ -1319,6 +1323,10 @@ function emitDetailRequestState(nextDetail: RequestDetail) {
     cacheReadInputTokens: nextDetail.cache_read_input_tokens ?? null,
     cost: detailTotalCost(nextDetail),
     actualCost: nextDetail.actual_cost ?? null,
+    billingMultiplier: nextDetail.billing_multiplier,
+    billingCost: nextDetail.billing_cost,
+    routingGroupId: nextDetail.routing_group_id ?? null,
+    routingGroupName: nextDetail.routing_group_name ?? null,
     responseTimeMs: nextDetail.response_time_ms ?? undefined,
     firstByteTimeMs: nextDetail.first_byte_time_ms ?? null,
     isStream: nextDetail.is_stream ?? null,

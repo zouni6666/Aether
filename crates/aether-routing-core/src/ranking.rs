@@ -13,6 +13,10 @@ pub enum CandidateKind {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RankingOverlay {
+    /// Effective provider exclusions after model overrides. These take
+    /// precedence over every provider allowlist.
+    #[serde(default)]
+    pub disabled_providers: Vec<String>,
     #[serde(default)]
     pub allowed_providers: Vec<String>,
     #[serde(default)]
@@ -112,11 +116,15 @@ impl RankingOverlay {
     }
 
     pub fn provider_allowed(&self, provider_id: &str) -> bool {
-        self.allowed_providers.is_empty()
-            || self
-                .allowed_providers
-                .iter()
-                .any(|item| item == provider_id)
+        !self
+            .disabled_providers
+            .iter()
+            .any(|item| item == provider_id)
+            && (self.allowed_providers.is_empty()
+                || self
+                    .allowed_providers
+                    .iter()
+                    .any(|item| item == provider_id))
     }
 
     pub fn key_allowed(&self, key_id: &str) -> bool {
@@ -179,6 +187,41 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+
+    #[test]
+    fn disabled_providers_take_precedence_over_allowlists() {
+        let mut overlay = RankingOverlay {
+            disabled_providers: vec!["provider-disabled".to_string()],
+            ..RankingOverlay::default()
+        };
+        assert!(!overlay.provider_allowed("provider-disabled"));
+        assert!(overlay.provider_allowed("provider-enabled"));
+
+        overlay.allowed_providers = vec![
+            "provider-disabled".to_string(),
+            "provider-enabled".to_string(),
+        ];
+        assert!(!overlay.provider_allowed("provider-disabled"));
+        assert!(overlay.provider_allowed("provider-enabled"));
+        assert!(!overlay.provider_allowed("provider-unlisted"));
+
+        // An allowlist containing only disabled providers must not become an
+        // empty allowlist, which would otherwise allow unrelated providers.
+        overlay.allowed_providers = vec!["provider-disabled".to_string()];
+        assert!(!overlay.provider_allowed("provider-disabled"));
+        assert!(!overlay.provider_allowed("provider-enabled"));
+    }
+
+    #[test]
+    fn legacy_overlay_without_disabled_providers_preserves_provider_selection() {
+        let overlay: RankingOverlay = serde_json::from_value(serde_json::json!({
+            "allowed_providers": ["provider-enabled"]
+        }))
+        .expect("legacy overlays should remain readable");
+        assert!(overlay.disabled_providers.is_empty());
+        assert!(overlay.provider_allowed("provider-enabled"));
+        assert!(!overlay.provider_allowed("provider-unlisted"));
+    }
 
     #[test]
     fn overlay_applies_provider_and_key_priority() {

@@ -1228,6 +1228,15 @@ function applyProviderSnapshot(updated: ProviderWithEndpointsSummary): void {
   provider.value = updated
 }
 
+// A provider opened from scheduling may not belong to the resource page's loaded slice.
+// Apply edits supplied by the parent even when the drawer loaded its own initial snapshot.
+watch(() => props.initialProvider, (updated) => {
+  if (!props.open || !updated || updated.id !== props.providerId) return
+  providerLoadRequestId += 1
+  applyProviderSnapshot(updated)
+  loading.value = false
+})
+
 function getProviderKeysPageSize(providerType?: string | null): number {
   return (providerType || '').trim().toLowerCase() === 'custom'
     ? CUSTOM_PROVIDER_KEYS_PAGE_SIZE

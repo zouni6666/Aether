@@ -3,6 +3,9 @@
 The following rules preserve the provider-specific behavior of the `xai` provider
 across Aether's request and transport layers.
 
+Release refresh, per-node cache synchronization, and version overrides are documented
+in [provider client profiles](provider-client-profiles.md). Grok retains its official stable
+channel with npm fallback and the existing three-hour refresh interval.
 ## Responses and tools
 
 - HTTP requests drop `previous_response_id`. Clients must supply conversation

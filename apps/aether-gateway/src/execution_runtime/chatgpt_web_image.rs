@@ -43,12 +43,11 @@ use crate::AppState;
 
 const CHATGPT_WEB_INTERNAL_HEADER: &str = "x-aether-chatgpt-web-image";
 const CHATGPT_WEB_DEFAULT_BASE_URL: &str = "https://chatgpt.com";
-const CHATGPT_WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0";
-const CHATGPT_WEB_CLIENT_VERSION: &str = "prod-be885abbfcfe7b1f511e88b3003d9ee44757fbad";
-const CHATGPT_WEB_BUILD_NUMBER: &str = "5955942";
-const CHATGPT_WEB_SEC_CH_UA: &str =
-    r#""Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24""#;
-const CHATGPT_WEB_BROWSER_PROFILE: &str = "chrome143";
+use aether_provider_transport::client_identity::CHATGPT_WEB_BROWSER_PROFILE;
+use aether_provider_transport::client_identity::{
+    CHATGPT_WEB_BUILD_NUMBER, CHATGPT_WEB_CLIENT_VERSION, CHATGPT_WEB_SEC_CH_UA,
+    CHATGPT_WEB_USER_AGENT,
+};
 const CHATGPT_WEB_QUOTA_REFRESH_TIMEOUT_MS: u64 = 30_000;
 const CHATGPT_WEB_QUOTA_REFRESH_PROXY_TIMEOUT_MS: u64 = 60_000;
 const RUNTIME_METADATA_CAS_MAX_ATTEMPTS: usize = 16;

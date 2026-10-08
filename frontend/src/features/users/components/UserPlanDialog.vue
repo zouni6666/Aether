@@ -43,70 +43,26 @@
           </Button>
         </div>
 
-        <div
-          v-if="loadingEntitlements"
-          class="rounded-lg border border-dashed border-border/60 bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground"
+        <UserPlanList
+          :entitlements="entitlements"
+          :loading="loadingEntitlements"
+          :format-date-time="formatDateTime"
+          :entitlement-labels="entitlementLabels"
+          :empty-text="legacyT('当前没有有效套餐')"
         >
-          {{ legacyT('正在加载用户套餐...') }}
-        </div>
-        <div
-          v-else-if="entitlements.length === 0"
-          class="rounded-lg border border-dashed border-border/60 bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground"
-        >
-          {{ legacyT('当前没有有效套餐') }}
-        </div>
-        <div
-          v-else
-          class="space-y-2.5"
-        >
-          <div
-            v-for="item in entitlements"
-            :key="item.id"
-            class="rounded-lg border border-border bg-card/80 p-3"
-          >
-            <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-              <div class="min-w-0 flex-1">
-                <div class="flex flex-wrap items-center gap-2">
-                  <span class="font-medium text-foreground">
-                    {{ item.plan_title || item.plan?.title || item.plan_id }}
-                  </span>
-                  <Badge
-                    :variant="item.active ? 'success' : 'secondary'"
-                    class="h-5 px-1.5 py-0 text-[10px]"
-                  >
-                    {{ item.active ? legacyT('生效中') : item.status }}
-                  </Badge>
-                </div>
-                <div class="mt-2 flex flex-wrap gap-1.5">
-                  <Badge
-                    v-for="(label, index) in entitlementLabels(item.entitlements)"
-                    :key="`${label}-${index}`"
-                    variant="outline"
-                    class="h-5 px-1.5 py-0 text-[10px]"
-                  >
-                    {{ label }}
-                  </Badge>
-                </div>
-              </div>
-              <div class="flex shrink-0 items-start gap-2">
-                <div class="text-left text-[11px] text-muted-foreground sm:text-right">
-                  <div>{{ legacyT('开始：') }}{{ formatDateTime(item.starts_at) }}</div>
-                  <div>{{ legacyT('到期：') }}{{ formatDateTime(item.expires_at) }}</div>
-                </div>
-                <Button
-                  v-if="item.active"
-                  variant="destructive"
-                  size="sm"
-                  class="h-7 px-2 text-[11px]"
-                  :disabled="revokingEntitlementId === item.id"
-                  @click="$emit('revoke', item)"
-                >
-                  {{ revokingEntitlementId === item.id ? legacyT('撤销中...') : legacyT('撤销套餐') }}
-                </Button>
-              </div>
-            </div>
-          </div>
-        </div>
+          <template #actions="{ item }">
+            <Button
+              v-if="item.active"
+              variant="destructive"
+              size="sm"
+              class="h-7 px-2 text-[11px]"
+              :disabled="revokingEntitlementId === item.id"
+              @click="$emit('revoke', item)"
+            >
+              {{ revokingEntitlementId === item.id ? legacyT('撤销中...') : legacyT('撤销套餐') }}
+            </Button>
+          </template>
+        </UserPlanList>
       </section>
 
       <section class="space-y-3 rounded-lg border border-border bg-card/70 p-4">
@@ -185,8 +141,8 @@
 
 <script setup lang="ts">
 import { PackageCheck } from 'lucide-vue-next'
+import UserPlanList from './UserPlanList.vue'
 import {
-  Badge,
   Button,
   Dialog,
   Select,

@@ -1463,6 +1463,19 @@ pub trait ProviderCatalogReadRepository: Send + Sync {
 
 #[async_trait]
 pub trait ProviderCatalogWriteRepository: Send + Sync {
+    /// Create a provider and exclude it from every other existing routing group
+    /// in one transaction. Implementations must fail closed if unsupported.
+    async fn create_provider_in_routing_group(
+        &self,
+        _provider: &StoredProviderCatalogProvider,
+        _shift_existing_priorities_from: Option<i32>,
+        _routing_group_id: &str,
+    ) -> Result<StoredProviderCatalogProvider, crate::DataLayerError> {
+        Err(crate::DataLayerError::InvalidConfiguration(
+            "atomic provider creation in a routing group is not supported".to_string(),
+        ))
+    }
+
     async fn create_provider(
         &self,
         provider: &StoredProviderCatalogProvider,

@@ -222,8 +222,8 @@ const { confirm } = useConfirm()
 const { success, warning, error: showError } = useToast()
 
 const actionOptions: ProviderBatchActionOption[] = [
-  { value: 'enable', label: '启用', hint: '恢复所选提供商参与调度。', icon: Power },
-  { value: 'disable', label: '停用', hint: '停止所选提供商参与调度，保留配置。', icon: PowerOff },
+  { value: 'enable', label: '启用', hint: '全局启用所选提供商；各策略分组的启用设置仍分别生效。', icon: Power },
+  { value: 'disable', label: '停用', hint: '在所有策略分组中停止所选提供商参与调度，保留配置。', icon: PowerOff },
   { value: 'delete', label: '删除', hint: '永久删除所选提供商及其端点、账号和配置，此操作不可恢复。', icon: Trash2, destructive: true },
 ]
 
@@ -242,7 +242,7 @@ const progressTotal = ref(0)
 const progressLabel = ref('')
 const lastResultMessage = ref('')
 
-const dialogDescription = computed(() => '批量启用、停用或删除当前页提供商')
+const dialogDescription = computed(() => '批量修改当前页提供商的全局状态，或删除提供商')
 const selectedIdSet = computed(() => new Set(selectedProviderIds.value))
 const selectedCount = computed(() => selectedProviderIds.value.length)
 const selectedActionLabel = computed(() => actionOptions.find(action => action.value === selectedAction.value)?.label || '')

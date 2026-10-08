@@ -1996,9 +1996,22 @@ async fn proxy_request_inner(
     request_permit = aether_runtime::AdmissionPermit::combine(
         request_permit.into_iter().chain(plan_usage_permit),
     );
-    if let Some(request_permit) = request_permit.as_ref() {
+    // The affinity-forwarding node already returned above. Observe only local
+    // AI execution, retaining the guard in both the body and detached execution.
+    let activity_permit = control_decision
+        .is_some_and(|decision| {
+            decision.route_class.as_deref() == Some("ai_public")
+                && decision.execution_runtime_candidate
+        })
+        .then(|| state.request_activity.begin().into_admission_permit());
+    if let Some(activity) = activity_permit.as_ref() {
+        crate::request_lifecycle::track_request_activity(activity.clone());
+    }
+    if let Some(background_permit) = aether_runtime::AdmissionPermit::combine(
+        request_permit.clone().into_iter().chain(activity_permit),
+    ) {
         parts.extensions.insert(
-            crate::executor::candidate_loop::BackgroundAdmissionPermit::new(request_permit.clone()),
+            crate::executor::candidate_loop::BackgroundAdmissionPermit::new(background_permit),
         );
     }
 
@@ -2896,6 +2909,10 @@ mod tests {
             allowed_keys: vec!["key-other".to_string()],
             ..matching.clone()
         };
+        let disabled_provider = aether_routing_core::RankingOverlay {
+            disabled_providers: vec!["provider-allowed".to_string()],
+            ..matching.clone()
+        };
 
         assert!(routing_overlay_allows_affinity_target(None, &target));
         assert!(routing_overlay_allows_affinity_target(
@@ -2908,6 +2925,10 @@ mod tests {
         ));
         assert!(!routing_overlay_allows_affinity_target(
             Some(&wrong_key),
+            &target
+        ));
+        assert!(!routing_overlay_allows_affinity_target(
+            Some(&disabled_provider),
             &target
         ));
     }

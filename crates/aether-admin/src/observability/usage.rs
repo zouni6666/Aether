@@ -1295,6 +1295,8 @@ fn admin_usage_active_request_json(
     let cache_creation_input_tokens = admin_usage_cache_creation_tokens(item);
     let client_is_stream = admin_usage_client_is_stream(item);
     let upstream_is_stream = admin_usage_upstream_is_stream(item);
+    let billing_multiplier = item.billing_multiplier();
+    let billing_cost = item.billing_cost().map(|cost| round_to(cost, 6));
     let mut value = json!({
         "id": item.id,
         "status": item.status,
@@ -1334,6 +1336,11 @@ fn admin_usage_active_request_json(
         "request_path_and_query": admin_usage_metadata_string(item, "request_path_and_query"),
         "has_fallback": admin_usage_has_fallback(item),
     });
+    value["billing_multiplier"] = json!(billing_multiplier);
+    value["billing_cost"] = json!(billing_cost);
+    value["routing_group_id"] = json!(item.routing_group_id());
+    value["routing_group_name"] = json!(item.routing_group_name());
+    value["rate_multiplier"] = json!(item.settlement_rate_multiplier());
     value["end_to_end_time_ms"] = json!(admin_usage_metadata_u64(item, "end_to_end_time_ms"));
     value["end_to_end_first_byte_time_ms"] = json!(admin_usage_metadata_u64(
         item,
@@ -1395,6 +1402,8 @@ pub fn admin_usage_record_json(
         .unwrap_or_else(|| "已删除用户".to_string());
     let client_is_stream = admin_usage_client_is_stream(item);
     let upstream_is_stream = admin_usage_upstream_is_stream(item);
+    let billing_multiplier = item.billing_multiplier();
+    let billing_cost = item.billing_cost().map(|cost| round_to(cost, 6));
 
     let mut payload = json!({
         "id": item.id,
@@ -1443,6 +1452,10 @@ pub fn admin_usage_record_json(
         "provider_key_name": provider_key_name,
         "model_version": Value::Null,
     });
+    payload["billing_multiplier"] = json!(billing_multiplier);
+    payload["billing_cost"] = json!(billing_cost);
+    payload["routing_group_id"] = json!(item.routing_group_id());
+    payload["routing_group_name"] = json!(item.routing_group_name());
     let object = payload
         .as_object_mut()
         .expect("admin usage record payload should be an object");
@@ -2723,7 +2736,7 @@ pub fn build_admin_usage_replay_plan_response(
 mod tests {
     use std::collections::BTreeMap;
 
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     use super::{
         admin_usage_active_request_json, admin_usage_client_is_stream, admin_usage_has_body_value,
@@ -2846,6 +2859,98 @@ mod tests {
         assert_eq!(record["upstream_is_stream"], true);
         assert_eq!(record["client_requested_stream"], false);
         assert_eq!(record["client_is_stream"], false);
+    }
+
+    #[test]
+    fn admin_usage_payloads_preserve_routing_group_snapshot_and_precise_display_cost() {
+        for (metadata, multiplier, cost, group_name) in [
+            (None, 1.0, json!(0.0), Value::Null),
+            (
+                Some(json!({"routing_group_billing_multiplier": 0.0})),
+                0.0,
+                json!(0.0),
+                Value::Null,
+            ),
+            (
+                Some(json!({
+                    "routing_group_billing_multiplier": 2.5,
+                    "routing_group_id": "group-1",
+                    "routing_group_name": "请求时的分组",
+                    "rate_multiplier": 0.5
+                })),
+                2.5,
+                json!(0.000004),
+                json!("请求时的分组"),
+            ),
+            (
+                Some(json!({
+                    "billing_multiplier_snapshot": {"version": 1, "factors": {"routing_group": 2.5, "user_group": 2.0}, "multiplier": 5.0},
+                    "routing_group_billing_multiplier": 2.5,
+                    "routing_group_id": "group-1",
+                    "routing_group_name": "请求时的分组",
+                    "rate_multiplier": 0.5
+                })),
+                5.0,
+                json!(0.000007),
+                json!("请求时的分组"),
+            ),
+        ] {
+            let item = StoredRequestUsageAudit {
+                total_cost_usd: 0.00000149,
+                actual_total_cost_usd: 0.0000002,
+                request_metadata: metadata,
+                ..sample_usage("completed", Some(200), None)
+            };
+            let record = admin_usage_record_json(
+                &item,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                false,
+                false,
+                None,
+            );
+            let active = admin_usage_active_request_json(&item, None, None, None);
+            let detail = build_admin_usage_detail_payload(
+                &item,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                false,
+                false,
+                None,
+                false,
+                None,
+                &BTreeMap::new(),
+            );
+            for payload in [&record, &active, &detail] {
+                assert_eq!(payload["billing_multiplier"], multiplier);
+                assert_eq!(payload["billing_cost"], cost);
+                assert_eq!(payload["routing_group_name"], group_name);
+                assert_eq!(
+                    payload["routing_group_id"],
+                    if group_name.is_null() {
+                        Value::Null
+                    } else {
+                        json!("group-1")
+                    }
+                );
+                assert_eq!(
+                    payload["rate_multiplier"],
+                    if group_name.is_null() {
+                        Value::Null
+                    } else {
+                        json!(0.5)
+                    }
+                );
+                assert_eq!(payload["cost"], 0.000001);
+                assert_eq!(payload["actual_cost"], 0.0);
+            }
+        }
+        let item = StoredRequestUsageAudit {
+            total_cost_usd: f64::MAX,
+            request_metadata: Some(json!({"routing_group_billing_multiplier": 2.0})),
+            ..sample_usage("completed", Some(200), None)
+        };
+        assert!(admin_usage_active_request_json(&item, None, None, None)["billing_cost"].is_null());
     }
 
     #[test]

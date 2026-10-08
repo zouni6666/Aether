@@ -6,8 +6,8 @@ pub use aether_data_contracts::repository::auth::{
     AuthApiKeyLookupKey, AuthApiKeyReadRepository, AuthApiKeyWriteRepository, AuthRepository,
     CompareAndSwapAuthApiKeyCiphertext, CreateStandaloneApiKeyRecord, CreateUserApiKeyRecord,
     ResolvedAuthApiKeySnapshot, ResolvedAuthApiKeySnapshotReader, StandaloneApiKeyExportListQuery,
-    StoredAuthApiKeyExportRecord, StoredAuthApiKeySnapshot, UpdateStandaloneApiKeyBasicRecord,
-    UpdateUserApiKeyBasicRecord,
+    StoredAuthApiKeyExportRecord, StoredAuthApiKeySnapshot, UpdateApiKeyRoutingGroupSelection,
+    UpdateStandaloneApiKeyBasicRecord, UpdateUserApiKeyBasicRecord,
 };
 #[cfg(feature = "postgres")]
 pub use aether_data_postgres::SqlxAuthApiKeySnapshotReadRepository;

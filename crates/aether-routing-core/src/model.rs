@@ -133,6 +133,86 @@ mod execution_policy_tests {
     use super::*;
 
     #[test]
+    fn group_visibility_is_opt_in_and_round_trips_without_losing_policy() {
+        let legacy: RoutingGroupConfig = serde_json::from_str("{}").unwrap();
+        assert!(!legacy.user_visible);
+        assert!(!RoutingGroupConfig::default().user_visible);
+        for user_visible in [false, true] {
+            let config: RoutingGroupConfig = serde_json::from_value(serde_json::json!({
+                "user_visible": user_visible,
+                "billing_multiplier": 0.5,
+                "disabled_providers": ["private-provider"],
+                "default_policy": { "scheduling_mode": "fixed_order" }
+            }))
+            .unwrap();
+            let encoded = serde_json::to_value(&config).unwrap();
+            assert_eq!(encoded["user_visible"], user_visible);
+            assert_eq!(config.billing_multiplier, 0.5);
+            assert_eq!(config.disabled_providers, ["private-provider"]);
+            assert_eq!(
+                serde_json::from_value::<RoutingGroupConfig>(encoded).unwrap(),
+                config
+            );
+        }
+        for invalid in [
+            serde_json::json!(null),
+            serde_json::json!("true"),
+            serde_json::json!(1),
+        ] {
+            assert!(
+                serde_json::from_value::<RoutingGroupConfig>(serde_json::json!({
+                    "user_visible": invalid
+                }))
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn group_billing_multiplier_defaults_to_one_and_rejects_invalid_values() {
+        let legacy: RoutingGroupConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.billing_multiplier, 1.0);
+        assert_eq!(RoutingGroupConfig::default().billing_multiplier, 1.0);
+        for multiplier in [0.0, 0.25, 1.0, 2.5] {
+            let config: RoutingGroupConfig = serde_json::from_value(serde_json::json!({
+                "billing_multiplier": multiplier
+            }))
+            .unwrap();
+            crate::validate_routing_group_config(&config).unwrap();
+            assert_eq!(config.billing_multiplier, multiplier);
+            assert_eq!(
+                serde_json::from_value::<RoutingGroupConfig>(
+                    serde_json::to_value(&config).unwrap()
+                )
+                .unwrap(),
+                config
+            );
+        }
+        for multiplier in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let config = RoutingGroupConfig {
+                billing_multiplier: multiplier,
+                ..RoutingGroupConfig::default()
+            };
+            assert!(matches!(
+                crate::validate_routing_group_config(&config),
+                Err(crate::RoutingValidationError::InvalidBillingMultiplier)
+            ));
+        }
+        for value in [
+            serde_json::json!(null),
+            serde_json::json!("2"),
+            serde_json::json!(false),
+        ] {
+            assert!(
+                serde_json::from_value::<RoutingGroupConfig>(serde_json::json!({
+                    "billing_multiplier": value
+                }))
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn routing_failover_configuration_round_trips_and_validates() {
         let config: RoutingGroupConfig = serde_json::from_value(serde_json::json!({
             "default_policy": {
@@ -188,6 +268,11 @@ pub struct RoutingModelPolicy {
     pub allowed_providers: Vec<String>,
     #[serde(default)]
     pub allowed_keys: Vec<String>,
+    /// Per-model provider enablement. A `false` value adds a provider to this
+    /// model's exclusions and `true` removes an inherited exclusion, including
+    /// one from the legacy group-wide `disabled_providers` baseline.
+    #[serde(default)]
+    pub provider_enabled_overrides: BTreeMap<String, bool>,
     #[serde(default)]
     pub provider_priority_overrides: BTreeMap<String, i32>,
     #[serde(default)]
@@ -222,8 +307,19 @@ pub struct RoutingRule {
     pub stop_processing: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoutingGroupConfig {
+    /// Whether authenticated users can discover and explicitly select this
+    /// group. Private bindings and automatic defaults remain independent.
+    #[serde(default)]
+    pub user_visible: bool,
+    /// Group-wide billing multiplier, snapshotted when a request is routed.
+    #[serde(default = "default_billing_multiplier")]
+    pub billing_multiplier: f64,
+    /// Legacy provider exclusion baseline for the group. Explicit per-model
+    /// enablement overrides may change it; allowlists and rules cannot.
+    #[serde(default)]
+    pub disabled_providers: Vec<String>,
     /// The default policy is global for the selected strategy group. Model
     /// differences are expressed through `model_policies` and `rules`.
     #[serde(default)]
@@ -232,6 +328,23 @@ pub struct RoutingGroupConfig {
     pub model_policies: Vec<RoutingModelPolicy>,
     #[serde(default)]
     pub rules: Vec<RoutingRule>,
+}
+
+pub(crate) fn default_billing_multiplier() -> f64 {
+    1.0
+}
+
+impl Default for RoutingGroupConfig {
+    fn default() -> Self {
+        Self {
+            user_visible: false,
+            billing_multiplier: default_billing_multiplier(),
+            disabled_providers: Vec::new(),
+            default_policy: RoutingDefaultPolicy::default(),
+            model_policies: Vec::new(),
+            rules: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

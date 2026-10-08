@@ -125,6 +125,7 @@ pub(crate) async fn build_admin_update_user_api_key_response(
             concurrent_limit_present,
             ip_rules,
             feature_settings,
+            routing_group_selection: None,
         })
         .await?
     else {

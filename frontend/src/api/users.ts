@@ -461,9 +461,14 @@ export const usersApi = {
     return response.data
   },
 
-  async listUserPlanEntitlements(userId: string): Promise<AdminUserPlanEntitlementsResponse> {
+  async listUserPlanEntitlements(
+    userId: string,
+    options: { include_inactive?: boolean } = {},
+    signal?: AbortSignal,
+  ): Promise<AdminUserPlanEntitlementsResponse> {
     const response = await apiClient.get<AdminUserPlanEntitlementsResponse>(
-      `/api/admin/users/${userId}/billing/entitlements`
+      `/api/admin/users/${userId}/billing/entitlements`,
+      { params: options, signal },
     )
     return response.data
   },

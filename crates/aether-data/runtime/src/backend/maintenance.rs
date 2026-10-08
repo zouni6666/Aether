@@ -168,6 +168,26 @@ impl DataBackends {
         }
     }
 
+    pub async fn rebuild_overview_buckets(
+        &self,
+        input: &StatsHourlyAggregationInput,
+    ) -> Result<usize, DataLayerError> {
+        match self.sql_backend() {
+            Some(backend) => backend.rebuild_overview_buckets(input).await,
+            None => Ok(0),
+        }
+    }
+
+    pub async fn drain_overview_dirty_events(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, DataLayerError> {
+        match self.sql_backend() {
+            Some(backend) => backend.drain_overview_dirty_events(now).await,
+            None => Ok(0),
+        }
+    }
+
     pub async fn aggregate_stats_hourly(
         &self,
         input: &StatsHourlyAggregationInput,
@@ -412,6 +432,30 @@ impl<'a> SqlBackendRef<'a> {
         match self {
             #[cfg(feature = "postgres")]
             Self::Postgres(postgres) => postgres.aggregate_wallet_daily_usage(input).await,
+            #[cfg(not(feature = "postgres"))]
+            Self::Disabled(_) => unreachable!("a SQL backend cannot exist without a driver"),
+        }
+    }
+
+    async fn rebuild_overview_buckets(
+        self,
+        input: &StatsHourlyAggregationInput,
+    ) -> Result<usize, DataLayerError> {
+        match self {
+            #[cfg(feature = "postgres")]
+            Self::Postgres(postgres) => postgres.rebuild_overview_buckets(input).await,
+            #[cfg(not(feature = "postgres"))]
+            Self::Disabled(_) => unreachable!("a SQL backend cannot exist without a driver"),
+        }
+    }
+
+    async fn drain_overview_dirty_events(
+        self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, DataLayerError> {
+        match self {
+            #[cfg(feature = "postgres")]
+            Self::Postgres(postgres) => postgres.drain_overview_dirty_events(now).await,
             #[cfg(not(feature = "postgres"))]
             Self::Disabled(_) => unreachable!("a SQL backend cannot exist without a driver"),
         }

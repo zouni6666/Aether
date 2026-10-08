@@ -102,8 +102,12 @@ impl SchedulerOrderingConfig {
 
 fn scheduler_priority_mode_from_routing(mode: RoutingSetPriorityMode) -> SchedulerPriorityMode {
     match mode {
-        RoutingSetPriorityMode::Provider => SchedulerPriorityMode::Provider,
-        RoutingSetPriorityMode::GlobalKey => SchedulerPriorityMode::GlobalKey,
+        // Defaults and previously resolved snapshots may still carry the
+        // removed global_key mode. Keep that compatibility at this boundary,
+        // without changing the scheduler's independent GlobalKey capability.
+        RoutingSetPriorityMode::Provider | RoutingSetPriorityMode::GlobalKey => {
+            SchedulerPriorityMode::Provider
+        }
     }
 }
 
@@ -161,6 +165,33 @@ mod tests {
     use super::*;
     use crate::data::GatewayDataState;
 
+    #[test]
+    fn legacy_resolved_key_snapshot_uses_provider_ordering() {
+        let snapshot: ResolvedRoutingPolicy = serde_json::from_value(json!({
+            "group_id": "legacy-group",
+            "selection_source": "system_default",
+            "requested_model": "model-a",
+            "resolved_model": "model-a",
+            "priority_mode": "global_key",
+            "scheduling_mode": "fixed_order",
+            "keep_priority_on_conversion": true,
+            "sticky_key_attempts": 4,
+            "ranking_overlay": { "key_priority_overrides": { "key-a": 2 } },
+            "mutation_plan": { "body_patch": [], "header_patch": [] }
+        }))
+        .expect("legacy snapshots must remain readable");
+
+        let ordering = SchedulerOrderingConfig::from_routing_policy(&snapshot);
+        assert_eq!(ordering.priority_mode, SchedulerPriorityMode::Provider);
+        assert_eq!(
+            ordering.scheduling_mode,
+            SchedulerSchedulingMode::FixedOrder
+        );
+        assert!(ordering.keep_priority_on_conversion);
+        assert_eq!(ordering.sticky_key_attempts, 4);
+        assert_eq!(snapshot.ranking_overlay.key_priority_overrides["key-a"], 2);
+    }
+
     async fn create_system_default(
         repository: &InMemoryRoutingGroupRepository,
         enabled: bool,
@@ -185,14 +216,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn system_default_routing_group_exposes_strategy_ordering() {
+    async fn legacy_system_default_routing_group_uses_provider_ordering() {
         let repository = Arc::new(InMemoryRoutingGroupRepository::default());
         create_system_default(
             &repository,
             true,
             json!({
                 "default_policy": {
-                    "priority_mode": "provider",
+                    "priority_mode": "global_key",
                     "scheduling_mode": "fixed_order",
                     "keep_priority_on_conversion": false
                 }

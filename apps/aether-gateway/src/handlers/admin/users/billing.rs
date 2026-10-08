@@ -1,7 +1,9 @@
 use super::{build_admin_users_bad_request_response, build_admin_users_data_unavailable_response};
 use crate::handlers::admin::billing::admin_payment_gateway_response_projection;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
-use crate::handlers::admin::shared::{attach_admin_audit_response, unix_secs_to_rfc3339};
+use crate::handlers::admin::shared::{
+    attach_admin_audit_response, query_param_value, unix_secs_to_rfc3339,
+};
 use crate::handlers::shared::unix_ms_to_rfc3339;
 use crate::GatewayError;
 use aether_data_contracts::repository::billing::{BillingPlanRecord, UserPlanEntitlementRecord};
@@ -177,8 +179,13 @@ fn entitlement_payload(
 async fn load_admin_user_entitlements_payload(
     state: &AdminAppState<'_>,
     user_id: &str,
+    include_inactive: bool,
 ) -> Result<Option<serde_json::Value>, GatewayError> {
-    let entitlements = match state.app().list_user_plan_entitlements(user_id).await? {
+    let entitlements = match state
+        .app()
+        .list_user_plan_entitlements_with_history(user_id, include_inactive)
+        .await?
+    {
         Some(value) => value,
         None => return Ok(None),
     };
@@ -214,7 +221,17 @@ pub(in super::super) async fn build_admin_list_user_billing_entitlements_respons
         )
             .into_response());
     }
-    match load_admin_user_entitlements_payload(state, &user_id).await? {
+    let include_inactive =
+        match query_param_value(request_context.query_string(), "include_inactive").as_deref() {
+            None | Some("false" | "0") => false,
+            Some("true" | "1") => true,
+            _ => {
+                return Ok(build_admin_users_bad_request_response(
+                    "include_inactive 必须为布尔值",
+                ))
+            }
+        };
+    match load_admin_user_entitlements_payload(state, &user_id, include_inactive).await? {
         Some(payload) => Ok(Json(payload).into_response()),
         None => Ok(build_admin_users_data_unavailable_response()),
     }
@@ -256,7 +273,7 @@ pub(in super::super) async fn build_admin_revoke_user_billing_entitlement_respon
             return Ok(build_admin_users_data_unavailable_response());
         }
     }
-    let entitlements = match load_admin_user_entitlements_payload(state, &user_id).await? {
+    let entitlements = match load_admin_user_entitlements_payload(state, &user_id, false).await? {
         Some(value) => value,
         None => return Ok(build_admin_users_data_unavailable_response()),
     };
@@ -401,7 +418,7 @@ pub(in super::super) async fn build_admin_grant_user_billing_plan_response(
             return Ok(build_admin_users_data_unavailable_response());
         }
     };
-    let entitlements = match load_admin_user_entitlements_payload(state, &user_id).await? {
+    let entitlements = match load_admin_user_entitlements_payload(state, &user_id, false).await? {
         Some(value) => value,
         None => return Ok(build_admin_users_data_unavailable_response()),
     };

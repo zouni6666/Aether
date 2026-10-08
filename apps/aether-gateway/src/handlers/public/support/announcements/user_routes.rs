@@ -1,3 +1,4 @@
+use aether_data::repository::announcements::UserAnnouncementListQuery;
 use axum::{
     body::Body,
     http,
@@ -33,6 +34,40 @@ fn parse_announcement_read_status_request(
     }
 }
 
+fn parse_user_announcements_query(
+    raw: Option<&str>,
+    now_unix_secs: u64,
+) -> Result<UserAnnouncementListQuery, String> {
+    let mut query = UserAnnouncementListQuery {
+        unread_only: false,
+        offset: 0,
+        limit: 20,
+        now_unix_secs,
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    for (key, value) in url::form_urlencoded::parse(raw.unwrap_or_default().as_bytes()) {
+        if !seen.insert(key.clone()) {
+            return Err(format!("duplicate announcement query parameter: {key}"));
+        }
+        match key.as_ref() {
+            "limit" => {
+                query.limit = value.parse().map_err(|_| "invalid announcement limit")?;
+            }
+            "offset" => {
+                query.offset = value.parse().map_err(|_| "invalid announcement offset")?;
+            }
+            "unread_only" => {
+                query.unread_only = value
+                    .parse()
+                    .map_err(|_| "unread_only must be true or false")?;
+            }
+            _ => return Err(format!("unsupported announcement query parameter: {key}")),
+        }
+    }
+    query.validate().map_err(|err| err.to_string())?;
+    Ok(query)
+}
+
 pub(crate) async fn maybe_build_local_announcement_user_response(
     state: &AppState,
     request_context: &GatewayPublicRequestContext,
@@ -54,6 +89,48 @@ pub(crate) async fn maybe_build_local_announcement_user_response(
     let now_unix_secs = chrono::Utc::now().timestamp().max(0) as u64;
 
     match decision.route_kind.as_deref() {
+        Some("list")
+            if request_context.request_method == http::Method::GET
+                && matches!(
+                    request_context.request_path.as_str(),
+                    "/api/announcements/users/me" | "/api/announcements/users/me/"
+                ) =>
+        {
+            let query = match parse_user_announcements_query(
+                request_context.request_query_string.as_deref(),
+                now_unix_secs,
+            ) {
+                Ok(query) => query,
+                Err(detail) => return Some(announcements_bad_request_response(detail)),
+            };
+            let page = match state.list_user_announcements(&auth.user.id, &query).await {
+                Ok(page) => page,
+                Err(err) => {
+                    return Some(announcements_internal_error_response(
+                        announcements_internal_detail(err),
+                    ))
+                }
+            };
+            let items = page
+                .items
+                .iter()
+                .map(|item| {
+                    let mut value = build_public_announcement_payload(&item.announcement);
+                    value["is_read"] = json!(item.is_read);
+                    value
+                })
+                .collect::<Vec<_>>();
+            Some(
+                Json(json!({
+                    "items": items,
+                    "total": page.total,
+                    "unread_count": page.unread_count,
+                    "limit": query.limit,
+                    "offset": query.offset,
+                }))
+                .into_response(),
+            )
+        }
         Some("unread_count")
             if request_context.request_method == http::Method::GET
                 && matches!(

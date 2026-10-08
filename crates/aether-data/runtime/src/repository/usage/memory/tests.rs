@@ -22,6 +22,543 @@ use aether_data_contracts::repository::usage::{
 };
 use serde_json::json;
 
+#[tokio::test]
+async fn customer_billing_statistics_use_frozen_factors_and_preserve_legacy_provider_cost() {
+    use aether_data_contracts::repository::usage::*;
+    let now = chrono::Utc::now();
+    let at = now - chrono::Duration::seconds(10);
+    let mut billed = sample_usage("customer-billed", at.timestamp());
+    billed.total_cost_usd = 2.0;
+    billed.actual_total_cost_usd = 0.5;
+    billed.request_metadata = Some(json!({
+        "billing_multiplier_snapshot": {
+            "version": 1,
+            "factors": {"routing_group": 2.0, "user_group": 0.75},
+            "multiplier": 1.5
+        },
+        "routing_group_billing_multiplier": 99.0,
+        "rate_multiplier": 0.25
+    }));
+    let mut legacy = sample_usage("customer-legacy", at.timestamp());
+    legacy.total_cost_usd = 2.0;
+    legacy.actual_total_cost_usd = 0.5;
+    let mut free = sample_usage("customer-free", at.timestamp());
+    free.total_cost_usd = 2.0;
+    free.actual_total_cost_usd = 0.5;
+    free.request_metadata = Some(json!({"routing_group_billing_multiplier": 0.0}));
+    let mut invalid = sample_usage("customer-invalid", at.timestamp());
+    invalid.total_cost_usd = 999.0;
+    invalid.actual_total_cost_usd = 999.0;
+    invalid.request_metadata = Some(json!({"billing_multiplier_snapshot": null}));
+    let repo = InMemoryUsageReadRepository::seed([billed, legacy, free, invalid])
+        .with_dashboard_stats_since(at - chrono::Duration::seconds(1));
+    let overview = repo
+        .query_usage_analytics(&UsageAnalyticsQuery {
+            from_unix_ms: (at - chrono::Duration::seconds(1)).timestamp_millis() as u64,
+            to_unix_ms: now.timestamp_millis() as u64,
+            timezone: "UTC".into(),
+            limit: 1,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        overview.summary.billable_amount.as_deref(),
+        Some("3.50000000")
+    );
+    let query = UsageDashboardAnalyticsQuery {
+        timezone: "UTC".into(),
+    };
+    let analytics = repo.query_dashboard_analytics(&query).await.unwrap();
+    assert_eq!(
+        analytics.total.summary.billable_amount.as_deref(),
+        Some("3.50000000")
+    );
+    let summary = repo.query_dashboard_summary(&query).await.unwrap();
+    assert_eq!(summary.total.billable_amount.as_deref(), Some("3.50000000"));
+    assert_eq!(summary.total.pricing_available_count, 3);
+}
+
+#[tokio::test]
+async fn overview_model_performance_merges_provider_samples_without_pagination() {
+    use aether_data_contracts::repository::usage::*;
+    let at = chrono::DateTime::parse_from_rfc3339("2026-09-12T10:05:00Z").unwrap();
+    let mut records = Vec::new();
+    for (index, provider, first_byte, response_time, output_tokens) in [
+        (0, "provider-a", 100, 1100, 100),
+        (1, "provider-a", 300, 1300, 200),
+        (2, "provider-b", 500, 2500, 400),
+    ] {
+        let mut row = sample_usage(&format!("model-sample-{index}"), at.timestamp());
+        row.provider_id = Some(provider.into());
+        row.model = "shared-model".into();
+        row.target_model = Some(format!("{provider}-deployment"));
+        row.first_byte_time_ms = Some(first_byte);
+        row.response_time_ms = Some(response_time);
+        row.output_tokens = output_tokens;
+        row.is_stream = true;
+        records.push(row);
+    }
+    let mut failed = sample_usage("model-failed", at.timestamp());
+    failed.model = "shared-model".into();
+    failed.status = "failed".into();
+    failed.first_byte_time_ms = None;
+    failed.response_time_ms = None;
+    records.push(failed);
+    let mut pending = sample_usage("model-pending", at.timestamp());
+    pending.model = "pending-model".into();
+    pending.status = "pending".into();
+    pending.first_byte_time_ms = None;
+    pending.response_time_ms = None;
+    records.push(pending);
+
+    let repo = InMemoryUsageReadRepository::seed(records);
+    let query = UsageAnalyticsQuery {
+        from_unix_ms: (at - chrono::Duration::minutes(5)).timestamp_millis() as u64,
+        to_unix_ms: (at + chrono::Duration::minutes(55)).timestamp_millis() as u64,
+        timezone: "UTC".into(),
+        view: UsageAnalyticsView::Performance,
+        limit: 1,
+        offset: 1,
+        ..Default::default()
+    };
+    let result = repo.query_usage_analytics(&query).await.unwrap();
+    assert_eq!(result.model_rows.len(), 2);
+    assert_eq!(result.model_rows[0].id.as_deref(), Some("shared-model"));
+    assert!(result
+        .model_rows
+        .iter()
+        .all(|row| row.bucket_start.is_none()));
+    let metrics = &result.model_rows[0].metrics;
+    assert_eq!(metrics.request_count, 4);
+    assert_eq!(metrics.successful_request_count, 3);
+    assert_eq!(metrics.failed_request_count, 1);
+    assert_eq!(metrics.first_byte_sample_count, 3);
+    assert_eq!(metrics.first_byte_sum_ms, 900.0);
+    assert_eq!(metrics.latency_sample_count, 3);
+    assert_eq!(metrics.latency_sum_ms, 4900.0);
+    assert_eq!(metrics.output_tps_sample_count, 3);
+    assert_eq!(metrics.output_tps_sum, 500.0);
+    assert_eq!(result.model_rows[1].metrics.first_byte_sample_count, 0);
+    assert_eq!(result.model_rows[1].metrics.in_flight_request_count, 1);
+    assert_eq!(
+        result
+            .model_rows
+            .iter()
+            .map(|row| row.metrics.request_count)
+            .sum::<u64>(),
+        result.summary.request_count
+    );
+
+    let filtered = repo
+        .query_usage_analytics(&UsageAnalyticsQuery {
+            model: Some("shared-model".into()),
+            ..query
+        })
+        .await
+        .unwrap();
+    assert_eq!(filtered.model_rows, vec![result.model_rows[0].clone()]);
+}
+
+#[tokio::test]
+async fn overview_memory_chart_hour_buckets_are_utc_in_half_hour_zones() {
+    use aether_data_contracts::repository::usage::*;
+    let at = chrono::DateTime::parse_from_rfc3339("2026-09-12T10:05:00Z").unwrap();
+    let repo = InMemoryUsageReadRepository::seed([sample_usage("hour-zone", at.timestamp())]);
+    let query = UsageAnalyticsQuery {
+        from_unix_ms: (at - chrono::Duration::minutes(5)).timestamp_millis() as u64,
+        to_unix_ms: (at + chrono::Duration::minutes(55)).timestamp_millis() as u64,
+        timezone: "Asia/Kolkata".into(),
+        view: UsageAnalyticsView::DashboardCharts,
+        granularity: UsageAnalyticsGranularity::Hour,
+        limit: 1,
+        ..Default::default()
+    };
+    let charts = repo.query_usage_analytics(&query).await.unwrap();
+    assert_eq!(charts.summary.request_count, 1);
+    assert_eq!(charts.rows.len(), 1);
+    assert_eq!(charts.rows[0].metrics.request_count, 1);
+    assert_eq!(
+        charts.rows[0].bucket_start,
+        charts.model_rows[0].bucket_start
+    );
+}
+
+#[tokio::test]
+async fn overview_memory_chart_days_survive_skipped_midnight() {
+    use aether_data_contracts::repository::usage::*;
+    let moments = [
+        "2026-09-05T12:00:00Z",
+        "2026-09-06T12:00:00Z",
+        "2026-09-07T12:00:00Z",
+    ];
+    let repo = InMemoryUsageReadRepository::seed(moments.map(|moment| {
+        sample_usage(
+            moment,
+            chrono::DateTime::parse_from_rfc3339(moment)
+                .unwrap()
+                .timestamp(),
+        )
+    }));
+    let query = UsageAnalyticsQuery {
+        from_unix_ms: chrono::DateTime::parse_from_rfc3339("2026-09-05T04:00:00Z")
+            .unwrap()
+            .timestamp_millis() as u64,
+        to_unix_ms: chrono::DateTime::parse_from_rfc3339("2026-09-08T03:00:00Z")
+            .unwrap()
+            .timestamp_millis() as u64,
+        timezone: "America/Santiago".into(),
+        view: UsageAnalyticsView::DashboardCharts,
+        limit: 1,
+        ..Default::default()
+    };
+    let charts = repo.query_usage_analytics(&query).await.unwrap();
+    assert_eq!(charts.summary.request_count, 3);
+    assert_eq!(charts.rows.len(), 3);
+    assert_eq!(charts.model_rows.len(), 3);
+    for (series, model) in charts.rows.iter().zip(&charts.model_rows) {
+        assert_eq!(series.metrics.request_count, 1);
+        assert_eq!(series.bucket_start, model.bucket_start);
+        assert_eq!(
+            series.metrics.billable_amount,
+            model.metrics.billable_amount
+        );
+    }
+}
+
+#[tokio::test]
+async fn overview_memory_dashboard_keeps_all_history_and_chart_dimensions() {
+    use aether_data_contracts::repository::usage::*;
+    let now = chrono::Utc::now();
+    let mut old = sample_usage(
+        "old-dashboard",
+        (now - chrono::Duration::days(800)).timestamp(),
+    );
+    old.actual_total_cost_usd = 2.0;
+    old.model = "old-model".into();
+    let mut current = sample_usage("current-dashboard", now.timestamp());
+    current.actual_total_cost_usd = 0.5;
+    current.model = "new-model".into();
+    let repo = InMemoryUsageReadRepository::seed([old, current]);
+    let dashboard = repo
+        .query_dashboard_analytics(&UsageDashboardAnalyticsQuery {
+            timezone: "Asia/Shanghai".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(dashboard.today.summary.request_count, 1);
+    assert_eq!(dashboard.total.summary.request_count, 2);
+    assert_eq!(
+        dashboard.today.summary.billable_amount.as_deref(),
+        Some("0.50000000")
+    );
+    assert_eq!(
+        dashboard.total.summary.billable_amount.as_deref(),
+        Some("2.50000000")
+    );
+    assert_eq!(dashboard.today.read_revision, dashboard.total.read_revision);
+    assert_eq!(dashboard.history_complete, None);
+    let charts = repo
+        .query_usage_analytics(&UsageAnalyticsQuery {
+            from_unix_ms: (now - chrono::Duration::days(1)).timestamp_millis() as u64,
+            to_unix_ms: (now + chrono::Duration::seconds(1)).timestamp_millis() as u64,
+            timezone: "Asia/Shanghai".into(),
+            view: UsageAnalyticsView::DashboardCharts,
+            limit: 1,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(charts.model_rows.len(), 1);
+    assert_eq!(charts.model_rows[0].id.as_deref(), Some("new-model"));
+    assert_eq!(charts.provider_rows.len(), 1);
+    assert_eq!(
+        charts.model_rows[0].metrics.billable_amount,
+        charts.summary.billable_amount
+    );
+}
+
+#[tokio::test]
+async fn overview_memory_dashboard_total_keeps_card_coverage_without_historical_diagnostics() {
+    use aether_data_contracts::repository::usage::*;
+    let now = chrono::Utc::now();
+    let mut known = sample_usage("dashboard-total-known", now.timestamp());
+    known.request_metadata = Some(json!({"analytics_attribution":{"is_standalone":false}}));
+    let mut missing = sample_usage(
+        "dashboard-total-missing",
+        (now - chrono::Duration::days(800)).timestamp(),
+    );
+    missing.billing_status = "pending".into();
+    missing.request_metadata =
+        Some(json!({"usage_available":false,"usage_pricing_available":false}));
+    let mut session = sample_usage("dashboard-total-session", now.timestamp());
+    session.request_metadata = Some(json!({"analytics_attribution":{"record_kind":"session"}}));
+    let future = sample_usage(
+        "dashboard-total-future",
+        (now + chrono::Duration::days(1)).timestamp(),
+    );
+    let repo = InMemoryUsageReadRepository::seed([known, missing, session, future])
+        .with_analytics_allocations([UsageAnalyticsAllocation {
+            request_id: "dashboard-total-known".into(),
+            complete: true,
+            wallet_debit_amount: Some("0.18000000".into()),
+            ..Default::default()
+        }]);
+    let dashboard = repo
+        .query_dashboard_analytics(&UsageDashboardAnalyticsQuery {
+            timezone: "UTC".into(),
+        })
+        .await
+        .unwrap();
+    let total = dashboard.total.summary;
+    assert_eq!(total.request_count, 2);
+    assert_eq!(total.total_tokens, 150);
+    assert_eq!(total.billable_amount.as_deref(), Some("0.18000000"));
+    assert_eq!(total.usage_available_count, 1);
+    assert_eq!(total.pricing_available_count, 1);
+    assert_eq!(total.settled_count, 1);
+    assert_eq!(total.allocation_available_count, 1);
+    assert!(total.latency_p95_ms.is_none());
+    assert!(total.wallet_debit_amount.is_none());
+    assert_eq!(dashboard.today.summary.latency_p95_ms, Some(420.0));
+    assert_eq!(dashboard.today.summary.successful_request_count, 1);
+    assert_eq!(
+        dashboard.today.summary.wallet_debit_amount.as_deref(),
+        Some("0.18000000")
+    );
+}
+
+#[tokio::test]
+async fn overview_memory_employee_roster_and_allocations_are_global() {
+    use aether_data_contracts::repository::usage::*;
+    use aether_data_contracts::repository::users::StoredUserSummary;
+    let mut usage = sample_usage("overview-request", 1_700_000_000);
+    usage.user_id = Some("alice".into());
+    usage.request_metadata = Some(json!({"analytics_attribution":{"is_standalone":false}}));
+    usage.billing_status = "settled".into();
+    usage.actual_total_cost_usd = 0.00000001;
+    let repo = InMemoryUsageReadRepository::seed([usage])
+        .with_analytics_users([
+            StoredUserSummary::new(
+                "alice".into(),
+                "Alice".into(),
+                None,
+                "user".into(),
+                true,
+                false,
+            )
+            .unwrap(),
+            StoredUserSummary::new(
+                "zero".into(),
+                "Zero".into(),
+                None,
+                "user".into(),
+                true,
+                false,
+            )
+            .unwrap(),
+        ])
+        .with_analytics_allocations([UsageAnalyticsAllocation {
+            request_id: "overview-request".into(),
+            quota_covered_amount: Some("0.00000000".into()),
+            wallet_consumed_amount: Some("0.00000001".into()),
+            wallet_debit_amount: Some("0.00000000".into()),
+            complete: true,
+            ..Default::default()
+        }]);
+    let mut query = UsageAnalyticsQuery {
+        from_unix_ms: 1_700_000_000_000,
+        to_unix_ms: 1_700_000_060_000,
+        timezone: "UTC".into(),
+        view: UsageAnalyticsView::Users,
+        limit: 1,
+        descending: true,
+        ..Default::default()
+    };
+    let first = repo.query_usage_analytics(&query).await.unwrap();
+    assert_eq!(first.total, 2);
+    assert_eq!(first.users[0].user_id, "alice");
+    assert_eq!(first.user_summary.as_ref().unwrap().user_count, 2);
+    assert_eq!(first.user_summary.as_ref().unwrap().active_user_count, 1);
+    assert!(first.user_finance_summary.is_none());
+    assert!(first.user_payments.is_none());
+    assert!(first.users[0].finance.is_none());
+    assert_eq!(
+        first.summary.wallet_consumed_amount.as_deref(),
+        Some("0.00000001")
+    );
+    assert_eq!(
+        first.summary.wallet_debit_amount.as_deref(),
+        Some("0.00000000")
+    );
+    query.offset = 1;
+    let second = repo.query_usage_analytics(&query).await.unwrap();
+    assert_eq!(second.users[0].user_id, "zero");
+    assert_eq!(second.users[0].metrics.request_count, 0);
+    assert_eq!(second.user_summary, first.user_summary);
+    let searched = repo
+        .query_usage_analytics(&UsageAnalyticsQuery {
+            search: Some("Zero".into()),
+            offset: 0,
+            ..query.clone()
+        })
+        .await
+        .unwrap();
+    assert_eq!(searched.user_summary.as_ref().unwrap().user_count, 1);
+    assert_eq!(searched.user_summary.as_ref().unwrap().active_user_count, 0);
+    assert_eq!(searched.summary.request_count, 0);
+    query.from_unix_ms = query.to_unix_ms;
+    query.to_unix_ms += 60_000;
+    let outside = repo.query_usage_analytics(&query).await.unwrap();
+    assert_eq!(outside.summary.request_count, 0);
+}
+
+#[tokio::test]
+async fn overview_memory_employee_is_grouped_by_account_owner() {
+    use aether_data_contracts::repository::{usage::*, users::StoredUserSummary};
+    let mut usage = sample_usage("trusted-request", 1_700_000_000);
+    usage.user_id = Some("owner".into());
+    usage.request_metadata =
+        Some(json!({"analytics_attribution":{"is_standalone":false,"actor_user_id":"actor"}}));
+    let repo = InMemoryUsageReadRepository::seed([usage]).with_analytics_users(
+        ["owner", "actor"].map(|id| {
+            StoredUserSummary::new(id.into(), id.into(), None, "user".into(), true, false).unwrap()
+        }),
+    );
+    let query = UsageAnalyticsQuery {
+        from_unix_ms: 1_700_000_000_000,
+        to_unix_ms: 1_700_000_060_000,
+        timezone: "UTC".into(),
+        view: UsageAnalyticsView::Users,
+        attribution_kind: Some("employee".into()),
+        has_usage: Some(true),
+        limit: 100,
+        ..Default::default()
+    };
+    let result = repo.query_usage_analytics(&query).await.unwrap();
+    assert_eq!(result.total, 1);
+    assert_eq!(result.users[0].user_id, "owner");
+    let detail = repo
+        .query_usage_analytics(&UsageAnalyticsQuery {
+            actor_user_id: Some("owner".into()),
+            ..query
+        })
+        .await
+        .unwrap();
+    assert_eq!(detail.users[0], result.users[0]);
+}
+
+#[tokio::test]
+async fn overview_memory_legacy_requests_use_existing_key_account_flags() {
+    use aether_data_contracts::repository::{usage::*, users::StoredUserSummary};
+    let snapshots = [("member-key", false), ("standalone-key", true)].map(|(id, standalone)| {
+        (
+            None,
+            StoredAuthApiKeySnapshot::new(
+                "user-1".into(),
+                "alice".into(),
+                None,
+                "user".into(),
+                "local".into(),
+                true,
+                false,
+                None,
+                None,
+                None,
+                id.into(),
+                None,
+                true,
+                false,
+                standalone,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap(),
+        )
+    });
+    let keys = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(snapshots));
+    let rows = ["member-key", "standalone-key", "deleted-key"].map(|id| {
+        let mut usage = sample_usage(id, 1_700_000_000);
+        usage.api_key_id = Some(id.into());
+        usage.request_metadata = None;
+        usage
+    });
+    let repo = InMemoryUsageReadRepository::seed(rows)
+        .with_auth_api_key_repository(keys)
+        .with_analytics_users([StoredUserSummary::new(
+            "user-1".into(),
+            "alice".into(),
+            None,
+            "user".into(),
+            true,
+            false,
+        )
+        .unwrap()]);
+    let mut query = UsageAnalyticsQuery {
+        from_unix_ms: 1_700_000_000_000,
+        to_unix_ms: 1_700_000_060_000,
+        timezone: "UTC".into(),
+        view: UsageAnalyticsView::Consumption,
+        limit: 100,
+        ..Default::default()
+    };
+    let result = repo.query_usage_analytics(&query).await.unwrap();
+    assert_eq!(result.summary.request_count, 3);
+    assert_eq!(result.summary.usage_active_users, 1);
+    assert_eq!(result.summary.trusted_attribution_count, 1);
+    for (key, kind, source, user) in [
+        ("member-key", "employee", "user_account", Some("user-1")),
+        ("standalone-key", "standalone", "standalone_key", None),
+        ("deleted-key", "unknown", "unknown", None),
+    ] {
+        let row = result
+            .consumption
+            .iter()
+            .find(|row| row.request_id == key)
+            .unwrap();
+        assert_eq!(row.attribution_kind, kind);
+        assert_eq!(row.attribution_source, source);
+        assert_eq!(row.user_id.as_deref(), user);
+        assert_eq!(row.credential_owner_id.as_deref(), Some("user-1"));
+    }
+    query.view = UsageAnalyticsView::Users;
+    query.attribution_kind = Some("employee".into());
+    let employees = repo.query_usage_analytics(&query).await.unwrap();
+    assert_eq!(employees.users[0].metrics.request_count, 1);
+    assert_eq!(employees.summary.request_count, 1);
+}
+
+#[tokio::test]
+async fn overview_memory_health_does_not_treat_upstream_cancellation_as_client() {
+    use aether_data_contracts::repository::usage::*;
+    let mut upstream = sample_usage("upstream-cancel", 1_700_000_000);
+    upstream.status = "cancelled".into();
+    upstream.request_metadata =
+        Some(json!({"analytics_failure":{"origin":"upstream","reason":"provider_cancelled"}}));
+    let mut client = upstream.clone();
+    client.request_id = "client-cancel".into();
+    client.request_metadata =
+        Some(json!({"analytics_failure":{"origin":"client","reason":"downstream_disconnect"}}));
+    let repo = InMemoryUsageReadRepository::seed([upstream, client]);
+    let summary = repo
+        .summarize_health_observations(&HealthObservationQuery {
+            from_unix_ms: 1_700_000_000_000,
+            to_unix_ms: 1_700_000_060_000,
+            object_kind: HealthObservationObjectKind::Model,
+            object_values: None,
+            segments: 4,
+        })
+        .await
+        .unwrap();
+    assert_eq!(summary.overall.request_count, 2);
+    assert_eq!(summary.overall.service_failed_count, 1);
+    assert_eq!(summary.overall.excluded_count, 1);
+}
+
 fn sample_usage(request_id: &str, created_at_unix_ms: i64) -> StoredRequestUsageAudit {
     StoredRequestUsageAudit::new(
         "usage-1".to_string(),
@@ -134,6 +671,58 @@ fn sample_upsert_usage_record(request_id: &str) -> UpsertUsageRecord {
         finalized_at_unix_secs: None,
         created_at_unix_ms: Some(1_700_000_000),
         updated_at_unix_secs: 1_700_000_000,
+    }
+}
+
+#[tokio::test]
+async fn upsert_preserves_routing_group_snapshot_across_terminal_metadata_replacement() {
+    for terminal_metadata in [
+        None,
+        Some(json!({"rate_multiplier": 0.5, "billing_snapshot": {"status": "complete"}})),
+        Some(json!({
+            "routing_group_billing_multiplier": 99.0,
+            "billing_multiplier_snapshot": {"version": 1, "factors": {"routing_group": 3.0}, "multiplier": 3.0},
+            "routing_group_id": "changed-group",
+            "routing_group_name": "changed-group-name",
+            "plan_usage_reservation_token": "550e8400-e29b-41d4-a716-446655440002",
+            "rate_multiplier": 0.5
+        })),
+    ] {
+        let repository = InMemoryUsageReadRepository::default();
+        let mut pending = sample_upsert_usage_record("req-group-snapshot");
+        pending.request_metadata = Some(json!({
+            "routing_group_billing_multiplier": 0.25,
+            "billing_multiplier_snapshot": {"version": 1, "factors": {"routing_group": 0.25, "user_group": 2.0}, "multiplier": 0.5},
+            "routing_group_id": "group-original",
+            "routing_group_name": "请求时的分组",
+            "plan_usage_reservation_token": "550e8400-e29b-41d4-a716-446655440001"
+        }));
+        repository
+            .upsert(pending)
+            .await
+            .expect("pending usage should persist");
+        let mut terminal = sample_upsert_usage_record("req-group-snapshot");
+        terminal.status = "completed".to_string();
+        terminal.request_metadata = terminal_metadata;
+        terminal.updated_at_unix_secs += 1;
+        let stored = repository
+            .upsert(terminal)
+            .await
+            .expect("terminal usage should persist");
+        assert_eq!(stored.routing_group_billing_multiplier(), 0.25);
+        assert_eq!(stored.billing_multiplier(), 0.5);
+        assert_eq!(
+            stored.request_metadata.as_ref().unwrap()["billing_multiplier_snapshot"],
+            json!({
+                "version": 1, "factors": {"routing_group": 0.25, "user_group": 2.0}, "multiplier": 0.5
+            })
+        );
+        assert_eq!(stored.routing_group_id(), Some("group-original"));
+        assert_eq!(stored.routing_group_name(), Some("请求时的分组"));
+        assert_eq!(
+            stored.request_metadata.as_ref().unwrap()["plan_usage_reservation_token"],
+            "550e8400-e29b-41d4-a716-446655440001"
+        );
     }
 }
 
@@ -2899,4 +3488,100 @@ async fn summarize_usage_provider_performance_computes_tps_and_top_provider_time
     assert_eq!(without_timeline.summary, summary.summary);
     assert_eq!(without_timeline.providers, summary.providers);
     assert!(without_timeline.timeline.is_empty());
+}
+
+#[tokio::test]
+async fn future_dashboard_summary_excludes_old_rows_and_preserves_canonical_cache_samples() {
+    use aether_data_contracts::repository::usage::UsageDashboardAnalyticsQuery;
+    let now = chrono::Utc::now();
+    let since = now - chrono::Duration::minutes(5);
+    let mut included = sample_usage(
+        "future-summary",
+        (now - chrono::Duration::seconds(1)).timestamp(),
+    );
+    included.api_key_id = None;
+    included.api_format = Some("claude:messages".into());
+    included.endpoint_api_format = Some("claude:messages".into());
+    included.input_tokens = 80;
+    included.output_tokens = 20;
+    included.total_tokens = 150;
+    included.cache_read_input_tokens = 40;
+    included.cache_creation_input_tokens = 10;
+    included.response_time_ms = Some(800);
+    included.first_byte_time_ms = Some(100);
+    included.is_stream = false;
+    included.request_metadata = Some(json!({"upstream_is_stream": true}));
+    included.actual_total_cost_usd = 0.12345678;
+    included.billing_status = "settled".into();
+    let mut excluded = included.clone();
+    excluded.request_id = "before-activation".into();
+    excluded.created_at_unix_ms = (since - chrono::Duration::days(500)).timestamp() as u64;
+    let repo =
+        InMemoryUsageReadRepository::seed([included, excluded]).with_dashboard_stats_since(since);
+    let first = repo
+        .query_dashboard_summary(&UsageDashboardAnalyticsQuery {
+            timezone: "Asia/Kathmandu".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(first.total.request_count, 1);
+    assert_eq!(first.total.total_tokens, 150);
+    assert_eq!(first.total.billable_amount.as_deref(), Some("0.12345678"));
+    assert_eq!(first.today.cache_input_tokens, 130);
+    assert_eq!(first.today.cache_read_tokens, 40);
+    assert_eq!(first.today.first_byte_sample_count, 1);
+    assert_eq!(first.today.response_sample_count, 1);
+    assert_eq!(first.today.stream_requests, 1);
+    assert_eq!(first.today.standard_requests, 0);
+    assert_eq!(first.active_days, 1);
+    assert_eq!(first.consecutive_active_days, 1);
+    assert_eq!(
+        first.activity_days.iter().map(|d| d.requests).sum::<u64>(),
+        1
+    );
+    // Audit retention does not own the additive projection.
+    repo.by_request_id.write().unwrap().clear();
+    let retained = repo
+        .query_dashboard_summary(&UsageDashboardAnalyticsQuery {
+            timezone: "Asia/Kathmandu".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(retained.total, first.total);
+    assert_eq!(retained.stats_since, since.to_rfc3339());
+}
+
+#[tokio::test]
+async fn future_dashboard_summary_streak_uses_local_days_before_heatmap_truncation() {
+    use aether_data_contracts::repository::usage::UsageDashboardAnalyticsQuery;
+    use chrono::TimeZone;
+
+    let now = chrono::Utc::now();
+    let tz = chrono_tz::Asia::Kathmandu;
+    let today = now.with_timezone(&tz).date_naive();
+    let rows = (1..=400).map(|offset| {
+        let day = today - chrono::Duration::days(offset);
+        let at = tz
+            .from_local_datetime(&day.and_hms_opt(12, 0, 0).unwrap())
+            .single()
+            .unwrap();
+        sample_usage(&format!("streak-{offset}"), at.timestamp())
+    });
+    let repo = InMemoryUsageReadRepository::seed(rows)
+        .with_dashboard_stats_since(now - chrono::Duration::days(401));
+    let summary = repo
+        .query_dashboard_summary(&UsageDashboardAnalyticsQuery {
+            timezone: tz.to_string(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(summary.today.request_count, 0);
+    assert_eq!(summary.active_days, 400);
+    assert_eq!(summary.consecutive_active_days, 400);
+    assert_eq!(summary.activity_days.len(), 364);
+    assert_eq!(
+        summary.activity_days.last().unwrap().date,
+        today.pred_opt().unwrap().to_string()
+    );
 }

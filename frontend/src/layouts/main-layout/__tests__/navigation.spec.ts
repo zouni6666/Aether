@@ -1,16 +1,16 @@
 import { describe, expect, it } from 'vitest'
-import type { RouteLocationNormalizedLoaded } from 'vue-router'
+import type { LocationQuery, RouteLocationNormalizedLoaded } from 'vue-router'
 
 import { buildBreadcrumbs, buildNavigation } from '@/layouts/main-layout/navigation'
 import type { MessageKey } from '@/i18n'
 
 const translate = (key: MessageKey) => `tx:${key}`
 
-function route(path: string, name?: string, meta: Record<string, unknown> = {}): RouteLocationNormalizedLoaded {
+function route(path: string, name?: string, meta: Record<string, unknown> = {}, query: LocationQuery = {}): RouteLocationNormalizedLoaded {
   return {
     path,
     fullPath: path,
-    query: {},
+    query,
     hash: '',
     name,
     params: {},
@@ -85,8 +85,23 @@ describe('main layout navigation builder', () => {
 
     const overviewItems = adminNavigation.find(group => group.title === 'tx:nav.group.overview')?.items ?? []
     expect(overviewItems.findIndex(item => item.name === '远程控制')).toBe(
-      overviewItems.findIndex(item => item.name === 'tx:nav.performanceAnalysis') + 1,
+      overviewItems.findIndex(item => item.name === 'tx:nav.healthMonitor') + 1,
     )
+  })
+
+  it('keeps the five fixed overview destinations in product order', () => {
+    const navigation = buildNavigation({ canAccessAdmin: true, modules: {}, isModuleActive: () => false })
+    expect(navigation[0]?.items.map(item => item.href)).toEqual([
+      '/admin/dashboard', '/admin/operations', '/admin/user-stats', '/admin/cost-analysis', '/admin/health-monitor',
+    ])
+  })
+
+  it('offers one provider destination for management and scheduling', () => {
+    const navigation = buildNavigation({ canAccessAdmin: true, modules: {}, isModuleActive: () => false })
+    const destinations = navigation.flatMap(group => group.items.map(item => item.href))
+
+    expect(destinations.filter(href => href === '/admin/providers')).toHaveLength(1)
+    expect(destinations).not.toContain('/admin/routing')
   })
 
   it('builds admin navigation with dynamic module menu items sorted by menu order', () => {
@@ -137,7 +152,7 @@ describe('main layout navigation builder', () => {
     )
   })
 
-  it('builds translated breadcrumbs for settings and routing detail pages', () => {
+  it('builds translated breadcrumbs for settings and module pages', () => {
     const navigation = buildNavigation({
       canAccessAdmin: true,
       modules: {},
@@ -154,18 +169,6 @@ describe('main layout navigation builder', () => {
     })).toEqual([
       { label: 'tx:nav.group.account' },
       { label: 'tx:breadcrumb.personalSettings' },
-    ])
-
-    expect(buildBreadcrumbs({
-      route: route('/admin/routing/new', 'RoutingProfileCreate'),
-      navigation,
-      modules: {},
-      isNavActive: href => href === '/admin/routing',
-      t: translate,
-    })).toEqual([
-      { label: 'tx:nav.group.management' },
-      { label: 'tx:nav.routing', href: '/admin/routing' },
-      { label: 'tx:breadcrumb.routingCreate' },
     ])
 
     expect(buildBreadcrumbs({
@@ -216,6 +219,39 @@ describe('main layout navigation builder', () => {
     })).toEqual([
       expect.objectContaining({ label: expect.any(String) }),
       { label: '远程控制' },
+    ])
+  })
+
+  it.each<LocationQuery>([{}, { group: 'strategy-a' }, { group: 'new' }])(
+    'uses the provider directory breadcrumb for every group %o',
+    (query) => {
+      const navigation = buildNavigation({ canAccessAdmin: true, modules: {}, isModuleActive: () => false, t: translate })
+
+      expect(buildBreadcrumbs({
+        route: route('/admin/providers', 'ProviderManagement', {}, query),
+        navigation,
+        modules: {},
+        isNavActive: href => href === '/admin/providers',
+        t: translate,
+      })).toEqual([
+        { label: 'tx:nav.group.management' },
+        { label: 'tx:nav.providers' },
+      ])
+    },
+  )
+
+  it('uses the same provider directory breadcrumb for the default group', () => {
+    const navigation = buildNavigation({ canAccessAdmin: true, modules: {}, isModuleActive: () => false, t: translate })
+
+    expect(buildBreadcrumbs({
+      route: route('/admin/providers', 'ProviderManagement'),
+      navigation,
+      modules: {},
+      isNavActive: href => href === '/admin/providers',
+      t: translate,
+    })).toEqual([
+      { label: 'tx:nav.group.management' },
+      { label: 'tx:nav.providers' },
     ])
   })
 })

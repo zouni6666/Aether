@@ -105,6 +105,12 @@ impl WalletReadSnapshot {
                     .as_deref()
                     .is_none_or(|expected| wallet.status == expected)
             })
+            .filter(|wallet| {
+                query
+                    .user_id
+                    .as_deref()
+                    .is_none_or(|expected| wallet.user_id.as_deref() == Some(expected))
+            })
             .filter(|wallet| match query.owner_type.as_deref() {
                 Some("user") => wallet.user_id.is_some(),
                 Some("api_key") => wallet.api_key_id.is_some(),

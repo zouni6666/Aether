@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use url::form_urlencoded;
 
-pub const GEMINI_CLI_USER_AGENT: &str = "GeminiCLI/0.1.5 (Windows; AMD64)";
+pub const GEMINI_CLI_USER_AGENT: &str = crate::client_identity::GEMINI_CLI.user_agent;
 pub const GEMINI_CLI_V1INTERNAL_PATH_TEMPLATE: &str = "/v1internal:{action}";
 pub const GEMINI_CLI_RETRIEVE_USER_QUOTA_PATH: &str = "/v1internal:retrieveUserQuota";
 

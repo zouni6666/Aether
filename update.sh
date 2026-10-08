@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # One-click updater for Docker Compose deployments.
 #
-# This updates the app container image and recreates only the app service. It is
-# intentionally not a hot patch of the running Rust process.
+# This applies schema migrations with the new image before recreating the app
+# service. It is intentionally not a hot patch of the running Rust process.
 
 set -euo pipefail
 
@@ -220,6 +220,14 @@ compose_pull_app() {
     compose pull "${APP_SERVICE}"
 }
 
+compose_migrate_app() {
+    # The image entrypoint is aether-gateway; pass only its migration flag.
+    # A one-off container uses the new image and existing service environment,
+    # without publishing app ports, restarting dependencies, or replacing app.
+    # --migrate applies schema changes only; app startup runs pending backfills.
+    compose run --rm --no-deps -T "${APP_SERVICE}" --migrate
+}
+
 compose_up_app() {
     local wait_for_health="${1:-false}"
     local -a up_args=(up -d)
@@ -279,6 +287,10 @@ if [[ "${NO_PULL}" != "true" ]]; then
     echo ">>> Pulling latest image for ${APP_SERVICE}..."
     compose_pull_app
 fi
+
+echo ">>> Applying schema migrations before replacing ${APP_SERVICE}..."
+compose_migrate_app \
+    || die "database migration failed; app was not recreated; no running service was stopped"
 
 echo ">>> Recreating ${APP_SERVICE}..."
 if compose_supports_wait; then

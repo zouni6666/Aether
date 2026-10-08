@@ -35,10 +35,38 @@ fn build_admin_endpoint_health_bad_request_response(detail: &str) -> Response<Bo
 pub(super) async fn maybe_build_local_admin_endpoints_health_response(
     state: &AdminAppState<'_>,
     request_context: &AdminRequestContext<'_>,
+    request_body: Option<&axum::body::Bytes>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
     let Some(decision) = request_context.decision() else {
         return Ok(None);
     };
+
+    if decision.route_family.as_deref() == Some("endpoints_health") {
+        if decision.route_kind.as_deref() == Some("health_v2") {
+            return Ok(Some(
+                crate::handlers::shared::health_monitor::build_health_v2_response(
+                    state.app(),
+                    request_context.path(),
+                    request_context.query_string(),
+                    crate::handlers::shared::health_monitor::HealthAudience::Admin,
+                )
+                .await,
+            ));
+        }
+        if decision.route_kind.as_deref() == Some("health_v2_publication") {
+            return Ok(Some(
+                crate::handlers::shared::health_monitor::build_publication_response(
+                    state.app(),
+                    if request_context.method() == http::Method::PUT {
+                        Some(request_body.map_or(&[][..], |body| body.as_ref()))
+                    } else {
+                        None
+                    },
+                )
+                .await,
+            ));
+        }
+    }
 
     if decision.route_family.as_deref() == Some("endpoints_health")
         && decision.route_kind.as_deref() == Some("health_summary")

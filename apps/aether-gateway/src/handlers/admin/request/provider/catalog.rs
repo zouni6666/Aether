@@ -420,6 +420,24 @@ impl<'a> AdminAppState<'a> {
             .await
     }
 
+    pub(crate) async fn create_provider_catalog_provider_in_routing_group(
+        &self,
+        provider: &aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider,
+        shift_existing_priorities_from: Option<i32>,
+        routing_group_id: &str,
+    ) -> Result<
+        Option<aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider>,
+        GatewayError,
+    > {
+        self.app
+            .create_provider_catalog_provider_in_routing_group(
+                provider,
+                shift_existing_priorities_from,
+                routing_group_id,
+            )
+            .await
+    }
+
     pub(crate) async fn update_provider_catalog_provider(
         &self,
         provider: &aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider,

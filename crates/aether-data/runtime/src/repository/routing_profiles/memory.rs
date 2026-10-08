@@ -20,6 +20,58 @@ pub struct InMemoryRoutingGroupRepository {
 }
 
 impl InMemoryRoutingGroupRepository {
+    pub(crate) fn create_scoped_provider<T>(
+        &self,
+        selected_group_id: &str,
+        provider_id: &str,
+        create: impl FnOnce() -> Result<T, DataLayerError>,
+    ) -> Result<T, DataLayerError> {
+        let mut groups = self.groups.write().expect("routing group repository lock");
+        if !groups.contains_key(selected_group_id) {
+            return Err(DataLayerError::InvalidInput(
+                "routing_group_not_found".to_string(),
+            ));
+        }
+        let mut updated = groups.clone();
+        for group in updated.values_mut() {
+            let had_provider = group
+                .config_json
+                .get("disabled_providers")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|disabled| {
+                    disabled
+                        .iter()
+                        .any(|value| value.as_str() == Some(provider_id))
+                });
+            if (group.id == selected_group_id && !had_provider)
+                || (group.id != selected_group_id && had_provider)
+            {
+                continue;
+            }
+            let object = group.config_json.as_object_mut().ok_or_else(|| {
+                DataLayerError::InvalidInput("routing group config must be an object".to_string())
+            })?;
+            let disabled = object
+                .entry("disabled_providers")
+                .or_insert_with(|| serde_json::json!([]));
+            let disabled = disabled.as_array_mut().ok_or_else(|| {
+                DataLayerError::InvalidInput("disabled_providers must be an array".to_string())
+            })?;
+            disabled.retain(|value| value.as_str() != Some(provider_id));
+            if group.id != selected_group_id {
+                disabled.push(serde_json::json!(provider_id));
+            }
+            group.version = group.version.saturating_add(1);
+            group.updated_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+        }
+        let created = create()?;
+        *groups = updated;
+        Ok(created)
+    }
+
     pub fn seed<I, B, V>(groups: I, bindings: B, versions: V) -> Self
     where
         I: IntoIterator<Item = StoredRoutingGroup>,

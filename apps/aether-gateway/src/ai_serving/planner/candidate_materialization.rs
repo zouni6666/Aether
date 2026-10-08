@@ -2579,6 +2579,8 @@ mod tests {
 
         let fixed_order_app = AppState::new().expect("state should build");
         let fixed_order_policy = ResolvedRoutingPolicy {
+            billing_multiplier: 1.0,
+            group_name: None,
             group_id: Some("routing-group-fixed-order".to_string()),
             group_version: Some(1),
             selection_source: "test".to_string(),

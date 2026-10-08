@@ -243,7 +243,10 @@ impl SyncAttemptTerminalGuard {
         record_sync_attempt_forced_terminal_state(
             self.state.clone(),
             self.plan.clone(),
-            self.report_context.clone(),
+            crate::usage::reporting::failure::gateway_error_analytics_context(
+                self.report_context.as_ref(),
+                error,
+            ),
             self.request_diagnostics.clone(),
             self.candidate_started_unix_ms,
             self.candidate_started_at,
@@ -317,6 +320,16 @@ async fn record_sync_attempt_forced_terminal_state(
     let error_message = error_message.into();
     let report_context =
         attach_request_diagnostics_to_report_context(report_context, request_diagnostics.as_ref());
+    let report_context = if matches!(usage_event_type, UsageEventType::Cancelled) {
+        crate::usage::reporting::failure::with_analytics_failure(
+            report_context.as_ref(),
+            "unknown",
+            "finalize",
+            "request_task_cancelled",
+        )
+    } else {
+        report_context
+    };
     let terminal_unix_ms = current_request_candidate_unix_ms();
     let latency_ms = elapsed_ms_since(candidate_started_at);
     record_local_request_candidate_status(
@@ -614,15 +627,19 @@ async fn record_sync_terminal_usage(
     candidate_started_at: Instant,
     candidate_first_byte_elapsed_ms: Option<u64>,
 ) {
+    let analytics_context =
+        crate::usage::reporting::failure::sync_analytics_context(report_context, payload);
     let report_context_with_diagnostics =
         attach_current_request_diagnostics_and_candidate_start_timing_to_report_context(
-            report_context,
+            analytics_context.as_ref(),
             candidate_started_at,
             candidate_first_byte_elapsed_ms,
         );
     let context_seed = build_terminal_usage_context_seed(
         plan,
-        report_context_with_diagnostics.as_ref().or(report_context),
+        report_context_with_diagnostics
+            .as_ref()
+            .or(analytics_context.as_ref()),
     );
     let payload_seed = build_sync_terminal_usage_payload_seed(payload);
     state
@@ -2074,37 +2091,38 @@ async fn execute_execution_runtime_sync_impl(
         .unwrap_or_else(|| "-".to_string());
     let candidate_started_at = Instant::now();
     let candidate_started_unix_secs = current_request_candidate_unix_ms();
-    let _provider_pool_in_flight_guard = match acquire_provider_pool_execution_guard(state, &plan)
-        .await?
-    {
-        ProviderPoolInFlightAdmission::Acquired(guard) => guard,
-        ProviderPoolInFlightAdmission::Saturated { limit } => {
-            record_local_runtime_candidate_skip_reason(
-                state,
-                trace_id,
-                "provider_key_concurrency_limit_reached",
-            );
-            if let Some(retry_scope) = retry_scope_out.as_deref_mut() {
-                *retry_scope = AiAttemptRetryScope::Candidate;
+    let _provider_pool_in_flight_guard =
+        match acquire_provider_pool_execution_guard(state, &plan, report_context.as_ref()).await? {
+            ProviderPoolInFlightAdmission::Acquired(guard) => guard,
+            ProviderPoolInFlightAdmission::Saturated { limit } => {
+                record_local_runtime_candidate_skip_reason(
+                    state,
+                    trace_id,
+                    "provider_key_concurrency_limit_reached",
+                );
+                if let Some(retry_scope) = retry_scope_out.as_deref_mut() {
+                    *retry_scope = AiAttemptRetryScope::Candidate;
+                }
+                record_local_request_candidate_status(
+                    state,
+                    &plan,
+                    report_context.as_ref(),
+                    SchedulerRequestCandidateStatusUpdate {
+                        status: RequestCandidateStatus::Skipped,
+                        status_code: Some(StatusCode::TOO_MANY_REQUESTS.as_u16()),
+                        error_type: Some("provider_key_concurrency_limit_reached".to_string()),
+                        error_message: Some(format!(
+                            "provider key concurrency limit reached: {limit}"
+                        )),
+                        latency_ms: Some(0),
+                        started_at_unix_ms: Some(candidate_started_unix_secs),
+                        finished_at_unix_ms: Some(candidate_started_unix_secs),
+                    },
+                )
+                .await;
+                return Ok(None);
             }
-            record_local_request_candidate_status(
-                state,
-                &plan,
-                report_context.as_ref(),
-                SchedulerRequestCandidateStatusUpdate {
-                    status: RequestCandidateStatus::Skipped,
-                    status_code: Some(StatusCode::TOO_MANY_REQUESTS.as_u16()),
-                    error_type: Some("provider_key_concurrency_limit_reached".to_string()),
-                    error_message: Some(format!("provider key concurrency limit reached: {limit}")),
-                    latency_ms: Some(0),
-                    started_at_unix_ms: Some(candidate_started_unix_secs),
-                    finished_at_unix_ms: Some(candidate_started_unix_secs),
-                },
-            )
-            .await;
-            return Ok(None);
-        }
-    };
+        };
     let lifecycle_seed = build_lifecycle_usage_seed(&plan, report_context.as_ref());
     let usage_data = state.usage_lifecycle_data_state().as_ref().clone();
     state
@@ -2804,6 +2822,9 @@ async fn execute_execution_runtime_sync_impl(
         provider_response_observation.response_headers_observed_at_unix_ms,
         &provider_response_observation.request_order_id,
     );
+    if let Some(error) = result.error.as_ref() {
+        report_context = crate::usage::reporting::failure::execution_error_analytics_context(report_context.as_ref(), error);
+    }
     if result.status_code >= 400 {
         apply_local_execution_effect(
             state,

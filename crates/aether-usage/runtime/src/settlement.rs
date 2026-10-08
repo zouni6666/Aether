@@ -7,7 +7,7 @@ use aether_data_contracts::repository::settlement::{
 };
 use aether_data_contracts::repository::usage::PLAN_USAGE_RESERVATION_DEFERRED_METADATA_KEY;
 use aether_data_contracts::repository::usage::{
-    cancelled_request_fee_is_billable, StoredRequestUsageAudit,
+    billing_multiplier_snapshot, cancelled_request_fee_is_billable, StoredRequestUsageAudit,
 };
 use aether_data_contracts::{DataLayerError, DataLayerError::InvalidInput};
 use async_trait::async_trait;
@@ -72,16 +72,25 @@ pub(crate) async fn reconcile_usage_policy_cost_for_event_with_result(
         return Ok(None);
     };
     let actual_cost_units = if terminal_state == UsagePolicyCostReservationState::Finalized {
-        let actual_cost_usd = event.data.actual_total_cost_usd.ok_or_else(|| {
+        let snapshot = billing_multiplier_snapshot(event.data.request_metadata.as_ref())?;
+        let cost = if snapshot.is_some() {
+            event.data.total_cost_usd
+        } else {
+            event.data.actual_total_cost_usd
+        };
+        let actual_cost_usd = cost.ok_or_else(|| {
             InvalidInput(
                 "completed usage event with a plan reservation token is missing actual cost"
                     .to_string(),
             )
         })?;
-        nonnegative_usd_to_usage_policy_cost_units(finite_cost(actual_cost_usd)?.max(0.0))
-            .ok_or_else(|| {
-                InvalidInput("usage policy settlement cost exceeds the supported range".to_string())
-            })?
+        let actual_cost_usd = match snapshot {
+            Some(snapshot) => snapshot.cost(actual_cost_usd)?,
+            None => finite_cost(actual_cost_usd)?.max(0.0),
+        };
+        nonnegative_usd_to_usage_policy_cost_units(actual_cost_usd).ok_or_else(|| {
+            InvalidInput("usage policy settlement cost exceeds the supported range".to_string())
+        })?
     } else {
         0
     };
@@ -115,6 +124,34 @@ pub async fn settle_usage_if_needed(
     settle_usage_with_reconciled_cost(writer, usage, None).await
 }
 
+pub(crate) async fn settle_usage_after_upsert(
+    writer: &dyn UsageSettlementWriter,
+    usage: &StoredRequestUsageAudit,
+    event: &UsageEvent,
+) -> Result<(), DataLayerError> {
+    // Different admissions can share a client request id. Finalize that event's
+    // own server-issued reservation without borrowing the other admission's rate.
+    if event_usage_policy_reservation_token(event).is_some()
+        && event_usage_policy_reservation_token(event) != usage_policy_reservation_token(usage)
+        && !plan_usage_reservation_reconciliation_is_deferred(event.data.request_metadata.as_ref())
+    {
+        let billable = event.event_type == UsageEventType::Completed
+            || (event.event_type == UsageEventType::Cancelled
+                && cancelled_request_fee_is_billable(event.data.request_metadata.as_ref()));
+        if billable
+            && billing_multiplier_snapshot(event.data.request_metadata.as_ref())?.is_none()
+            && billing_multiplier_snapshot(usage.request_metadata.as_ref())?.is_some()
+        {
+            return Err(InvalidInput(
+                "colliding usage admission is missing its own billing multiplier snapshot"
+                    .to_string(),
+            ));
+        }
+        reconcile_usage_policy_cost_for_event(writer, event).await?;
+    }
+    settle_usage_if_needed(writer, usage).await
+}
+
 pub(crate) async fn settle_usage_with_reconciled_cost(
     writer: &dyn UsageSettlementWriter,
     usage: &StoredRequestUsageAudit,
@@ -126,6 +163,11 @@ pub(crate) async fn settle_usage_with_reconciled_cost(
     if !matches!(usage.status.as_str(), "completed" | "failed" | "cancelled") {
         return Ok(());
     }
+
+    let billing_cost_usd = match billing_multiplier_snapshot(usage.request_metadata.as_ref())? {
+        Some(snapshot) => snapshot.cost(usage.total_cost_usd)?,
+        None => finite_cost(usage.actual_total_cost_usd)?.max(0.0),
+    };
 
     let finalized_at_unix_secs = usage
         .finalized_at_unix_secs
@@ -148,14 +190,14 @@ pub(crate) async fn settle_usage_with_reconciled_cost(
             {
                 (
                     UsagePolicyCostReservationState::Finalized,
-                    nonnegative_usd_to_usage_policy_cost_units(
-                        finite_cost(usage.actual_total_cost_usd)?.max(0.0),
-                    )
-                    .ok_or_else(|| {
-                        InvalidInput(
-                            "usage policy settlement cost exceeds the supported range".to_string(),
-                        )
-                    })?,
+                    nonnegative_usd_to_usage_policy_cost_units(billing_cost_usd).ok_or_else(
+                        || {
+                            InvalidInput(
+                                "usage policy settlement cost exceeds the supported range"
+                                    .to_string(),
+                            )
+                        },
+                    )?,
                 )
             } else {
                 (UsagePolicyCostReservationState::Released, 0)
@@ -194,6 +236,7 @@ pub(crate) async fn settle_usage_with_reconciled_cost(
         billing_status: usage.billing_status.clone(),
         total_cost_usd: finite_cost(usage.total_cost_usd)?,
         actual_total_cost_usd: finite_cost(usage.actual_total_cost_usd)?,
+        billing_cost_usd: Some(billing_cost_usd),
         finalized_at_unix_secs,
     };
     let _ = writer.settle_usage(input).await?;
@@ -447,6 +490,62 @@ mod tests {
             reconciliations[0].terminal_state,
             UsagePolicyCostReservationState::Finalized
         );
+    }
+
+    #[tokio::test]
+    async fn composite_billing_rate_charges_customer_without_changing_provider_cost() {
+        for (group_rate, user_rate, expected_cost) in [(2.0, 0.75, 1.875), (0.0, 3.0, 0.0)] {
+            let writer = TestSettlementWriter {
+                has_writer: true,
+                ..Default::default()
+            };
+            let mut usage = sample_usage();
+            let snapshot =
+                aether_data_contracts::repository::usage::BillingMultiplierSnapshot::from_factors(
+                    std::collections::BTreeMap::from([
+                        ("routing_group".to_string(), group_rate),
+                        ("user_group".to_string(), user_rate),
+                    ]),
+                )
+                .unwrap();
+            usage.request_metadata.as_mut().unwrap()["billing_multiplier_snapshot"] =
+                json!(snapshot);
+            settle_usage_if_needed(&writer, &usage).await.unwrap();
+            let inputs = writer.inputs.lock().unwrap();
+            assert_eq!(inputs[0].billing_cost_usd, Some(expected_cost));
+            assert_eq!(inputs[0].total_cost_usd, 1.25);
+            assert_eq!(inputs[0].actual_total_cost_usd, 0.75);
+            assert_eq!(
+                writer.reconciliations.lock().unwrap()[0].actual_cost_units,
+                (expected_cost * 100_000_000.0).round() as u64
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn corrupt_or_overflowing_billing_rate_never_changes_wallet_or_reservation() {
+        for (base, snapshot) in [
+            (1.25, serde_json::Value::Null),
+            (
+                1.25,
+                json!({"version":1,"factors":{"routing_group":2},"multiplier":1}),
+            ),
+            (
+                f64::MAX,
+                json!({"version":1,"factors":{"routing_group":2},"multiplier":2}),
+            ),
+        ] {
+            let writer = TestSettlementWriter {
+                has_writer: true,
+                ..Default::default()
+            };
+            let mut usage = sample_usage();
+            usage.total_cost_usd = base;
+            usage.request_metadata.as_mut().unwrap()["billing_multiplier_snapshot"] = snapshot;
+            assert!(settle_usage_if_needed(&writer, &usage).await.is_err());
+            assert!(writer.inputs.lock().unwrap().is_empty());
+            assert!(writer.reconciliations.lock().unwrap().is_empty());
+        }
     }
 
     #[tokio::test]

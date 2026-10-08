@@ -1,12 +1,16 @@
 <template>
-  <Card class="p-4 overflow-hidden">
+  <Card
+    class="p-4 overflow-hidden"
+    :title="tooltip"
+  >
     <div class="flex items-center justify-between mb-3">
       <p class="text-sm font-semibold">
         {{ title }}
       </p>
       <div
         v-if="hasData"
-        class="flex items-center gap-1 text-[11px] text-muted-foreground flex-shrink-0"
+        class="items-center gap-1 text-[11px] text-muted-foreground flex-shrink-0"
+        :class="compact ? 'hidden sm:flex' : 'flex'"
       >
         <span class="flex-shrink-0">少</span>
         <div
@@ -36,6 +40,7 @@
       v-else-if="hasData"
       :data="data"
       :show-header="false"
+      :compact="compact"
     />
     <div
       v-else
@@ -56,6 +61,8 @@ import type { ActivityHeatmap as ActivityHeatmapData } from '@/types/activity'
 const props = defineProps<{
   data: ActivityHeatmapData | null
   title: string
+  tooltip?: string
+  compact?: boolean
   isLoading?: boolean
   hasError?: boolean
 }>()

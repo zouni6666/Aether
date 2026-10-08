@@ -188,6 +188,100 @@ afterEach(() => {
 })
 
 describe('UsageRecordsTable', () => {
+  it.each([
+    [{ routing_group_name: '生产策略', routing_group_id: 'group-1' }, '生产策略'],
+    [{ routing_group_name: ' ', routing_group_id: 'group-history' }, 'group-history'],
+    [{}, '未记录分组'],
+  ])('shows group then the provider Key in desktop and mobile layouts', (group, expected) => {
+    const root = mountUsageRecordsTable([buildRecord({
+      ...group,
+      provider: '上游 A',
+      provider_key_name: '供应商 Key',
+      api_key: { id: 'user-key', name: '用户 API Key', display: 'sk-user' },
+    })])
+    expect([...root.querySelectorAll('[data-usage-provider="routing-group"]')].map(element => element.textContent?.trim()))
+      .toEqual([expected, expected])
+    const providerLines = [...root.querySelectorAll<HTMLElement>('[data-usage-provider="provider-key"]')]
+    expect(providerLines.map(element => element.textContent?.trim())).toEqual(['上游 A · 供应商 Key', '上游 A · 供应商 Key'])
+    for (const providerLine of providerLines) {
+      expect(providerLine.previousElementSibling?.getAttribute('data-usage-provider')).toBe('routing-group')
+      expect(providerLine.title).toBe('上游 A · 供应商 Key')
+    }
+  })
+
+  it('does not substitute a user API Key when the provider Key is unavailable', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      provider: '上游 A',
+      api_key: { id: 'user-key', name: '用户 API Key', display: 'sk-user' },
+    })])
+    expect([...root.querySelectorAll('[data-usage-provider="provider-key"]')].map(element => element.textContent?.trim()))
+      .toEqual(['上游 A · -', '上游 A · -'])
+  })
+
+  it.each([
+    [0, '$0.00'],
+    [1, '$10.00'],
+    [0.5, '$5.00'],
+    [2, '$20.00'],
+    [undefined, '$3.00'],
+  ])('shows customer charges in both layouts for multiplier %s, including legacy charges', (multiplier, expected) => {
+    const root = mountUsageRecordsTable([buildRecord({
+      cost: 10,
+      actual_cost: 3,
+      rate_multiplier: 0.3,
+      billing_multiplier: multiplier as number | undefined,
+    })], { isAdmin: false })
+    const subtitles = [...root.querySelectorAll('[data-usage-cost="routing-group"]')]
+    expect(subtitles).toHaveLength(2)
+    expect(subtitles.map(element => element.textContent?.trim())).toEqual([expected, expected])
+    expect(subtitles.every(element => element.getAttribute('title') === '实际扣费')).toBe(true)
+    expect([...root.querySelectorAll('[data-usage-cost="base"]')].map(element => element.textContent?.trim())).toEqual(['$10.00', '$10.00'])
+    expect(root.querySelector('[data-usage-cost="provider-key"]')).toBeNull()
+    expect(root.querySelector('[data-usage-provider]')).toBeNull()
+  })
+
+  it('uses the historical customer charge independently of the administrator-only provider Key cost', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      cost: 10,
+      actual_cost: 3,
+      rate_multiplier: 0.3,
+      billing_multiplier: 2,
+      billing_cost: 19.99,
+    })], { showActualCost: true })
+    const subtitles = [...root.querySelectorAll('[data-usage-cost="routing-group"]')]
+    expect(subtitles.map(element => element.textContent?.trim())).toEqual(['$19.99', '$19.99'])
+    const keyCosts = [...root.querySelectorAll<HTMLElement>('[data-usage-cost="provider-key"]')]
+    expect(keyCosts.map(element => element.textContent?.trim())).toEqual(['$3.00', '$3.00'])
+    expect(keyCosts.every(element => element.title.includes('提供商 Key 成本'))).toBe(true)
+  })
+
+  it('does not replace an unavailable customer charge with the base or provider Key cost', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      cost: 10,
+      actual_cost: 3,
+      rate_multiplier: 0.3,
+      billing_multiplier: 2,
+      billing_cost: null,
+    })], { showActualCost: true })
+    expect(root.querySelector('[data-usage-cost="routing-group"]')).toBeNull()
+    expect([...root.querySelectorAll('[data-usage-cost="base"]')].map(element => element.textContent?.trim()))
+      .toEqual(['$10.00', '$10.00'])
+    expect([...root.querySelectorAll('[data-usage-cost="provider-key"]')].map(element => element.textContent?.trim()))
+      .toEqual(['$3.00', '$3.00'])
+  })
+
+  it.each(['usage_available', 'usage_pricing_available'] as const)('hides all numeric costs when %s is false', field => {
+    const root = mountUsageRecordsTable([buildRecord({
+      [field]: false,
+      actual_cost: 3,
+      rate_multiplier: 0.3,
+      billing_multiplier: 2,
+      billing_cost: 0.02,
+    })], { showActualCost: true })
+    expect(root.querySelector('[data-usage-cost]')).toBeNull()
+    expect(root.querySelectorAll(field === 'usage_available' ? '[data-usage-unavailable="cost"]' : '[data-usage-unpriced="cost"]')).toHaveLength(2)
+  })
+
   it('shows output TPS after the request completes', () => {
     const root = mountUsageRecordsTable([buildRecord()])
 
@@ -438,6 +532,42 @@ describe('UsageRecordsTable', () => {
       .toBe('xhigh')
     expect(inlineLayout?.querySelector('[data-usage-model-badge="fast"]')?.textContent?.trim())
       .toBe('Fast')
+  })
+
+  it('shows the Gemini thinkingLevel reasoning effort next to the model name', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      model: 'gemini-3.8-flash',
+      requested_reasoning_effort: 'high',
+      reasoning_effort: 'high',
+    })])
+
+    expect(root.textContent).toContain('gemini-3.8-flash')
+    const badge = root.querySelector('[data-usage-model-badge="reasoning"]')
+    expect(badge?.textContent?.trim()).toBe('high')
+    expect(badge?.getAttribute('title')).toBe('Reasoning: high')
+  })
+
+  it('shows the Gemini thinkingLevel mapping when request and provider disagree', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      model: 'gemini-3.8-flash',
+      requested_reasoning_effort: 'xhigh',
+      reasoning_effort: 'high',
+    })])
+
+    expect(root.textContent).toContain('xhigh -> high')
+    expect(root.querySelector('[data-usage-model-badge="reasoning"]')?.textContent?.trim())
+      .toBe('xhigh -> high')
+  })
+
+  it('shows a disabled Gemini thinkingBudget as none', () => {
+    const root = mountUsageRecordsTable([buildRecord({
+      model: 'gemini-3.8-flash',
+      requested_reasoning_effort: null,
+      reasoning_effort: 'none',
+    })])
+
+    expect(root.querySelector('[data-usage-model-badge="reasoning"]')?.textContent?.trim())
+      .toBe('none')
   })
 
   it('shows request reasoning effort while the record is pending', () => {

@@ -113,4 +113,13 @@ describe('adminApi analytics cache options', () => {
     })
   })
 
+  it('refreshes both leaderboards for the same precise period as user accounts', async () => {
+    const range = { from: '2026-09-10T15:20:42Z', to: '2026-09-10T16:20:42Z', timezone: 'Asia/Shanghai' }
+    await adminApi.getLeaderboardUsers(range, { skipCache: true })
+    await adminApi.getLeaderboardUserGroups(range, { skipCache: true })
+    expect(getMock).toHaveBeenCalledWith('/api/admin/stats/leaderboard/users', { params: range })
+    expect(getMock).toHaveBeenCalledWith('/api/admin/stats/leaderboard/user-groups', { params: range })
+    for (const call of cachedRequestMock.mock.calls as unknown[][]) expect(call[2]).toBe(0)
+  })
+
 })

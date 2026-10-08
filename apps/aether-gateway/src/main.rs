@@ -2513,20 +2513,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
-    match state.prewarm_codex_client_profile().await {
-        Ok(version) => {
-            info!(
-                codex_client_version = %version,
-                "prewarmed Codex client profile"
-            );
-        }
-        Err(err) => {
-            warn!(
-                error = %err,
-                "failed to refresh Codex client profile; built-in or cached profile remains active"
-            );
+    for (client, result) in state.prewarm_client_profiles().await {
+        match result {
+            Ok(version) => info!(client, version = %version, "prewarmed client profile"),
+            Err(error) => warn!(client, error = %error,
+                "client profile refresh failed; built-in or cached profile remains active"),
         }
     }
+    // All roles synchronize local snapshots, not just the singleton owner.
+    // Keep the guard alive until main exits so shutdown cancels the task.
+    let _client_profile_cache_sync = state.spawn_client_profile_cache_sync();
     match prewarm_direct_h2c_sender_cache_from_env_for_startup().await {
         Ok(Some(report)) => {
             if report.failed_targets > 0 {

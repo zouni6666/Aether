@@ -198,7 +198,23 @@
             </RouterLink>
 
             <!-- Right Actions -->
-            <div class="flex shrink-0 items-center gap-0.5 sm:gap-3">
+            <div class="flex shrink-0 items-center gap-0 sm:gap-3 max-sm:[&_button]:h-8 max-sm:[&_button]:w-8">
+              <AnnouncementBell
+                :open="announcementPanel === 'mobile'"
+                :items="announcementStore.items"
+                :unread-count="announcementStore.unreadCount"
+                :loading="announcementStore.loading"
+                :error="announcementStore.error"
+                :has-more="announcementStore.hasMore"
+                :marking-all="announcementStore.markingAll"
+                :can-manage="authStore.canOperateAdmin"
+                @update:open="setAnnouncementPanel('mobile', $event)"
+                @select="openAnnouncement"
+                @refresh="refreshAnnouncements"
+                @load-more="announcementStore.loadList(true)"
+                @read-all="markAllAnnouncementsRead"
+                @create="openAnnouncementComposer"
+              />
               <VersionButton
                 v-if="isAdmin"
                 :status="versionStatus"
@@ -385,6 +401,22 @@
             id="header-actions-right"
             class="flex items-center"
           />
+          <AnnouncementBell
+            :open="announcementPanel === 'desktop'"
+            :items="announcementStore.items"
+            :unread-count="announcementStore.unreadCount"
+            :loading="announcementStore.loading"
+            :error="announcementStore.error"
+            :has-more="announcementStore.hasMore"
+            :marking-all="announcementStore.markingAll"
+            :can-manage="authStore.canOperateAdmin"
+            @update:open="setAnnouncementPanel('desktop', $event)"
+            @select="openAnnouncement"
+            @refresh="refreshAnnouncements"
+            @load-more="announcementStore.loadList(true)"
+            @read-all="markAllAnnouncementsRead"
+            @create="openAnnouncementComposer"
+          />
           <VersionButton
             v-if="isAdmin"
             :status="versionStatus"
@@ -422,42 +454,15 @@
 
     <RouterView />
 
-    <Dialog
+    <AnnouncementDialog
       v-model="requiredAnnouncementOpen"
-      persistent
-      size="lg"
-      :title="t('announcement.requiredTitle')"
-      :description="t('announcement.requiredDescription')"
-    >
-      <div
-        v-if="currentRequiredAnnouncement"
-        class="space-y-4"
-      >
-        <div>
-          <h3 class="text-lg font-semibold text-foreground">
-            {{ currentRequiredAnnouncement.title }}
-          </h3>
-          <p class="mt-1 text-xs text-muted-foreground">
-            {{ formatRequiredAnnouncementDate(currentRequiredAnnouncement.created_at) }}
-          </p>
-        </div>
-        <!-- eslint-disable vue/no-v-html -->
-        <div
-          class="prose prose-sm dark:prose-invert max-h-[50vh] max-w-none overflow-y-auto"
-          v-html="renderRequiredAnnouncement(currentRequiredAnnouncement.content)"
-        />
-        <!-- eslint-enable vue/no-v-html -->
-      </div>
-      <template #footer>
-        <Button
-          type="button"
-          :disabled="acknowledgingRequiredAnnouncement"
-          @click="acknowledgeRequiredAnnouncement"
-        >
-          {{ acknowledgingRequiredAnnouncement ? t('common.confirming') : t('common.confirmRead') }}
-        </Button>
-      </template>
-    </Dialog>
+      :announcement="currentRequiredAnnouncement"
+      :persistent="announcementNeedsConfirmation"
+      :confirm-read="!!currentRequiredAnnouncement && !currentRequiredAnnouncement.is_read"
+      :confirming="acknowledgingRequiredAnnouncement"
+      :error="announcementReadError"
+      @confirm="acknowledgeRequiredAnnouncement"
+    />
 
     <!-- 更新提示弹窗 -->
     <UpdateDialog
@@ -490,20 +495,19 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
+import { computed, provide, ref, watch, onMounted, onUnmounted } from 'vue'
 import { useLocalStorage } from '@vueuse/core'
 import { useRoute, useRouter } from 'vue-router'
-import { marked } from 'marked'
 import { useAuthStore } from '@/stores/auth'
 import { useModuleStore } from '@/stores/modules'
 import { useSiteInfo } from '@/composables/useSiteInfo'
 import { useToast } from '@/composables/useToast'
 import { isDemoMode } from '@/config/demo'
 import { adminApi, type CheckUpdateResponse, type ReleaseEntry, type SystemUpdateCapabilityResponse, type UpdateTaskStatusResponse } from '@/api/admin'
-import { announcementApi, type Announcement } from '@/api/announcements'
+import type { Announcement } from '@/api/announcements'
+import { useAnnouncementStore } from '@/stores/announcements'
 import { parseApiError } from '@/utils/errorParser'
 import Button from '@/components/ui/button.vue'
-import { Dialog } from '@/components/ui'
 import AppShell from '@/components/layout/AppShell.vue'
 import SidebarNav from '@/components/layout/SidebarNav.vue'
 import HeaderLogo from '@/components/HeaderLogo.vue'
@@ -511,6 +515,9 @@ import LanguageSwitcher from '@/components/common/LanguageSwitcher.vue'
 import ThemeModeButton from '@/components/common/ThemeModeButton.vue'
 import UpdateDialog from '@/components/common/UpdateDialog.vue'
 import VersionButton from '@/components/common/VersionButton.vue'
+import AnnouncementBell from '@/components/common/AnnouncementBell.vue'
+import AnnouncementDialog from '@/components/common/AnnouncementDialog.vue'
+import { openAnnouncementKey } from '@/components/common/announcementContext'
 import { buildUpdateErrorStatus } from '@/utils/updateStatus'
 import { safeExternalHttpsUrl } from '@/utils/navigationSecurity'
 import {
@@ -526,7 +533,6 @@ import {
 
 import GithubIcon from '@/components/icons/GithubIcon.vue'
 import { prefetchNavigationTarget } from '@/utils/adminNavigationPrefetch'
-import { sanitizeMarkdown } from '@/utils/sanitize'
 import { useI18n, type MessageKey } from '@/i18n'
 import { buildBreadcrumbs, buildNavigation } from './main-layout/navigation'
 
@@ -536,6 +542,7 @@ const router = useRouter()
 const route = useRoute()
 const authStore = useAuthStore()
 const moduleStore = useModuleStore()
+const announcementStore = useAnnouncementStore()
 const { siteName, siteSubtitle } = useSiteInfo()
 const { success, error: showError } = useToast()
 const { t, locale } = useI18n()
@@ -545,15 +552,22 @@ const isAdmin = computed(() => authStore.user?.role === 'admin')
 const showAuthError = ref(false)
 const mobileMenuOpen = ref(false)
 const sidebarCollapsed = useLocalStorage('aether-sidebar-collapsed', false)
-const requiredAnnouncements = ref<Announcement[]>([])
+const announcementText = (zh: string, en: string) => locale.value === 'zh-CN' ? zh : en
+const announcementPanel = ref<'desktop' | 'mobile' | null>(null)
+const manualAnnouncement = ref<Announcement | null>(null)
+const announcementReadError = ref('')
 const acknowledgingRequiredAnnouncement = ref(false)
+let announcementReadRequestId = 0
+const currentRequiredAnnouncement = computed(() => manualAnnouncement.value ?? announcementStore.requiredItems[0] ?? null)
+const announcementNeedsConfirmation = computed(() => !!currentRequiredAnnouncement.value?.requires_ack && !currentRequiredAnnouncement.value.is_read)
 const requiredAnnouncementOpen = computed({
-  get: () => requiredAnnouncements.value.length > 0,
+  get: () => !!currentRequiredAnnouncement.value,
   set: (value) => {
-    if (value) void loadRequiredAnnouncements()
+    if (!value && !announcementNeedsConfirmation.value) manualAnnouncement.value = null
   }
 })
-const currentRequiredAnnouncement = computed(() => requiredAnnouncements.value[0] ?? null)
+let announcementPollTimer: number | null = null
+provide(openAnnouncementKey, openAnnouncement)
 
 // 更新检查相关
 const showUpdateDialog = ref(false)
@@ -583,7 +597,6 @@ const VERSION_STATUS_ERROR_CACHE_TTL_MS = 5 * 60 * 1000
 let versionStatusLoadPromise: Promise<CheckUpdateResponse | null> | null = null
 let updateStatusPollTimer: number | null = null
 let updateCheckTimer: number | null = null
-let requiredAnnouncementsPromise: Promise<void> | null = null
 const updateProgressPercent = computed(() => updateTaskStatus.value?.progress_percent ?? null)
 const updateProgressText = computed(() => formatUpdateProgressText(updateTaskStatus.value))
 const updateDialogTitle = computed(() => {
@@ -1099,62 +1112,88 @@ function syncAuthNotice() {
 function handleVisibilityChange() {
   if (!document.hidden) {
     syncAuthNotice()
+    void announcementStore.refreshStatus()
   }
 }
 
 watch(
-  () => [authStore.user, authStore.token] as const,
-  () => {
+  () => [authStore.user?.id, !!authStore.token] as const,
+  ([userId, authenticated]) => {
     showAuthError.value = !!authStore.user && !authStore.token
-    if (authStore.user && authStore.token) {
-      void loadRequiredAnnouncements()
-    } else {
-      requiredAnnouncements.value = []
-    }
+    announcementPanel.value = null
+    manualAnnouncement.value = null
+    announcementReadError.value = ''
+    announcementReadRequestId += 1
+    acknowledgingRequiredAnnouncement.value = false
+    announcementStore.resetSession(userId && authenticated ? userId : null)
+    if (userId && authenticated) void announcementStore.refreshStatus()
   },
   { immediate: true }
 )
 
-async function loadRequiredAnnouncements() {
-  if (!authStore.user || !authStore.token) return
-  if (requiredAnnouncementsPromise) return requiredAnnouncementsPromise
+watch(() => currentRequiredAnnouncement.value?.id, () => {
+  announcementReadError.value = ''
+  if (currentRequiredAnnouncement.value) announcementPanel.value = null
+})
 
-  requiredAnnouncementsPromise = (async () => {
-    try {
-      const response = await announcementApi.getRequiredUnreadAnnouncements()
-      requiredAnnouncements.value = response.items.filter(item => item.requires_ack && !item.is_read)
-    } catch {
-      requiredAnnouncements.value = []
-    } finally {
-      requiredAnnouncementsPromise = null
-    }
-  })()
-
-  return requiredAnnouncementsPromise
+function setAnnouncementPanel(panel: 'desktop' | 'mobile', open: boolean) {
+  announcementPanel.value = open ? panel : announcementPanel.value === panel ? null : announcementPanel.value
+  if (open) void refreshAnnouncements()
 }
 
-function renderRequiredAnnouncement(content: string): string {
-  return sanitizeMarkdown(marked(content || '') as string)
+async function refreshAnnouncements() {
+  await Promise.all([announcementStore.loadList(), announcementStore.refreshStatus()])
 }
 
-function formatRequiredAnnouncementDate(value: string): string {
-  return new Date(value).toLocaleString(locale.value)
+function closeAnnouncementPanel() {
+  announcementPanel.value = null
+}
+
+function openAnnouncement(announcement: Announcement) {
+  closeAnnouncementPanel()
+  manualAnnouncement.value = announcement
+  announcementReadError.value = ''
+  if (!announcement.is_read && !announcement.requires_ack) void acknowledgeRequiredAnnouncement()
+}
+
+function openAnnouncementComposer() {
+  if (!authStore.canOperateAdmin) return
+  closeAnnouncementPanel()
+  void router.push({ path: '/admin/announcements', query: { create: '1' } })
+}
+
+async function markAllAnnouncementsRead() {
+  try {
+    await announcementStore.markAllRead()
+  } catch (err) {
+    showError(parseApiError(err, announcementText('标记已读失败', 'Could not mark announcements as read')))
+  }
 }
 
 async function acknowledgeRequiredAnnouncement() {
   const announcement = currentRequiredAnnouncement.value
   if (!announcement) return
+  const requestId = ++announcementReadRequestId
   acknowledgingRequiredAnnouncement.value = true
   try {
-    await announcementApi.markAsRead(announcement.id)
-    requiredAnnouncements.value = requiredAnnouncements.value.slice(1)
+    await announcementStore.markRead(announcement.id)
+    if (requestId !== announcementReadRequestId) return
+    if (manualAnnouncement.value?.id === announcement.id) {
+      if (announcement.requires_ack) manualAnnouncement.value = null
+      else manualAnnouncement.value = { ...announcement, is_read: true }
+    }
+  } catch (err) {
+    if (requestId === announcementReadRequestId) {
+      announcementReadError.value = parseApiError(err, announcementText('标记已读失败，请重试', 'Could not mark as read. Please retry.'))
+    }
   } finally {
-    acknowledgingRequiredAnnouncement.value = false
+    if (requestId === announcementReadRequestId) acknowledgingRequiredAnnouncement.value = false
   }
 }
 
 onMounted(() => {
   document.addEventListener('visibilitychange', handleVisibilityChange)
+  window.addEventListener('resize', closeAnnouncementPanel)
   syncAuthNotice()
   applyCachedVersionStatus()
 
@@ -1164,7 +1203,9 @@ onMounted(() => {
       // 路由守卫会在需要模块状态时按需处理失败场景。
     })
   }
-  void loadRequiredAnnouncements()
+  announcementPollTimer = window.setInterval(() => {
+    if (!document.hidden) void announcementStore.refreshStatus()
+  }, 60_000)
 
   // 延迟检查更新，避免 GitHub Releases 检查和首屏业务数据争抢资源。
   updateCheckTimer = window.setTimeout(() => {
@@ -1180,6 +1221,10 @@ onMounted(() => {
 
 onUnmounted(() => {
   document.removeEventListener('visibilitychange', handleVisibilityChange)
+  window.removeEventListener('resize', closeAnnouncementPanel)
+  if (announcementPollTimer !== null) window.clearInterval(announcementPollTimer)
+  announcementReadRequestId += 1
+  announcementStore.resetSession(null)
   if (updateCheckTimer !== null) {
     window.clearTimeout(updateCheckTimer)
     updateCheckTimer = null

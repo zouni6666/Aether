@@ -50,12 +50,197 @@ use chrono::{TimeZone, Utc};
 const TEST_EMAIL_VERIFICATION_TOKEN: &str =
     "test-email-verification-token-00000000000000000000000000000000";
 
+#[path = "public_support/announcement_user_list.rs"]
+mod announcement_user_list;
+mod api_key_routing;
 #[path = "public_support/auth_cookie.rs"]
 mod auth_cookie;
 #[path = "public_support/dashboard.rs"]
 mod dashboard;
+#[path = "public_support/routing_groups.rs"]
+mod routing_groups;
 #[path = "public_support/vscodex.rs"]
 mod vscodex;
+
+#[tokio::test]
+async fn health_v2_public_scope_filters_summary_lists_and_details_before_projection() {
+    let now = Utc::now();
+    let mut published = sample_user_usage_audit(
+        "private-detail-id",
+        "private-request-id",
+        "private-user-id",
+        "internal-published-model",
+        "private-provider-name",
+        "failed",
+        now - chrono::Duration::minutes(5),
+    );
+    published.request_metadata = Some(json!({
+        "analytics_failure": {"origin": "upstream", "stage": "response", "reason": "private-diagnostic", "schema_version": 1},
+    }));
+    let hidden = sample_user_usage_audit(
+        "private-hidden-id",
+        "private-hidden-request",
+        "private-user-id",
+        "unpublished-model",
+        "private-provider-name",
+        "completed",
+        now - chrono::Duration::minutes(4),
+    );
+    let data = GatewayDataState::with_usage_reader_for_tests(Arc::new(InMemoryUsageReadRepository::seed(vec![published, hidden])))
+        .with_system_config_values_for_tests(vec![("health_publication_v1".into(), json!({
+            "enabled": true, "objects": [
+                {"public_id": "model-api", "kind": "model", "value": "internal-published-model", "display_name": "Model API"},
+            ],
+        }))]);
+    let (gateway_url, gateway_handle) = start_server(build_router_with_state(
+        AppState::new().unwrap().with_data_state_for_tests(data),
+    ))
+    .await;
+    let client = reqwest::Client::new();
+    for resource in ["summary", "objects", "objects/model-api"] {
+        let response = client
+            .get(format!(
+                "{gateway_url}/api/public/health/v2/{resource}?kind=model"
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response.json().await.unwrap();
+        let metrics = match resource {
+            "summary" => &body["data"]["requests"],
+            "objects" => &body["data"]["items"][0],
+            _ => &body["data"],
+        };
+        assert_eq!(
+            metrics["request_count"], 1,
+            "{resource} includes only the published model"
+        );
+        if resource == "objects" {
+            assert_eq!(body["data"]["total"], 1);
+            assert!(!metrics["timeline"].as_array().unwrap().is_empty());
+        }
+        let encoded = body.to_string();
+        for forbidden in [
+            "private-",
+            "internal-published-model",
+            "unpublished-model",
+            "provider_id",
+            "api_key_id",
+            "source_value",
+            "attempts",
+            "error_message",
+            "analytics_failure",
+        ] {
+            assert!(
+                !encoded.contains(forbidden),
+                "{resource} leaked {forbidden}"
+            );
+        }
+    }
+    let empty_scope = client
+        .get(format!(
+            "{gateway_url}/api/public/health/v2/summary?kind=api_format"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(empty_scope.status(), StatusCode::OK);
+    let empty: serde_json::Value = empty_scope.json().await.unwrap();
+    assert_eq!(empty["data"]["object_count"], 0);
+    assert_eq!(empty["data"]["requests"]["request_count"], 0);
+    gateway_handle.abort();
+}
+
+#[tokio::test]
+async fn health_v2_authenticated_user_access_does_not_publish_anonymous_status() {
+    let now = Utc::now();
+    let user = sample_auth_user(now);
+    let access_token = build_test_auth_token(
+        "access",
+        serde_json::Map::from_iter([
+            ("user_id".into(), json!(user.id)),
+            ("role".into(), json!(user.role)),
+            (
+                "created_at".into(),
+                json!(user.created_at.map(|value| value.to_rfc3339())),
+            ),
+            ("session_id".into(), json!("health-user-session")),
+        ]),
+        now + chrono::Duration::hours(1),
+    );
+    let data = GatewayDataState::with_usage_reader_for_tests(Arc::new(
+        InMemoryUsageReadRepository::seed(vec![sample_user_usage_audit(
+            "health-user-row",
+            "health-user-request",
+            &user.id,
+            "model-health",
+            "internal-provider",
+            "completed",
+            now - chrono::Duration::minutes(5),
+        )]),
+    ))
+    .with_user_reader(Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![
+        user,
+    ])))
+    .with_provider_catalog_reader(Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )))
+    .with_system_config_values_for_tests(vec![(
+        "health_publication_v1".into(),
+        json!({ "enabled": false, "objects": [] }),
+    )]);
+    let state = AppState::new()
+        .unwrap()
+        .with_data_state_for_tests(data)
+        .with_auth_session_for_tests(sample_auth_session(
+            "user-auth-1",
+            "health-user-session",
+            "health-user-device",
+            "refresh-token-placeholder",
+            now,
+        ));
+    let (gateway_url, gateway_handle) = start_server(build_router_with_state(state)).await;
+    let client = reqwest::Client::new();
+    let url = format!("{gateway_url}/api/users/me/health/v2/objects?kind=api_format");
+    let anonymous = client.get(&url).send().await.unwrap();
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+    let authenticated = client
+        .get(&url)
+        .bearer_auth(&access_token)
+        .header("x-client-device-id", "health-user-device")
+        .header("user-agent", "AetherTest/1.0")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(authenticated.status(), StatusCode::OK);
+    let body: serde_json::Value = authenticated.json().await.unwrap();
+    assert_eq!(body["meta"]["scope"]["kind"], "authenticated");
+    assert_eq!(body["data"]["total"], 1);
+    assert_eq!(body["data"]["items"][0]["request_count"], 1);
+    assert!(body["data"]["items"][0].get("attempts").is_none());
+    assert!(!body.to_string().contains("internal-provider"));
+    let provider = client
+        .get(format!(
+            "{gateway_url}/api/users/me/health/v2/objects?kind=provider"
+        ))
+        .bearer_auth(&access_token)
+        .header("x-client-device-id", "health-user-device")
+        .header("user-agent", "AetherTest/1.0")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(provider.status(), StatusCode::BAD_REQUEST);
+    let public = client
+        .get(format!("{gateway_url}/api/public/health/v2/objects"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(public.status(), StatusCode::NOT_FOUND);
+    gateway_handle.abort();
+}
 
 #[tokio::test]
 async fn gateway_handles_public_announcements_list_without_proxying_upstream() {
@@ -7806,6 +7991,7 @@ async fn gateway_handles_users_me_api_key_writes_locally_without_proxying_upstre
         .expect("created id should be string")
         .to_string();
     assert_eq!(create_payload["name"], "writer-key");
+    assert!(create_payload.get("credential_kind").is_none());
     assert_eq!(create_payload["rate_limit"], 120);
     assert_eq!(create_payload["concurrent_limit"], serde_json::Value::Null);
     assert_eq!(
@@ -7847,6 +8033,7 @@ async fn gateway_handles_users_me_api_key_writes_locally_without_proxying_upstre
         .await
         .expect("json body should parse");
     assert_eq!(update_payload["name"], "writer-key-renamed");
+    assert!(update_payload.get("credential_kind").is_none());
     assert_eq!(update_payload["rate_limit"], 30);
     assert_eq!(update_payload["concurrent_limit"], 4);
     assert_eq!(

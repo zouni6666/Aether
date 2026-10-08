@@ -412,6 +412,17 @@ fn normalize_local_oauth_refresh_error_message(
         .unwrap_or_else(|| "Token 刷新失败".to_string())
 }
 
+fn local_oauth_refresh_gateway_error(
+    error: &provider_transport::LocalOAuthRefreshError,
+) -> GatewayError {
+    // Keep a bounded, credential-redacted reason for internal diagnostics.
+    // GatewayError::Internal still returns the generic error response to clients.
+    GatewayError::Internal(format!(
+        "local oauth refresh failed: {}",
+        crate::error::redact_error_detail(error)
+    ))
+}
+
 fn merge_local_oauth_refresh_failure_reason(
     current_reason: Option<&str>,
     refresh_reason: &str,
@@ -1556,10 +1567,8 @@ impl AppState {
                     }
                     return Ok(None);
                 }
-                Err(_) => {
-                    return Err(GatewayError::Internal(
-                        "local oauth refresh failed".to_string(),
-                    ));
+                Err(err) => {
+                    return Err(local_oauth_refresh_gateway_error(&err));
                 }
             };
 
@@ -3484,12 +3493,85 @@ mod tests {
     use tokio::sync::Notify;
 
     use super::{
-        AgentIdentityAuthConfigFence, AppState, CodexRuntimeOAuthObservation,
-        ProviderTransportSnapshotCacheKey, ProviderTransportSnapshotFlight,
-        ProviderTransportSnapshotFlightResult, ProviderTransportSnapshotInflightRegistration,
-        PROVIDER_TRANSPORT_SNAPSHOT_CACHE_STALE_TTL, PROVIDER_TRANSPORT_SNAPSHOT_CACHE_TTL,
+        local_oauth_refresh_gateway_error, AgentIdentityAuthConfigFence, AppState,
+        CodexRuntimeOAuthObservation, ProviderTransportSnapshotCacheKey,
+        ProviderTransportSnapshotFlight, ProviderTransportSnapshotFlightResult,
+        ProviderTransportSnapshotInflightRegistration, PROVIDER_TRANSPORT_SNAPSHOT_CACHE_STALE_TTL,
+        PROVIDER_TRANSPORT_SNAPSHOT_CACHE_TTL,
     };
     use crate::data::GatewayDataState;
+
+    #[test]
+    fn oauth_refresh_diagnostic_preserves_failure_reason_and_redacts_credentials() {
+        for (message, secret) in [
+            (
+                "connection refused refresh_token=refresh-secret",
+                "refresh-secret",
+            ),
+            (
+                "connection refused accessToken=access-secret",
+                "access-secret",
+            ),
+            (
+                "connection refused client_secret=client-secret",
+                "client-secret",
+            ),
+            (
+                "connection refused Authorization: Bearer bearer-secret",
+                "bearer-secret",
+            ),
+            (
+                "connection refused https://proxy-user:proxy-secret@proxy.example",
+                "proxy-secret",
+            ),
+        ] {
+            let error = crate::provider_transport::LocalOAuthRefreshError::TransportMessage {
+                provider_type: "codex",
+                message: message.to_string(),
+            };
+            let diagnostic = local_oauth_refresh_gateway_error(&error).into_message();
+            assert!(diagnostic.contains("codex oauth refresh transport failed"));
+            assert!(diagnostic.contains("connection refused"));
+            assert!(!diagnostic.contains(secret), "diagnostic: {diagnostic}");
+        }
+    }
+
+    #[test]
+    fn oauth_refresh_diagnostic_keeps_http_status_without_provider_body() {
+        let error = crate::provider_transport::LocalOAuthRefreshError::HttpStatus {
+            provider_type: "codex",
+            status_code: 503,
+            body_excerpt: "unstructured-provider-secret".to_string(),
+        };
+        let diagnostic = local_oauth_refresh_gateway_error(&error).into_message();
+
+        assert!(diagnostic.contains("codex oauth refresh returned HTTP 503"));
+        assert!(!diagnostic.contains("unstructured-provider-secret"));
+    }
+
+    #[tokio::test]
+    async fn oauth_refresh_diagnostic_is_hidden_from_client_response() {
+        use axum::body::to_bytes;
+        use axum::response::IntoResponse;
+
+        let error = crate::provider_transport::LocalOAuthRefreshError::TransportMessage {
+            provider_type: "codex",
+            message: "connection refused".to_string(),
+        };
+        let response = local_oauth_refresh_gateway_error(&error).into_response();
+
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("error response body should read");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).expect("error should be JSON"),
+            json!({"error": {"message": "internal server error"}}),
+        );
+    }
 
     fn sample_provider() -> StoredProviderCatalogProvider {
         StoredProviderCatalogProvider::new(

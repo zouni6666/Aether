@@ -6,7 +6,7 @@ use aether_routing_core::ResolvedRoutingPolicy;
 use aether_runtime::ConcurrencyPermit;
 use aether_scheduler_core::{
     enumerate_minimal_candidate_selection_with_model_directives, normalize_api_format,
-    resolve_requested_global_model_name_with_model_directives_and_request_operation,
+    resolve_requested_global_model_name_with_reserved_global_model,
     row_supports_requested_model_with_model_directives_and_request_operation,
     ClientSessionAffinity, EnumerateMinimalCandidateSelectionInput,
     SchedulerMinimalCandidateSelectionCandidate,
@@ -378,6 +378,7 @@ pub(crate) struct LocalCandidatePreselectionPageCursor<'a> {
     requested_name_offsets: BTreeMap<String, u32>,
     scanned_rows_by_format: BTreeMap<String, u32>,
     resolved_global_model_names: BTreeMap<String, String>,
+    reserved_global_model_names: BTreeMap<String, Option<String>>,
     fallback_offsets: BTreeMap<String, u32>,
     fallback_scan_epoch: u32,
     exhausted_api_formats: BTreeSet<String>,
@@ -457,6 +458,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
             requested_name_offsets: BTreeMap::new(),
             scanned_rows_by_format: BTreeMap::new(),
             resolved_global_model_names: BTreeMap::new(),
+            reserved_global_model_names: BTreeMap::new(),
             fallback_offsets: BTreeMap::new(),
             fallback_scan_epoch: 0,
             exhausted_api_formats: BTreeSet::new(),
@@ -555,6 +557,7 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
         self.requested_name_offsets.clear();
         self.scanned_rows_by_format.clear();
         self.resolved_global_model_names.clear();
+        self.reserved_global_model_names.clear();
         self.fallback_offsets.clear();
         self.fallback_scan_epoch = self.fallback_scan_epoch.wrapping_add(1);
         self.exhausted_api_formats.clear();
@@ -1185,6 +1188,34 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
             || self.exhausted_api_formats.contains(&normalized_api_format)
     }
 
+    /// Global model names are a reserved routing namespace, so a request that
+    /// names one must not be answered by a provider whose own model merely
+    /// carries that name as an upstream alias. Cached per routing model: the
+    /// answer does not change between pages or API formats.
+    async fn reserved_global_model_name(
+        &mut self,
+        rows: &[StoredMinimalCandidateSelectionRow],
+        routing_model: &str,
+    ) -> Result<Option<String>, GatewayError> {
+        if let Some(cached) = self.reserved_global_model_names.get(routing_model) {
+            return Ok(cached.clone());
+        }
+        let state = self.state;
+        let reserved_global_model_name =
+            crate::data::candidate_selection::resolve_reserved_global_model_name(
+                state.app().data.as_ref(),
+                rows,
+                routing_model,
+            )
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        self.reserved_global_model_names.insert(
+            routing_model.to_string(),
+            reserved_global_model_name.clone(),
+        );
+        Ok(reserved_global_model_name)
+    }
+
     async fn build_page_outcome_from_rows(
         &mut self,
         candidate_api_format: &str,
@@ -1216,15 +1247,17 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
             if let Some(value) = self.resolved_global_model_names.get(normalized_api_format) {
                 value.clone()
             } else {
-                let Some(value) =
-                    resolve_requested_global_model_name_with_model_directives_and_request_operation(
-                        &rows,
-                        &routing_model,
-                        normalized_api_format,
-                        false,
-                        self.request_operation.as_deref(),
-                    )
-                else {
+                let reserved_global_model_name = self
+                    .reserved_global_model_name(&rows, &routing_model)
+                    .await?;
+                let Some(value) = resolve_requested_global_model_name_with_reserved_global_model(
+                    &rows,
+                    &routing_model,
+                    normalized_api_format,
+                    false,
+                    self.request_operation.as_deref(),
+                    reserved_global_model_name.as_deref(),
+                ) else {
                     return Ok(None);
                 };
                 self.resolved_global_model_names
@@ -1475,12 +1508,16 @@ mod tests {
     use crate::AppState;
     use aether_crypto::DEVELOPMENT_ENCRYPTION_KEY;
     use aether_data::repository::candidate_selection::InMemoryMinimalCandidateSelectionReadRepository;
+    use aether_data::repository::global_models::InMemoryGlobalModelReadRepository;
     use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
     use aether_data::DataLayerError;
     use aether_data_contracts::repository::candidate_selection::{
         MinimalCandidateSelectionReadRepository, StoredApiFormatCandidateRowsQuery,
         StoredPoolKeyCandidateRowsByKeyIdsQuery, StoredPoolKeyCandidateRowsQuery,
         StoredProviderModelMapping, StoredRequestedModelCandidateRowsQuery,
+    };
+    use aether_data_contracts::repository::global_models::{
+        GlobalModelReadRepository, StoredPublicGlobalModel,
     };
     use aether_data_contracts::repository::provider_catalog::{
         StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
@@ -1856,6 +1893,191 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn routing_policy_excludes_group_disabled_providers_from_candidate_pages() {
+        let repository: Arc<dyn MinimalCandidateSelectionReadRepository> =
+            Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed([
+                standard_candidate_row("provider-disabled", "openai:chat", 0),
+                standard_candidate_row("provider-enabled", "openai:chat", 1),
+            ]));
+        let app = AppState::new()
+            .expect("gateway state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_minimal_candidate_selection_reader_for_tests(repository),
+            );
+        let auth_snapshot = unrestricted_auth_snapshot();
+        let model_directive_policy =
+            crate::system_features::ModelDirectivePolicySnapshot::load(&app).await;
+        let config = serde_json::from_value(serde_json::json!({
+            "disabled_providers": ["provider-disabled"],
+            "model_policies": [{
+                "model": "*",
+                "allowed_providers": ["provider-disabled", "provider-enabled"]
+            }]
+        }))
+        .expect("routing config should parse");
+        let routing_policy = aether_routing_core::resolve_routing_policy(
+            &config,
+            aether_routing_core::RoutingPolicyInput {
+                group_id: Some("routing-group-1"),
+                group_version: Some(1),
+                selection_source: "test",
+                requested_model: "gpt-5",
+                resolved_model: "gpt-5",
+                api_format: "openai:chat",
+                user_id: None,
+                api_key_id: None,
+                headers: &serde_json::json!({}),
+                body: &serde_json::json!({}),
+                phase: aether_routing_core::RoutingRulePhase::ClientRequest,
+            },
+        )
+        .expect("routing policy should resolve");
+        let mut cursor = LocalCandidatePreselectionPageCursor::new(
+            PlannerAppState::new(&app),
+            &model_directive_policy,
+            "openai:chat",
+            "gpt-5",
+            None,
+            false,
+            None,
+            &auth_snapshot,
+            Some(&routing_policy),
+            None,
+            None,
+            true,
+            LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModelAndApiFormat,
+            false,
+            None,
+        )
+        .await;
+
+        let page = cursor
+            .next_page()
+            .await
+            .expect("routing candidate scan should succeed")
+            .expect("the enabled provider should remain");
+        assert_eq!(
+            page.candidates
+                .iter()
+                .map(|candidate| candidate.provider_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["provider-enabled"]
+        );
+        assert!(cursor
+            .next_page()
+            .await
+            .expect("routing scan should finish")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn model_provider_enablement_filters_candidate_pages_without_affecting_other_models() {
+        let mut rows = Vec::new();
+        for model in ["model-a", "model-b", "model-c"] {
+            for (provider, priority) in [
+                ("provider-legacy-disabled", 0),
+                ("provider-model-disabled", 1),
+                ("provider-other", 2),
+                ("provider-inactive", 3),
+            ] {
+                let mut row = standard_candidate_row(provider, "openai:chat", priority);
+                row.global_model_id = format!("global-{model}");
+                row.global_model_name = model.into();
+                row.model_provider_model_name = model.into();
+                row.model_id = format!("{provider}-{model}");
+                row.provider_is_active = provider != "provider-inactive";
+                rows.push(row);
+            }
+        }
+        let repository: Arc<dyn MinimalCandidateSelectionReadRepository> =
+            Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(rows));
+        let app = AppState::new().unwrap().with_data_state_for_tests(
+            GatewayDataState::with_minimal_candidate_selection_reader_for_tests(repository),
+        );
+        let auth = unrestricted_auth_snapshot();
+        let directives = crate::system_features::ModelDirectivePolicySnapshot::load(&app).await;
+        let config = serde_json::from_value(serde_json::json!({
+            "disabled_providers": ["provider-legacy-disabled"],
+            "model_policies": [
+                { "model": "model-a", "provider_enabled_overrides": {
+                    "provider-model-disabled": false, "provider-inactive": true
+                } },
+                { "model": "model-b", "provider_enabled_overrides": {
+                    "provider-legacy-disabled": true, "provider-inactive": true
+                } }
+            ],
+            "rules": [{ "id": "legacy-allowlist", "actions": [{
+                "type": "restrict_providers", "provider_ids": [
+                    "provider-legacy-disabled", "provider-model-disabled", "provider-other", "provider-inactive"
+                ]
+            }] }]
+        })).unwrap();
+        // Revisit A after B to exercise candidate caches shared by the app.
+        for (model, expected) in [
+            ("model-a", vec!["provider-other"]),
+            (
+                "model-b",
+                vec![
+                    "provider-legacy-disabled",
+                    "provider-model-disabled",
+                    "provider-other",
+                ],
+            ),
+            ("model-c", vec!["provider-model-disabled", "provider-other"]),
+            ("model-a", vec!["provider-other"]),
+        ] {
+            let policy = aether_routing_core::resolve_routing_policy(
+                &config,
+                aether_routing_core::RoutingPolicyInput {
+                    group_id: Some("group-1"),
+                    group_version: Some(1),
+                    selection_source: "test",
+                    requested_model: model,
+                    resolved_model: model,
+                    api_format: "openai:chat",
+                    user_id: None,
+                    api_key_id: None,
+                    headers: &serde_json::json!({}),
+                    body: &serde_json::json!({}),
+                    phase: aether_routing_core::RoutingRulePhase::ClientRequest,
+                },
+            )
+            .unwrap();
+            let mut cursor = LocalCandidatePreselectionPageCursor::new(
+                PlannerAppState::new(&app),
+                &directives,
+                "openai:chat",
+                model,
+                None,
+                false,
+                None,
+                &auth,
+                Some(&policy),
+                None,
+                None,
+                true,
+                LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModelAndApiFormat,
+                true,
+                None,
+            )
+            .await;
+            let mut providers = Vec::new();
+            while let Some(page) = cursor.next_page().await.unwrap() {
+                providers.extend(
+                    page.candidates
+                        .into_iter()
+                        .map(|candidate| candidate.provider_id),
+                );
+            }
+            providers.sort();
+            assert_eq!(
+                providers, expected,
+                "provider enablement must remain isolated for {model}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn routing_policy_collects_candidate_pages_before_final_ranking() {
         let rows = (0..300)
             .map(|index| {
@@ -1877,6 +2099,8 @@ mod tests {
         let model_directive_policy =
             crate::system_features::ModelDirectivePolicySnapshot::load(&app).await;
         let routing_policy = ResolvedRoutingPolicy {
+            billing_multiplier: 1.0,
+            group_name: None,
             group_id: Some("routing-group-1".to_string()),
             group_version: Some(1),
             selection_source: "test".to_string(),
@@ -1942,6 +2166,8 @@ mod tests {
         let model_directive_policy =
             crate::system_features::ModelDirectivePolicySnapshot::load(&app).await;
         let routing_policy = ResolvedRoutingPolicy {
+            billing_multiplier: 1.0,
+            group_name: None,
             group_id: Some("routing-group-fallback".to_string()),
             group_version: Some(1),
             selection_source: "test".to_string(),
@@ -2088,6 +2314,96 @@ mod tests {
             model_is_active: true,
             model_is_available: true,
         }
+    }
+
+    fn public_global_model(name: &str) -> StoredPublicGlobalModel {
+        StoredPublicGlobalModel {
+            id: format!("global-model-{name}"),
+            name: name.to_string(),
+            display_name: None,
+            is_active: true,
+            default_price_per_request: None,
+            default_tiered_pricing: None,
+            supported_capabilities: None,
+            config: None,
+            usage_count: 0,
+        }
+    }
+
+    /// The cursor provider reaches its upstream under a name that belongs to another
+    /// global model. A `claude:messages` client asking for `gemini-3.8-flash` has to
+    /// land on the provider bound to that global model — format conversion and all —
+    /// rather than on the one that only borrows the name on the way out, which is the
+    /// one an API-format-ordered scan reaches first.
+    #[tokio::test]
+    async fn paged_preselection_keeps_a_global_model_name_from_a_provider_alias() {
+        let mut aliasing = standard_candidate_row("ursor", "claude:messages", 1);
+        aliasing.global_model_id = "global-model-gemini-3.8-flash-cursor".to_string();
+        aliasing.global_model_name = "gemini-3.8-flash-cursor".to_string();
+        aliasing.model_provider_model_name = "gemini-3.8-flash-cursor".to_string();
+        aliasing.model_provider_model_mappings = Some(vec![StoredProviderModelMapping {
+            name: "gemini-3.8-flash".to_string(),
+            priority: 1,
+            api_formats: None,
+            endpoint_ids: None,
+            operations: None,
+        }]);
+
+        let mut bound = standard_candidate_row("anti", "gemini:generate_content", 2);
+        bound.global_model_id = "global-model-gemini-3.8-flash".to_string();
+        bound.global_model_name = "gemini-3.8-flash".to_string();
+        bound.model_provider_model_name = "gemini-3.8-flash".to_string();
+
+        let repository: Arc<dyn MinimalCandidateSelectionReadRepository> =
+            Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed([
+                aliasing, bound,
+            ]));
+        let global_models: Arc<dyn GlobalModelReadRepository> =
+            Arc::new(InMemoryGlobalModelReadRepository::seed([
+                public_global_model("gemini-3.8-flash"),
+                public_global_model("gemini-3.8-flash-cursor"),
+            ]));
+        let data_state =
+            GatewayDataState::with_minimal_candidate_selection_reader_for_tests(repository)
+                .with_global_model_reader(global_models);
+        let app = AppState::new()
+            .expect("gateway state should build")
+            .with_data_state_for_tests(data_state);
+        let auth_snapshot = unrestricted_auth_snapshot();
+        let model_directive_policy =
+            crate::system_features::ModelDirectivePolicySnapshot::load(&app).await;
+        let mut cursor = LocalCandidatePreselectionPageCursor::new(
+            PlannerAppState::new(&app),
+            &model_directive_policy,
+            "claude:messages",
+            "gemini-3.8-flash",
+            None,
+            false,
+            None,
+            &auth_snapshot,
+            None,
+            None,
+            None,
+            true,
+            LocalCandidatePreselectionKeyMode::ProviderEndpointKeyModelAndApiFormat,
+            true,
+            None,
+        )
+        .await;
+
+        let page = cursor
+            .next_page()
+            .await
+            .expect("preselection should succeed")
+            .expect("the bound provider should still be reachable");
+
+        assert_eq!(page.candidates.len(), 1);
+        assert_eq!(page.candidates[0].provider_name, "anti");
+        assert_eq!(page.candidates[0].global_model_name, "gemini-3.8-flash");
+        assert_eq!(
+            page.candidates[0].endpoint_api_format,
+            "gemini:generate_content"
+        );
     }
 
     fn standard_candidate_row(
@@ -2694,6 +3010,8 @@ mod tests {
         let model_directive_policy =
             crate::system_features::ModelDirectivePolicySnapshot::load(&app).await;
         let routing_policy = ResolvedRoutingPolicy {
+            billing_multiplier: 1.0,
+            group_name: None,
             group_id: Some("routing-group-codex-first".to_string()),
             group_version: Some(1),
             selection_source: "test".to_string(),

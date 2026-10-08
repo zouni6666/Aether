@@ -3,6 +3,7 @@
     class="p-4 space-y-3 hover:bg-muted/20 transition-colors cursor-pointer"
     @click="$emit('viewDetail', provider.id)"
   >
+    <slot name="scheduling" />
     <!-- 第一行：名称 + 状态 + 操作 -->
     <div class="flex items-start justify-between gap-3">
       <slot name="drag-handle" />
@@ -24,7 +25,7 @@
             :variant="provider.is_active ? 'success' : 'secondary'"
             class="text-xs shrink-0"
           >
-            {{ legacyT(provider.is_active ? '活跃' : '停用') }}
+            {{ legacyT(provider.is_active ? '全局启用' : '全局停用') }}
           </Badge>
         </div>
         <!-- 内联编辑备注 (移动端) -->
@@ -72,6 +73,7 @@
         class="flex items-center gap-0.5 shrink-0"
         @click.stop
       >
+        <slot name="group-action" />
         <Button
           variant="ghost"
           size="icon"
@@ -85,7 +87,7 @@
           variant="ghost"
           size="icon"
           class="h-7 w-7"
-          :title="legacyT('编辑')"
+          :title="legacyT('编辑提供商')"
           @click="$emit('editProvider', provider)"
         >
           <Edit class="h-3.5 w-3.5" />
@@ -103,6 +105,8 @@
           variant="ghost"
           size="icon"
           class="h-7 w-7"
+          :title="legacyT(provider.is_active ? '全局停用提供商' : '全局启用提供商')"
+          :aria-label="legacyT(provider.is_active ? '全局停用提供商' : '全局启用提供商')"
           @click="$emit('toggleStatus', provider)"
         >
           <Power class="h-3.5 w-3.5" />

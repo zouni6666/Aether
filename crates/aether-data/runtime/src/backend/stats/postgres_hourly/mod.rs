@@ -13,6 +13,32 @@ mod sql;
 use self::sql::*;
 
 impl PostgresBackend {
+    pub async fn drain_overview_dirty_events(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<u64, DataLayerError> {
+        let repository = aether_data_postgres::SqlxUsageReadRepository::new(self.pool().clone());
+        let merged = repository.merge_overview_dirty_events().await?;
+        let retained = repository.maintain_dashboard_projection(now, 1_000).await?;
+        Ok(merged + u64::from(retained))
+    }
+
+    pub async fn rebuild_overview_buckets(
+        &self,
+        input: &StatsHourlyAggregationInput,
+    ) -> Result<usize, DataLayerError> {
+        let repository = aether_data_postgres::SqlxUsageReadRepository::new(self.pool().clone());
+        let cleaned = repository
+            .maintain_dashboard_projection(input.aggregated_at, 1_000)
+            .await?;
+        let rebuilt = repository
+            .rebuild_overview_buckets(input.target_hour_utc + chrono::Duration::hours(1), 8)
+            .await?;
+        // Retention work uses the worker's existing bounded catch-up loop too,
+        // so a busy installation can retire more than one batch per hour.
+        Ok(rebuilt + usize::from(cleaned))
+    }
+
     pub async fn aggregate_stats_hourly(
         &self,
         input: &StatsHourlyAggregationInput,

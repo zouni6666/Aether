@@ -6,9 +6,11 @@ import {
   createEmptyRoutingGroupConfig,
   getDefaultModelPolicy,
   getModelScheduling,
+  isRoutingProviderEnabled,
   modelSchedulingRuleId,
   normalizeRoutingGroupConfig,
   normalizeStickyKeyAttempts,
+  parseBillingMultiplier,
   resolveModelKeyPriorityOverride,
   setDefaultPoolPriorityOverrides,
   setDefaultProviderPriorityOverrides,
@@ -25,6 +27,27 @@ describe('routingPolicy', () => {
     expect(config.default_policy.priority_mode).toBe('provider')
     expect(config.default_policy.scheduling_mode).toBe('cache_affinity')
     expect(config.default_policy.cancel_on_client_disconnect).toBe(false)
+    expect(config.billing_multiplier).toBe(1)
+    expect(config.user_visible).toBe(false)
+  })
+
+  it('keeps new and legacy groups private unless user visibility is explicitly true', () => {
+    expect(createEmptyRoutingGroupConfig().user_visible).toBe(false)
+    expect(normalizeRoutingGroupConfig({ user_visible: true }).user_visible).toBe(true)
+    for (const user_visible of [undefined, null, false, 'true', 1]) {
+      expect(normalizeRoutingGroupConfig({ user_visible } as unknown as Parameters<typeof normalizeRoutingGroupConfig>[0]).user_visible).toBe(false)
+    }
+  })
+
+  it('preserves a nonnegative billing multiplier while defaulting legacy configs to one', () => {
+    expect(createEmptyRoutingGroupConfig().billing_multiplier).toBe(1)
+    expect(normalizeRoutingGroupConfig({ billing_multiplier: 0 }).billing_multiplier).toBe(0)
+    expect(normalizeRoutingGroupConfig({ billing_multiplier: 1.25 }).billing_multiplier).toBe(1.25)
+    expect(parseBillingMultiplier('0')).toBe(0)
+    expect(parseBillingMultiplier('1.25')).toBe(1.25)
+    for (const value of ['', ' ', '-0.1', 'Infinity', '1e309', Number.NaN, Infinity, null, undefined, true]) {
+      expect(parseBillingMultiplier(value)).toBeNull()
+    }
   })
 
   it('preserves cancellation policy across model scheduling edits', () => {
@@ -59,14 +82,43 @@ describe('routingPolicy', () => {
     expect(next.model_policies[0].allowed_providers).toEqual(['provider-a'])
   })
 
+  it('normalizes model membership independently and preserves explicit false overrides', () => {
+    const overrides = { enabled: true, disabled: false }
+    const config = normalizeRoutingGroupConfig({ model_policies: [
+      { ...createEmptyModelPolicy('model-a'), provider_enabled_overrides: overrides },
+      { model: 'legacy-model' } as ReturnType<typeof createEmptyModelPolicy>,
+      { ...createEmptyModelPolicy('invalid-model'), provider_enabled_overrides: { '': true, valid: false, string: 'false' } as unknown as Record<string, boolean> },
+    ] })
+    expect(config.model_policies[0].provider_enabled_overrides).toEqual(overrides)
+    expect(config.model_policies[0].provider_enabled_overrides).not.toBe(overrides)
+    expect(config.model_policies[1].provider_enabled_overrides).toEqual({})
+    expect(config.model_policies[2].provider_enabled_overrides).toEqual({ valid: false })
+    expect(createEmptyModelPolicy().provider_enabled_overrides).toEqual({})
+  })
+
+  it('resolves model membership before default membership and legacy group exclusions', () => {
+    const config = createEmptyRoutingGroupConfig()
+    config.disabled_providers = ['provider-a', 'provider-b']
+    config.model_policies = [{ ...createEmptyModelPolicy('*'), provider_enabled_overrides: { 'provider-a': true, 'provider-c': false } }]
+    const selected = { ...createEmptyModelPolicy('model-a'), provider_enabled_overrides: { 'provider-b': true, 'provider-c': true, 'provider-d': false } }
+    expect(isRoutingProviderEnabled(config, 'provider-a', selected)).toBe(true)
+    expect(isRoutingProviderEnabled(config, 'provider-b', selected)).toBe(true)
+    expect(isRoutingProviderEnabled(config, 'provider-c', selected)).toBe(true)
+    expect(isRoutingProviderEnabled(config, 'provider-d', selected)).toBe(false)
+    expect(isRoutingProviderEnabled(config, 'provider-b', createEmptyModelPolicy('model-b'))).toBe(false)
+    expect(isRoutingProviderEnabled(config, 'provider-c')).toBe(false)
+    expect(isRoutingProviderEnabled(config, 'provider-d')).toBe(true)
+  })
+
   it('stores default priority overrides on the wildcard model policy', () => {
-    const config = upsertModelPolicy(createEmptyRoutingGroupConfig(), createEmptyModelPolicy('gpt-5'))
+    const config = upsertModelPolicy({ ...createEmptyRoutingGroupConfig(), user_visible: true }, createEmptyModelPolicy('gpt-5'))
     const next = setDefaultProviderPriorityOverrides(config, {
       'provider-a': 0,
       'provider-b': 2,
     })
 
     const policy = getDefaultModelPolicy(next)
+    expect(next.user_visible).toBe(true)
     expect(policy.model).toBe(DEFAULT_ROUTING_POLICY_MODEL)
     expect(next.model_policies.map(item => item.model)).toEqual([DEFAULT_ROUTING_POLICY_MODEL, 'gpt-5'])
     expect(policy.provider_priority_overrides).toEqual({

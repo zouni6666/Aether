@@ -155,6 +155,17 @@ pub(crate) fn with_error_flow_report_context(
     error_flow: Value,
 ) -> Option<Value> {
     let mut object = report_context?.as_object()?.clone();
+    if !object.contains_key("analytics_failure")
+        && error_flow.get("source").and_then(Value::as_str) == Some("upstream_response")
+        && error_flow
+            .get("status_code")
+            .and_then(Value::as_u64)
+            .is_some_and(|status| status >= 400)
+    {
+        object.insert("analytics_failure".into(), json!({
+            "origin": "upstream", "stage": "response", "reason": "upstream_response_error", "schema_version": 1,
+        }));
+    }
     object.insert("error_flow".to_string(), error_flow);
     Some(Value::Object(object))
 }

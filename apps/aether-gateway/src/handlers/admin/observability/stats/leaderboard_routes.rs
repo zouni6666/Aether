@@ -5,7 +5,7 @@ use super::leaderboard::{
     build_user_leaderboard_items_from_summaries, compare_leaderboard_items,
     load_user_leaderboard_metadata, AdminStatsLeaderboardItem, AdminStatsLeaderboardNameMode,
 };
-use super::range::{parse_bounded_u32, parse_nonnegative_usize};
+use super::range::{parse_bounded_u32, parse_nonnegative_usize, resolve_precise_time_bounds};
 use super::resolve_admin_usage_time_range;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::{query_param_bool, query_param_value};
@@ -228,6 +228,10 @@ pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
             Ok(value) => value,
             Err(detail) => return Ok(Some(admin_stats_bad_request_response(detail))),
         };
+        let precise_bounds = match resolve_precise_time_bounds(query) {
+            Ok(value) => value,
+            Err(detail) => return Ok(Some(admin_stats_bad_request_response(detail))),
+        };
         let metric = match AdminStatsLeaderboardMetric::parse(query) {
             Ok(value) => value,
             Err(detail) => return Ok(Some(admin_stats_bad_request_response(detail))),
@@ -272,7 +276,8 @@ pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
                 "user_id is not supported for the user group leaderboard".to_string(),
             )));
         }
-        let Some((created_from_unix_secs, created_until_unix_secs)) = time_range.to_unix_bounds()
+        let Some((created_from_unix_secs, created_until_unix_secs)) =
+            precise_bounds.or_else(|| time_range.to_unix_bounds())
         else {
             return Ok(Some(build_admin_stats_user_group_leaderboard_response(
                 metric,
@@ -402,6 +407,10 @@ pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
             Ok(value) => value,
             Err(detail) => return Ok(Some(admin_stats_bad_request_response(detail))),
         };
+        let precise_bounds = match resolve_precise_time_bounds(query) {
+            Ok(value) => value,
+            Err(detail) => return Ok(Some(admin_stats_bad_request_response(detail))),
+        };
         let metric = match AdminStatsLeaderboardMetric::parse(query) {
             Ok(value) => value,
             Err(detail) => return Ok(Some(admin_stats_bad_request_response(detail))),
@@ -442,7 +451,8 @@ pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
                 Ok(value) => value,
                 Err(detail) => return Ok(Some(admin_stats_bad_request_response(detail))),
             };
-        let Some((created_from_unix_secs, created_until_unix_secs)) = time_range.to_unix_bounds()
+        let Some((created_from_unix_secs, created_until_unix_secs)) =
+            precise_bounds.or_else(|| time_range.to_unix_bounds())
         else {
             return Ok(Some(admin_stats_leaderboard_empty_response(
                 metric,

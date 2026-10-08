@@ -20,12 +20,15 @@ pub use policy::{
     supports_local_claude_code_transport_with_network,
 };
 pub use profile::{
-    current_claude_code_transport_identity_profile, ClaudeCodeBodyCapabilityGate,
+    claude_code_client_profile, claude_code_client_user_agent, claude_code_client_version,
+    current_claude_code_transport_identity_profile, set_claude_code_cli_version,
+    set_claude_code_client_profile, ClaudeCodeBodyCapabilityGate, ClaudeCodeClientProfile,
     ClaudeCodeTransportIdentityProfile, ClaudeCodeTransportIdentityProfileVersion,
+    ClaudeCodeTransportIdentityTemplate, CLAUDE_CODE_BUILTIN_CLI_VERSION,
     CLAUDE_CODE_CONTEXT_MANAGEMENT_BETA, CLAUDE_CODE_TRANSPORT_IDENTITY_2026_04,
 };
 pub use request::{
-    build_claude_code_passthrough_headers, sanitize_claude_code_request_body,
-    sanitize_claude_code_request_body_for_beta_header,
+    build_claude_code_passthrough_headers, finalize_claude_code_request_identity,
+    sanitize_claude_code_request_body, sanitize_claude_code_request_body_for_beta_header,
 };
 pub use url::build_claude_code_messages_url;

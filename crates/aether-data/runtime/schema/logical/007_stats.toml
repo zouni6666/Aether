@@ -500,6 +500,12 @@ type = "float64"
 default = 0
 
 [[table.stats_daily.columns]]
+name = "billing_cost"
+type = "decimal_money"
+nullable = true
+driver.postgres.type = "numeric(20,8)"
+
+[[table.stats_daily.columns]]
 name = "input_cost"
 type = "float64"
 default = 0

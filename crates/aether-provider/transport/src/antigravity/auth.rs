@@ -5,8 +5,8 @@ use serde_json::Value;
 use super::super::snapshot::GatewayProviderTransportSnapshot;
 
 pub const ANTIGRAVITY_PROVIDER_TYPE: &str = "antigravity";
-pub const ANTIGRAVITY_CLIENT_VERSION: &str = "4.3.0";
-pub const ANTIGRAVITY_REQUEST_USER_AGENT: &str = "vscode/1.X.X (Antigravity/4.3.0)";
+pub const ANTIGRAVITY_CLIENT_VERSION: &str = crate::client_identity::ANTIGRAVITY.version;
+pub const ANTIGRAVITY_REQUEST_USER_AGENT: &str = crate::client_identity::ANTIGRAVITY.user_agent;
 const ANTIGRAVITY_CLIENT_NAME: &str = "antigravity";
 const ANTIGRAVITY_GOOG_API_CLIENT: &str = "gl-node/18.18.2 fire/0.8.6 grpc/1.10.x";
 

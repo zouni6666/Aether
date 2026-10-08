@@ -260,6 +260,52 @@ mod tests {
         )
     }
 
+    #[test]
+    fn concurrency_activity_survives_retry_and_ends_with_the_logical_turn() {
+        let activity = std::sync::Arc::new(crate::request_activity::RequestActivity::default());
+        let first = logical().with_turn_control(super::ResponsesWebSocketTurnControl {
+            decision: crate::control::GatewayControlDecision::synthetic(
+                "/v1/responses",
+                Some("ai_public".into()),
+                None,
+                None,
+                None,
+            ),
+            auth_snapshot: None,
+            rpm_bypassed: false,
+            activity: std::sync::Arc::new(activity.begin()),
+        });
+        let mut state = ResponsesTurnState::Idle;
+        state.begin(first, FakeAttempt(1));
+        assert_eq!(activity.active(), 1);
+        assert_eq!(state.detach_attempt(), Some(FakeAttempt(1)));
+        assert_eq!(
+            activity.active(),
+            1,
+            "transparent retry retains one logical request"
+        );
+        state.resume(FakeAttempt(2)).unwrap();
+        assert_eq!(activity.active(), 1);
+        assert_eq!(state.end(), Some(FakeAttempt(2)));
+        assert_eq!(activity.active(), 0);
+
+        let logical = logical().with_turn_control(super::ResponsesWebSocketTurnControl {
+            decision: crate::control::GatewayControlDecision::synthetic(
+                "/v1/responses",
+                Some("ai_public".into()),
+                None,
+                None,
+                None,
+            ),
+            auth_snapshot: None,
+            rpm_bypassed: false,
+            activity: std::sync::Arc::new(activity.begin()),
+        });
+        state.begin(logical, FakeAttempt(3));
+        drop(state);
+        assert_eq!(activity.active(), 0, "disconnect drops the logical request");
+    }
+
     /// 透明重试失败之后：旧 attempt 已经被 detach 并结算过，logical turn 仍停在
     /// `Replanning`。此时 `end()` 不能再交出 attempt，否则同一个 attempt 会被
     /// 结算两次（两条 usage terminal、两次 pool lease 释放）。

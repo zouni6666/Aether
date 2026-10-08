@@ -8,14 +8,17 @@ use serde_json::{Map, Value};
 use crate::repository::candidates::sanitize_request_candidate_skip_reason;
 
 use super::{
-    normalize_provider_response_model, LIVE_SESSION_METADATA_KEY,
+    billing_multiplier_snapshot, normalize_provider_response_model,
+    BILLING_MULTIPLIER_SNAPSHOT_METADATA_KEY, LIVE_SESSION_METADATA_KEY,
     PLAN_USAGE_RESERVATION_DEFERRED_METADATA_KEY, PROVIDER_ACTUAL_SERVICE_TIER_METADATA_KEY,
     PROVIDER_CACHE_TTL_MINUTES_METADATA_KEY, PROVIDER_REASONING_EFFORT_METADATA_KEY,
     PROVIDER_RESPONSE_MODEL_METADATA_KEY, PROVIDER_SERVICE_TIER_METADATA_KEY,
     REALTIME_SESSION_METADATA_KEY, REQUESTED_REASONING_EFFORT_METADATA_KEY,
     ROUTING_CANDIDATE_SKIP_REASON_METADATA_KEY, ROUTING_FAILURE_DIAGNOSTIC_METADATA_KEY,
-    USAGE_AVAILABLE_METADATA_KEY, USAGE_PRICING_AVAILABLE_METADATA_KEY,
-    WEBSOCKET_MODE_METADATA_KEY, WEBSOCKET_TRANSPORT_METADATA_KEY,
+    ROUTING_GROUP_BILLING_MULTIPLIER_METADATA_KEY, ROUTING_GROUP_ID_METADATA_KEY,
+    ROUTING_GROUP_NAME_METADATA_KEY, USAGE_AVAILABLE_METADATA_KEY,
+    USAGE_PRICING_AVAILABLE_METADATA_KEY, WEBSOCKET_MODE_METADATA_KEY,
+    WEBSOCKET_TRANSPORT_METADATA_KEY,
 };
 
 const UPSTREAM_IS_STREAM_KEY: &str = "upstream_is_stream";
@@ -43,10 +46,106 @@ pub fn sanitize_usage_request_metadata_ref(value: Option<&Value>) -> Option<Valu
     sanitize_usage_request_metadata_object(value?.as_object()?)
 }
 
+/// Keep the request's first captured billing snapshot and reservation owner across retries.
+pub fn preserve_usage_routing_group_snapshot(
+    incoming: Option<Value>,
+    previous: Option<&Value>,
+) -> Option<Value> {
+    let Some(previous) = previous.and_then(Value::as_object) else {
+        return incoming;
+    };
+    let mut snapshot = Map::from_iter(
+        [
+            BILLING_MULTIPLIER_SNAPSHOT_METADATA_KEY,
+            ROUTING_GROUP_BILLING_MULTIPLIER_METADATA_KEY,
+            ROUTING_GROUP_ID_METADATA_KEY,
+            ROUTING_GROUP_NAME_METADATA_KEY,
+            PLAN_USAGE_RESERVATION_TOKEN_KEY,
+        ]
+        .into_iter()
+        .filter_map(|key| {
+            previous
+                .get(key)
+                .map(|value| (key.to_string(), value.clone()))
+        }),
+    );
+    if !snapshot.contains_key(BILLING_MULTIPLIER_SNAPSHOT_METADATA_KEY)
+        && snapshot.contains_key(ROUTING_GROUP_BILLING_MULTIPLIER_METADATA_KEY)
+    {
+        let captured = billing_multiplier_snapshot(Some(&Value::Object(snapshot.clone())))
+            .ok()
+            .flatten()
+            .and_then(|snapshot| serde_json::to_value(snapshot).ok())
+            .unwrap_or(Value::Null);
+        snapshot.insert(
+            BILLING_MULTIPLIER_SNAPSHOT_METADATA_KEY.to_string(),
+            captured,
+        );
+    }
+    let Some(Value::Object(snapshot)) = sanitize_usage_request_metadata_object(&snapshot) else {
+        return incoming;
+    };
+    let mut metadata = incoming
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    metadata.extend(snapshot);
+    Some(Value::Object(metadata))
+}
+
 pub fn sanitize_usage_request_metadata_object(source: &Map<String, Value>) -> Option<Value> {
     let mut target = Map::new();
+    if let Some(snapshot) = source.get(BILLING_MULTIPLIER_SNAPSHOT_METADATA_KEY) {
+        let metadata = serde_json::json!({BILLING_MULTIPLIER_SNAPSHOT_METADATA_KEY: snapshot});
+        let snapshot = match billing_multiplier_snapshot(Some(&metadata)) {
+            Ok(Some(snapshot)) => serde_json::to_value(snapshot)
+                .expect("validated billing multiplier snapshot must serialize"),
+            // Preserve an invalid marker so malformed financial input cannot silently
+            // fall back to legacy billing after metadata projection.
+            _ => Value::Null,
+        };
+        target.insert(
+            BILLING_MULTIPLIER_SNAPSHOT_METADATA_KEY.to_string(),
+            snapshot,
+        );
+    }
+    if let Some(source) = source
+        .get("analytics_measurement")
+        .and_then(|value| value.get("source"))
+        .and_then(Value::as_str)
+        .filter(|source| matches!(*source, "reported" | "estimated" | "mixed" | "unknown"))
+    {
+        target.insert(
+            "analytics_measurement".into(),
+            serde_json::json!({"source":source}),
+        );
+    }
+    for (key, fields) in [
+        (
+            "analytics_attribution",
+            &["record_kind", "parent_request_id"][..],
+        ),
+        ("analytics_failure", &["origin", "stage", "reason"][..]),
+    ] {
+        if let Some(object) = source.get(key).and_then(Value::as_object) {
+            let mut projected = Map::new();
+            for field in fields {
+                insert_token(object, &mut projected, field, 128);
+            }
+            if key == "analytics_attribution" {
+                if let Some(value) = object.get("is_standalone").and_then(Value::as_bool) {
+                    projected.insert("is_standalone".into(), Value::Bool(value));
+                }
+            }
+            insert_bounded_u64(object, &mut projected, "schema_version", 1);
+            if !projected.is_empty() {
+                target.insert(key.into(), Value::Object(projected));
+            }
+        }
+    }
 
     insert_token(source, &mut target, "trace_id", 128);
+    insert_token(source, &mut target, ROUTING_GROUP_ID_METADATA_KEY, 128);
+    insert_bounded_text(source, &mut target, ROUTING_GROUP_NAME_METADATA_KEY, 256);
     insert_ip_address(source, &mut target, "client_ip");
     insert_client_family(source, &mut target);
     for key in [
@@ -147,6 +246,7 @@ pub fn sanitize_usage_request_metadata_object(source: &Map<String, Value>) -> Op
 
     for key in [
         "rate_multiplier",
+        ROUTING_GROUP_BILLING_MULTIPLIER_METADATA_KEY,
         "input_price_per_1m",
         "output_price_per_1m",
         "cache_creation_price_per_1m",
@@ -154,6 +254,20 @@ pub fn sanitize_usage_request_metadata_object(source: &Map<String, Value>) -> Op
         "price_per_request",
     ] {
         insert_nonnegative_number(source, &mut target, key);
+    }
+    // An invalid legacy routing factor must remain a financial tombstone. Dropping it
+    // would make a subsequent reader silently fall back to the historical provider charge.
+    if source
+        .get(ROUTING_GROUP_BILLING_MULTIPLIER_METADATA_KEY)
+        .is_some_and(|value| {
+            !value
+                .as_f64()
+                .is_some_and(|value| value.is_finite() && value >= 0.0)
+        })
+    {
+        target
+            .entry(BILLING_MULTIPLIER_SNAPSHOT_METADATA_KEY.to_string())
+            .or_insert(Value::Null);
     }
 
     let billing_snapshot = source
@@ -1122,6 +1236,27 @@ fn insert_token(
     target.insert(key.to_string(), Value::String(value.to_string()));
 }
 
+fn insert_bounded_text(
+    source: &Map<String, Value>,
+    target: &mut Map<String, Value>,
+    key: &str,
+    max_len: usize,
+) {
+    let Some(value) = source
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| {
+            !value.is_empty()
+                && value.chars().count() <= max_len
+                && !value.chars().any(char::is_control)
+        })
+    else {
+        return;
+    };
+    target.insert(key.to_string(), Value::String(value.to_string()));
+}
+
 fn insert_dimension_token(source: &Map<String, Value>, target: &mut Map<String, Value>, key: &str) {
     let Some(value) = source
         .get(key)
@@ -1229,7 +1364,132 @@ fn safe_version_value(value: &Value) -> Option<String> {
 mod tests {
     use serde_json::json;
 
-    use super::{sanitize_usage_request_metadata, sanitize_usage_request_metadata_ref};
+    use super::{
+        billing_multiplier_snapshot, preserve_usage_routing_group_snapshot,
+        sanitize_usage_request_metadata, sanitize_usage_request_metadata_ref,
+    };
+
+    #[test]
+    fn billing_multiplier_snapshot_projection_preserves_invalid_marker_and_immutable_factors() {
+        for snapshot in [
+            serde_json::Value::Null,
+            json!({"version": 1, "factors": {"routing_group": 2.0}, "multiplier": 1.0}),
+            json!({"version": 99, "factors": {}, "multiplier": 1.0}),
+        ] {
+            let projected = sanitize_usage_request_metadata(Some(json!({
+                "billing_multiplier_snapshot": snapshot,
+                "routing_group_billing_multiplier": 0.5,
+            })))
+            .unwrap();
+            assert_eq!(
+                projected.get("billing_multiplier_snapshot"),
+                Some(&serde_json::Value::Null)
+            );
+            assert!(billing_multiplier_snapshot(Some(&projected)).is_err());
+            let preserved = preserve_usage_routing_group_snapshot(
+                Some(json!({"billing_multiplier_snapshot": {"version": 1, "factors": {}, "multiplier": 1.0}})),
+                Some(&projected),
+            ).unwrap();
+            assert!(billing_multiplier_snapshot(Some(&preserved)).is_err());
+        }
+        let legacy =
+            json!({"routing_group_billing_multiplier": 0.25, "routing_group_name": "历史分组"});
+        let preserved = preserve_usage_routing_group_snapshot(
+            Some(json!({"billing_multiplier_snapshot": {"version": 1, "factors": {"routing_group": 99.0}, "multiplier": 99.0}})),
+            Some(&legacy),
+        ).unwrap();
+        assert_eq!(
+            billing_multiplier_snapshot(Some(&preserved))
+                .unwrap()
+                .unwrap()
+                .multiplier(),
+            0.25
+        );
+        assert_eq!(preserved["routing_group_name"], "历史分组");
+    }
+
+    #[test]
+    fn billing_multiplier_snapshot_projection_rejects_malformed_legacy_factors() {
+        for factor in [serde_json::Value::Null, json!(-1), json!("2"), json!({})] {
+            let projected = sanitize_usage_request_metadata(Some(json!({
+                "routing_group_billing_multiplier": factor,
+            })))
+            .expect("invalid financial input must retain a tombstone");
+            assert_eq!(
+                projected["billing_multiplier_snapshot"],
+                serde_json::Value::Null
+            );
+            assert!(billing_multiplier_snapshot(Some(&projected)).is_err());
+            assert_eq!(
+                sanitize_usage_request_metadata(Some(projected.clone())),
+                Some(projected)
+            );
+        }
+        let generic = sanitize_usage_request_metadata(Some(json!({
+            "routing_group_billing_multiplier": -1,
+            "billing_multiplier_snapshot": {"version": 1, "factors": {"routing_group": 2}, "multiplier": 2},
+        })))
+        .unwrap();
+        assert_eq!(
+            billing_multiplier_snapshot(Some(&generic))
+                .unwrap()
+                .unwrap()
+                .multiplier(),
+            2.0
+        );
+    }
+
+    #[test]
+    fn billing_multiplier_snapshot_preserves_the_original_reservation_owner() {
+        let token_a = "550e8400-e29b-41d4-a716-446655440001";
+        let token_b = "550e8400-e29b-41d4-a716-446655440002";
+        let incoming = json!({
+            "plan_usage_reservation_token": token_b,
+            "billing_multiplier_snapshot": {"version": 1, "factors": {"routing_group": 3}, "multiplier": 3},
+        });
+        let previous = json!({
+            "plan_usage_reservation_token": token_a,
+            "billing_multiplier_snapshot": {"version": 1, "factors": {"routing_group": 0.5}, "multiplier": 0.5},
+        });
+        let preserved =
+            preserve_usage_routing_group_snapshot(Some(incoming.clone()), Some(&previous)).unwrap();
+        assert_eq!(preserved["plan_usage_reservation_token"], token_a);
+        assert_eq!(
+            billing_multiplier_snapshot(Some(&preserved))
+                .unwrap()
+                .unwrap()
+                .multiplier(),
+            0.5
+        );
+
+        for empty in [json!({}), json!({"plan_usage_reservation_token": " "})] {
+            let preserved =
+                preserve_usage_routing_group_snapshot(Some(incoming.clone()), Some(&empty))
+                    .unwrap();
+            assert_eq!(preserved["plan_usage_reservation_token"], token_b);
+        }
+    }
+
+    #[test]
+    fn account_attribution_preserves_key_flag_without_custom_identity_or_purpose() {
+        let metadata = sanitize_usage_request_metadata(Some(json!({
+            "analytics_attribution": {
+                "is_standalone": false,
+                "record_kind": "request",
+                "actor_user_id": "another-member",
+                "credential_kind": "personal",
+                "source": "trusted_identity"
+            }
+        })))
+        .unwrap();
+        assert_eq!(
+            metadata["analytics_attribution"],
+            json!({
+                "is_standalone": false,
+                "record_kind": "request"
+            })
+        );
+    }
 
     #[test]
     fn persistence_projection_drops_credentials_and_free_diagnostics() {

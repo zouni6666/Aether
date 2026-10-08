@@ -606,6 +606,7 @@ pub(super) async fn begin_unowned_responses_websocket_turn(
         state,
         &plan,
         plan.request_id.as_str(),
+        Some(report_context.as_ref().unwrap_or(&Value::Null)),
     )
     .await
     {

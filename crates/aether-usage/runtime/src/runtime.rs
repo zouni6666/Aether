@@ -26,9 +26,7 @@ use crate::request_metadata::{
     request_body_derived_facts_action, retain_first_byte_request_metadata,
     RequestBodyDerivedFactsAction,
 };
-use crate::settlement::{
-    reconcile_usage_policy_cost_for_event_with_result, settle_usage_with_reconciled_cost,
-};
+use crate::settlement::settle_usage_after_upsert;
 use crate::shutdown::{UsageBackgroundTasks, UsageShutdownState};
 use crate::worker::{
     build_usage_queue_worker_with_record_gate, UsageWorkerControl, UsageWorkerObservation,
@@ -5156,21 +5154,6 @@ impl UsageRuntime {
     where
         T: UsageRuntimeAccess,
     {
-        let reconciled = match reconcile_usage_policy_cost_for_event_with_result(data, event).await
-        {
-            Ok(reconciled) => reconciled,
-            Err(err) => {
-                warn!(
-                    event_name = "usage_event_cost_reconciliation_failed",
-                    log_type = "event",
-                    usage_event_type = ?event.event_type,
-                    request_id = %event.request_id,
-                    error = %err,
-                    "usage runtime failed to reconcile plan cost before direct usage upsert"
-                );
-                return false;
-            }
-        };
         match build_upsert_usage_record_from_event(event) {
             Ok(record) => match catch_usage_writer_panic(
                 "direct usage upsert",
@@ -5179,9 +5162,7 @@ impl UsageRuntime {
             .await
             {
                 Ok(Some(stored)) => {
-                    if let Err(err) =
-                        settle_usage_with_reconciled_cost(data, &stored, reconciled).await
-                    {
+                    if let Err(err) = settle_usage_after_upsert(data, &stored, event).await {
                         warn!(
                             event_name = "usage_terminal_settlement_failed",
                             log_type = "event",

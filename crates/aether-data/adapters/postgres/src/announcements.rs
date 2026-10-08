@@ -60,6 +60,48 @@ ORDER BY a.is_pinned DESC, a.priority DESC, a.created_at DESC, a.id ASC
 LIMIT $3
 "#;
 
+const LIST_USER_ANNOUNCEMENTS_SQL: &str = r#"
+WITH visible AS MATERIALIZED (
+  SELECT a.*, EXISTS (
+    SELECT 1 FROM announcement_reads r WHERE r.user_id = $1 AND r.announcement_id = a.id
+  ) AS is_read
+  FROM announcements a
+  WHERE a.is_active = TRUE
+    AND (a.start_time IS NULL OR a.start_time <= TO_TIMESTAMP($2::double precision))
+    AND (a.end_time IS NULL OR a.end_time >= TO_TIMESTAMP($2::double precision))
+), counts AS (
+  SELECT count(*) FILTER (WHERE NOT $3 OR NOT is_read)::bigint AS total,
+         count(*) FILTER (WHERE NOT is_read)::bigint AS unread_count
+  FROM visible
+)
+SELECT
+  counts.total,
+  counts.unread_count,
+  a.id,
+  a.title,
+  a.content,
+  a.type,
+  a.priority,
+  a.is_active,
+  a.is_pinned,
+  a.requires_ack,
+  a.is_read,
+  a.author_id,
+  u.username AS author_username,
+  EXTRACT(EPOCH FROM a.start_time)::bigint AS start_time_unix_secs,
+  EXTRACT(EPOCH FROM a.end_time)::bigint AS end_time_unix_secs,
+  EXTRACT(EPOCH FROM a.created_at)::bigint AS created_at_unix_ms,
+  EXTRACT(EPOCH FROM a.updated_at)::bigint AS updated_at_unix_secs
+FROM counts
+LEFT JOIN LATERAL (
+  SELECT * FROM visible WHERE NOT $3 OR NOT is_read
+  ORDER BY is_pinned DESC, priority DESC, created_at DESC, id ASC
+  LIMIT $4 OFFSET $5
+) a ON TRUE
+LEFT JOIN users u ON u.id = a.author_id
+ORDER BY a.is_pinned DESC, a.priority DESC, a.created_at DESC, a.id ASC
+"#;
+
 const CREATE_ANNOUNCEMENT_SQL: &str = r#"
 INSERT INTO announcements (
   id,
@@ -262,6 +304,40 @@ impl AnnouncementReadRepository for SqlxAnnouncementReadRepository {
         Ok(StoredAnnouncementPage { items, total })
     }
 
+    async fn list_user_announcements(
+        &self,
+        user_id: &str,
+        query: &UserAnnouncementListQuery,
+    ) -> Result<StoredUserAnnouncementPage, DataLayerError> {
+        query.validate()?;
+        // A single statement preserves counts even when the selected page is empty.
+        let rows = sqlx::query(LIST_USER_ANNOUNCEMENTS_SQL)
+            .bind(user_id)
+            .bind(query.now_unix_secs as f64)
+            .bind(query.unread_only)
+            .bind(query.limit as i64)
+            .bind(query.offset as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_postgres_err()?;
+        let mut page = StoredUserAnnouncementPage::default();
+        for row in rows {
+            page.total = row.try_get::<i64, _>("total").map_postgres_err()? as u64;
+            page.unread_count = row.try_get::<i64, _>("unread_count").map_postgres_err()? as u64;
+            if row
+                .try_get::<Option<String>, _>("id")
+                .map_postgres_err()?
+                .is_some()
+            {
+                page.items.push(StoredUserAnnouncement {
+                    announcement: map_announcement_row(&row)?,
+                    is_read: row.try_get("is_read").map_postgres_err()?,
+                });
+            }
+        }
+        Ok(page)
+    }
+
     async fn count_unread_active_announcements(
         &self,
         user_id: &str,
@@ -420,6 +496,103 @@ fn map_announcement_row(row: &PgRow) -> Result<StoredAnnouncement, DataLayerErro
 mod tests {
     use super::SqlxAnnouncementReadRepository;
     use crate::{PostgresPoolConfig, PostgresPoolFactory};
+
+    #[tokio::test]
+    #[ignore = "requires AETHER_TEST_DATABASE_URL; uses connection-local temporary tables"]
+    async fn live_personal_announcement_page_preserves_global_unread_and_visibility() {
+        use aether_data_contracts::repository::announcements::{
+            AnnouncementReadRepository, AnnouncementWriteRepository, UserAnnouncementListQuery,
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&std::env::var("AETHER_TEST_DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "CREATE TEMP TABLE announcements (LIKE public.announcements INCLUDING ALL);
+          CREATE TEMP TABLE announcement_reads (LIKE public.announcement_reads INCLUDING ALL);
+          CREATE TEMP TABLE users (id varchar(36) PRIMARY KEY, username varchar(255));",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let repository = SqlxAnnouncementReadRepository::new(pool.clone());
+        let now = 1_800_000_000_i64;
+        for (id, active, pinned, priority, start, end) in [
+            ("pinned", true, true, 0, None, None),
+            ("normal-a", true, false, 20, Some(now), Some(now)),
+            ("normal-b", true, false, 20, None, None),
+            ("draft", false, false, 99, None, None),
+            ("future", true, false, 99, Some(now + 1), None),
+            ("expired", true, false, 99, None, Some(now - 1)),
+        ] {
+            sqlx::query("INSERT INTO announcements(id,title,content,type,priority,is_active,is_pinned,created_at,updated_at,start_time,end_time) VALUES($1,$1,'content','info',$2,$3,$4,TO_TIMESTAMP($5::double precision),TO_TIMESTAMP($5::double precision),TO_TIMESTAMP($6::double precision),TO_TIMESTAMP($7::double precision))")
+                .bind(id).bind(priority).bind(active).bind(pinned).bind(now as f64)
+                .bind(start.map(|value| value as f64)).bind(end.map(|value| value as f64))
+                .execute(&pool).await.unwrap();
+        }
+        repository
+            .mark_announcement_as_read("reader", "pinned", now as u64)
+            .await
+            .unwrap();
+        let mut query = UserAnnouncementListQuery {
+            unread_only: false,
+            offset: 0,
+            limit: 1,
+            now_unix_secs: now as u64,
+        };
+        let first = repository
+            .list_user_announcements("reader", &query)
+            .await
+            .unwrap();
+        assert_eq!((first.total, first.unread_count), (3, 2));
+        assert_eq!(first.items[0].announcement.id, "pinned");
+        assert!(first.items[0].is_read);
+        query.unread_only = true;
+        query.offset = 1;
+        let second = repository
+            .list_user_announcements("reader", &query)
+            .await
+            .unwrap();
+        assert_eq!((second.total, second.unread_count), (2, 2));
+        assert_eq!(second.items[0].announcement.id, "normal-b");
+        assert!(!second.items[0].is_read);
+        query.offset = i64::MAX as usize;
+        let empty = repository
+            .list_user_announcements("reader", &query)
+            .await
+            .unwrap();
+        assert!(empty.items.is_empty());
+        assert_eq!((empty.total, empty.unread_count), (2, 2));
+        let other = repository
+            .list_user_announcements("other", &query)
+            .await
+            .unwrap();
+        assert_eq!((other.total, other.unread_count), (3, 3));
+        repository
+            .mark_announcement_as_read("reader", "normal-a", now as u64)
+            .await
+            .unwrap();
+        query.offset = 0;
+        let after_read = repository
+            .list_user_announcements("reader", &query)
+            .await
+            .unwrap();
+        assert_eq!((after_read.total, after_read.unread_count), (1, 1));
+        assert_eq!(
+            repository
+                .count_unread_active_announcements("reader", now as u64)
+                .await
+                .unwrap(),
+            1
+        );
+        query.limit = 101;
+        assert!(repository
+            .list_user_announcements("reader", &query)
+            .await
+            .is_err());
+        pool.close().await;
+    }
 
     #[tokio::test]
     async fn repository_constructs_from_lazy_pool() {

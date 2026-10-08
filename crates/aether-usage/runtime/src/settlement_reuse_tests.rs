@@ -66,6 +66,10 @@ impl UsageSettlementWriter for ReuseStore {
         &self,
         input: ReconcileUsagePolicyCostInput,
     ) -> Result<Option<StoredUsagePolicyCostReservation>, DataLayerError> {
+        assert!(
+            self.upserts.load(Ordering::Relaxed) > 0,
+            "a durable usage row must exist before a reservation is finalized"
+        );
         input.validate()?;
         self.reconciliations.lock().unwrap().push(input.clone());
         tokio::task::yield_now().await;
@@ -185,7 +189,7 @@ async fn write(store: &ReuseStore, event: UsageEvent, direct: bool) {
 }
 
 #[tokio::test]
-async fn worker_and_direct_writes_reuse_confirmed_reservation_and_still_settle_wallet() {
+async fn worker_and_direct_writes_persist_before_reconciling_and_settling_wallet() {
     for direct in [false, true] {
         let store = ReuseStore::default();
         write(&store, event(), direct).await;
@@ -198,11 +202,12 @@ async fn worker_and_direct_writes_reuse_confirmed_reservation_and_still_settle_w
         assert_eq!(settlements.len(), 1);
         assert_eq!(settlements[0].request_id, "req-1");
         assert_eq!(settlements[0].actual_total_cost_usd, 0.75);
+        assert_eq!(settlements[0].billing_cost_usd, Some(0.75));
     }
 }
 
 #[tokio::test]
-async fn missing_or_different_reconciliation_results_keep_stored_usage_reconciliation() {
+async fn missing_or_different_reconciliation_results_do_not_repeat_stored_usage_reconciliation() {
     let changes: [fn(&mut StoredUsagePolicyCostReservation); 9] = [
         |row| row.request_id = "other-request".to_string(),
         |row| row.subject_id = "other-user".to_string(),
@@ -223,7 +228,7 @@ async fn missing_or_different_reconciliation_results_keep_stored_usage_reconcili
                 ..Default::default()
             };
             write(&store, event(), direct).await;
-            assert_eq!(store.reconciliations.lock().unwrap().len(), 2);
+            assert_eq!(store.reconciliations.lock().unwrap().len(), 1);
             assert_eq!(store.settlements.lock().unwrap().len(), 1);
         }
     }
@@ -252,19 +257,56 @@ async fn changed_stored_usage_is_reconciled_using_its_own_identity_cost_and_term
             };
             write(&store, event(), direct).await;
             let reconciliations = store.reconciliations.lock().unwrap();
-            assert_eq!(reconciliations.len(), 2);
-            assert_eq!(reconciliations[1].request_id, stored.request_id);
+            let stored_token = stored.request_metadata.as_ref().unwrap()
+                ["plan_usage_reservation_token"]
+                .as_str()
+                .unwrap();
             assert_eq!(
-                reconciliations[1].subject_id,
+                reconciliations.len(),
+                if stored_token == RESERVATION_TOKEN {
+                    1
+                } else {
+                    2
+                }
+            );
+            if stored_token != RESERVATION_TOKEN {
+                assert_eq!(reconciliations[0].reservation_token, RESERVATION_TOKEN);
+                assert_eq!(reconciliations[0].actual_cost_units, 75_000_000);
+            }
+            let reconciliation = reconciliations.last().unwrap();
+            assert_eq!(reconciliation.request_id, stored.request_id);
+            assert_eq!(
+                reconciliation.subject_id,
                 stored.user_id.as_ref().unwrap().as_str()
             );
             assert_eq!(
-                reconciliations[1].reservation_token,
+                reconciliation.reservation_token,
                 stored.request_metadata.as_ref().unwrap()["plan_usage_reservation_token"]
                     .as_str()
                     .unwrap()
             );
-            assert_ne!(reconciliations[0], reconciliations[1]);
+            assert_eq!(
+                reconciliation.actual_cost_units,
+                if stored.status == "failed" {
+                    0
+                } else {
+                    (stored.actual_total_cost_usd * 100_000_000.0) as u64
+                }
+            );
+            assert_eq!(
+                reconciliation.terminal_state,
+                if stored.status == "failed" {
+                    UsagePolicyCostReservationState::Released
+                } else {
+                    UsagePolicyCostReservationState::Finalized
+                }
+            );
+            assert_eq!(
+                reconciliation.finalized_at_unix_secs,
+                stored
+                    .finalized_at_unix_secs
+                    .unwrap_or(stored.updated_at_unix_secs)
+            );
             let settlements = store.settlements.lock().unwrap();
             assert_eq!(settlements.len(), 1);
             assert_eq!(
@@ -273,6 +315,185 @@ async fn changed_stored_usage_is_reconciled_using_its_own_identity_cost_and_term
             );
             assert_eq!(settlements[0].status, stored.status);
         }
+    }
+}
+
+#[tokio::test]
+async fn worker_and_direct_settle_customer_multiplier_snapshot_without_changing_provider_cost() {
+    for direct in [false, true] {
+        for (group_multiplier, promotion_multiplier, expected) in [
+            (0.0, 1.0, 0.0),
+            (1.0, 1.0, 1.25),
+            (2.0, 0.25, 0.625),
+            (3.0, 1.0, 3.75),
+        ] {
+            let store = ReuseStore::default();
+            let mut event = event();
+            event.data.request_metadata.as_mut().unwrap()["billing_multiplier_snapshot"] = json!({
+                "version": 1,
+                "factors": {"routing_group": group_multiplier, "promotion": promotion_multiplier},
+                "multiplier": group_multiplier * promotion_multiplier
+            });
+            write(&store, event, direct).await;
+            let reconciliations = store.reconciliations.lock().unwrap();
+            assert_eq!(reconciliations.len(), 1, "direct={direct}");
+            assert_eq!(
+                reconciliations[0].actual_cost_units,
+                (expected * 100_000_000.0) as u64
+            );
+            let settlements = store.settlements.lock().unwrap();
+            assert_eq!(settlements.len(), 1);
+            assert_eq!(settlements[0].billing_cost_usd, Some(expected));
+            assert_eq!(settlements[0].total_cost_usd, 1.25);
+            assert_eq!(settlements[0].actual_total_cost_usd, 0.75);
+        }
+    }
+}
+
+#[tokio::test]
+async fn sparse_terminal_event_uses_persisted_multiplier_and_cost_for_both_ledger_and_wallet() {
+    for direct in [false, true] {
+        let mut stored = sample_usage();
+        stored.total_cost_usd = 2.0;
+        stored.actual_total_cost_usd = 0.25;
+        stored.request_metadata.as_mut().unwrap()["billing_multiplier_snapshot"] = json!({
+            "version": 1,
+            "factors": {"routing_group": 3.0, "promotion": 0.5},
+            "multiplier": 1.5
+        });
+        let expected = stored.billing_cost().unwrap();
+        assert_eq!(expected, 3.0);
+        let store = ReuseStore {
+            stored_override: Some(stored),
+            ..Default::default()
+        };
+        // Sparse asynchronous completion has neither the captured multiplier
+        // nor authoritative charges. Persistence restores the original snapshot.
+        let mut terminal = event();
+        terminal.data.total_cost_usd = None;
+        terminal.data.actual_total_cost_usd = None;
+        write(&store, terminal, direct).await;
+        let reconciliations = store.reconciliations.lock().unwrap();
+        assert_eq!(reconciliations.len(), 1, "direct={direct}");
+        assert_eq!(reconciliations[0].actual_cost_units, 300_000_000);
+        let settlements = store.settlements.lock().unwrap();
+        assert_eq!(settlements.len(), 1);
+        assert_eq!(settlements[0].billing_cost_usd, Some(expected));
+        assert_eq!(settlements[0].total_cost_usd, 2.0);
+        assert_eq!(settlements[0].actual_total_cost_usd, 0.25);
+    }
+}
+
+#[tokio::test]
+async fn colliding_request_id_reconciles_new_token_with_its_own_snapshot_after_upsert() {
+    for direct in [false, true] {
+        let mut stored = sample_usage();
+        stored.total_cost_usd = 2.0;
+        stored.request_metadata = Some(json!({
+            "plan_usage_reservation_token": "previous-token",
+            "billing_multiplier_snapshot": {
+                "version": 1,
+                "factors": {"routing_group": 0.5},
+                "multiplier": 0.5
+            }
+        }));
+        let store = ReuseStore {
+            stored_override: Some(stored),
+            ..Default::default()
+        };
+        let mut terminal = event();
+        terminal.data.request_metadata.as_mut().unwrap()["billing_multiplier_snapshot"] = json!({
+            "version": 1,
+            "factors": {"routing_group": 3.0},
+            "multiplier": 3.0
+        });
+        write(&store, terminal, direct).await;
+        assert_eq!(store.upserts.load(Ordering::Relaxed), 1);
+        let reconciliations = store.reconciliations.lock().unwrap();
+        assert_eq!(reconciliations.len(), 2, "direct={direct}");
+        assert_eq!(reconciliations[0].reservation_token, RESERVATION_TOKEN);
+        assert_eq!(reconciliations[0].actual_cost_units, 375_000_000);
+        assert_eq!(reconciliations[1].reservation_token, "previous-token");
+        assert_eq!(reconciliations[1].actual_cost_units, 100_000_000);
+        let settlements = store.settlements.lock().unwrap();
+        assert_eq!(settlements.len(), 1);
+        assert_eq!(settlements[0].billing_cost_usd, Some(1.0));
+        assert_eq!(settlements[0].actual_total_cost_usd, 0.75);
+    }
+}
+
+#[tokio::test]
+async fn sparse_colliding_token_cannot_borrow_another_requests_multiplier() {
+    for direct in [false, true] {
+        for (event_type, billable_cancel) in [
+            (UsageEventType::Completed, false),
+            (UsageEventType::Cancelled, true),
+        ] {
+            let mut stored = sample_usage();
+            stored.request_metadata = Some(json!({
+                "plan_usage_reservation_token": "previous-token",
+                "billing_multiplier_snapshot": {
+                    "version": 1,
+                    "factors": {"routing_group": 0.0},
+                    "multiplier": 0.0
+                }
+            }));
+            let store = ReuseStore {
+                stored_override: Some(stored),
+                ..Default::default()
+            };
+            let mut terminal = event();
+            terminal.event_type = event_type;
+            terminal.data.request_metadata.as_mut().unwrap()["cancelled_request_fee"] =
+                json!(billable_cancel);
+            if direct {
+                write(&store, terminal, true).await;
+            } else {
+                assert!(write_event_record(&store, &terminal).await.is_err());
+            }
+            assert_eq!(store.upserts.load(Ordering::Relaxed), 1);
+            assert!(
+                store.reconciliations.lock().unwrap().is_empty(),
+                "direct={direct}"
+            );
+            assert!(store.settlements.lock().unwrap().is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn failed_colliding_token_is_released_without_borrowing_snapshot_or_charge() {
+    for direct in [false, true] {
+        let mut stored = sample_usage();
+        stored.billing_status = "settled".to_string();
+        stored.request_metadata = Some(json!({
+            "plan_usage_reservation_token": "previous-token",
+            "billing_multiplier_snapshot": {
+                "version": 1,
+                "factors": {"routing_group": 2.0},
+                "multiplier": 2.0
+            }
+        }));
+        let store = ReuseStore {
+            stored_override: Some(stored),
+            ..Default::default()
+        };
+        let mut terminal = event();
+        terminal.event_type = UsageEventType::Failed;
+        terminal.data.total_cost_usd = None;
+        terminal.data.actual_total_cost_usd = None;
+        write(&store, terminal, direct).await;
+        let reconciliations = store.reconciliations.lock().unwrap();
+        assert_eq!(reconciliations.len(), 2, "direct={direct}");
+        assert_eq!(reconciliations[0].reservation_token, RESERVATION_TOKEN);
+        assert_eq!(
+            reconciliations[0].terminal_state,
+            UsagePolicyCostReservationState::Released
+        );
+        assert_eq!(reconciliations[0].actual_cost_units, 0);
+        assert_eq!(reconciliations[1].reservation_token, "previous-token");
+        assert_eq!(reconciliations[1].actual_cost_units, 250_000_000);
+        assert!(store.settlements.lock().unwrap().is_empty());
     }
 }
 
@@ -329,7 +550,7 @@ async fn cancellation_release_billable_cancellation_and_zero_cost_preserve_settl
 }
 
 #[tokio::test]
-async fn reconciliation_failure_stops_both_writes_before_upsert_and_wallet_settlement() {
+async fn reconciliation_failure_keeps_durable_usage_but_stops_wallet_settlement() {
     for direct in [false, true] {
         let store = ReuseStore {
             response: ReconcileResponse::Error,
@@ -341,13 +562,13 @@ async fn reconciliation_failure_stops_both_writes_before_upsert_and_wallet_settl
             assert!(write_event_record(&store, &event()).await.is_err());
         }
         assert_eq!(store.reconciliations.lock().unwrap().len(), 1);
-        assert_eq!(store.upserts.load(Ordering::Relaxed), 0);
+        assert_eq!(store.upserts.load(Ordering::Relaxed), 1);
         assert!(store.settlements.lock().unwrap().is_empty());
     }
 }
 
 #[tokio::test]
-async fn retry_after_upsert_failure_reconciles_again_before_settling() {
+async fn retry_after_upsert_failure_reconciles_only_the_successfully_persisted_usage() {
     for direct in [false, true] {
         let store = ReuseStore {
             fail_next_upsert: AtomicBool::new(true),
@@ -358,9 +579,10 @@ async fn retry_after_upsert_failure_reconciles_again_before_settling() {
         } else {
             assert!(write_event_record(&store, &event()).await.is_err());
         }
+        assert!(store.reconciliations.lock().unwrap().is_empty());
         assert!(store.settlements.lock().unwrap().is_empty());
         write(&store, event(), direct).await;
-        assert_eq!(store.reconciliations.lock().unwrap().len(), 2);
+        assert_eq!(store.reconciliations.lock().unwrap().len(), 1);
         assert_eq!(store.upserts.load(Ordering::Relaxed), 2);
         assert_eq!(store.settlements.lock().unwrap().len(), 1);
     }
@@ -481,11 +703,17 @@ async fn concurrent_duplicate_delivery_debits_real_memory_wallet_only_once() {
         let store = store.clone();
         let runtime = runtime.clone();
         tasks.spawn(async move {
+            let mut terminal = event();
+            terminal.data.request_metadata.as_mut().unwrap()["billing_multiplier_snapshot"] = json!({
+                "version": 1,
+                "factors": {"routing_group": 3.0, "promotion": 0.5},
+                "multiplier": 1.5
+            });
             if index % 2 == 0 {
-                write_event_record(store.as_ref(), &event()).await.unwrap();
+                write_event_record(store.as_ref(), &terminal).await.unwrap();
             } else {
                 runtime
-                    .record_terminal_event_direct(store.as_ref(), event())
+                    .record_terminal_event_direct(store.as_ref(), terminal)
                     .await;
             }
         });
@@ -495,13 +723,25 @@ async fn concurrent_duplicate_delivery_debits_real_memory_wallet_only_once() {
     }
     assert_eq!(store.reconciliations.lock().unwrap().len(), 32);
     assert_eq!(store.settlements.lock().unwrap().len(), 32);
+    assert!(store
+        .reconciliations
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|input| input.actual_cost_units == 187_500_000));
+    assert!(store
+        .settlements
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|input| input.billing_cost_usd == Some(1.875) && input.actual_total_cost_usd == 0.75));
     let wallet = wallets
         .find(WalletLookupKey::UserId("user-1"))
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(wallet.balance + wallet.gift_balance, 11.25);
-    assert_eq!(wallet.total_consumed, 0.75);
+    assert_eq!(wallet.balance + wallet.gift_balance, 10.125);
+    assert_eq!(wallet.total_consumed, 1.875);
     assert!(matches!(
         store
             .repository

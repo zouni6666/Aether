@@ -61,6 +61,19 @@ export function usagePolicyEntitlementLabels(policy: UsagePolicyEntitlement): st
   return labels.length > 0 ? labels : ['使用限制']
 }
 
+export function billingEntitlementLabels(
+  items: BillingEntitlement[] | undefined,
+  translate: (value: string) => string,
+): string[] {
+  return (items || []).flatMap((item) => {
+    if (item.type === 'wallet_credit') return `${translate('附赠余额')} $${Number(item.amount_usd || 0).toFixed(2)}`
+    if (item.type === 'daily_quota') return `${translate('每日额度')} $${Number(item.daily_quota_usd || 0).toFixed(2)}`
+    if (item.type === 'membership_group') return translate('会员权益')
+    if (item.type === 'usage_policy') return usagePolicyEntitlementLabels(item)
+    return []
+  })
+}
+
 function formatUsagePolicyRuleLabel(rule: UsagePolicyRule): string {
   const limit = formatLimit(rule.limit)
 

@@ -16,6 +16,8 @@ use crate::{DataLayerError, DatabaseDriver, SqlDatabaseConfig};
 mod postgres;
 
 #[cfg(all(test, feature = "postgres"))]
+mod dashboard_snapshot_tests;
+#[cfg(all(test, feature = "postgres"))]
 mod tests;
 
 #[cfg(feature = "postgres")]
@@ -97,6 +99,38 @@ struct AuxiliaryTable {
 }
 
 const AUXILIARY_TABLES: &[AuxiliaryTable] = &[
+    AuxiliaryTable {
+        name: "dashboard_stats_state",
+        primary_key: &["singleton"],
+    },
+    AuxiliaryTable {
+        name: "dashboard_stats_total",
+        primary_key: &["shard"],
+    },
+    AuxiliaryTable {
+        name: "dashboard_stats_minute",
+        primary_key: &["bucket_start", "shard"],
+    },
+    AuxiliaryTable {
+        name: "dashboard_activity_hour",
+        primary_key: &["bucket_start", "shard"],
+    },
+    AuxiliaryTable {
+        name: "dashboard_activity_minute",
+        primary_key: &["bucket_start", "shard"],
+    },
+    AuxiliaryTable {
+        name: "dashboard_actor_minute",
+        primary_key: &["bucket_start", "shard", "actor_user_id"],
+    },
+    AuxiliaryTable {
+        name: "dashboard_user_events_minute",
+        primary_key: &["bucket_start", "shard"],
+    },
+    AuxiliaryTable {
+        name: "dashboard_request_contributions",
+        primary_key: &["request_id"],
+    },
     AuxiliaryTable {
         name: "audit_logs",
         primary_key: &["id"],
@@ -182,6 +216,10 @@ const AUXILIARY_TABLES: &[AuxiliaryTable] = &[
         primary_key: &["provider"],
     },
     AuxiliaryTable {
+        name: "provider_expenses",
+        primary_key: &["id"],
+    },
+    AuxiliaryTable {
         name: "billing_plans",
         primary_key: &["id"],
     },
@@ -211,6 +249,10 @@ const AUXILIARY_TABLES: &[AuxiliaryTable] = &[
     },
     AuxiliaryTable {
         name: "usage_routing_snapshots",
+        primary_key: &["request_id"],
+    },
+    AuxiliaryTable {
+        name: "usage_attribution_snapshots",
         primary_key: &["request_id"],
     },
     AuxiliaryTable {
@@ -389,6 +431,22 @@ pub struct DataExportManifest {
     pub created_at_unix_secs: u64,
     pub source_driver: Option<DatabaseDriver>,
     pub domains: Vec<ExportDomain>,
+    /// Complete dashboard projection, restored atomically rather than merged by row.
+    /// Older exports omit this field and retain their ordinary import behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dashboard_snapshot: Option<DashboardSnapshotManifest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DashboardSnapshotManifest {
+    pub version: u32,
+    pub tables: BTreeMap<String, DashboardSnapshotTable>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DashboardSnapshotTable {
+    pub rows: usize,
+    pub sha256: String,
 }
 
 impl DataExportManifest {
@@ -405,6 +463,7 @@ impl DataExportManifest {
             created_at_unix_secs,
             source_driver,
             domains,
+            dashboard_snapshot: None,
         }
     }
 }

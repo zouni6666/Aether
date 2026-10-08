@@ -23,6 +23,9 @@ pub(crate) enum GatewayRoutingSelectionError {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct GatewayRoutingSelectionInput<'a> {
     pub explicit_group: Option<&'a str>,
+    /// A public group selected on the user's API key. Explicit request headers
+    /// take precedence, while an unavailable saved choice must fail closed.
+    pub preferred_group: Option<&'a str>,
     pub user_id: Option<&'a str>,
     pub api_key_id: Option<&'a str>,
     pub user_group_ids: &'a [String],
@@ -66,6 +69,28 @@ pub(crate) async fn select_gateway_routing_group(
         return Ok(GatewayRoutingGroupSelection {
             group: Some(group),
             source: "explicit_header".to_string(),
+        });
+    }
+
+    if let Some(preferred) = input
+        .preferred_group
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let group = repository
+            .find_routing_group(RoutingGroupLookupKey::Id(preferred))
+            .await
+            .map_err(repository_selection_error)?
+            .ok_or_else(|| GatewayRoutingSelectionError::NotFound(preferred.to_string()))?;
+        if !group.enabled {
+            return Err(GatewayRoutingSelectionError::Disabled(group.id));
+        }
+        if !has_authenticated_principal(&input) || !routing_group_is_user_visible(&group) {
+            return Err(GatewayRoutingSelectionError::Forbidden(group.id));
+        }
+        return Ok(GatewayRoutingGroupSelection {
+            group: Some(group),
+            source: "api_key_selection".to_string(),
         });
     }
 
@@ -128,6 +153,11 @@ async fn explicit_group_allowed(
     group: &StoredRoutingGroup,
     input: &GatewayRoutingSelectionInput<'_>,
 ) -> Result<bool, GatewayRoutingSelectionError> {
+    // Public selection is opt-in. Turning it off does not revoke existing
+    // administrator-granted bindings or the system-default compatibility path.
+    if has_authenticated_principal(input) && routing_group_is_user_visible(group) {
+        return Ok(true);
+    }
     if group.is_system_default {
         return Ok(true);
     }
@@ -145,6 +175,22 @@ async fn explicit_group_allowed(
         }
     }
     Ok(false)
+}
+
+pub(crate) fn routing_group_is_user_visible(group: &StoredRoutingGroup) -> bool {
+    group
+        .config_json
+        .get("user_visible")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+}
+
+fn has_authenticated_principal(input: &GatewayRoutingSelectionInput<'_>) -> bool {
+    input
+        .user_id
+        .into_iter()
+        .chain(input.api_key_id)
+        .any(|id| !id.trim().is_empty())
 }
 
 fn repository_selection_error(error: impl std::fmt::Display) -> GatewayRoutingSelectionError {
@@ -232,6 +278,225 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn public_groups_allow_authenticated_selection_but_visibility_is_opt_in() {
+        let repository = InMemoryRoutingGroupRepository::default();
+        for (id, config, enabled) in [
+            ("public", json!({ "user_visible": true }), true),
+            ("private", json!({ "user_visible": false }), true),
+            ("legacy", json!({}), true),
+            ("malformed", json!({ "user_visible": "true" }), true),
+            ("disabled", json!({ "user_visible": true }), false),
+        ] {
+            repository
+                .create_routing_group(CreateRoutingGroupRecord {
+                    id: id.into(),
+                    name: format!("{id}-name"),
+                    description: None,
+                    enabled,
+                    is_system_default: false,
+                    sort_order: 0,
+                    config_json: config,
+                    version: 1,
+                    created_at: 1,
+                    updated_at: 1,
+                    published_at: None,
+                })
+                .await
+                .unwrap();
+        }
+        for (user_id, api_key_id) in [(Some("user-1"), None), (None, Some("key-1"))] {
+            for explicit in ["public", "public-name"] {
+                let selected = select_gateway_routing_group(
+                    &repository,
+                    GatewayRoutingSelectionInput {
+                        explicit_group: Some(explicit),
+                        user_id,
+                        api_key_id,
+                        user_group_ids: &[],
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+                assert_eq!(selected.group.unwrap().id, "public");
+            }
+        }
+        for id in ["private", "legacy", "malformed"] {
+            assert_eq!(
+                select_gateway_routing_group(
+                    &repository,
+                    GatewayRoutingSelectionInput {
+                        explicit_group: Some(id),
+                        user_id: Some("user-1"),
+                        ..Default::default()
+                    }
+                )
+                .await
+                .unwrap_err(),
+                GatewayRoutingSelectionError::Forbidden(id.into())
+            );
+        }
+        assert_eq!(
+            select_gateway_routing_group(
+                &repository,
+                GatewayRoutingSelectionInput {
+                    explicit_group: Some("disabled"),
+                    user_id: Some("user-1"),
+                    ..Default::default()
+                }
+            )
+            .await
+            .unwrap_err(),
+            GatewayRoutingSelectionError::Disabled("disabled".into())
+        );
+        assert_eq!(
+            select_gateway_routing_group(
+                &repository,
+                GatewayRoutingSelectionInput {
+                    explicit_group: Some("public"),
+                    ..Default::default()
+                }
+            )
+            .await
+            .unwrap_err(),
+            GatewayRoutingSelectionError::Forbidden("public".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn api_key_selected_public_group_precedes_bindings_and_header_precedes_saved_choice() {
+        let repository = InMemoryRoutingGroupRepository::default();
+        for (id, visible) in [
+            ("selected", true),
+            ("header", true),
+            ("private-default", false),
+        ] {
+            repository
+                .create_routing_group(CreateRoutingGroupRecord {
+                    id: id.into(),
+                    name: id.into(),
+                    description: None,
+                    enabled: true,
+                    is_system_default: false,
+                    sort_order: 0,
+                    config_json: json!({ "user_visible": visible }),
+                    version: 1,
+                    created_at: 1,
+                    updated_at: 1,
+                    published_at: None,
+                })
+                .await
+                .unwrap();
+        }
+        repository
+            .create_routing_group_binding(CreateRoutingGroupBindingRecord {
+                id: "admin-default".into(),
+                group_id: "private-default".into(),
+                subject_type: RoutingGroupBindingSubject::ApiKey,
+                subject_id: "key-1".into(),
+                is_default: true,
+                allow_explicit_select: true,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .await
+            .unwrap();
+
+        for (explicit, preferred, expected, source) in [
+            (None, Some("selected"), "selected", "api_key_selection"),
+            (
+                Some("header"),
+                Some("selected"),
+                "header",
+                "explicit_header",
+            ),
+            // An explicit authorized request overrides an invalid saved choice.
+            (Some("header"), Some("missing"), "header", "explicit_header"),
+            (
+                Some("private-default"),
+                Some("selected"),
+                "private-default",
+                "explicit_header",
+            ),
+            (None, None, "private-default", "api_key_default"),
+        ] {
+            let selection = select_gateway_routing_group(
+                &repository,
+                GatewayRoutingSelectionInput {
+                    explicit_group: explicit,
+                    preferred_group: preferred,
+                    api_key_id: Some("key-1"),
+                    user_id: Some("user-1"),
+                    user_group_ids: &[],
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(selection.group.unwrap().id, expected);
+            assert_eq!(selection.source, source);
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_api_key_group_selection_fails_closed_without_default_fallback() {
+        let repository = InMemoryRoutingGroupRepository::default();
+        for (id, visible, enabled, is_default) in [
+            ("private-default", false, true, true),
+            ("disabled", true, false, false),
+        ] {
+            repository
+                .create_routing_group(CreateRoutingGroupRecord {
+                    id: id.into(),
+                    name: format!("{id}-name"),
+                    description: None,
+                    enabled,
+                    is_system_default: is_default,
+                    sort_order: 0,
+                    config_json: json!({ "user_visible": visible }),
+                    version: 1,
+                    created_at: 1,
+                    updated_at: 1,
+                    published_at: None,
+                })
+                .await
+                .unwrap();
+        }
+        for (id, error) in [
+            (
+                "private-default",
+                GatewayRoutingSelectionError::Forbidden("private-default".into()),
+            ),
+            (
+                "disabled",
+                GatewayRoutingSelectionError::Disabled("disabled".into()),
+            ),
+            (
+                "missing",
+                GatewayRoutingSelectionError::NotFound("missing".into()),
+            ),
+            // Saved selections are stable IDs, not mutable group names.
+            (
+                "private-default-name",
+                GatewayRoutingSelectionError::NotFound("private-default-name".into()),
+            ),
+        ] {
+            assert_eq!(
+                select_gateway_routing_group(
+                    &repository,
+                    GatewayRoutingSelectionInput {
+                        preferred_group: Some(id),
+                        user_id: Some("user-1"),
+                        ..Default::default()
+                    }
+                )
+                .await
+                .unwrap_err(),
+                error
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn selects_api_key_default_binding() {
         let repository = InMemoryRoutingGroupRepository::default();
         repository
@@ -268,6 +533,7 @@ mod tests {
             &repository,
             GatewayRoutingSelectionInput {
                 explicit_group: None,
+                preferred_group: None,
                 user_id: None,
                 api_key_id: Some("api-key-1"),
                 user_group_ids: &[],
@@ -304,6 +570,7 @@ mod tests {
             &repository,
             GatewayRoutingSelectionInput {
                 explicit_group: None,
+                preferred_group: None,
                 user_id: Some("user-1"),
                 api_key_id: Some("api-key-1"),
                 user_group_ids: &["user-group-1".to_string()],
@@ -327,7 +594,7 @@ mod tests {
                 enabled: true,
                 is_system_default: false,
                 sort_order: 0,
-                config_json: json!({}),
+                config_json: json!({ "user_visible": false }),
                 version: 1,
                 created_at: 1,
                 updated_at: 1,
@@ -353,6 +620,7 @@ mod tests {
             &repository,
             GatewayRoutingSelectionInput {
                 explicit_group: Some("private-group"),
+                preferred_group: None,
                 user_id: Some("user-1"),
                 api_key_id: Some("api-key-1"),
                 user_group_ids: &["team-1".to_string()],
@@ -373,6 +641,7 @@ mod tests {
             &repository,
             GatewayRoutingSelectionInput {
                 explicit_group: Some("missing"),
+                preferred_group: None,
                 user_id: Some("user-1"),
                 api_key_id: Some("api-key-1"),
                 user_group_ids: &[],
@@ -397,6 +666,7 @@ mod tests {
             &repository,
             GatewayRoutingSelectionInput {
                 explicit_group: Some("group-name"),
+                preferred_group: None,
                 user_id: Some("user-1"),
                 api_key_id: Some("api-key-1"),
                 user_group_ids: &[],
@@ -423,6 +693,7 @@ mod tests {
             &repository,
             GatewayRoutingSelectionInput {
                 explicit_group: None,
+                preferred_group: None,
                 user_id: Some("user-1"),
                 api_key_id: Some("api-key-1"),
                 user_group_ids: &[],
@@ -463,6 +734,7 @@ mod tests {
             &repository,
             GatewayRoutingSelectionInput {
                 explicit_group: Some("disabled-group"),
+                preferred_group: None,
                 user_id: Some("user-1"),
                 api_key_id: Some("api-key-1"),
                 user_group_ids: &[],
@@ -514,6 +786,7 @@ mod tests {
             &repository,
             GatewayRoutingSelectionInput {
                 explicit_group: Some("private-group"),
+                preferred_group: None,
                 user_id: Some("user-1"),
                 api_key_id: Some("api-key-1"),
                 user_group_ids: &[],

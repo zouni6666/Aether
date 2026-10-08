@@ -3,6 +3,46 @@ use http::Uri;
 use super::{classify_control_route, headers};
 
 #[test]
+fn overview_routes_require_the_admin_stats_principal_and_get_method() {
+    for (suffix, kind) in [
+        ("dashboard", "dashboard"),
+        ("dashboard/summary", "dashboard_summary"),
+        ("dashboard/total", "dashboard_total"),
+        ("dashboard/charts", "dashboard_charts"),
+        ("summary", "summary"),
+        ("timeseries", "timeseries"),
+        ("breakdown", "breakdown"),
+        ("users", "users"),
+        ("users/employee-1", "user_detail"),
+        ("consumption", "consumption"),
+        ("costs", "costs"),
+        ("operations/live", "operations_live"),
+        ("operations/performance", "operations_performance"),
+        ("operations/resources", "operations_resources"),
+    ] {
+        for trailing in ["", "/"] {
+            let uri: Uri = format!("/api/admin/overview/{suffix}{trailing}")
+                .parse()
+                .unwrap();
+            let decision = classify_control_route(&http::Method::GET, &uri, &headers(&[])).unwrap();
+            assert_eq!(decision.route_family.as_deref(), Some("overview_manage"));
+            assert_eq!(decision.route_kind.as_deref(), Some(kind));
+            assert_eq!(
+                decision.auth_endpoint_signature.as_deref(),
+                Some("admin:stats")
+            );
+            assert!(!decision.is_execution_runtime_candidate());
+            let decision = classify_control_route(&http::Method::POST, &uri, &headers(&[]));
+            assert!(
+                decision.is_none_or(
+                    |decision| decision.route_family.as_deref() != Some("overview_manage")
+                )
+            );
+        }
+    }
+}
+
+#[test]
 fn classifies_admin_stats_provider_quota_usage_as_admin_proxy_route() {
     let headers = headers(&[]);
     let uri: Uri = "/api/admin/stats/providers/quota-usage"

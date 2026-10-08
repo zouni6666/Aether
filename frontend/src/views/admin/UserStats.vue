@@ -1,540 +1,306 @@
 <template>
-  <div class="space-y-6 px-4 sm:px-6 lg:px-0">
-    <div class="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
-      <div>
-        <h1 class="text-lg font-semibold">
-          {{ t('userStats.title') }}
-        </h1>
-        <p class="text-xs text-muted-foreground">
-          {{ t('userStats.description') }}
-        </p>
-      </div>
-      <div class="flex flex-wrap items-center gap-2">
-        <Select v-model="scope">
-          <SelectTrigger class="h-8 w-32 text-xs">
-            <SelectValue :placeholder="t('userStats.scope.placeholder')" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="user">
-              {{ t('userStats.scope.user') }}
-            </SelectItem>
-            <SelectItem value="user_group">
-              {{ t('userStats.scope.userGroup') }}
-            </SelectItem>
-          </SelectContent>
-        </Select>
-        <Select v-model="selectedEntityId">
-          <SelectTrigger class="h-8 w-52 text-xs">
-            <SelectValue :placeholder="scope === 'user' ? t('userStats.select.user') : t('userStats.select.userGroup')" />
-          </SelectTrigger>
-          <SelectContent
-            :search-threshold="0"
-            :search-placeholder="scope === 'user' ? t('userStats.search.user') : t('userStats.search.userGroup')"
-          >
-            <SelectItem
-              v-for="entity in allEntities"
-              :key="entity.id"
-              :value="entity.id"
-            >
-              {{ entity.name }}
-            </SelectItem>
-          </SelectContent>
-        </Select>
-        <Select v-model="compareEntityId">
-          <SelectTrigger class="h-8 w-52 text-xs">
-            <SelectValue :placeholder="t('userStats.compare.placeholder')" />
-          </SelectTrigger>
-          <SelectContent
-            :search-threshold="0"
-            :search-placeholder="scope === 'user' ? t('userStats.search.user') : t('userStats.search.userGroup')"
-          >
-            <SelectItem value="__none__">
-              {{ t('userStats.compare.none') }}
-            </SelectItem>
-            <SelectItem
-              v-for="entity in comparisonEntities"
-              :key="`compare-${entity.id}`"
-              :value="entity.id"
-            >
-              {{ entity.name }}
-            </SelectItem>
-          </SelectContent>
-        </Select>
-        <TimeRangePicker
-          v-model="timeRange"
-          :allow-hourly="true"
-        />
-      </div>
-    </div>
-
-    <div class="grid grid-cols-1 gap-4 lg:grid-cols-2">
-      <LeaderboardTable
-        :title="scope === 'user' ? t('userStats.leaderboard.user') : t('userStats.leaderboard.userGroup')"
-        :items="leaderboard"
-        :metric="metric"
-        :loading="leaderboardLoading"
-        :show-member-count="scope === 'user_group'"
-        selectable
-        @update:metric="metric = $event"
-        @select="selectLeaderboardItem"
-      >
-        <template #pagination>
-          <div class="flex items-center justify-between border-t px-4 py-3 text-xs text-muted-foreground">
-            <span>{{ t('userStats.pagination.summary', { total: leaderboardTotal, page: currentPage }) }}</span>
-            <div class="flex gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                :disabled="leaderboardOffset === 0 || leaderboardLoading"
-                @click="changeLeaderboardPage(-1)"
-              >
-                {{ t('userStats.pagination.previous') }}
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                :disabled="!hasNextLeaderboardPage || leaderboardLoading"
-                @click="changeLeaderboardPage(1)"
-              >
-                {{ t('userStats.pagination.next') }}
-              </Button>
-            </div>
-          </div>
-        </template>
-      </LeaderboardTable>
-
-      <Card class="space-y-3 p-4">
-        <div>
-          <h3 class="text-sm font-semibold">
-            {{ scope === 'user' ? t('userStats.summary.user') : t('userStats.summary.userGroup') }}
-          </h3>
-          <p class="mt-0.5 truncate text-xs text-muted-foreground">
-            {{ selectedEntityName || t('userStats.selectPrompt') }}
-          </p>
-        </div>
-        <div
-          v-if="summaryLoading"
-          class="p-6"
-        >
-          <LoadingState />
-        </div>
-        <div
-          v-else
-          class="grid grid-cols-2 gap-3 text-sm"
-        >
-          <div>
-            <div class="text-xs text-muted-foreground">
-              {{ t('stats.metric.requests') }}
-            </div>
-            <div class="font-semibold">
-              {{ usageSummary?.total_requests ?? 0 }}
-            </div>
-          </div>
-          <div>
-            <div class="text-xs text-muted-foreground">
-              {{ t('stats.metric.tokens') }}
-            </div>
-            <div class="font-semibold">
-              {{ formatTokens(usageSummary?.total_tokens ?? 0) }}
-            </div>
-          </div>
-          <div>
-            <div class="text-xs text-muted-foreground">
-              {{ t('stats.metric.cost') }}
-            </div>
-            <div class="font-semibold">
-              {{ formatCurrency(usageSummary?.total_cost ?? 0) }}
-            </div>
-          </div>
-          <div>
-            <div class="text-xs text-muted-foreground">
-              {{ t('stats.metric.errorRate') }}
-            </div>
-            <div class="font-semibold">
-              {{ usageSummary?.error_rate ?? 0 }}%
-            </div>
-          </div>
-          <template v-if="scope === 'user_group'">
-            <div>
-              <div class="text-xs text-muted-foreground">
-                {{ t('userStats.members.current') }}
-              </div>
-              <div class="font-semibold">
-                {{ groupMemberCount }}
-              </div>
-            </div>
-            <div>
-              <div class="text-xs text-muted-foreground">
-                {{ t('userStats.members.active') }}
-              </div>
-              <div class="font-semibold">
-                {{ activeGroupMemberCount }}
-              </div>
-            </div>
-          </template>
-        </div>
-      </Card>
-    </div>
-
-    <LeaderboardTable
-      v-if="scope === 'user_group'"
-      :title="t('userStats.memberLeaderboard')"
-      :items="memberLeaderboard"
-      :metric="metric"
-      :loading="memberLeaderboardLoading"
-      :show-metric-select="false"
-      selectable
-      @select="selectMember"
-    />
-
-    <Card class="space-y-4 p-4">
-      <div>
-        <h3 class="text-sm font-semibold">
-          {{ scope === 'user' ? t('userStats.trend.user') : t('userStats.trend.userGroup') }}
-        </h3>
-        <p class="mt-0.5 truncate text-xs text-muted-foreground">
-          {{ selectedEntityName || t('userStats.selectPrompt') }}
-        </p>
-      </div>
-      <div
-        v-if="seriesLoading"
-        class="p-6"
-      >
-        <LoadingState />
-      </div>
-      <div
-        v-else
-        class="h-[280px]"
-      >
-        <LineChart :data="seriesChartData" />
-      </div>
-    </Card>
-
-    <Card
-      v-if="comparisonSeries.length > 0"
-      class="space-y-4 p-4"
+  <main class="space-y-5 px-4 pb-8 sm:px-6 lg:px-0">
+    <OverviewToolbar
+      :title="t('用户分析', 'User analysis')"
+      :range="range"
+      :show-range="false"
+      :refresh-active="autoRefresh"
+      :refresh-title="refreshTitle"
+      @update:range="setRange"
+      @refresh="toggleAutoRefresh"
     >
-      <h3 class="text-sm font-semibold">
-        {{ scope === 'user' ? t('userStats.comparisonTrend.user') : t('userStats.comparisonTrend.userGroup') }}
-      </h3>
-      <div class="h-[280px]">
-        <LineChart :data="comparisonChartData" />
-      </div>
-    </Card>
-  </div>
+      <template #range-picker>
+        <TimeRangePicker
+          :model-value="{ ...range, preset: relativePreset || undefined }"
+          :preset-options="['last1hour', 'today', 'yesterday', 'last24hours', 'last7days', 'last30days', 'last90days', 'custom']"
+          :show-granularity="false"
+          @update:model-value="handleRangePicker"
+        />
+      </template>
+      <Button
+        variant="outline"
+        size="sm"
+        :disabled="exporting"
+        @click="exportCsv('users', requestQuery)"
+      >
+        <Download class="mr-2 h-4 w-4" />{{ t('导出用户报表', 'Export user report') }}
+      </Button>
+    </OverviewToolbar>
+    <OverviewStatus
+      :error="error || exportError"
+      @retry="refreshAll"
+    />
+    <UserFinanceSummary
+      :summary="data?.data.summary"
+      :finance="data?.data.finance_summary"
+      :user-count="data?.data.summary?.user_count"
+      :active-user-count="data?.data.summary?.active_user_count"
+    />
+    <UserReports :revision="revision">
+      <template #additional>
+        <UserUsageStats
+          :range="range"
+          :revision="revision"
+        >
+          <template #user-leaderboard="{ selectUser }">
+            <TableCard
+              :title="t('用户排行与账目', 'User rankings and accounts')"
+              :description="t('点击消费、请求数或 Tokens 排序；消费与到账按所选时间统计，余额为当前值', 'Sort by consumption, requests or Tokens; consumption and credits follow the selected period, balances are current')"
+              class="relative min-w-0"
+              data-user-accounts
+            >
+              <template #actions>
+                <form
+                  class="flex w-full items-center gap-2 md:w-auto"
+                  @submit.prevent="patch({ search: search.trim() || undefined, offset: undefined })"
+                >
+                  <div class="relative min-w-0 flex-1 md:w-48 md:flex-none">
+                    <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground z-10 pointer-events-none" />
+                    <Input
+                      v-model="search"
+                      type="search"
+                      :placeholder="t('搜索用户', 'Search users')"
+                      :aria-label="t('搜索用户', 'Search users')"
+                      class="h-8 w-full text-xs border-border/60 pl-8"
+                    />
+                  </div>
+                  <Button
+                    type="submit"
+                    size="sm"
+                    variant="outline"
+                    class="h-8 text-xs"
+                  >
+                    {{ t('查询', 'Search') }}
+                  </Button>
+                </form>
+              </template>
+              <p
+                v-if="query.search"
+                class="border-b border-border/60 px-4 py-3 text-xs text-muted-foreground sm:px-6"
+              >
+                {{ t('上方汇总与账目仅包含匹配的用户', 'The summary and accounts include matching users only') }}
+              </p>
+              <div
+                class="min-w-0"
+                :aria-busy="loading"
+              >
+                <Table class="min-w-[1120px]">
+                  <TableHeader>
+                    <TableRow class="border-b border-border/60 hover:bg-transparent">
+                      <TableHead class="h-12 w-16 font-semibold">
+                        {{ t('序号', 'No.') }}
+                      </TableHead>
+                      <TableHead class="h-12 font-semibold">
+                        {{ t('用户', 'User') }}
+                      </TableHead>
+                      <SortableTableHead
+                        v-for="column in columns"
+                        :key="column.key"
+                        class="h-12 font-semibold text-right"
+                        :column-key="column.key"
+                        :active-key="requestQuery.sort"
+                        :direction="requestQuery.order"
+                        default-direction="desc"
+                        align="right"
+                        @sort="sort"
+                      >
+                        {{ column.label }}
+                      </SortableTableHead>
+                      <TableHead class="h-12 font-semibold text-right">
+                        {{ t('充值', 'Recharges') }}
+                      </TableHead>
+                      <TableHead class="h-12 font-semibold text-right">
+                        {{ t('余额', 'Balance') }}
+                      </TableHead>
+                      <TableHead class="h-12 font-semibold text-right">
+                        {{ t('最近使用', 'Last used') }}
+                      </TableHead>
+                      <TableHead class="h-12 font-semibold text-right">
+                        {{ t('操作', 'Actions') }}
+                      </TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    <TableRow
+                      v-for="(user, index) in data?.data.items || []"
+                      :key="user.user_id"
+                      class="border-b border-border/40 hover:bg-muted/30 transition-colors h-[72px]"
+                    >
+                      <TableCell
+                        class="py-4 text-xs font-medium tabular-nums"
+                        data-user-rank
+                      >
+                        {{ (data?.data.offset ?? requestQuery.offset) + index + 1 }}
+                      </TableCell>
+                      <TableCell class="max-w-64 py-4 text-xs">
+                        <button
+                          type="button"
+                          class="break-words hover:text-primary hover:underline"
+                          @click="accountUser = user"
+                        >
+                          {{ user.username }}
+                        </button>
+                        <span
+                          v-if="!user.is_active"
+                          class="ml-2 text-xs text-muted-foreground"
+                        >{{ t('停用', 'Disabled') }}</span>
+                        <p class="mt-0.5 break-words text-xs text-muted-foreground">
+                          {{ user.email }}
+                        </p>
+                      </TableCell>
+                      <TableCell
+                        class="whitespace-nowrap py-4 text-right text-xs font-medium tabular-nums"
+                        :title="user.billable_amount?.value ?? ''"
+                      >
+                        {{ money(user.billable_amount) }}
+                      </TableCell>
+                      <TableCell class="py-4 text-right text-xs tabular-nums">
+                        {{ count(user.request_count) }}
+                      </TableCell>
+                      <TableCell class="py-4 text-right text-xs tabular-nums">
+                        {{ count(user.total_tokens) }}
+                      </TableCell>
+                      <TableCell class="whitespace-nowrap py-4 text-right text-xs tabular-nums">
+                        {{ money(user.finance?.recharge_amount) }}
+                      </TableCell>
+                      <TableCell class="whitespace-nowrap py-4 text-right text-xs tabular-nums">
+                        {{ money(user.finance?.wallet_balance) }}
+                      </TableCell>
+                      <TableCell class="whitespace-nowrap py-4 text-right text-xs text-muted-foreground">
+                        {{ timestamp(user.last_used_at, range.timezone) }}
+                      </TableCell>
+                      <TableCell class="whitespace-nowrap py-4 text-right text-xs">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          :title="t('查看', 'View') + ' ' + user.username + ' ' + t('使用趋势', 'usage trend')"
+                          :aria-label="t('查看', 'View') + ' ' + user.username + ' ' + t('使用趋势', 'usage trend')"
+                          @click="selectUser(user)"
+                        >
+                          <ChartNoAxesCombined class="h-4 w-4" />
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          :title="t('查看', 'View') + ' ' + user.username + ' ' + t('账目', 'account')"
+                          :aria-label="t('查看', 'View') + ' ' + user.username + ' ' + t('账目', 'account')"
+                          @click="accountUser = user"
+                        >
+                          <ReceiptText class="h-4 w-4" />
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                    <TableRow v-if="!data?.data.items.length">
+                      <TableCell
+                        colspan="9"
+                        class="py-12 text-center text-muted-foreground"
+                      >
+                        {{ loading ? t('加载中', 'Loading') : error ? t('用户账目暂不可用', 'User accounts unavailable') : t('没有符合条件的用户', 'No matching users') }}
+                      </TableCell>
+                    </TableRow>
+                  </TableBody>
+                </Table>
+              </div>
+              <template #pagination>
+                <Pagination
+                  v-if="data"
+                  :total="data.data.total"
+                  :current="Math.floor(requestQuery.offset / requestQuery.limit) + 1"
+                  :page-size="requestQuery.limit"
+                  :page-size-options="[25, 50, 100]"
+                  @update:current="changePage"
+                  @update:page-size="changePageSize"
+                />
+              </template>
+            </TableCard>
+          </template>
+        </UserUsageStats>
+      </template>
+    </UserReports>
+    <UserAccountDrawer
+      v-if="accountUser"
+      :key="accountUser.user_id"
+      :user="accountUser"
+      :timezone="range.timezone"
+      @close="accountUser = null"
+    />
+  </main>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import {
-  Button,
-  Card,
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue
-} from '@/components/ui'
-import LineChart from '@/components/charts/LineChart.vue'
-import { LoadingState, TimeRangePicker } from '@/components/common'
-import { LeaderboardTable } from '@/components/stats'
-import { adminApi, type LeaderboardItem } from '@/api/admin'
-import { usersApi, type User, type UserGroup, type UserGroupMember } from '@/api/users'
-import { usageApi } from '@/api/usage'
-import { formatCurrency, formatTokens } from '@/utils/format'
-import { useI18n } from '@/i18n'
-import { getDateRangeFromPeriod } from '@/features/usage/composables'
+import { computed, ref, watch } from 'vue'
+import { Download, Search, ReceiptText, ChartNoAxesCombined } from 'lucide-vue-next'
+import { Button, Input, Pagination, SortableTableHead, Table, TableBody, TableCard, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui'
+import TimeRangePicker from '@/components/common/TimeRangePicker.vue'
 import type { DateRangeParams } from '@/features/usage/types'
-
-type StatsScope = 'user' | 'user_group'
-type SelectableEntity = { id: string; name: string }
-
-interface UsageSummary {
-  total_requests: number
-  total_tokens: number
-  total_cost: number
-  error_rate: number
+import { overviewApi } from '@/api/overview'
+import OverviewToolbar from '@/features/overview/components/OverviewToolbar.vue'
+import OverviewStatus from '@/features/overview/components/OverviewStatus.vue'
+import UserFinanceSummary from '@/features/overview/users/UserFinanceSummary.vue'
+import UserReports from '@/features/overview/users/UserReports.vue'
+import UserAccountDrawer from '@/features/overview/users/UserAccountDrawer.vue'
+import UserUsageStats from '@/features/overview/users/UserUsageStats.vue'
+import { useUserAnalysisRefresh } from '@/features/overview/users/useUserAnalysisRefresh'
+import { presetRange, rangeFromQuery, useOverviewQuery } from '@/features/overview/query'
+import { useOverviewRequest } from '@/features/overview/useOverviewRequest'
+import { useOverviewExport } from '@/features/overview/useOverviewExport'
+import { useOverviewI18n } from '@/features/overview/i18n'
+import { count, money, timestamp } from '@/features/overview/format'
+const { t } = useOverviewI18n()
+const { query, range, relativePreset, refreshRange, setRange, patch } = useOverviewQuery('today', { rolling: true })
+const { revision, autoRefresh, refreshTitle, refreshAll, toggleAutoRefresh } = useUserAnalysisRefresh(refreshRange)
+const search = ref(query.value.search || '')
+const accountUser = ref<{ user_id: string; username: string } | null>(null)
+const paginationUpdating = ref(false)
+watch(() => query.value.search, value => { search.value = value || '' })
+const requestQuery = computed(() => ({
+  ...range.value,
+  search: query.value.search,
+  limit: Math.max(1, Math.min(100, query.value.limit || 25)),
+  offset: query.value.offset || 0,
+  sort: ['billable_amount', 'request_count', 'total_tokens'].includes(query.value.sort || '') ? query.value.sort : 'billable_amount',
+  order: query.value.order || 'desc',
+}))
+const scope = computed(() => JSON.stringify({ ...requestQuery.value, ...(relativePreset.value ? { from: undefined, to: undefined, preset: relativePreset.value } : {}) }))
+const { data, loading, error } = useOverviewRequest(() => JSON.stringify([requestQuery.value, revision.value]), signal => overviewApi.users(requestQuery.value, signal), { scopeKey: scope })
+const { exporting, exportError, exportCsv } = useOverviewExport()
+const columns = computed(() => [{ key: 'billable_amount', label: t('消费', 'Consumption') }, { key: 'request_count', label: t('请求数', 'Requests') }, { key: 'total_tokens', label: 'Tokens' }])
+function sameRange(left: DateRangeParams, right: typeof range.value): boolean {
+  return left.from === right.from && left.to === right.to && (left.timezone || right.timezone) === right.timezone
 }
-
-interface TimeSeriesItem {
-  date: string
-  total_cost: number
-}
-
-const { t } = useI18n()
-
-const PAGE_SIZE = 10
-const timeRange = ref<DateRangeParams>(getDateRangeFromPeriod('last7days'))
-const metric = ref<'requests' | 'tokens' | 'cost'>('requests')
-const scope = ref<StatsScope>('user')
-
-const users = ref<User[]>([])
-const userGroups = ref<UserGroup[]>([])
-const selectedUserId = ref('')
-const selectedUserGroupId = ref('')
-const compareUserId = ref('__none__')
-const compareUserGroupId = ref('__none__')
-
-const leaderboard = ref<LeaderboardItem[]>([])
-const leaderboardTotal = ref(0)
-const leaderboardOffset = ref(0)
-const leaderboardLoading = ref(false)
-const memberLeaderboard = ref<LeaderboardItem[]>([])
-const memberLeaderboardLoading = ref(false)
-const groupMemberCount = ref(0)
-const activeGroupMemberCount = ref(0)
-const usageSummary = ref<UsageSummary | null>(null)
-const summaryLoading = ref(false)
-const series = ref<TimeSeriesItem[]>([])
-const comparisonSeries = ref<TimeSeriesItem[]>([])
-const seriesLoading = ref(false)
-
-let leaderboardRequestId = 0
-let panelRequestId = 0
-let leaderboardDebounceTimer: ReturnType<typeof setTimeout> | null = null
-let panelDebounceTimer: ReturnType<typeof setTimeout> | null = null
-let ready = false
-
-const allEntities = computed<SelectableEntity[]>(() => scope.value === 'user'
-  ? users.value.map(user => ({ id: user.id, name: user.username || user.email || user.id }))
-  : [...userGroups.value.map(group => ({ id: group.id, name: group.name })),
-    { id: '__ungrouped__', name: t('userStats.ungrouped') }])
-
-const selectedEntityId = computed({
-  get: () => scope.value === 'user' ? selectedUserId.value : selectedUserGroupId.value,
-  set: (value: string) => {
-    if (scope.value === 'user') selectedUserId.value = value
-    else selectedUserGroupId.value = value
-  }
-})
-
-const compareEntityId = computed({
-  get: () => scope.value === 'user' ? compareUserId.value : compareUserGroupId.value,
-  set: (value: string) => {
-    if (scope.value === 'user') compareUserId.value = value
-    else compareUserGroupId.value = value
-  }
-})
-
-const comparisonEntities = computed(() => allEntities.value.filter(
-  entity => entity.id !== selectedEntityId.value
-))
-const selectedEntityName = computed(() => allEntities.value.find(
-  entity => entity.id === selectedEntityId.value
-)?.name ?? '')
-const comparedEntityName = computed(() => allEntities.value.find(
-  entity => entity.id === compareEntityId.value
-)?.name ?? '')
-const currentPage = computed(() => Math.floor(leaderboardOffset.value / PAGE_SIZE) + 1)
-const hasNextLeaderboardPage = computed(
-  () => leaderboardOffset.value + leaderboard.value.length < leaderboardTotal.value
-)
-
-function buildTimeRangeParams() {
-  return {
-    start_date: timeRange.value.start_date,
-    end_date: timeRange.value.end_date,
-    preset: timeRange.value.preset,
-    timezone: timeRange.value.timezone,
-    tz_offset_minutes: timeRange.value.tz_offset_minutes,
-    granularity: timeRange.value.granularity || 'day'
-  }
-}
-
-function scopeParams(id: string) {
-  return scope.value === 'user' ? { user_id: id } : { user_group_id: id }
-}
-
-function ensureSelectedEntity() {
-  const entities = allEntities.value
-  if (!entities.some(entity => entity.id === selectedEntityId.value)) {
-    selectedEntityId.value = entities[0]?.id ?? ''
-  }
-  if (compareEntityId.value !== '__none__' && !entities.some(entity => entity.id === compareEntityId.value)) {
-    compareEntityId.value = '__none__'
-  }
-}
-
-async function loadEntities() {
-  const [loadedUsers, groupsResponse] = await Promise.all([
-    usersApi.getAllUsers(),
-    usersApi.listUserGroups()
-  ])
-  users.value = loadedUsers
-  userGroups.value = groupsResponse.items
-  ensureSelectedEntity()
-}
-
-async function loadLeaderboard() {
-  const requestId = ++leaderboardRequestId
-  leaderboardLoading.value = true
-  try {
-    const params = {
-      ...buildTimeRangeParams(),
-      metric: metric.value,
-      limit: PAGE_SIZE,
-      offset: leaderboardOffset.value
-    }
-    const response = scope.value === 'user'
-      ? await adminApi.getLeaderboardUsers(params)
-      : await adminApi.getLeaderboardUserGroups(params)
-    if (requestId !== leaderboardRequestId) return
-    leaderboard.value = response.items
-    leaderboardTotal.value = response.total
-  } finally {
-    if (requestId === leaderboardRequestId) leaderboardLoading.value = false
-  }
-}
-
-async function loadPanels() {
-  const selectedId = selectedEntityId.value
-  const requestId = ++panelRequestId
-  if (!selectedId) {
-    usageSummary.value = null
-    series.value = []
-    comparisonSeries.value = []
-    memberLeaderboard.value = []
-    groupMemberCount.value = 0
-    activeGroupMemberCount.value = 0
+function handleRangePicker(value: DateRangeParams) {
+  const timezone = value.timezone || range.value.timezone
+  if (value.preset) {
+    if (value.preset === relativePreset.value) return
+    const next = value.preset === 'yesterday'
+      ? rangeFromQuery({ preset: value.preset, timezone }, range.value)
+      : presetRange(value.preset, timezone)
+    void setRange(next, value.preset)
     return
   }
-  summaryLoading.value = true
-  seriesLoading.value = true
-  memberLeaderboardLoading.value = scope.value === 'user_group'
-  try {
-    const primaryParams = { ...buildTimeRangeParams(), ...scopeParams(selectedId) }
-    const shouldCompare = compareEntityId.value !== '__none__'
-    const comparisonPromise: Promise<TimeSeriesItem[]> = shouldCompare
-      ? adminApi.getTimeSeries({
-        ...buildTimeRangeParams(),
-        ...scopeParams(compareEntityId.value)
-      })
-      : Promise.resolve([])
-    const memberPromise: Promise<{ items: LeaderboardItem[] }> = scope.value === 'user_group'
-      ? adminApi.getLeaderboardUsers({
-        ...buildTimeRangeParams(),
-        metric: metric.value,
-        user_group_id: selectedId,
-        limit: PAGE_SIZE
-      })
-      : Promise.resolve({ items: [] })
-    const groupMembersPromise: Promise<UserGroupMember[]> = scope.value === 'user_group' && selectedId !== '__ungrouped__'
-      ? usersApi.listUserGroupMembers(selectedId)
-      : Promise.resolve([])
-
-    const [summary, primarySeries, compareSeries, members, groupMembers] = await Promise.all([
-      usageApi.getUsageStats(primaryParams),
-      adminApi.getTimeSeries(primaryParams),
-      comparisonPromise,
-      memberPromise,
-      groupMembersPromise
-    ])
-    if (requestId !== panelRequestId) return
-    usageSummary.value = { ...summary, error_rate: summary.error_rate ?? 0 }
-    series.value = primarySeries
-    comparisonSeries.value = compareSeries
-    memberLeaderboard.value = members.items
-    const ungroupedUsers = users.value.filter(user => user.groups?.length === 0)
-    groupMemberCount.value = selectedId === '__ungrouped__'
-      ? ungroupedUsers.length : groupMembers.filter(member => !member.is_deleted).length
-    activeGroupMemberCount.value = selectedId === '__ungrouped__'
-      ? ungroupedUsers.filter(user => user.is_active).length
-      : groupMembers.filter(member => !member.is_deleted && member.is_active).length
-  } finally {
-    if (requestId === panelRequestId) {
-      summaryLoading.value = false
-      seriesLoading.value = false
-      memberLeaderboardLoading.value = false
-    }
+  if (value.from && value.to) {
+    if (sameRange(value, range.value)) return
+    void setRange({ from: value.from, to: value.to, timezone }, undefined)
+    return
+  }
+  if (value.start_date && value.end_date) {
+    const next = rangeFromQuery({ start_date: value.start_date, end_date: value.end_date, timezone }, range.value)
+    if (!sameRange(next, range.value)) void setRange(next)
   }
 }
-
-function selectLeaderboardItem(item: LeaderboardItem) {
-  selectedEntityId.value = item.id
+function sort({ key, direction }: { key: string; direction: 'asc' | 'desc' }) {
+  void patch({ sort: key, order: direction, offset: undefined })
 }
-
-function selectMember(item: LeaderboardItem) {
-  scope.value = 'user'
-  selectedUserId.value = item.id
+async function changePage(page: number) {
+  if (loading.value || paginationUpdating.value) return
+  paginationUpdating.value = true
+  try { await patch({ offset: (page - 1) * requestQuery.value.limit }) } finally { paginationUpdating.value = false }
 }
-
-function changeLeaderboardPage(direction: -1 | 1) {
-  leaderboardOffset.value = Math.max(0, leaderboardOffset.value + direction * PAGE_SIZE)
-  void loadLeaderboard()
+async function changePageSize(limit: number) {
+  if (loading.value || paginationUpdating.value) return
+  paginationUpdating.value = true
+  try { await patch({ limit, offset: undefined }) } finally { paginationUpdating.value = false }
 }
-
-const seriesChartData = computed(() => ({
-  labels: series.value.map(item => item.date),
-  datasets: [{
-    label: t('stats.metric.cost'),
-    data: series.value.map(item => item.total_cost),
-    borderColor: 'rgb(59, 130, 246)',
-    tension: 0.25,
-    pointRadius: 2
-  }]
-}))
-
-const comparisonChartData = computed(() => ({
-  labels: series.value.map(item => item.date),
-  datasets: [
-    {
-      label: selectedEntityName.value || t('userStats.chart.current'),
-      data: series.value.map(item => item.total_cost),
-      borderColor: 'rgb(59, 130, 246)',
-      tension: 0.25,
-      pointRadius: 2
-    },
-    {
-      label: comparedEntityName.value || t('userStats.chart.comparison'),
-      data: comparisonSeries.value.map(item => item.total_cost),
-      borderColor: 'rgb(234, 179, 8)',
-      tension: 0.25,
-      pointRadius: 2
-    }
-  ]
-}))
-
-function scheduleLeaderboardLoad() {
-  if (!ready) return
-  if (leaderboardDebounceTimer) clearTimeout(leaderboardDebounceTimer)
-  leaderboardDebounceTimer = setTimeout(() => {
-    leaderboardDebounceTimer = null
-    void loadLeaderboard()
-  }, 120)
-}
-
-function schedulePanelLoad() {
-  if (!ready) return
-  if (panelDebounceTimer) clearTimeout(panelDebounceTimer)
-  panelDebounceTimer = setTimeout(() => {
-    panelDebounceTimer = null
-    void loadPanels()
-  }, 120)
-}
-
-watch(scope, () => {
-  leaderboardOffset.value = 0
-  ensureSelectedEntity()
-  scheduleLeaderboardLoad()
-  schedulePanelLoad()
-})
-watch([timeRange, metric], () => {
-  leaderboardOffset.value = 0
-  scheduleLeaderboardLoad()
-  schedulePanelLoad()
-}, { deep: true })
-watch([selectedEntityId, compareEntityId], schedulePanelLoad)
-
-onMounted(async () => {
-  await loadEntities()
-  ready = true
-  await Promise.all([loadLeaderboard(), loadPanels()])
-})
-
-onUnmounted(() => {
-  if (leaderboardDebounceTimer) clearTimeout(leaderboardDebounceTimer)
-  if (panelDebounceTimer) clearTimeout(panelDebounceTimer)
-  leaderboardRequestId += 1
-  panelRequestId += 1
-})
 </script>

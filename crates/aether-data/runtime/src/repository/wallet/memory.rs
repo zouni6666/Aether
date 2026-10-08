@@ -831,6 +831,12 @@ impl WalletReadRepository for InMemoryWalletRepository {
                     .as_deref()
                     .is_none_or(|expected| wallet.status == expected)
             })
+            .filter(|wallet| {
+                query
+                    .user_id
+                    .as_deref()
+                    .is_none_or(|expected| wallet.user_id.as_deref() == Some(expected))
+            })
             .filter(|wallet| match query.owner_type.as_deref() {
                 Some("user") => wallet.user_id.is_some(),
                 Some("api_key") => wallet.api_key_id.is_some(),
@@ -3423,6 +3429,7 @@ mod tests {
 
         let page = repository
             .list_admin_wallets(&AdminWalletListQuery {
+                user_id: None,
                 status: Some("active".to_string()),
                 owner_type: Some("api_key".to_string()),
                 limit: 1,
@@ -3435,6 +3442,31 @@ mod tests {
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].id, "wallet-3");
         assert_eq!(page.items[0].updated_at_unix_secs, Some(110));
+
+        let query = AdminWalletListQuery {
+            user_id: Some("user-2".to_string()),
+            owner_type: Some("user".to_string()),
+            limit: 1,
+            ..Default::default()
+        };
+        let selected = repository.list_admin_wallets(&query).await.unwrap();
+        assert_eq!(selected.total, 1);
+        assert_eq!(selected.items[0].id, "wallet-2");
+        let missing = repository
+            .list_admin_wallets(&AdminWalletListQuery {
+                user_id: Some("missing-user".to_string()),
+                ..query.clone()
+            })
+            .await
+            .unwrap();
+        assert_eq!(missing.total, 0);
+        assert!(missing.items.is_empty());
+        let beyond_page = repository
+            .list_admin_wallets(&AdminWalletListQuery { offset: 1, ..query })
+            .await
+            .unwrap();
+        assert_eq!(beyond_page.total, 1);
+        assert!(beyond_page.items.is_empty());
     }
 
     #[tokio::test]

@@ -31,6 +31,8 @@ use crate::constants::{
 };
 use crate::data::GatewayDataState;
 
+mod overview;
+
 const DAY_0_UNIX_SECS: i64 = 1_710_913_600;
 const DAY_1_UNIX_SECS: i64 = 1_711_000_000;
 const DAY_2_UNIX_SECS: i64 = 1_711_086_400;

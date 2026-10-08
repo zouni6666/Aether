@@ -5,6 +5,7 @@ pub mod auth;
 mod auth_config;
 mod cache;
 pub mod claude_code;
+pub mod client_identity;
 mod codex_fingerprint;
 pub mod conversion;
 mod diagnostics;
@@ -154,6 +155,7 @@ pub use rules::{
 };
 pub use same_format_provider::{
     build_same_format_provider_headers, build_same_format_provider_request_body,
+    build_same_format_provider_request_body_for_operation,
     build_same_format_provider_request_body_with_compatibility_report,
     build_same_format_provider_request_body_with_compatibility_report_and_reasoning_replay_policy,
     build_same_format_provider_upstream_url, classify_same_format_provider_request_behavior,
@@ -199,7 +201,8 @@ pub use windsurf::{
 pub use xai::{
     extract_xai_user_id_from_auth_config, extract_xai_user_id_from_value,
     insert_cli_identity_headers, insert_cli_identity_headers_if_needed, is_xai_provider_transport,
-    resolved_xai_request_base_url, resolved_xai_upstream_base_url,
-    should_attach_cli_identity_headers, xai_auth_uses_api, xai_uses_official_api, XAI_API_BASE_URL,
-    XAI_CHAT_PROXY_BASE_URL, XAI_PROVIDER_TYPE,
+    resolved_xai_request_base_url, resolved_xai_upstream_base_url, set_xai_client_version,
+    should_attach_cli_identity_headers, xai_auth_uses_api, xai_client_version,
+    xai_uses_official_api, XAI_API_BASE_URL, XAI_CHAT_PROXY_BASE_URL, XAI_DEFAULT_CLIENT_VERSION,
+    XAI_PROVIDER_TYPE,
 };

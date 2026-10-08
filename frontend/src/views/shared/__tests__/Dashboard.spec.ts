@@ -7,6 +7,10 @@ const dashboardApiMocks = vi.hoisted(() => ({
   getStats: vi.fn(),
   getDailyStats: vi.fn(),
 }))
+const overviewApiMocks = vi.hoisted(() => ({ dashboard: vi.fn(), dashboardTotal: vi.fn(), summary: vi.fn(), dashboardSummary: vi.fn() }))
+const announcementApiMocks = vi.hoisted(() => ({ getAnnouncements: vi.fn(), markAsRead: vi.fn() }))
+
+vi.mock('@/api/overview', () => ({ overviewApi: overviewApiMocks }))
 
 vi.mock('@/stores/auth', () => ({
   useAuthStore: () => ({
@@ -21,10 +25,13 @@ vi.mock('@/api/dashboard', () => ({
 }))
 
 vi.mock('@/api/announcements', () => ({
-  announcementApi: {
-    getAnnouncements: vi.fn().mockResolvedValue({ items: [] }),
-    markAsRead: vi.fn().mockResolvedValue({}),
-  },
+  announcementApi: announcementApiMocks,
+}))
+
+vi.mock('@/features/overview/dashboard/DashboardAnnouncements.vue', () => ({
+  default: defineComponent({
+    setup: () => () => h('aside', { id: 'announcements-section' }, '系统公告'),
+  }),
 }))
 
 vi.mock('@/components/charts/BarChart.vue', async () => {
@@ -67,7 +74,6 @@ vi.mock('@/components/ui', async () => {
     Badge: passthrough('BadgeStub', 'span'),
     Button: passthrough('ButtonStub', 'button'),
     Skeleton: defineComponent({ name: 'SkeletonStub', setup: () => () => h('div') }),
-    Dialog: passthrough('DialogStub'),
     Table: passthrough('TableStub', 'table'),
     TableHeader: passthrough('TableHeaderStub', 'thead'),
     TableBody: passthrough('TableBodyStub', 'tbody'),
@@ -92,15 +98,10 @@ vi.mock('lucide-vue-next', async () => {
     Key: Icon,
     Hash: Icon,
     Zap: Icon,
-    Bell: Icon,
-    AlertCircle: Icon,
-    AlertTriangle: Icon,
-    Info: Icon,
-    Wrench: Icon,
-    Loader2: Icon,
     Clock: Icon,
     Database: Icon,
     Shuffle: Icon,
+    CheckCircle2: Icon,
   }
 })
 
@@ -123,6 +124,12 @@ async function settle() {
 }
 
 beforeEach(() => {
+  announcementApiMocks.getAnnouncements.mockReset()
+  announcementApiMocks.markAsRead.mockReset()
+  overviewApiMocks.dashboard.mockReset()
+  overviewApiMocks.dashboardTotal.mockReset()
+  overviewApiMocks.summary.mockReset()
+  overviewApiMocks.dashboardSummary.mockReset()
   dashboardApiMocks.getStats.mockReset()
   dashboardApiMocks.getDailyStats.mockReset()
   dashboardApiMocks.getDailyStats.mockResolvedValue({
@@ -165,6 +172,35 @@ describe('Dashboard ordinary user wallet card', () => {
 
     expect(root.textContent).toContain('$110.00')
     expect(root.textContent).toContain('套餐额度 $100.00 · 钱包余额 $10.00')
+    expect(overviewApiMocks.dashboard).not.toHaveBeenCalled()
+    expect(overviewApiMocks.dashboardTotal).not.toHaveBeenCalled()
+    expect(overviewApiMocks.summary).not.toHaveBeenCalled()
+    expect(overviewApiMocks.dashboardSummary).not.toHaveBeenCalled()
+    expect(root.querySelector('#announcements-section')).not.toBeNull()
+    expect(root.querySelector('[role="dialog"]')).toBeNull()
+    expect(root.textContent).toContain('系统公告')
+    expect(announcementApiMocks.getAnnouncements).not.toHaveBeenCalled()
+    expect(announcementApiMocks.markAsRead).not.toHaveBeenCalled()
+  })
+
+  it('preserves monthly cache and cost statistics without requesting announcements', async () => {
+    dashboardApiMocks.getStats.mockResolvedValue({
+      stats: [],
+      cache_stats: { cache_creation_tokens: 25, cache_read_tokens: 200, total_cache_tokens: 225, cache_hit_rate: 80 },
+      monthly_cost: 12.5,
+    })
+    const root = mountDashboard()
+    await settle()
+
+    expect(root.textContent).toContain('本月统计')
+    expect(root.textContent).toContain('缓存命中率')
+    expect(root.textContent).toContain('80%')
+    expect(root.textContent).toContain('缓存读取')
+    expect(root.textContent).toContain('缓存创建')
+    expect(root.textContent).toContain('本月费用')
+    expect(root.textContent).toContain('$12.50')
+    expect(overviewApiMocks.dashboard).not.toHaveBeenCalled()
+    expect(announcementApiMocks.getAnnouncements).not.toHaveBeenCalled()
   })
 })
 
@@ -180,6 +216,8 @@ describe('Dashboard refresh controls', () => {
       expect(root.textContent).not.toContain('自动刷新')
       expect(dashboardApiMocks.getStats).toHaveBeenCalledTimes(1)
       expect(dashboardApiMocks.getDailyStats).toHaveBeenCalledTimes(1)
+      expect(announcementApiMocks.getAnnouncements).not.toHaveBeenCalled()
+      expect(overviewApiMocks.dashboard).not.toHaveBeenCalled()
 
       await vi.advanceTimersByTimeAsync(60_000)
       await settle()

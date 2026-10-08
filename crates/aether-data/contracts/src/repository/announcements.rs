@@ -97,6 +97,39 @@ pub struct StoredAnnouncementPage {
     pub total: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UserAnnouncementListQuery {
+    pub unread_only: bool,
+    pub offset: usize,
+    pub limit: usize,
+    pub now_unix_secs: u64,
+}
+
+impl UserAnnouncementListQuery {
+    pub fn validate(&self) -> Result<(), crate::DataLayerError> {
+        if !(1..=100).contains(&self.limit) || i64::try_from(self.offset).is_err() {
+            return Err(crate::DataLayerError::InvalidInput(
+                "announcement limit must be between 1 and 100 and offset must fit in i64"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StoredUserAnnouncement {
+    pub announcement: StoredAnnouncement,
+    pub is_read: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct StoredUserAnnouncementPage {
+    pub items: Vec<StoredUserAnnouncement>,
+    pub total: u64,
+    pub unread_count: u64,
+}
+
 fn parse_timestamp(value: i64, field: &str) -> Result<u64, crate::DataLayerError> {
     u64::try_from(value).map_err(|_| {
         crate::DataLayerError::UnexpectedValue(format!("{field} is negative: {value}"))
@@ -114,6 +147,13 @@ pub trait AnnouncementReadRepository: Send + Sync {
         &self,
         query: &AnnouncementListQuery,
     ) -> Result<StoredAnnouncementPage, crate::DataLayerError>;
+
+    /// Counts and page share one snapshot; unread_count covers all currently active announcements.
+    async fn list_user_announcements(
+        &self,
+        user_id: &str,
+        query: &UserAnnouncementListQuery,
+    ) -> Result<StoredUserAnnouncementPage, crate::DataLayerError>;
 
     async fn count_unread_active_announcements(
         &self,

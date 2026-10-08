@@ -179,6 +179,8 @@ pub(crate) struct AdminCodexResetCreditConsumeRequest {
 pub(crate) struct AdminProviderCreateRequest {
     pub(crate) name: String,
     #[serde(default)]
+    pub(crate) routing_group_id: Option<String>,
+    #[serde(default)]
     pub(crate) provider_type: Option<String>,
     #[serde(default)]
     pub(crate) description: Option<String>,

@@ -577,6 +577,45 @@ pub struct UpdateUserApiKeyBasicRecord {
     /// unchanged. Keeping this patch in the basic mutation record lets repositories apply the
     /// complete user-key update in one atomic write.
     pub feature_settings: Option<Option<serde_json::Value>>,
+    /// Self-service updates merge routing selection separately against the
+    /// current stored settings. `None` retains administrative replacement semantics.
+    pub routing_group_selection: Option<UpdateApiKeyRoutingGroupSelection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateApiKeyRoutingGroupSelection {
+    /// `None` preserves the latest stored group; `Some(None)` follows the
+    /// default; `Some(Some(id))` selects the validated public group.
+    pub group_id: Option<Option<String>>,
+}
+
+impl UpdateApiKeyRoutingGroupSelection {
+    /// Repositories must call this while holding the same write lock as the
+    /// surrounding API key mutation, so unrelated edits cannot restore a stale
+    /// group choice or a stale feature-settings object.
+    pub fn merge_feature_settings(
+        &self,
+        current: Option<&serde_json::Value>,
+        replacement: Option<Option<serde_json::Value>>,
+    ) -> Option<serde_json::Value> {
+        let group_id = match &self.group_id {
+            None => current
+                .and_then(|value| value.get("routing_group_id"))
+                .and_then(serde_json::Value::as_str)
+                .map(|id| serde_json::Value::String(id.to_string())),
+            Some(group_id) => group_id.clone().map(serde_json::Value::String),
+        };
+        let mut settings = replacement
+            .unwrap_or_else(|| current.cloned())
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
+        settings.remove("routing_group_id");
+        settings.remove("routing_group_name");
+        if let Some(group_id) = group_id {
+            settings.insert("routing_group_id".to_string(), group_id);
+        }
+        (!settings.is_empty()).then_some(serde_json::Value::Object(settings))
+    }
 }
 
 impl std::fmt::Debug for UpdateUserApiKeyBasicRecord {

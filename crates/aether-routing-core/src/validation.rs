@@ -28,6 +28,8 @@ const ROUTING_POOL_PRESETS: &[&str] = &[
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum RoutingValidationError {
+    #[error("routing group billing multiplier must be a non-negative finite number")]
+    InvalidBillingMultiplier,
     #[error("routing failover rules are invalid: {0}")]
     InvalidFailoverRules(String),
     #[error("routing rule id is empty")]
@@ -71,6 +73,9 @@ pub enum RoutingValidationError {
 pub fn validate_routing_group_config(
     config: &RoutingGroupConfig,
 ) -> Result<(), RoutingValidationError> {
+    if !config.billing_multiplier.is_finite() || config.billing_multiplier < 0.0 {
+        return Err(RoutingValidationError::InvalidBillingMultiplier);
+    }
     crate::validate_routing_failover_rules(&config.default_policy.execution_policy.failover_rules)
         .map_err(RoutingValidationError::InvalidFailoverRules)?;
     let mut rule_ids = BTreeSet::new();

@@ -293,28 +293,12 @@
               </Badge>
             </div>
           </div>
-          <div class="flex flex-col items-end flex-shrink-0">
-            <span
-              v-if="record.usage_available !== false && record.usage_pricing_available !== false"
-              class="text-sm text-primary font-semibold leading-5"
-            >{{ formatCurrency(record.cost || 0) }}</span>
-            <span
-              v-else-if="record.usage_available === false"
-              data-usage-unavailable="cost"
-              class="text-sm text-muted-foreground font-medium leading-5"
-              title="上游未提供可验证的 token/费用用量"
-            >不可用</span>
-            <span
-              v-else
-              data-usage-unpriced="cost"
-              class="text-sm text-muted-foreground font-medium leading-5"
-              title="token 用量可验证，但当前计价规则不支持该音频用量分项"
-            >未计价</span>
-            <span
-              v-if="record.usage_available !== false && record.usage_pricing_available !== false && showActualCost && record.actual_cost !== undefined && record.rate_multiplier && record.rate_multiplier !== 1.0"
-              class="text-[10px] text-muted-foreground"
-            >{{ formatCurrency(record.actual_cost) }}</span>
-          </div>
+          <UsageCostDisplay
+            :record="record"
+            :show-actual-cost="showActualCost"
+            compact
+            class="shrink-0"
+          />
         </div>
 
         <!-- 第二行：时间 + API格式 -->
@@ -331,19 +315,22 @@
           </template>
         </div>
 
-        <!-- 第三行：用户 + 提供商 -->
+        <!-- 用户与上游提供商信息 -->
         <div
           v-if="isAdmin"
-          class="mt-1 flex min-w-0 items-center gap-1.5 text-[10px] leading-3.5 text-muted-foreground"
+          class="mt-1 min-w-0 truncate text-[10px] leading-3.5 text-muted-foreground"
+          :title="formatRecordUserSegment(record)"
         >
-          <span
-            class="min-w-0 truncate"
-            :title="formatRecordUserProviderLine(record)"
-          >
-            {{ formatRecordUserSegment(record) }}
-          </span>
-          <span class="shrink-0 text-muted-foreground/40">·</span>
-          <span class="min-w-0 truncate">{{ formatRecordProviderSegment(record) }}</span>
+          {{ formatRecordUserSegment(record) }}
+        </div>
+        <div
+          v-if="isAdmin"
+          class="mt-1 flex min-w-0 items-center gap-1.5 text-[10px] leading-3.5"
+        >
+          <UsageProviderDisplay
+            :record="record"
+            class="flex-1"
+          />
           <!-- 手机与桌面保持相同的标记优先级：发生故障转移时优先显示转移标记。 -->
           <Shuffle
             v-if="record.has_fallback"
@@ -774,20 +761,10 @@
             class="py-4 w-[16%]"
           >
             <div class="flex min-w-0 items-center gap-1">
-              <div class="flex min-w-0 flex-col text-xs gap-0.5">
-                <span class="truncate">{{ record.provider }}</span>
-                <span
-                  v-if="record.provider_key_name"
-                  class="text-muted-foreground truncate"
-                  :title="record.provider_key_name"
-                >
-                  {{ record.provider_key_name }}
-                  <span
-                    v-if="record.rate_multiplier && record.rate_multiplier !== 1.0"
-                    class="text-foreground/60"
-                  >({{ record.rate_multiplier }}x)</span>
-                </span>
-              </div>
+              <UsageProviderDisplay
+                :record="record"
+                class="text-xs"
+              />
               <Shuffle
                 v-if="record.has_fallback"
                 data-usage-attempt-marker="fallback"
@@ -974,34 +951,10 @@
             v-if="isColumnVisible('cost')"
             class="text-right py-4 w-[6%]"
           >
-            <div
-              v-if="record.usage_available !== false && record.usage_pricing_available !== false"
-              class="flex flex-col items-end text-xs gap-0.5"
-            >
-              <span class="text-primary font-medium">{{ formatCurrency(record.cost || 0) }}</span>
-              <span
-                v-if="showActualCost && record.actual_cost !== undefined && record.rate_multiplier && record.rate_multiplier !== 1.0"
-                class="text-muted-foreground"
-              >
-                {{ formatCurrency(record.actual_cost) }}
-              </span>
-            </div>
-            <div
-              v-else-if="record.usage_available === false"
-              data-usage-unavailable="cost"
-              class="text-xs text-muted-foreground"
-              title="上游未提供可验证的 token/费用用量"
-            >
-              不可用
-            </div>
-            <div
-              v-else
-              data-usage-unpriced="cost"
-              class="text-xs text-muted-foreground"
-              title="token 用量可验证，但当前计价规则不支持该音频用量分项"
-            >
-              未计价
-            </div>
+            <UsageCostDisplay
+              :record="record"
+              :show-actual-cost="showActualCost"
+            />
           </TableCell>
           <TableCell
             v-if="isColumnVisible('performance')"
@@ -1110,7 +1063,7 @@ import {
   TableFilterMenu,
 } from '@/components/ui'
 import { Ban, EyeOff, RefreshCcw, Search, Shuffle } from 'lucide-vue-next'
-import { formatTokens, formatCurrency } from '@/utils/format'
+import { formatTokens } from '@/utils/format'
 import { getCacheCreationTokens, getCacheReadTokens, getEffectiveInputTokens } from '../token-normalization'
 import {
   formatOutputRate,
@@ -1140,6 +1093,8 @@ import type { MultiSelectOption } from '@/components/common/MultiSelect.vue'
 import ElapsedTimeText from './ElapsedTimeText.vue'
 import ServerUserSelector from './ServerUserSelector.vue'
 import UsageModelDisplay from './UsageModelDisplay.vue'
+import UsageCostDisplay from './UsageCostDisplay.vue'
+import UsageProviderDisplay from './UsageProviderDisplay.vue'
 
 export interface UserOption {
   id: string
@@ -1466,16 +1421,8 @@ function getRecordUserName(record: UsageRecord): string {
   return record.username || record.user_email || (record.user_id ? `User ${record.user_id}` : '已删除用户')
 }
 
-function formatRecordUserProviderLine(record: UsageRecord): string {
-  return `${formatRecordUserSegment(record)} · ${formatRecordProviderSegment(record)}`
-}
-
 function formatRecordUserSegment(record: UsageRecord): string {
   return `${getRecordUserName(record)} / ${record.api_key?.name || '-'}`
-}
-
-function formatRecordProviderSegment(record: UsageRecord): string {
-  return `${record.provider || '-'} / ${record.provider_key_name || '-'}`
 }
 
 watch(() => props.filterSearch, (value) => {

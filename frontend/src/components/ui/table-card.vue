@@ -8,9 +8,17 @@
       <slot name="header">
         <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 sm:gap-4">
           <!-- 左侧：标题 -->
-          <h3 class="text-sm sm:text-base font-semibold shrink-0">
-            {{ title }}
-          </h3>
+          <div class="min-w-0">
+            <h3 class="text-sm sm:text-base font-semibold shrink-0">
+              {{ title }}
+            </h3>
+            <p
+              v-if="description"
+              class="mt-1 text-xs text-muted-foreground"
+            >
+              {{ description }}
+            </p>
+          </div>
 
           <!-- 右侧：操作区 -->
           <div
@@ -36,6 +44,7 @@ import { Card } from '@/components/ui'
 
 interface Props {
   title?: string
+  description?: string
 }
 
 defineProps<Props>()

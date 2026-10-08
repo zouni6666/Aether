@@ -1,9 +1,15 @@
-use super::{monitoring, stats, usage};
+use super::{monitoring, overview, stats, usage};
 use crate::handlers::admin::request::{AdminRouteRequest, AdminRouteResult};
 
 pub(crate) async fn maybe_build_local_admin_observability_response(
     request: AdminRouteRequest<'_>,
 ) -> AdminRouteResult {
+    if let Some(response) =
+        overview::maybe_build_overview_response(&request.state(), &request.request_context())
+            .await?
+    {
+        return Ok(Some(response));
+    }
     if let Some(response) =
         stats::maybe_build_local_admin_stats_response(&request.state(), &request.request_context())
             .await?

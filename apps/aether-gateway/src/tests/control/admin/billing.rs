@@ -73,6 +73,138 @@ async fn send_admin_billing_request(
 }
 
 #[tokio::test]
+async fn user_account_history_http_filters_wallet_and_plan_history() {
+    use aether_data::repository::{
+        billing::{InMemoryBillingReadRepository, UserPlanEntitlementRecord},
+        users::StoredUserAuthRecord,
+        wallet::{InMemoryWalletRepository, StoredWalletSnapshot},
+    };
+
+    let users = ["user-1", "user-2"].map(|id| {
+        StoredUserAuthRecord::new(
+            id.to_string(),
+            Some(format!("{id}@example.com")),
+            true,
+            id.to_string(),
+            Some("hash".to_string()),
+            "user".to_string(),
+            "local".to_string(),
+            None,
+            None,
+            None,
+            true,
+            false,
+            None,
+            None,
+        )
+        .expect("user should build")
+    });
+    let wallets = ["user-1", "user-2"].map(|id| {
+        StoredWalletSnapshot::new(
+            format!("wallet-{id}"),
+            Some(id.to_string()),
+            None,
+            12.5,
+            2.5,
+            "finite".to_string(),
+            "USD".to_string(),
+            "active".to_string(),
+            30.0,
+            10.0,
+            3.0,
+            1.5,
+            1_710_000_000,
+        )
+        .expect("wallet should build")
+    });
+    let now = chrono::Utc::now().timestamp().max(0) as u64;
+    let entitlements = [
+        ("current", "user-1", "active"),
+        ("revoked", "user-1", "revoked"),
+        ("another-user", "user-2", "revoked"),
+    ]
+    .map(|(id, user_id, status)| UserPlanEntitlementRecord {
+        id: id.to_string(),
+        user_id: user_id.to_string(),
+        plan_id: "plan-1".to_string(),
+        payment_order_id: format!("order-{id}"),
+        status: status.to_string(),
+        starts_at_unix_secs: now - 60,
+        expires_at_unix_secs: now + 3600,
+        entitlements_snapshot: json!([]),
+        created_at_unix_secs: now - 60,
+        updated_at_unix_secs: now,
+    });
+    let state = AppState::new().unwrap().with_data_state_for_tests(
+        GatewayDataState::with_user_billing_and_wallet_for_tests(
+            Arc::new(InMemoryUserReadRepository::seed_auth_users(users)),
+            Arc::new(InMemoryBillingReadRepository::seed_user_plan_entitlements(
+                entitlements,
+            )),
+            Arc::new(InMemoryWalletRepository::seed(wallets)),
+        ),
+    );
+    let (url, handle) = start_server(build_router_with_state(state)).await;
+    let wallet_path = "/api/admin/wallets?user_id=user-1&owner_type=user&limit=1&offset=0";
+    let response = send_admin_billing_request(&url, http::Method::GET, wallet_path, None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let wallet: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(wallet["total"], 1);
+    assert_eq!(wallet["items"].as_array().unwrap().len(), 1);
+    assert_eq!(wallet["items"][0]["id"], "wallet-user-1");
+    assert_eq!(wallet["items"][0]["user_id"], "user-1");
+
+    let response = send_admin_billing_request(
+        &url,
+        http::Method::GET,
+        "/api/admin/wallets?user_id=missing-user&limit=1",
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let missing: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(missing["total"], 0);
+    assert_eq!(missing["items"], json!([]));
+
+    let path = "/api/admin/users/user-1/billing/entitlements";
+    for query in ["", "?include_inactive=false"] {
+        let response =
+            send_admin_billing_request(&url, http::Method::GET, &format!("{path}{query}"), None)
+                .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let current: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(current["total"], 1);
+        assert_eq!(current["items"][0]["id"], "current");
+        assert_eq!(current["items"][0]["active"], true);
+    }
+    let response = send_admin_billing_request(
+        &url,
+        http::Method::GET,
+        &format!("{path}?include_inactive=true"),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let history: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(history["total"], 2);
+    let items = history["items"].as_array().unwrap();
+    assert!(items.iter().all(|item| item["user_id"] == "user-1"));
+    assert!(items
+        .iter()
+        .any(|item| item["id"] == "revoked" && item["active"] == false));
+
+    let response = send_admin_billing_request(
+        &url,
+        http::Method::GET,
+        &format!("{path}?include_inactive=invalid"),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_handles_admin_billing_presets_locally_with_trusted_admin_principal() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
@@ -656,4 +788,111 @@ async fn gateway_handles_admin_billing_collector_routes_locally_with_trusted_adm
 
     gateway_handle.abort();
     upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn provider_expense_http_contract_requires_admin_and_records_retries_only_once() {
+    use aether_data::repository::{
+        billing::InMemoryBillingReadRepository,
+        provider_catalog::InMemoryProviderCatalogReadRepository,
+    };
+    use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider;
+    let provider = StoredProviderCatalogProvider::new(
+        "provider-1".into(),
+        "=Supplier".into(),
+        None,
+        "custom".into(),
+    )
+    .unwrap();
+    let catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![],
+        vec![],
+    ));
+    let state = AppState::new().unwrap().with_data_state_for_tests(
+        GatewayDataState::with_billing_reader_for_tests(Arc::new(
+            InMemoryBillingReadRepository::default(),
+        ))
+        .with_provider_catalog_reader(catalog),
+    );
+    let (url, handle) = start_server(build_router_with_state(state)).await;
+    let path = "/api/admin/billing/provider-expenses";
+    let client = reqwest::Client::new();
+    assert!(matches!(
+        client
+            .get(format!("{url}{path}"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+    ));
+    let payload = json!({"client_request_id":uuid::Uuid::new_v4().to_string(),"provider_id":"provider-1","kind":"subscription","amount":"12.30","currency":"USD","paid_at":"2026-09-20T00:00:00Z","period_start":"2026-09-20T00:00:00Z","period_end":"2026-10-20T00:00:00Z","note":"=SUM(1,2)"});
+    let first =
+        send_admin_billing_request(&url, http::Method::POST, path, Some(payload.clone())).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let first: serde_json::Value = first.json().await.unwrap();
+    assert_eq!(first["item"]["amount"], "12.30000000");
+    let again =
+        send_admin_billing_request(&url, http::Method::POST, path, Some(payload.clone())).await;
+    assert_eq!(again.status(), StatusCode::OK);
+    let again: serde_json::Value = again.json().await.unwrap();
+    assert_eq!(first["item"]["id"], again["item"]["id"]);
+    let mut conflict = payload.clone();
+    conflict["amount"] = json!("13");
+    assert_eq!(
+        send_admin_billing_request(&url, http::Method::POST, path, Some(conflict))
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+    let range = "?from=2026-09-01T00:00:00Z&to=2026-10-01T00:00:00Z&limit=1&offset=5";
+    let page =
+        send_admin_billing_request(&url, http::Method::GET, &format!("{path}{range}"), None).await;
+    assert_eq!(page.status(), StatusCode::OK);
+    let page: serde_json::Value = page.json().await.unwrap();
+    assert_eq!(page["total"], 1);
+    assert_eq!(page["items"], json!([]));
+    assert_eq!(page["totals"][0]["subscription_amount"], "12.30000000");
+    let csv = send_admin_billing_request(
+        &url,
+        http::Method::GET,
+        &format!("{path}{range}&format=csv"),
+        None,
+    )
+    .await;
+    assert_eq!(csv.status(), StatusCode::OK);
+    let csv = csv.text().await.unwrap();
+    assert!(csv.contains("'=Supplier"));
+    assert!(csv.contains("'=SUM(1,2)"));
+    assert!(csv.contains("12.30000000"));
+    let accounts = send_admin_billing_request(
+        &url,
+        http::Method::GET,
+        "/api/admin/billing/provider-accounts",
+        None,
+    )
+    .await;
+    assert_eq!(accounts.status(), StatusCode::OK);
+    let accounts: serde_json::Value = accounts.json().await.unwrap();
+    assert_eq!(accounts["items"][0]["provider_id"], "provider-1");
+    assert!(accounts["items"][0]["balance"].is_null());
+    let void_path = format!("{path}/{}/void", first["item"]["id"].as_str().unwrap());
+    let voided = send_admin_billing_request(&url, http::Method::POST, &void_path, None).await;
+    assert_eq!(voided.status(), StatusCode::OK);
+    let voided: serde_json::Value = voided.json().await.unwrap();
+    assert_eq!(voided["item"]["status"], "void");
+    let again = send_admin_billing_request(&url, http::Method::POST, &void_path, None).await;
+    assert_eq!(again.status(), StatusCode::OK);
+    let again: serde_json::Value = again.json().await.unwrap();
+    assert_eq!(voided, again);
+    let page: serde_json::Value =
+        send_admin_billing_request(&url, http::Method::GET, &format!("{path}{range}"), None)
+            .await
+            .json()
+            .await
+            .unwrap();
+    assert_eq!(page["total"], 0);
+    assert_eq!(page["totals"], json!([]));
+    handle.abort();
 }

@@ -55,10 +55,14 @@ pub struct RoutingRuntimeFacts {
     pub priority_mode: Option<RoutingSetPriorityMode>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RoutingDecisionTrace {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billing_multiplier: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_version: Option<i64>,
     pub selection_source: String,

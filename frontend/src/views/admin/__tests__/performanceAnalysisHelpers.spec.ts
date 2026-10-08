@@ -3,7 +3,7 @@ import {
   buildProviderPerformanceChartData,
   formatDurationMs,
   formatProviderPerformanceMetric,
-} from '../performanceAnalysisHelpers'
+} from '@/features/overview/operations/performanceHelpers'
 import type { ProviderPerformanceItem, ProviderPerformanceTimelineItem } from '@/api/admin'
 
 describe('performanceAnalysisHelpers', () => {

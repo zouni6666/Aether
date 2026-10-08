@@ -1038,6 +1038,13 @@ async fn gateway_rejects_internal_gateway_report_with_tampered_protected_context
         ("endpoint_id", json!("endpoint-unrelated-victim")),
         ("key_id", json!("key-unrelated-victim")),
         ("client_api_format", json!("gemini:video")),
+        ("routing_group_billing_multiplier", json!(0.0)),
+        (
+            "billing_multiplier_snapshot",
+            json!({"version": 1, "factors": {"routing_group": 0.0}, "multiplier": 0.0}),
+        ),
+        ("routing_group_id", json!("unrelated-group")),
+        ("routing_group_name", json!("forged-group")),
         ("task_id", json!("task-unrelated-victim")),
         ("local_task_id", json!("local-task-unrelated-victim")),
         ("local_short_id", json!("short-unrelated-victim")),

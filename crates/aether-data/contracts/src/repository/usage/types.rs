@@ -11,6 +11,10 @@ pub const PROVIDER_RESPONSE_MODEL_METADATA_KEY: &str = "provider_response_model"
 pub const PROVIDER_CACHE_TTL_MINUTES_METADATA_KEY: &str = "provider_cache_ttl_minutes";
 pub const ROUTING_CANDIDATE_SKIP_REASON_METADATA_KEY: &str = "routing_candidate_skip_reason";
 pub const ROUTING_FAILURE_DIAGNOSTIC_METADATA_KEY: &str = "routing_failure_diagnostic";
+/// Immutable routing-group multiplier captured when the request is planned.
+pub const ROUTING_GROUP_BILLING_MULTIPLIER_METADATA_KEY: &str = "routing_group_billing_multiplier";
+pub const ROUTING_GROUP_ID_METADATA_KEY: &str = "routing_group_id";
+pub const ROUTING_GROUP_NAME_METADATA_KEY: &str = "routing_group_name";
 pub const WEBSOCKET_MODE_METADATA_KEY: &str = "websocket_mode";
 pub const WEBSOCKET_TRANSPORT_METADATA_KEY: &str = "websocket_transport";
 pub const PLAN_USAGE_RESERVATION_DEFERRED_METADATA_KEY: &str = "plan_usage_reservation_deferred";
@@ -53,6 +57,75 @@ pub fn extract_provider_reasoning_effort_from_body(value: Option<&Value>) -> Opt
                 .and_then(Value::as_str)
         })
         .and_then(normalize_provider_reasoning_effort)
+        .or_else(|| {
+            // Gemini also nests its payload one level down, so both the flat
+            // `generateContent` body and the `v1internal` envelope that carries it are read.
+            extract_gemini_reasoning_effort_from_body(object).or_else(|| {
+                object
+                    .get("request")
+                    .and_then(Value::as_object)
+                    .and_then(extract_gemini_reasoning_effort_from_body)
+            })
+        })
+}
+
+/// Gemini `generateContent` states its reasoning depth inside
+/// `generationConfig.thinkingConfig`, either as a symbolic `thinkingLevel` or as a token
+/// `thinkingBudget`. Both camelCase and snake_case spellings are read so that a captured client
+/// body and a converted provider body resolve to the same label.
+///
+/// `includeThoughts` alone is a visibility flag, not a depth, so it never produces a label.
+fn extract_gemini_reasoning_effort_from_body(
+    object: &serde_json::Map<String, Value>,
+) -> Option<String> {
+    let generation_config = object
+        .get("generationConfig")
+        .or_else(|| object.get("generation_config"))
+        .and_then(Value::as_object)?;
+    let thinking_config = generation_config
+        .get("thinkingConfig")
+        .or_else(|| generation_config.get("thinking_config"))
+        .and_then(Value::as_object)?;
+
+    if let Some(level) = thinking_config
+        .get("thinkingLevel")
+        .or_else(|| thinking_config.get("thinking_level"))
+        .and_then(Value::as_str)
+        .and_then(normalize_gemini_thinking_level)
+    {
+        return Some(level);
+    }
+
+    thinking_config
+        .get("thinkingBudget")
+        .or_else(|| thinking_config.get("thinking_budget"))
+        .and_then(Value::as_u64)
+        .map(|budget| {
+            // `0` disables reasoning outright. The shared budget ladder collapses it into `low`,
+            // which would report an explicitly disabled request as a shallow one.
+            if budget == 0 {
+                "none".to_string()
+            } else {
+                aether_ai_formats::formats::openai::shared::map_thinking_budget_to_openai_reasoning_effort(budget)
+                    .to_string()
+            }
+        })
+}
+
+/// Gemini also emits the protobuf enum spelling (`THINKING_LEVEL_HIGH`); the level itself is what
+/// the badge vocabulary understands, so the enum prefix is stripped before normalizing.
+///
+/// `THINKING_LEVEL_UNSPECIFIED` is the enum's "no explicit level" member, not a depth. It is
+/// rejected rather than surfaced, otherwise the badge would read `unspecified`.
+fn normalize_gemini_thinking_level(value: &str) -> Option<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    let normalized = normalized
+        .strip_prefix("thinking_level_")
+        .unwrap_or(normalized.as_str());
+    if normalized == "unspecified" {
+        return None;
+    }
+    normalize_provider_reasoning_effort(normalized)
 }
 
 fn normalize_provider_reasoning_effort(value: &str) -> Option<String> {
@@ -759,6 +832,47 @@ impl StoredRequestUsageAudit {
         self.request_metadata_number("rate_multiplier")
     }
 
+    /// Historical requests without a captured multiplier retain the original 1x rate.
+    pub fn routing_group_billing_multiplier(&self) -> f64 {
+        self.request_metadata_number(ROUTING_GROUP_BILLING_MULTIPLIER_METADATA_KEY)
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .unwrap_or(1.0)
+    }
+
+    /// Routing factor projection retained for callers inspecting this individual factor.
+    pub fn routing_group_billing_cost(&self) -> Option<f64> {
+        let cost = self.total_cost_usd * self.routing_group_billing_multiplier();
+        cost.is_finite().then_some(cost)
+    }
+
+    pub fn billing_multiplier(&self) -> f64 {
+        super::billing_multiplier_snapshot(self.request_metadata.as_ref())
+            .ok()
+            .flatten()
+            .map(|snapshot| snapshot.multiplier())
+            .unwrap_or(1.0)
+    }
+
+    /// Customer charge is independent of upstream Key cost. Legacy rows keep their
+    /// original charge; no current configuration is consulted for historical usage.
+    pub fn billing_cost(&self) -> Option<f64> {
+        match super::billing_multiplier_snapshot(self.request_metadata.as_ref()).ok()? {
+            Some(snapshot) => snapshot.cost(self.total_cost_usd).ok(),
+            None => self
+                .actual_total_cost_usd
+                .is_finite()
+                .then_some(self.actual_total_cost_usd.max(0.0)),
+        }
+    }
+
+    pub fn routing_group_id(&self) -> Option<&str> {
+        self.request_metadata_string(ROUTING_GROUP_ID_METADATA_KEY)
+    }
+
+    pub fn routing_group_name(&self) -> Option<&str> {
+        self.request_metadata_string(ROUTING_GROUP_NAME_METADATA_KEY)
+    }
+
     pub fn settlement_is_free_tier(&self) -> Option<bool> {
         self.request_metadata_bool("is_free_tier")
     }
@@ -1137,6 +1251,24 @@ pub struct StoredProviderApiKeyWindowUsageSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct UsageAuditListQuery {
+    #[serde(default)]
+    pub slow_threshold_ms: Option<u64>,
+    #[serde(default)]
+    pub endpoint_kind: Option<String>,
+    #[serde(default)]
+    pub request_type: Option<String>,
+    #[serde(default)]
+    pub has_format_conversion: Option<bool>,
+    #[serde(default)]
+    pub provider_id: Option<String>,
+    #[serde(default)]
+    pub api_key_id: Option<String>,
+    #[serde(default)]
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub attribution_kind: Option<String>,
+    #[serde(default)]
+    pub actor_user_id: Option<String>,
     pub created_from_unix_secs: Option<u64>,
     pub created_until_unix_secs: Option<u64>,
     pub user_id: Option<String>,
@@ -1157,6 +1289,24 @@ pub struct UsageAuditListQuery {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct UsageAuditKeywordSearchQuery {
+    #[serde(default)]
+    pub slow_threshold_ms: Option<u64>,
+    #[serde(default)]
+    pub endpoint_kind: Option<String>,
+    #[serde(default)]
+    pub request_type: Option<String>,
+    #[serde(default)]
+    pub has_format_conversion: Option<bool>,
+    #[serde(default)]
+    pub provider_id: Option<String>,
+    #[serde(default)]
+    pub api_key_id: Option<String>,
+    #[serde(default)]
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub attribution_kind: Option<String>,
+    #[serde(default)]
+    pub actor_user_id: Option<String>,
     pub created_from_unix_secs: Option<u64>,
     pub created_until_unix_secs: Option<u64>,
     pub user_id: Option<String>,
@@ -1900,6 +2050,42 @@ pub enum StoredUsageBodyPayload {
 
 #[async_trait]
 pub trait UsageReadRepository: Send + Sync {
+    async fn query_dashboard_summary(
+        &self,
+        _query: &super::UsageDashboardAnalyticsQuery,
+    ) -> Result<super::StoredDashboardSummary, crate::DataLayerError> {
+        Err(crate::DataLayerError::UnexpectedValue(
+            "dashboard summary repository unavailable".into(),
+        ))
+    }
+
+    async fn query_dashboard_analytics(
+        &self,
+        _query: &super::UsageDashboardAnalyticsQuery,
+    ) -> Result<super::StoredUsageDashboardAnalytics, crate::DataLayerError> {
+        Err(crate::DataLayerError::UnexpectedValue(
+            "dashboard analytics repository unavailable".into(),
+        ))
+    }
+
+    async fn summarize_health_observations(
+        &self,
+        _query: &super::HealthObservationQuery,
+    ) -> Result<super::HealthObservationSummary, crate::DataLayerError> {
+        Err(crate::DataLayerError::UnexpectedValue(
+            "health observations repository unavailable".into(),
+        ))
+    }
+
+    async fn query_usage_analytics(
+        &self,
+        _query: &super::UsageAnalyticsQuery,
+    ) -> Result<super::StoredUsageAnalytics, crate::DataLayerError> {
+        Err(crate::DataLayerError::UnexpectedValue(
+            "usage analytics repository unavailable".into(),
+        ))
+    }
+
     async fn find_by_id(
         &self,
         id: &str,
@@ -3267,6 +3453,40 @@ mod tests {
     }
 
     #[test]
+    fn routing_group_snapshot_defaults_legacy_multiplier_without_inventing_a_group() {
+        let mut usage = sample_usage();
+        usage.total_cost_usd = 4.0;
+        assert_eq!(usage.routing_group_billing_multiplier(), 1.0);
+        assert_eq!(usage.routing_group_billing_cost(), Some(4.0));
+        assert_eq!(usage.routing_group_id(), None);
+        assert_eq!(usage.routing_group_name(), None);
+        for (value, multiplier, cost) in [
+            (json!(0), 0.0, 0.0),
+            (json!(0.25), 0.25, 1.0),
+            (json!(2.5), 2.5, 10.0),
+            (json!(-2), 1.0, 4.0),
+            (json!("Infinity"), 1.0, 4.0),
+            (json!(f64::INFINITY), 1.0, 4.0),
+            (json!(f64::NAN), 1.0, 4.0),
+        ] {
+            usage.request_metadata = Some(json!({
+                "routing_group_billing_multiplier": value,
+                "routing_group_id": "group-recorded",
+                "routing_group_name": "请求时的分组",
+                "rate_multiplier": 0.75
+            }));
+            assert_eq!(usage.routing_group_billing_multiplier(), multiplier);
+            assert_eq!(usage.routing_group_billing_cost(), Some(cost));
+            assert_eq!(usage.routing_group_id(), Some("group-recorded"));
+            assert_eq!(usage.routing_group_name(), Some("请求时的分组"));
+            assert_eq!(usage.settlement_rate_multiplier(), Some(0.75));
+        }
+        usage.request_metadata = Some(json!({"routing_group_billing_multiplier": 2.0}));
+        usage.total_cost_usd = f64::MAX;
+        assert_eq!(usage.routing_group_billing_cost(), None);
+    }
+
+    #[test]
     fn settlement_accessors_prefer_typed_metadata() {
         let mut usage = sample_usage();
         usage.output_price_per_1m = Some(11.0);
@@ -3514,6 +3734,157 @@ mod tests {
 
         assert_eq!(usage.provider_reasoning_effort(), None);
         assert_eq!(usage.provider_service_tier(), None);
+    }
+
+    #[test]
+    fn gemini_thinking_level_supplies_reasoning_effort_for_both_body_spellings() {
+        let mut usage = sample_usage();
+        usage.provider_request_body = Some(json!({
+            "generationConfig": {
+                "thinkingConfig": { "includeThoughts": true, "thinkingLevel": "HIGH" }
+            }
+        }));
+
+        assert_eq!(usage.provider_reasoning_effort().as_deref(), Some("high"));
+
+        // The converted provider body keeps snake_case keys, and the client body may carry the
+        // protobuf enum spelling. Both must land on the same badge vocabulary.
+        usage.provider_request_body = Some(json!({
+            "generation_config": {
+                "thinking_config": { "thinking_level": "thinking_level_medium" }
+            }
+        }));
+
+        assert_eq!(usage.provider_reasoning_effort().as_deref(), Some("medium"));
+
+        usage.provider_request_body = Some(json!({
+            "generationConfig": {
+                "thinkingConfig": { "thinkingLevel": "  low  " }
+            }
+        }));
+
+        assert_eq!(usage.provider_reasoning_effort().as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn gemini_thinking_budget_supplies_reasoning_effort_without_collapsing_zero() {
+        let mut usage = sample_usage();
+        usage.provider_request_body = Some(json!({
+            "generationConfig": { "thinkingConfig": { "thinkingBudget": 8192 } }
+        }));
+
+        assert_eq!(usage.provider_reasoning_effort().as_deref(), Some("xhigh"));
+
+        // `0` disables reasoning. The shared budget ladder maps 0..=1664 to `low`, which would
+        // report an explicitly disabled request as shallow, so the Gemini path reports `none`.
+        usage.provider_request_body = Some(json!({
+            "generationConfig": { "thinkingConfig": { "thinkingBudget": 0 } }
+        }));
+
+        assert_eq!(usage.provider_reasoning_effort().as_deref(), Some("none"));
+
+        usage.provider_request_body = Some(json!({
+            "generation_config": { "thinking_config": { "thinking_budget": 1280 } }
+        }));
+
+        assert_eq!(usage.provider_reasoning_effort().as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn gemini_thinking_config_without_level_or_budget_yields_no_reasoning_effort() {
+        let mut usage = sample_usage();
+        usage.provider_request_body = Some(json!({
+            "generationConfig": { "thinkingConfig": { "includeThoughts": true } }
+        }));
+
+        assert_eq!(usage.provider_reasoning_effort(), None);
+
+        // A level-less, budget-less config must not fall back to metadata either: the captured
+        // body is authoritative and it says nothing about depth.
+        usage.request_metadata = Some(json!({ "provider_reasoning_effort": "max" }));
+        assert_eq!(usage.provider_reasoning_effort(), None);
+
+        // `THINKING_LEVEL_UNSPECIFIED` is the enum's "no explicit level" member, not a depth.
+        usage.request_metadata = None;
+        usage.provider_request_body = Some(json!({
+            "generationConfig": {
+                "thinkingConfig": { "thinkingLevel": "THINKING_LEVEL_UNSPECIFIED" }
+            }
+        }));
+
+        assert_eq!(usage.provider_reasoning_effort(), None);
+    }
+
+    /// The v1internal envelope nests the real `generateContent` payload under `request`. This is
+    /// the shape the Antigravity/Gemini CLI transports actually send upstream, so the extraction
+    /// has to descend into it or every converted `openai:chat -> gemini` request loses its badge.
+    #[test]
+    fn gemini_thinking_config_is_read_from_the_v1internal_envelope() {
+        let mut usage = sample_usage();
+        usage.provider_request_body = Some(json!({
+            "model": "gemini-3.8-flash-tiered",
+            "project": "aicode-consumers",
+            "requestId": "req-1",
+            "requestType": "agent",
+            "userAgent": "vscode/1.X.X (Antigravity/4.3.0)",
+            "request": {
+                "contents": [{ "role": "user", "parts": [{ "text": "hi" }] }],
+                "generationConfig": {
+                    "maxOutputTokens": 65536,
+                    "thinkingConfig": { "includeThoughts": true, "thinkingLevel": "high" }
+                }
+            }
+        }));
+
+        assert_eq!(usage.provider_reasoning_effort().as_deref(), Some("high"));
+
+        usage.provider_request_body = Some(json!({
+            "model": "gemini-3.8-flash-tiered",
+            "request": {
+                "generation_config": {
+                    "thinking_config": { "include_thoughts": true, "thinking_budget": 32768 }
+                }
+            }
+        }));
+
+        assert_eq!(usage.provider_reasoning_effort().as_deref(), Some("xhigh"));
+
+        usage.provider_request_body = Some(json!({
+            "model": "gemini-3.8-flash-tiered",
+            "request": {
+                "generationConfig": { "thinkingConfig": { "thinkingBudget": 0 } }
+            }
+        }));
+
+        assert_eq!(usage.provider_reasoning_effort().as_deref(), Some("none"));
+    }
+
+    /// A converted request that carries only `maxOutputTokens` must stay badge-less rather than
+    /// picking up a depth from somewhere else in the envelope.
+    #[test]
+    fn v1internal_envelope_without_thinking_config_yields_no_reasoning_effort() {
+        let mut usage = sample_usage();
+        usage.provider_request_body = Some(json!({
+            "model": "gemini-3.8-flash-tiered",
+            "project": "aicode-consumers",
+            "request": {
+                "contents": [{ "role": "user", "parts": [{ "text": "hi" }] }],
+                "generationConfig": { "maxOutputTokens": 65536 }
+            }
+        }));
+
+        assert_eq!(usage.provider_reasoning_effort(), None);
+    }
+
+    #[test]
+    fn gemini_thinking_config_does_not_shadow_explicit_effort_fields() {
+        let mut usage = sample_usage();
+        usage.provider_request_body = Some(json!({
+            "reasoning_effort": "max",
+            "generationConfig": { "thinkingConfig": { "thinkingLevel": "low" } }
+        }));
+
+        assert_eq!(usage.provider_reasoning_effort().as_deref(), Some("max"));
     }
 
     #[test]

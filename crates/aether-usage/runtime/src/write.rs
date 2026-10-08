@@ -126,6 +126,7 @@ pub enum UsageTerminalState {
 
 #[derive(Debug, Clone)]
 pub struct TerminalUsageContextSeed {
+    token_measurement_source: &'static str,
     pub client_contract: String,
     pub provider_contract: String,
     pub request_id: String,
@@ -191,6 +192,7 @@ pub struct StreamTerminalUsagePayloadSeed {
 
 #[derive(Debug, Clone)]
 pub struct TerminalUsageSeed {
+    token_measurement_source: &'static str,
     pub terminal_state: UsageTerminalState,
     pub client_contract: String,
     pub provider_contract: String,
@@ -651,6 +653,7 @@ fn build_terminal_usage_event_from_seed_impl(
     trusted_request_metadata: bool,
 ) -> Result<UsageEvent, DataLayerError> {
     let TerminalUsageSeed {
+        token_measurement_source,
         terminal_state,
         client_contract,
         provider_contract,
@@ -795,7 +798,7 @@ fn build_terminal_usage_event_from_seed_impl(
     };
 
     if let Some(usage) = standardized_usage.as_ref() {
-        apply_standardized_usage_seed(usage, &mut data);
+        apply_standardized_usage_seed(usage, &mut data, token_measurement_source);
     }
 
     if data.total_tokens.is_none() {
@@ -805,6 +808,7 @@ fn build_terminal_usage_event_from_seed_impl(
             .and_then(extract_token_counts_from_value)
         {
             data.input_tokens = Some(tokens.0);
+            mark_analytics_measurement(&mut data, token_measurement_source);
             data.output_tokens = Some(tokens.1);
             data.total_tokens = Some(tokens.2);
         }
@@ -850,6 +854,13 @@ pub fn build_terminal_usage_context_seed(
     );
 
     TerminalUsageContextSeed {
+        token_measurement_source: match context_value_ref(context, "usage_token_source")
+            .and_then(Value::as_str)
+        {
+            Some("estimated") => "estimated",
+            Some("mixed") => "mixed",
+            _ => "reported",
+        },
         client_contract,
         provider_contract,
         has_format_conversion,
@@ -1046,6 +1057,21 @@ pub fn build_sync_terminal_usage_seed(
     let derived_standardized_usage = provider_response_full
         .as_ref()
         .map(|response| map_usage_from_response(response, context_seed.provider_contract.as_str()));
+    // Context usage here is Kiro's locally simulated input/cache usage. A
+    // standard response may still contribute independently reported output.
+    let token_measurement_source =
+        if standardized_usage.is_some() && context_seed.token_measurement_source != "estimated" {
+            if derived_standardized_usage
+                .as_ref()
+                .is_some_and(|usage| usage.output_tokens > 0 || usage.reasoning_tokens > 0)
+            {
+                "mixed"
+            } else {
+                "estimated"
+            }
+        } else {
+            context_seed.token_measurement_source
+        };
     let standardized_usage =
         merge_standardized_usage_with_context_cache(standardized_usage, derived_standardized_usage);
     let terminal_state = infer_sync_terminal_state(
@@ -1068,6 +1094,7 @@ pub fn build_sync_terminal_usage_seed(
     );
 
     TerminalUsageSeed {
+        token_measurement_source,
         terminal_state,
         client_contract: context_seed.client_contract,
         provider_contract: context_seed.provider_contract,
@@ -1261,6 +1288,7 @@ pub fn build_stream_terminal_usage_seed(
     );
 
     TerminalUsageSeed {
+        token_measurement_source: context_seed.token_measurement_source,
         terminal_state,
         client_contract: context_seed.client_contract,
         provider_contract: context_seed.provider_contract,
@@ -2186,6 +2214,11 @@ fn build_runtime_request_metadata_seed_from_parts(
     provider_request_body_base64: Option<&str>,
 ) -> Option<Value> {
     let mut metadata = Map::new();
+    for key in ["analytics_attribution", "analytics_failure"] {
+        if let Some(value) = context_value_ref(context, key) {
+            metadata.insert(key.into(), value.clone());
+        }
+    }
     if let Some(trace_id) = context_string(context, "trace_id") {
         metadata.insert("trace_id".to_string(), Value::String(trace_id));
     }
@@ -2658,7 +2691,30 @@ fn infer_endpoint_kind(api_format: &str) -> Option<&str> {
     api_format.split_once(':').map(|(_, kind)| kind)
 }
 
-fn apply_standardized_usage_seed(usage: &StandardizedUsage, data: &mut UsageEventData) {
+fn apply_standardized_usage_seed(
+    usage: &StandardizedUsage,
+    data: &mut UsageEventData,
+    token_source: &str,
+) {
+    let token_source = usage
+        .token_source
+        .map(|source| source.as_str())
+        .unwrap_or(token_source);
+    // Dimensions such as image_count are not evidence of measured tokens.
+    if [
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.cache_creation_tokens,
+        usage.cache_creation_ephemeral_5m_tokens,
+        usage.cache_creation_ephemeral_1h_tokens,
+        usage.cache_read_tokens,
+        usage.reasoning_tokens,
+    ]
+    .into_iter()
+    .any(|tokens| tokens > 0)
+    {
+        mark_analytics_measurement(data, token_source);
+    }
     if usage.input_tokens > 0 {
         data.input_tokens = Some(usage.input_tokens as u64);
     }
@@ -3162,6 +3218,7 @@ fn apply_completed_image_usage_estimate(data: &mut UsageEventData) {
     if positive_tokens(data.input_tokens) == 0 {
         if let Some(usage) = request_usage.as_ref() {
             data.input_tokens = Some(usage.input_tokens);
+            mark_analytics_measurement(data, "estimated");
         }
     }
     apply_request_cache_usage_estimate(data, request_usage.as_ref());
@@ -3172,6 +3229,25 @@ fn apply_completed_image_usage_estimate(data: &mut UsageEventData) {
             data.total_tokens = Some(total_tokens);
         }
     }
+}
+
+fn mark_analytics_measurement(data: &mut UsageEventData, source: &str) {
+    let mut metadata = data
+        .request_metadata
+        .take()
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    let previous = metadata
+        .get("analytics_measurement")
+        .and_then(|value| value.get("source"))
+        .and_then(Value::as_str);
+    let source = match previous {
+        Some("mixed") => "mixed",
+        Some(old) if old != source && old != "unknown" => "mixed",
+        _ => source,
+    };
+    metadata.insert("analytics_measurement".into(), json!({"source":source}));
+    data.request_metadata = Some(Value::Object(metadata));
 }
 
 fn apply_completed_image_dimensions(data: &mut UsageEventData) {
@@ -5248,6 +5324,10 @@ mod tests {
         assert_eq!(event.data.output_tokens.unwrap_or_default(), 0);
         assert_eq!(event.data.total_tokens, event.data.input_tokens);
         assert_eq!(
+            event.data.request_metadata.as_ref().unwrap()["analytics_measurement"]["source"],
+            "estimated"
+        );
+        assert_eq!(
             event
                 .data
                 .request_metadata
@@ -5693,6 +5773,44 @@ mod tests {
         assert_eq!(event.data.input_tokens, Some(4));
         assert_eq!(event.data.output_tokens, Some(6));
         assert_eq!(event.data.total_tokens, Some(10));
+        assert_eq!(
+            event.data.request_metadata.as_ref().unwrap()["analytics_measurement"]["source"],
+            "reported"
+        );
+        for source in ["estimated", "mixed"] {
+            let mut payload = payload.clone();
+            payload.report_context.as_mut().unwrap()["usage_token_source"] = json!(source);
+            let event =
+                build_sync_terminal_usage_event(&plan, payload.report_context.as_ref(), &payload)
+                    .unwrap();
+            assert_eq!(event.data.input_tokens, Some(4));
+            assert_eq!(event.data.output_tokens, Some(6));
+            assert_eq!(event.data.total_tokens, Some(10));
+            assert_eq!(
+                event.data.request_metadata.as_ref().unwrap()["analytics_measurement"]["source"],
+                source
+            );
+            assert!(event
+                .data
+                .request_metadata
+                .as_ref()
+                .unwrap()
+                .get("usage_token_source")
+                .is_none());
+
+            payload.status_code = 500;
+            payload.body_json = Some(json!({"error": {"message": "no token measurement"}}));
+            let failed =
+                build_sync_terminal_usage_event(&plan, payload.report_context.as_ref(), &payload)
+                    .unwrap();
+            assert!(failed
+                .data
+                .request_metadata
+                .as_ref()
+                .unwrap()
+                .get("analytics_measurement")
+                .is_none());
+        }
         assert_eq!(
             event.data.response_headers,
             Some(json!({
@@ -6529,6 +6647,32 @@ mod tests {
         assert_eq!(event.data.cache_creation_input_tokens, Some(1200));
         assert_eq!(event.data.cache_read_input_tokens, Some(300));
         assert_eq!(event.data.total_tokens, Some(300));
+        assert_eq!(
+            event.data.request_metadata.as_ref().unwrap()["analytics_measurement"]["source"],
+            "estimated"
+        );
+
+        let mut payload = payload;
+        payload.body_json = Some(json!({"usage": {"output_tokens": 17}}));
+        let mixed =
+            build_sync_terminal_usage_event(&plan, payload.report_context.as_ref(), &payload)
+                .unwrap();
+        assert_eq!(mixed.data.output_tokens, Some(17));
+        assert_eq!(mixed.data.cache_read_input_tokens, Some(300));
+        assert_eq!(
+            mixed.data.request_metadata.as_ref().unwrap()["analytics_measurement"]["source"],
+            "mixed"
+        );
+
+        payload.report_context.as_mut().unwrap()["usage_token_source"] = json!("estimated");
+        let native =
+            build_sync_terminal_usage_event(&plan, payload.report_context.as_ref(), &payload)
+                .unwrap();
+        assert_eq!(native.data.output_tokens, Some(17));
+        assert_eq!(
+            native.data.request_metadata.as_ref().unwrap()["analytics_measurement"]["source"],
+            "estimated"
+        );
     }
 
     #[test]
@@ -6598,6 +6742,7 @@ mod tests {
     #[test]
     fn manual_terminal_seed_event_builder_sanitizes_metadata_but_preserves_headers_and_bodies() {
         let event = build_terminal_usage_event_from_seed(TerminalUsageSeed {
+            token_measurement_source: "reported",
             terminal_state: UsageTerminalState::Completed,
             client_contract: "openai:chat".to_string(),
             provider_contract: "openai:chat".to_string(),

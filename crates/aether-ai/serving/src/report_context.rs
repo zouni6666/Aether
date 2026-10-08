@@ -64,6 +64,13 @@ pub fn build_ai_execution_report_context(parts: AiExecutionReportContextParts<'_
         Value::Bool(parts.auth_context.api_key_is_standalone),
     );
     object.insert(
+        "analytics_attribution".into(),
+        serde_json::json!({
+            "is_standalone": parts.auth_context.api_key_is_standalone,
+            "record_kind": "request"
+        }),
+    );
+    object.insert(
         "username".to_string(),
         parts
             .auth_context
@@ -215,8 +222,51 @@ pub fn build_ai_execution_report_context(parts: AiExecutionReportContextParts<'_
         );
     }
 
-    object.extend(parts.extra_fields);
+    object.extend(parts.extra_fields.into_iter().filter(|(key, _)| {
+        !matches!(
+            key.as_str(),
+            "analytics_attribution"
+                | "analytics_failure"
+                | "analytics_measurement"
+                | "usage_token_source"
+        )
+    }));
+    if uses_estimated_token_adapter(&object) {
+        // Bind the adapter's provenance to the planner context. This is a hint,
+        // not a measurement: usage records materialize it only when tokens exist.
+        object.insert(
+            "usage_token_source".into(),
+            Value::String("estimated".into()),
+        );
+    }
     Value::Object(object)
+}
+
+fn uses_estimated_token_adapter(context: &Map<String, Value>) -> bool {
+    let grok = context
+        .get("provider_type")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value.eq_ignore_ascii_case("grok"))
+        || context
+            .get("provider_request_headers")
+            .and_then(Value::as_object)
+            .is_some_and(|headers| {
+                headers.iter().any(|(name, value)| {
+                    name.eq_ignore_ascii_case("x-aether-grok-runtime")
+                        && value.as_str() == Some("1")
+                })
+            });
+    let matches = |key: &str, expected: &str| {
+        context
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case(expected))
+    };
+    let kiro = context.get("has_envelope").and_then(Value::as_bool) == Some(true)
+        && matches("envelope_name", "kiro:generateAssistantResponse")
+        && matches("provider_api_format", "claude:messages")
+        && !matches("client_envelope_name", "kiro:generateAssistantResponse");
+    grok || kiro
 }
 
 pub fn provider_stream_event_api_format_for_provider_type(
@@ -280,6 +330,13 @@ mod tests {
             BTreeMap::from([("authorization".to_string(), "Bearer token".to_string())]);
         let mut extra_fields = Map::new();
         extra_fields.insert("extra".to_string(), json!("value"));
+        extra_fields.insert(
+            "analytics_attribution".into(),
+            json!({"is_standalone":true,"actor_user_id":"forged"}),
+        );
+        extra_fields.insert("analytics_failure".into(), json!({"origin":"client"}));
+        extra_fields.insert("analytics_measurement".into(), json!({"source":"reported"}));
+        extra_fields.insert("usage_token_source".into(), json!("estimated"));
         let ranking = SchedulerRankingOutcome {
             original_index: 2,
             ranking_index: 1,
@@ -290,44 +347,48 @@ mod tests {
             demoted_by: None,
         };
 
-        let report = build_ai_execution_report_context(AiExecutionReportContextParts {
-            auth_context: &auth_context,
-            request_id: "trace-a",
-            candidate_id: "candidate-a",
-            candidate_index: 3,
-            retry_index: 1,
-            pool_key_index: Some(0),
-            model: "gpt-5",
-            provider_name: "RightCode",
-            provider_id: "provider-1",
-            endpoint_id: "endpoint-1",
-            key_id: "key-1",
-            key_name: Some("primary"),
-            model_id: Some("model-1"),
-            global_model_id: Some("global-1"),
-            global_model_name: Some("GPT-5"),
-            provider_api_format: "openai:responses",
-            client_api_format: "openai:chat",
-            mapped_model: Some("gpt-5"),
-            candidate_group_id: Some("group-1"),
-            ranking: Some(&ranking),
-            upstream_url: Some("https://example.com/v1/responses"),
-            header_rules: Some(&json!({"set": []})),
-            body_rules: None,
-            provider_request_method: Some(json!("POST")),
-            provider_request_headers: Some(&provider_headers),
-            original_headers: &original_headers,
-            original_request_body: Some(json!({"model": "gpt-5"})),
-            request_origin: AiRequestOrigin {
-                client_ip: Some("127.0.0.1".to_string()),
-                user_agent: Some("test-agent".to_string()),
-            },
-            client_requested_stream: false,
-            upstream_is_stream: true,
-            has_envelope: false,
-            needs_conversion: true,
-            extra_fields,
-        });
+        let build_report = |provider_headers: &BTreeMap<String, String>,
+                            extra_fields: Map<String, Value>| {
+            build_ai_execution_report_context(AiExecutionReportContextParts {
+                auth_context: &auth_context,
+                request_id: "trace-a",
+                candidate_id: "candidate-a",
+                candidate_index: 3,
+                retry_index: 1,
+                pool_key_index: Some(0),
+                model: "gpt-5",
+                provider_name: "RightCode",
+                provider_id: "provider-1",
+                endpoint_id: "endpoint-1",
+                key_id: "key-1",
+                key_name: Some("primary"),
+                model_id: Some("model-1"),
+                global_model_id: Some("global-1"),
+                global_model_name: Some("GPT-5"),
+                provider_api_format: "openai:responses",
+                client_api_format: "openai:chat",
+                mapped_model: Some("gpt-5"),
+                candidate_group_id: Some("group-1"),
+                ranking: Some(&ranking),
+                upstream_url: Some("https://example.com/v1/responses"),
+                header_rules: Some(&json!({"set": []})),
+                body_rules: None,
+                provider_request_method: Some(json!("POST")),
+                provider_request_headers: Some(provider_headers),
+                original_headers: &original_headers,
+                original_request_body: Some(json!({"model": "gpt-5"})),
+                request_origin: AiRequestOrigin {
+                    client_ip: Some("127.0.0.1".to_string()),
+                    user_agent: Some("test-agent".to_string()),
+                },
+                client_requested_stream: false,
+                upstream_is_stream: true,
+                has_envelope: false,
+                needs_conversion: true,
+                extra_fields,
+            })
+        };
+        let report = build_report(&provider_headers, extra_fields.clone());
 
         assert_eq!(report["user_id"], "user-1");
         assert_eq!(report["candidate_index"], 3);
@@ -341,6 +402,47 @@ mod tests {
             "Bearer token"
         );
         assert_eq!(report["extra"], "value");
+        assert_eq!(
+            report["analytics_attribution"],
+            json!({"is_standalone":false,"record_kind":"request"})
+        );
+        assert!(report["analytics_attribution"]
+            .get("actor_user_id")
+            .is_none());
+        assert!(report.get("analytics_failure").is_none());
+        assert!(report.get("analytics_measurement").is_none());
+        assert!(report.get("usage_token_source").is_none());
+
+        let grok_headers = BTreeMap::from([("X-Aether-Grok-Runtime".into(), "1".into())]);
+        assert_eq!(
+            build_report(&grok_headers, extra_fields.clone())["usage_token_source"],
+            "estimated"
+        );
+        let mut native = extra_fields.clone();
+        native.insert("provider_type".into(), json!("Grok"));
+        assert_eq!(
+            build_report(&provider_headers, native)["usage_token_source"],
+            "estimated"
+        );
+
+        let mut kiro = extra_fields;
+        kiro.insert("has_envelope".into(), json!(true));
+        kiro.insert(
+            "envelope_name".into(),
+            json!("kiro:generateAssistantResponse"),
+        );
+        kiro.insert("provider_api_format".into(), json!("claude:messages"));
+        assert_eq!(
+            build_report(&provider_headers, kiro.clone())["usage_token_source"],
+            "estimated"
+        );
+        kiro.insert(
+            "client_envelope_name".into(),
+            json!("kiro:generateAssistantResponse"),
+        );
+        assert!(build_report(&provider_headers, kiro)
+            .get("usage_token_source")
+            .is_none());
     }
 
     #[test]

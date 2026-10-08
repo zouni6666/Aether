@@ -23,5 +23,6 @@ pub use plan::{
 };
 pub use result::{ExecutionResponseObservation, ExecutionResult, ExecutionTelemetry, ResponseBody};
 pub use usage::{
-    ExecutionStreamTerminalSummary, StandardizedUsage, USAGE_SERVER_NOW_UNIX_MS_HEADER,
+    ExecutionStreamTerminalSummary, StandardizedUsage, UsageTokenSource,
+    USAGE_SERVER_NOW_UNIX_MS_HEADER,
 };

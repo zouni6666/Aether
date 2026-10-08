@@ -427,6 +427,10 @@ name = "idx_payment_orders_status"
 columns = ["status"]
 
 [[table.payment_orders.indexes]]
+name = "idx_payment_orders_status_credited_user"
+columns = ["status", "credited_at", "user_id"]
+
+[[table.payment_orders.indexes]]
 name = "idx_payment_orders_gateway_order_id"
 columns = ["gateway_order_id"]
 

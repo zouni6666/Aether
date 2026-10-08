@@ -1,60 +1,50 @@
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { createApp, defineComponent, h, nextTick, onMounted, onUnmounted } from 'vue'
+import { createMemoryHistory, createRouter } from 'vue-router'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import AdminOperationsDashboard from '../AdminOperationsDashboard.vue'
 
-const source = readFileSync(
-  resolve(process.cwd(), 'src/views/admin/AdminOperationsDashboard.vue'),
-  'utf8',
-)
-
-describe('AdminOperationsDashboard refresh behavior', () => {
-  it('refreshes on entry and supports toggling automatic refresh', () => {
-    expect(source).not.toContain('手动刷新')
-    expect(source).toContain('@click="toggleAutoRefresh"')
-    expect(source).toContain("autoRefresh ? '点击关闭自动刷新' : '点击开启自动刷新'")
-    expect(source).toContain('onMounted(() => {')
-    expect(source).toContain('void refreshAll()')
-    expect(source).toContain('const AUTO_REFRESH_INTERVAL = 10_000')
-    expect(source).toContain('autoRefreshTimer = setInterval(')
-    expect(source).toContain('clearInterval(autoRefreshTimer)')
-
-    const rangeWatcher = source
-      .split('watch(timeRange, () => {')[1]
-      ?.split('}, { deep: true })')[0]
-    expect(rangeWatcher).toBeTruthy()
-    expect(rangeWatcher).toContain('if (autoRefresh.value)')
-    expect(rangeWatcher).toContain('refreshAll()')
+vi.mock('@/features/overview/components/OverviewToolbar.vue', () => ({ default: { render: () => null } }))
+const lifecycle = vi.hoisted(() => ({ mounted: [] as string[], unmounted: [] as string[] }))
+function view(name: string) {
+  return defineComponent({
+    setup(_, { slots }) {
+      onMounted(() => lifecycle.mounted.push(name))
+      onUnmounted(() => lifecycle.unmounted.push(name))
+      return () => h('div', { 'data-view': name }, [name, slots.default?.({ snapshot: { node_id: 'live-node' } }), slots.details?.(), slots.diagnostics?.()])
+    },
   })
+}
+vi.mock('@/features/overview/operations/RuntimeView.vue', () => ({ default: view('runtime') }))
+vi.mock('@/features/overview/operations/PerformanceView.vue', () => ({ default: view('performance') }))
+vi.mock('@/features/overview/operations/LiveMetrics.vue', () => ({ default: view('details') }))
+vi.mock('@/features/overview/operations/RuntimeFocus.vue', () => ({ default: { render: () => null } }))
+async function settle() { await Promise.resolve(); await Promise.resolve(); await nextTick(); await new Promise(resolve => setTimeout(resolve, 0)) }
 
-  it('does not request the heavyweight system-status fallback', () => {
-    expect(source).not.toContain('monitoringApi.getSystemStatus()')
-  })
+describe('operations view lifecycle', () => {
+  afterEach(() => vi.useRealTimers())
 
-  it('forces fresh analytics and renders each result as soon as it settles', () => {
-    expect(source).toContain('adminApi.getTimeSeries(params, { skipCache: true })')
-    expect(source).toContain('adminApi.getPercentiles(params, { skipCache: true })')
-    expect(source).toContain('}, { skipCache: true })')
-    expect(source).toContain('adminApi.getErrorDistribution(params, { skipCache: true })')
-    expect(source).toContain('include_timeline: false')
-
-    const progressiveSetup = source.split('const results = await Promise.allSettled([')[0]
-    expect(progressiveSetup).toContain('timeSeries.value = value')
-    expect(progressiveSetup).toContain('percentiles.value = value')
-    expect(progressiveSetup).toContain('providerPerformance.value = value')
-    expect(progressiveSetup).toContain('errorDistribution.value = value.distribution')
-    expect(progressiveSetup).toContain('gatewayMetrics.value = value')
-  })
-
-  it('reuses analytics responses instead of requesting a duplicate usage summary', () => {
-    expect(source).not.toContain('usageApi.getUsageStats(')
-    expect(source).not.toContain('summaryStats')
-    expect(source).toContain('function seriesTokenTotal(')
-    expect(source).toContain('numeric(item.input_tokens)')
-    expect(source).toContain('numeric(item.output_tokens)')
-    expect(source).toContain('numeric(item.cache_creation_tokens)')
-    expect(source).toContain('numeric(item.cache_read_tokens)')
-    expect(source).toContain('timeSeries.value.map(seriesTokenTotal)')
-    expect(source).toContain('label="已分类错误"')
-    expect(source).toContain('errorDistribution.value.reduce(')
+  it('keeps every section mounted regardless of legacy view query values or browser history', async () => {
+    lifecycle.mounted.length = 0
+    lifecycle.unmounted.length = 0
+    const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/admin/operations', component: AdminOperationsDashboard }] })
+    await router.push('/admin/operations?view=performance&from=2026-09-10T23:30:00Z&to=2026-09-11T00:30:00Z&timezone=UTC')
+    const root = document.createElement('div')
+    const app = createApp(AdminOperationsDashboard).use(router)
+    app.mount(root)
+    expect([...lifecycle.mounted].sort()).toEqual(['details', 'details', 'performance', 'runtime'])
+    expect(root.querySelector('[role="tablist"]')).toBeNull()
+    expect(root.querySelector('[role="tab"]')).toBeNull()
+    await router.push({ query: { ...router.currentRoute.value.query, view: 'resources' } })
+    await settle()
+    expect(lifecycle.mounted).toHaveLength(4)
+    expect(lifecycle.unmounted).toEqual([])
+    expect(router.currentRoute.value.query.from).toBe('2026-09-10T23:30:00Z')
+    router.back()
+    await settle()
+    for (const name of ['runtime', 'performance']) expect(root.querySelector(`[data-view="${name}"]`)).not.toBeNull()
+    expect(root.querySelectorAll('[data-view="details"]')).toHaveLength(2)
+    expect(lifecycle.unmounted).toEqual([])
+    app.unmount()
+    expect([...lifecycle.unmounted].sort()).toEqual(['details', 'details', 'performance', 'runtime'])
   })
 })

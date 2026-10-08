@@ -10,7 +10,7 @@ export const adminRoutes: RouteRecordRaw[] = [
       {
         path: 'dashboard',
         name: 'AdminDashboard',
-        component: view(() => import('@/views/shared/Dashboard.vue'))
+        component: view(() => import('@/views/admin/AdminDashboard.vue'))
       },
       {
         path: 'operations',
@@ -71,17 +71,29 @@ export const adminRoutes: RouteRecordRaw[] = [
       {
         path: 'routing',
         name: 'RoutingProfiles',
-        component: view(() => import('@/views/admin/RoutingProfiles.vue'))
+        redirect: to => ({
+          name: 'ProviderManagement',
+          query: { ...to.query, view: undefined, group: undefined },
+          hash: to.hash,
+        })
       },
       {
         path: 'routing/new',
         name: 'RoutingProfileCreate',
-        component: view(() => import('@/views/admin/RoutingProfiles.vue'))
+        redirect: to => ({
+          name: 'ProviderManagement',
+          query: { ...to.query, view: undefined, group: 'new' },
+          hash: to.hash,
+        })
       },
       {
         path: 'routing/:groupId',
         name: 'RoutingProfileDetail',
-        component: view(() => import('@/views/admin/RoutingProfiles.vue'))
+        redirect: to => ({
+          name: 'ProviderManagement',
+          query: { ...to.query, view: undefined, group: String(to.params.groupId) },
+          hash: to.hash,
+        })
       },
       {
         path: 'health-monitor',
@@ -104,9 +116,14 @@ export const adminRoutes: RouteRecordRaw[] = [
         component: view(() => import('@/views/admin/CostAnalysis.vue'))
       },
       {
+        path: 'user-stats/:userId',
+        name: 'UserAnalysisDetail',
+        component: view(() => import('@/views/admin/UserAnalysisDetail.vue'))
+      },
+      {
         path: 'performance-analysis',
         name: 'PerformanceAnalysis',
-        component: view(() => import('@/views/admin/PerformanceAnalysis.vue'))
+        redirect: to => ({ path: '/admin/operations', query: { ...to.query, view: undefined } })
       },
       {
         path: 'system',

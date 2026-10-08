@@ -23,6 +23,7 @@ pub const PROVIDER_OUTBOUND_CONTEXT_MAX_VALUE_BYTES: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderOutboundRequestContext {
+    api_operation: Option<aether_ai_formats::ApiOperation>,
     logical_turn_id: String,
     original_turn_id: Option<String>,
     original_client_session_id: Option<String>,
@@ -33,6 +34,7 @@ pub struct ProviderOutboundRequestContext {
 impl ProviderOutboundRequestContext {
     pub fn new(logical_turn_id: impl Into<String>, turn_started_at_unix_ms: u64) -> Self {
         Self {
+            api_operation: None,
             logical_turn_id: canonical_required_value(logical_turn_id.into(), "logical_turn_id"),
             original_turn_id: None,
             original_client_session_id: None,
@@ -66,6 +68,15 @@ impl ProviderOutboundRequestContext {
 
     pub fn logical_turn_id(&self) -> &str {
         self.logical_turn_id.as_str()
+    }
+
+    pub fn with_api_operation(mut self, operation: aether_ai_formats::ApiOperation) -> Self {
+        self.api_operation = Some(operation);
+        self
+    }
+
+    pub fn api_operation(&self) -> Option<aether_ai_formats::ApiOperation> {
+        self.api_operation
     }
 
     pub fn original_turn_id(&self) -> Option<&str> {
@@ -106,6 +117,7 @@ pub enum ProviderOutboundRequestPolicyReason {
     AgentIdentityExcluded,
     UnsupportedApiFormat,
     CompactOperationExcluded,
+    NativeOperationExcluded,
     Disabled,
     RequestBodyNotObject,
 }
@@ -187,6 +199,23 @@ pub fn apply_provider_outbound_request_policies(
     provider_request_headers: &mut BTreeMap<String, String>,
     provider_request_body: &mut Value,
 ) -> Vec<ProviderOutboundRequestPolicyResult> {
+    // This is the common boundary after planner rules and before transport.
+    provider_request_headers.retain(|name, _| !name.eq_ignore_ascii_case("x-envoy-internal"));
+    if transport
+        .provider
+        .provider_type
+        .trim()
+        .eq_ignore_ascii_case("claude_code")
+        && aether_ai_formats::normalize_api_format_alias(provider_api_format) == "claude:messages"
+    {
+        let profile = crate::claude_code::current_claude_code_transport_identity_profile();
+        crate::claude_code::finalize_claude_code_request_identity(
+            provider_request_headers,
+            provider_request_body,
+            &profile,
+            context.api_operation(),
+        );
+    }
     if !transport
         .provider
         .provider_type

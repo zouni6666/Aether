@@ -38,8 +38,9 @@ use super::super::async_task::{
 };
 use super::super::cache::{
     AuthApiKeyLastUsedCache, AuthContextCache, AuthSnapshotCache, DashboardResponseCache,
-    DirectPlanBypassCache, JsonValueCache, SchedulerAffinityCache, SchedulerAffinitySnapshotEntry,
-    SchedulerAffinityTarget, SystemConfigCache, SystemConfigInflightRegistration, ValueCache,
+    DirectPlanBypassCache, JsonValueCache, OverviewTotalCache, SchedulerAffinityCache,
+    SchedulerAffinitySnapshotEntry, SchedulerAffinityTarget, SystemConfigCache,
+    SystemConfigInflightRegistration, ValueCache,
 };
 use super::super::data::{GatewayDataConfig, GatewayDataState};
 use super::super::fallback_metrics;
@@ -53,7 +54,10 @@ use super::super::router::RequestAdmissionError;
 use super::super::{control::GatewayControlDecision, error::GatewayError};
 use super::super::{provider_transport, usage};
 
-use crate::codex_profile::spawn_worker as spawn_codex_client_profile_worker;
+use crate::cli_client_profile::{
+    spawn_worker as spawn_cli_client_profile_worker, CLAUDE_CODE_CLI_PROFILE, CLI_PROFILES,
+    CODEX_CLI_PROFILE, XAI_CLI_PROFILE,
+};
 use crate::maintenance::spawn_account_self_check_worker;
 use crate::maintenance::spawn_audit_cleanup_worker;
 use crate::maintenance::spawn_db_maintenance_worker;
@@ -150,7 +154,29 @@ fn system_config_key_affects_provider_transport_snapshot(key: &str) -> bool {
 
 impl AppState {
     pub async fn prewarm_codex_client_profile(&self) -> Result<String, String> {
-        crate::codex_profile::prewarm(self.runtime_state()).await
+        crate::cli_client_profile::prewarm(&CODEX_CLI_PROFILE, self.runtime_state()).await
+    }
+
+    pub async fn prewarm_claude_code_client_profile(&self) -> Result<String, String> {
+        crate::cli_client_profile::prewarm(&CLAUDE_CODE_CLI_PROFILE, self.runtime_state()).await
+    }
+
+    pub async fn prewarm_xai_client_profile(&self) -> Result<String, String> {
+        crate::cli_client_profile::prewarm(&XAI_CLI_PROFILE, self.runtime_state()).await
+    }
+
+    pub async fn prewarm_client_profiles(&self) -> Vec<(&'static str, Result<String, String>)> {
+        futures_util::future::join_all(CLI_PROFILES.iter().map(|spec| async move {
+            (
+                spec.client_name(),
+                crate::cli_client_profile::prewarm(spec, self.runtime_state()).await,
+            )
+        }))
+        .await
+    }
+
+    pub fn spawn_client_profile_cache_sync(&self) -> crate::ClientProfileSyncGuard {
+        crate::cli_client_profile::spawn_cache_sync(self.clone())
     }
 
     pub async fn prewarm_chat_pii_redaction_runtime_config(&self) -> Result<bool, String> {
@@ -259,6 +285,7 @@ impl AppState {
     }
 
     fn replace_foreground_data_state(&mut self, data: Arc<GatewayDataState>) {
+        self.overview_total_cache = Arc::new(OverviewTotalCache::default());
         self.clear_provider_transport_snapshot_cache();
         self.invalidate_scheduler_affinity_cache();
         self.invalidate_auth_context_cache();
@@ -356,6 +383,8 @@ impl AppState {
             runtime_state: runtime_state.clone(),
             internal_gateway_auth,
             usage_runtime: Arc::new(usage::UsageRuntime::disabled()),
+            request_activity: Arc::new(crate::request_activity::RequestActivity::default()),
+            execution_activity: Arc::new(crate::execution_activity::ExecutionActivity::default()),
             video_tasks: Arc::new(VideoTaskService::new(
                 VideoTaskTruthSourceMode::PythonSyncReport,
             )),
@@ -407,6 +436,7 @@ impl AppState {
             scheduler_affinity_cache: Arc::new(SchedulerAffinityCache::default()),
             scheduler_affinity_epoch: Arc::new(AtomicU64::new(0)),
             dashboard_response_cache: Arc::new(DashboardResponseCache::default()),
+            overview_total_cache: Arc::new(OverviewTotalCache::default()),
             system_config_cache: Arc::new(SystemConfigCache::default()),
             endpoint_response_header_rules_cache: Arc::new(JsonValueCache::default()),
             candidate_row_page_cache: Arc::new(crate::cache::CandidateRowPageCache::default()),
@@ -2347,10 +2377,15 @@ impl AppState {
             crate::task_runtime::TASK_KEY_MODEL_FETCH_WORKER,
             spawn_model_fetch_worker(background_state.clone()),
         );
-        supervise_worker(
-            crate::task_runtime::TASK_KEY_CODEX_CLIENT_PROFILE,
-            Some(spawn_codex_client_profile_worker(background_state.clone())),
-        );
+        for spec in CLI_PROFILES {
+            supervise_worker(
+                spec.task_key(),
+                Some(spawn_cli_client_profile_worker(
+                    spec,
+                    background_state.clone(),
+                )),
+            );
+        }
         supervise_worker(
             crate::task_runtime::TASK_KEY_VIDEO_TASK_POLLER,
             spawn_video_task_poller(background_state.clone()),

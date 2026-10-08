@@ -58,6 +58,7 @@ pub struct CreateRoutingGroupRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UpdateRoutingGroupRecord {
+    pub expected_version: Option<i64>,
     pub name: Option<String>,
     pub description: Option<Option<String>>,
     pub enabled: Option<bool>,
@@ -244,6 +245,16 @@ pub fn apply_group_patch(
     group: &mut StoredRoutingGroup,
     patch: UpdateRoutingGroupRecord,
 ) -> Result<(), crate::DataLayerError> {
+    if patch
+        .expected_version
+        .is_some_and(|version| version != group.version)
+    {
+        return Err(crate::DataLayerError::InvalidInput(
+            "routing_group_version_conflict".to_string(),
+        ));
+    }
+    let previous_version = group.version;
+    let config_changed = patch.config_json.is_some();
     if let Some(name) = patch.name {
         if name.trim().is_empty() {
             return Err(crate::DataLayerError::InvalidInput(
@@ -273,7 +284,13 @@ pub fn apply_group_patch(
         group.config_json = config_json;
     }
     if let Some(version) = patch.version {
-        group.version = version.max(1);
+        group.version = if config_changed {
+            version.max(previous_version.saturating_add(1))
+        } else {
+            version.max(previous_version)
+        };
+    } else if config_changed {
+        group.version = previous_version.saturating_add(1);
     }
     if let Some(published_at) = patch.published_at {
         group.published_at = published_at;

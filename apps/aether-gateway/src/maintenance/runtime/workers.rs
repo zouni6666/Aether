@@ -772,57 +772,96 @@ pub(crate) fn spawn_stats_hourly_aggregation_worker(
         app,
         crate::task_runtime::TASK_KEY_STATS_HOURLY_AGG,
         |app| async move {
-            let data = app.data.clone();
-            let mut deferred_since = None;
-            tokio::time::sleep(STATS_AGGREGATION_STARTUP_GRACE).await;
-            loop {
-                let mut processed = 0_usize;
-                let mut deferred = false;
-                while processed < STATS_HOURLY_CATCH_UP_BURST_LIMIT {
-                    let permit = STATS_AGGREGATION_GATE
-                        .acquire()
-                        .await
-                        .expect("stats aggregation gate should remain open");
-                    if should_defer_stats_aggregation(
-                        &app,
+            // Both loops belong to the singleton lease future. Losing the
+            // lease/shutting down drops them together; no detached task survives.
+            let drain = async {
+                let data = app.data.clone();
+                let mut deferred_since = None;
+                let mut interval = tokio::time::interval(Duration::from_secs(10));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    interval.tick().await;
+                    if should_defer_for_database_pressure(
                         &data,
-                        "stats_hourly_aggregation",
+                        "overview_dirty_drain",
                         &mut deferred_since,
                     ) {
-                        drop(permit);
-                        deferred = true;
-                        break;
+                        continue;
                     }
-                    match run_stats_hourly_aggregation_once(&data).await {
-                        Ok(true) => {
-                            processed += 1;
-                            tokio::time::sleep(STATS_CATCH_UP_BUCKET_PAUSE).await;
-                            drop(permit);
+                    // At most ten batches per tick; normal traffic and idle
+                    // installations stop after the first empty batch.
+                    for _ in 0..10 {
+                        match data.drain_overview_dirty_events(Utc::now()).await {
+                            Ok(0) => break,
+                            Ok(_) => tokio::task::yield_now().await,
+                            Err(err) => {
+                                log_maintenance_worker_failure(
+                                    "overview_dirty_drain",
+                                    "tick",
+                                    &err,
+                                );
+                                break;
+                            }
                         }
-                        Ok(false) => break,
-                        Err(err) => {
-                            log_maintenance_worker_failure(
-                                "stats_hourly_aggregation",
-                                "tick",
-                                &err,
-                            );
+                    }
+                }
+            };
+            let hourly = async {
+                let data = app.data.clone();
+                let mut deferred_since = None;
+                tokio::time::sleep(STATS_AGGREGATION_STARTUP_GRACE).await;
+                loop {
+                    let mut processed = 0_usize;
+                    let mut deferred = false;
+                    while processed < STATS_HOURLY_CATCH_UP_BURST_LIMIT {
+                        let permit = STATS_AGGREGATION_GATE
+                            .acquire()
+                            .await
+                            .expect("stats aggregation gate should remain open");
+                        if should_defer_stats_aggregation(
+                            &app,
+                            &data,
+                            "stats_hourly_aggregation",
+                            &mut deferred_since,
+                        ) {
+                            drop(permit);
+                            deferred = true;
                             break;
                         }
+                        match run_stats_hourly_aggregation_once(&data).await {
+                            Ok(true) => {
+                                processed += 1;
+                                tokio::time::sleep(STATS_CATCH_UP_BUCKET_PAUSE).await;
+                                drop(permit);
+                            }
+                            Ok(false) => break,
+                            Err(err) => {
+                                log_maintenance_worker_failure(
+                                    "stats_hourly_aggregation",
+                                    "tick",
+                                    &err,
+                                );
+                                break;
+                            }
+                        }
                     }
-                }
 
-                if deferred {
-                    tokio::time::sleep(MAINTENANCE_PRESSURE_RETRY_INTERVAL).await;
-                    continue;
-                }
+                    if deferred {
+                        tokio::time::sleep(MAINTENANCE_PRESSURE_RETRY_INTERVAL).await;
+                        continue;
+                    }
 
-                if processed >= STATS_HOURLY_CATCH_UP_BURST_LIMIT {
-                    continue;
-                }
+                    if processed >= STATS_HOURLY_CATCH_UP_BURST_LIMIT {
+                        continue;
+                    }
 
-                tokio::time::sleep(duration_until_next_stats_hourly_aggregation_run(Utc::now()))
+                    tokio::time::sleep(
+                        duration_until_next_stats_hourly_aggregation_run(Utc::now()),
+                    )
                     .await;
-            }
+                }
+            };
+            tokio::join!(drain, hourly);
         },
     ))
 }

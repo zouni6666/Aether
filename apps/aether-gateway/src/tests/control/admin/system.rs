@@ -1181,6 +1181,12 @@ async fn gateway_handles_admin_system_users_export_locally_with_trusted_admin_pr
         .as_deref()
         .is_some_and(|value| value.starts_with("aether-auth-api-key-secret-v2:"))));
     assert_eq!(recovery_payload["version"], "1.5");
+    assert!(recovery_payload["users"][0]["api_keys"][0]
+        .get("credential_kind")
+        .is_none());
+    assert!(recovery_payload["standalone_keys"][0]
+        .get("credential_kind")
+        .is_none());
     assert_eq!(recovery_payload["users"][0]["password_hash"], "argon2-hash");
     assert_eq!(
         recovery_payload["users"][0]["api_keys"][0]["key_hash"],
@@ -1228,6 +1234,12 @@ async fn gateway_handles_admin_system_users_export_locally_with_trusted_admin_pr
     );
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["version"], "1.6");
+    assert!(payload["users"][0]["api_keys"][0]
+        .get("credential_kind")
+        .is_none());
+    assert!(payload["standalone_keys"][0]
+        .get("credential_kind")
+        .is_none());
     assert!(payload["exported_at"].as_str().is_some());
     assert_eq!(payload["user_groups"][0]["name"], "Restricted GPT");
     assert!(payload["user_groups"][0].get("priority").is_none());

@@ -150,16 +150,17 @@ describe('RoutingFailoverPolicyEditor', () => {
     expect(editor.value?.commitJsonDrafts()).toBe(false)
   })
 
-  it('edits independent global budgets and documents sticky retry exclusion', async () => {
+  it('edits independent global transfer budgets', async () => {
     const { root, policy } = mountEditor()
-    expect(root.textContent).toContain('首次尝试和粘性同 Key 重试不计入')
-    expect(root.textContent).toContain('不会中断已开始的调用')
     const count = control<HTMLInputElement>(root, '全局最大转移次数')
     count.value = '4'
     count.dispatchEvent(new Event('input', { bubbles: true }))
     await nextTick()
     expect(policy.value.max_transfer_count).toBe(4)
     expect(policy.value.max_transfer_timeout_seconds).toBe(0)
+    await input(control<HTMLInputElement>(root, '全局最大转移时间'), '15')
+    expect(policy.value.max_transfer_count).toBe(4)
+    expect(policy.value.max_transfer_timeout_seconds).toBe(15)
   })
 
   it('adds regex and status-only rules and reports invalid drafts', async () => {

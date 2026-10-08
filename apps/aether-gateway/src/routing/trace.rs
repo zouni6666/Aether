@@ -5,7 +5,9 @@ pub(crate) fn build_routing_trace_seed(
     client_api_format: &str,
 ) -> RoutingDecisionTrace {
     RoutingDecisionTrace {
+        billing_multiplier: Some(policy.billing_multiplier),
         group_id: policy.group_id.clone(),
+        group_name: policy.group_name.clone(),
         group_version: policy.group_version,
         selection_source: policy.selection_source.clone(),
         selected_rules: policy

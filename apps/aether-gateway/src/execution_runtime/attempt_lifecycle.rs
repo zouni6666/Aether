@@ -668,8 +668,22 @@ impl ExecutionAttemptLifecycle {
         });
 
         // 1. usage terminal
+        let analytics_context = if facts.provider.cancelled_by_provider() {
+            crate::usage::reporting::failure::with_analytics_failure(
+                payload.report_context.as_ref(),
+                "upstream",
+                "stream_read",
+                "provider_cancelled",
+            )
+        } else {
+            crate::usage::reporting::failure::stream_analytics_context(
+                payload.report_context.as_ref(),
+                &payload,
+                facts.delivery.is_aborted() && !facts.provider.is_terminal(),
+            )
+        };
         let context_seed =
-            build_terminal_usage_context_seed(&self.plan, payload.report_context.as_ref());
+            build_terminal_usage_context_seed(&self.plan, analytics_context.as_ref());
         let payload_seed = build_stream_terminal_usage_payload_seed(&payload);
         let billing_void = settlement.billing.is_void();
         let usage_runtime = Arc::clone(&state.usage_runtime);

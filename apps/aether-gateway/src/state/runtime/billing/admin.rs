@@ -610,6 +610,17 @@ impl AppState {
             .map_err(data_error)
     }
 
+    pub(crate) async fn list_user_plan_entitlements_with_history(
+        &self,
+        user_id: &str,
+        include_inactive: bool,
+    ) -> Result<Option<Vec<UserPlanEntitlementRecord>>, GatewayError> {
+        self.data
+            .list_user_plan_entitlements_with_history(user_id, include_inactive)
+            .await
+            .map_err(data_error)
+    }
+
     pub(crate) async fn revoke_user_plan_entitlement(
         &self,
         user_id: &str,

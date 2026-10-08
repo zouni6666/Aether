@@ -27,8 +27,6 @@ use crate::{
     build_models_fetch_url_for_client_version, deepseek_anthropic_models_fetch_uses_openai_auth,
 };
 
-const CLAUDE_CLI_USER_AGENT: &str = "claude-code/1.0.1";
-const GEMINI_CLI_USER_AGENT: &str = "GeminiCLI/0.1.5 (Windows; AMD64)";
 const CLAUDE_VERSION_HEADER: &str = "2023-06-01";
 const ANTIGRAVITY_FETCH_PROVIDER_API_FORMAT: &str = "antigravity:fetch_available_models";
 const ANTIGRAVITY_LOAD_CODE_ASSIST_PROVIDER_API_FORMAT: &str = "antigravity:load_code_assist";
@@ -37,7 +35,7 @@ const KIRO_LIST_AVAILABLE_MODELS_PROVIDER_API_FORMAT: &str = "kiro:list_availabl
 const WINDSURF_MODEL_CONFIGS_PROVIDER_API_FORMAT: &str = "windsurf:model_configs";
 const WINDSURF_MODEL_CONFIGS_PATH: &str =
     "/exa.api_server_pb.ApiServerService/GetCascadeModelConfigs";
-const WINDSURF_IDE_VERSION: &str = "1.9600.41";
+const WINDSURF_IDE_VERSION: &str = aether_provider_transport::client_identity::WINDSURF.version;
 
 const BROWSER_FINGERPRINT_HEADERS: &[(&str, &str)] = &[
     (
@@ -129,6 +127,12 @@ pub async fn build_standard_models_fetch_execution_plan_for_client_version(
         provider_type == "codex" && api_format.starts_with("openai:");
     let is_deepseek_anthropic_models_fetch = api_format.starts_with("claude:")
         && deepseek_anthropic_models_fetch_uses_openai_auth(&transport.endpoint.base_url);
+    if is_codex_openai_models_fetch {
+        if let Some(version) = codex_client_version {
+            aether_ai_formats::CodexClientProfile::cli(version)
+                .map_err(|error| error.to_string())?;
+        }
+    }
     let mut headers =
         standard_models_fetch_headers(&api_format, &provider_type, codex_client_version);
     if is_codex_openai_models_fetch {
@@ -313,7 +317,10 @@ pub async fn build_gemini_cli_load_code_assist_plan(
         .ok_or_else(|| "GeminiCLI loadCodeAssist requires bearer or OAuth auth".to_string())?;
 
     let mut headers = BTreeMap::from([
-        ("user-agent".to_string(), GEMINI_CLI_USER_AGENT.to_string()),
+        (
+            "user-agent".to_string(),
+            aether_provider_transport::gemini_cli::gemini_cli_client_user_agent(),
+        ),
         ("accept-encoding".to_string(), "identity".to_string()),
         ("content-type".to_string(), "application/json".to_string()),
     ]);
@@ -636,10 +643,9 @@ fn standard_models_fetch_headers(
         return BTreeMap::from([
             (
                 "user-agent".to_string(),
-                format!(
-                    "{}/{client_version}",
-                    aether_ai_formats::codex_client_originator()
-                ),
+                aether_ai_formats::CodexClientProfile::cli(client_version)
+                    .expect("validated Codex catalog client version")
+                    .user_agent,
             ),
             (
                 "originator".to_string(),
@@ -657,8 +663,19 @@ fn standard_models_fetch_headers(
                 "anthropic-version".to_string(),
                 CLAUDE_VERSION_HEADER.to_string(),
             )]);
-            if matches!(provider_type.as_str(), "claude_code" | "kiro") {
-                headers.insert("user-agent".to_string(), CLAUDE_CLI_USER_AGENT.to_string());
+            if provider_type == "claude_code" {
+                headers.insert(
+                    "user-agent".to_string(),
+                    aether_provider_transport::claude_code::claude_code_client_profile()
+                        .user_agent
+                        .clone(),
+                );
+            } else if provider_type == "kiro" {
+                headers.insert(
+                    "user-agent".to_string(),
+                    aether_provider_transport::client_identity::KIRO_MODELS_LEGACY_USER_AGENT
+                        .to_string(),
+                );
             }
             headers
         }
@@ -668,7 +685,10 @@ fn standard_models_fetch_headers(
                 .map(|(key, value)| (key.to_string(), value.to_string()))
                 .collect::<BTreeMap<_, _>>();
             if provider_type == "gemini_cli" {
-                headers.insert("user-agent".to_string(), GEMINI_CLI_USER_AGENT.to_string());
+                headers.insert(
+                    "user-agent".to_string(),
+                    aether_provider_transport::gemini_cli::gemini_cli_client_user_agent(),
+                );
             }
             headers
         }
@@ -1059,7 +1079,12 @@ mod tests {
         );
         assert_eq!(
             plan.headers.get("user-agent").map(String::as_str),
-            Some("codex_cli_rs/0.145.2")
+            Some(
+                aether_ai_formats::CodexClientProfile::cli("0.145.2")
+                    .unwrap()
+                    .user_agent
+                    .as_str()
+            )
         );
         assert_eq!(
             plan.headers.get("originator").map(String::as_str),

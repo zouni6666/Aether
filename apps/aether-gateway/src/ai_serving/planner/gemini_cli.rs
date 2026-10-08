@@ -7,7 +7,7 @@ use crate::ai_serving::transport::{
     build_gemini_cli_v1internal_request, build_standard_provider_request_headers,
     GatewayProviderTransportSnapshot, GeminiCliRequestAuth, GeminiCliRequestAuthSupport,
     GeminiCliRequestEnvelopeSupport, StandardProviderRequestHeaders,
-    StandardProviderRequestHeadersInput, GEMINI_CLI_USER_AGENT,
+    StandardProviderRequestHeadersInput,
 };
 use crate::AppState;
 
@@ -64,8 +64,10 @@ pub(crate) async fn build_gemini_cli_v1internal_provider_request(
     )
     .ok_or(GeminiCliV1InternalRequestError::UpstreamUrlUnavailable)?;
 
-    let extra_headers =
-        BTreeMap::from([("user-agent".to_string(), GEMINI_CLI_USER_AGENT.to_string())]);
+    let extra_headers = BTreeMap::from([(
+        "user-agent".to_string(),
+        crate::ai_serving::transport::gemini_cli::gemini_cli_client_user_agent(),
+    )]);
     let headers = build_standard_provider_request_headers(StandardProviderRequestHeadersInput {
         transport: &payload.transport,
         provider_api_format: input.provider_api_format,

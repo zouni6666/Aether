@@ -1,0 +1,175 @@
+[table.usage_attribution_snapshots]
+domain = "usage"
+primary_key = ["request_id"]
+
+[[table.usage_attribution_snapshots.columns]]
+name = "request_id"
+type = "text"
+
+[[table.usage_attribution_snapshots.columns]]
+name = "actor_user_id"
+type = "text"
+nullable = true
+
+[[table.usage_attribution_snapshots.columns]]
+name = "credential_owner_id"
+type = "text"
+nullable = true
+
+[[table.usage_attribution_snapshots.columns]]
+name = "attribution_kind"
+type = "text"
+default = "unknown"
+
+[[table.usage_attribution_snapshots.columns]]
+name = "attribution_source"
+type = "text"
+default = "unknown"
+
+[[table.usage_attribution_snapshots.columns]]
+name = "record_kind"
+type = "text"
+default = "request"
+
+[[table.usage_attribution_snapshots.columns]]
+name = "parent_request_id"
+type = "text"
+nullable = true
+
+[[table.usage_attribution_snapshots.columns]]
+name = "schema_version"
+type = "int32"
+default = 1
+
+[[table.usage_attribution_snapshots.columns]]
+name = "attribution_revision"
+type = "int64"
+default = 1
+
+[[table.usage_attribution_snapshots.columns]]
+name = "recorded_at"
+type = "timestamp"
+default = { raw = "NOW()" }
+
+[[table.usage_attribution_snapshots.indexes]]
+name = "ix_usage_attribution_actor_request"
+columns = ["actor_user_id", "request_id"]
+
+[[table.usage_attribution_snapshots.indexes]]
+name = "ix_usage_attribution_owner_request"
+columns = ["credential_owner_id", "request_id"]
+
+[table.stats_bucket_state]
+domain = "stats"
+primary_key = ["projection_version","granularity","bucket_start"]
+
+[[table.stats_bucket_state.columns]]
+name = "projection_version"
+type = "text"
+
+[[table.stats_bucket_state.columns]]
+name = "granularity"
+type = "text"
+
+[[table.stats_bucket_state.columns]]
+name = "bucket_start"
+type = "timestamp"
+
+[[table.stats_bucket_state.columns]]
+name = "source_revision"
+type = "int64"
+default = 0
+
+[[table.stats_bucket_state.columns]]
+name = "built_revision"
+type = "int64"
+default = -1
+
+[[table.stats_bucket_state.columns]]
+name = "coverage_status"
+type = "text"
+default = "unbuilt"
+
+[[table.stats_bucket_state.columns]]
+name = "built_at"
+type = "timestamp"
+nullable = true
+
+[[table.stats_bucket_state.columns]]
+name = "last_error"
+type = "text"
+nullable = true
+
+[[table.stats_bucket_state.columns]]
+name = "last_failed_at"
+type = "timestamp"
+nullable = true
+
+[table.stats_overview_hourly]
+domain = "stats"
+primary_key = ["projection_version","bucket_start","dimensions"]
+
+[[table.stats_overview_hourly.columns]]
+name = "projection_version"
+type = "text"
+
+[[table.stats_overview_hourly.columns]]
+name = "bucket_start"
+type = "timestamp"
+
+[[table.stats_overview_hourly.columns]]
+name = "dimensions"
+type = "json"
+
+[[table.stats_overview_hourly.columns]]
+name = "metrics"
+type = "json"
+
+[table.stats_overview_daily]
+domain = "stats"
+primary_key = ["projection_version","bucket_start","dimensions"]
+
+[[table.stats_overview_daily.columns]]
+name = "projection_version"
+type = "text"
+
+[[table.stats_overview_daily.columns]]
+name = "bucket_start"
+type = "timestamp"
+
+[[table.stats_overview_daily.columns]]
+name = "dimensions"
+type = "json"
+
+[[table.stats_overview_daily.columns]]
+name = "metrics"
+type = "json"
+
+[table.stats_overview_dirty_events]
+domain = "stats"
+primary_key = ["transaction_id", "projection_version", "granularity", "bucket_start"]
+
+[[table.stats_overview_dirty_events.columns]]
+name = "transaction_id"
+type = "int64"
+
+[[table.stats_overview_dirty_events.columns]]
+name = "projection_version"
+type = "text"
+
+[[table.stats_overview_dirty_events.columns]]
+name = "granularity"
+type = "text"
+
+[[table.stats_overview_dirty_events.columns]]
+name = "bucket_start"
+type = "timestamp"
+
+[[table.stats_overview_dirty_events.columns]]
+name = "unrecoverable"
+type = "bool"
+default = false
+
+[[table.stats_overview_dirty_events.indexes]]
+name = "ix_stats_overview_dirty_events_bucket"
+columns = ["projection_version", "granularity", "bucket_start"]

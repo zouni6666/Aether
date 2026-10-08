@@ -159,6 +159,12 @@ async fn perform_stats_aggregation_for_day(
         .execute(&mut *tx)
         .await?;
 
+    sqlx::query(UPDATE_STATS_DAILY_BILLING_COST_SQL)
+        .bind(day_start_utc)
+        .bind(day_end_utc)
+        .execute(&mut *tx)
+        .await?;
+
     let model_rows =
         upsert_stats_daily_model_rows(&mut tx, day_start_utc, day_end_utc, now_utc).await?;
     let provider_rows =

@@ -68,9 +68,11 @@ const props = withDefaults(defineProps<{
   isAdmin: boolean
   hours?: number
   refreshIntervalMs?: number
+  data?: IntervalTimelineResponse | null
 }>(), {
   hours: 24,  // 默认当天
-  refreshIntervalMs: 30000
+  refreshIntervalMs: 30000,
+  data: undefined,
 })
 
 const loading = ref(false)
@@ -292,6 +294,11 @@ const chartOptions = computed<ChartOptions<'scatter'>>(() => ({
 
 async function loadData() {
   const requestId = ++loadRequestId
+  if (props.data !== undefined) {
+    timelineData.value = props.data
+    loading.value = false
+    return
+  }
   loading.value = true
   try {
     const limit = props.isAdmin ? ADMIN_TIMELINE_LIMIT : USER_TIMELINE_LIMIT
@@ -332,6 +339,7 @@ function stopRefreshTimer() {
 }
 
 function scheduleNextRefresh() {
+  if (props.data !== undefined) return
   if (refreshTimer) return
   if (!isPageVisible.value) return
   if (!props.refreshIntervalMs || props.refreshIntervalMs <= 0) return
@@ -355,7 +363,7 @@ function handleVisibilityChange() {
   scheduleNextRefresh()
 }
 
-watch([() => props.hours, () => props.isAdmin], () => {
+watch([() => props.hours, () => props.isAdmin, () => props.data], () => {
   void loadData()
   stopRefreshTimer()
   scheduleNextRefresh()

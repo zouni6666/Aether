@@ -14,6 +14,7 @@ use crate::{
 impl AppState {
     pub(crate) async fn list_admin_wallets(
         &self,
+        user_id: Option<&str>,
         status: Option<&str>,
         owner_type: Option<&str>,
         limit: usize,
@@ -22,6 +23,7 @@ impl AppState {
         let page = self
             .data
             .list_admin_wallets(&AdminWalletListQuery {
+                user_id: user_id.map(ToOwned::to_owned),
                 status: status.map(ToOwned::to_owned),
                 owner_type: owner_type.map(ToOwned::to_owned),
                 limit,

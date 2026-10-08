@@ -45,6 +45,7 @@ pub(super) struct StreamFailureReport {
     honor_http_failover: bool,
     extra_error_fields: Map<String, Value>,
     provider_body_json: Option<Value>,
+    analytics_failure: Option<Value>,
 }
 
 #[derive(Serialize)]
@@ -133,6 +134,7 @@ impl StreamFailureReport {
             honor_http_failover: _,
             mut extra_error_fields,
             provider_body_json,
+            analytics_failure: _,
         } = self;
         extra_error_fields.insert("type".to_string(), Value::String(error_type));
         extra_error_fields.insert("message".to_string(), Value::String(error_message));
@@ -178,6 +180,7 @@ pub(super) fn build_stream_failure_report(
         honor_http_failover: false,
         extra_error_fields: Map::new(),
         provider_body_json: None,
+        analytics_failure: None,
     }
 }
 
@@ -196,6 +199,7 @@ pub(super) fn build_stream_transport_failure_report(
         honor_http_failover: false,
         extra_error_fields: Map::new(),
         provider_body_json: None,
+        analytics_failure: None,
     }
 }
 
@@ -241,6 +245,10 @@ pub(super) fn build_stream_failure_from_execution_error(
         honor_http_failover: error.upstream_status.is_some(),
         extra_error_fields: error_object,
         provider_body_json: None,
+        analytics_failure: crate::usage::reporting::failure::execution_error_analytics_context(
+            None, error,
+        )
+        .and_then(|context| context.get("analytics_failure").cloned()),
     }
 }
 
@@ -271,6 +279,7 @@ pub(super) fn build_stream_failure_from_provider_error_body(
         honor_http_failover: true,
         extra_error_fields: Map::new(),
         provider_body_json: Some(body_json.clone()),
+        analytics_failure: None,
     }
 }
 
@@ -334,6 +343,7 @@ fn build_stream_failure_sync_payload(
     let status_code = failure.status_code;
     let upstream_status_code = failure.upstream_status_code;
     let transport_error = failure.transport_error;
+    let analytics_failure = failure.analytics_failure.clone();
     let (body, client_body) = failure.into_body_jsons();
     headers.retain(|name, _| {
         !name.eq_ignore_ascii_case("content-encoding")
@@ -355,6 +365,9 @@ fn build_stream_failure_sync_payload(
         .or(report_context);
     let report_context = report_context.map(|mut context| {
         if let Some(object) = context.as_object_mut() {
+            if let Some(failure) = analytics_failure {
+                object.insert("analytics_failure".into(), failure);
+            }
             let response_headers = serde_json::to_value(&headers).unwrap_or(Value::Null);
             if upstream_status_code.is_some() {
                 object.insert(
@@ -499,9 +512,11 @@ async fn record_stream_sync_failure(
     );
     if !matches!(handling, StreamFailureHandling::HonorLocalFailover) || !retrying_next_candidate {
         crate::execution_runtime::mark_stream_candidate_watchdog_terminal_started();
+        let analytics_context =
+            crate::usage::reporting::failure::sync_analytics_context(report_context, payload);
         let report_context_with_diagnostics =
             attach_current_request_diagnostics_and_candidate_timing_to_report_context(
-                report_context,
+                analytics_context.as_ref(),
                 payload
                     .telemetry
                     .as_ref()
@@ -513,7 +528,9 @@ async fn record_stream_sync_failure(
             );
         let context_seed = build_terminal_usage_context_seed(
             plan,
-            report_context_with_diagnostics.as_ref().or(report_context),
+            report_context_with_diagnostics
+                .as_ref()
+                .or(analytics_context.as_ref()),
         );
         let payload_seed = build_sync_terminal_usage_payload_seed(payload);
         state
@@ -779,9 +796,13 @@ async fn handle_prefetch_transport_stream_failure(
         && matches!(analysis.decision, LocalFailoverDecision::RetryNextCandidate);
     if !retrying_next_candidate {
         crate::execution_runtime::mark_stream_candidate_watchdog_terminal_started();
+        let analytics_context = crate::usage::reporting::failure::sync_analytics_context(
+            payload.report_context.as_ref(),
+            &payload,
+        );
         let report_context_with_diagnostics =
             attach_current_request_diagnostics_and_candidate_timing_to_report_context(
-                payload.report_context.as_ref(),
+                analytics_context.as_ref(),
                 payload
                     .telemetry
                     .as_ref()
@@ -796,7 +817,7 @@ async fn handle_prefetch_transport_stream_failure(
             plan,
             report_context_with_diagnostics
                 .as_ref()
-                .or(payload.report_context.as_ref()),
+                .or(analytics_context.as_ref()),
         );
         let payload_seed = build_sync_terminal_usage_payload_seed(&payload);
         state

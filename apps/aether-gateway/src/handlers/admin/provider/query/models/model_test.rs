@@ -3462,7 +3462,7 @@ async fn provider_query_execute_standard_test_candidate(
     {
         request_headers
             .entry("user-agent".to_string())
-            .or_insert_with(|| crate::provider_transport::GEMINI_CLI_USER_AGENT.to_string());
+            .or_insert_with(aether_provider_transport::gemini_cli::gemini_cli_client_user_agent);
     }
     let protected_headers = if uses_vertex_query_auth {
         vec!["content-type"]

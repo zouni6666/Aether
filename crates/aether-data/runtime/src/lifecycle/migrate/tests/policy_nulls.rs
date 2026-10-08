@@ -5,7 +5,10 @@ use aether_data_postgres::{
     SqlxAuthApiKeySnapshotReadRepository, SqlxManagementTokenRepository, SqlxUserReadRepository,
 };
 use serde_json::{json, Value};
-use sqlx::{migrate::Migrate, query, query_scalar, Connection, PgConnection, PgPool};
+use sqlx::{
+    migrate::Migrate, postgres::PgPoolOptions, query, query_scalar, Connection, PgConnection,
+    PgPool,
+};
 
 use super::{prepare_database_for_startup, ManagedPostgresServer, POSTGRES_MIGRATOR};
 use crate::lifecycle::migrate::run_migrations;
@@ -80,7 +83,11 @@ async fn postgres_policy_null_migration_preserves_non_null_policies_and_is_idemp
         else {
             return;
         };
-        let pool = PgPool::connect(server.database_url())
+        // Queries are sequential; avoid expanding beyond the fixture server's
+        // connection limit while SQLx returns prior connections asynchronously.
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(server.database_url())
             .await
             .expect("policy fixture pool should connect");
 

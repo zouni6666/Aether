@@ -49,6 +49,7 @@ pub(crate) struct ProviderPoolDemandSnapshot {
 pub(crate) struct ProviderPoolInFlightGuard {
     kind: ProviderPoolInFlightGuardKind,
     provider_key_permit: Option<RuntimeSemaphorePermit>,
+    observed_activity: Option<crate::execution_activity::ExecutionActivityGuard>,
     released: bool,
 }
 
@@ -73,11 +74,28 @@ enum ProviderPoolInFlightGuardKind {
 }
 
 impl ProviderPoolInFlightGuard {
+    fn observe_execution(
+        guard: Option<Self>,
+        activity: crate::execution_activity::ExecutionActivityGuard,
+    ) -> Self {
+        // Observability remains active when provider demand tracking is disabled.
+        let mut guard = guard.unwrap_or(Self {
+            kind: ProviderPoolInFlightGuardKind::Disabled,
+            provider_key_permit: None,
+            observed_activity: None,
+            released: false,
+        });
+        guard.observed_activity = Some(activity);
+        guard
+    }
+
     pub(crate) async fn release(mut self) {
         self.release_inner().await;
     }
 
     async fn release_inner(&mut self) {
+        // Observation ends with execution, before distributed permit cleanup can wait.
+        self.observed_activity.take();
         if self.released {
             return;
         }
@@ -358,6 +376,7 @@ pub(crate) async fn acquire_provider_pool_in_flight_guard_with_key_limit(
             provider_key_permit.map(|provider_key_permit| ProviderPoolInFlightGuard {
                 kind: ProviderPoolInFlightGuardKind::Disabled,
                 provider_key_permit: Some(provider_key_permit),
+                observed_activity: None,
                 released: false,
             }),
         );
@@ -369,6 +388,7 @@ pub(crate) async fn acquire_provider_pool_in_flight_guard_with_key_limit(
                 provider_key_permit.map(|provider_key_permit| ProviderPoolInFlightGuard {
                     kind: ProviderPoolInFlightGuardKind::Disabled,
                     provider_key_permit: Some(provider_key_permit),
+                    observed_activity: None,
                     released: false,
                 }),
             );
@@ -381,6 +401,7 @@ pub(crate) async fn acquire_provider_pool_in_flight_guard_with_key_limit(
                     counter,
                 },
                 provider_key_permit,
+                observed_activity: None,
                 released: false,
             }));
         }
@@ -392,6 +413,7 @@ pub(crate) async fn acquire_provider_pool_in_flight_guard_with_key_limit(
                     counter,
                 },
                 provider_key_permit,
+                observed_activity: None,
                 released: false,
             }));
         }
@@ -417,6 +439,7 @@ pub(crate) async fn acquire_provider_pool_in_flight_guard_with_key_limit(
                 provider_key_permit.map(|provider_key_permit| ProviderPoolInFlightGuard {
                     kind: ProviderPoolInFlightGuardKind::Disabled,
                     provider_key_permit: Some(provider_key_permit),
+                    observed_activity: None,
                     released: false,
                 }),
             );
@@ -431,6 +454,7 @@ pub(crate) async fn acquire_provider_pool_in_flight_guard_with_key_limit(
                 provider_key_permit.map(|provider_key_permit| ProviderPoolInFlightGuard {
                     kind: ProviderPoolInFlightGuardKind::Disabled,
                     provider_key_permit: Some(provider_key_permit),
+                    observed_activity: None,
                     released: false,
                 }),
             );
@@ -454,11 +478,53 @@ pub(crate) async fn acquire_provider_pool_in_flight_guard_with_key_limit(
             renew_handle: Some(renew_handle),
         },
         provider_key_permit,
+        observed_activity: None,
         released: false,
     }))
 }
 
 pub(crate) async fn acquire_provider_pool_execution_guard(
+    state: &AppState,
+    plan: &ExecutionPlan,
+    report_context: Option<&serde_json::Value>,
+) -> Result<ProviderPoolInFlightAdmission, GatewayError> {
+    let admission = acquire_provider_pool_execution_guard_unobserved(state, plan).await?;
+    let ProviderPoolInFlightAdmission::Acquired(guard) = admission else {
+        return Ok(admission);
+    };
+    let requested_model = report_context
+        .and_then(|context| context.get("model"))
+        .and_then(serde_json::Value::as_str);
+    let observation_id = execution_observation_request_id(&plan.request_id, report_context);
+    let activity = state.execution_activity.begin(
+        observation_id.as_ref(),
+        &plan.provider_id,
+        plan.provider_name.as_deref(),
+        requested_model,
+    );
+    Ok(ProviderPoolInFlightAdmission::Acquired(Some(
+        ProviderPoolInFlightGuard::observe_execution(guard, activity),
+    )))
+}
+
+fn execution_observation_request_id<'a>(
+    request_id: &'a str,
+    report_context: Option<&serde_json::Value>,
+) -> std::borrow::Cow<'a, str> {
+    // Transparent Responses retries have distinct audit request IDs, but share
+    // one server-issued logical turn ID. Count that client request once.
+    report_context
+        .and_then(|context| context.get("websocket_logical_turn_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| std::borrow::Cow::Owned(format!("ws:{value}")))
+        .unwrap_or(std::borrow::Cow::Borrowed(request_id))
+}
+
+/// Long-lived audio/live sockets use the same capacity permits, but are not
+/// individual requests and must not contribute to per-request RPM/concurrency.
+pub(crate) async fn acquire_provider_pool_execution_guard_unobserved(
     state: &AppState,
     plan: &ExecutionPlan,
 ) -> Result<ProviderPoolInFlightAdmission, GatewayError> {
@@ -749,6 +815,109 @@ mod tests {
         .expect("replacement admission should resolve")
         .expect("replacement guard should acquire after release");
         drop(replacement);
+    }
+
+    #[test]
+    fn execution_observation_deduplicates_websocket_attempts_by_logical_turn() {
+        let context = serde_json::json!({"websocket_logical_turn_id": "logical-turn-1"});
+        assert_eq!(
+            execution_observation_request_id("attempt-1", Some(&context)),
+            execution_observation_request_id("attempt-2", Some(&context)),
+        );
+        assert_ne!(
+            execution_observation_request_id("logical-turn-1", None),
+            execution_observation_request_id("attempt-1", Some(&context)),
+        );
+        assert_eq!(
+            execution_observation_request_id("http-request", None),
+            "http-request"
+        );
+        assert_eq!(
+            execution_observation_request_id(
+                "http-request",
+                Some(&serde_json::json!({"websocket_logical_turn_id": " "}))
+            ),
+            "http-request",
+        );
+    }
+
+    #[tokio::test]
+    async fn execution_activity_survives_disabled_pool_tracking_and_clears_on_release_or_drop() {
+        let activity = Arc::new(crate::execution_activity::ExecutionActivity::default());
+        // Pool mode Off (without a key limit) returns None. Execution admission
+        // still attaches the independent observation to a disabled wrapper.
+        let mut guard = ProviderPoolInFlightGuard::observe_execution(
+            None,
+            activity.begin(
+                "request-1",
+                "provider-1",
+                Some("Provider"),
+                Some("client-model"),
+            ),
+        );
+        let snapshot = activity.snapshot();
+        assert_eq!(snapshot["providers"][0]["current_concurrency"], 1);
+        assert_eq!(snapshot["providers"][0]["requests_per_minute"], 1);
+        assert_eq!(snapshot["models"][0]["model"], "client-model");
+        guard.release_inner().await;
+        assert_eq!(
+            activity.snapshot()["providers"][0]["current_concurrency"],
+            0
+        );
+        assert!(guard.observed_activity.is_none());
+        drop(guard);
+
+        let guard = ProviderPoolInFlightGuard::observe_execution(
+            None,
+            activity.begin(
+                "request-2",
+                "provider-1",
+                Some("Provider"),
+                Some("client-model"),
+            ),
+        );
+        assert_eq!(activity.snapshot()["models"][0]["current_concurrency"], 1);
+        drop(guard);
+        let snapshot = activity.snapshot();
+        assert_eq!(snapshot["models"][0]["current_concurrency"], 0);
+        assert_eq!(snapshot["providers"][0]["requests_per_minute"], 2);
+    }
+
+    #[tokio::test]
+    async fn execution_activity_releases_with_an_existing_pool_guard() {
+        let runtime = Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+        let activity = Arc::new(crate::execution_activity::ExecutionActivity::default());
+        let provider_id = "provider-observed-release";
+        let pool_guard = acquire_provider_pool_in_flight_guard(
+            runtime.clone(),
+            provider_id,
+            "request-1",
+            Some("candidate-1"),
+            "key-1",
+        )
+        .await
+        .expect("pool guard should be acquired");
+        let guard = ProviderPoolInFlightGuard::observe_execution(
+            Some(pool_guard),
+            activity.begin("request-1", provider_id, Some("Provider"), None),
+        );
+        assert_eq!(
+            provider_pool_live_in_flight_count(runtime.as_ref(), provider_id).await,
+            1
+        );
+        assert_eq!(
+            activity.snapshot()["providers"][0]["current_concurrency"],
+            1
+        );
+        guard.release().await;
+        assert_eq!(
+            provider_pool_live_in_flight_count(runtime.as_ref(), provider_id).await,
+            0
+        );
+        assert_eq!(
+            activity.snapshot()["providers"][0]["current_concurrency"],
+            0
+        );
     }
 
     #[tokio::test]

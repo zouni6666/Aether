@@ -22,6 +22,8 @@ pub(crate) mod test_support;
 mod trace;
 mod usage_helpers;
 
+pub(super) use resilience::overview_resilience_payload;
+
 pub(crate) async fn maybe_build_local_admin_monitoring_response(
     state: &AdminAppState<'_>,
     request_context: &AdminRequestContext<'_>,

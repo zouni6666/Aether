@@ -562,6 +562,30 @@ impl GatewayDataState {
         Ok(created)
     }
 
+    pub(crate) async fn create_provider_catalog_provider_in_routing_group(
+        &self,
+        provider: &StoredProviderCatalogProvider,
+        shift_existing_priorities_from: Option<i32>,
+        routing_group_id: &str,
+    ) -> Result<Option<StoredProviderCatalogProvider>, DataLayerError> {
+        let created = match &self.provider_catalog_writer {
+            Some(repository) => repository
+                .create_provider_in_routing_group(
+                    provider,
+                    shift_existing_priorities_from,
+                    routing_group_id,
+                )
+                .await
+                .map(Some),
+            None => Ok(None),
+        }?;
+        if created.is_some() {
+            self.clear_provider_catalog_cache();
+            self.clear_routing_group_cache();
+        }
+        Ok(created)
+    }
+
     pub(crate) async fn update_provider_catalog_provider(
         &self,
         provider: &StoredProviderCatalogProvider,

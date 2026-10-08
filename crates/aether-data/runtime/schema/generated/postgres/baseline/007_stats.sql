@@ -172,6 +172,7 @@ CREATE TABLE IF NOT EXISTS public.stats_daily (
     cache_read_tokens bigint DEFAULT 0 NOT NULL,
     total_cost double precision DEFAULT 0 NOT NULL,
     actual_total_cost double precision DEFAULT 0 NOT NULL,
+    billing_cost numeric(20,8),
     input_cost double precision DEFAULT 0 NOT NULL,
     output_cost double precision DEFAULT 0 NOT NULL,
     cache_creation_cost double precision DEFAULT 0 NOT NULL,

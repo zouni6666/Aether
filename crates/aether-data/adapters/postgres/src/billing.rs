@@ -1,3 +1,4 @@
+mod provider_expenses;
 use async_trait::async_trait;
 use sqlx::{PgPool, Row};
 
@@ -154,6 +155,38 @@ impl SqlxBillingReadRepository {
 
 #[async_trait]
 impl BillingReadRepository for SqlxBillingReadRepository {
+    async fn list_provider_expenses(
+        &self,
+        query: &aether_data_contracts::repository::billing::ProviderExpenseQuery,
+    ) -> Result<
+        Option<aether_data_contracts::repository::billing::ProviderExpensePage>,
+        DataLayerError,
+    > {
+        self.expense_page(query).await
+    }
+    async fn create_provider_expense(
+        &self,
+        input: &aether_data_contracts::repository::billing::ProviderExpenseInput,
+    ) -> Result<
+        AdminBillingMutationOutcome<
+            aether_data_contracts::repository::billing::ProviderExpenseRecord,
+        >,
+        DataLayerError,
+    > {
+        self.insert_expense(input).await
+    }
+    async fn void_provider_expense(
+        &self,
+        id: &str,
+        operator: Option<&str>,
+    ) -> Result<
+        AdminBillingMutationOutcome<
+            aether_data_contracts::repository::billing::ProviderExpenseRecord,
+        >,
+        DataLayerError,
+    > {
+        self.void_expense(id, operator).await
+    }
     async fn find_model_context(
         &self,
         provider_id: &str,
@@ -1087,6 +1120,15 @@ WHERE product_id = $1
         &self,
         user_id: &str,
     ) -> Result<Option<Vec<UserPlanEntitlementRecord>>, DataLayerError> {
+        self.list_user_plan_entitlements_with_history(user_id, false)
+            .await
+    }
+
+    async fn list_user_plan_entitlements_with_history(
+        &self,
+        user_id: &str,
+        include_inactive: bool,
+    ) -> Result<Option<Vec<UserPlanEntitlementRecord>>, DataLayerError> {
         let rows = sqlx::query(
             r#"
 SELECT
@@ -1098,12 +1140,12 @@ SELECT
   CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs
 FROM user_plan_entitlements
 WHERE user_id = $1
-  AND status = 'active'
-  AND expires_at > NOW()
+  AND ($2 OR (status = 'active' AND expires_at > NOW()))
 ORDER BY expires_at ASC, created_at ASC
             "#,
         )
         .bind(user_id)
+        .bind(include_inactive)
         .fetch_all(&self.pool)
         .await
         .map_postgres_err()?;

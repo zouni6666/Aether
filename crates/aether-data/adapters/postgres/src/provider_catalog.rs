@@ -1180,6 +1180,16 @@ WHERE id = $1
         provider: &StoredProviderCatalogProvider,
         shift_existing_priorities_from: Option<i32>,
     ) -> Result<StoredProviderCatalogProvider, DataLayerError> {
+        self.create_provider_with_routing_group(provider, shift_existing_priorities_from, None)
+            .await
+    }
+
+    async fn create_provider_with_routing_group(
+        &self,
+        provider: &StoredProviderCatalogProvider,
+        shift_existing_priorities_from: Option<i32>,
+        routing_group_id: Option<&str>,
+    ) -> Result<StoredProviderCatalogProvider, DataLayerError> {
         if provider.id.trim().is_empty() {
             return Err(DataLayerError::InvalidInput(
                 "provider catalog provider.id is empty".to_string(),
@@ -1207,6 +1217,40 @@ WHERE id = $1
         }
 
         let mut tx = self.pool.begin().await.map_postgres_err()?;
+
+        if let Some(group_id) = routing_group_id {
+            // Group edits use the same lock: validation, exclusions, and provider
+            // creation are committed together, including concurrent deletions.
+            sqlx::query("LOCK TABLE routing_groups IN SHARE ROW EXCLUSIVE MODE")
+                .execute(&mut *tx)
+                .await
+                .map_postgres_err()?;
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM routing_groups WHERE id = $1)")
+                    .bind(group_id)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_postgres_err()?;
+            if !exists {
+                return Err(DataLayerError::InvalidInput(
+                    "routing_group_not_found".to_string(),
+                ));
+            }
+            sqlx::query(r#"
+UPDATE routing_groups
+SET config_json = jsonb_set(config_json::jsonb, '{disabled_providers}',
+      CASE WHEN id = $1
+        THEN COALESCE(config_json::jsonb -> 'disabled_providers', '[]'::jsonb) - $2::text
+        ELSE (COALESCE(config_json::jsonb -> 'disabled_providers', '[]'::jsonb) - $2::text) || jsonb_build_array($2::text)
+      END),
+    version = version + 1,
+    updated_at = EXTRACT(EPOCH FROM NOW())::bigint
+WHERE (id <> $1 AND NOT (COALESCE(config_json::jsonb -> 'disabled_providers', '[]'::jsonb) ? $2::text))
+   OR (id = $1 AND (COALESCE(config_json::jsonb -> 'disabled_providers', '[]'::jsonb) ? $2::text))
+"#)
+                .bind(group_id).bind(&provider.id)
+                .execute(&mut *tx).await.map_postgres_err()?;
+        }
 
         if let Some(target_priority) = shift_existing_priorities_from {
             sqlx::query(
@@ -3015,6 +3059,20 @@ impl ProviderCatalogReadRepository for SqlxProviderCatalogReadRepository {
 
 #[async_trait]
 impl ProviderCatalogWriteRepository for SqlxProviderCatalogReadRepository {
+    async fn create_provider_in_routing_group(
+        &self,
+        provider: &StoredProviderCatalogProvider,
+        shift_existing_priorities_from: Option<i32>,
+        routing_group_id: &str,
+    ) -> Result<StoredProviderCatalogProvider, DataLayerError> {
+        self.create_provider_with_routing_group(
+            provider,
+            shift_existing_priorities_from,
+            Some(routing_group_id),
+        )
+        .await
+    }
+
     async fn create_provider(
         &self,
         provider: &StoredProviderCatalogProvider,

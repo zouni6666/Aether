@@ -561,7 +561,18 @@ SET
   rate_limit = CASE WHEN $7 THEN $8 ELSE rate_limit END,
   concurrent_limit = CASE WHEN $9 THEN $10 ELSE concurrent_limit END,
   ip_rules = CASE WHEN $11 THEN $12::jsonb ELSE ip_rules END,
-  feature_settings = CASE WHEN $13 THEN $14::jsonb ELSE feature_settings END,
+  feature_settings = CASE WHEN $16 THEN
+    NULLIF(
+      (COALESCE(CASE WHEN $13 THEN $14::jsonb ELSE feature_settings END, '{}'::jsonb)
+        - 'routing_group_id' - 'routing_group_name')
+      || CASE WHEN $17 THEN
+          CASE WHEN $18::text IS NULL THEN '{}'::jsonb
+               ELSE jsonb_build_object('routing_group_id', $18::text) END
+        WHEN jsonb_typeof(feature_settings->'routing_group_id') = 'string' THEN
+          jsonb_build_object('routing_group_id', feature_settings->'routing_group_id')
+        ELSE '{}'::jsonb END,
+      '{}'::jsonb)
+    ELSE CASE WHEN $13 THEN $14::jsonb ELSE feature_settings END END,
   updated_at = NOW()
 WHERE user_id = $1
   AND id = $2
@@ -1357,6 +1368,18 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
             .bind(record.feature_settings.is_some())
             .bind(feature_settings)
             .bind(false)
+            .bind(record.routing_group_selection.is_some())
+            .bind(
+                record
+                    .routing_group_selection
+                    .as_ref()
+                    .is_some_and(|patch| patch.group_id.is_some()),
+            )
+            .bind(
+                record
+                    .routing_group_selection
+                    .and_then(|patch| patch.group_id.flatten()),
+            )
             .fetch_optional(&self.pool)
             .await
             .map_postgres_err()?;
@@ -1418,6 +1441,18 @@ WHERE id = $2
             .bind(record.feature_settings.is_some())
             .bind(feature_settings)
             .bind(true)
+            .bind(record.routing_group_selection.is_some())
+            .bind(
+                record
+                    .routing_group_selection
+                    .as_ref()
+                    .is_some_and(|patch| patch.group_id.is_some()),
+            )
+            .bind(
+                record
+                    .routing_group_selection
+                    .and_then(|patch| patch.group_id.flatten()),
+            )
             .fetch_optional(&self.pool)
             .await
             .map_postgres_err()?;
@@ -2143,10 +2178,124 @@ mod tests {
             .contains("key_encrypted = CASE WHEN $3 THEN $4 ELSE key_encrypted END"));
         assert!(UPDATE_USER_API_KEY_BASIC_SQL
             .contains("ip_rules = CASE WHEN $11 THEN $12::jsonb ELSE ip_rules END"));
-        assert!(UPDATE_USER_API_KEY_BASIC_SQL.contains(
-            "feature_settings = CASE WHEN $13 THEN $14::jsonb ELSE feature_settings END"
-        ));
+        assert!(UPDATE_USER_API_KEY_BASIC_SQL
+            .contains("CASE WHEN $13 THEN $14::jsonb ELSE feature_settings END"));
         assert!(UPDATE_USER_API_KEY_BASIC_SQL.contains("AND ($15 = FALSE OR is_locked = FALSE)"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AETHER_TEST_DATABASE_URL; uses only a temporary table"]
+    async fn live_api_key_routing_patch_preserves_concurrent_feature_edits() {
+        use aether_data_contracts::repository::auth::{
+            AuthApiKeyWriteRepository, UpdateApiKeyRoutingGroupSelection,
+            UpdateUserApiKeyBasicRecord,
+        };
+        use serde_json::json;
+
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&std::env::var("AETHER_TEST_DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        // The repository's complete production UPDATE runs against a session-local table.
+        sqlx::raw_sql(
+            r#"
+CREATE TEMP TABLE api_keys (
+  id text PRIMARY KEY, user_id text, key_hash text, key_encrypted text, name text,
+  allowed_providers json, allowed_api_formats json, allowed_models json,
+  ip_rules jsonb, rate_limit integer, concurrent_limit integer,
+  force_capabilities json, feature_settings jsonb, is_active boolean DEFAULT true,
+  is_locked boolean DEFAULT false, is_standalone boolean DEFAULT false,
+  expires_at timestamptz, auto_delete_on_expiry boolean DEFAULT false,
+  total_requests bigint DEFAULT 0, total_tokens bigint DEFAULT 0,
+  total_cost_usd numeric DEFAULT 0, last_used_at timestamptz,
+  created_at timestamptz DEFAULT NOW(), updated_at timestamptz DEFAULT NOW()
+);
+INSERT INTO api_keys (id,user_id,key_hash,name,feature_settings)
+VALUES ('key-1','user-1','hash-1','key','{"routing_group_id":"a","pii":false}');
+"#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let repository = SqlxAuthApiKeySnapshotReadRepository::new(pool.clone());
+        let patch = |features, group_id| UpdateUserApiKeyBasicRecord {
+            user_id: "user-1".into(),
+            api_key_id: "key-1".into(),
+            key_encrypted: None,
+            key_encrypted_present: false,
+            name: None,
+            name_present: false,
+            rate_limit: None,
+            rate_limit_present: false,
+            concurrent_limit: None,
+            concurrent_limit_present: false,
+            ip_rules: None,
+            feature_settings: features,
+            routing_group_selection: Some(UpdateApiKeyRoutingGroupSelection { group_id }),
+        };
+        // Prepared before the group change: stale or injected group fields must not win.
+        let stale_feature_edit =
+            patch(Some(Some(json!({"routing_group_id":"a","pii":true}))), None);
+        repository
+            .update_user_api_key_basic_if_unlocked(patch(None, Some(Some("b".into()))))
+            .await
+            .unwrap()
+            .unwrap();
+        let edited = repository
+            .update_user_api_key_basic_if_unlocked(stale_feature_edit)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            edited.feature_settings,
+            Some(json!({"routing_group_id":"b","pii":true}))
+        );
+        let changed = repository
+            .update_user_api_key_basic_if_unlocked(patch(None, Some(Some("c".into()))))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            changed.feature_settings,
+            Some(json!({"routing_group_id":"c","pii":true}))
+        );
+        let cleared_features = repository
+            .update_user_api_key_basic_if_unlocked(patch(Some(None), None))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            cleared_features.feature_settings,
+            Some(json!({"routing_group_id":"c"}))
+        );
+        let cleared_group = repository
+            .update_user_api_key_basic_if_unlocked(patch(None, Some(None)))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cleared_group.feature_settings, None);
+        let mut admin = patch(Some(Some(json!({"admin":true}))), None);
+        admin.routing_group_selection = None;
+        assert_eq!(
+            repository
+                .update_user_api_key_basic(admin)
+                .await
+                .unwrap()
+                .unwrap()
+                .feature_settings,
+            Some(json!({"admin":true}))
+        );
+        sqlx::query("UPDATE api_keys SET is_locked=true")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(repository
+            .update_user_api_key_basic_if_unlocked(patch(None, Some(Some("d".into()))))
+            .await
+            .unwrap()
+            .is_none());
+        pool.close().await;
     }
 
     #[tokio::test]

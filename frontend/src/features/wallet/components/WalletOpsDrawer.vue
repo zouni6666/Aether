@@ -264,74 +264,10 @@
                   />
                 </div>
 
-                <div class="rounded-2xl border border-border/60 overflow-hidden bg-background">
-                  <div class="overflow-x-auto">
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead>时间</TableHead>
-                          <TableHead>类型</TableHead>
-                          <TableHead>金额</TableHead>
-                          <TableHead>余额变化</TableHead>
-                          <TableHead>说明</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        <TableRow
-                          v-for="tx in txItems"
-                          :key="tx.id"
-                        >
-                          <TableCell class="text-xs text-muted-foreground whitespace-nowrap">
-                            {{ formatDateTime(tx.created_at) }}
-                          </TableCell>
-                          <TableCell>
-                            <div class="space-y-1">
-                              <Badge
-                                variant="outline"
-                                class="font-mono"
-                              >
-                                {{ walletTransactionCategoryLabel(tx.category) }}
-                              </Badge>
-                              <div class="text-[11px] text-muted-foreground">
-                                {{ walletTransactionReasonLabel(tx.reason_code) }}
-                              </div>
-                            </div>
-                          </TableCell>
-                          <TableCell
-                            class="tabular-nums"
-                            :class="toFiniteNumber(tx.amount) >= 0 ? 'text-emerald-600' : 'text-rose-600'"
-                          >
-                            {{ toFiniteNumber(tx.amount) >= 0 ? '+' : '' }}{{ formatFixed(tx.amount, 4) }}
-                          </TableCell>
-                          <TableCell class="text-xs tabular-nums whitespace-nowrap">
-                            <div>{{ formatFixed(tx.balance_before, 4) }} → {{ formatFixed(tx.balance_after, 4) }}</div>
-                            <div
-                              v-if="tx.recharge_balance_before !== null && tx.recharge_balance_before !== undefined && tx.gift_balance_before !== null && tx.gift_balance_before !== undefined"
-                              class="text-[11px] text-muted-foreground mt-0.5"
-                            >
-                              充 {{ formatFixed(tx.recharge_balance_before, 4) }}→{{ formatFixed(tx.recharge_balance_after, 4) }}
-                              · 赠 {{ formatFixed(tx.gift_balance_before, 4) }}→{{ formatFixed(tx.gift_balance_after, 4) }}
-                            </div>
-                          </TableCell>
-                          <TableCell class="text-xs text-muted-foreground max-w-[260px] truncate">
-                            {{ tx.description || '-' }}
-                          </TableCell>
-                        </TableRow>
-                        <TableRow v-if="!loadingTx && txItems.length === 0">
-                          <TableCell
-                            colspan="5"
-                            class="py-10"
-                          >
-                            <EmptyState
-                              title="暂无资金流水"
-                              description="当前钱包没有资金动作记录"
-                            />
-                          </TableCell>
-                        </TableRow>
-                      </TableBody>
-                    </Table>
-                  </div>
-                </div>
+                <WalletTransactionsTable
+                  :items="txItems"
+                  :loading="loadingTx"
+                />
 
                 <Pagination
                   :current="txPage"
@@ -509,7 +445,6 @@
 </template>
 
 <script setup lang="ts">
-import { getI18nLocale } from '@/i18n'
 import { computed, ref, watch } from 'vue'
 import {
   Badge,
@@ -535,6 +470,7 @@ import {
   TabsTrigger,
 } from '@/components/ui'
 import { EmptyState } from '@/components/common'
+import WalletTransactionsTable from './WalletTransactionsTable.vue'
 import {
   adminWalletApi,
   type AdminWallet,
@@ -548,8 +484,6 @@ import {
   refundStatusLabel,
   walletStatusBadge,
   walletStatusLabel,
-  walletTransactionCategoryLabel,
-  walletTransactionReasonLabel,
 } from '@/utils/walletDisplay'
 import { useToast } from '@/composables/useToast'
 import { useConfirm } from '@/composables/useConfirm'
@@ -1024,17 +958,6 @@ async function submitCompleteRefund() {
   } finally {
     submittingRefundAction.value = false
   }
-}
-
-function formatDateTime(value: string | null | undefined) {
-  if (!value) return '-'
-  return new Date(value).toLocaleString(getI18nLocale(), {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
 }
 
 function toFiniteNumber(value: unknown, fallback = 0): number {

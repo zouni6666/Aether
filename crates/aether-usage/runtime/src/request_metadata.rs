@@ -8,9 +8,11 @@ use aether_data_contracts::repository::usage::{
     sanitize_usage_request_metadata_object as project_usage_request_metadata_object,
     sanitize_usage_request_metadata_ref as project_usage_request_metadata_ref,
     usage_body_capture_is_authoritative, UsageBodyCaptureState,
-    PROVIDER_ACTUAL_SERVICE_TIER_METADATA_KEY, PROVIDER_CACHE_TTL_MINUTES_METADATA_KEY,
-    PROVIDER_REASONING_EFFORT_METADATA_KEY, PROVIDER_RESPONSE_MODEL_METADATA_KEY,
-    PROVIDER_SERVICE_TIER_METADATA_KEY, REQUESTED_REASONING_EFFORT_METADATA_KEY,
+    BILLING_MULTIPLIER_SNAPSHOT_METADATA_KEY, PROVIDER_ACTUAL_SERVICE_TIER_METADATA_KEY,
+    PROVIDER_CACHE_TTL_MINUTES_METADATA_KEY, PROVIDER_REASONING_EFFORT_METADATA_KEY,
+    PROVIDER_RESPONSE_MODEL_METADATA_KEY, PROVIDER_SERVICE_TIER_METADATA_KEY,
+    REQUESTED_REASONING_EFFORT_METADATA_KEY, ROUTING_GROUP_BILLING_MULTIPLIER_METADATA_KEY,
+    ROUTING_GROUP_ID_METADATA_KEY, ROUTING_GROUP_NAME_METADATA_KEY,
 };
 use serde_json::{Map, Value};
 
@@ -112,6 +114,10 @@ pub(crate) fn retain_first_byte_request_metadata(value: Option<Value>) -> Option
                 | "model_id"
                 | "global_model_id"
                 | "global_model_name"
+                | ROUTING_GROUP_BILLING_MULTIPLIER_METADATA_KEY
+                | BILLING_MULTIPLIER_SNAPSHOT_METADATA_KEY
+                | ROUTING_GROUP_ID_METADATA_KEY
+                | ROUTING_GROUP_NAME_METADATA_KEY
         )
     });
     (!metadata.is_empty()).then_some(Value::Object(metadata))
@@ -542,6 +548,10 @@ mod tests {
             "request_path": "/v1/chat/completions",
             "upstream_is_stream": true,
             "proxy": {"mode": "manual", "node_id": "proxy-1"},
+            "routing_group_billing_multiplier": 0.25,
+            "billing_multiplier_snapshot": {"version": 1, "factors": {"routing_group": 0.25, "user_group": 2.0}, "multiplier": 0.5},
+            "routing_group_id": "group-1",
+            "routing_group_name": "默认调度策略",
             "billing_snapshot": {"dimensions": [1, 2, 3]},
             "settlement_snapshot": {"status": "pending"},
             "stage_timings_ms": {"planning": 12}
@@ -555,7 +565,11 @@ mod tests {
                 "client_ip": "203.0.113.8",
                 "request_path": "/v1/chat/completions",
                 "request_path_and_query": "/v1/chat/completions",
-                "upstream_is_stream": true
+                "upstream_is_stream": true,
+                "routing_group_billing_multiplier": 0.25,
+                "billing_multiplier_snapshot": {"version": 1, "factors": {"routing_group": 0.25, "user_group": 2.0}, "multiplier": 0.5},
+                "routing_group_id": "group-1",
+                "routing_group_name": "默认调度策略"
             })
         );
     }
@@ -642,6 +656,52 @@ mod tests {
             }
         })))
         .is_none());
+    }
+
+    #[test]
+    fn routing_group_snapshot_survives_seed_and_sanitization() {
+        for multiplier in [0.0, 0.25, 1.0, 2.5] {
+            let context = json!({
+                "routing_group_billing_multiplier": multiplier,
+                "billing_multiplier_snapshot": {"version": 1, "factors": {"routing_group": multiplier, "user_group": 2.0}, "multiplier": multiplier * 2.0},
+                "routing_group_id": "group-1",
+                "routing_group_name": "请求时的分组",
+                "rate_multiplier": 0.75,
+                "routing_trace": {"untrusted": true}
+            });
+            let metadata = build_usage_request_metadata_seed(&sample_plan(), context.as_object())
+                .expect("group snapshot should survive projection");
+            assert_eq!(metadata["routing_group_billing_multiplier"], multiplier);
+            assert_eq!(
+                metadata["billing_multiplier_snapshot"],
+                context["billing_multiplier_snapshot"]
+            );
+            assert_eq!(metadata["routing_group_id"], "group-1");
+            assert_eq!(metadata["routing_group_name"], "请求时的分组");
+            assert_eq!(metadata["rate_multiplier"], 0.75);
+            assert!(metadata.get("routing_trace").is_none());
+            assert_eq!(
+                sanitize_usage_request_metadata(Some(metadata.clone())),
+                Some(metadata)
+            );
+        }
+        for multiplier in [json!(-1), json!("Infinity"), json!(f64::NAN)] {
+            let context = json!({"routing_group_billing_multiplier": multiplier});
+            let metadata = build_usage_request_metadata_seed(&sample_plan(), context.as_object())
+                .expect(
+                "invalid pricing must retain a marker instead of falling back to legacy billing",
+            );
+            assert_eq!(
+                metadata.get("billing_multiplier_snapshot"),
+                Some(&Value::Null)
+            );
+            assert!(
+                aether_data_contracts::repository::usage::billing_multiplier_snapshot(Some(
+                    &metadata
+                ))
+                .is_err()
+            );
+        }
     }
 
     #[test]
@@ -742,6 +802,39 @@ mod tests {
             attach_client_request_body_metadata(Some(updated), Some(&json!({ "model": "gpt-5" })))
                 .expect("trace metadata should remain");
         assert!(cleared.get("requested_reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn gemini_thinking_config_is_derived_into_client_and_provider_reasoning_metadata() {
+        let client_body = json!({
+            "generationConfig": {
+                "thinkingConfig": { "includeThoughts": true, "thinkingLevel": "HIGH" }
+            }
+        });
+        let provider_body = json!({
+            "generation_config": {
+                "thinking_config": { "thinking_budget": 8192 }
+            }
+        });
+
+        let metadata = attach_client_request_body_metadata(
+            Some(json!({ "trace_id": "trace-1" })),
+            Some(&client_body),
+        )
+        .expect("metadata should remain");
+        assert_eq!(metadata["requested_reasoning_effort"], "high");
+
+        let metadata = attach_provider_request_body_metadata(
+            Some(metadata),
+            Some("gemini:generate_content"),
+            Some("gemini-3.8-flash"),
+            Some("gemini-3.8-flash"),
+            Some(&provider_body),
+        )
+        .expect("metadata should remain");
+
+        assert_eq!(metadata["requested_reasoning_effort"], "high");
+        assert_eq!(metadata["provider_reasoning_effort"], "xhigh");
     }
 
     #[test]

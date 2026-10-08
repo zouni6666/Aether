@@ -1,6 +1,18 @@
 use crate::{AppState, GatewayError};
 
 impl AppState {
+    pub(crate) async fn list_user_announcements(
+        &self,
+        user_id: &str,
+        query: &aether_data::repository::announcements::UserAnnouncementListQuery,
+    ) -> Result<aether_data::repository::announcements::StoredUserAnnouncementPage, GatewayError>
+    {
+        self.data
+            .list_user_announcements(user_id, query)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn list_announcements(
         &self,
         query: &aether_data::repository::announcements::AnnouncementListQuery,

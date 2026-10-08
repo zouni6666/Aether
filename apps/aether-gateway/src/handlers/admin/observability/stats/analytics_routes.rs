@@ -1,5 +1,8 @@
 use super::super::resolve_usage_user_group_scope;
-use super::range::{build_comparison_range, parse_bounded_u32};
+use super::range::{
+    build_comparison_range, parse_bounded_u32, precise_admin_stats_time_range,
+    resolve_precise_time_bounds,
+};
 use super::resolve_admin_usage_time_range;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::{
@@ -285,12 +288,36 @@ pub(super) async fn maybe_build_local_admin_stats_analytics_response(
             Ok(value) => value,
             Err(detail) => return Ok(Some(admin_stats_bad_request_response(detail))),
         };
-        let time_range = match resolve_admin_usage_time_range(request_context.query_string()) {
+        let legacy_time_range = match resolve_admin_usage_time_range(request_context.query_string())
+        {
             Ok(value) => value,
             Err(detail) => return Ok(Some(admin_stats_bad_request_response(detail))),
         };
-        if let Err(detail) = time_range.validate_for_time_series(granularity) {
-            return Ok(Some(admin_stats_bad_request_response(detail)));
+        let precise_bounds = match resolve_precise_time_bounds(request_context.query_string()) {
+            Ok(value) => value,
+            Err(detail) => return Ok(Some(admin_stats_bad_request_response(detail))),
+        };
+        let precise_time_range = match precise_bounds {
+            Some((from, to)) => {
+                match precise_admin_stats_time_range(request_context.query_string(), from, to) {
+                    Ok(value) => Some(value),
+                    Err(detail) => return Ok(Some(admin_stats_bad_request_response(detail))),
+                }
+            }
+            None => None,
+        };
+        let time_range = precise_time_range.as_ref().unwrap_or(&legacy_time_range);
+        if precise_bounds.is_none() {
+            if let Err(detail) = time_range.validate_for_time_series(granularity) {
+                return Ok(Some(admin_stats_bad_request_response(detail)));
+            }
+        } else if precise_bounds
+            .and_then(|(from, to)| to.checked_sub(from))
+            .is_some_and(|seconds| seconds > 90 * 86_400)
+        {
+            return Ok(Some(admin_stats_bad_request_response(
+                "Query range cannot exceed 90 days".to_string(),
+            )));
         }
         if !state.has_usage_data_reader() {
             return Ok(Some(admin_stats_time_series_empty_response()));
@@ -314,7 +341,8 @@ pub(super) async fn maybe_build_local_admin_stats_analytics_response(
             | AdminStatsGranularity::Week
             | AdminStatsGranularity::Month => UsageTimeSeriesGranularity::Day,
         };
-        let Some((created_from_unix_secs, created_until_unix_secs)) = time_range.to_unix_bounds()
+        let Some((created_from_unix_secs, created_until_unix_secs)) =
+            precise_bounds.or_else(|| time_range.to_unix_bounds())
         else {
             return Ok(Some(admin_stats_time_series_empty_response()));
         };
@@ -336,7 +364,7 @@ pub(super) async fn maybe_build_local_admin_stats_analytics_response(
             })
             .await?;
         return Ok(Some(build_admin_stats_time_series_response_from_summaries(
-            &time_range,
+            time_range,
             granularity,
             &buckets,
         )));

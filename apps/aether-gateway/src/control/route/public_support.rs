@@ -147,6 +147,36 @@ pub(super) fn classify_public_support_route(
             false,
         ))
     } else if method == http::Method::GET
+        && (matches!(
+            normalized_path,
+            "/api/users/me/health/v2/summary" | "/api/users/me/health/v2/objects"
+        ) || normalized_path
+            .strip_prefix("/api/users/me/health/v2/objects/")
+            .is_some_and(|id| !id.is_empty() && !id.contains('/')))
+    {
+        Some(classified(
+            "public_support",
+            "health_user",
+            "health_v2",
+            "user:health",
+            false,
+        ))
+    } else if method == http::Method::GET
+        && (matches!(
+            normalized_path,
+            "/api/public/health/v2/summary" | "/api/public/health/v2/objects"
+        ) || normalized_path
+            .strip_prefix("/api/public/health/v2/objects/")
+            .is_some_and(|id| !id.is_empty() && !id.contains('/')))
+    {
+        Some(classified(
+            "public_support",
+            "public_catalog",
+            "health_v2",
+            "public:catalog",
+            false,
+        ))
+    } else if method == http::Method::GET
         && matches!(
             normalized_path,
             "/api/public/site-info"
@@ -271,6 +301,19 @@ pub(super) fn classify_public_support_route(
             "monitoring_user",
             route_kind,
             "user:monitoring",
+            false,
+        ))
+    } else if method == http::Method::GET
+        && matches!(
+            normalized_path,
+            "/api/announcements/users/me" | "/api/announcements/users/me/"
+        )
+    {
+        Some(classified(
+            "public_support",
+            "announcement_user",
+            "list",
+            "user:announcements",
             false,
         ))
     } else if method == http::Method::GET
@@ -594,6 +637,7 @@ pub(super) fn classify_public_support_route(
                 | "/api/users/me/usage/interval-timeline"
                 | "/api/users/me/usage/heatmap"
                 | "/api/users/me/providers"
+                | "/api/users/me/routing-groups"
                 | "/api/users/me/available-models"
                 | "/api/users/me/client-config"
                 | "/api/users/me/endpoint-status"
@@ -611,6 +655,7 @@ pub(super) fn classify_public_support_route(
             "/api/users/me/usage/interval-timeline" => "usage_interval_timeline",
             "/api/users/me/usage/heatmap" => "usage_heatmap",
             "/api/users/me/providers" => "providers",
+            "/api/users/me/routing-groups" => "routing_groups",
             "/api/users/me/available-models" => "available_models",
             "/api/users/me/client-config" => "client_config",
             "/api/users/me/endpoint-status" => "endpoint_status",

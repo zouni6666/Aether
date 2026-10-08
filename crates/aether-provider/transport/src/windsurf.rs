@@ -23,7 +23,7 @@ pub mod proto;
 pub const PROVIDER_TYPE: &str = "windsurf";
 pub const WINDSURF_ENVELOPE_NAME: &str = "windsurf:GetChatMessage";
 pub const GET_CHAT_MESSAGE_PATH: &str = "/exa.api_server_pb.ApiServerService/GetChatMessage";
-const DEFAULT_IDE_VERSION: &str = "1.9600.41";
+pub const DEFAULT_IDE_VERSION: &str = crate::client_identity::WINDSURF.version;
 const PLACEHOLDER_API_KEY: &str = "__placeholder__";
 
 pub fn is_windsurf_provider_transport(transport: &GatewayProviderTransportSnapshot) -> bool {

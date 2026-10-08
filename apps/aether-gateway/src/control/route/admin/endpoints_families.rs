@@ -6,6 +6,33 @@ pub(super) fn classify_admin_endpoints_family_route(
     method: &http::Method,
     normalized_path: &str,
 ) -> Option<ClassifiedRoute> {
+    if normalized_path == "/api/admin/endpoints/health/v2/publication"
+        && (method == http::Method::GET || method == http::Method::PUT)
+    {
+        return Some(classified(
+            "admin_proxy",
+            "endpoints_health",
+            "health_v2_publication",
+            "admin:endpoints_health",
+            false,
+        ));
+    }
+    if method == http::Method::GET
+        && (matches!(
+            normalized_path,
+            "/api/admin/endpoints/health/v2/summary" | "/api/admin/endpoints/health/v2/objects"
+        ) || normalized_path
+            .strip_prefix("/api/admin/endpoints/health/v2/objects/")
+            .is_some_and(|id| !id.is_empty() && !id.contains('/')))
+    {
+        return Some(classified(
+            "admin_proxy",
+            "endpoints_health",
+            "health_v2",
+            "admin:endpoints_health",
+            false,
+        ));
+    }
     if method == http::Method::GET && normalized_path == "/api/admin/endpoints/health/summary" {
         Some(classified(
             "admin_proxy",

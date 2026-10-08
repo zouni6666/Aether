@@ -639,6 +639,44 @@ impl AppState {
         }
     }
 
+    pub(crate) async fn create_provider_catalog_provider_in_routing_group(
+        &self,
+        provider: &provider_catalog::StoredProviderCatalogProvider,
+        shift_existing_priorities_from: Option<i32>,
+        routing_group_id: &str,
+    ) -> Result<Option<provider_catalog::StoredProviderCatalogProvider>, GatewayError> {
+        let protected = self.protect_provider_catalog_provider(provider)?;
+        let created = self
+            .data
+            .create_provider_catalog_provider_in_routing_group(
+                &protected,
+                shift_existing_priorities_from,
+                routing_group_id,
+            )
+            .await
+            .map_err(|err| match err {
+                aether_data_contracts::DataLayerError::InvalidInput(ref message)
+                    if message == "routing_group_not_found" =>
+                {
+                    GatewayError::Client {
+                        status: axum::http::StatusCode::NOT_FOUND,
+                        message: "策略分组不存在，请刷新后重试".to_string(),
+                    }
+                }
+                _ => GatewayError::Internal(err.to_string()),
+            })?;
+        if created.is_some() {
+            self.invalidate_provider_routing_caches();
+        }
+        match created {
+            Some(provider) => self
+                .open_provider_catalog_provider(provider)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
     pub(crate) async fn update_provider_catalog_provider(
         &self,
         provider: &provider_catalog::StoredProviderCatalogProvider,

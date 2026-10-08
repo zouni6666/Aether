@@ -160,6 +160,7 @@ const COUNT_ADMIN_WALLETS_SQL: &str = r#"
 SELECT COUNT(*) AS total
 FROM wallets
 WHERE ($1::TEXT IS NULL OR status = $1)
+  AND ($3::TEXT IS NULL OR user_id = $3)
   AND (
     $2::TEXT IS NULL
     OR ($2 = 'user' AND user_id IS NOT NULL)
@@ -189,14 +190,15 @@ FROM wallets w
 LEFT JOIN users ON users.id = w.user_id
 LEFT JOIN api_keys ON api_keys.id = w.api_key_id
 WHERE ($1::TEXT IS NULL OR w.status = $1)
+  AND ($3::TEXT IS NULL OR w.user_id = $3)
   AND (
     $2::TEXT IS NULL
     OR ($2 = 'user' AND w.user_id IS NOT NULL)
     OR ($2 = 'api_key' AND w.api_key_id IS NOT NULL)
   )
 ORDER BY w.updated_at DESC
-OFFSET $3
-LIMIT $4
+OFFSET $4
+LIMIT $5
 "#;
 
 const COUNT_ADMIN_WALLET_LEDGER_SQL: &str = r#"
@@ -1087,6 +1089,7 @@ impl WalletReadRepository for SqlxWalletRepository {
             sqlx::query(COUNT_ADMIN_WALLETS_SQL)
                 .bind(query.status.as_deref())
                 .bind(query.owner_type.as_deref())
+                .bind(query.user_id.as_deref())
                 .fetch_one(&self.pool)
                 .await
                 .map_postgres_err()?,
@@ -1095,6 +1098,7 @@ impl WalletReadRepository for SqlxWalletRepository {
             sqlx::query(LIST_ADMIN_WALLETS_SQL)
                 .bind(query.status.as_deref())
                 .bind(query.owner_type.as_deref())
+                .bind(query.user_id.as_deref())
                 .bind(as_i64(query.offset, "wallet offset")?)
                 .bind(as_i64(query.limit, "wallet limit")?)
                 .fetch(&self.pool),

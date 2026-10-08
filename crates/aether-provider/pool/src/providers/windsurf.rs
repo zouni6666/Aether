@@ -177,7 +177,12 @@ fn build_windsurf_connect_rpc_request(
     headers.insert("content-type".to_string(), "application/json".to_string());
     headers.insert("accept".to_string(), "application/json".to_string());
     headers.insert("connect-protocol-version".to_string(), "1".to_string());
-    headers.insert("user-agent".to_string(), "windsurf/1.9600.41".to_string());
+    headers.insert(
+        "user-agent".to_string(),
+        aether_provider_transport::client_identity::WINDSURF
+            .user_agent
+            .to_string(),
+    );
 
     ProviderPoolQuotaRequestSpec {
         request_id,
@@ -200,9 +205,9 @@ fn windsurf_metadata(api_key: &str) -> Value {
     json!({
         "apiKey": api_key,
         "ideName": "windsurf",
-        "ideVersion": "1.9600.41",
+        "ideVersion": aether_provider_transport::client_identity::WINDSURF.version,
         "extensionName": "windsurf",
-        "extensionVersion": "1.9600.41",
+        "extensionVersion": aether_provider_transport::client_identity::WINDSURF.version,
         "locale": "en",
     })
 }

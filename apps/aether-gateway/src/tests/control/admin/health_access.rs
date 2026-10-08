@@ -32,6 +32,107 @@ use crate::data::GatewayDataState;
 const ADMIN_ENDPOINT_HEALTH_DATA_UNAVAILABLE_DETAIL: &str =
     "Admin endpoint health data unavailable";
 
+#[tokio::test]
+async fn health_v2_publication_requires_admin_and_public_projection_keeps_empty_objects() {
+    use aether_data::repository::usage::InMemoryUsageReadRepository;
+
+    let data = GatewayDataState::with_usage_reader_for_tests(Arc::new(
+        InMemoryUsageReadRepository::seed(Vec::new()),
+    ))
+    .with_system_config_values_for_tests(vec![(
+        "health_publication_v1".to_string(),
+        json!({ "enabled": false, "objects": [] }),
+    )]);
+    let gateway = build_router_with_state(AppState::new().unwrap().with_data_state_for_tests(data));
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+    let publication = json!({ "enabled": true, "objects": [
+        {"public_id": "chat", "kind": "api_format", "value": "internal-format", "display_name": "Chat API"},
+        {"public_id": "model", "kind": "model", "value": "internal-model", "display_name": "Model API"}
+    ]});
+    let denied = client
+        .put(format!(
+            "{gateway_url}/api/admin/endpoints/health/v2/publication"
+        ))
+        .json(&publication)
+        .send()
+        .await
+        .unwrap();
+    assert!(matches!(
+        denied.status(),
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+    ));
+    let disabled = client
+        .get(format!("{gateway_url}/api/public/health/v2/objects"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(disabled.status(), StatusCode::NOT_FOUND);
+
+    let saved = client
+        .put(format!(
+            "{gateway_url}/api/admin/endpoints/health/v2/publication"
+        ))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&publication)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(saved.status(), StatusCode::OK);
+    assert_eq!(
+        saved.json::<serde_json::Value>().await.unwrap(),
+        publication
+    );
+
+    let public = client
+        .get(format!(
+            "{gateway_url}/api/public/health/v2/objects?kind=api_format&window=1h"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(public.status(), StatusCode::OK);
+    let body: serde_json::Value = public.json().await.unwrap();
+    assert_eq!(body["data"]["total"], 1);
+    assert_eq!(body["data"]["items"][0]["id"], "chat");
+    assert_eq!(body["data"]["items"][0]["status"], "unknown");
+    assert_eq!(body["data"]["items"][0]["request_count"], 0);
+    assert!(body["data"]["items"][0]["service_availability"]["value"].is_null());
+    let text = body.to_string();
+    for forbidden in [
+        "internal-format",
+        "internal-model",
+        "provider_id",
+        "source_value",
+        "attempts",
+    ] {
+        assert!(
+            !text.contains(forbidden),
+            "public projection leaked {forbidden}"
+        );
+    }
+    let hidden = client
+        .get(format!(
+            "{gateway_url}/api/public/health/v2/objects/internal-format"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
+    let internal_kind = client
+        .get(format!(
+            "{gateway_url}/api/public/health/v2/objects?kind=provider"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(internal_kind.status(), StatusCode::BAD_REQUEST);
+    gateway_handle.abort();
+}
+
 async fn assert_admin_modules_status_with_smtp_password(
     stored_password: &str,
     notification_ready: bool,

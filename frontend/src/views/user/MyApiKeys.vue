@@ -111,6 +111,9 @@
                   >
                     {{ apiKey.name }}
                   </div>
+                  <div class="text-xs text-muted-foreground mt-0.5 truncate">
+                    策略分组：{{ apiKeyRoutingGroupName(apiKey) }}
+                  </div>
                   <div class="text-xs text-muted-foreground mt-0.5">
                     创建于 {{ formatDate(apiKey.created_at) }}
                   </div>
@@ -358,6 +361,9 @@
 
             <!-- 第二行：密钥、时间、统计 -->
             <div class="space-y-1.5">
+              <div class="text-xs text-muted-foreground truncate">
+                策略分组：{{ apiKeyRoutingGroupName(apiKey) }}
+              </div>
               <div class="flex items-center gap-2 text-xs">
                 <code class="font-mono text-muted-foreground">{{ apiKey.key_display || 'sk-••••••••' }}</code>
                 <span class="text-muted-foreground">•</span>
@@ -434,6 +440,70 @@
           />
           <p class="text-xs text-muted-foreground">
             给密钥起一个有意义的名称方便识别
+          </p>
+        </div>
+
+        <div class="space-y-2">
+          <Label
+            for="key-routing-group"
+            class="text-sm font-semibold"
+          >策略分组</Label>
+          <Select
+            v-model="newKeyRoutingGroup"
+            :disabled="routingGroupsLoading || Boolean(routingGroupsError) || creating"
+          >
+            <SelectTrigger
+              id="key-routing-group"
+              aria-label="策略分组"
+              class="h-11 border-border/60"
+            >
+              <SelectValue>{{ selectedRoutingGroupLabel }}</SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem :value="DEFAULT_ROUTING_GROUP">
+                跟随默认
+              </SelectItem>
+              <SelectItem
+                v-if="unavailableRoutingGroup"
+                :value="unavailableRoutingGroup.id"
+                disabled
+              >
+                {{ unavailableRoutingGroup.name }}（当前绑定）
+              </SelectItem>
+              <SelectItem
+                v-for="group in routingGroups"
+                :key="group.id"
+                :value="group.id"
+              >
+                {{ group.name }} · {{ group.billing_multiplier }} 倍{{ group.is_default ? ' · 默认' : '' }}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+          <p
+            v-if="routingGroupsLoading"
+            class="text-xs text-muted-foreground"
+          >
+            正在加载策略分组…
+          </p>
+          <div
+            v-else-if="routingGroupsError"
+            class="flex items-center justify-between gap-2 text-xs text-muted-foreground"
+          >
+            <span role="status">{{ routingGroupsError }}，当前选择保持不变。</span>
+            <Button
+              variant="ghost"
+              size="sm"
+              class="h-6 shrink-0 px-2 text-xs"
+              @click="loadRoutingGroups"
+            >
+              重试
+            </Button>
+          </div>
+          <p
+            v-else
+            class="text-xs text-muted-foreground"
+          >
+            {{ unavailableRoutingGroup ? '当前分组已不可用，请选择其他分组或跟随默认。' : routingGroups.length ? '选择此密钥使用的调度与计费策略；跟随默认会使用管理员设置的默认调度。' : '暂无可选策略分组，可使用默认调度。' }}
           </p>
         </div>
 
@@ -914,7 +984,7 @@
 <script setup lang="ts">
 import { getI18nLocale } from '@/i18n'
 import { ref, onMounted, onBeforeUnmount, computed, watch, reactive } from 'vue'
-import { meApi, type ApiKey, type InstallSessionTargetSystem, type InstallTargetCli, type ApiKeyInstallSession } from '@/api/me'
+import { meApi, type ApiKey, type UserRoutingGroup, type InstallSessionTargetSystem, type InstallTargetCli, type ApiKeyInstallSession } from '@/api/me'
 import Card from '@/components/ui/card.vue'
 import Button from '@/components/ui/button.vue'
 import Input from '@/components/ui/input.vue'
@@ -1006,6 +1076,12 @@ const newKeyName = ref('')
 const newKeyRateLimit = ref<number | undefined>(undefined)
 const newKeyConcurrentLimit = ref<number | undefined>(undefined)
 const newKeyIpRulesText = ref('')
+const DEFAULT_ROUTING_GROUP = '__follow_default__'
+const newKeyRoutingGroup = ref(DEFAULT_ROUTING_GROUP)
+const routingGroups = ref<UserRoutingGroup[]>([])
+const routingGroupsLoading = ref(false)
+const routingGroupsError = ref('')
+let routingGroupsRequest = 0
 const keyRedactionMode = ref<'inherit' | 'custom'>('inherit')
 const newKeyRedactionEnabled = ref(false)
 const newKeyRedactionInjectNotice = ref(true)
@@ -1013,6 +1089,17 @@ const newKeyValue = ref('')
 const createdApiKey = ref<ApiKey | null>(null)
 const keyToDelete = ref<ApiKey | null>(null)
 const editingApiKey = ref<ApiKey | null>(null)
+const unavailableRoutingGroup = computed(() => {
+  const key = editingApiKey.value
+  return key?.routing_group_id && !routingGroups.value.some(group => group.id === key.routing_group_id)
+    ? { id: key.routing_group_id, name: apiKeyRoutingGroupName(key) }
+    : null
+})
+const selectedRoutingGroupLabel = computed(() => {
+  if (newKeyRoutingGroup.value === DEFAULT_ROUTING_GROUP) return '跟随默认'
+  const group = routingGroups.value.find(group => group.id === newKeyRoutingGroup.value)
+  return group ? `${group.name} · ${group.billing_multiplier} 倍` : unavailableRoutingGroup.value?.name ?? '已选择分组'
+})
 const selectedInstallApiKey = ref<ApiKey | null>(null)
 const pendingFirstInstallApiKey = ref<ApiKey | null>(null)
 const installCli = ref<InstallTargetCli>('claude_code')
@@ -1140,6 +1227,25 @@ function resetInstallCopiedState() {
   installCopied.value = false
 }
 
+function apiKeyRoutingGroupName(apiKey: ApiKey): string {
+  return apiKey.routing_group_id ? apiKey.routing_group_name || '已绑定分组' : '跟随默认'
+}
+
+async function loadRoutingGroups() {
+  const request = ++routingGroupsRequest
+  routingGroupsLoading.value = true
+  routingGroupsError.value = ''
+  try {
+    const response = await meApi.getRoutingGroups()
+    if (request === routingGroupsRequest) routingGroups.value = response.items
+  } catch (error) {
+    if (request === routingGroupsRequest) routingGroupsError.value = '策略分组加载失败'
+    log.error('加载用户策略分组失败:', error)
+  } finally {
+    if (request === routingGroupsRequest) routingGroupsLoading.value = false
+  }
+}
+
 function openEditApiKeyDialog(apiKey: ApiKey) {
   const hasRedactionFeature = hasChatPiiRedactionFeatureSettings(apiKey.feature_settings)
   const redactionFeature = readChatPiiRedactionFeatureSettings(apiKey.feature_settings)
@@ -1148,6 +1254,9 @@ function openEditApiKeyDialog(apiKey: ApiKey) {
   newKeyRateLimit.value = apiKey.rate_limit ?? undefined
   newKeyConcurrentLimit.value = apiKey.concurrent_limit ?? undefined
   newKeyIpRulesText.value = apiKey.ip_rules?.join(', ') ?? ''
+  newKeyRoutingGroup.value = apiKey.routing_group_id ?? DEFAULT_ROUTING_GROUP
+  routingGroups.value = []
+  void loadRoutingGroups()
   keyRedactionMode.value = hasRedactionFeature ? 'custom' : 'inherit'
   newKeyRedactionEnabled.value = redactionFeature.enabled
   newKeyRedactionInjectNotice.value = redactionFeature.inject_model_instruction
@@ -1161,6 +1270,9 @@ function openCreateApiKeyDialog() {
   newKeyRateLimit.value = undefined
   newKeyConcurrentLimit.value = undefined
   newKeyIpRulesText.value = ''
+  newKeyRoutingGroup.value = DEFAULT_ROUTING_GROUP
+  routingGroups.value = []
+  void loadRoutingGroups()
   keyRedactionMode.value = 'inherit'
   newKeyRedactionEnabled.value = false
   newKeyRedactionInjectNotice.value = true
@@ -1435,6 +1547,8 @@ function closeCreatedKeyDialog() {
 }
 
 function closeApiKeyDialog() {
+  ++routingGroupsRequest
+  routingGroupsLoading.value = false
   showCreateDialog.value = false
   editingApiKey.value = null
   if (!showKeyDialog.value) {
@@ -1444,6 +1558,7 @@ function closeApiKeyDialog() {
   newKeyRateLimit.value = undefined
   newKeyConcurrentLimit.value = undefined
   newKeyIpRulesText.value = ''
+  newKeyRoutingGroup.value = DEFAULT_ROUTING_GROUP
   keyRedactionMode.value = 'inherit'
   newKeyRedactionEnabled.value = false
   newKeyRedactionInjectNotice.value = true
@@ -1452,6 +1567,14 @@ function closeApiKeyDialog() {
 async function saveApiKey() {
   if (!newKeyName.value.trim()) {
     showError('请输入密钥名称')
+    return
+  }
+  const routingGroupId = newKeyRoutingGroup.value === DEFAULT_ROUTING_GROUP ? null : newKeyRoutingGroup.value
+  const routingGroupChanged = routingGroupId !== (editingApiKey.value?.routing_group_id ?? null)
+  if (routingGroupChanged && routingGroupId && (
+    routingGroupsLoading.value || routingGroupsError.value || !routingGroups.value.some(group => group.id === routingGroupId)
+  )) {
+    showError('请重新加载并选择可用策略分组')
     return
   }
 
@@ -1465,6 +1588,7 @@ async function saveApiKey() {
         rate_limit: newKeyRateLimit.value ?? 0,
         concurrent_limit: newKeyConcurrentLimit.value,
         ip_rules: ipRules,
+        ...(routingGroupChanged ? { routing_group_id: routingGroupId } : {}),
         feature_settings: keyRedactionMode.value === 'custom'
           ? mergeChatPiiRedactionFeatureSettings(editingApiKey.value.feature_settings, {
                 enabled: newKeyRedactionEnabled.value,
@@ -1479,6 +1603,7 @@ async function saveApiKey() {
         rate_limit: newKeyRateLimit.value ?? 0,
         concurrent_limit: newKeyConcurrentLimit.value,
         ip_rules: ipRules,
+        routing_group_id: routingGroupId,
         ...(keyRedactionMode.value === 'custom'
           ? {
               feature_settings: mergeChatPiiRedactionFeatureSettings(null, {

@@ -21,29 +21,8 @@
           />
         </div>
 
-        <!-- 状态筛选 -->
-        <div :class="{ 'xl:hidden': !cardView }">
-          <Select
-            :model-value="filterStatus"
-            @update:model-value="$emit('update:filterStatus', $event)"
-          >
-            <SelectTrigger class="w-20 sm:w-28 h-8 text-xs border-border/60">
-              <SelectValue :placeholder="legacyT('全部状态')" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem
-                v-for="status in statusFilters"
-                :key="status.value"
-                :value="status.value"
-              >
-                {{ legacyT(status.label) }}
-              </SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-
         <!-- API 格式筛选 -->
-        <div :class="{ 'xl:hidden': !cardView }">
+        <div class="xl:hidden">
           <Select
             :model-value="filterApiFormat"
             @update:model-value="$emit('update:filterApiFormat', $event)"
@@ -64,7 +43,10 @@
         </div>
 
         <!-- 模型筛选 -->
-        <div :class="{ 'xl:hidden': !cardView }">
+        <div
+          v-if="showModelFilter !== false"
+          class="xl:hidden"
+        >
           <Select
             :model-value="filterModel"
             @update:model-value="$emit('update:filterModel', $event)"
@@ -122,32 +104,13 @@
           :loading="loading"
           @click="$emit('refresh')"
         />
-        <Button
-          variant="ghost"
-          size="icon"
-          class="h-8 w-8"
-          :class="{ 'bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary': cardView }"
-          :title="legacyT(cardView ? '切换到列表视图' : '切换到卡片视图')"
-          :aria-label="legacyT('卡片视图')"
-          :aria-pressed="cardView"
-          @click="$emit('toggleView')"
-        >
-          <List
-            v-if="cardView"
-            class="w-3.5 h-3.5"
-          />
-          <LayoutGrid
-            v-else
-            class="w-3.5 h-3.5"
-          />
-        </Button>
       </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { Search, Plus, FilterX, Users, LayoutGrid, List } from 'lucide-vue-next'
+import { Search, Plus, FilterX, Users } from 'lucide-vue-next'
 import Button from '@/components/ui/button.vue'
 import Input from '@/components/ui/input.vue'
 import Select from '@/components/ui/select.vue'
@@ -159,29 +122,25 @@ import RefreshButton from '@/components/ui/refresh-button.vue'
 import type { FilterOption } from '@/features/providers/composables/useProviderFilters'
 import { useI18n } from '@/i18n'
 
-defineProps<{
+withDefaults(defineProps<{
   searchQuery: string
-  filterStatus: string
   filterApiFormat: string
+  showModelFilter?: boolean
   filterModel: string
-  statusFilters: FilterOption[]
   apiFormatFilters: FilterOption[]
   modelFilters: FilterOption[]
   hasActiveFilters: boolean
   loading: boolean
-  cardView: boolean
-}>()
+}>(), { showModelFilter: true })
 
 defineEmits<{
   'update:searchQuery': [value: string]
-  'update:filterStatus': [value: string]
   'update:filterApiFormat': [value: string]
   'update:filterModel': [value: string]
   'resetFilters': []
   'batchProcess': []
   'addProvider': []
   'refresh': []
-  'toggleView': []
 }>()
 
 const { legacyT } = useI18n()

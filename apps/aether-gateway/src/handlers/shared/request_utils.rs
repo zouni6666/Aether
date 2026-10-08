@@ -232,6 +232,7 @@ pub(crate) fn admin_proxy_local_requires_buffered_body(
                 decision.route_kind.as_deref(),
             ) {
                 (Some("endpoints_manage"), http::Method::POST, Some("create_provider_key"))
+                | (Some("endpoints_health"), http::Method::PUT, Some("health_v2_publication"))
                 | (Some("endpoints_manage"), http::Method::POST, Some("create_endpoint"))
                 | (Some("endpoints_manage"), http::Method::POST, Some("batch_delete_keys"))
                 | (Some("endpoints_manage"), http::Method::POST, Some("refresh_quota"))
@@ -345,6 +346,7 @@ pub(crate) fn admin_proxy_local_requires_buffered_body(
                 | (Some("billing_manage"), http::Method::PUT, Some("update_rule"))
                 | (Some("billing_manage"), http::Method::POST, Some("create_collector"))
                 | (Some("billing_manage"), http::Method::PUT, Some("update_collector"))
+                | (Some("billing_manage"), http::Method::POST, Some("create_provider_expense"))
                 | (Some("billing_manage"), http::Method::POST, Some("create_plan"))
                 | (Some("billing_manage"), http::Method::PUT, Some("update_plan"))
                 | (Some("billing_manage"), http::Method::PATCH, Some("set_plan_status"))

@@ -26,6 +26,14 @@ use super::{
 
 const USERS_ME_API_KEY_WRITE_UNAVAILABLE_DETAIL: &str = "用户 API 密钥写入暂不可用";
 
+#[path = "user_me_api_key_routing.rs"]
+mod routing_selection;
+use routing_selection::{
+    api_key_routing_group_id, deserialize_routing_group_patch, merge_api_key_feature_settings,
+    normalize_api_key_feature_settings_patch, routing_group_names, routing_group_payload_fields,
+    validate_routing_group_patch,
+};
+
 fn users_me_api_key_secret_response(mut response: Response<Body>) -> Response<Body> {
     response.headers_mut().insert(
         http::header::CACHE_CONTROL,
@@ -43,6 +51,8 @@ struct UsersMeCreateApiKeyRequest {
     concurrent_limit: Option<i32>,
     #[serde(default)]
     feature_settings: Option<serde_json::Value>,
+    #[serde(default)]
+    routing_group_id: Option<String>,
     #[serde(default, alias = "allowed_ips")]
     ip_rules: Option<Vec<String>>,
 }
@@ -57,6 +67,8 @@ struct UsersMeUpdateApiKeyRequest {
     concurrent_limit: Option<i32>,
     #[serde(default, deserialize_with = "deserialize_optional_json_patch")]
     feature_settings: Option<Option<serde_json::Value>>,
+    #[serde(default, deserialize_with = "deserialize_routing_group_patch")]
+    routing_group_id: Option<Option<String>>,
     #[serde(
         default,
         alias = "allowed_ips",
@@ -170,8 +182,9 @@ fn build_users_me_api_key_list_payload(
     state: &AppState,
     record: &aether_data::repository::auth::StoredAuthApiKeyExportRecord,
     is_locked: bool,
+    group_names: &BTreeMap<String, String>,
 ) -> serde_json::Value {
-    json!({
+    let mut payload = json!({
         "id": record.api_key_id,
         "name": record.name,
         "key_display": users_me_masked_api_key_display(state, record),
@@ -187,15 +200,24 @@ fn build_users_me_api_key_list_payload(
         "ip_rules": record.ip_rules,
         "force_capabilities": record.force_capabilities,
         "feature_settings": record.feature_settings,
-    })
+    });
+    payload
+        .as_object_mut()
+        .expect("API key payload is an object")
+        .extend(routing_group_payload_fields(
+            record.feature_settings.as_ref(),
+            group_names,
+        ));
+    payload
 }
 
 fn build_users_me_api_key_detail_payload(
     state: &AppState,
     record: &aether_data::repository::auth::StoredAuthApiKeyExportRecord,
     is_locked: bool,
+    group_names: &BTreeMap<String, String>,
 ) -> serde_json::Value {
-    json!({
+    let mut payload = json!({
         "id": record.api_key_id,
         "name": record.name,
         "key_display": users_me_masked_api_key_display(state, record),
@@ -210,7 +232,15 @@ fn build_users_me_api_key_detail_payload(
         "last_used_at": format_users_me_optional_unix_secs_iso8601(record.last_used_at_unix_secs),
         "expires_at": format_users_me_optional_unix_secs_iso8601(record.expires_at_unix_secs),
         "created_at": format_users_me_optional_unix_secs_iso8601(record.created_at_unix_secs),
-    })
+    });
+    payload
+        .as_object_mut()
+        .expect("API key payload is an object")
+        .extend(routing_group_payload_fields(
+            record.feature_settings.as_ref(),
+            group_names,
+        ));
+    payload
 }
 
 fn normalize_users_me_required_api_key_name(value: &str) -> Result<String, String> {
@@ -336,6 +366,13 @@ pub(super) async fn handle_users_me_api_keys_get(
     };
     records.retain(|record| !record.is_standalone);
     records.sort_by(|left, right| left.api_key_id.cmp(&right.api_key_id));
+    let group_names = routing_group_names(
+        state,
+        records
+            .iter()
+            .any(|record| api_key_routing_group_id(record.feature_settings.as_ref()).is_some()),
+    )
+    .await;
 
     let snapshot_ids = records
         .iter()
@@ -367,7 +404,7 @@ pub(super) async fn handle_users_me_api_keys_get(
                     .get(&record.api_key_id)
                     .map(|snapshot| snapshot.api_key_is_locked)
                     .unwrap_or(false);
-                build_users_me_api_key_list_payload(state, record, is_locked)
+                build_users_me_api_key_list_payload(state, record, is_locked, &group_names)
             })
             .collect::<Vec<_>>(),
     )
@@ -461,8 +498,16 @@ pub(super) async fn handle_users_me_api_key_detail_get(
         }
     };
 
+    let group_names = routing_group_names(
+        state,
+        api_key_routing_group_id(record.feature_settings.as_ref()).is_some(),
+    )
+    .await;
     Json(build_users_me_api_key_detail_payload(
-        state, &record, is_locked,
+        state,
+        &record,
+        is_locked,
+        &group_names,
     ))
     .into_response()
 }
@@ -567,8 +612,17 @@ pub(super) async fn handle_users_me_api_key_create(
                 return build_auth_error_response(http::StatusCode::BAD_REQUEST, detail, false);
             }
         };
-    let feature_settings = match normalize_feature_settings(payload.feature_settings) {
-        Ok(value) => value,
+    let routing_group_patch =
+        match validate_routing_group_patch(state, None, Some(payload.routing_group_id)).await {
+            Ok(value) => value,
+            Err(response) => return response,
+        };
+    let feature_settings = match merge_api_key_feature_settings(
+        None,
+        Some(payload.feature_settings),
+        routing_group_patch,
+    ) {
+        Ok(value) => value.flatten(),
         Err(detail) => {
             return build_auth_error_response(http::StatusCode::BAD_REQUEST, detail, false);
         }
@@ -631,26 +685,36 @@ pub(super) async fn handle_users_me_api_key_create(
         return build_users_me_api_key_writer_unavailable_response();
     };
 
-    users_me_api_key_secret_response(
-        Json(json!({
-            "id": created.api_key_id,
-            "name": created.name,
-            "key": plaintext_key,
-            "key_display": users_me_masked_api_key_display(state, &created),
-            "is_active": created.is_active,
-            "is_locked": false,
-            "rate_limit": created.rate_limit,
-            "concurrent_limit": created.concurrent_limit,
-            "ip_rules": created.ip_rules,
-            "feature_settings": created.feature_settings,
-            "last_used_at": format_users_me_optional_unix_secs_iso8601(created.last_used_at_unix_secs),
-            "created_at": format_users_me_optional_unix_secs_iso8601(created.created_at_unix_secs),
-            "total_requests": created.total_requests,
-            "total_cost_usd": created.total_cost_usd,
-            "message": "API密钥创建成功",
-        }))
-        .into_response(),
+    let group_names = routing_group_names(
+        state,
+        api_key_routing_group_id(created.feature_settings.as_ref()).is_some(),
     )
+    .await;
+    let mut payload = json!({
+        "id": created.api_key_id,
+        "name": created.name,
+        "key": plaintext_key,
+        "key_display": users_me_masked_api_key_display(state, &created),
+        "is_active": created.is_active,
+        "is_locked": false,
+        "rate_limit": created.rate_limit,
+        "concurrent_limit": created.concurrent_limit,
+        "ip_rules": created.ip_rules,
+        "feature_settings": created.feature_settings,
+        "last_used_at": format_users_me_optional_unix_secs_iso8601(created.last_used_at_unix_secs),
+        "created_at": format_users_me_optional_unix_secs_iso8601(created.created_at_unix_secs),
+        "total_requests": created.total_requests,
+        "total_cost_usd": created.total_cost_usd,
+        "message": "API密钥创建成功",
+    });
+    payload
+        .as_object_mut()
+        .expect("API key payload is an object")
+        .extend(routing_group_payload_fields(
+            created.feature_settings.as_ref(),
+            &group_names,
+        ));
+    users_me_api_key_secret_response(Json(payload).into_response())
 }
 
 pub(super) async fn handle_users_me_api_key_update(
@@ -715,14 +779,39 @@ pub(super) async fn handle_users_me_api_key_update(
                 return build_auth_error_response(http::StatusCode::BAD_REQUEST, detail, false);
             }
         };
-    let feature_settings = match payload.feature_settings {
-        Some(value) => match normalize_feature_settings(value) {
-            Ok(value) => Some(value),
-            Err(detail) => {
-                return build_auth_error_response(http::StatusCode::BAD_REQUEST, detail, false);
+    let current_features = if matches!(payload.routing_group_id.as_ref(), Some(Some(_))) {
+        match state
+            .read_auth_api_key_feature_settings(&auth.user.id, &snapshot.api_key_id, false)
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                return build_auth_error_response(
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("user API key feature settings lookup failed: {error:?}"),
+                    false,
+                )
             }
-        },
-        None => None,
+        }
+    } else {
+        None
+    };
+    let routing_group_patch = match validate_routing_group_patch(
+        state,
+        current_features.as_ref(),
+        payload.routing_group_id,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let feature_settings = match normalize_api_key_feature_settings_patch(payload.feature_settings)
+    {
+        Ok(value) => value,
+        Err(detail) => {
+            return build_auth_error_response(http::StatusCode::BAD_REQUEST, detail, false)
+        }
     };
     let ip_rules = match payload.ip_rules {
         Some(value) => match normalize_users_me_ip_rules(value) {
@@ -752,6 +841,11 @@ pub(super) async fn handle_users_me_api_key_update(
                 concurrent_limit_present,
                 ip_rules,
                 feature_settings,
+                routing_group_selection: Some(
+                    aether_data::repository::auth::UpdateApiKeyRoutingGroupSelection {
+                        group_id: routing_group_patch,
+                    },
+                ),
             },
         )
         .await
@@ -768,8 +862,17 @@ pub(super) async fn handle_users_me_api_key_update(
         return build_users_me_api_key_mutation_conflict_response();
     };
 
-    let mut payload =
-        build_users_me_api_key_detail_payload(state, &updated, snapshot.api_key_is_locked);
+    let group_names = routing_group_names(
+        state,
+        api_key_routing_group_id(updated.feature_settings.as_ref()).is_some(),
+    )
+    .await;
+    let mut payload = build_users_me_api_key_detail_payload(
+        state,
+        &updated,
+        snapshot.api_key_is_locked,
+        &group_names,
+    );
     payload["message"] = json!("API密钥已更新");
     Json(payload).into_response()
 }
@@ -1095,7 +1198,8 @@ mod tests {
     use axum::{response::IntoResponse, Json};
 
     use super::{
-        normalize_users_me_ip_rules, users_me_api_key_secret_response, UsersMeUpdateApiKeyRequest,
+        normalize_users_me_ip_rules, users_me_api_key_secret_response, UsersMeCreateApiKeyRequest,
+        UsersMeUpdateApiKeyRequest,
     };
     use serde_json::json;
 
@@ -1108,6 +1212,28 @@ mod tests {
             response.headers().get(axum::http::header::CACHE_CONTROL),
             Some(&axum::http::HeaderValue::from_static("no-store"))
         );
+    }
+
+    #[test]
+    fn routing_group_selection_patch_distinguishes_missing_clear_and_valid_string() {
+        let unchanged: UsersMeUpdateApiKeyRequest =
+            serde_json::from_value(json!({"name": "renamed"})).unwrap();
+        assert_eq!(unchanged.routing_group_id, None);
+        let cleared: UsersMeUpdateApiKeyRequest =
+            serde_json::from_value(json!({"routing_group_id": null})).unwrap();
+        assert_eq!(cleared.routing_group_id, Some(None));
+        let selected: UsersMeUpdateApiKeyRequest =
+            serde_json::from_value(json!({"routing_group_id": "group-1"})).unwrap();
+        assert_eq!(selected.routing_group_id, Some(Some("group-1".to_string())));
+        let created: UsersMeCreateApiKeyRequest =
+            serde_json::from_value(json!({"name": "created", "routing_group_id": "group-1"}))
+                .unwrap();
+        assert_eq!(created.routing_group_id.as_deref(), Some("group-1"));
+        for invalid in [json!(true), json!(3), json!([]), json!({})] {
+            let request = json!({"name": "invalid", "routing_group_id": invalid});
+            assert!(serde_json::from_value::<UsersMeCreateApiKeyRequest>(request.clone()).is_err());
+            assert!(serde_json::from_value::<UsersMeUpdateApiKeyRequest>(request).is_err());
+        }
     }
 
     #[test]

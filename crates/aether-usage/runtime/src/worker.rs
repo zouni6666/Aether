@@ -16,9 +16,7 @@ use crate::queue::UsageDeadLetterOutcome;
 use crate::runtime::{
     UsageBillingEventEnricher, UsageRuntimeAccess, UsageWorkerRecordConcurrencyGate,
 };
-use crate::settlement::{
-    reconcile_usage_policy_cost_for_event_with_result, settle_usage_with_reconciled_cost,
-};
+use crate::settlement::settle_usage_after_upsert;
 use crate::{
     build_upsert_usage_record_from_event, UsageEvent, UsageEventType, UsageQueue,
     UsageRuntimeConfig, UsageSettlementWriter,
@@ -796,10 +794,11 @@ pub async fn write_event_record<T>(data: &T, event: &UsageEvent) -> Result<(), D
 where
     T: UsageRecordWriter + UsageSettlementWriter + Send + Sync,
 {
-    let reconciled = reconcile_usage_policy_cost_for_event_with_result(data, event).await?;
     let record = build_upsert_usage_record_from_event(event)?;
     if let Some(stored) = data.upsert_usage_record(record).await? {
-        settle_usage_with_reconciled_cost(data, &stored, reconciled).await?;
+        // Sparse terminal events may omit pricing factors. Only the stored request
+        // snapshot is authoritative before finalizing an immutable cost reservation.
+        settle_usage_after_upsert(data, &stored, event).await?;
     }
     // Manual proxy traffic is counted at the actual transport-attempt boundary. Usage events are
     // replayable, so emitting that side effect here would count normal requests and reclaims twice.
@@ -1240,49 +1239,49 @@ mod tests {
                 .lock()
                 .expect("records lock")
                 .push(record.clone());
-            Ok(Some(
-                StoredRequestUsageAudit::new(
-                    "usage-1".to_string(),
-                    record.request_id,
-                    record.user_id,
-                    record.api_key_id,
-                    record.username,
-                    record.api_key_name,
-                    record.provider_name,
-                    record.model,
-                    record.target_model,
-                    record.provider_id,
-                    record.provider_endpoint_id,
-                    record.provider_api_key_id,
-                    record.request_type,
-                    record.api_format,
-                    record.api_family,
-                    record.endpoint_kind,
-                    record.endpoint_api_format,
-                    record.provider_api_family,
-                    record.provider_endpoint_kind,
-                    record.has_format_conversion.unwrap_or(false),
-                    record.is_stream.unwrap_or(false),
-                    record.input_tokens.unwrap_or_default() as i32,
-                    record.output_tokens.unwrap_or_default() as i32,
-                    record.total_tokens.unwrap_or_default() as i32,
-                    record.total_cost_usd.unwrap_or_default(),
-                    record.actual_total_cost_usd.unwrap_or_default(),
-                    record.status_code.map(i32::from),
-                    record.error_message,
-                    record.error_category,
-                    record.response_time_ms.map(|value| value as i32),
-                    record.first_byte_time_ms.map(|value| value as i32),
-                    record.status,
-                    record.billing_status,
-                    record
-                        .created_at_unix_ms
-                        .unwrap_or(record.updated_at_unix_secs) as i64,
-                    record.updated_at_unix_secs as i64,
-                    record.finalized_at_unix_secs.map(|value| value as i64),
-                )
-                .expect("stored usage should build"),
-            ))
+            let mut stored = StoredRequestUsageAudit::new(
+                "usage-1".to_string(),
+                record.request_id,
+                record.user_id,
+                record.api_key_id,
+                record.username,
+                record.api_key_name,
+                record.provider_name,
+                record.model,
+                record.target_model,
+                record.provider_id,
+                record.provider_endpoint_id,
+                record.provider_api_key_id,
+                record.request_type,
+                record.api_format,
+                record.api_family,
+                record.endpoint_kind,
+                record.endpoint_api_format,
+                record.provider_api_family,
+                record.provider_endpoint_kind,
+                record.has_format_conversion.unwrap_or(false),
+                record.is_stream.unwrap_or(false),
+                record.input_tokens.unwrap_or_default() as i32,
+                record.output_tokens.unwrap_or_default() as i32,
+                record.total_tokens.unwrap_or_default() as i32,
+                record.total_cost_usd.unwrap_or_default(),
+                record.actual_total_cost_usd.unwrap_or_default(),
+                record.status_code.map(i32::from),
+                record.error_message,
+                record.error_category,
+                record.response_time_ms.map(|value| value as i32),
+                record.first_byte_time_ms.map(|value| value as i32),
+                record.status,
+                record.billing_status,
+                record
+                    .created_at_unix_ms
+                    .unwrap_or(record.updated_at_unix_secs) as i64,
+                record.updated_at_unix_secs as i64,
+                record.finalized_at_unix_secs.map(|value| value as i64),
+            )
+            .expect("stored usage should build");
+            stored.request_metadata = record.request_metadata;
+            Ok(Some(stored))
         }
     }
 
@@ -1510,7 +1509,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn same_request_id_terminal_events_reconcile_each_reservation_token_before_upsert() {
+    async fn same_request_id_terminal_events_reconcile_each_persisted_reservation_token() {
         let store = TestUsageStore::default();
         let mut first = sample_event();
         first.request_id = "shared-client-trace".to_string();
@@ -1619,7 +1618,12 @@ mod tests {
         worker.queue.ensure_consumer_group().await.expect("group");
         let mut event = sample_event();
         event.data.request_metadata = Some(serde_json::json!({
-            "plan_usage_reservation_token": "pricing-retry-reservation"
+            "plan_usage_reservation_token": "pricing-retry-reservation",
+            "billing_multiplier_snapshot": {
+                "version": 1,
+                "factors": {"routing_group": 3.0, "promotion": 0.5},
+                "multiplier": 1.5
+            }
         }));
         worker.queue.enqueue(&event).await.expect("enqueue");
         let batch = worker
@@ -1676,17 +1680,27 @@ mod tests {
             assert_eq!(records[0].total_cost_usd, Some(0.456));
             assert_eq!(records[0].actual_total_cost_usd, Some(0.123));
             assert_eq!(records[0].total_tokens, Some(10));
+            assert_eq!(
+                records[0].request_metadata.as_ref().unwrap()["billing_multiplier_snapshot"]
+                    ["multiplier"],
+                1.5
+            );
         }
         {
             let reconciliations = store.reconciliations.lock().expect("reconciliations lock");
             assert_eq!(reconciliations.len(), 1);
-            assert_eq!(reconciliations[0].actual_cost_units, 12_300_000);
+            assert_eq!(reconciliations[0].actual_cost_units, 68_400_000);
             assert_eq!(
                 reconciliations[0].reservation_token,
                 "pricing-retry-reservation"
             );
         }
-        assert_eq!(store.settlements.lock().expect("settlements lock").len(), 1);
+        {
+            let settlements = store.settlements.lock().expect("settlements lock");
+            assert_eq!(settlements.len(), 1);
+            assert_eq!(settlements[0].billing_cost_usd, Some(0.456 * 1.5));
+            assert_eq!(settlements[0].actual_total_cost_usd, 0.123);
+        }
         assert_eq!(
             store.enrich_calls.lock().expect("enrich calls lock").len(),
             2

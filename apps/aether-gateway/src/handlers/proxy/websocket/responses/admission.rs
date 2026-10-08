@@ -11,7 +11,8 @@ use aether_contracts::ExecutionPlan;
 
 use crate::execution_runtime::acquire_upstream_execution_gate;
 use crate::provider_pool_demand::{
-    acquire_provider_pool_execution_guard, ProviderPoolInFlightAdmission, ProviderPoolInFlightGuard,
+    acquire_provider_pool_execution_guard, acquire_provider_pool_execution_guard_unobserved,
+    ProviderPoolInFlightAdmission, ProviderPoolInFlightGuard,
 };
 use crate::upstream_admission::UpstreamTargetAdmissionPermit;
 use crate::{AppState, GatewayError};
@@ -28,6 +29,7 @@ impl ResponsesWebSocketTurnAdmission {
         state: &AppState,
         plan: &ExecutionPlan,
         trace_id: &str,
+        observation_context: Option<&serde_json::Value>,
     ) -> Result<Self, GatewayError> {
         let upstream_execution = acquire_upstream_execution_gate(state, trace_id).await?;
         let upstream_target = match state
@@ -41,7 +43,13 @@ impl ResponsesWebSocketTurnAdmission {
                 return Err(error);
             }
         };
-        let provider_pool = match acquire_provider_pool_execution_guard(state, plan).await? {
+        let provider_admission = match observation_context {
+            Some(context) => {
+                acquire_provider_pool_execution_guard(state, plan, Some(context)).await?
+            }
+            None => acquire_provider_pool_execution_guard_unobserved(state, plan).await?,
+        };
+        let provider_pool = match provider_admission {
             ProviderPoolInFlightAdmission::Acquired(guard) => guard,
             ProviderPoolInFlightAdmission::Saturated { limit } => {
                 drop(upstream_target);

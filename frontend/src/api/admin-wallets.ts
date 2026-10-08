@@ -94,12 +94,13 @@ export interface RefundCompleteRequest {
 
 export const adminWalletApi = {
   async listWallets(params?: {
+    user_id?: string
     status?: string
     owner_type?: 'user' | 'api_key'
     limit?: number
     offset?: number
-  }): Promise<AdminWalletListResponse> {
-    const response = await apiClient.get<AdminWalletListResponse>('/api/admin/wallets', { params })
+  }, signal?: AbortSignal): Promise<AdminWalletListResponse> {
+    const response = await apiClient.get<AdminWalletListResponse>('/api/admin/wallets', { params, signal })
     return response.data
   },
 
@@ -183,11 +184,12 @@ export const adminWalletApi = {
 
   async getWalletTransactions(
     walletId: string,
-    params?: { limit?: number; offset?: number }
+    params?: { limit?: number; offset?: number },
+    signal?: AbortSignal,
   ): Promise<AdminWalletTransactionsResponse> {
     const response = await apiClient.get<AdminWalletTransactionsResponse>(
       `/api/admin/wallets/${walletId}/transactions`,
-      { params }
+      { params, signal }
     )
     return response.data
   },

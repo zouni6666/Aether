@@ -527,6 +527,7 @@ fn settlement_input(index: usize) -> UsageSettlementInput {
         billing_status: "pending".to_string(),
         total_cost_usd: 0.0,
         actual_total_cost_usd: COST_PER_REQUEST_USD,
+        billing_cost_usd: None,
         finalized_at_unix_secs: Some(now_unix_secs().saturating_add(index as u64)),
     }
 }

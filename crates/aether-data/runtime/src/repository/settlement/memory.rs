@@ -10,7 +10,7 @@ use super::{
     ReserveUsagePolicyCostInput, ReserveUsagePolicyCostOutcome, ReserveUsagePolicyRequestInput,
     ReserveUsagePolicyRequestOutcome, SettlementWriteRepository, StoredUsagePolicyCostReservation,
     StoredUsagePolicyRequestAdmission, StoredUsageSettlement, UsagePolicyCostReservationState,
-    UsagePolicyRequestAdmissionState, UsageSettlementInput, SETTLEMENT_EPSILON_USD,
+    UsagePolicyRequestAdmissionState, UsageSettlementInput,
 };
 use crate::repository::wallet::{InMemoryWalletRepository, StoredWalletSnapshot};
 use crate::DataLayerError;
@@ -511,9 +511,7 @@ impl SettlementWriteRepository for InMemorySettlementRepository {
                 settlement.wallet_recharge_balance_after = Some(wallet.balance);
                 settlement.wallet_gift_balance_after = Some(wallet.gift_balance);
                 settlement.wallet_balance_after = Some(wallet.balance + wallet.gift_balance);
-            } else if final_billing_status == "settled"
-                && billable_cost_usd > SETTLEMENT_EPSILON_USD
-            {
+            } else if final_billing_status == "settled" && billable_cost_usd > 0.0 {
                 final_billing_status = "insufficient_quota".to_string();
                 settlement.billing_status = final_billing_status.clone();
             }
@@ -1088,6 +1086,116 @@ mod tests {
         .expect("wallet should build")
     }
 
+    fn group_billed_input(request_id: &str) -> UsageSettlementInput {
+        UsageSettlementInput {
+            request_id: request_id.to_string(),
+            user_id: Some("user-1".to_string()),
+            api_key_id: Some("key-1".to_string()),
+            api_key_is_standalone: false,
+            provider_id: Some("provider-1".to_string()),
+            status: "completed".to_string(),
+            billing_status: "pending".to_string(),
+            total_cost_usd: 2.0,
+            actual_total_cost_usd: 0.5,
+            billing_cost_usd: Some(3.0),
+            finalized_at_unix_secs: Some(200),
+        }
+    }
+
+    #[tokio::test]
+    async fn group_customer_charge_debits_user_wallet_once_without_inflating_provider_cost() {
+        let repository =
+            InMemorySettlementRepository::seed(vec![sample_user_wallet("user-wallet", "user-1")]);
+        let input = group_billed_input("group-billed-user");
+        let first = repository
+            .settle_usage(input.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.wallet_id.as_deref(), Some("user-wallet"));
+        assert_eq!(first.wallet_balance_before, Some(12.0));
+        assert_eq!(first.wallet_balance_after, Some(9.0));
+        assert_eq!(first.provider_monthly_used_usd, Some(0.5));
+        assert_eq!(repository.settle_usage(input).await.unwrap(), Some(first));
+
+        repository.wallets.with_mut(|wallets| {
+            let wallet = &wallets["user-wallet"];
+            assert_eq!(wallet.balance, 7.0);
+            assert_eq!(wallet.gift_balance, 2.0);
+            assert_eq!(wallet.total_consumed, 3.0);
+        });
+        assert_eq!(
+            repository.provider_monthly_used.read().unwrap()["provider-1"],
+            0.5
+        );
+    }
+
+    #[tokio::test]
+    async fn zero_group_customer_charge_keeps_wallet_unchanged_and_records_provider_cost() {
+        let repository =
+            InMemorySettlementRepository::seed(vec![sample_user_wallet("user-wallet", "user-1")]);
+        let mut input = group_billed_input("group-billed-free");
+        input.billing_cost_usd = Some(0.0);
+        let first = repository
+            .settle_usage(input.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.billing_status, "settled");
+        assert_eq!(first.wallet_balance_before, Some(12.0));
+        assert_eq!(first.wallet_balance_after, Some(12.0));
+        assert_eq!(first.provider_monthly_used_usd, Some(0.5));
+        assert_eq!(repository.settle_usage(input).await.unwrap(), Some(first));
+        repository.wallets.with_mut(|wallets| {
+            let wallet = &wallets["user-wallet"];
+            assert_eq!(wallet.balance, 10.0);
+            assert_eq!(wallet.gift_balance, 2.0);
+            assert_eq!(wallet.total_consumed, 0.0);
+        });
+        assert_eq!(
+            repository.provider_monthly_used.read().unwrap()["provider-1"],
+            0.5
+        );
+    }
+
+    #[tokio::test]
+    async fn standalone_key_wallet_pays_group_customer_charge_without_debiting_owner() {
+        let repository = InMemorySettlementRepository::seed(vec![
+            sample_wallet(),
+            sample_user_wallet("owner-wallet", "user-1"),
+        ]);
+        let mut input = group_billed_input("group-billed-standalone");
+        input.api_key_is_standalone = true;
+        let settlement = repository.settle_usage(input).await.unwrap().unwrap();
+        assert_eq!(settlement.wallet_id.as_deref(), Some("wallet-1"));
+        assert_eq!(settlement.wallet_balance_after, Some(9.0));
+        assert_eq!(settlement.provider_monthly_used_usd, Some(0.5));
+        repository.wallets.with_mut(|wallets| {
+            assert_eq!(wallets["wallet-1"].balance, 7.0);
+            assert_eq!(wallets["wallet-1"].total_consumed, 3.0);
+            assert_eq!(wallets["owner-wallet"].balance, 10.0);
+            assert_eq!(wallets["owner-wallet"].gift_balance, 2.0);
+            assert_eq!(wallets["owner-wallet"].total_consumed, 0.0);
+        });
+    }
+
+    #[tokio::test]
+    async fn invalid_customer_charge_rejects_settlement_before_mutating_financial_state() {
+        for charge in [-0.01, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let repository = InMemorySettlementRepository::seed(vec![sample_wallet()]);
+            let mut input = group_billed_input("group-billed-invalid");
+            input.billing_cost_usd = Some(charge);
+            assert!(repository.settle_usage(input).await.is_err());
+            repository.wallets.with_mut(|wallets| {
+                assert_eq!(wallets["wallet-1"].balance, 10.0);
+                assert_eq!(wallets["wallet-1"].gift_balance, 2.0);
+                assert_eq!(wallets["wallet-1"].total_consumed, 0.0);
+            });
+            assert!(repository.provider_monthly_used.read().unwrap().is_empty());
+            assert!(repository.settlements.read().unwrap().is_empty());
+        }
+    }
+
     #[tokio::test]
     async fn settles_usage_against_wallet_and_provider_quota() {
         let repository = InMemorySettlementRepository::seed(vec![sample_wallet()]);
@@ -1102,6 +1210,7 @@ mod tests {
                 billing_status: "pending".to_string(),
                 total_cost_usd: 3.0,
                 actual_total_cost_usd: 6.0,
+                billing_cost_usd: None,
                 finalized_at_unix_secs: Some(200),
             })
             .await
@@ -1129,6 +1238,7 @@ mod tests {
                 billing_status: "pending".to_string(),
                 total_cost_usd: 3.0,
                 actual_total_cost_usd: 6.0,
+                billing_cost_usd: None,
                 finalized_at_unix_secs: Some(200),
             })
             .await
@@ -1154,6 +1264,7 @@ mod tests {
                 billing_status: "pending".to_string(),
                 total_cost_usd: 3.0,
                 actual_total_cost_usd: 6.0,
+                billing_cost_usd: None,
                 finalized_at_unix_secs: Some(200),
             })
             .await
@@ -1183,6 +1294,7 @@ mod tests {
                 billing_status: "pending".to_string(),
                 total_cost_usd: 3.0,
                 actual_total_cost_usd: 1.5,
+                billing_cost_usd: None,
                 finalized_at_unix_secs: Some(200),
             })
             .await
@@ -1209,6 +1321,7 @@ mod tests {
                 billing_status: "pending".to_string(),
                 total_cost_usd: 3.0,
                 actual_total_cost_usd: 15.0,
+                billing_cost_usd: None,
                 finalized_at_unix_secs: Some(200),
             })
             .await
@@ -1236,6 +1349,7 @@ mod tests {
             billing_status: "pending".to_string(),
             total_cost_usd: 3.0,
             actual_total_cost_usd: 6.0,
+            billing_cost_usd: None,
             finalized_at_unix_secs: Some(200),
         };
 
@@ -1265,6 +1379,7 @@ mod tests {
             billing_status: "pending".to_string(),
             total_cost_usd: 3.0,
             actual_total_cost_usd: 6.0,
+            billing_cost_usd: None,
             finalized_at_unix_secs: Some(200),
         };
         let mut tasks = Vec::new();
@@ -1305,6 +1420,7 @@ mod tests {
                     billing_status: "pending".to_string(),
                     total_cost_usd: 1.0,
                     actual_total_cost_usd: 1.0,
+                    billing_cost_usd: None,
                     finalized_at_unix_secs: Some(200),
                 })
                 .await;
@@ -1336,6 +1452,7 @@ mod tests {
                 billing_status: "pending".to_string(),
                 total_cost_usd: 2.0,
                 actual_total_cost_usd: 1.0,
+                billing_cost_usd: None,
                 finalized_at_unix_secs: Some(250),
             })
             .await
@@ -1353,6 +1470,7 @@ mod tests {
                 billing_status: "settled".to_string(),
                 total_cost_usd: 2.0,
                 actual_total_cost_usd: 1.0,
+                billing_cost_usd: None,
                 finalized_at_unix_secs: Some(250),
             })
             .await

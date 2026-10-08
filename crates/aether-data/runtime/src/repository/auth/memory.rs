@@ -229,6 +229,24 @@ impl InMemoryAuthApiKeySnapshotRepository {
             .unwrap_or(0)
     }
 
+    pub fn standalone_flags(&self) -> BTreeMap<String, bool> {
+        let index = self
+            .index
+            .read()
+            .expect("auth api key snapshot repository lock");
+        index
+            .export_by_api_key_id
+            .iter()
+            .map(|(id, record)| (id.clone(), record.is_standalone))
+            .chain(
+                index
+                    .by_api_key_id
+                    .iter()
+                    .map(|(id, snapshot)| (id.clone(), snapshot.api_key_is_standalone)),
+            )
+            .collect()
+    }
+
     pub fn snapshot_lookup_count(&self, api_key_id: &str) -> usize {
         self.index
             .read()
@@ -1006,8 +1024,13 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
                 export.ip_rules = ip_rules;
             }
         }
-        if let Some(feature_settings) = record.feature_settings {
-            if let Some(export) = index.export_by_api_key_id.get_mut(&record.api_key_id) {
+        if let Some(export) = index.export_by_api_key_id.get_mut(&record.api_key_id) {
+            if let Some(selection) = record.routing_group_selection {
+                export.feature_settings = selection.merge_feature_settings(
+                    export.feature_settings.as_ref(),
+                    record.feature_settings,
+                );
+            } else if let Some(feature_settings) = record.feature_settings {
                 export.feature_settings = match feature_settings {
                     Some(serde_json::Value::Null) | None => None,
                     Some(value) => Some(value),
@@ -1071,8 +1094,13 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
                 export.ip_rules = ip_rules;
             }
         }
-        if let Some(feature_settings) = record.feature_settings {
-            if let Some(export) = index.export_by_api_key_id.get_mut(&record.api_key_id) {
+        if let Some(export) = index.export_by_api_key_id.get_mut(&record.api_key_id) {
+            if let Some(selection) = record.routing_group_selection {
+                export.feature_settings = selection.merge_feature_settings(
+                    export.feature_settings.as_ref(),
+                    record.feature_settings,
+                );
+            } else if let Some(feature_settings) = record.feature_settings {
                 export.feature_settings = match feature_settings {
                     Some(serde_json::Value::Null) | None => None,
                     Some(value) => Some(value),
@@ -2018,6 +2046,7 @@ mod tests {
                 concurrent_limit_present: false,
                 ip_rules: None,
                 feature_settings: Some(Some(serde_json::json!({"must_not_change": true}))),
+                routing_group_selection: None,
             })
             .await
             .expect("locked basic update should resolve")
@@ -2085,6 +2114,7 @@ mod tests {
                 concurrent_limit_present: false,
                 ip_rules: None,
                 feature_settings: Some(Some(serde_json::json!({"admin": true}))),
+                routing_group_selection: None,
             })
             .await
             .expect("administrator update should resolve")
@@ -2099,6 +2129,43 @@ mod tests {
             .await
             .expect("admin status update should resolve")
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn standalone_flags_cover_export_only_keys_and_remove_deleted_keys() {
+        let mut standalone = sample_snapshot("standalone-key", "user-1");
+        standalone.api_key_is_standalone = true;
+        let repository = InMemoryAuthApiKeySnapshotRepository::seed([
+            (None, sample_snapshot("member-key", "user-1")),
+            (None, standalone),
+        ]);
+        let mut export = repository
+            .list_export_api_keys_by_ids(&["standalone-key".into()])
+            .await
+            .unwrap()
+            .remove(0);
+        export.api_key_id = "export-only-key".into();
+        let repository = repository.with_export_records([export]);
+
+        assert_eq!(
+            repository.standalone_flags(),
+            std::collections::BTreeMap::from([
+                ("member-key".into(), false),
+                ("standalone-key".into(), true),
+                ("export-only-key".into(), true),
+            ])
+        );
+        assert!(repository
+            .delete_standalone_api_key("standalone-key")
+            .await
+            .unwrap());
+        assert_eq!(
+            repository.standalone_flags(),
+            std::collections::BTreeMap::from([
+                ("member-key".into(), false),
+                ("export-only-key".into(), true),
+            ])
+        );
     }
 
     #[tokio::test]
@@ -2309,6 +2376,130 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn user_key_feature_and_group_updates_merge_against_the_locked_current_record() {
+        use super::super::UpdateApiKeyRoutingGroupSelection;
+
+        fn patch() -> UpdateUserApiKeyBasicRecord {
+            UpdateUserApiKeyBasicRecord {
+                user_id: "user-1".into(),
+                api_key_id: "key-1".into(),
+                key_encrypted: None,
+                key_encrypted_present: false,
+                name: None,
+                name_present: false,
+                rate_limit: None,
+                rate_limit_present: false,
+                concurrent_limit: None,
+                concurrent_limit_present: false,
+                ip_rules: None,
+                feature_settings: None,
+                routing_group_selection: Some(UpdateApiKeyRoutingGroupSelection { group_id: None }),
+            }
+        }
+
+        // Both repository entry points must apply the same merge, with the
+        // self-service entry point additionally fencing locked keys.
+        for require_unlocked in [false, true] {
+            let repository = InMemoryAuthApiKeySnapshotRepository::seed([(
+                None,
+                sample_snapshot("key-1", "user-1"),
+            )]);
+            repository.set_user_api_key_feature_settings("user-1", "key-1", Some(serde_json::json!({
+                "routing_group_id": "group-a", "routing_group_name": "stale-name", "pii": {"enabled": false},
+            }))).await.unwrap().unwrap();
+            async fn apply(
+                repository: &InMemoryAuthApiKeySnapshotRepository,
+                record: UpdateUserApiKeyBasicRecord,
+                require_unlocked: bool,
+            ) -> StoredAuthApiKeyExportRecord {
+                if require_unlocked {
+                    repository
+                        .update_user_api_key_basic_if_unlocked(record)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                } else {
+                    repository
+                        .update_user_api_key_basic(record)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                }
+            }
+
+            // The PII request is prepared while A is selected, but another
+            // request selects B before that prepared replacement is committed.
+            let mut prepared_pii = patch();
+            prepared_pii.feature_settings = Some(Some(serde_json::json!({
+                "pii": {"enabled": true}, "routing_group_id": "group-a", "routing_group_name": "injected-name",
+            })));
+            let mut select_b = patch();
+            select_b.routing_group_selection.as_mut().unwrap().group_id =
+                Some(Some("group-b".into()));
+            apply(&repository, select_b, require_unlocked).await;
+            let merged = apply(&repository, prepared_pii, require_unlocked).await;
+            assert_eq!(
+                merged.feature_settings,
+                Some(serde_json::json!({
+                    "pii": {"enabled": true}, "routing_group_id": "group-b",
+                }))
+            );
+
+            // Conversely a group-only request prepared before a feature change
+            // must preserve the latest feature object when it reaches storage.
+            let mut prepared_group = patch();
+            prepared_group
+                .routing_group_selection
+                .as_mut()
+                .unwrap()
+                .group_id = Some(Some("group-c".into()));
+            let mut latest_pii = patch();
+            latest_pii.feature_settings = Some(Some(
+                serde_json::json!({ "pii": { "enabled": false, "mode": "strict" } }),
+            ));
+            apply(&repository, latest_pii, require_unlocked).await;
+            let merged = apply(&repository, prepared_group, require_unlocked).await;
+            assert_eq!(
+                merged.feature_settings,
+                Some(serde_json::json!({
+                    "pii": {"enabled": false, "mode": "strict"}, "routing_group_id": "group-c",
+                }))
+            );
+
+            let mut clear_features = patch();
+            clear_features.feature_settings = Some(None);
+            let cleared = apply(&repository, clear_features, require_unlocked).await;
+            assert_eq!(
+                cleared.feature_settings,
+                Some(serde_json::json!({"routing_group_id": "group-c"}))
+            );
+            let mut clear_group = patch();
+            clear_group
+                .routing_group_selection
+                .as_mut()
+                .unwrap()
+                .group_id = Some(None);
+            assert!(apply(&repository, clear_group, require_unlocked)
+                .await
+                .feature_settings
+                .is_none());
+
+            // Administrative callers can still replace the complete document.
+            let mut admin = patch();
+            admin.routing_group_selection = None;
+            admin.feature_settings = Some(Some(
+                serde_json::json!({ "routing_group_id": "admin-group", "admin": true }),
+            ));
+            assert_eq!(
+                apply(&repository, admin, require_unlocked)
+                    .await
+                    .feature_settings,
+                Some(serde_json::json!({ "routing_group_id": "admin-group", "admin": true }))
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn update_user_api_key_basic_updates_concurrent_limit() {
         let repository = InMemoryAuthApiKeySnapshotRepository::seed(vec![(
             Some("hash-1".to_string()),
@@ -2329,6 +2520,7 @@ mod tests {
                 concurrent_limit_present: true,
                 ip_rules: None,
                 feature_settings: None,
+                routing_group_selection: None,
             })
             .await
             .expect("update should succeed")
@@ -2364,6 +2556,7 @@ mod tests {
                 concurrent_limit_present: true,
                 ip_rules: None,
                 feature_settings: None,
+                routing_group_selection: None,
             })
             .await
             .expect("nullable values should clear")
@@ -2386,6 +2579,7 @@ mod tests {
                 concurrent_limit_present: false,
                 ip_rules: None,
                 feature_settings: None,
+                routing_group_selection: None,
             })
             .await
             .expect("zero rate limit should persist")

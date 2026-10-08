@@ -769,6 +769,7 @@ async fn register_codex_agent_identity_from_access_token_with_auth_api_base_url(
         .map_err(|_| CodexAgentIdentityEnrollmentError::KeyGenerationFailed)?;
     let agent_private_key = STANDARD.encode(private_key_der.as_bytes());
     let agent_public_key = agent_identity_ssh_public_key(&signing_key);
+    let client_profile = aether_ai_formats::codex_client_profile();
     let registration_url = agent_registration_url(auth_api_base_url)
         .map_err(|_| CodexAgentIdentityEnrollmentError::RegistrationRequestFailed)?;
     let mut headers = BTreeMap::from([
@@ -778,14 +779,8 @@ async fn register_codex_agent_identity_from_access_token_with_auth_api_base_url(
             "authorization".to_string(),
             format!("Bearer {access_token}"),
         ),
-        (
-            "user-agent".to_string(),
-            aether_ai_formats::codex_client_user_agent(),
-        ),
-        (
-            "originator".to_string(),
-            aether_ai_formats::codex_client_originator(),
-        ),
+        ("user-agent".to_string(), client_profile.user_agent.clone()),
+        ("originator".to_string(), client_profile.originator.clone()),
     ]);
     if options.is_fedramp_account {
         headers.insert("x-openai-fedramp".to_string(), "true".to_string());
@@ -799,7 +794,7 @@ async fn register_codex_agent_identity_from_access_token_with_auth_api_base_url(
             content_type: Some("application/json".to_string()),
             json_body: Some(json!({
                 "abom": {
-                    "agent_version": aether_ai_formats::codex_client_version(),
+                    "agent_version": client_profile.codex_version,
                     "agent_harness_id": CODEX_AGENT_IDENTITY_AGENT_HARNESS_ID,
                     "running_location": format!("cli-{}", std::env::consts::OS),
                 },

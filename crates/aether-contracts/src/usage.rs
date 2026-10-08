@@ -4,8 +4,28 @@ use serde::{Deserialize, Serialize};
 
 pub const USAGE_SERVER_NOW_UNIX_MS_HEADER: &str = "x-aether-server-now-unix-ms";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageTokenSource {
+    Reported,
+    Estimated,
+    Mixed,
+}
+
+impl UsageTokenSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Reported => "reported",
+            Self::Estimated => "estimated",
+            Self::Mixed => "mixed",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct StandardizedUsage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_source: Option<UsageTokenSource>,
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub cache_creation_tokens: i64,
@@ -28,6 +48,7 @@ impl StandardizedUsage {
 
     pub fn get(&self, field_name: &str) -> Option<serde_json::Value> {
         match field_name {
+            "token_source" => self.token_source.map(|source| serde_json::json!(source)),
             "input_tokens" => Some(serde_json::json!(self.input_tokens)),
             "output_tokens" => Some(serde_json::json!(self.output_tokens)),
             "cache_creation_tokens" => Some(serde_json::json!(self.cache_creation_tokens)),
@@ -49,6 +70,7 @@ impl StandardizedUsage {
     pub fn set(&mut self, field_name: &str, value: impl Into<serde_json::Value>) {
         let value = value.into();
         match field_name {
+            "token_source" => self.token_source = serde_json::from_value(value).ok(),
             "input_tokens" => self.input_tokens = as_i64(&value, 0),
             "output_tokens" => self.output_tokens = as_i64(&value, 0),
             "cache_creation_tokens" => self.cache_creation_tokens = as_i64(&value, 0),
@@ -159,7 +181,45 @@ fn as_f64(value: &serde_json::Value, default: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExecutionStreamTerminalSummary, StandardizedUsage};
+    use super::{ExecutionStreamTerminalSummary, StandardizedUsage, UsageTokenSource};
+
+    #[test]
+    fn token_source_survives_wire_roundtrip_without_affecting_usage_completeness() {
+        let mut estimated = StandardizedUsage::new();
+        estimated.set("token_source", "estimated");
+        assert!(!estimated.has_token_signal());
+        assert!(estimated.dimensions.is_empty());
+        assert_eq!(estimated.token_source, Some(UsageTokenSource::Estimated));
+        estimated.output_tokens = 17;
+        let score = estimated.signal_score();
+        let summary = ExecutionStreamTerminalSummary {
+            standardized_usage: Some(estimated),
+            ..Default::default()
+        };
+        let encoded = serde_json::to_value(&summary).unwrap();
+        assert_eq!(encoded["standardized_usage"]["token_source"], "estimated");
+        let decoded: ExecutionStreamTerminalSummary = serde_json::from_value(encoded).unwrap();
+        let decoded = decoded.standardized_usage.unwrap();
+        assert_eq!(decoded.token_source.unwrap().as_str(), "estimated");
+        assert_eq!(decoded.signal_score(), score);
+        let complete = StandardizedUsage {
+            input_tokens: 29,
+            output_tokens: 17,
+            ..StandardizedUsage::new()
+        };
+        assert_eq!(
+            StandardizedUsage::choose_more_complete(Some(decoded), Some(complete.clone())),
+            Some(complete)
+        );
+        let legacy = serde_json::to_value(StandardizedUsage::new()).unwrap();
+        assert!(legacy.get("token_source").is_none());
+        assert_eq!(
+            serde_json::from_value::<StandardizedUsage>(legacy)
+                .unwrap()
+                .token_source,
+            None
+        );
+    }
 
     #[test]
     fn standardized_usage_prefers_more_complete_candidate() {

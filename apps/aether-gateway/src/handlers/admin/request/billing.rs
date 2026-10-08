@@ -121,6 +121,7 @@ impl<'a> AdminAppState<'a> {
 
     pub(crate) async fn list_admin_wallets(
         &self,
+        user_id: Option<&str>,
         status: Option<&str>,
         owner_type: Option<&str>,
         limit: usize,
@@ -133,7 +134,7 @@ impl<'a> AdminAppState<'a> {
         GatewayError,
     > {
         self.app
-            .list_admin_wallets(status, owner_type, limit, offset)
+            .list_admin_wallets(user_id, status, owner_type, limit, offset)
             .await
     }
 

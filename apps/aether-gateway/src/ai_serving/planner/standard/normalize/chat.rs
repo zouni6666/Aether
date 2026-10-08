@@ -112,6 +112,22 @@ pub(crate) fn build_cross_format_openai_chat_request_body(
     Some(provider_request_body)
 }
 
+pub(crate) fn build_cross_format_openai_chat_upstream_url(
+    parts: &http::request::Parts,
+    transport: &GatewayProviderTransportSnapshot,
+    mapped_model: &str,
+    provider_api_format: &str,
+    upstream_is_stream: bool,
+) -> Option<String> {
+    crate::ai_serving::transport::build_cross_format_openai_chat_upstream_url(
+        transport,
+        mapped_model,
+        provider_api_format,
+        upstream_is_stream,
+        parts.uri.query(),
+    )
+}
+
 #[cfg(test)]
 mod antigravity_schema_tests {
     use super::*;
@@ -146,20 +162,4 @@ mod antigravity_schema_tests {
             }
         }
     }
-}
-
-pub(crate) fn build_cross_format_openai_chat_upstream_url(
-    parts: &http::request::Parts,
-    transport: &GatewayProviderTransportSnapshot,
-    mapped_model: &str,
-    provider_api_format: &str,
-    upstream_is_stream: bool,
-) -> Option<String> {
-    crate::ai_serving::transport::build_cross_format_openai_chat_upstream_url(
-        transport,
-        mapped_model,
-        provider_api_format,
-        upstream_is_stream,
-        parts.uri.query(),
-    )
 }

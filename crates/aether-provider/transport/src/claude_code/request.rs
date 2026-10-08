@@ -49,23 +49,50 @@ pub fn build_claude_code_passthrough_headers(
         out.insert("anthropic-beta".to_string(), incoming_beta_values.join(","));
     }
 
-    let profile = *current_claude_code_transport_identity_profile();
+    let profile = current_claude_code_transport_identity_profile();
     profile.apply_fixed_headers(&mut out, stream);
     profile.apply_beta_policy(&mut out, None);
 
     out
 }
 
+/// Reconcile header/body identity using one immutable profile at the common
+/// outbound boundary. Preserve the planner's content negotiation and count-token contract.
+pub fn finalize_claude_code_request_identity(
+    headers: &mut BTreeMap<String, String>,
+    body: &mut Value,
+    profile: &ClaudeCodeTransportIdentityProfile,
+    operation: Option<aether_ai_formats::ApiOperation>,
+) {
+    let accept = headers.get("accept").cloned();
+    let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false)
+        || accept
+            .as_deref()
+            .is_some_and(|v| v.contains("text/event-stream"));
+    profile.apply_fixed_headers(headers, stream);
+    if stream {
+        crate::headers::force_identity_accept_encoding(headers);
+    }
+    profile.apply_beta_policy(headers, operation);
+    if let Some(accept) = accept {
+        headers.insert("accept".to_string(), accept);
+    }
+    if operation != Some(aether_ai_formats::ApiOperation::ClaudeCountTokens) {
+        let beta = headers.get("anthropic-beta").cloned().unwrap_or_default();
+        sanitize_claude_code_request_body_for_beta_header(body, &beta, profile);
+    }
+}
+
 pub fn sanitize_claude_code_request_body(body: &mut Value) {
-    let profile = *current_claude_code_transport_identity_profile();
+    let profile = current_claude_code_transport_identity_profile();
     let beta_header = profile.merge_beta_tokens(None, None);
-    sanitize_claude_code_request_body_for_beta_header(body, &beta_header, profile);
+    sanitize_claude_code_request_body_for_beta_header(body, &beta_header, &profile);
 }
 
 pub fn sanitize_claude_code_request_body_for_beta_header(
     body: &mut Value,
     beta_header: &str,
-    profile: ClaudeCodeTransportIdentityProfile,
+    profile: &ClaudeCodeTransportIdentityProfile,
 ) {
     let Some(body_object) = body.as_object_mut() else {
         return;
@@ -303,7 +330,7 @@ mod tests {
 
     #[test]
     fn context_management_body_is_gated_by_the_matching_beta_token() {
-        let profile = *current_claude_code_transport_identity_profile();
+        let profile = current_claude_code_transport_identity_profile();
         let original = json!({
             "context_management": {
                 "edits": [{"type":"clear_thinking_20251015", "keep":"all"}]
@@ -315,7 +342,7 @@ mod tests {
         sanitize_claude_code_request_body_for_beta_header(
             &mut without_beta,
             "oauth-2025-04-20",
-            profile,
+            &profile,
         );
         assert!(without_beta.get("context_management").is_none());
 
@@ -323,7 +350,7 @@ mod tests {
         sanitize_claude_code_request_body_for_beta_header(
             &mut with_beta,
             "oauth-2025-04-20, context-management-2025-06-27",
-            profile,
+            &profile,
         );
         assert_eq!(with_beta, original);
     }
@@ -369,5 +396,57 @@ mod tests {
             body["system"][0]["text"],
             "x-anthropic-billing-header: cc_version=2.1.284.abc; cc_entrypoint=cli;"
         );
+    }
+}
+#[cfg(test)]
+mod final_identity_tests {
+    use super::*;
+    use crate::claude_code::{ClaudeCodeClientProfile, CLAUDE_CODE_TRANSPORT_IDENTITY_2026_04};
+    use std::sync::Arc;
+    fn profile() -> ClaudeCodeTransportIdentityProfile {
+        ClaudeCodeTransportIdentityProfile::new(
+            &CLAUDE_CODE_TRANSPORT_IDENTITY_2026_04,
+            Arc::new(ClaudeCodeClientProfile::cli("2.1.286").unwrap()),
+        )
+    }
+    #[test]
+    fn terminal_snapshot_reconciles_billing_and_headers_without_changing_negotiation() {
+        let mut headers = BTreeMap::from([
+            ("accept".into(), "text/event-stream".into()),
+            ("User-Agent".into(), "old-client".into()),
+            ("X-Stainless-Package-Version".into(), "old-sdk".into()),
+            ("Anthropic-Beta".into(), "custom-beta".into()),
+        ]);
+        let mut body = serde_json::json!({"stream":true, "system":[{"type":"text", "text":"x-anthropic-billing-header: cc_version=2.1.280.abc; cc_entrypoint=cli;"}]});
+        finalize_claude_code_request_identity(&mut headers, &mut body, &profile(), None);
+        assert_eq!(headers["user-agent"], "claude-cli/2.1.286 (external, cli)");
+        assert_eq!(headers["accept"], "text/event-stream");
+        assert_eq!(headers["accept-encoding"], "identity");
+        assert_eq!(headers["x-stainless-package-version"], "0.112.1");
+        assert!(!headers.contains_key("User-Agent"));
+        assert!(!headers.contains_key("X-Stainless-Package-Version"));
+        assert!(!headers.contains_key("Anthropic-Beta"));
+        assert!(headers["anthropic-beta"].contains("custom-beta"));
+        assert!(body["system"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("cc_version=2.1.286.abc;"));
+        let before = body.clone();
+        finalize_claude_code_request_identity(&mut headers, &mut body, &profile(), None);
+        assert_eq!(body, before);
+    }
+    #[test]
+    fn count_token_body_remains_untouched() {
+        let mut headers = BTreeMap::new();
+        let mut body = serde_json::json!({"model":"claude-test", "messages":[], "thinking":{"type":"enabled"}});
+        let before = body.clone();
+        finalize_claude_code_request_identity(
+            &mut headers,
+            &mut body,
+            &profile(),
+            Some(aether_ai_formats::ApiOperation::ClaudeCountTokens),
+        );
+        assert_eq!(body, before);
+        assert_eq!(headers["user-agent"], "claude-cli/2.1.286 (external, cli)");
     }
 }

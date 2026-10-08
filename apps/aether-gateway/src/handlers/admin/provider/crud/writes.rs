@@ -62,6 +62,16 @@ pub(crate) async fn maybe_build_local_admin_provider_writes_response(
                 )));
             }
         };
+        let routing_group_id = payload
+            .routing_group_id
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_string);
+        if routing_group_id.as_deref() == Some("") {
+            return Ok(Some(build_admin_provider_bad_request_response(
+                "routing_group_id 不能为空",
+            )));
+        }
         let (record, shift_existing_priorities_from) =
             match state.build_admin_create_provider_record(payload).await {
                 Ok(record) => record,
@@ -69,10 +79,23 @@ pub(crate) async fn maybe_build_local_admin_provider_writes_response(
                     return Ok(Some(build_admin_provider_bad_request_response(message)));
                 }
             };
-        let Some(created_provider) = state
-            .create_provider_catalog_provider(&record, shift_existing_priorities_from)
-            .await?
-        else {
+        let created = match routing_group_id.as_deref() {
+            Some(group_id) => {
+                state
+                    .create_provider_catalog_provider_in_routing_group(
+                        &record,
+                        shift_existing_priorities_from,
+                        group_id,
+                    )
+                    .await?
+            }
+            None => {
+                state
+                    .create_provider_catalog_provider(&record, shift_existing_priorities_from)
+                    .await?
+            }
+        };
+        let Some(created_provider) = created else {
             return Ok(Some(build_admin_providers_data_unavailable_response()));
         };
 

@@ -49,6 +49,7 @@ vi.mock('@/utils/logger', () => ({
 
 import { useUsageData } from '../useUsageData'
 import type { UsageRecord } from '../../types'
+import { resolveUsageBilling } from '../../utils/usageBilling'
 
 function buildUsageRecord(overrides: Partial<UsageRecord> = {}): UsageRecord {
   return {
@@ -135,6 +136,18 @@ describe('useUsageData', () => {
       status: 'websocket',
       include_total: false,
     }))
+  })
+
+  it('preserves precise overview scope and false performance filters in records and total requests', async () => {
+    const { loadRecords } = useUsageData({ isAdminPage: ref(true) })
+    getAllUsageRecordsMock.mockResolvedValueOnce({ records: [], total: 100, total_is_estimated: true })
+    const range = { from: '2026-09-10T16:20:42.000Z', to: '2026-09-10T17:20:42.000Z', timezone: 'Asia/Shanghai' }
+    const filters = { provider_id: 'provider-1', api_key_id: 'key-1', endpoint_kind: 'chat', request_type: 'standard', is_stream: false, has_format_conversion: false, slow_threshold_ms: 8000 }
+    await loadRecords({ page: 2, pageSize: 20 }, filters, range)
+    await flushMicrotasks()
+    expect(getAllUsageRecordsMock).toHaveBeenCalledWith(expect.objectContaining({ ...range, ...filters, offset: 20 }))
+    expect(getAllUsageRecordTotalMock).toHaveBeenCalledWith(expect.objectContaining({ ...range, ...filters }))
+    expect(getAllUsageRecordsMock.mock.calls[0][0].preset).toBeUndefined()
   })
 
   it('sends the WebSocket type filter to the user records endpoint before pagination', async () => {
@@ -508,6 +521,47 @@ describe('useUsageData', () => {
       cost: 0.07,
       actual_cost: 0.07,
     })
+  })
+
+  it('preserves billing snapshots across sparse refreshes but accepts newer zero or unavailable amounts', async () => {
+    const { loadRecords, currentRecords } = useUsageData({ isAdminPage: ref(true) })
+    async function refresh(overrides: Partial<UsageRecord>) {
+      getAllUsageRecordsMock.mockResolvedValueOnce({
+        records: [buildUsageRecord(overrides)], total: 1, limit: 20, offset: 0,
+      })
+      await loadRecords({ page: 1, pageSize: 20 })
+    }
+    await refresh({ updated_at: '2026-05-01T00:00:02Z', billing_multiplier: 2, billing_cost: 0.02, routing_group_id: 'group-1', routing_group_name: '历史分组' })
+    await refresh({ updated_at: '2026-05-01T00:00:03Z' })
+    expect(currentRecords.value[0]).toMatchObject({ billing_multiplier: 2, billing_cost: 0.02, routing_group_id: 'group-1', routing_group_name: '历史分组' })
+    await refresh({ updated_at: '2026-05-01T00:00:01Z', billing_multiplier: 0, billing_cost: 0, routing_group_name: '过时分组' })
+    expect(currentRecords.value[0]).toMatchObject({ billing_multiplier: 2, billing_cost: 0.02, routing_group_id: 'group-1', routing_group_name: '历史分组' })
+    await refresh({ updated_at: '2026-05-01T00:00:04Z', billing_multiplier: 0, billing_cost: 0 })
+    expect(currentRecords.value[0]).toMatchObject({ cost: 0.01, billing_multiplier: 0, billing_cost: 0 })
+    await refresh({ updated_at: '2026-05-01T00:00:05Z', billing_multiplier: null, billing_cost: null })
+    expect(currentRecords.value[0]).toMatchObject({ billing_multiplier: 0, billing_cost: null })
+    await refresh({ updated_at: '2026-05-01T00:00:06Z', cost: 0.02, billing_multiplier: 2 })
+    expect(resolveUsageBilling(currentRecords.value[0])).toEqual({ multiplier: 2, cost: null })
+  })
+
+  it('recalculates a completed group cost when a mixed-version list omits the amount and resets costs for a changed group', async () => {
+    const { loadRecords, currentRecords } = useUsageData({ isAdminPage: ref(true) })
+    async function refresh(overrides: Partial<UsageRecord>) {
+      getAllUsageRecordsMock.mockResolvedValueOnce({
+        records: [buildUsageRecord(overrides)], total: 1, limit: 20, offset: 0,
+      })
+      await loadRecords({ page: 1, pageSize: 20 })
+    }
+    await refresh({ status: 'pending', cost: 0, routing_group_id: 'g1', billing_multiplier: 2, billing_cost: 0 })
+    await refresh({ status: 'completed', cost: 3, routing_group_id: 'g1', billing_multiplier: 2 })
+    expect(resolveUsageBilling(currentRecords.value[0])).toEqual({ cost: 6, multiplier: 2 })
+    await refresh({ status: 'completed', cost: 3, routing_group_id: 'g1', billing_multiplier: 2, billing_cost: 5.99999999 })
+    // A sparse list zero that the base-cost merger rejects must not erase the precise captured amount.
+    await refresh({ status: 'completed', cost: 0, routing_group_id: 'g1' })
+    expect(currentRecords.value[0].billing_cost).toBe(5.99999999)
+    await refresh({ status: 'completed', cost: 3, routing_group_id: 'g2' })
+    expect(resolveUsageBilling(currentRecords.value[0])).toEqual({ cost: null, multiplier: 1 })
+    expect(currentRecords.value[0].billing_cost).toBeNull()
   })
 
   it('refreshes exact admin record totals after an estimated first page', async () => {

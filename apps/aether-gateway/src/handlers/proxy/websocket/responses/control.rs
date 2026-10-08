@@ -32,6 +32,8 @@ pub(super) struct ResponsesWebSocketTurnControl {
     pub(super) decision: GatewayControlDecision,
     pub(super) auth_snapshot: Option<GatewayAuthApiKeySnapshot>,
     pub(super) rpm_bypassed: bool,
+    // Shared across transparent retries and owned by LogicalTurn, not the socket.
+    pub(super) activity: std::sync::Arc<crate::request_activity::RequestActivityGuard>,
 }
 
 pub(super) async fn resolve_responses_websocket_turn_control(
@@ -124,6 +126,7 @@ pub(super) async fn resolve_responses_websocket_turn_control(
         decision,
         auth_snapshot,
         rpm_bypassed,
+        activity: std::sync::Arc::new(state.request_activity.begin()),
     })
 }
 

@@ -1,18 +1,22 @@
 <template>
   <section
-    class="space-y-4 rounded-lg border border-border/60 p-4"
+    class="min-w-0 space-y-4"
+    :class="{ 'rounded-lg border border-border/60 p-4': !sidebar }"
     data-testid="routing-failover-policy"
   >
     <div>
       <h3 class="text-sm font-medium">
         故障转移规则
       </h3>
-      <p class="mt-1 text-xs leading-relaxed text-muted-foreground">
-        作用于当前调度策略的所有提供商。先检查全局规则，再检查提供商自身规则；业务内容输出后不再重放请求。
-      </p>
     </div>
-    <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
-      <label class="space-y-1.5 text-sm">
+    <div
+      class="grid min-w-0 gap-3"
+      :class="sidebar ? 'grid-cols-2' : 'grid-cols-1 md:grid-cols-2'"
+    >
+      <label
+        class="min-w-0 space-y-1.5"
+        :class="sidebar ? 'text-xs' : 'text-sm'"
+      >
         <span>全局最大转移次数</span>
         <Input
           :model-value="modelValue.max_transfer_count"
@@ -23,9 +27,11 @@
           aria-label="全局最大转移次数"
           @update:model-value="updateLimit('max_transfer_count', $event)"
         />
-        <span class="block text-xs leading-relaxed text-muted-foreground">0 不限制。首次尝试和粘性同 Key 重试不计入；每次切换候选计 1 次。</span>
       </label>
-      <label class="space-y-1.5 text-sm">
+      <label
+        class="min-w-0 space-y-1.5"
+        :class="sidebar ? 'text-xs' : 'text-sm'"
+      >
         <span>全局最大转移时间（秒）</span>
         <Input
           :model-value="modelValue.max_transfer_timeout_seconds"
@@ -36,8 +42,8 @@
           aria-label="全局最大转移时间"
           @update:model-value="updateLimit('max_transfer_timeout_seconds', $event)"
         />
-        <span class="block text-xs leading-relaxed text-muted-foreground">0 不限制。从首次尝试累计，耗尽后不再启动下一次尝试；不会中断已开始的调用，单次超时仍独立生效。</span>
       </label>
+      <slot name="limits-extra" />
     </div>
     <div
       v-for="section in ruleSections"
@@ -49,9 +55,6 @@
           <h4 class="text-sm font-medium">
             {{ section.title }}
           </h4>
-          <p class="mt-1 text-xs leading-relaxed text-muted-foreground">
-            {{ section.description }}
-          </p>
         </div>
         <div class="flex shrink-0 items-center gap-1">
           <Button
@@ -129,14 +132,15 @@
           v-for="(rule, index) in modelValue.failover_rules[section.key]"
           :key="index"
           class="grid min-w-0 grid-cols-[minmax(0,1fr)_2rem] items-start gap-2"
-          :class="section.key === 'error_stop_patterns' ? 'sm:grid-cols-[10rem_minmax(0,1fr)_2rem]' : ''"
+          :class="section.key === 'error_stop_patterns' && !sidebar ? 'sm:grid-cols-[10rem_minmax(0,1fr)_2rem]' : ''"
         >
           <Input
             v-if="section.key === 'error_stop_patterns'"
             :model-value="statusDrafts[index] ?? rule.status_codes.join(', ')"
             :disabled="disabled"
             size="sm"
-            class="col-span-2 min-w-0 w-full font-mono text-xs sm:col-span-1"
+            class="col-span-2 min-w-0 w-full font-mono text-xs"
+            :class="{ 'sm:col-span-1': !sidebar }"
             :aria-label="`终止规则 ${index + 1} 状态码`"
             placeholder="400, 413（选填）"
             title="状态码用逗号或空格分隔；留空则匹配全部错误状态"
@@ -165,9 +169,6 @@
         </div>
       </template>
     </div>
-    <p class="text-xs text-muted-foreground">
-      正则支持 (?i) 忽略大小写；服务端在保存时校验语法。每组最多 64 条，每条正则最多 4096 字节。
-    </p>
     <p
       v-if="validationError"
       role="alert"
@@ -191,7 +192,7 @@ import {
   type RoutingFailoverRules,
 } from '../utils/routingFailover'
 
-const props = defineProps<{ modelValue: RoutingFailoverPolicy, disabled?: boolean }>()
+const props = defineProps<{ modelValue: RoutingFailoverPolicy, disabled?: boolean, sidebar?: boolean }>()
 const emit = defineEmits<{
   'update:modelValue': [value: RoutingFailoverPolicy]
   'pending-change': [value: boolean]
@@ -214,9 +215,9 @@ const jsonDirty = reactive<Record<RuleSection, boolean>>({
   error_stop_patterns: false,
 })
 const statusDrafts = ref<Record<number, string>>({})
-const ruleSections: Array<{ key: RuleSection, title: string, description: string }> = [
-  { key: 'success_failover_patterns', title: '成功转移规则', description: 'HTTP 200 的响应体或流式输出前的缓冲内容命中正则时，放弃当前候选并继续转移；不是对所有 200 都重试。' },
-  { key: 'error_stop_patterns', title: '错误终止规则', description: '状态码与正则同时满足时立即终止。可只填状态码，或只填正则匹配全部 400–599 错误；对流内错误使用解析后的错误状态。' },
+const ruleSections: Array<{ key: RuleSection, title: string }> = [
+  { key: 'success_failover_patterns', title: '成功转移规则' },
+  { key: 'error_stop_patterns', title: '错误终止规则' },
 ]
 const validationError = computed(() => {
   const rules = errorRulesFromForm()

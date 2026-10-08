@@ -18,10 +18,7 @@
 --   Runs before 20260403000000_baseline.sql so that fresh databases have a
 --   complete schema by the time baseline (a no-op handoff point) and all
 --   later ADD COLUMN IF NOT EXISTS migrations execute.
-SET statement_timeout = 0;
-
-SET lock_timeout = 0;
-
+-- Keep the migration runner's statement and lock deadlines in effect.
 SET idle_in_transaction_session_timeout = 0;
 
 SET client_encoding = 'UTF8';
