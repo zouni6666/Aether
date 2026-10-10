@@ -836,6 +836,7 @@ export interface PoolAdvancedConfig {
   sticky_session_ttl_seconds?: number | null
   load_threshold_percent?: number | null
   skip_exhausted_accounts?: boolean | null
+  ignore_exhausted_accounts?: boolean | null
   // Codex only: treat remaining quota <= 1% as exhausted (default false).
   reserve_minimum_quota?: boolean
   // 旧字段（兼容读取）

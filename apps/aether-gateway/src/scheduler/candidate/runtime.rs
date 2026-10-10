@@ -385,9 +385,10 @@ async fn read_provider_pool_state_map(
                 .and_then(|value| value.get("pool_advanced"));
             let skip_exhausted_accounts = pool_advanced
                 .and_then(serde_json::Value::as_object)
-                .and_then(|value| value.get("skip_exhausted_accounts"))
+                .and_then(|value| value.get("ignore_exhausted_accounts"))
                 .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
+                .map(|ignore| !ignore)
+                .unwrap_or(true);
             let reserve_minimum_quota = pool_advanced
                 .and_then(serde_json::Value::as_object)
                 .and_then(|value| value.get("reserve_minimum_quota"))

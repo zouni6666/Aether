@@ -3,7 +3,7 @@ export type PoolHealthToggleKey =
   | 'account_self_check_enabled'
   | 'auto_remove_banned_keys'
   | 'auto_remove_quota_exhausted_keys'
-  | 'skip_exhausted_accounts'
+  | 'ignore_exhausted_accounts'
 
 export interface PoolHealthToggleCard {
   key: PoolHealthToggleKey
@@ -39,9 +39,9 @@ export function buildPoolHealthToggleCards(): PoolHealthToggleCard[] {
       description: '探测到黑色“额度耗尽”账号后自动从号池移除。',
     },
     {
-      key: 'skip_exhausted_accounts',
-      label: '跳过额度耗尽账号',
-      description: '当 Codex / Kiro 账号额度已耗尽时，直接标记为不可调度并在请求侧跳过。',
+      key: 'ignore_exhausted_accounts',
+      label: '忽略额度耗尽',
+      description: '默认关闭，额度耗尽账号不参与调度。开启后忽略额度耗尽状态，仍保留封禁、冷却和最低额度保留等限制。',
     },
   ]
 }

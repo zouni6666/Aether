@@ -18,8 +18,6 @@ pub struct PoolSchedulingPreset {
 pub struct PoolSchedulingConfig {
     pub scheduling_presets: Vec<PoolSchedulingPreset>,
     pub lru_enabled: bool,
-    /// Retained for configuration/API compatibility. Active quota exhaustion is
-    /// always an admission block; reset-aware adapters decide when it clears.
     pub skip_exhausted_accounts: bool,
     pub cost_limit_per_key_tokens: Option<u64>,
 }
@@ -227,14 +225,9 @@ fn schedule_pool_group<Candidate>(
             continue;
         }
 
-        // A quota snapshot is an account-level admission signal, not merely a
-        // ranking hint. Continuing to schedule a member whose quota is known to
-        // be exhausted causes a request-wide retry storm (the upstream returns
-        // 429 for every attempt). `quota_hard_blocked` remains available for
-        // providers that can distinguish an explicit permanent block, but every
-        // active exhaustion must be removed from the request's candidate set;
-        // reset-aware provider adapters clear the signal once capacity returns.
-        if item.key_context.quota_hard_blocked || item.key_context.quota_exhausted {
+        if item.key_context.quota_hard_blocked
+            || (pool_config.skip_exhausted_accounts && item.key_context.quota_exhausted)
+        {
             skipped.push(PoolSkippedCandidate {
                 candidate: item.candidate,
                 skip_reason: POOL_ACCOUNT_EXHAUSTED_SKIP_REASON,
@@ -936,7 +929,30 @@ mod tests {
     }
 
     #[test]
-    fn pool_scheduler_skips_exhausted_accounts_even_when_legacy_flag_is_false() {
+    fn pool_scheduler_allows_exhausted_accounts_when_ignored_but_keeps_hard_blocks() {
+        let mut exhausted =
+            sample_candidate("provider-pool", "endpoint-1", "key-exhausted", 10, true);
+        exhausted.key_context.quota_exhausted = true;
+        exhausted
+            .pool_config
+            .as_mut()
+            .unwrap()
+            .skip_exhausted_accounts = false;
+        let mut blocked = exhausted.clone();
+        blocked.candidate = "key-blocked".to_string();
+        blocked.facts.key_id = "key-blocked".to_string();
+        blocked.key_context.quota_hard_blocked = true;
+
+        let outcome = run_pool_scheduler(vec![exhausted, blocked], &BTreeMap::new(), "seed");
+
+        assert_eq!(outcome.candidates.len(), 1);
+        assert_eq!(outcome.candidates[0].candidate, "key-exhausted");
+        assert_eq!(outcome.skipped_candidates.len(), 1);
+        assert_eq!(outcome.skipped_candidates[0].candidate, "key-blocked");
+    }
+
+    #[test]
+    fn pool_scheduler_skips_exhausted_accounts_by_default() {
         let ready = sample_candidate("provider-pool", "endpoint-1", "key-ready", 10, true);
         let mut exhausted =
             sample_candidate("provider-pool", "endpoint-1", "key-exhausted", 10, true);
@@ -1535,7 +1551,7 @@ mod tests {
         let pool_config = pool_enabled.then(|| PoolSchedulingConfig {
             scheduling_presets: Vec::new(),
             lru_enabled: true,
-            skip_exhausted_accounts: false,
+            skip_exhausted_accounts: true,
             cost_limit_per_key_tokens: None,
         });
         PoolCandidateInput {
