@@ -72,6 +72,8 @@ export interface UsageRecord {
   response_time_updated_at?: string | null
   has_fallback?: boolean
   has_retry?: boolean
+  /** 请求体实际发生过敏感信息脱敏（上游收到的是占位符）。 */
+  chat_pii_redaction?: boolean
   /**
    * 是否存在被调度跳过的候选（候选在调度阶段即被判定不可用，从未向上游发起请求）。
    * 与 has_fallback 的区别：has_fallback 代表"更靠前的候选真的失败了"，

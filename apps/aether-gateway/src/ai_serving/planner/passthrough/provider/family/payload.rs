@@ -15,7 +15,7 @@ use crate::ai_serving::planner::materialization_policy::{
 };
 use crate::ai_serving::planner::report_context::{
     build_local_execution_report_context, insert_native_client_envelope_name,
-    LocalExecutionReportContextParts,
+    mark_chat_pii_redaction, LocalExecutionReportContextParts,
 };
 use crate::ai_serving::planner::spec_metadata::local_same_format_provider_spec_metadata;
 use crate::ai_serving::planner::CandidateFailureDiagnostic;
@@ -167,6 +167,7 @@ pub(crate) async fn maybe_build_local_same_format_provider_decision_payload_for_
         provider_api_format.as_str(),
     );
     let effective_headers = input.effective_headers(&parts.headers);
+    mark_chat_pii_redaction(&mut extra_fields, parts, request_redacted);
     let report_context = append_local_failover_policy_to_value(
         append_execution_contract_fields_to_value(
             build_local_execution_report_context(LocalExecutionReportContextParts {

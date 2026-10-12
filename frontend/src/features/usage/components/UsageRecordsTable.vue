@@ -233,6 +233,13 @@
                 model-class="text-[15px] font-semibold leading-5"
                 stack-full-width
               />
+              <ShieldCheck
+                v-if="record.chat_pii_redaction"
+                data-usage-attempt-marker="pii-redaction"
+                class="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400 flex-shrink-0"
+                title="此请求触发了敏感信息保护：发送给上游的内容已替换为占位符"
+                aria-label="触发敏感信息保护"
+              />
               <!-- 状态 Badge -->
               <Badge
                 v-if="isUsageRecordFailed(record)"
@@ -751,10 +758,19 @@
             :class="[isAdmin ? 'w-[14%]' : 'w-[22%]']"
             :title="getModelTooltip(record)"
           >
-            <UsageModelDisplay
-              :record="record"
-              class="text-xs"
-            />
+            <div class="flex min-w-0 items-start gap-1">
+              <UsageModelDisplay
+                :record="record"
+                class="text-xs"
+              />
+              <ShieldCheck
+                v-if="record.chat_pii_redaction"
+                data-usage-attempt-marker="pii-redaction"
+                class="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-400"
+                title="此请求触发了敏感信息保护：发送给上游的内容已替换为占位符"
+                aria-label="触发敏感信息保护"
+              />
+            </div>
           </TableCell>
           <TableCell
             v-if="isAdmin && isColumnVisible('provider')"
@@ -1062,7 +1078,7 @@ import {
   SortableTableHead,
   TableFilterMenu,
 } from '@/components/ui'
-import { Ban, EyeOff, RefreshCcw, Search, Shuffle } from 'lucide-vue-next'
+import { Ban, EyeOff, RefreshCcw, Search, ShieldCheck, Shuffle } from 'lucide-vue-next'
 import { formatTokens } from '@/utils/format'
 import { getCacheCreationTokens, getCacheReadTokens, getEffectiveInputTokens } from '../token-normalization'
 import {

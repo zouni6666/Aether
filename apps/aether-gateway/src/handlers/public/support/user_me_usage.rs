@@ -519,6 +519,17 @@ fn infer_client_family_from_user_agent(user_agent: &str) -> Option<&'static str>
     Some("unknown")
 }
 
+fn users_me_usage_chat_pii_redacted(item: &StoredRequestUsageAudit) -> bool {
+    item.request_metadata
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .and_then(|metadata| {
+            metadata.get(aether_data_contracts::repository::usage::CHAT_PII_REDACTION_METADATA_KEY)
+        })
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+}
+
 fn users_me_usage_client_family(item: &StoredRequestUsageAudit) -> Option<&str> {
     item.client_family
         .as_deref()
@@ -599,6 +610,7 @@ fn build_users_me_usage_record_payload(
         "request_path_and_query": users_me_usage_metadata_string(item, "request_path_and_query"),
         "status": item.status,
         "has_fallback": item.has_fallback(),
+        "chat_pii_redaction": users_me_usage_chat_pii_redacted(item),
         "created_at": unix_secs_to_rfc3339(item.created_at_unix_ms),
         "cache_creation_input_tokens": cache_creation_input_tokens,
         "cache_creation_ephemeral_5m_input_tokens": item.cache_creation_ephemeral_5m_input_tokens,
@@ -694,6 +706,7 @@ fn build_users_me_usage_active_payload(item: &StoredRequestUsageAudit) -> serde_
         "target_model": item.target_model,
         "response_model": item.provider_response_model(),
         "has_fallback": item.has_fallback(),
+        "chat_pii_redaction": users_me_usage_chat_pii_redacted(item),
     });
     payload["routing_group_id"] = json!(item.routing_group_id());
     payload["routing_group_name"] = json!(item.routing_group_name());
@@ -2364,6 +2377,7 @@ mod tests {
             client_response_body_ref: Some(
                 "usage://request/req-1/client_response_body".to_string(),
             ),
+            request_metadata: Some(json!({"chat_pii_redaction": true})),
             ..sample_usage("completed")
         };
 
@@ -2382,5 +2396,7 @@ mod tests {
         assert_eq!(active_payload["upstream_is_stream"], true);
         assert_eq!(active_payload["client_requested_stream"], false);
         assert_eq!(active_payload["client_is_stream"], false);
+        assert_eq!(record_payload["chat_pii_redaction"], true);
+        assert_eq!(active_payload["chat_pii_redaction"], true);
     }
 }

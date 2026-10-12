@@ -114,6 +114,8 @@ export interface UsageRecordDetail {
   cache_read_price_per_1m?: number
   price_per_request?: number  // 按次计费价格
   has_fallback?: boolean
+  /** 请求体实际发生过敏感信息脱敏（上游收到的是占位符）。 */
+  chat_pii_redaction?: boolean
   api_key?: {
     id: string
     name: string
@@ -415,6 +417,7 @@ export const meApi = {
       client_is_stream?: boolean | null
       has_format_conversion?: boolean | null
       has_fallback?: boolean | null
+      chat_pii_redaction?: boolean | null
       target_model?: string | null
       response_model?: string | null
       request_type?: string | null
@@ -466,6 +469,7 @@ export const meApi = {
       client_is_stream?: boolean | null
       has_format_conversion?: boolean | null
       has_fallback?: boolean | null
+      chat_pii_redaction?: boolean | null
       target_model?: string | null
       response_model?: string | null
       request_type?: string | null

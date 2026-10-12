@@ -707,7 +707,14 @@ async fn bootstrap_responses_websocket(
     // 首轮的 mask session 要活到响应帧还原，但连接此刻还没绑定，只能先接住，
     // 等 `bind_responses_upstream` 之后登记到连接上。
     let (first_event, first_turn_redaction_session) = match redacted_first_event {
-        Ok(Some(redaction)) => (redaction.client_event, Some(redaction.session)),
+        Ok(Some(redaction)) => {
+            // 这一轮真的替换过内容：把事实带进 planning parts，
+            // planner 会把它写进使用记录（chat_pii_redaction）。
+            planning_parts
+                .extensions
+                .insert(crate::privacy::ChatPiiRedactionTurnMarker);
+            (redaction.client_event, Some(redaction.session))
+        }
         Ok(None) => (first_event, None),
         Err(error) => {
             warn!(
@@ -1023,6 +1030,7 @@ async fn bootstrap_responses_websocket(
             .remember_persisted(previous_response_id);
     }
     first_turn.set_provider_response_headers(bound.upstream_response_headers.clone());
+    let first_event_pii_redacted = first_turn_redaction_session.is_some();
     if let Some(session) = first_turn_redaction_session {
         register_initial_redaction_session(&mut bound, session);
     }
@@ -1032,7 +1040,8 @@ async fn bootstrap_responses_websocket(
             .with_provider_store(first_provider_event.get("store") == Some(&Value::Bool(true)))
             .with_turn_control(turn_control)
             .with_plan_usage_permit(plan_usage_permit)
-            .with_plan_usage_policy_snapshot(plan_usage_policy_snapshot),
+            .with_plan_usage_policy_snapshot(plan_usage_policy_snapshot)
+            .with_client_event_pii_redacted(first_event_pii_redacted),
         first_turn,
     );
 

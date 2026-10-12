@@ -233,6 +233,14 @@
                       :requested="serviceTierFacts.requested"
                       :price-multiplier="processingTierPriceMultiplier"
                     />
+                    <div
+                      v-if="detail.chat_pii_redaction"
+                      data-request-detail-pii-redaction
+                      class="mt-3 flex items-start gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-xs text-emerald-700 dark:text-emerald-400"
+                    >
+                      <ShieldCheck class="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                      <span>此请求触发了敏感信息保护：发送给上游供应商的内容已将敏感信息替换为占位符。</span>
+                    </div>
                   </div>
 
                   <!-- 分隔线 -->
@@ -913,7 +921,7 @@ import Separator from '@/components/ui/separator.vue'
 import Skeleton from '@/components/ui/skeleton.vue'
 import Tabs from '@/components/ui/tabs.vue'
 import TabsContent from '@/components/ui/tabs-content.vue'
-import { AlertTriangle, Check, Columns2, RefreshCw, X, Monitor, Server, MessageSquareText, Code2, Terminal, Play } from 'lucide-vue-next'
+import { AlertTriangle, Check, Columns2, RefreshCw, X, Monitor, Server, MessageSquareText, Code2, Terminal, Play, ShieldCheck } from 'lucide-vue-next'
 import { dashboardApi, type RequestBodyField, type RequestDetail } from '@/api/dashboard'
 import { formatRequestBodyLoadError, formatStoredBodyLoadError } from '../utils/body-load-error'
 import type { ImageProgress, RequestTrace } from '@/api/requestTrace'
@@ -1015,6 +1023,7 @@ const emit = defineEmits<{
     apiFormat?: string | null
     endpointApiFormat?: string | null
     hasFormatConversion?: boolean | null
+    chatPiiRedaction?: boolean | null
     targetModel?: string | null
     requestedReasoningEffort?: string | null
     reasoningEffort?: string | null
@@ -1342,6 +1351,7 @@ function emitDetailRequestState(nextDetail: RequestDetail) {
     apiFormat: nextDetail.api_format ?? null,
     endpointApiFormat: nextDetail.endpoint_api_format ?? null,
     hasFormatConversion: nextDetail.has_format_conversion ?? null,
+    chatPiiRedaction: nextDetail.chat_pii_redaction ?? null,
     ...(targetModel ? { targetModel } : {}),
     ...(requestedReasoningEffort ? { requestedReasoningEffort } : {}),
     ...(reasoningEffort ? { reasoningEffort } : {}),

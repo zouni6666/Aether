@@ -463,7 +463,14 @@ pub(super) async fn forward_client_message(
                 )
                 .await;
             let (client_event, turn_redaction_session) = match redacted_client_event {
-                Ok(Some(redaction)) => (redaction.client_event, Some(redaction.session)),
+                Ok(Some(redaction)) => {
+                    // 这一轮真的替换过内容：把事实带进 planning parts，
+                    // planner 会把它写进使用记录（chat_pii_redaction）。
+                    planning_parts
+                        .extensions
+                        .insert(crate::privacy::ChatPiiRedactionTurnMarker);
+                    (redaction.client_event, Some(redaction.session))
+                }
                 Ok(None) => (client_event, None),
                 Err(error) => {
                     warn!(
@@ -837,6 +844,7 @@ async fn forward_pinned_continuation(
     }
 
     turn.set_provider_response_headers(bound.upstream_response_headers.clone());
+    let client_event_pii_redacted = turn_redaction_session.is_some();
     if let Some(session) = turn_redaction_session {
         bound.redaction_restorer.register(session);
     }
@@ -849,7 +857,8 @@ async fn forward_pinned_continuation(
             .with_provider_store(provider_event.get("store") == Some(&Value::Bool(true)))
             .with_turn_control(turn_control)
             .with_plan_usage_permit(plan_usage_permit)
-            .with_plan_usage_policy_snapshot(plan_usage_policy_snapshot),
+            .with_plan_usage_policy_snapshot(plan_usage_policy_snapshot)
+            .with_client_event_pii_redacted(client_event_pii_redacted),
         turn,
     );
     bound.next_turn_index = bound.next_turn_index.saturating_add(1);
@@ -890,6 +899,7 @@ async fn forward_replanned_response_create(
     plan_usage_permit: Option<aether_runtime::AdmissionPermit>,
     plan_usage_policy_snapshot: Option<PlanUsagePolicySnapshot>,
 ) -> RelayDisposition {
+    let client_event_pii_redacted = turn_redaction_session.is_some();
     let turn_request_id = Uuid::new_v4().to_string();
     let now_unix_secs = current_unix_secs();
     let excluded_key_ids = bound.exhausted_exclusions.key_ids(now_unix_secs);
@@ -1103,7 +1113,8 @@ async fn forward_replanned_response_create(
                 .with_provider_store(provider_event.get("store") == Some(&Value::Bool(true)))
                 .with_turn_control(turn_control)
                 .with_plan_usage_permit(plan_usage_permit)
-                .with_plan_usage_policy_snapshot(plan_usage_policy_snapshot),
+                .with_plan_usage_policy_snapshot(plan_usage_policy_snapshot)
+                .with_client_event_pii_redacted(client_event_pii_redacted),
             turn,
         );
         bound.next_turn_index = bound.next_turn_index.saturating_add(1);
@@ -1212,7 +1223,8 @@ async fn forward_replanned_response_create(
             .with_provider_store(provider_event.get("store") == Some(&Value::Bool(true)))
             .with_turn_control(turn_control)
             .with_plan_usage_permit(plan_usage_permit)
-            .with_plan_usage_policy_snapshot(plan_usage_policy_snapshot),
+            .with_plan_usage_policy_snapshot(plan_usage_policy_snapshot)
+            .with_client_event_pii_redacted(client_event_pii_redacted),
         turn,
     );
     bound.next_turn_index = bound.next_turn_index.saturating_add(1);

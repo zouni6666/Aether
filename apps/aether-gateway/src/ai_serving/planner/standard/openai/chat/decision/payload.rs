@@ -3,7 +3,8 @@ use crate::ai_serving::planner::common::OPENAI_CHAT_STREAM_PLAN_KIND;
 use crate::ai_serving::planner::decision_input::apply_provider_request_routing_policy_to_decision;
 use crate::ai_serving::planner::report_context::{
     build_local_execution_report_context, insert_native_client_envelope_name,
-    insert_provider_stream_event_api_format, LocalExecutionReportContextParts,
+    insert_provider_stream_event_api_format, mark_chat_pii_redaction,
+    LocalExecutionReportContextParts,
 };
 use crate::ai_serving::planner::{
     build_ai_execution_decision_response, resolve_transport_request_encoding_policy,
@@ -158,6 +159,7 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
         Some(body_json)
     };
     let effective_headers = input.effective_headers(&parts.headers);
+    mark_chat_pii_redaction(&mut extra_fields, parts, request_redacted);
     let report_context_started_at = std::time::Instant::now();
     let report_context = append_local_failover_policy_to_value(
         append_execution_contract_fields_to_value(

@@ -756,6 +756,16 @@ impl CachedRequestRedaction {
     }
 }
 
+/// 标记：本轮客户端事件在进入 planner 之前就已经完成 PII 脱敏。
+///
+/// Responses WebSocket 路径会在规划前先把 `response.create` 脱敏（见
+/// `handlers::proxy::websocket::responses::redaction`），planner 拿到的事件已是
+/// 占位符态，无法再从 `request_redacted` 推出“这一轮真的替换过内容”。这个标记由
+/// WS 路径写入 planning parts 的 extensions，planner 用它给使用记录打标
+/// （`chat_pii_redaction = true`）。
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ChatPiiRedactionTurnMarker;
+
 #[derive(Default, Clone)]
 pub(crate) struct RedactionSessionSlot {
     session: Arc<Mutex<Option<RedactionSession>>>,

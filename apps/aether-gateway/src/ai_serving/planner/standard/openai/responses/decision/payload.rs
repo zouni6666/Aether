@@ -5,7 +5,8 @@ use crate::ai_serving::build_request_trace_proxy_value;
 use crate::ai_serving::planner::decision_input::apply_provider_request_routing_policy_to_decision_with_websocket_mode;
 use crate::ai_serving::planner::report_context::{
     build_local_execution_report_context, insert_native_client_envelope_name,
-    insert_provider_stream_event_api_format, LocalExecutionReportContextParts,
+    insert_provider_stream_event_api_format, mark_chat_pii_redaction,
+    LocalExecutionReportContextParts,
 };
 use crate::ai_serving::planner::spec_metadata::local_openai_responses_spec_metadata;
 use crate::ai_serving::planner::{
@@ -147,6 +148,7 @@ pub(crate) async fn maybe_build_local_openai_responses_decision_payload_for_cand
         resolved.transport.provider.provider_type.as_str(),
     );
     let effective_headers = input.effective_headers(&parts.headers);
+    mark_chat_pii_redaction(&mut extra_fields, parts, resolved.request_redacted);
     let report_context = append_local_failover_policy_to_value(
         append_execution_contract_fields_to_value(
             build_local_execution_report_context(LocalExecutionReportContextParts {

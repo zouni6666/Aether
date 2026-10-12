@@ -22,6 +22,11 @@ use crate::plan_usage_policy::PlanUsagePolicySnapshot;
 #[derive(Debug)]
 pub(super) struct LogicalTurn {
     pub(super) client_event: Value,
+    /// 这一轮的 `client_event` 是否实际命中过 PII 脱敏。
+    ///
+    /// 透明重试（配额换 key）会重建 planning parts 并重放同一份事件，
+    /// 事实必须留在 logical turn 上，否则重试产生的记录会漏标。
+    pub(super) client_event_pii_redacted: bool,
     /// Effective `store` after provider body rules and WebSocket framing. Only
     /// an explicit provider-side `true` permits cross-connection registry
     /// state; false or absent remains ZDR/connection-local.
@@ -52,6 +57,7 @@ impl LogicalTurn {
     pub(super) fn new(client_event: Value, turn_index: u64, logical_turn_id: String) -> Self {
         Self {
             client_event,
+            client_event_pii_redacted: false,
             provider_store: false,
             turn_index,
             logical_turn_id,
@@ -96,6 +102,11 @@ impl LogicalTurn {
 
     pub(super) fn with_provider_store(mut self, provider_store: bool) -> Self {
         self.provider_store = provider_store;
+        self
+    }
+
+    pub(super) fn with_client_event_pii_redacted(mut self, redacted: bool) -> Self {
+        self.client_event_pii_redacted = redacted;
         self
     }
 

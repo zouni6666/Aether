@@ -9,14 +9,14 @@ use crate::repository::candidates::sanitize_request_candidate_skip_reason;
 
 use super::{
     billing_multiplier_snapshot, normalize_provider_response_model,
-    BILLING_MULTIPLIER_SNAPSHOT_METADATA_KEY, LIVE_SESSION_METADATA_KEY,
-    PLAN_USAGE_RESERVATION_DEFERRED_METADATA_KEY, PROVIDER_ACTUAL_SERVICE_TIER_METADATA_KEY,
-    PROVIDER_CACHE_TTL_MINUTES_METADATA_KEY, PROVIDER_REASONING_EFFORT_METADATA_KEY,
-    PROVIDER_RESPONSE_MODEL_METADATA_KEY, PROVIDER_SERVICE_TIER_METADATA_KEY,
-    REALTIME_SESSION_METADATA_KEY, REQUESTED_REASONING_EFFORT_METADATA_KEY,
-    ROUTING_CANDIDATE_SKIP_REASON_METADATA_KEY, ROUTING_FAILURE_DIAGNOSTIC_METADATA_KEY,
-    ROUTING_GROUP_BILLING_MULTIPLIER_METADATA_KEY, ROUTING_GROUP_ID_METADATA_KEY,
-    ROUTING_GROUP_NAME_METADATA_KEY, USAGE_AVAILABLE_METADATA_KEY,
+    BILLING_MULTIPLIER_SNAPSHOT_METADATA_KEY, CHAT_PII_REDACTION_METADATA_KEY,
+    LIVE_SESSION_METADATA_KEY, PLAN_USAGE_RESERVATION_DEFERRED_METADATA_KEY,
+    PROVIDER_ACTUAL_SERVICE_TIER_METADATA_KEY, PROVIDER_CACHE_TTL_MINUTES_METADATA_KEY,
+    PROVIDER_REASONING_EFFORT_METADATA_KEY, PROVIDER_RESPONSE_MODEL_METADATA_KEY,
+    PROVIDER_SERVICE_TIER_METADATA_KEY, REALTIME_SESSION_METADATA_KEY,
+    REQUESTED_REASONING_EFFORT_METADATA_KEY, ROUTING_CANDIDATE_SKIP_REASON_METADATA_KEY,
+    ROUTING_FAILURE_DIAGNOSTIC_METADATA_KEY, ROUTING_GROUP_BILLING_MULTIPLIER_METADATA_KEY,
+    ROUTING_GROUP_ID_METADATA_KEY, ROUTING_GROUP_NAME_METADATA_KEY, USAGE_AVAILABLE_METADATA_KEY,
     USAGE_PRICING_AVAILABLE_METADATA_KEY, WEBSOCKET_MODE_METADATA_KEY,
     WEBSOCKET_TRANSPORT_METADATA_KEY,
 };
@@ -182,6 +182,7 @@ pub fn sanitize_usage_request_metadata_object(source: &Map<String, Value>) -> Op
         "is_free_tier",
         CANCELLED_REQUEST_FEE_METADATA_KEY,
         USAGE_AVAILABLE_METADATA_KEY,
+        CHAT_PII_REDACTION_METADATA_KEY,
         USAGE_PRICING_AVAILABLE_METADATA_KEY,
     ] {
         insert_bool(source, &mut target, key);
@@ -1874,5 +1875,26 @@ mod tests {
             .pointer("/realtime_session/authorization")
             .is_none());
         assert!(metadata.pointer("/realtime_session/nested").is_none());
+    }
+
+    #[test]
+    fn usage_metadata_keeps_chat_pii_redaction_bool_only() {
+        let metadata = sanitize_usage_request_metadata(Some(json!({
+            "chat_pii_redaction": true,
+            "trace_id": "trace-pii",
+        })))
+        .expect("pii redaction marker should remain");
+        assert_eq!(metadata["chat_pii_redaction"], true);
+        assert_eq!(metadata["trace_id"], "trace-pii");
+
+        // 只接受布尔值：字符串/数字形态不能把“是否脱敏”变成含糊事实。
+        for invalid in [json!("true"), json!(1)] {
+            let projected = sanitize_usage_request_metadata(Some(json!({
+                "chat_pii_redaction": invalid,
+                "trace_id": "trace-pii",
+            })))
+            .expect("trace_id alone should keep the object");
+            assert!(projected.get("chat_pii_redaction").is_none());
+        }
     }
 }

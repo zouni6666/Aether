@@ -217,6 +217,8 @@ export interface RequestDetail {
   api_format?: string
   endpoint_api_format?: string
   has_format_conversion?: boolean | null
+  /** 请求体实际发生过敏感信息脱敏（上游收到的是占位符）。 */
+  chat_pii_redaction?: boolean
   model: string
   target_model?: string | null  // 映射后的目标模型名
   response_model?: string | null  // 上游响应体实际返回的模型名

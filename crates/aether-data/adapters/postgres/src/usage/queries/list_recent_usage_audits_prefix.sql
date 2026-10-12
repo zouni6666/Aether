@@ -194,6 +194,7 @@ SELECT
       OR NULLIF(BTRIM("usage".request_metadata->>'websocket_transport'), '') IS NOT NULL
       OR ("usage".request_metadata->>'usage_available') IN ('true', 'false')
       OR ("usage".request_metadata->>'usage_pricing_available') IN ('true', 'false')
+      OR json_typeof("usage".request_metadata->'chat_pii_redaction') = 'boolean'
       OR json_typeof("usage".request_metadata->'live_session') = 'object'
       OR json_typeof("usage".request_metadata->'realtime_session') = 'object'
       THEN (jsonb_strip_nulls(jsonb_build_object(
@@ -255,6 +256,12 @@ SELECT
         CASE
           WHEN ("usage".request_metadata->>'usage_pricing_available') IN ('true', 'false')
             THEN ("usage".request_metadata->>'usage_pricing_available')::boolean
+          ELSE NULL
+        END,
+        'chat_pii_redaction',
+        CASE
+          WHEN json_typeof("usage".request_metadata->'chat_pii_redaction') = 'boolean'
+            THEN "usage".request_metadata->'chat_pii_redaction'
           ELSE NULL
         END,
         'live_session',

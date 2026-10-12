@@ -1286,6 +1286,17 @@ pub fn admin_usage_client_family(item: &StoredRequestUsageAudit) -> Option<&str>
         })
 }
 
+fn admin_usage_chat_pii_redacted(item: &StoredRequestUsageAudit) -> bool {
+    item.request_metadata
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|metadata| {
+            metadata.get(aether_data_contracts::repository::usage::CHAT_PII_REDACTION_METADATA_KEY)
+        })
+        .and_then(Value::as_bool)
+        == Some(true)
+}
+
 fn admin_usage_active_request_json(
     item: &StoredRequestUsageAudit,
     api_key_name: Option<String>,
@@ -1340,6 +1351,7 @@ fn admin_usage_active_request_json(
     value["billing_cost"] = json!(billing_cost);
     value["routing_group_id"] = json!(item.routing_group_id());
     value["routing_group_name"] = json!(item.routing_group_name());
+    value["chat_pii_redaction"] = json!(admin_usage_chat_pii_redacted(item));
     value["rate_multiplier"] = json!(item.settlement_rate_multiplier());
     value["end_to_end_time_ms"] = json!(admin_usage_metadata_u64(item, "end_to_end_time_ms"));
     value["end_to_end_first_byte_time_ms"] = json!(admin_usage_metadata_u64(
@@ -1456,6 +1468,7 @@ pub fn admin_usage_record_json(
     payload["billing_cost"] = json!(billing_cost);
     payload["routing_group_id"] = json!(item.routing_group_id());
     payload["routing_group_name"] = json!(item.routing_group_name());
+    payload["chat_pii_redaction"] = json!(admin_usage_chat_pii_redacted(item));
     let object = payload
         .as_object_mut()
         .expect("admin usage record payload should be an object");
@@ -4375,5 +4388,40 @@ mod tests {
             false,
             true
         ));
+    }
+
+    #[test]
+    fn admin_usage_record_json_exposes_chat_pii_redaction_marker() {
+        let item = StoredRequestUsageAudit {
+            request_metadata: Some(json!({"chat_pii_redaction": true})),
+            ..sample_usage("completed", Some(200), None)
+        };
+
+        let record = admin_usage_record_json(
+            &item,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            false,
+            false,
+            None,
+        );
+        assert_eq!(record["chat_pii_redaction"], true);
+        let active = admin_usage_active_request_json(&item, None, None, None);
+        assert_eq!(active["chat_pii_redaction"], true);
+
+        // 非布尔形态属于非法事实：不得把它当成“已脱敏”。
+        let invalid = StoredRequestUsageAudit {
+            request_metadata: Some(json!({"chat_pii_redaction": "true"})),
+            ..sample_usage("completed", Some(200), None)
+        };
+        let record = admin_usage_record_json(
+            &invalid,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            false,
+            false,
+            None,
+        );
+        assert_eq!(record["chat_pii_redaction"], false);
     }
 }

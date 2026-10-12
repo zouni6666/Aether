@@ -8,11 +8,12 @@ use aether_data_contracts::repository::usage::{
     sanitize_usage_request_metadata_object as project_usage_request_metadata_object,
     sanitize_usage_request_metadata_ref as project_usage_request_metadata_ref,
     usage_body_capture_is_authoritative, UsageBodyCaptureState,
-    BILLING_MULTIPLIER_SNAPSHOT_METADATA_KEY, PROVIDER_ACTUAL_SERVICE_TIER_METADATA_KEY,
-    PROVIDER_CACHE_TTL_MINUTES_METADATA_KEY, PROVIDER_REASONING_EFFORT_METADATA_KEY,
-    PROVIDER_RESPONSE_MODEL_METADATA_KEY, PROVIDER_SERVICE_TIER_METADATA_KEY,
-    REQUESTED_REASONING_EFFORT_METADATA_KEY, ROUTING_GROUP_BILLING_MULTIPLIER_METADATA_KEY,
-    ROUTING_GROUP_ID_METADATA_KEY, ROUTING_GROUP_NAME_METADATA_KEY,
+    BILLING_MULTIPLIER_SNAPSHOT_METADATA_KEY, CHAT_PII_REDACTION_METADATA_KEY,
+    PROVIDER_ACTUAL_SERVICE_TIER_METADATA_KEY, PROVIDER_CACHE_TTL_MINUTES_METADATA_KEY,
+    PROVIDER_REASONING_EFFORT_METADATA_KEY, PROVIDER_RESPONSE_MODEL_METADATA_KEY,
+    PROVIDER_SERVICE_TIER_METADATA_KEY, REQUESTED_REASONING_EFFORT_METADATA_KEY,
+    ROUTING_GROUP_BILLING_MULTIPLIER_METADATA_KEY, ROUTING_GROUP_ID_METADATA_KEY,
+    ROUTING_GROUP_NAME_METADATA_KEY,
 };
 use serde_json::{Map, Value};
 
@@ -119,6 +120,7 @@ pub(crate) fn retain_first_byte_request_metadata(value: Option<Value>) -> Option
                 | BILLING_MULTIPLIER_SNAPSHOT_METADATA_KEY
                 | ROUTING_GROUP_ID_METADATA_KEY
                 | ROUTING_GROUP_NAME_METADATA_KEY
+                | CHAT_PII_REDACTION_METADATA_KEY
         )
     });
     (!metadata.is_empty()).then_some(Value::Object(metadata))
@@ -548,6 +550,7 @@ mod tests {
             "client_ip": "203.0.113.8",
             "request_path": "/v1/chat/completions",
             "upstream_is_stream": true,
+            "chat_pii_redaction": true,
             "proxy": {"mode": "manual", "node_id": "proxy-1"},
             "routing_group_billing_multiplier": 0.25,
             "billing_multiplier_snapshot": {"version": 1, "factors": {"routing_group": 0.25, "user_group": 2.0}, "multiplier": 0.5},
@@ -567,6 +570,7 @@ mod tests {
                 "request_path": "/v1/chat/completions",
                 "request_path_and_query": "/v1/chat/completions",
                 "upstream_is_stream": true,
+                "chat_pii_redaction": true,
                 "routing_group_billing_multiplier": 0.25,
                 "billing_multiplier_snapshot": {"version": 1, "factors": {"routing_group": 0.25, "user_group": 2.0}, "multiplier": 0.5},
                 "routing_group_id": "group-1",

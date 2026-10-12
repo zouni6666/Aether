@@ -8,8 +8,8 @@ use aether_ai_serving::{
 };
 use aether_data_contracts::repository::usage::{
     BillingMultiplierSnapshot, BILLING_MULTIPLIER_SNAPSHOT_METADATA_KEY,
-    ROUTING_GROUP_BILLING_MULTIPLIER_METADATA_KEY, ROUTING_GROUP_ID_METADATA_KEY,
-    ROUTING_GROUP_NAME_METADATA_KEY,
+    CHAT_PII_REDACTION_METADATA_KEY, ROUTING_GROUP_BILLING_MULTIPLIER_METADATA_KEY,
+    ROUTING_GROUP_ID_METADATA_KEY, ROUTING_GROUP_NAME_METADATA_KEY,
 };
 use aether_routing_core::ResolvedRoutingPolicy;
 use aether_runtime_state::RuntimeLockLease;
@@ -73,6 +73,31 @@ pub(crate) struct LocalExecutionReportContextParts<'a> {
     pub(crate) has_envelope: bool,
     pub(crate) needs_conversion: bool,
     pub(crate) extra_fields: Map<String, Value>,
+}
+
+/// 把“本请求确实命中过敏感信息脱敏”写进 report context，最终投影为使用记录的
+/// `chat_pii_redaction` 元数据。
+///
+/// HTTP 路径由 planner 的脱敏结果直接给出命中事实（`request_redacted`）；
+/// Responses WebSocket 路径在规划前就完成了脱敏，planner 看到的事件已是占位符态，
+/// 命中事实由 [`crate::privacy::ChatPiiRedactionTurnMarker`] 扩展带进来。
+/// 只在真正发生替换时写入，避免把“功能开着”误标成“这次脱敏了”。
+pub(crate) fn mark_chat_pii_redaction(
+    extra_fields: &mut Map<String, Value>,
+    parts: &http::request::Parts,
+    request_redacted: bool,
+) {
+    if request_redacted
+        || parts
+            .extensions
+            .get::<crate::privacy::ChatPiiRedactionTurnMarker>()
+            .is_some()
+    {
+        extra_fields.insert(
+            CHAT_PII_REDACTION_METADATA_KEY.to_string(),
+            Value::Bool(true),
+        );
+    }
 }
 
 pub(crate) fn build_local_execution_report_context(
@@ -638,6 +663,33 @@ mod tests {
                 "ja4": "ja4-value",
                 "protocol": "TLSv1.3"
             })
+        );
+    }
+
+    #[test]
+    fn marks_chat_pii_redaction_only_when_content_was_replaced() {
+        let (parts, _) = http::Request::new(()).into_parts();
+        let mut extra_fields = Map::new();
+        super::mark_chat_pii_redaction(&mut extra_fields, &parts, false);
+        assert!(extra_fields.is_empty(), "未命中不得写入脱敏标记");
+
+        let mut extra_fields = Map::new();
+        super::mark_chat_pii_redaction(&mut extra_fields, &parts, true);
+        assert_eq!(
+            extra_fields.get(super::CHAT_PII_REDACTION_METADATA_KEY),
+            Some(&Value::Bool(true))
+        );
+
+        // Responses WebSocket 在规划前完成脱敏，事实只能靠扩展带进 planner。
+        let (mut ws_parts, _) = http::Request::new(()).into_parts();
+        ws_parts
+            .extensions
+            .insert(crate::privacy::ChatPiiRedactionTurnMarker);
+        let mut extra_fields = Map::new();
+        super::mark_chat_pii_redaction(&mut extra_fields, &ws_parts, false);
+        assert_eq!(
+            extra_fields.get(super::CHAT_PII_REDACTION_METADATA_KEY),
+            Some(&Value::Bool(true))
         );
     }
 }

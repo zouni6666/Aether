@@ -49,6 +49,7 @@ export interface UsageRecord {
   updated_at?: string | null
   response_time_updated_at?: string | null
   has_fallback?: boolean // 🆕 是否发生了 fallback
+  chat_pii_redaction?: boolean // 请求体实际发生过敏感信息脱敏
   client_family?: string | null
   client_ip?: string | null
   user_agent?: string | null
@@ -650,6 +651,7 @@ export const usageApi = {
       client_is_stream?: boolean | null
       has_format_conversion?: boolean | null
       has_fallback?: boolean | null
+      chat_pii_redaction?: boolean | null
       target_model?: string | null
       response_model?: string | null
       request_type?: string | null
@@ -726,6 +728,7 @@ export const usageApi = {
       client_is_stream?: boolean | null
       has_format_conversion?: boolean | null
       has_fallback?: boolean | null
+      chat_pii_redaction?: boolean | null
       target_model?: string | null
       response_model?: string | null
       request_type?: string | null

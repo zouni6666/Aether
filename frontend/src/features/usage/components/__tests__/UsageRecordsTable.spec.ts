@@ -93,6 +93,7 @@ vi.mock('lucide-vue-next', async () => {
     Search: Icon,
     Shuffle: Icon,
     Ban: Icon,
+    ShieldCheck: Icon,
     ChevronDown: Icon,
     Check: Icon,
   }
@@ -863,6 +864,27 @@ describe('UsageRecordsTable', () => {
 
     expect(root.querySelector('[data-usage-attempt-marker="fallback"]')).not.toBeNull()
     expect(root.querySelector('[data-usage-attempt-marker="retry"]')).not.toBeNull()
+  })
+
+  it('shows the PII redaction marker in both admin and user layouts', () => {
+    const adminRoot = mountUsageRecordsTable([buildRecord({ chat_pii_redaction: true })])
+    const adminMarkers = [...adminRoot.querySelectorAll('[data-usage-attempt-marker="pii-redaction"]')]
+    expect(adminMarkers).toHaveLength(2)
+    for (const marker of adminMarkers) {
+      expect(marker.getAttribute('aria-label')).toBe('触发敏感信息保护')
+      expect(marker.getAttribute('title')).toContain('上游')
+    }
+
+    const userRoot = mountUsageRecordsTable(
+      [buildRecord({ chat_pii_redaction: true })],
+      { isAdmin: false },
+    )
+    expect([...userRoot.querySelectorAll('[data-usage-attempt-marker="pii-redaction"]')]).toHaveLength(2)
+  })
+
+  it('hides the PII redaction marker when the request was never redacted', () => {
+    const root = mountUsageRecordsTable([buildRecord({ chat_pii_redaction: false })])
+    expect(root.querySelector('[data-usage-attempt-marker="pii-redaction"]')).toBeNull()
   })
 
   it('shows the skipped-candidate marker when a candidate was skipped by scheduling', () => {

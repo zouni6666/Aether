@@ -113,6 +113,38 @@ function buildFastTierDetail(): RequestDetail {
 }
 
 describe('RequestDetailDrawer settlement pricing', () => {
+  it('emits request redaction facts without promising response restoration for a failed request', async () => {
+    apiMocks.getRequestDetail.mockResolvedValue({
+      ...buildEmbeddingDetail(),
+      chat_pii_redaction: true,
+      status: 'failed',
+      status_code: 502,
+    } satisfies RequestDetail)
+    const updates = vi.fn()
+    const isOpen = ref(false)
+    const root = document.createElement('div')
+    document.body.appendChild(root)
+    const app = createApp({
+      setup: () => () => h(RequestDetailDrawer, {
+        isOpen: isOpen.value,
+        requestId: 'usage-embedding-1',
+        onRequestState: updates,
+      }),
+    })
+    app.mount(root)
+    mountedApps.push({ app, root })
+    isOpen.value = true
+    await nextTick()
+
+    await vi.waitFor(() => expect(updates).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'usage-embedding-1',
+      chatPiiRedaction: true,
+    })))
+    const notice = document.body.querySelector('[data-request-detail-pii-redaction]')
+    expect(notice?.textContent).toContain('敏感信息替换为占位符')
+    expect(notice?.textContent).not.toContain('已还原')
+  })
+
   it.each([
     { billingMultiplier: 0, billingCost: 0 },
     { billingMultiplier: undefined, billingCost: undefined },

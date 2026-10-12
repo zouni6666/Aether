@@ -132,6 +132,8 @@ pub(super) async fn retry_active_turn_after_quota_exhaustion(
         );
         return Ok(false);
     }
+    // 先取出事实，避免 `active` 的可变借用跨过后面对 `bound` 的再借用。
+    let client_event_pii_redacted = active.client_event_pii_redacted;
     active.retry_attempted = true;
     active.turn_attempt = active.turn_attempt.saturating_add(1);
     let client_event = active.client_event.clone();
@@ -160,6 +162,13 @@ pub(super) async fn retry_active_turn_after_quota_exhaustion(
     let exhausted_key_id = exhausted_key.as_ref().map(|(key_id, _)| key_id.clone());
 
     let mut planning_parts = build_planning_parts(context);
+    if client_event_pii_redacted {
+        // 透明重试重放的是已脱敏事件；把事实带进新的 planning parts，
+        // 保证重试产生的使用记录同样标记 chat_pii_redaction。
+        planning_parts
+            .extensions
+            .insert(crate::privacy::ChatPiiRedactionTurnMarker);
+    }
     if let Some(codex_fingerprint_context) = codex_fingerprint_context.as_ref() {
         crate::ai_serving::codex_context::restore_codex_logical_turn_context(
             &mut planning_parts,
