@@ -592,6 +592,7 @@ export const meApi = {
   }): Promise<{
     analysis_period_hours: number
     total_points: number
+    truncated?: boolean
     points: Array<{ x: string; y: number; model?: string }>
     models?: string[]
   }> {
@@ -602,6 +603,7 @@ export const meApi = {
         const response = await apiClient.get<{
           analysis_period_hours: number
           total_points: number
+          truncated?: boolean
           points: Array<{ x: string; y: number; model?: string }>
           models?: string[]
         }>('/api/users/me/usage/interval-timeline', { params })

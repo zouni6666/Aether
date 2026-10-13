@@ -22,6 +22,7 @@ use axum::{
 use chrono::Utc;
 use serde_json::{json, Value};
 
+use crate::handlers::shared::sample_interval_timeline;
 use crate::GatewayError;
 
 use super::{
@@ -1566,21 +1567,23 @@ pub(super) async fn handle_users_me_usage_interval_timeline_get(
         }
     };
 
-    let mut points = Vec::new();
-    for row in intervals {
-        points.push(json!({
-            "x": unix_secs_to_rfc3339(row.created_at_unix_secs),
-            "y": round_to(row.interval_minutes, 2),
-            "model": row.model,
-        }));
-        if points.len() >= limit {
-            break;
-        }
-    }
+    // 按请求顺序抽样并保留首尾点，避免窗口末尾的稀疏请求被截掉。
+    let total_points = intervals.len();
+    let points = sample_interval_timeline(intervals, limit)
+        .into_iter()
+        .map(|row| {
+            json!({
+                "x": unix_secs_to_rfc3339(row.created_at_unix_secs),
+                "y": round_to(row.interval_minutes, 2),
+                "model": row.model,
+            })
+        })
+        .collect::<Vec<_>>();
 
     Json(json!({
         "analysis_period_hours": hours,
-        "total_points": points.len(),
+        "total_points": total_points,
+        "truncated": points.len() < total_points,
         "points": points,
     }))
     .into_response()

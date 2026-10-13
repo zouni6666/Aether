@@ -27,6 +27,12 @@
         </span>
       </div>
     </div>
+    <p
+      v-if="truncatedHint"
+      class="text-[11px] text-muted-foreground mb-2"
+    >
+      {{ truncatedHint }}
+    </p>
     <div
       v-if="loading"
       class="h-[160px] flex items-center justify-center"
@@ -121,6 +127,15 @@ const COLORS = [
 const hasData = computed(() =>
   timelineData.value && timelineData.value.points && timelineData.value.points.length > 0
 )
+
+// 窗口内数据量超过展示预算时后端会均匀抽样，提示用户避免误读为完整数据
+const truncatedHint = computed(() => {
+  const data = timelineData.value
+  if (!data?.points?.length) return ''
+  const total = data.total_points || data.points.length
+  if (total <= data.points.length) return ''
+  return `窗口内共 ${total.toLocaleString()} 个间隔点，已均匀抽样展示 ${data.points.length.toLocaleString()} 个`
+})
 
 // 判断是否有多个分组（管理员按用户分组，普通用户按模型分组）
 const hasMultipleGroups = computed(() => {

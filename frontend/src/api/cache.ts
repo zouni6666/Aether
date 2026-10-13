@@ -300,6 +300,7 @@ export interface IntervalTimelinePoint {
 export interface IntervalTimelineResponse {
   analysis_period_hours: number
   total_points: number
+  truncated?: boolean  // 窗口内数据超过 limit 时是否发生了均匀抽样
   points: IntervalTimelinePoint[]
   users?: Record<string, string>  // user_id -> username 映射（仅 include_user_info=true 时存在）
   models?: string[]  // 出现的模型列表

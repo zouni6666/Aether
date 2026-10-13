@@ -4598,12 +4598,14 @@ function generateIntervalTimelineData(
   const response: {
     analysis_period_hours: number
     total_points: number
+    truncated?: boolean
     points: typeof points
     users?: Record<string, string>
     models?: string[]
   } = {
     analysis_period_hours: hours,
     total_points: points.length,
+    truncated: false,
     points,
     models: usedModels
   }

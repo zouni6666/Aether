@@ -1,6 +1,7 @@
 use super::super::analytics::list_usage_cache_affinity_intervals;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::{query_param_bool, query_param_value, unix_secs_to_rfc3339};
+use crate::handlers::shared::sample_interval_timeline;
 use crate::GatewayError;
 use aether_admin::observability::usage::{
     admin_usage_bad_request_response, admin_usage_data_unavailable_response,
@@ -107,31 +108,31 @@ pub(super) async fn build_admin_usage_cache_affinity_interval_timeline_response(
     }
 
     let total_points_before_limit: usize = grouped.values().map(Vec::len).sum();
+    // 多用户视图沿用各用户配额，并在每组内按顺序抽样、保留首尾点。
     let points: Vec<serde_json::Value> = if include_user_info && user_id.is_none() {
         let user_limits =
             admin_usage_proportional_limits(&grouped, limit, total_points_before_limit);
         let mut selected = Vec::new();
-        for (group_user_id, mut items) in grouped {
+        for (group_user_id, items) in grouped {
             let take = user_limits
                 .get(&group_user_id)
                 .copied()
-                .unwrap_or(items.len());
-            selected.extend(items.drain(..std::cmp::min(take, items.len())));
+                .unwrap_or(items.len())
+                .min(items.len());
+            selected.extend(sample_interval_timeline(items, take));
         }
         selected.sort_by(admin_usage_point_sort_key);
         selected
     } else {
         let mut selected = grouped.into_values().flatten().collect::<Vec<_>>();
         selected.sort_by(admin_usage_point_sort_key);
-        if selected.len() > limit {
-            selected.truncate(limit);
-        }
-        selected
+        sample_interval_timeline(selected, limit)
     };
 
     let mut response = json!({
         "analysis_period_hours": hours,
-        "total_points": points.len(),
+        "total_points": total_points_before_limit,
+        "truncated": points.len() < total_points_before_limit,
         "points": points,
     });
     if include_user_info && user_id.is_none() {
