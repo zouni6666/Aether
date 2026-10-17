@@ -3147,6 +3147,7 @@ async fn provider_query_execute_standard_test_candidate(
                         force_body_stream_field: require_body_stream_field,
                         kiro_auth_config: None,
                         is_claude_code: false,
+                        is_vertex: false,
                         enable_model_directives: false,
                     },
                 )

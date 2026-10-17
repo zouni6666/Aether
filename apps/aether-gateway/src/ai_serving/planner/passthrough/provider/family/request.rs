@@ -211,6 +211,7 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
             prepared.force_body_stream_field,
             prepared.kiro_auth.as_ref(),
             prepared.is_claude_code,
+            prepared.is_vertex,
             false,
             reasoning_replay_policy,
         )
