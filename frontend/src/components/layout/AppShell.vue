@@ -20,6 +20,7 @@
         v-if="$slots.sidebar"
         class="app-shell__sidebar"
         :class="sidebarClass"
+        :style="sidebarStyle"
       >
         <slot name="sidebar" />
       </aside>
@@ -38,18 +39,20 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, type CSSProperties } from 'vue'
 
 const props = withDefaults(defineProps<{
   showNotice?: boolean
   contentClass?: string
   mainClass?: string
   sidebarClass?: string
+  sidebarStyle?: CSSProperties
 }>(), {
   showNotice: false,
   contentClass: '',
   mainClass: '',
   sidebarClass: '',
+  sidebarStyle: () => ({}),
 })
 
 const showNotice = computed(() => props.showNotice)
