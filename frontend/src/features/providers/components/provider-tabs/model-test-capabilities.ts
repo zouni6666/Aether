@@ -116,14 +116,16 @@ export function selectPreferredModelTestEndpoint<T extends ModelTestEndpointSour
   model: ModelTestImageSource | null | undefined,
   endpoints: T[],
 ): T | null {
+  const activeEndpoints = endpoints.filter(endpoint => endpoint.is_active !== false)
+  const preferredEndpoints = activeEndpoints.length > 0 ? activeEndpoints : endpoints
   if (modelSupportsImageGeneration(model)) {
-    const imageEndpoint = endpoints.find(
+    const imageEndpoint = preferredEndpoints.find(
       endpoint => normalizeApiFormatAlias(endpoint.api_format) === 'openai:image',
     )
     if (imageEndpoint) return imageEndpoint
   }
 
-  return endpoints[0] ?? null
+  return preferredEndpoints[0] ?? null
 }
 
 export function getOpenAiImageModelTestCapability(

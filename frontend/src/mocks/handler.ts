@@ -2165,7 +2165,7 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
     await delay()
     requireAdmin()
     refreshMockReferralModuleStatus()
-    return createMockResponse(MOCK_MODULE_STATUSES)
+    return createMockResponse(structuredClone(MOCK_MODULE_STATUSES))
   },
 
   // ========== Admin: System ==========

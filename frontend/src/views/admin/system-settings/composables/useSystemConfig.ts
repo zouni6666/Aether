@@ -4,6 +4,7 @@ import { adminApi } from '@/api/admin'
 import { parseApiError } from '@/utils/errorParser'
 import { log } from '@/utils/logger'
 import { useSiteInfo } from '@/composables/useSiteInfo'
+import { useModuleStore } from '@/stores/modules'
 
 export interface SystemConfig {
   // 站点信息
@@ -168,6 +169,7 @@ function createDefaultConfig(): SystemConfig {
 export function useSystemConfig() {
   const { success, error } = useToast()
   const { refreshSiteInfo } = useSiteInfo()
+  const moduleStore = useModuleStore()
 
   const systemConfig = ref<SystemConfig>(createDefaultConfig())
   const originalConfig = ref<SystemConfig | null>(null)
@@ -470,6 +472,11 @@ export function useSystemConfig() {
         referral_headcount_amount_usd: systemConfig.value.referral_headcount_amount_usd,
         referral_headcount_trigger: systemConfig.value.referral_headcount_trigger,
       })
+      try {
+        await moduleStore.fetchModules()
+      } catch (err) {
+        log.error('返利配置已保存，刷新模块状态失败:', err)
+      }
       await Promise.all(
         configItems.map((item) =>
           adminApi.updateSystemConfig(item.key, item.value, item.description)

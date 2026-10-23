@@ -197,6 +197,26 @@ describe('ModelMappingTab response contracts', () => {
     expect(testMocks.testModel.mock.calls[0][0]).not.toHaveProperty('api_key_ids')
   })
 
+  it('allows a selected key test with a disabled provider and endpoint', async () => {
+    const state = mountMappingTab({
+      provider: { ...provider, is_active: false },
+      endpoints: endpoints?.map(endpoint => ({ ...endpoint, is_active: false, active_keys: 0 })),
+    })
+    await openMappingTest(state)
+
+    expect(keyMocks.getProviderKeys).toHaveBeenCalledWith(provider.id)
+    expect(state.testKeyOptions.map(option => option.value)).toEqual(['chat-key'])
+    state.selectedTestKeyIds = ['chat-key']
+    await state.handleStartMappingTest()
+
+    expect(testMocks.showError).not.toHaveBeenCalled()
+    expect(testMocks.testModel).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      provider_id: provider.id,
+      endpoint_id: 'chat',
+      api_key_ids: ['chat-key'],
+    }), expect.objectContaining({ signal: expect.any(AbortSignal) }))
+  })
+
   it('waits for keys to load before allowing a test', async () => {
     let resolveKeys!: (keys: EndpointAPIKey[]) => void
     keyMocks.getProviderKeys.mockReturnValue(new Promise<EndpointAPIKey[]>(resolve => {

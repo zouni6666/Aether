@@ -393,7 +393,6 @@ import {
   buildDefaultModelTestRequestHeaders,
   buildDefaultModelTestRequestBody,
   isModelTestableApiFormat,
-  isModelTestableEndpoint,
   modelTestMappingScopeMatchesEndpoint,
   modelTestKeySupportsEndpoint,
   parseModelTestRequestHeadersDraft,
@@ -513,17 +512,9 @@ const testRequestBodyDraft = ref('')
 const testRequestBodyResetValue = ref('')
 const mappingTestEndpoints = ref<ProviderEndpoint[] | null>(null)
 const providerKeysState = computed(() => props.providerKeys ?? [])
-const activeEndpoints = computed(() => (props.endpoints ?? [])
-  .filter(endpoint => {
-    if (typeof endpoint.active_keys === 'number') {
-      return endpoint.is_active !== false
-        && isModelTestableApiFormat(endpoint.api_format)
-        && (endpoint.active_keys > 0
-          || isModelTestableEndpoint(endpoint, providerKeysState.value, props.provider.provider_type))
-    }
-    return isModelTestableEndpoint(endpoint, providerKeysState.value, props.provider.provider_type)
-  }))
-const selectableTestEndpoints = computed(() => mappingTestEndpoints.value ?? activeEndpoints.value)
+const testableEndpoints = computed(() => (props.endpoints ?? [])
+  .filter(endpoint => isModelTestableApiFormat(endpoint.api_format)))
+const selectableTestEndpoints = computed(() => mappingTestEndpoints.value ?? testableEndpoints.value)
 const parsedTestRequestHeaders = computed(() => parseModelTestRequestHeadersDraft(testRequestHeadersDraft.value))
 const testRequestHeadersError = computed(() => parsedTestRequestHeaders.value.error)
 const parsedTestRequestBody = computed(() => parseModelTestRequestBodyDraft(testRequestBodyDraft.value))
@@ -893,9 +884,9 @@ function runMappingTest(
   endpointsOverride?: ProviderEndpoint[],
   sourceModel?: Model | null,
 ) {
-  const endpoints = endpointsOverride ?? activeEndpoints.value
+  const endpoints = endpointsOverride ?? testableEndpoints.value
   if (endpoints.length === 0) {
-    showError('暂无可用于测试的活跃端点')
+    showError('暂无可用于测试的端点')
     return
   }
   pendingMappingKey.value = testingKey
@@ -987,9 +978,9 @@ async function handleStartMappingTest() {
 
 function scopedMappingEndpoints(item: CombinedMapping): ProviderEndpoint[] {
   const group = item.group
-  if (!group) return activeEndpoints.value
+  if (!group) return testableEndpoints.value
 
-  return activeEndpoints.value.filter(endpoint => modelTestMappingScopeMatchesEndpoint(
+  return testableEndpoints.value.filter(endpoint => modelTestMappingScopeMatchesEndpoint(
     group.apiFormats,
     group.endpointIds,
     endpoint,

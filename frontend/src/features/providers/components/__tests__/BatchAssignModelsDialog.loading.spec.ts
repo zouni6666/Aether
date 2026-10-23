@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, defineComponent, h, nextTick, type App } from 'vue'
+import { createApp, defineComponent, h, nextTick, ref, type App } from 'vue'
 
 import BatchAssignModelsDialog from '../BatchAssignModelsDialog.vue'
 
@@ -227,6 +227,112 @@ describe('BatchAssignModelsDialog loading', () => {
     await settle()
 
     expect(visibleModelIds(root)).toEqual(['gm-beta', 'gm-alpha'])
+  })
+})
+
+describe('BatchAssignModelsDialog selection ordering', () => {
+  async function mountDialog() {
+    globalModelMocks.getGlobalModels.mockResolvedValue({
+      models: [
+        createGlobalModel('gm-zeta', 'zeta-model', 'Zeta'),
+        createGlobalModel('gm-alpha', 'alpha-model', 'Alpha'),
+        createGlobalModel('gm-mu', 'mu-model', 'Mu'),
+      ],
+      total: 3,
+    })
+    endpointMocks.getProviderModels.mockResolvedValue([
+      createProviderModel('pm-mu', 'gm-mu'),
+    ])
+
+    const open = ref(true)
+    const root = document.createElement('div')
+    document.body.appendChild(root)
+    const app = createApp(defineComponent({
+      setup() {
+        return () => open.value ? h(BatchAssignModelsDialog, {
+          open: true,
+          providerId: 'provider-1',
+          'onUpdate:open': (value: boolean) => { open.value = value },
+        }) : null
+      },
+    }))
+    app.mount(root)
+    mountedApps.push({ app, root })
+    await settle()
+    return { root, open }
+  }
+
+  function modelRow(root: HTMLElement, id: string): HTMLElement {
+    return root.querySelector(`[data-testid="batch-assign-model-${id}"]`) as HTMLElement
+  }
+
+  it('returns a saved model to name order immediately when unchecked', async () => {
+    const { root } = await mountDialog()
+    expect(visibleModelIds(root)).toEqual(['gm-mu', 'gm-alpha', 'gm-zeta'])
+
+    modelRow(root, 'gm-mu').click()
+    await settle()
+
+    expect(visibleModelIds(root)).toEqual(['gm-alpha', 'gm-mu', 'gm-zeta'])
+    expect(modelRow(root, 'gm-mu').querySelector('.bg-primary')).toBeNull()
+
+    modelRow(root, 'gm-mu').click()
+    await settle()
+
+    expect(visibleModelIds(root)).toEqual(['gm-mu', 'gm-alpha', 'gm-zeta'])
+  })
+
+  it('keeps newly checked models in name order until saved, including search results', async () => {
+    const { root } = await mountDialog()
+
+    modelRow(root, 'gm-zeta').click()
+    await settle()
+
+    expect(modelRow(root, 'gm-zeta').querySelector('.bg-primary')).not.toBeNull()
+    expect(visibleModelIds(root)).toEqual(['gm-mu', 'gm-alpha', 'gm-zeta'])
+    expect(endpointMocks.batchAssignModelsToProvider).not.toHaveBeenCalled()
+
+    const search = root.querySelector('input') as HTMLInputElement
+    search.value = 'model'
+    search.dispatchEvent(new Event('input', { bubbles: true }))
+    await settle()
+
+    expect(visibleModelIds(root)).toEqual(['gm-mu', 'gm-alpha', 'gm-zeta'])
+
+    modelRow(root, 'gm-zeta').click()
+    await settle()
+
+    expect(modelRow(root, 'gm-zeta').querySelector('.bg-primary')).toBeNull()
+    expect(visibleModelIds(root)).toEqual(['gm-mu', 'gm-alpha', 'gm-zeta'])
+  })
+
+  it('pins a newly associated model when reopened after saving', async () => {
+    endpointMocks.batchAssignModelsToProvider.mockResolvedValue({
+      success: [{ global_model_id: 'gm-zeta', global_model_name: 'zeta-model', model_id: 'pm-zeta' }],
+      errors: [],
+    })
+    const { root, open } = await mountDialog()
+
+    modelRow(root, 'gm-zeta').click()
+    await settle()
+    expect(visibleModelIds(root)).toEqual(['gm-mu', 'gm-alpha', 'gm-zeta'])
+
+    const saveButton = Array.from(root.querySelectorAll('button'))
+      .find(button => button.textContent?.trim() === '保存') as HTMLButtonElement
+    saveButton.click()
+    await settle()
+
+    expect(endpointMocks.batchAssignModelsToProvider).toHaveBeenCalledWith('provider-1', ['gm-zeta'])
+    expect(open.value).toBe(false)
+
+    endpointMocks.getProviderModels.mockResolvedValue([
+      createProviderModel('pm-mu', 'gm-mu'),
+      createProviderModel('pm-zeta', 'gm-zeta'),
+    ])
+    open.value = true
+    await settle()
+
+    expect(visibleModelIds(root)).toEqual(['gm-mu', 'gm-zeta', 'gm-alpha'])
   })
 })
 

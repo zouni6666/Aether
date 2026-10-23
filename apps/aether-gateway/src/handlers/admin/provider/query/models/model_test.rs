@@ -919,6 +919,7 @@ fn provider_query_select_kiro_endpoint<'a>(
     endpoints: &'a [StoredProviderCatalogEndpoint],
     endpoint_id: Option<&str>,
     api_format: Option<&str>,
+    allow_inactive: bool,
 ) -> Result<Option<&'a StoredProviderCatalogEndpoint>, &'static str> {
     if let Some(endpoint_id) = endpoint_id {
         let endpoint = endpoints.iter().find(|endpoint| endpoint.id == endpoint_id);
@@ -929,12 +930,35 @@ fn provider_query_select_kiro_endpoint<'a>(
 
     if let Some(api_format) = api_format {
         let endpoint = endpoints.iter().find(|endpoint| {
-            endpoint.is_active && endpoint.api_format.trim().eq_ignore_ascii_case(api_format)
+            (allow_inactive || endpoint.is_active)
+                && endpoint.api_format.trim().eq_ignore_ascii_case(api_format)
         });
         return Ok(endpoint);
     }
 
-    Ok(endpoints.iter().find(|endpoint| endpoint.is_active))
+    Ok(endpoints
+        .iter()
+        .find(|endpoint| allow_inactive || endpoint.is_active))
+}
+
+async fn provider_query_read_test_transport(
+    state: &AdminAppState<'_>,
+    provider_id: &str,
+    endpoint_id: &str,
+    key_id: &str,
+    selected_key_ids: Option<&BTreeSet<String>>,
+) -> Result<Option<AdminGatewayProviderTransportSnapshot>, GatewayError> {
+    let mut transport = state
+        .read_provider_transport_snapshot(provider_id, endpoint_id, key_id)
+        .await?;
+    if selected_key_ids.is_some_and(|ids| ids.contains(key_id)) {
+        if let Some(transport) = transport.as_mut() {
+            // Explicit admin tests bypass scheduling status only in this local snapshot.
+            transport.provider.is_active = true;
+            transport.endpoint.is_active = true;
+        }
+    }
+    Ok(transport)
 }
 
 fn provider_query_key_supports_endpoint(
@@ -957,7 +981,10 @@ async fn provider_query_select_preferred_non_kiro_endpoint(
     selected_key_ids: Option<&BTreeSet<String>>,
 ) -> Option<StoredProviderCatalogEndpoint> {
     for priority in 0..=2 {
-        for endpoint in endpoints.iter().filter(|endpoint| endpoint.is_active) {
+        for endpoint in endpoints
+            .iter()
+            .filter(|endpoint| selected_key_ids.is_some() || endpoint.is_active)
+        {
             if provider_query_model_test_endpoint_priority(
                 &provider.provider_type,
                 &endpoint.api_format,
@@ -976,9 +1003,14 @@ async fn provider_query_select_preferred_non_kiro_endpoint(
                 {
                     continue;
                 }
-                let Ok(Some(transport)) = state
-                    .read_provider_transport_snapshot(&provider.id, &endpoint.id, &key.id)
-                    .await
+                let Ok(Some(transport)) = provider_query_read_test_transport(
+                    state,
+                    &provider.id,
+                    &endpoint.id,
+                    &key.id,
+                    selected_key_ids,
+                )
+                .await
                 else {
                     continue;
                 };
@@ -996,7 +1028,7 @@ async fn provider_query_select_preferred_non_kiro_endpoint(
     endpoints
         .iter()
         .find(|endpoint| {
-            endpoint.is_active
+            (selected_key_ids.is_some() || endpoint.is_active)
                 && keys.iter().any(|key| {
                     key.is_active
                         && provider_query_selected_key_ids_allow_key(selected_key_ids, &key.id)
@@ -1007,7 +1039,11 @@ async fn provider_query_select_preferred_non_kiro_endpoint(
                         )
                 })
         })
-        .or_else(|| endpoints.iter().find(|endpoint| endpoint.is_active))
+        .or_else(|| {
+            endpoints
+                .iter()
+                .find(|endpoint| selected_key_ids.is_some() || endpoint.is_active)
+        })
         .cloned()
 }
 
@@ -1447,6 +1483,7 @@ async fn provider_query_build_kiro_test_candidates(
             &endpoints,
             requested_endpoint_id.as_deref(),
             requested_api_format.as_deref(),
+            selected_key_ids.is_some(),
         ) {
             Ok(Some(endpoint)) => endpoint.clone(),
             Ok(None) => {
@@ -1538,7 +1575,12 @@ async fn provider_query_build_kiro_test_candidates(
             provider_query_key_supports_endpoint(key, &provider.provider_type, &endpoint.api_format)
         })
     {
-        if provider_query_key_allows_effective_test_model(&key, &requested_model, &effective_model)
+        if selected_key_ids.is_some()
+            || provider_query_key_allows_effective_test_model(
+                &key,
+                &requested_model,
+                &effective_model,
+            )
         {
             keys.push(key);
         } else {
@@ -1562,7 +1604,7 @@ async fn provider_query_build_kiro_test_candidates(
         )
     });
 
-    let scheduled_candidates = if test_mode.eq_ignore_ascii_case("pool") {
+    let scheduled_candidates = if selected_key_ids.is_none() {
         if let Some(pool_config) =
             admin_provider_pool_config_from_config_value(provider.config.as_ref())
         {
@@ -1824,9 +1866,14 @@ async fn provider_query_execute_kiro_test_candidate(
     trace_id: &str,
     requested_model: &str,
 ) -> Result<ProviderQueryExecutionOutcome, GatewayError> {
-    let Some(transport) = state
-        .read_provider_transport_snapshot(&provider.id, &candidate.endpoint.id, &candidate.key.id)
-        .await?
+    let Some(transport) = provider_query_read_test_transport(
+        state,
+        &provider.id,
+        &candidate.endpoint.id,
+        &candidate.key.id,
+        provider_query_extract_api_key_ids(payload).as_ref(),
+    )
+    .await?
     else {
         return Ok(provider_query_skipped_execution_outcome(
             Value::Null,
@@ -2170,9 +2217,14 @@ async fn provider_query_execute_openai_image_test_candidate(
     trace_id: &str,
     requested_model: &str,
 ) -> Result<ProviderQueryExecutionOutcome, GatewayError> {
-    let Some(mut transport) = state
-        .read_provider_transport_snapshot(&provider.id, &candidate.endpoint.id, &candidate.key.id)
-        .await?
+    let Some(mut transport) = provider_query_read_test_transport(
+        state,
+        &provider.id,
+        &candidate.endpoint.id,
+        &candidate.key.id,
+        provider_query_extract_api_key_ids(payload).as_ref(),
+    )
+    .await?
     else {
         return Ok(provider_query_skipped_execution_outcome(
             Value::Null,
@@ -2577,9 +2629,14 @@ async fn provider_query_execute_antigravity_test_candidate(
     trace_id: &str,
     requested_model: &str,
 ) -> Result<ProviderQueryExecutionOutcome, GatewayError> {
-    let Some(mut transport) = state
-        .read_provider_transport_snapshot(&provider.id, &candidate.endpoint.id, &candidate.key.id)
-        .await?
+    let Some(mut transport) = provider_query_read_test_transport(
+        state,
+        &provider.id,
+        &candidate.endpoint.id,
+        &candidate.key.id,
+        provider_query_extract_api_key_ids(payload).as_ref(),
+    )
+    .await?
     else {
         return Ok(provider_query_skipped_execution_outcome(
             Value::Null,
@@ -2794,9 +2851,14 @@ async fn provider_query_execute_grok_test_candidate(
     route_path: &str,
     trace_id: &str,
 ) -> Result<ProviderQueryExecutionOutcome, GatewayError> {
-    let Some(transport) = state
-        .read_provider_transport_snapshot(&provider.id, &candidate.endpoint.id, &candidate.key.id)
-        .await?
+    let Some(transport) = provider_query_read_test_transport(
+        state,
+        &provider.id,
+        &candidate.endpoint.id,
+        &candidate.key.id,
+        provider_query_extract_api_key_ids(payload).as_ref(),
+    )
+    .await?
     else {
         return Ok(provider_query_skipped_execution_outcome(
             Value::Null,
@@ -2965,9 +3027,14 @@ async fn provider_query_execute_standard_test_candidate(
     route_path: &str,
     trace_id: &str,
 ) -> Result<ProviderQueryExecutionOutcome, GatewayError> {
-    let Some(mut transport) = state
-        .read_provider_transport_snapshot(&provider.id, &candidate.endpoint.id, &candidate.key.id)
-        .await?
+    let Some(mut transport) = provider_query_read_test_transport(
+        state,
+        &provider.id,
+        &candidate.endpoint.id,
+        &candidate.key.id,
+        provider_query_extract_api_key_ids(payload).as_ref(),
+    )
+    .await?
     else {
         return Ok(provider_query_skipped_execution_outcome(
             Value::Null,

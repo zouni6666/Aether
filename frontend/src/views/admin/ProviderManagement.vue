@@ -1,6 +1,7 @@
 <template>
   <ProviderSchedulingView
     ref="schedulingWorkspace"
+    v-slot="{ panelCollapsed, togglePanel }"
     :provider-revision="providerRevision"
     @inspect-provider="openProviderDrawer"
     @context-change="updateSchedulingContext"
@@ -28,6 +29,7 @@
       >
         <!-- 标题和操作栏 -->
         <ProviderTableHeader
+          :policy-panel-collapsed="panelCollapsed"
           :search-query="searchQuery"
           :filter-api-format="filterApiFormat"
           filter-model="all"
@@ -36,6 +38,7 @@
           :model-filters="[]"
           :has-active-filters="hasActiveFilters"
           :loading="loading"
+          @toggle-policy-panel="togglePanel"
           @update:search-query="searchQuery = $event"
           @update:filter-api-format="filterApiFormat = $event"
           @reset-filters="resetFilters"

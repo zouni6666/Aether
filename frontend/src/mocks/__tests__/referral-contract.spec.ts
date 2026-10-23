@@ -15,6 +15,17 @@ describe('referral demo contract', () => {
     setMockUserToken(null)
   })
 
+  it('returns independent module status snapshots so toggles update reactive navigation', async () => {
+    setMockUserToken('demo-access-token-admin')
+    const before = await handleMockRequest({ method: 'GET', url: '/api/admin/modules/status' })
+    expect(before?.data).toMatchObject({ referral: { enabled: false, active: false } })
+    await handleMockRequest({ method: 'PUT', url: '/api/admin/modules/status/referral/enabled', data: JSON.stringify({ enabled: true }) })
+    const after = await handleMockRequest({ method: 'GET', url: '/api/admin/modules/status' })
+    expect(after?.data).not.toBe(before?.data)
+    expect(before?.data).toMatchObject({ referral: { enabled: false, active: false } })
+    expect(after?.data).toMatchObject({ referral: { enabled: true, active: true } })
+  })
+
   it('keeps both administrator switches and the ordinary user status consistent', async () => {
     setMockUserToken('demo-access-token-admin')
     await handleMockRequest({ method: 'PUT', url: '/api/admin/system/configs/referral_enabled', data: JSON.stringify({ value: true }) })

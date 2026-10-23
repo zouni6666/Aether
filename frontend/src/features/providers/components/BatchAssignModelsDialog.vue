@@ -289,16 +289,19 @@ function compareGlobalModelsByName(left: GlobalModelResponse, right: GlobalModel
   return nameA.localeCompare(nameB)
 }
 
-// 过滤后的全局模型：当前已勾选/已关联的排在可见结果顶部，便于取消关联
+// 仅将已保存关联且仍勾选的模型置顶，未保存的新勾选保持名称排序
 const filteredGlobalModels = computed(() => {
   const query = searchQuery.value.toLowerCase().trim()
   const selectedIds = selectedGlobalModelIds.value
+  const isPinned = (model: GlobalModelResponse) => (
+    initialGlobalModelIds.value.has(model.id) && selectedIds.has(model.id)
+  )
   const matched = allGlobalModels.value.filter(model => globalModelMatchesQuery(model, query))
   const pinned = matched
-    .filter(model => selectedIds.has(model.id))
+    .filter(isPinned)
     .sort(compareGlobalModelsByName)
   const rest = matched
-    .filter(model => !selectedIds.has(model.id))
+    .filter(model => !isPinned(model))
     .sort(compareGlobalModelsByName)
   return [...pinned, ...rest]
 })

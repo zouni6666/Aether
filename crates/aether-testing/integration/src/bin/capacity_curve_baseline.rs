@@ -800,8 +800,9 @@ async fn connect_protocol_peer(
                             }
                         }
                         Some(Ok(Message::Ping(payload))) => {
-                            if sink.send(Message::Pong(payload)).await.is_err() {
-                                break;
+                            match sink.send(Message::Pong(payload)).await {
+                                Ok(()) => {},
+                                Err(_) => break,
                             }
                         }
                         None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,

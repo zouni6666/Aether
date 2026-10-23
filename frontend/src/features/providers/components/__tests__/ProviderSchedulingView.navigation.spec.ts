@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, ref, type App } from 'vue'
 import { createMemoryHistory, createRouter, RouterView, type LocationQueryRaw } from 'vue-router'
 import ProviderSchedulingView from '../ProviderSchedulingView.vue'
+import ProviderTableHeader from '../ProviderTableHeader.vue'
 import { createEmptyRoutingGroupConfig, setDefaultProviderPriorityOverrides, type RoutingGroupConfig } from '@/features/routing/utils/routingPolicy'
 import type { RoutingGroupRecord, RoutingGroupUpdateRequest } from '@/api/routing-profiles'
 
@@ -10,6 +11,7 @@ const confirm = vi.hoisted(() => vi.fn())
 const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }))
 const inspectProvider = vi.hoisted(() => vi.fn())
 const contextChange = vi.hoisted(() => vi.fn())
+const commitFailoverDrafts = vi.hoisted(() => vi.fn())
 vi.mock('@/api/routing-profiles', () => routingApi)
 vi.mock('@/api/global-models', () => ({ getGlobalModels: vi.fn().mockResolvedValue({ models: [] }) }))
 vi.mock('@/composables/useToast', () => ({ useToast: () => toast }))
@@ -20,14 +22,17 @@ vi.mock('../ProviderSchedulingStatus.vue', () => ({ default: { render: () => nul
 vi.mock('@/features/routing/components', async () => {
   const { defineComponent, h } = await import('vue')
   return {
-    RoutingFailoverPolicyEditor: defineComponent({ setup(_, { expose }) { expose({ commitJsonDrafts: () => true }); return () => null } }),
+    RoutingFailoverPolicyEditor: defineComponent({ setup(_, { expose }) { expose({ commitJsonDrafts: commitFailoverDrafts }); return () => null } }),
     RoutingSchedulingPolicyEditor: defineComponent({
-      props: { refreshRevision: Number, layout: String },
-      emits: ['inspect-provider'],
+      props: { refreshRevision: Number, layout: String, config: Object },
+      emits: ['inspect-provider', 'selection-change'],
       setup(props, { emit, slots }) {
         return () => h('div', [
           slots['toolbar-leading']?.(),
           h('button', { 'aria-label': '查看示例提供商', 'data-revision': props.refreshRevision, 'data-layout': props.layout, onClick: () => emit('inspect-provider', 'provider-a') }, '示例提供商'),
+          h('button', { 'aria-label': '选择示例调度配置', onClick: () => emit('selection-change', {
+            id: 'selected-policy', policy: props.config?.default_policy, priorityMode: 'provider', schedulingMode: 'fixed_order', scope: 'selected', modelNames: ['example-model'],
+          }) }, '示例配置'),
           slots['toolbar-actions']?.(),
         ])
       },
@@ -36,6 +41,7 @@ vi.mock('@/features/routing/components', async () => {
 })
 
 const mounted: Array<{ app: App; root: HTMLElement }> = []
+const collapsedStorageKey = 'aether-provider-policy-collapsed'
 const originalScrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView')
 function group(id: string, overrides: Partial<RoutingGroupRecord> = {}): RoutingGroupRecord {
   return { id, name: id, enabled: true, is_system_default: false, sort_order: 0, config_json: createEmptyRoutingGroupConfig(), version: 1, created_at: 1, updated_at: 1, ...overrides }
@@ -44,6 +50,9 @@ async function flush() {
   await nextTick()
   await new Promise(resolve => setTimeout(resolve, 0))
   await nextTick()
+  await vi.waitFor(() => {
+    expect(document.querySelector('#provider-policy-editor.policy-panel-enter-active, #provider-policy-editor.policy-panel-leave-active')).toBeNull()
+  }, { interval: 10 })
 }
 async function mountWorkspace(query: LocationQueryRaw = {}, items = [group('first'), group('default', { is_system_default: true }), group('last')]) {
   routingApi.listRoutingGroups.mockResolvedValue({ items, total: items.length })
@@ -53,7 +62,14 @@ async function mountWorkspace(query: LocationQueryRaw = {}, items = [group('firs
   const workspace = ref<{ updateDraftConfig: (config: RoutingGroupConfig) => void; refreshGroups: () => Promise<void>; ensureSaved: () => Promise<boolean> } | null>(null)
   const Providers = defineComponent({
     setup() {
-      return () => h(ProviderSchedulingView, { ref: workspace, providerRevision: providerRevision.value, onInspectProvider: inspectProvider, onContextChange: contextChange }, { default: () => h('div', { 'data-testid': 'provider-directory' }, '提供商目录') })
+      return () => h(ProviderSchedulingView, { ref: workspace, providerRevision: providerRevision.value, onInspectProvider: inspectProvider, onContextChange: contextChange }, {
+        default: ({ panelCollapsed, togglePanel }: { panelCollapsed: boolean; togglePanel: () => void }) => h('div', { 'data-testid': 'provider-directory' }, [
+          h(ProviderTableHeader, {
+            searchQuery: '', filterApiFormat: 'all', filterModel: 'all', apiFormatFilters: [], modelFilters: [], hasActiveFilters: false, loading: false,
+            policyPanelCollapsed: panelCollapsed, onTogglePolicyPanel: togglePanel,
+          }),
+        ]),
+      })
     },
   })
   const router = createRouter({ history: createMemoryHistory(), routes: [
@@ -110,18 +126,118 @@ async function editMultiplier(root: HTMLElement, value: string, label = '分组�
 
 beforeEach(() => {
   vi.clearAllMocks()
+  localStorage.removeItem(collapsedStorageKey)
+  commitFailoverDrafts.mockReturnValue(true)
   confirm.mockResolvedValue(false)
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+  vi.stubGlobal('matchMedia', vi.fn((query: string) => ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    dispatchEvent: vi.fn(),
+  })))
   Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { value: vi.fn(), configurable: true })
 })
 afterEach(() => {
   for (const { app, root } of mounted.splice(0)) { app.unmount(); root.remove() }
+  localStorage.removeItem(collapsedStorageKey)
   vi.unstubAllGlobals()
   if (originalScrollIntoView) Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', originalScrollIntoView)
   else Reflect.deleteProperty(HTMLElement.prototype, 'scrollIntoView')
 })
 
 describe('ProviderSchedulingView workspace navigation', () => {
+  it('keeps the draft, mounted editors and scheduling context when the policy panel is collapsed', async () => {
+    const { root, router, providerRevision } = await mountWorkspace()
+    await editName(root, '折叠后保留')
+    button(root, '选择示例调度配置').click()
+    await nextTick()
+    const activePolicy = JSON.parse(JSON.stringify(contextChange.mock.lastCall?.[0].activePolicy))
+    const editor = element(root, '#provider-policy-editor')
+    const inspectButton = button(root, '查看示例提供商')
+    const collapse = button(root, '收起策略分组')
+    const directory = element(root, '[data-testid="provider-directory"]')
+    const title = element(directory, 'h3')
+    expect(directory.contains(collapse)).toBe(true)
+    expect(collapse.compareDocumentPosition(title) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(editor.tagName).toBe('ASIDE')
+    expect(editor.contains(collapse)).toBe(false)
+    expect(collapse.getAttribute('aria-controls')).toBe(editor.id)
+    expect(collapse.getAttribute('aria-expanded')).toBe('true')
+    collapse.click()
+    await flush()
+    expect(editor.style.display).toBe('none')
+    expect(button(root, '展开策略分组').getAttribute('aria-expanded')).toBe('false')
+    expect(localStorage.getItem(collapsedStorageKey)).toBe('true')
+    expect(button(root, '查看示例提供商')).toBe(inspectButton)
+    expect(contextChange.mock.lastCall?.[0].activePolicy).toEqual(activePolicy)
+    expect(contextChange.mock.lastCall?.[0].groupName).toBe('折叠后保留')
+    expect(button(root, '保存调度').disabled).toBe(false)
+    expect(router.currentRoute.value.query.group).toBeUndefined()
+    expect(confirm).not.toHaveBeenCalled()
+    expect(routingApi.updateRoutingGroup).not.toHaveBeenCalled()
+    providerRevision.value += 1
+    await nextTick()
+    expect(inspectButton.dataset.revision).toBe('1')
+    button(root, '展开策略分组').click()
+    await flush()
+    expect(editor.style.display).not.toBe('none')
+    expect(button(root, '查看示例提供商')).toBe(inspectButton)
+    expect(element<HTMLInputElement>(root, '[aria-label="策略名称"]').value).toBe('折叠后保留')
+    expect(localStorage.getItem(collapsedStorageKey)).toBe('false')
+  })
+
+  it('restores the collapsed panel after revisiting the provider page', async () => {
+    const { root, router } = await mountWorkspace()
+    button(root, '收起策略分组').click()
+    await flush()
+    await router.push({ name: 'Other' })
+    await router.push({ name: 'ProviderManagement' })
+    await flush()
+    expect(element(root, '#provider-policy-editor').style.display).toBe('none')
+    expect(button(root, '展开策略分组').getAttribute('aria-expanded')).toBe('false')
+    expect(selector(root).textContent?.trim()).toBe('default · 默认')
+    expect(root.querySelector('[data-testid="provider-directory"]')).not.toBeNull()
+  })
+
+  it.each([
+    { field: '策略名称', value: '', error: '策略名称不能为空' },
+    { field: '分组倍率', value: '', error: '分组倍率必须是大于或等于 0 的有效数字' },
+  ])('expands the panel and focuses $field when saving finds invalid input', async ({ field, value, error }) => {
+    const { root, workspace } = await mountWorkspace()
+    if (field === '策略名称') await editName(root, value)
+    else await editMultiplier(root, value)
+    button(root, '收起策略分组').click()
+    await flush()
+    confirm.mockResolvedValueOnce(true)
+    expect(await workspace.value?.ensureSaved()).toBe(false)
+    await flush()
+    expect(element(root, '#provider-policy-editor').style.display).not.toBe('none')
+    expect(document.activeElement).toBe(element(root, `[aria-label="${field}"]`))
+    expect(toast.error).toHaveBeenCalledWith(error)
+    expect(routingApi.updateRoutingGroup).not.toHaveBeenCalled()
+  })
+
+  it('reveals the failover editor when its pending JSON draft prevents saving a collapsed panel', async () => {
+    const { root, workspace } = await mountWorkspace()
+    await editName(root, '待校验配置')
+    commitFailoverDrafts.mockReturnValueOnce(false)
+    button(root, '收起策略分组').click()
+    await flush()
+    confirm.mockResolvedValueOnce(true)
+    expect(await workspace.value?.ensureSaved()).toBe(false)
+    await flush()
+    expect(commitFailoverDrafts).toHaveBeenCalledOnce()
+    expect(element(root, '#provider-policy-editor').style.display).not.toBe('none')
+    expect(button(root, '故障转移').getAttribute('aria-expanded')).toBe('true')
+    expect(element<HTMLInputElement>(root, '[aria-label="策略名称"]').value).toBe('待校验配置')
+    expect(routingApi.updateRoutingGroup).not.toHaveBeenCalled()
+  })
+
   it('defaults legacy groups to private and saves visibility without losing scheduling or rankings', async () => {
     const legacyConfig = createEmptyRoutingGroupConfig()
     Reflect.deleteProperty(legacyConfig, 'user_visible')
@@ -385,8 +501,12 @@ describe('ProviderSchedulingView workspace navigation', () => {
 
   it('starts an inline draft and creates the complete edited configuration only on header save', async () => {
     const { root, router, workspace } = await mountWorkspace()
-    button(root, '新建策略').click()
+    button(root, '收起策略分组').click()
     await flush()
+    await router.push({ name: 'ProviderManagement', query: { group: 'new' } })
+    await flush()
+    expect(element(root, '#provider-policy-editor').style.display).not.toBe('none')
+    expect(document.activeElement).toBe(element(root, '[aria-label="策略名称"]'))
     expect(router.currentRoute.value.query.group).toBe('new')
     expect(selector(root).textContent?.trim()).toBe('新建策略')
     expect(document.querySelector('[role="dialog"]')).toBeNull()
@@ -437,7 +557,10 @@ describe('ProviderSchedulingView workspace navigation', () => {
   })
 
   it.each([false, true])('opens a new draft from its deep link with first-group default=%s', async firstGroup => {
+    localStorage.setItem(collapsedStorageKey, 'true')
     const { root, router } = await mountWorkspace({ group: 'new' }, firstGroup ? [] : [group('existing')])
+    expect(element(root, '#provider-policy-editor').style.display).not.toBe('none')
+    expect(button(root, '收起策略分组').getAttribute('aria-expanded')).toBe('true')
     expect(router.currentRoute.value.query.group).toBe('new')
     expect(selector(root).textContent?.trim()).toBe('新建策略')
     expect(element<HTMLInputElement>(root, '[aria-label="策略名称"]').value).toBe('')
@@ -548,8 +671,13 @@ describe('ProviderSchedulingView workspace navigation', () => {
     await workspace.value?.refreshGroups()
     expect(element<HTMLInputElement>(root, '[aria-label="策略名称"]').value).toBe('我的修改')
     routingApi.updateRoutingGroup.mockRejectedValue({ response: { status: 409 } })
-    button(root, '保存调度').click()
+    button(root, '收起策略分组').click()
     await flush()
+    confirm.mockResolvedValueOnce(true)
+    expect(await workspace.value?.ensureSaved()).toBe(false)
+    await flush()
+    expect(element(root, '#provider-policy-editor').style.display).not.toBe('none')
+    expect(button(root, '收起策略分组').getAttribute('aria-expanded')).toBe('true')
     expect(routingApi.updateRoutingGroup).toHaveBeenCalledWith('default', expect.objectContaining({ expected_version: 1 }))
     expect(button(root, '保存调度').disabled).toBe(false)
     expect(toast.error).toHaveBeenCalledWith(expect.stringContaining('其他操作中更新'))

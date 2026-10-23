@@ -130,6 +130,7 @@ vi.mock('@/features/providers/components/ProviderSchedulingView.vue', async () =
         const groupId = computed(() => typeof route.query.group === 'string' ? route.query.group : 'group-a')
         const config = shallowRef<RoutingGroupConfig>(createEmptyRoutingGroupConfig())
         const selectedPolicyIndex = ref(0)
+        const panelCollapsed = ref(false)
         watch(groupId, id => { config.value = workspace.groups[id] ?? createEmptyRoutingGroupConfig(); selectedPolicyIndex.value = 0 }, { immediate: true })
         const policies = computed(() => readSchedulingPolicies(config.value))
         const activePolicy = computed(() => {
@@ -171,13 +172,13 @@ vi.mock('@/features/providers/components/ProviderSchedulingView.vue', async () =
           refreshGroups: workspace.refreshGroups,
           ensureSaved: workspace.ensureSaved,
         })
-        return () => h('section', { 'data-scheduling-group': groupId.value }, [
+        return () => h('section', { 'data-scheduling-group': groupId.value, 'data-panel-collapsed': String(panelCollapsed.value) }, [
           h('button', {
             'data-inspect-scheduled-provider': '',
             onClick: () => emit('inspect-provider', 'provider-1'),
           }, '查看调度提供商'),
           ...policies.value.map((_entry, index) => h('button', { 'data-select-policy': index, onClick: () => { selectedPolicyIndex.value = index } }, `配置 ${index + 1}`)),
-          slots.default?.(),
+          slots.default?.({ panelCollapsed: panelCollapsed.value, togglePanel: () => { panelCollapsed.value = !panelCollapsed.value } }),
         ])
       },
     }),
@@ -301,6 +302,23 @@ afterEach(() => {
 })
 
 describe('ProviderManagement provider directory', () => {
+  it('toggles the policy panel from the provider management header', async () => {
+    const root = await mountView()
+    const panel = root.querySelector<HTMLElement>('[data-scheduling-group]')!
+    const collapse = findButton(root, '收起策略分组')
+    expect(panel.dataset.panelCollapsed).toBe('false')
+    expect(collapse.getAttribute('aria-controls')).toBe('provider-policy-editor')
+    expect(collapse.getAttribute('aria-expanded')).toBe('true')
+    collapse.click()
+    await settle()
+    expect(panel.dataset.panelCollapsed).toBe('true')
+    const expand = findButton(root, '展开策略分组')
+    expect(expand.getAttribute('aria-expanded')).toBe('false')
+    expand.click()
+    await settle()
+    expect(panel.dataset.panelCollapsed).toBe('false')
+  })
+
   it('filters and paginates the current search locally', async () => {
     apiMocks.getProvidersSummary.mockResolvedValue({ items: Array.from({ length: 30 }, (_, index) => createProvider({ id: `provider-${index + 1}` })), total: 30 })
     const root = await mountView()

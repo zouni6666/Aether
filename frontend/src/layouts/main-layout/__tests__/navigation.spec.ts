@@ -22,9 +22,9 @@ function route(path: string, name?: string, meta: Record<string, unknown> = {}, 
 }
 
 describe('main layout navigation builder', () => {
-  it.each([true, false])('keeps one admin referral history entry with active=%s while user entry follows the switch', active => {
+  it.each([true, false])('shows referral navigation only when the extension is active=%s for administrators and users', active => {
     const referral: ModuleStatus = {
-      name: 'referral', available: active, enabled: active, active,
+      name: 'referral', available: true, enabled: active, active,
       config_validated: true, config_error: null, display_name: '邀请返利',
       description: '', category: 'integration', health: 'healthy',
       admin_route: '/admin/referrals', admin_menu_group: 'management',
@@ -32,15 +32,15 @@ describe('main layout navigation builder', () => {
     }
     const options = { modules: { referral }, isModuleActive: () => active, t: translate }
     const admin = buildNavigation({ ...options, canAccessAdmin: true }).flatMap(group => group.items)
-    expect(admin.filter(item => item.href === '/admin/referrals')).toHaveLength(1)
+    expect(admin.filter(item => item.href === '/admin/referrals')).toHaveLength(active ? 1 : 0)
     const user = buildNavigation({ ...options, canAccessAdmin: false }).flatMap(group => group.items)
     expect(user.some(item => item.href === '/dashboard/referral')).toBe(active)
     expect(user.some(item => item.href === '/admin/referrals')).toBe(false)
   })
 
-  it('keeps administrator referral history reachable when module status has not loaded', () => {
+  it('hides administrator referral navigation until module status has loaded', () => {
     const items = buildNavigation({ canAccessAdmin: true, modules: {}, isModuleActive: () => false, t: translate }).flatMap(group => group.items)
-    expect(items.filter(item => item.href === '/admin/referrals')).toHaveLength(1)
+    expect(items.filter(item => item.href === '/admin/referrals')).toHaveLength(0)
   })
 
   it('builds user navigation from translation keys and active modules', () => {

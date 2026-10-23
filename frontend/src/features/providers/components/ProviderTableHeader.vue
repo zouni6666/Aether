@@ -2,9 +2,25 @@
   <div class="px-4 sm:px-6 py-3 sm:py-3.5 border-b border-border/50">
     <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 sm:gap-4">
       <!-- 左侧：标题 -->
-      <h3 class="text-sm sm:text-base font-semibold text-foreground shrink-0">
-        {{ legacyT('提供商管理') }}
-      </h3>
+      <div class="flex shrink-0 items-center gap-2">
+        <Button
+          v-if="policyPanelCollapsed !== undefined"
+          variant="ghost"
+          size="icon"
+          class="-ml-2 h-8 w-8 shrink-0"
+          :class="policyPanelCollapsed ? 'text-muted-foreground' : 'text-primary'"
+          :title="legacyT(policyPanelCollapsed ? '展开策略分组' : '收起策略分组')"
+          :aria-label="legacyT(policyPanelCollapsed ? '展开策略分组' : '收起策略分组')"
+          :aria-expanded="!policyPanelCollapsed"
+          aria-controls="provider-policy-editor"
+          @click="$emit('togglePolicyPanel')"
+        >
+          <SlidersHorizontal class="h-4 w-4" />
+        </Button>
+        <h3 class="text-sm sm:text-base font-semibold text-foreground">
+          {{ legacyT('提供商管理') }}
+        </h3>
+      </div>
 
       <!-- 右侧：操作区 -->
       <div class="flex flex-wrap items-center gap-2">
@@ -110,7 +126,7 @@
 </template>
 
 <script setup lang="ts">
-import { Search, Plus, FilterX, Users } from 'lucide-vue-next'
+import { Search, Plus, FilterX, SlidersHorizontal, Users } from 'lucide-vue-next'
 import Button from '@/components/ui/button.vue'
 import Input from '@/components/ui/input.vue'
 import Select from '@/components/ui/select.vue'
@@ -123,6 +139,7 @@ import type { FilterOption } from '@/features/providers/composables/useProviderF
 import { useI18n } from '@/i18n'
 
 withDefaults(defineProps<{
+  policyPanelCollapsed?: boolean
   searchQuery: string
   filterApiFormat: string
   showModelFilter?: boolean
@@ -131,9 +148,10 @@ withDefaults(defineProps<{
   modelFilters: FilterOption[]
   hasActiveFilters: boolean
   loading: boolean
-}>(), { showModelFilter: true })
+}>(), { showModelFilter: true, policyPanelCollapsed: undefined })
 
 defineEmits<{
+  'togglePolicyPanel': []
   'update:searchQuery': [value: string]
   'update:filterApiFormat': [value: string]
   'update:filterModel': [value: string]

@@ -344,6 +344,14 @@ describe('isModelTestableApiFormat', () => {
 })
 
 describe('selectPreferredModelTestEndpoint', () => {
+  it('defaults to an active endpoint while keeping disabled endpoints available for explicit key tests', () => {
+    const disabledEndpoint = { id: 'disabled', api_format: 'openai:chat', is_active: false }
+    const activeEndpoint = { id: 'active', api_format: 'openai:chat', is_active: true }
+
+    expect(selectPreferredModelTestEndpoint(null, [disabledEndpoint, activeEndpoint])).toBe(activeEndpoint)
+    expect(selectPreferredModelTestEndpoint(null, [disabledEndpoint])).toBe(disabledEndpoint)
+  })
+
   it('prefers openai image endpoints for image generation models', () => {
     const chatEndpoint = { id: 'chat', api_format: 'openai:chat', is_active: true }
     const imageEndpoint = { id: 'image', api_format: 'openai:image', is_active: true }
